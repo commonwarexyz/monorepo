@@ -7,7 +7,7 @@ use crate::{
         },
         wire, View,
     },
-    Digest, ThresholdSupervisor,
+    ThresholdSupervisor,
 };
 use bytes::Bytes;
 use commonware_cryptography::{
@@ -95,12 +95,16 @@ impl<
                             continue;
                         }
                     };
+                    let Ok(payload) = H::Digest::try_from(&proposal.payload) else {
+                        debug!(sender = hex(&s), "invalid payload");
+                        continue;
+                    };
                     let view = proposal.view;
 
                     // Notarize received digest
                     let share = self.supervisor.share(view).unwrap();
                     let parent = proposal.parent;
-                    let message = proposal_message(proposal.view, parent, &proposal.payload);
+                    let message = proposal_message(proposal.view, parent, &payload);
                     let proposal_signature =
                         ops::partial_sign_message(share, Some(&self.notarize_namespace), &message)
                             .serialize()
@@ -123,8 +127,8 @@ impl<
                     sender.send(Recipients::All, msg, true).await.unwrap();
 
                     // Notarize random digest
-                    let digest: Digest = H::random(&mut self.runtime).into();
-                    let message = proposal_message(view, parent, &digest);
+                    let payload = H::random(&mut self.runtime);
+                    let message = proposal_message(view, parent, &payload);
                     let proposal_signature =
                         ops::partial_sign_message(share, Some(&self.notarize_namespace), &message)
                             .serialize()
@@ -133,7 +137,7 @@ impl<
                         proposal: Some(wire::Proposal {
                             view,
                             parent,
-                            payload: digest,
+                            payload: payload.to_vec(),
                         }),
                         proposal_signature,
                         seed_signature,
@@ -154,12 +158,16 @@ impl<
                             continue;
                         }
                     };
+                    let Ok(payload) = H::Digest::try_from(&proposal.payload) else {
+                        debug!(sender = hex(&s), "invalid payload");
+                        continue;
+                    };
                     let view = proposal.view;
 
                     // Finalize provided digest
                     let share = self.supervisor.share(view).unwrap();
                     let parent = proposal.parent;
-                    let message = proposal_message(proposal.view, parent, &proposal.payload);
+                    let message = proposal_message(proposal.view, parent, &payload);
                     let proposal_signature =
                         ops::partial_sign_message(share, Some(&self.finalize_namespace), &message)
                             .serialize()
@@ -176,8 +184,8 @@ impl<
                     sender.send(Recipients::All, msg, true).await.unwrap();
 
                     // Finalize random digest
-                    let digest: Digest = H::random(&mut self.runtime).into();
-                    let message = proposal_message(view, parent, &digest);
+                    let payload = H::random(&mut self.runtime);
+                    let message = proposal_message(view, parent, &payload);
                     let signature =
                         ops::partial_sign_message(share, Some(&self.finalize_namespace), &message);
                     let proposal_signature = signature.serialize().into();
@@ -185,7 +193,7 @@ impl<
                         proposal: Some(wire::Proposal {
                             view,
                             parent,
-                            payload: digest,
+                            payload: payload.to_vec(),
                         }),
                         proposal_signature,
                     };

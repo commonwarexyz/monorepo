@@ -6,6 +6,7 @@
 //! expect breaking changes and occasional instability.
 
 use std::fmt::Debug;
+use std::hash::Hash;
 use std::ops::Deref;
 use std::ops::DerefMut;
 
@@ -19,6 +20,7 @@ pub mod ed25519;
 pub use ed25519::Ed25519;
 pub use ed25519::Ed25519Batch;
 pub mod sha256;
+pub use sha256::hash;
 pub use sha256::Sha256;
 pub mod secp256r1;
 pub use secp256r1::Secp256r1;
@@ -127,11 +129,34 @@ pub trait BatchScheme {
     fn verify<R: RngCore + CryptoRng>(self, rng: &mut R) -> bool;
 }
 
-/// Error Digest manipulations must rely on.
+/// Errors that can occur when interacting with cryptographic primitives.
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("invalid digest length")]
     InvalidDigestLength,
+}
+
+/// Byte array representing an arbitrary hash digest.
+pub trait Digest:
+    AsRef<[u8]>
+    + for<'a> TryFrom<&'a [u8], Error = Error>
+    + for<'a> TryFrom<&'a Vec<u8>, Error = Error>
+    + TryFrom<Vec<u8>, Error = Error>
+    + Deref<Target = [u8]>
+    + DerefMut<Target = [u8]>
+    + Default
+    + Sized
+    + Clone
+    + Send
+    + Sync
+    + 'static
+    + Eq
+    + PartialEq
+    + Ord
+    + PartialOrd
+    + Debug
+    + Hash
+{
 }
 
 /// Interface that commonware crates rely on for hashing.
@@ -148,23 +173,7 @@ pub enum Error {
 /// after cloning.
 pub trait Hasher: Clone + Send + Sync + 'static {
     /// Byte array representing a hash digest.
-    type Digest: AsRef<[u8]>
-        + for<'a> TryFrom<&'a Bytes, Error = Error>
-        + for<'a> TryFrom<&'a [u8], Error = Error>
-        + for<'a> TryFrom<&'a Vec<u8>, Error = Error>
-        + Deref<Target = [u8]>
-        + DerefMut<Target = [u8]>
-        + Sized
-        + Into<Bytes>
-        + Clone
-        + Send
-        + Sync
-        + 'static
-        + Eq
-        + PartialEq
-        + Ord
-        + PartialOrd
-        + Debug;
+    type Digest: Digest;
 
     /// Create a new hasher.
     fn new() -> Self;

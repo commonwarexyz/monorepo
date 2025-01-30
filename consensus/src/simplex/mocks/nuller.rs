@@ -75,6 +75,10 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Nuller<C, H, S> {
                             continue;
                         }
                     };
+                    let Ok(payload) = H::Digest::try_from(&proposal.payload) else {
+                        debug!(sender = hex(&s), "failed to decode proposal payload");
+                        continue;
+                    };
                     let view = proposal.view;
                     let public_key_index = self
                         .supervisor
@@ -100,7 +104,7 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Nuller<C, H, S> {
                         .unwrap();
 
                     // Finalize digest
-                    let msg = proposal_message(view, proposal.parent, &proposal.payload);
+                    let msg = proposal_message(view, proposal.parent, &payload);
                     let f = wire::Finalize {
                         proposal: Some(proposal.clone()),
                         signature: Some(wire::Signature {

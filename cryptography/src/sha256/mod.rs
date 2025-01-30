@@ -1,12 +1,17 @@
 //! SHA-256 implementation of the `Hasher` trait.
 
-use crate::{Error, Hasher};
-use bytes::Bytes;
+use crate::{Digest as CDigest, Error, Hasher};
 use rand::{CryptoRng, Rng};
 use sha2::{Digest as _, Sha256 as ISha256};
 use std::ops::{Deref, DerefMut};
 
 const DIGEST_LENGTH: usize = 32;
+
+/// Generate a SHA-256 digest from a message.
+pub fn hash(message: &[u8]) -> Digest {
+    let array: [u8; DIGEST_LENGTH] = ISha256::digest(message).into();
+    Digest::from(array)
+}
 
 /// SHA-256 hasher.
 #[derive(Debug)]
@@ -58,9 +63,11 @@ impl Hasher for Sha256 {
 }
 
 /// Digest of a SHA-256 hashing operation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[repr(transparent)]
 pub struct Digest([u8; DIGEST_LENGTH]);
+
+impl CDigest for Digest {}
 
 impl From<[u8; DIGEST_LENGTH]> for Digest {
     fn from(value: [u8; DIGEST_LENGTH]) -> Self {
@@ -80,13 +87,6 @@ impl TryFrom<&[u8]> for Digest {
     }
 }
 
-impl TryFrom<&Bytes> for Digest {
-    type Error = Error;
-    fn try_from(value: &Bytes) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_ref())
-    }
-}
-
 impl TryFrom<&Vec<u8>> for Digest {
     type Error = Error;
     fn try_from(value: &Vec<u8>) -> Result<Self, Self::Error> {
@@ -94,10 +94,10 @@ impl TryFrom<&Vec<u8>> for Digest {
     }
 }
 
-#[allow(clippy::from_over_into)]
-impl Into<Bytes> for Digest {
-    fn into(self) -> Bytes {
-        Bytes::copy_from_slice(self.as_ref())
+impl TryFrom<Vec<u8>> for Digest {
+    type Error = Error;
+    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_slice())
     }
 }
 
@@ -120,33 +120,39 @@ impl DerefMut for Digest {
     }
 }
 
+impl Default for Digest {
+    fn default() -> Self {
+        Self([0u8; DIGEST_LENGTH])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use commonware_utils::hex;
 
+    const HELLO_DIGEST: &str = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
+
     #[test]
     fn test_sha256() {
-        let digest = b"hello world";
+        let msg = b"hello world";
 
         // Generate initial hash
         let mut hasher = Sha256::new();
-        hasher.update(digest);
-        let hash = hasher.finalize();
-        assert!(Digest::try_from(hash.as_ref()).is_ok());
-        assert_eq!(
-            hex(hash.as_ref()),
-            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
-        );
+        hasher.update(msg);
+        let digest = hasher.finalize();
+        assert!(Digest::try_from(digest.as_ref()).is_ok());
+        assert_eq!(hex(digest.as_ref()), HELLO_DIGEST);
 
         // Reuse hasher
-        hasher.update(digest);
-        let hash = hasher.finalize();
-        assert!(Digest::try_from(hash.as_ref()).is_ok());
-        assert_eq!(
-            hex(hash.as_ref()),
-            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
-        );
+        hasher.update(msg);
+        let digest = hasher.finalize();
+        assert!(Digest::try_from(digest.as_ref()).is_ok());
+        assert_eq!(hex(digest.as_ref()), HELLO_DIGEST);
+
+        // Test simple hasher
+        let hash = hash(msg);
+        assert_eq!(hex(hash.as_ref()), HELLO_DIGEST);
     }
 
     #[test]

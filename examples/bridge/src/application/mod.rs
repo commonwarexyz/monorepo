@@ -23,9 +23,9 @@ pub struct Config<H: Hasher, Si: Sink, St: Stream> {
     pub hasher: H,
 
     /// Prover used to decode opaque proofs from consensus.
-    pub prover: Prover,
+    pub prover: Prover<H::Digest>,
 
-    pub other_prover: Prover,
+    pub other_prover: Prover<H::Digest>,
 
     pub identity: poly::Public,
 

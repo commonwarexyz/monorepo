@@ -3,7 +3,7 @@ use crate::{
     simplex::encoder::{nullify_message, proposal_message},
     Supervisor,
 };
-use commonware_cryptography::{PublicKey, Scheme};
+use commonware_cryptography::{Digest, PublicKey, Scheme};
 use commonware_utils::{hex, quorum};
 use std::collections::HashSet;
 use tracing::debug;
@@ -14,7 +14,7 @@ pub fn threshold(validators: &[PublicKey]) -> Option<(u32, u32)> {
     Some((threshold, len))
 }
 
-pub fn verify_notarization<S: Supervisor<Index = View>, C: Scheme>(
+pub fn verify_notarization<S: Supervisor<Index = View>, C: Scheme, D: Digest>(
     supervisor: &S,
     namespace: &[u8],
     notarization: &wire::Notarization,
@@ -26,6 +26,12 @@ pub fn verify_notarization<S: Supervisor<Index = View>, C: Scheme>(
             debug!(reason = "missing proposal", "dropping notarization");
             return false;
         }
+    };
+
+    // Ensure payload is well-formed
+    let Ok(payload) = D::try_from(&proposal.payload) else {
+        debug!(reason = "invalid payload", "dropping notarization");
+        return false;
     };
 
     // Ensure finalization has valid number of signatures
@@ -71,7 +77,7 @@ pub fn verify_notarization<S: Supervisor<Index = View>, C: Scheme>(
     }
 
     // Verify threshold notarization
-    let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
+    let message = proposal_message(proposal.view, proposal.parent, &payload);
     let mut seen = HashSet::new();
     for signature in notarization.signatures.iter() {
         // Get public key
@@ -195,7 +201,7 @@ pub fn verify_nullification<S: Supervisor<Index = View>, C: Scheme>(
     true
 }
 
-pub fn verify_finalization<S: Supervisor<Index = View>, C: Scheme>(
+pub fn verify_finalization<S: Supervisor<Index = View>, C: Scheme, D: Digest>(
     supervisor: &S,
     namespace: &[u8],
     finalization: &wire::Finalization,
@@ -207,6 +213,12 @@ pub fn verify_finalization<S: Supervisor<Index = View>, C: Scheme>(
             debug!(reason = "missing proposal", "dropping finalization");
             return false;
         }
+    };
+
+    // Ensure payload is well-formed
+    let Ok(payload) = D::try_from(&proposal.payload) else {
+        debug!(reason = "invalid payload", "dropping finalization");
+        return false;
     };
 
     // Ensure finalization has valid number of signatures
@@ -252,7 +264,7 @@ pub fn verify_finalization<S: Supervisor<Index = View>, C: Scheme>(
     }
 
     // Verify threshold finalization
-    let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
+    let message = proposal_message(proposal.view, proposal.parent, &payload);
     let mut seen = HashSet::new();
     for signature in finalization.signatures.iter() {
         // Get public key

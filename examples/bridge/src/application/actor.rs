@@ -6,7 +6,7 @@ use super::{
     Config,
 };
 use bytes::BufMut;
-use commonware_consensus::{threshold_simplex::Prover, Digest};
+use commonware_consensus::threshold_simplex::Prover;
 use commonware_cryptography::{
     bls12381::primitives::{group::Element, poly},
     Hasher,
@@ -26,17 +26,17 @@ const GENESIS: &[u8] = b"commonware is neat";
 pub struct Application<R: Rng, H: Hasher, Si: Sink, St: Stream> {
     runtime: R,
     indexer: Connection<Si, St>,
-    prover: Prover,
-    other_prover: Prover,
+    prover: Prover<H::Digest>,
+    other_prover: Prover<H::Digest>,
     public: Vec<u8>,
     other_public: Vec<u8>,
     hasher: H,
-    mailbox: mpsc::Receiver<Message>,
+    mailbox: mpsc::Receiver<Message<H::Digest>>,
 }
 
 impl<R: Rng, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St> {
     /// Create a new application actor.
-    pub fn new(runtime: R, config: Config<H, Si, St>) -> (Self, Supervisor, Mailbox) {
+    pub fn new(runtime: R, config: Config<H, Si, St>) -> (Self, Supervisor, Mailbox<H::Digest>) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
         (
             Self {
@@ -63,7 +63,7 @@ impl<R: Rng, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St> {
                     // Use the digest of the genesis message as the initial
                     // payload.
                     self.hasher.update(GENESIS);
-                    let digest: Digest = self.hasher.finalize().into();
+                    let digest = self.hasher.finalize();
                     let _ = response.send(digest);
                 }
                 Message::Propose { index, response } => {
@@ -119,7 +119,7 @@ impl<R: Rng, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St> {
 
                     // Hash the message
                     self.hasher.update(&msg);
-                    let digest: Digest = self.hasher.finalize().into();
+                    let digest = self.hasher.finalize();
                     info!(msg = hex(&msg), payload = hex(&digest), "proposed");
 
                     // Publish to indexer
@@ -154,16 +154,10 @@ impl<R: Rng, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St> {
                     let _ = response.send(digest);
                 }
                 Message::Verify { payload, response } => {
-                    // Ensure payload is a valid digest
-                    if H::Digest::try_from(&payload).is_err() {
-                        let _ = response.send(false);
-                        continue;
-                    }
-
                     // Fetch payload from indexer
                     let msg = wire::GetBlock {
                         network: self.public.clone(),
-                        digest: payload.clone(),
+                        digest: payload.to_vec(),
                     };
                     let msg = wire::Inbound {
                         payload: Some(wire::inbound::Payload::GetBlock(msg)),

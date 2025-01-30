@@ -5,9 +5,9 @@ use super::{
     },
     wire, View,
 };
-use crate::{Digest, Proof};
+use crate::Proof;
 use bytes::{Buf, BufMut};
-use commonware_cryptography::{PublicKey, Scheme, Signature};
+use commonware_cryptography::{Digest, PublicKey, Scheme, Signature};
 use std::{collections::HashSet, marker::PhantomData};
 
 /// Encode and decode proofs of activity.
@@ -15,27 +15,25 @@ use std::{collections::HashSet, marker::PhantomData};
 /// We don't use protobuf for proof encoding because we expect external parties
 /// to decode proofs in constrained environments where protobuf may not be implemented.
 #[derive(Clone)]
-pub struct Prover<C: Scheme> {
-    _crypto: PhantomData<C>,
-
+pub struct Prover<C: Scheme, D: Digest> {
     notarize_namespace: Vec<u8>,
     nullify_namespace: Vec<u8>,
     finalize_namespace: Vec<u8>,
 
-    digest: usize,
+    _crypto: PhantomData<C>,
+    _digest: PhantomData<D>,
 }
 
-impl<C: Scheme> Prover<C> {
+impl<C: Scheme, D: Digest> Prover<C, D> {
     /// Create a new prover with the given signing `namespace`.
-    pub fn new(namespace: &[u8], digest: usize) -> Self {
+    pub fn new(namespace: &[u8]) -> Self {
         Self {
-            _crypto: PhantomData,
-
             notarize_namespace: notarize_namespace(namespace),
             nullify_namespace: nullify_namespace(namespace),
             finalize_namespace: finalize_namespace(namespace),
 
-            digest,
+            _crypto: PhantomData,
+            _digest: PhantomData,
         }
     }
 
@@ -68,11 +66,11 @@ impl<C: Scheme> Prover<C> {
         mut proof: Proof,
         check_sig: bool,
         namespace: &[u8],
-    ) -> Option<(View, View, Digest, PublicKey)> {
+    ) -> Option<(View, View, D, PublicKey)> {
         // Ensure proof is big enough
         let (public_key_len, signature_len) = C::len();
         if proof.len()
-            != size_of::<u64>() + size_of::<u64>() + self.digest + public_key_len + signature_len
+            != size_of::<u64>() + size_of::<u64>() + size_of::<D>() + public_key_len + signature_len
         {
             return None;
         }
@@ -80,7 +78,8 @@ impl<C: Scheme> Prover<C> {
         // Decode proof
         let view = proof.get_u64();
         let parent = proof.get_u64();
-        let payload = proof.copy_to_bytes(self.digest);
+        let mut payload = D::default();
+        proof.copy_to_slice(&mut payload);
         let public_key = proof.copy_to_bytes(public_key_len);
         let signature = proof.copy_to_bytes(signature_len);
 
@@ -131,9 +130,9 @@ impl<C: Scheme> Prover<C> {
         max: u32,
         check_sigs: bool,
         namespace: &[u8],
-    ) -> Option<(View, View, Digest, Vec<PublicKey>)> {
+    ) -> Option<(View, View, D, Vec<PublicKey>)> {
         // Ensure proof prefix is big enough
-        let len = size_of::<u64>() + size_of::<u64>() + self.digest + size_of::<u32>();
+        let len = size_of::<u64>() + size_of::<u64>() + size_of::<D>() + size_of::<u32>();
         if proof.len() < len {
             return None;
         }
@@ -141,7 +140,8 @@ impl<C: Scheme> Prover<C> {
         // Decode proof prefix
         let view = proof.get_u64();
         let parent = proof.get_u64();
-        let payload = proof.copy_to_bytes(self.digest);
+        let mut payload = D::default();
+        proof.copy_to_slice(&mut payload);
         let count = proof.get_u32();
         if count > max {
             return None;
@@ -186,7 +186,7 @@ impl<C: Scheme> Prover<C> {
         &self,
         proof: Proof,
         check_sig: bool,
-    ) -> Option<(View, View, Digest, PublicKey)> {
+    ) -> Option<(View, View, D, PublicKey)> {
         self.deserialize_proposal(proof, check_sig, &self.notarize_namespace)
     }
 
@@ -196,7 +196,7 @@ impl<C: Scheme> Prover<C> {
         proof: Proof,
         max: u32,
         check_sigs: bool,
-    ) -> Option<(View, View, Digest, Vec<PublicKey>)> {
+    ) -> Option<(View, View, D, Vec<PublicKey>)> {
         self.deserialize_aggregation(proof, max, check_sigs, &self.notarize_namespace)
     }
 
@@ -205,7 +205,7 @@ impl<C: Scheme> Prover<C> {
         &self,
         proof: Proof,
         check_sig: bool,
-    ) -> Option<(View, View, Digest, PublicKey)> {
+    ) -> Option<(View, View, D, PublicKey)> {
         self.deserialize_proposal(proof, check_sig, &self.finalize_namespace)
     }
 
@@ -215,7 +215,7 @@ impl<C: Scheme> Prover<C> {
         proof: Proof,
         max: u32,
         check_sigs: bool,
-    ) -> Option<(View, View, Digest, Vec<PublicKey>)> {
+    ) -> Option<(View, View, D, Vec<PublicKey>)> {
         self.deserialize_aggregation(proof, max, check_sigs, &self.finalize_namespace)
     }
 
@@ -224,10 +224,10 @@ impl<C: Scheme> Prover<C> {
         view: View,
         public_key: &PublicKey,
         parent_1: View,
-        payload_1: &Digest,
+        payload_1: &D,
         signature_1: &Signature,
         parent_2: View,
-        payload_2: &Digest,
+        payload_2: &D,
         signature_2: &Signature,
     ) -> Proof {
         // Setup proof
@@ -265,10 +265,10 @@ impl<C: Scheme> Prover<C> {
         let len = size_of::<u64>()
             + public_key_len
             + size_of::<u64>()
-            + self.digest
+            + size_of::<D>()
             + signature_len
             + size_of::<u64>()
-            + self.digest
+            + size_of::<D>()
             + signature_len;
         if proof.len() != len {
             return None;
@@ -278,10 +278,12 @@ impl<C: Scheme> Prover<C> {
         let view = proof.get_u64();
         let public_key = proof.copy_to_bytes(public_key_len);
         let parent_1 = proof.get_u64();
-        let payload_1 = proof.copy_to_bytes(self.digest);
+        let mut payload_1 = D::default();
+        proof.copy_to_slice(&mut payload_1);
         let signature_1 = proof.copy_to_bytes(signature_len);
         let parent_2 = proof.get_u64();
-        let payload_2 = proof.copy_to_bytes(self.digest);
+        let mut payload_2 = D::default();
+        proof.copy_to_slice(&mut payload_2);
         let signature_2 = proof.copy_to_bytes(signature_len);
 
         // Verify signatures
@@ -314,10 +316,10 @@ impl<C: Scheme> Prover<C> {
         view: View,
         public_key: &PublicKey,
         parent_1: View,
-        payload_1: &Digest,
+        payload_1: &D,
         signature_1: &Signature,
         parent_2: View,
-        payload_2: &Digest,
+        payload_2: &D,
         signature_2: &Signature,
     ) -> Proof {
         Self::serialize_conflicting_proposal(
@@ -347,10 +349,10 @@ impl<C: Scheme> Prover<C> {
         view: View,
         public_key: &PublicKey,
         parent_1: View,
-        payload_1: &Digest,
+        payload_1: &D,
         signature_1: &Signature,
         parent_2: View,
-        payload_2: &Digest,
+        payload_2: &D,
         signature_2: &Signature,
     ) -> Proof {
         Self::serialize_conflicting_proposal(
@@ -379,7 +381,7 @@ impl<C: Scheme> Prover<C> {
         view: View,
         public_key: &PublicKey,
         parent: View,
-        payload: &Digest,
+        payload: &D,
         signature_finalize: &Signature,
         signature_null: &Signature,
     ) -> Proof {
@@ -414,7 +416,7 @@ impl<C: Scheme> Prover<C> {
         let len = size_of::<u64>()
             + public_key_len
             + size_of::<u64>()
-            + self.digest
+            + size_of::<D>()
             + signature_len
             + signature_len;
         if proof.len() != len {
@@ -425,7 +427,8 @@ impl<C: Scheme> Prover<C> {
         let view = proof.get_u64();
         let public_key = proof.copy_to_bytes(public_key_len);
         let parent = proof.get_u64();
-        let payload = proof.copy_to_bytes(self.digest);
+        let mut payload = D::default();
+        proof.copy_to_slice(&mut payload);
         let signature_finalize = proof.copy_to_bytes(signature_len);
         let signature_null = proof.copy_to_bytes(signature_len);
 
@@ -457,18 +460,20 @@ impl<C: Scheme> Prover<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::{sha256, Ed25519};
+    use commonware_cryptography::{sha256::Digest as Sha256Digest, Ed25519};
 
-    const DIGEST_LENGTH: usize = size_of::<sha256::Digest>();
+    fn test_digest(value: u8) -> Sha256Digest {
+        Sha256Digest::from([value; size_of::<Sha256Digest>()])
+    }
 
     #[test]
     fn test_deserialize_aggregation_empty() {
         // Create a proof with no signers
-        let prover = Prover::<Ed25519>::new(b"test", DIGEST_LENGTH);
+        let prover = Prover::<Ed25519, Sha256Digest>::new(b"test");
         let mut proof = Vec::new();
         proof.put_u64(1); // view
         proof.put_u64(0); // parent
-        proof.extend_from_slice(&[0; DIGEST_LENGTH]); // payload
+        proof.extend_from_slice(&test_digest(0)); // payload
         proof.put_u32(0); // count of 0 signatures is valid
 
         // Verify that the proof is accepted
@@ -483,10 +488,10 @@ mod tests {
         let mut proof = Vec::new();
         proof.put_u64(1); // view
         proof.put_u64(0); // parent
-        proof.extend_from_slice(&[0; DIGEST_LENGTH]); // payload
+        proof.extend_from_slice(&test_digest(0)); // payload
 
         // Verify that the proof is rejected
-        let prover = Prover::<Ed25519>::new(b"test", DIGEST_LENGTH);
+        let prover = Prover::<Ed25519, Sha256Digest>::new(b"test");
         let result = prover.deserialize_aggregation(
             proof.into(),
             u32::MAX, // Allow any count to test overflow protection
@@ -502,11 +507,11 @@ mod tests {
         let mut proof = Vec::new();
         proof.put_u64(1); // view
         proof.put_u64(0); // parent
-        proof.extend_from_slice(&[0; DIGEST_LENGTH]); // payload
+        proof.extend_from_slice(&test_digest(0)); // payload
         proof.put_u32(100);
 
         // Verify that the proof is rejected
-        let prover = Prover::<Ed25519>::new(b"test", DIGEST_LENGTH);
+        let prover = Prover::<Ed25519, Sha256Digest>::new(b"test");
         let result = prover.deserialize_aggregation(
             proof.into(),
             u32::MAX, // Allow any count to test overflow protection

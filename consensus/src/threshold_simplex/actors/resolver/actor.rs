@@ -9,9 +9,9 @@ use crate::{
         verifier::{verify_notarization, verify_nullification},
         wire, View,
     },
-    ThresholdSupervisor,
+    Parsed, ThresholdSupervisor,
 };
-use commonware_cryptography::{bls12381::primitives::poly, Scheme};
+use commonware_cryptography::{bls12381::primitives::poly, Digest, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{utils::requester, Receiver, Recipients, Sender};
 use commonware_runtime::Clock;
@@ -24,6 +24,7 @@ use rand::{seq::IteratorRandom, Rng};
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
+    marker::PhantomData,
     time::{Duration, SystemTime},
 };
 use tracing::{debug, warn};
@@ -98,10 +99,12 @@ impl Inflight {
 pub struct Actor<
     E: Clock + GClock + Rng,
     C: Scheme,
+    D: Digest,
     S: ThresholdSupervisor<Index = View, Identity = poly::Public>,
 > {
     runtime: E,
     supervisor: S,
+    _digest: PhantomData<D>,
 
     seed_namespace: Vec<u8>,
     notarize_namespace: Vec<u8>,
@@ -131,8 +134,9 @@ pub struct Actor<
 impl<
         E: Clock + GClock + Rng,
         C: Scheme,
+        D: Digest,
         S: ThresholdSupervisor<Index = View, Identity = poly::Public>,
-    > Actor<E, C, S>
+    > Actor<E, C, D, S>
 {
     pub fn new(runtime: E, cfg: Config<C, S>) -> (Self, Mailbox) {
         // Initialize requester
@@ -169,6 +173,7 @@ impl<
             Self {
                 runtime,
                 supervisor: cfg.supervisor,
+                _digest: PhantomData,
 
                 seed_namespace: seed_namespace(&cfg.namespace),
                 notarize_namespace: notarize_namespace(&cfg.namespace),
@@ -300,7 +305,7 @@ impl<
 
     pub async fn run(
         mut self,
-        mut voter: voter::Mailbox,
+        mut voter: voter::Mailbox<D>,
         mut sender: impl Sender,
         mut receiver: impl Receiver,
     ) {
@@ -529,27 +534,36 @@ impl<
                             let mut notarizations_found = BTreeSet::new();
                             let mut nullifications_found = BTreeSet::new();
                             for notarization in response.notarizations {
-                                let view = match notarization.proposal.as_ref() {
-                                    Some(proposal) => proposal.view,
+                                let proposal = match notarization.proposal.as_ref() {
+                                    Some(proposal) => proposal,
                                     None => {
                                         warn!(sender = hex(&s), "missing proposal");
                                         self.requester.block(s.clone());
                                         continue;
                                     },
                                 };
+                                let view = proposal.view;
+                                let Ok(payload) = D::try_from(&proposal.payload) else {
+                                    warn!(view, sender = hex(&s), "invalid proposal");
+                                    self.requester.block(s.clone());
+                                    continue;
+                                };
                                 let entry = Entry { task: Task::Notarization, view };
                                 if !self.required.contains(&entry) {
                                     debug!(view, sender = hex(&s), "unnecessary notarization");
                                     continue;
                                 }
-                                if !verify_notarization::<S>(&self.supervisor, &self.notarize_namespace, &self.seed_namespace, &notarization) {
+                                if !verify_notarization::<D, S>(&self.supervisor, &self.notarize_namespace, &self.seed_namespace, &notarization) {
                                     warn!(view, sender = hex(&s), "invalid notarization");
                                     self.requester.block(s.clone());
                                     continue;
                                 }
                                 self.required.remove(&entry);
                                 self.notarizations.insert(view, notarization.clone());
-                                voter.notarization(notarization).await;
+                                voter.notarization(Parsed{
+                                    message: notarization,
+                                    digest: payload,
+                                }).await;
                                 notarizations_found.insert(view);
                             }
 

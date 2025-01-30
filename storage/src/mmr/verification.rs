@@ -147,12 +147,9 @@ impl<H: CHasher> Proof<H> {
         }
         let mut hashes = Vec::with_capacity(hashes_len);
         for _ in 0..hashes_len {
-            let hash = buf.copy_to_bytes(size_of::<H::Digest>());
-            let hash = match H::Digest::try_from(&hash) {
-                Ok(hash) => hash,
-                Err(_) => return None,
-            };
-            hashes.push(hash);
+            let mut digest = H::Digest::default();
+            buf.copy_to_slice(&mut digest);
+            hashes.push(digest);
         }
         Some(Self { size, hashes })
     }

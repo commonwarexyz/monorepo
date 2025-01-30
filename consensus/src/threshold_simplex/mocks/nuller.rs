@@ -89,6 +89,10 @@ impl<
                             continue;
                         }
                     };
+                    let Ok(payload) = H::Digest::try_from(&proposal.payload) else {
+                        debug!(sender = hex(&s), "invalid payload");
+                        continue;
+                    };
                     let view = proposal.view;
 
                     // Nullify
@@ -116,7 +120,7 @@ impl<
                     sender.send(Recipients::All, msg, true).await.unwrap();
 
                     // Finalize digest
-                    let message = proposal_message(view, proposal.parent, &proposal.payload);
+                    let message = proposal_message(view, proposal.parent, &payload);
                     let proposal_signature =
                         ops::partial_sign_message(share, Some(&self.finalize_namespace), &message)
                             .serialize()

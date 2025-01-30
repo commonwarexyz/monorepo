@@ -6,6 +6,7 @@
 //! expect breaking changes and occasional instability.
 
 use bytes::Bytes;
+use commonware_cryptography::Digest;
 
 pub mod simplex;
 pub mod threshold_simplex;
@@ -21,18 +22,18 @@ pub type Activity = u8;
 /// Proof is a blob that attests to some data.
 pub type Proof = Bytes;
 
-/// Digest is an arbitrary hash digest.
-///
-/// Because consensus is only ever aware of the digest of application payloads, it is not instantiated with
-/// a specific [commonware_cryptography::Hasher]. It is up to the application to syntactically
-/// verify any `Digest` provided by consensus (may have come from an untrusted peer).
-pub type Digest = Bytes;
-
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
         use commonware_cryptography::{PublicKey};
         use futures::channel::oneshot;
         use std::future::Future;
+
+        /// Parsed is a wrapper around a message that has a parsable digest.
+        #[derive(Clone)]
+        struct Parsed<Message, D: Digest> {
+            pub message: Message,
+            pub digest: D,
+        }
 
         /// Automaton is the interface responsible for driving the consensus forward by proposing new payloads
         /// and verifying payloads proposed by other participants.
@@ -42,8 +43,11 @@ cfg_if::cfg_if! {
             /// This often includes things like the proposer, view number, the height, or the epoch.
             type Context;
 
+            /// Digest is an arbitrary hash digest.
+            type Digest: Digest;
+
             /// Payload used to initialize the consensus engine.
-            fn genesis(&mut self) -> impl Future<Output = Digest> + Send;
+            fn genesis(&mut self) -> impl Future<Output = Self::Digest> + Send;
 
             /// Generate a new payload for the given context.
             ///
@@ -53,7 +57,7 @@ cfg_if::cfg_if! {
             fn propose(
                 &mut self,
                 context: Self::Context,
-            ) -> impl Future<Output = oneshot::Receiver<Digest>> + Send;
+            ) -> impl Future<Output = oneshot::Receiver<Self::Digest>> + Send;
 
             /// Verify the payload is valid.
             ///
@@ -62,7 +66,7 @@ cfg_if::cfg_if! {
             fn verify(
                 &mut self,
                 context: Self::Context,
-                payload: Digest,
+                payload: Self::Digest,
             ) -> impl Future<Output = oneshot::Receiver<bool>> + Send;
         }
 
@@ -71,23 +75,29 @@ cfg_if::cfg_if! {
         /// The consensus engine is only aware of a payload's digest, not its contents. It is up
         /// to the relay to efficiently broadcast the full payload to other participants.
         pub trait Relay: Clone + Send + 'static {
+            /// Digest is an arbitrary hash digest.
+            type Digest: Digest;
+
             /// Called once consensus begins working towards a proposal provided by `Automaton` (i.e.
             /// it isn't dropped).
             ///
             /// Other participants may not begin voting on a proposal until they have the full contents,
             /// so timely delivery often yields better performance.
-            fn broadcast(&mut self, payload: Digest) -> impl Future<Output = ()> + Send;
+            fn broadcast(&mut self, payload: Self::Digest) -> impl Future<Output = ()> + Send;
         }
 
         /// Committer is the interface responsible for handling notifications of payload status.
         pub trait Committer: Clone + Send + 'static {
+            /// Digest is an arbitrary hash digest.
+            type Digest: Digest;
+
             /// Event that a payload has made some progress towards finalization but is not yet finalized.
             ///
             /// This is often used to provide an early ("best guess") confirmation to users.
-            fn prepared(&mut self, proof: Proof, payload: Digest) -> impl Future<Output = ()> + Send;
+            fn prepared(&mut self, proof: Proof, payload: Self::Digest) -> impl Future<Output = ()> + Send;
 
             /// Event indicating the container has been finalized.
-            fn finalized(&mut self, proof: Proof, payload: Digest) -> impl Future<Output = ()> + Send;
+            fn finalized(&mut self, proof: Proof, payload: Self::Digest) -> impl Future<Output = ()> + Send;
         }
 
         /// Supervisor is the interface responsible for managing which participants are active at a given time.
