@@ -122,12 +122,12 @@ impl<C: Scheme, D: Digest, S: Supervisor<Index = View>> Round<C, D, S> {
 
         // Compute proposal digest
         let message = proposal_message(proposal.view, proposal.parent, &notarize.digest);
-        let digest = hash(&message);
+        let proposal_digest = hash(&message);
 
         // Check if already notarized
         let public_key_index = notarize.message.signature.as_ref().unwrap().public_key;
         if let Some(previous_notarize) = self.notaries.get(&public_key_index) {
-            if previous_notarize == &digest {
+            if previous_notarize == &proposal_digest {
                 trace!(
                     view = self.view,
                     signer = hex(public_key),
@@ -173,12 +173,12 @@ impl<C: Scheme, D: Digest, S: Supervisor<Index = View>> Round<C, D, S> {
         // Store the notarize
         if self
             .notaries
-            .insert(public_key_index, digest.clone())
+            .insert(public_key_index, proposal_digest.clone())
             .is_some()
         {
             return false;
         }
-        let entry = self.notarizes.entry(digest).or_default();
+        let entry = self.notarizes.entry(proposal_digest).or_default();
         let signature = &notarize.message.signature.as_ref().unwrap().signature;
         let proof = Prover::<C, D>::serialize_proposal(proposal, public_key, signature);
         entry.insert(public_key_index, notarize);
@@ -301,11 +301,11 @@ impl<C: Scheme, D: Digest, S: Supervisor<Index = View>> Round<C, D, S> {
         }
         // Compute proposal digest
         let message = proposal_message(proposal.view, proposal.parent, &finalize.digest);
-        let digest = hash(&message);
+        let proposal_digest = hash(&message);
 
         // Check if already finalized
         if let Some(previous_finalize) = self.finalizers.get(&public_key_index) {
-            if previous_finalize == &digest {
+            if previous_finalize == &proposal_digest {
                 trace!(
                     view = self.view,
                     signer = hex(public_key),
@@ -351,12 +351,12 @@ impl<C: Scheme, D: Digest, S: Supervisor<Index = View>> Round<C, D, S> {
         // Store the finalize
         if self
             .finalizers
-            .insert(public_key_index, digest.clone())
+            .insert(public_key_index, proposal_digest.clone())
             .is_some()
         {
             return false;
         }
-        let entry = self.finalizes.entry(digest).or_default();
+        let entry = self.finalizes.entry(proposal_digest).or_default();
         let signature = &finalize.message.signature.as_ref().unwrap().signature;
         let proof = Prover::<C, D>::serialize_proposal(proposal, public_key, signature);
         entry.insert(public_key_index, finalize);
@@ -851,7 +851,7 @@ impl<
 
     async fn our_proposal(
         &mut self,
-        digest: Sha256Digest,
+        proposal_digest: Sha256Digest,
         proposal: Parsed<wire::Proposal, D>,
     ) -> bool {
         // Store the proposal
@@ -874,10 +874,10 @@ impl<
         debug!(
             view = proposal.message.view,
             parent = proposal.message.parent,
-            digest = hex(&digest),
+            digest = hex(&proposal_digest),
             "generated proposal"
         );
-        round.proposal = Some((digest, proposal));
+        round.proposal = Some((proposal_digest, proposal));
         round.verified_proposal = true;
         round.leader_deadline = None;
         true

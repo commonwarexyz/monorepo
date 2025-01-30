@@ -140,20 +140,20 @@ impl<
             proposal.message.parent,
             &proposal.digest,
         );
-        let digest = hash(&message);
+        let proposal_digest = hash(&message);
         if self.proposal.is_none() {
             debug!(
                 view = proposal.message.view,
-                digest = hex(&digest),
+                digest = hex(&proposal_digest),
                 "setting unverified proposal in notarization"
             );
-            self.proposal = Some((digest, proposal));
+            self.proposal = Some((proposal_digest, proposal));
         } else if let Some((previous_digest, _)) = &self.proposal {
-            if digest != *previous_digest {
+            if proposal_digest != *previous_digest {
                 warn!(
                     view = proposal.message.view,
                     previous_digest = hex(previous_digest),
-                    digest = hex(&digest),
+                    digest = hex(&proposal_digest),
                     "proposal in notarization does not match stored proposal"
                 );
             }
@@ -170,11 +170,11 @@ impl<
 
         // Compute proposal digest
         let message = proposal_message(proposal.view, proposal.parent, &notarize.digest);
-        let digest = hash(&message);
+        let proposal_digest = hash(&message);
 
         // Check if already notarized
         if let Some(previous_notarize) = self.notaries.get(&public_key_index) {
-            if previous_notarize == &digest {
+            if previous_notarize == &proposal_digest {
                 trace!(
                     view = self.view,
                     signer = public_key_index,
@@ -214,12 +214,12 @@ impl<
         // Store the notarize
         if self
             .notaries
-            .insert(public_key_index, digest.clone())
+            .insert(public_key_index, proposal_digest.clone())
             .is_some()
         {
             return false;
         }
-        let entry = self.notarizes.entry(digest).or_default();
+        let entry = self.notarizes.entry(proposal_digest).or_default();
         let proof = Prover::<D>::serialize_proposal(proposal, &notarize.message.proposal_signature);
         entry.insert(public_key_index, notarize);
         self.supervisor.report(NOTARIZE, proof).await;
@@ -292,11 +292,11 @@ impl<
         }
         // Compute proposal digest
         let message = proposal_message(proposal.view, proposal.parent, &finalize.digest);
-        let digest = hash(&message);
+        let proposal_digest = hash(&message);
 
         // Check if already finalized
         if let Some(previous_finalize) = self.finalizers.get(&public_key_index) {
-            if previous_finalize == &digest {
+            if previous_finalize == &proposal_digest {
                 trace!(
                     view = self.view,
                     signer = public_key_index,
@@ -336,12 +336,12 @@ impl<
         // Store the finalize
         if self
             .finalizers
-            .insert(public_key_index, digest.clone())
+            .insert(public_key_index, proposal_digest.clone())
             .is_some()
         {
             return false;
         }
-        let entry = self.finalizes.entry(digest).or_default();
+        let entry = self.finalizes.entry(proposal_digest).or_default();
         let signature = &finalize.message.proposal_signature;
         let proof = Prover::<D>::serialize_proposal(proposal, signature);
         entry.insert(public_key_index, finalize);
@@ -541,7 +541,7 @@ impl<
         }
 
         // Attempt to construct finalization
-        for (proposal, finalizes) in self.finalizes.iter() {
+        for (proposal_digest, finalizes) in self.finalizes.iter() {
             if (finalizes.len() as u32) < threshold {
                 continue;
             }
@@ -559,12 +559,12 @@ impl<
                 notarization_proposal.parent,
                 &notarization.digest,
             );
-            let digest = hash(&message);
-            if digest != *proposal {
+            let notarization_digest = hash(&message);
+            if notarization_digest != *proposal_digest {
                 warn!(
                     view = self.view,
-                    proposal = hex(proposal),
-                    notarization = hex(&digest),
+                    proposal = hex(proposal_digest),
+                    notarization = hex(&notarization_digest),
                     "finalization proposal does not match notarization"
                 );
             }
@@ -573,7 +573,7 @@ impl<
             // matter which one we choose.
             debug!(
                 view = self.view,
-                proposal = hex(proposal),
+                proposal = hex(proposal_digest),
                 verified = self.verified_proposal,
                 "broadcasting finalization"
             );
@@ -1106,7 +1106,7 @@ impl<
 
     async fn our_proposal(
         &mut self,
-        digest: Sha256Digest,
+        proposal_digest: Sha256Digest,
         proposal: Parsed<wire::Proposal, D>,
     ) -> bool {
         // Store the proposal
@@ -1129,10 +1129,10 @@ impl<
         debug!(
             view = proposal.message.view,
             parent = proposal.message.parent,
-            digest = hex(&digest),
+            digest = hex(&proposal_digest),
             "generated proposal"
         );
-        round.proposal = Some((digest, proposal));
+        round.proposal = Some((proposal_digest, proposal));
         round.verified_proposal = true;
         round.leader_deadline = None;
         true
