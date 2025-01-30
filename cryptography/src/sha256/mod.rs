@@ -7,6 +7,12 @@ use std::ops::{Deref, DerefMut};
 
 const DIGEST_LENGTH: usize = 32;
 
+/// Generate a SHA-256 digest from a message.
+pub fn hash(message: &[u8]) -> Digest {
+    let array: [u8; DIGEST_LENGTH] = ISha256::digest(message).into();
+    Digest::from(array)
+}
+
 /// SHA-256 hasher.
 #[derive(Debug)]
 pub struct Sha256 {
@@ -125,28 +131,28 @@ mod tests {
     use super::*;
     use commonware_utils::hex;
 
+    const HELLO_DIGEST: &str = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
+
     #[test]
     fn test_sha256() {
-        let digest = b"hello world";
+        let msg = b"hello world";
 
         // Generate initial hash
         let mut hasher = Sha256::new();
-        hasher.update(digest);
-        let hash = hasher.finalize();
-        assert!(Digest::try_from(hash.as_ref()).is_ok());
-        assert_eq!(
-            hex(hash.as_ref()),
-            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
-        );
+        hasher.update(msg);
+        let digest = hasher.finalize();
+        assert!(Digest::try_from(digest.as_ref()).is_ok());
+        assert_eq!(hex(digest.as_ref()), HELLO_DIGEST);
 
         // Reuse hasher
-        hasher.update(digest);
-        let hash = hasher.finalize();
-        assert!(Digest::try_from(hash.as_ref()).is_ok());
-        assert_eq!(
-            hex(hash.as_ref()),
-            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
-        );
+        hasher.update(msg);
+        let digest = hasher.finalize();
+        assert!(Digest::try_from(digest.as_ref()).is_ok());
+        assert_eq!(hex(digest.as_ref()), HELLO_DIGEST);
+
+        // Test simple hasher
+        let hash = hash(msg);
+        assert_eq!(hex(hash.as_ref()), HELLO_DIGEST);
     }
 
     #[test]

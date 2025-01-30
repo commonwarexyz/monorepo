@@ -3,7 +3,7 @@ use crate::{
     simplex::encoder::{nullify_message, proposal_message},
     Supervisor,
 };
-use commonware_cryptography::{PublicKey, Scheme};
+use commonware_cryptography::{Digest, PublicKey, Scheme};
 use commonware_utils::{hex, quorum};
 use std::collections::HashSet;
 use tracing::debug;
@@ -14,7 +14,7 @@ pub fn threshold(validators: &[PublicKey]) -> Option<(u32, u32)> {
     Some((threshold, len))
 }
 
-pub fn verify_notarization<S: Supervisor<Index = View>, C: Scheme>(
+pub fn verify_notarization<S: Supervisor<Index = View>, C: Scheme, D: Digest>(
     supervisor: &S,
     namespace: &[u8],
     notarization: &wire::Notarization,
@@ -201,7 +201,7 @@ pub fn verify_nullification<S: Supervisor<Index = View>, C: Scheme>(
     true
 }
 
-pub fn verify_finalization<S: Supervisor<Index = View>, C: Scheme>(
+pub fn verify_finalization<S: Supervisor<Index = View>, C: Scheme, D: Digest>(
     supervisor: &S,
     namespace: &[u8],
     finalization: &wire::Finalization,

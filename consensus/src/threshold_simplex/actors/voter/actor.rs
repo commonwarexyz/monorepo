@@ -20,8 +20,9 @@ use commonware_cryptography::{
         ops,
         poly::{self, Eval},
     },
+    hash,
     sha256::Digest as Sha256Digest,
-    Hasher, PublicKey, Scheme, Sha256,
+    PublicKey, Scheme,
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
@@ -50,7 +51,6 @@ struct Round<
     D: Digest,
     S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
 > {
-    hasher: Sha256,
     supervisor: S,
     _crypto: PhantomData<C>,
     _digest: PhantomData<D>,
@@ -96,7 +96,6 @@ impl<
 {
     pub fn new(supervisor: S, view: View) -> Self {
         Self {
-            hasher: Sha256::new(),
             supervisor,
             _crypto: PhantomData,
             _digest: PhantomData,
@@ -141,8 +140,7 @@ impl<
             proposal.message.parent,
             &proposal.digest,
         );
-        self.hasher.update(&message);
-        let digest = self.hasher.finalize();
+        let digest = hash(&message);
         if self.proposal.is_none() {
             debug!(
                 view = proposal.message.view,
@@ -172,8 +170,7 @@ impl<
 
         // Compute proposal digest
         let message = proposal_message(proposal.view, proposal.parent, &notarize.digest);
-        self.hasher.update(&message);
-        let digest = self.hasher.finalize();
+        let digest = hash(&message);
 
         // Check if already notarized
         if let Some(previous_notarize) = self.notaries.get(&public_key_index) {
@@ -295,8 +292,7 @@ impl<
         }
         // Compute proposal digest
         let message = proposal_message(proposal.view, proposal.parent, &finalize.digest);
-        self.hasher.update(&message);
-        let digest = self.hasher.finalize();
+        let digest = hash(&message);
 
         // Check if already finalized
         if let Some(previous_finalize) = self.finalizers.get(&public_key_index) {
@@ -563,8 +559,7 @@ impl<
                 notarization_proposal.parent,
                 &notarization.digest,
             );
-            self.hasher.update(&message);
-            let digest = self.hasher.finalize();
+            let digest = hash(&message);
             if digest != *proposal {
                 warn!(
                     view = self.view,
@@ -660,8 +655,6 @@ pub struct Actor<
     committer: F,
     supervisor: S,
 
-    hasher: Sha256,
-
     replay_concurrency: usize,
     journal: Option<Journal<B, E>>,
 
@@ -747,8 +740,6 @@ impl<
                 relay: cfg.relay,
                 committer: cfg.committer,
                 supervisor: cfg.supervisor,
-
-                hasher: Sha256::new(),
 
                 replay_concurrency: cfg.replay_concurrency,
                 journal: Some(journal),
@@ -2218,8 +2209,7 @@ impl<
                             let round = self.views.get_mut(&proposal.view).expect("missing round");
                             let proposal_message =
                                 proposal_message(proposal.view, proposal.parent, &payload);
-                            self.hasher.update(&proposal_message);
-                            let proposal_digest = self.hasher.finalize();
+                            let proposal_digest = hash(&proposal_message);
                             round.proposal = Some((
                                 proposal_digest,
                                 Parsed {
@@ -2409,8 +2399,7 @@ impl<
 
                     // Construct proposal
                     let message = proposal_message(context.view, context.parent.0, &proposed);
-                    self.hasher.update(&message);
-                    let proposal_digest = self.hasher.finalize();
+                    let proposal_digest = hash(&message);
                     let proposal = wire::Proposal {
                         view: context.view,
                         parent: context.parent.0,
