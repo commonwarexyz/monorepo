@@ -22,7 +22,12 @@ pub type Activity = u8;
 /// Proof is a blob that attests to some data.
 pub type Proof = Bytes;
 
-pub type Parsed<Message, Digest> = (Message, Digest);
+/// Parsed is a wrapper around a message that has a parsable digest.
+#[derive(Clone)]
+pub struct Parsed<Message, Digest> {
+    pub message: Message,
+    pub digest: Digest,
+}
 
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {

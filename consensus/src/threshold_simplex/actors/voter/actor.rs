@@ -136,12 +136,16 @@ impl<
     }
 
     fn add_verified_proposal(&mut self, proposal: Parsed<wire::Proposal, D>) {
-        let message = proposal_message(proposal.0.view, proposal.0.parent, &proposal.1);
+        let message = proposal_message(
+            proposal.message.view,
+            proposal.message.parent,
+            &proposal.digest,
+        );
         self.hasher.update(&message);
         let digest = self.hasher.finalize();
         if self.proposal.is_none() {
             debug!(
-                view = proposal.0.view,
+                view = proposal.message.view,
                 digest = hex(&digest),
                 "setting unverified proposal in notarization"
             );
@@ -149,7 +153,7 @@ impl<
         } else if let Some((previous_digest, _)) = &self.proposal {
             if digest != *previous_digest {
                 warn!(
-                    view = proposal.0.view,
+                    view = proposal.message.view,
                     previous_digest = hex(previous_digest),
                     digest = hex(&digest),
                     "proposal in notarization does not match stored proposal"
@@ -164,10 +168,10 @@ impl<
         notarize: Parsed<wire::Notarize, D>,
     ) -> bool {
         // Get proposal
-        let proposal = notarize.0.proposal.as_ref().unwrap();
+        let proposal = notarize.message.proposal.as_ref().unwrap();
 
         // Compute proposal digest
-        let message = proposal_message(proposal.view, proposal.parent, &notarize.1);
+        let message = proposal_message(proposal.view, proposal.parent, &notarize.digest);
         self.hasher.update(&message);
         let digest = self.hasher.finalize();
 
@@ -190,15 +194,15 @@ impl<
                 .unwrap()
                 .get(&public_key_index)
                 .unwrap();
-            let previous_proposal = previous_notarize.0.proposal.as_ref().unwrap();
+            let previous_proposal = previous_notarize.message.proposal.as_ref().unwrap();
             let proof = Prover::serialize_conflicting_notarize(
                 self.view,
                 previous_proposal.parent,
-                &previous_notarize.1,
-                &previous_notarize.0.proposal_signature,
+                &previous_notarize.digest,
+                &previous_notarize.message.proposal_signature,
                 proposal.parent,
-                &notarize.1,
-                &notarize.0.proposal_signature,
+                &notarize.digest,
+                &notarize.message.proposal_signature,
             );
             self.supervisor.report(CONFLICTING_NOTARIZE, proof).await;
             warn!(
@@ -219,7 +223,7 @@ impl<
             return false;
         }
         let entry = self.notarizes.entry(digest).or_default();
-        let proof = Prover::<D>::serialize_proposal(proposal, &notarize.0.proposal_signature);
+        let proof = Prover::<D>::serialize_proposal(proposal, &notarize.message.proposal_signature);
         entry.insert(public_key_index, notarize);
         self.supervisor.report(NOTARIZE, proof).await;
         true
@@ -245,12 +249,12 @@ impl<
             .unwrap()
             .get(&public_key_index)
             .unwrap();
-        let finalize_proposal = finalize.0.proposal.as_ref().unwrap();
+        let finalize_proposal = finalize.message.proposal.as_ref().unwrap();
         let proof = Prover::serialize_nullify_finalize(
             self.view,
             finalize_proposal.parent,
-            &finalize.1,
-            &finalize.0.proposal_signature,
+            &finalize.digest,
+            &finalize.message.proposal_signature,
             &nullify.view_signature,
         );
         self.supervisor.report(NULLIFY_AND_FINALIZE, proof).await;
@@ -269,15 +273,15 @@ impl<
         finalize: Parsed<wire::Finalize, D>,
     ) -> bool {
         // Check if also issued nullify
-        let proposal = finalize.0.proposal.as_ref().unwrap();
+        let proposal = finalize.message.proposal.as_ref().unwrap();
         let null = self.nullifies.get(&public_key_index);
         if let Some(null) = null {
             // Create fault
             let proof = Prover::serialize_nullify_finalize(
                 self.view,
                 proposal.parent,
-                &finalize.1,
-                &finalize.0.proposal_signature,
+                &finalize.digest,
+                &finalize.message.proposal_signature,
                 &null.view_signature,
             );
             self.supervisor.report(NULLIFY_AND_FINALIZE, proof).await;
@@ -290,7 +294,7 @@ impl<
             return false;
         }
         // Compute proposal digest
-        let message = proposal_message(proposal.view, proposal.parent, &finalize.1);
+        let message = proposal_message(proposal.view, proposal.parent, &finalize.digest);
         self.hasher.update(&message);
         let digest = self.hasher.finalize();
 
@@ -313,15 +317,15 @@ impl<
                 .unwrap()
                 .get(&public_key_index)
                 .unwrap();
-            let previous_proposal = previous_finalize.0.proposal.as_ref().unwrap();
+            let previous_proposal = previous_finalize.message.proposal.as_ref().unwrap();
             let proof = Prover::serialize_conflicting_finalize(
                 self.view,
                 previous_proposal.parent,
-                &previous_finalize.1,
-                &previous_finalize.0.proposal_signature,
+                &previous_finalize.digest,
+                &previous_finalize.message.proposal_signature,
                 proposal.parent,
-                &finalize.1,
-                &finalize.0.proposal_signature,
+                &finalize.digest,
+                &finalize.message.proposal_signature,
             );
             self.supervisor.report(CONFLICTING_FINALIZE, proof).await;
             warn!(
@@ -342,7 +346,7 @@ impl<
             return false;
         }
         let entry = self.finalizes.entry(digest).or_default();
-        let signature = &finalize.0.proposal_signature;
+        let signature = &finalize.message.proposal_signature;
         let proof = Prover::<D>::serialize_proposal(proposal, signature);
         entry.insert(public_key_index, finalize);
         self.supervisor.report(FINALIZE, proof).await;
@@ -360,8 +364,11 @@ impl<
         self.advance_deadline = None;
 
         // If proposal is missing, set it
-        let proposal = notarization.0.proposal.as_ref().unwrap().clone();
-        self.add_verified_proposal((proposal, notarization.1.clone()));
+        let proposal = notarization.message.proposal.as_ref().unwrap().clone();
+        self.add_verified_proposal(Parsed {
+            message: proposal,
+            digest: notarization.digest.clone(),
+        });
 
         // Store the notarization
         self.notarization = Some(notarization);
@@ -394,8 +401,11 @@ impl<
         self.advance_deadline = None;
 
         // If proposal is missing, set it
-        let proposal = finalization.0.proposal.as_ref().unwrap().clone();
-        self.add_verified_proposal((proposal, finalization.1.clone()));
+        let proposal = finalization.message.proposal.as_ref().unwrap().clone();
+        self.add_verified_proposal(Parsed {
+            message: proposal,
+            digest: finalization.digest.clone(),
+        });
 
         // Store the finalization
         self.finalization = Some(finalization);
@@ -436,15 +446,15 @@ impl<
 
             // Grab the proposal (all will be the same)
             let notarize = notarizes.values().next().unwrap();
-            let proposal = notarize.0.proposal.as_ref().unwrap().clone();
+            let proposal = notarize.message.proposal.as_ref().unwrap().clone();
 
             // Recover threshold signature
             let mut notarization = Vec::new();
             let mut seed = Vec::new();
             for notarize in notarizes.values() {
-                let eval = Eval::deserialize(&notarize.0.proposal_signature).unwrap();
+                let eval = Eval::deserialize(&notarize.message.proposal_signature).unwrap();
                 notarization.push(eval);
-                let eval = Eval::deserialize(&notarize.0.seed_signature).unwrap();
+                let eval = Eval::deserialize(&notarize.message.seed_signature).unwrap();
                 seed.push(eval);
             }
             let proposal_signature = ops::threshold_signature_recover(threshold, notarization)
@@ -463,7 +473,10 @@ impl<
                 seed_signature,
             };
             self.broadcast_notarization = true;
-            return Some((notarization, notarize.1.clone()));
+            return Some(Parsed {
+                message: notarization,
+                digest: notarize.digest.clone(),
+            });
         }
         None
     }
@@ -541,14 +554,14 @@ impl<
             let Some(notarization) = &self.notarization else {
                 continue;
             };
-            let seed_signature = notarization.0.seed_signature.clone();
+            let seed_signature = notarization.message.seed_signature.clone();
 
             // Check notarization and finalization proposal match
-            let notarization_proposal = notarization.0.proposal.as_ref().unwrap();
+            let notarization_proposal = notarization.message.proposal.as_ref().unwrap();
             let message = proposal_message(
                 notarization_proposal.view,
                 notarization_proposal.parent,
-                &notarization.1,
+                &notarization.digest,
             );
             self.hasher.update(&message);
             let digest = self.hasher.finalize();
@@ -572,12 +585,12 @@ impl<
 
             // Grab the proposal
             let finalize = finalizes.values().next().unwrap();
-            let proposal = finalize.0.proposal.as_ref().unwrap().clone();
+            let proposal = finalize.message.proposal.as_ref().unwrap().clone();
 
             // Recover threshold signature
             let mut finalization = Vec::new();
             for finalize in finalizes.values() {
-                let eval = Eval::deserialize(&finalize.0.proposal_signature).unwrap();
+                let eval = Eval::deserialize(&finalize.message.proposal_signature).unwrap();
                 finalization.push(eval);
             }
             let proposal_signature = ops::threshold_signature_recover(threshold, finalization)
@@ -593,7 +606,10 @@ impl<
             };
             // self.finalization = Some(finalization.clone());
             self.broadcast_finalization = true;
-            return Some((finalization, finalize.1.clone()));
+            return Some(Parsed {
+                message: finalization,
+                digest: finalize.digest.clone(),
+            });
         }
         None
     }
@@ -611,7 +627,7 @@ impl<
                 .values()
                 .next()
                 .unwrap()
-                .0
+                .message
                 .proposal
                 .as_ref()
                 .unwrap()
@@ -768,14 +784,14 @@ impl<
     fn is_notarized(&self, view: View) -> Option<&D> {
         let round = self.views.get(&view)?;
         if let Some(notarization) = &round.notarization {
-            return Some(&notarization.1);
+            return Some(&notarization.digest);
         }
         let (digest, proposal) = round.proposal.as_ref()?;
         let notarizes = round.notarizes.get(digest)?;
         let identity = self.supervisor.identity(view)?;
         let threshold = identity.required();
         if notarizes.len() >= threshold as usize {
-            return Some(&proposal.1);
+            return Some(&proposal.digest);
         }
         None
     }
@@ -796,14 +812,14 @@ impl<
     fn is_finalized(&self, view: View) -> Option<&D> {
         let round = self.views.get(&view)?;
         if let Some(finalization) = &round.finalization {
-            return Some(&finalization.1);
+            return Some(&finalization.digest);
         }
         let (digest, proposal) = round.proposal.as_ref()?;
         let finalizes = round.finalizes.get(digest)?;
         let identity = self.supervisor.identity(view)?;
         let threshold = identity.required();
         if finalizes.len() >= threshold as usize {
-            return Some(&proposal.1);
+            return Some(&proposal.digest);
         }
         None
     }
@@ -944,7 +960,7 @@ impl<
         if retry && past_view > 0 {
             if let Some(notarization) = self.construct_notarization(past_view, true) {
                 let msg = wire::Voter {
-                    payload: Some(wire::voter::Payload::Notarization(notarization.0)),
+                    payload: Some(wire::voter::Payload::Notarization(notarization.message)),
                 }
                 .encode_to_vec()
                 .into();
@@ -1103,12 +1119,15 @@ impl<
         proposal: Parsed<wire::Proposal, D>,
     ) -> bool {
         // Store the proposal
-        let round = self.views.get_mut(&proposal.0.view).expect("view missing");
+        let round = self
+            .views
+            .get_mut(&proposal.message.view)
+            .expect("view missing");
 
         // Check if view timed out
         if round.broadcast_nullify {
             debug!(
-                view = proposal.0.view,
+                view = proposal.message.view,
                 reason = "view timed out",
                 "dropping our proposal"
             );
@@ -1117,8 +1136,8 @@ impl<
 
         // Store the proposal
         debug!(
-            view = proposal.0.view,
-            parent = proposal.0.parent,
+            view = proposal.message.view,
+            parent = proposal.message.parent,
             digest = hex(&digest),
             "generated proposal"
         );
@@ -1160,7 +1179,7 @@ impl<
             // Check if leader has signed a digest
             let proposal_digest = round.notaries.get(&leader_index)?;
             let notarize = round.notarizes.get(proposal_digest)?.get(&leader_index)?;
-            let proposal = notarize.0.proposal.as_ref()?;
+            let proposal = notarize.message.proposal.as_ref()?;
 
             // Check parent validity
             if proposal.view <= proposal.parent {
@@ -1180,7 +1199,7 @@ impl<
                 );
                 return None;
             }
-            (proposal_digest, (proposal.clone(), notarize.1.clone()))
+            (proposal_digest, (proposal.clone(), notarize.digest.clone()))
         };
 
         // Ensure we have required notarizations
@@ -1232,7 +1251,13 @@ impl<
             view: proposal.0.view,
             parent: (proposal.0.parent, parent_payload),
         };
-        let round_proposal = Some((proposal_digest.clone(), (proposal.0, proposal.1.clone())));
+        let round_proposal = Some((
+            proposal_digest.clone(),
+            Parsed {
+                message: proposal.0,
+                digest: proposal.1.clone(),
+            },
+        ));
         let round = self.views.get_mut(&context.view).unwrap();
         round.proposal = round_proposal;
         Some((
@@ -1438,8 +1463,14 @@ impl<
         }
 
         // Handle notarize
-        self.handle_notarize(public_key_index, (notarize, payload))
-            .await;
+        self.handle_notarize(
+            public_key_index,
+            Parsed {
+                message: notarize,
+                digest: payload,
+            },
+        )
+        .await;
     }
 
     async fn handle_notarize(
@@ -1448,7 +1479,7 @@ impl<
         notarize: Parsed<wire::Notarize, D>,
     ) {
         // Check to see if notarize is for proposal in view
-        let view = notarize.0.proposal.as_ref().unwrap().view;
+        let view = notarize.message.proposal.as_ref().unwrap().view;
         let round = self
             .views
             .entry(view)
@@ -1456,7 +1487,7 @@ impl<
 
         // Handle notarize
         let notarize_bytes = wire::Voter {
-            payload: Some(wire::voter::Payload::Notarize(notarize.0.clone())),
+            payload: Some(wire::voter::Payload::Notarize(notarize.message.clone())),
         }
         .encode_to_vec()
         .into();
@@ -1509,12 +1540,16 @@ impl<
         }
 
         // Handle notarization
-        self.handle_notarization((notarization, payload)).await;
+        self.handle_notarization(Parsed {
+            message: notarization,
+            digest: payload,
+        })
+        .await;
     }
 
     async fn handle_notarization(&mut self, notarization: Parsed<wire::Notarization, D>) {
         // Create round (if it doesn't exist)
-        let view = notarization.0.proposal.as_ref().unwrap().view;
+        let view = notarization.message.proposal.as_ref().unwrap().view;
         let round = self
             .views
             .entry(view)
@@ -1522,11 +1557,13 @@ impl<
 
         // Store notarization
         let notarization_bytes = wire::Voter {
-            payload: Some(wire::voter::Payload::Notarization(notarization.0.clone())),
+            payload: Some(wire::voter::Payload::Notarization(
+                notarization.message.clone(),
+            )),
         }
         .encode_to_vec()
         .into();
-        let seed = group::Signature::deserialize(&notarization.0.seed_signature).unwrap();
+        let seed = group::Signature::deserialize(&notarization.message.seed_signature).unwrap();
         if round.add_verified_notarization(notarization) && self.journal.is_some() {
             self.journal
                 .as_mut()
@@ -1640,8 +1677,14 @@ impl<
         }
 
         // Handle finalize
-        self.handle_finalize(public_key_index, (finalize, payload))
-            .await;
+        self.handle_finalize(
+            public_key_index,
+            Parsed {
+                message: finalize,
+                digest: payload,
+            },
+        )
+        .await;
     }
 
     async fn handle_finalize(
@@ -1650,7 +1693,7 @@ impl<
         finalize: Parsed<wire::Finalize, D>,
     ) {
         // Get view for finalize
-        let view = finalize.0.proposal.as_ref().unwrap().view;
+        let view = finalize.message.proposal.as_ref().unwrap().view;
         let round = self
             .views
             .entry(view)
@@ -1658,7 +1701,7 @@ impl<
 
         // Handle finalize
         let finalize_bytes = wire::Voter {
-            payload: Some(wire::voter::Payload::Finalize(finalize.0.clone())),
+            payload: Some(wire::voter::Payload::Finalize(finalize.message.clone())),
         }
         .encode_to_vec()
         .into();
@@ -1711,12 +1754,16 @@ impl<
         }
 
         // Process finalization
-        self.handle_finalization((finalization, payload)).await;
+        self.handle_finalization(Parsed {
+            message: finalization,
+            digest: payload,
+        })
+        .await;
     }
 
     async fn handle_finalization(&mut self, finalization: Parsed<wire::Finalization, D>) {
         // Create round (if it doesn't exist)
-        let view = finalization.0.proposal.as_ref().unwrap().view;
+        let view = finalization.message.proposal.as_ref().unwrap().view;
         let round = self
             .views
             .entry(view)
@@ -1724,11 +1771,13 @@ impl<
 
         // Store finalization
         let finalization_bytes = wire::Voter {
-            payload: Some(wire::voter::Payload::Finalization(finalization.0.clone())),
+            payload: Some(wire::voter::Payload::Finalization(
+                finalization.message.clone(),
+            )),
         }
         .encode_to_vec()
         .into();
-        let seed = group::Signature::deserialize(&finalization.0.seed_signature).unwrap();
+        let seed = group::Signature::deserialize(&finalization.message.seed_signature).unwrap();
         if round.add_verified_finalization(finalization) && self.journal.is_some() {
             self.journal
                 .as_mut()
@@ -1765,7 +1814,11 @@ impl<
         }
         let share = self.supervisor.share(view).unwrap();
         let proposal = &round.proposal.as_ref().unwrap().1;
-        let message = proposal_message(proposal.0.view, proposal.0.parent, &proposal.1);
+        let message = proposal_message(
+            proposal.message.view,
+            proposal.message.parent,
+            &proposal.digest,
+        );
         let proposal_signature =
             ops::partial_sign_message(share, Some(&self.notarize_namespace), &message)
                 .serialize()
@@ -1775,14 +1828,14 @@ impl<
             .serialize()
             .into();
         round.broadcast_notarize = true;
-        Some((
-            wire::Notarize {
-                proposal: Some(proposal.0.clone()),
+        Some(Parsed {
+            message: wire::Notarize {
+                proposal: Some(proposal.message.clone()),
                 proposal_signature,
                 seed_signature,
             },
-            proposal.1.clone(),
-        ))
+            digest: proposal.digest.clone(),
+        })
     }
 
     fn construct_notarization(
@@ -1847,19 +1900,23 @@ impl<
                 return None;
             }
         };
-        let message = proposal_message(proposal.0.view, proposal.0.parent, &proposal.1);
+        let message = proposal_message(
+            proposal.message.view,
+            proposal.message.parent,
+            &proposal.digest,
+        );
         let proposal_signature =
             ops::partial_sign_message(share, Some(&self.finalize_namespace), &message)
                 .serialize()
                 .into();
         round.broadcast_finalize = true;
-        Some((
-            wire::Finalize {
-                proposal: Some(proposal.0.clone()),
+        Some(Parsed {
+            message: wire::Finalize {
+                proposal: Some(proposal.message.clone()),
                 proposal_signature,
             },
-            proposal.1.clone(),
-        ))
+            digest: proposal.digest.clone(),
+        })
     }
 
     fn construct_finalization(
@@ -1905,7 +1962,7 @@ impl<
 
             // Broadcast the notarize
             let msg = wire::Voter {
-                payload: Some(wire::voter::Payload::Notarize(notarize.0)),
+                payload: Some(wire::voter::Payload::Notarize(notarize.message)),
             }
             .encode_to_vec()
             .into();
@@ -1918,7 +1975,7 @@ impl<
         // Attempt to notarization
         if let Some(notarization) = self.construct_notarization(view, false) {
             // Update backfiller
-            backfiller.notarized(notarization.0.clone()).await;
+            backfiller.notarized(notarization.message.clone()).await;
 
             // Handle the notarization
             self.handle_notarization(notarization.clone()).await;
@@ -1932,17 +1989,19 @@ impl<
                 .expect("unable to sync journal");
 
             // Alert application
-            let proposal = notarization.0.proposal.as_ref().unwrap();
+            let proposal = notarization.message.proposal.as_ref().unwrap();
             let proof = Prover::<D>::serialize_threshold(
                 proposal,
-                &notarization.0.proposal_signature,
-                &notarization.0.seed_signature,
+                &notarization.message.proposal_signature,
+                &notarization.message.seed_signature,
             );
-            self.committer.prepared(proof, notarization.1.clone()).await;
+            self.committer
+                .prepared(proof, notarization.digest.clone())
+                .await;
 
             // Broadcast the notarization
             let msg = wire::Voter {
-                payload: Some(wire::voter::Payload::Notarization(notarization.0)),
+                payload: Some(wire::voter::Payload::Notarization(notarization.message)),
             }
             .encode_to_vec()
             .into();
@@ -2016,7 +2075,7 @@ impl<
                     let finalization = self.construct_finalization(self.last_finalized, true);
                     if let Some(finalization) = finalization {
                         let msg = wire::Voter {
-                            payload: Some(wire::voter::Payload::Finalization(finalization.0)),
+                            payload: Some(wire::voter::Payload::Finalization(finalization.message)),
                         }
                         .encode_to_vec()
                         .into();
@@ -2053,7 +2112,7 @@ impl<
 
             // Broadcast the finalize
             let msg = wire::Voter {
-                payload: Some(wire::voter::Payload::Finalize(finalize.0)),
+                payload: Some(wire::voter::Payload::Finalize(finalize.message)),
             }
             .encode_to_vec()
             .into();
@@ -2080,17 +2139,17 @@ impl<
                 .expect("unable to sync journal");
 
             // Alert application
-            let proposal = finalization.0.proposal.as_ref().unwrap();
+            let proposal = finalization.message.proposal.as_ref().unwrap();
             let proof = Prover::<D>::serialize_threshold(
                 proposal,
-                &finalization.0.proposal_signature,
-                &finalization.0.seed_signature,
+                &finalization.message.proposal_signature,
+                &finalization.message.seed_signature,
             );
-            self.committer.finalized(proof, finalization.1).await;
+            self.committer.finalized(proof, finalization.digest).await;
 
             // Broadcast the finalization
             let msg = wire::Voter {
-                payload: Some(wire::voter::Payload::Finalization(finalization.0)),
+                payload: Some(wire::voter::Payload::Finalization(finalization.message)),
             }
             .encode_to_vec()
             .into();
@@ -2145,8 +2204,14 @@ impl<
                             .get(public_key_index as usize)
                             .unwrap()
                             .clone();
-                        self.handle_notarize(public_key_index, (notarize, payload.clone()))
-                            .await;
+                        self.handle_notarize(
+                            public_key_index,
+                            Parsed {
+                                message: notarize,
+                                digest: payload.clone(),
+                            },
+                        )
+                        .await;
 
                         // Update round info
                         if public_key == self.crypto.public_key() {
@@ -2155,7 +2220,13 @@ impl<
                                 proposal_message(proposal.view, proposal.parent, &payload);
                             self.hasher.update(&proposal_message);
                             let proposal_digest = self.hasher.finalize();
-                            round.proposal = Some((proposal_digest, (proposal, payload)));
+                            round.proposal = Some((
+                                proposal_digest,
+                                Parsed {
+                                    message: proposal,
+                                    digest: payload,
+                                },
+                            ));
                             round.verified_proposal = true;
                             round.broadcast_notarize = true;
                         }
@@ -2164,7 +2235,11 @@ impl<
                         // Handle notarization
                         let proposal = notarization.proposal.as_ref().unwrap().clone();
                         let payload = D::try_from(&proposal.payload).unwrap();
-                        self.handle_notarization((notarization, payload)).await;
+                        self.handle_notarization(Parsed {
+                            message: notarization,
+                            digest: payload,
+                        })
+                        .await;
 
                         // Update round info
                         let round = self.views.get_mut(&proposal.view).expect("missing round");
@@ -2215,8 +2290,14 @@ impl<
                             .get(public_key_index as usize)
                             .unwrap()
                             .clone();
-                        self.handle_finalize(public_key_index, (finalize, payload))
-                            .await;
+                        self.handle_finalize(
+                            public_key_index,
+                            Parsed {
+                                message: finalize,
+                                digest: payload,
+                            },
+                        )
+                        .await;
 
                         // Update round info
                         //
@@ -2231,7 +2312,11 @@ impl<
                         let proposal = finalization.proposal.as_ref().unwrap();
                         let view = proposal.view;
                         let payload = D::try_from(&proposal.payload).unwrap();
-                        self.handle_finalization((finalization, payload)).await;
+                        self.handle_finalization(Parsed {
+                            message: finalization,
+                            digest: payload,
+                        })
+                        .await;
 
                         // Update round info
                         let round = self.views.get_mut(&view).expect("missing round");
@@ -2331,7 +2416,13 @@ impl<
                         parent: context.parent.0,
                         payload: proposed.to_vec(),
                     };
-                    if !self.our_proposal(proposal_digest, (proposal.clone(), proposed.clone())).await {
+                    if !self.our_proposal(
+                        proposal_digest,
+                        Parsed{
+                            message: proposal.clone(),
+                            digest: proposed.clone(),
+                        },
+                    ).await {
                         warn!(view = context.view, "failed to record our container");
                         continue;
                     }
@@ -2369,7 +2460,7 @@ impl<
                     let msg = mailbox.unwrap();
                     match msg {
                         Message::Notarization{ notarization }  => {
-                            view = notarization.0.proposal.as_ref().unwrap().view;
+                            view = notarization.message.proposal.as_ref().unwrap().view;
                             debug!(view, "received notarization from backfiller");
                             self.handle_notarization(notarization).await;
                         },
