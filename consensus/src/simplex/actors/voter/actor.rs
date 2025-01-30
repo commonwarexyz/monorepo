@@ -723,7 +723,7 @@ impl<
         if retry && past_view > 0 {
             if let Some(notarization) = self.construct_notarization(past_view, true) {
                 let msg = wire::Voter {
-                    payload: Some(wire::voter::Payload::Notarization(notarization)),
+                    payload: Some(wire::voter::Payload::Notarization(notarization.message)),
                 }
                 .encode_to_vec()
                 .into();
@@ -1131,6 +1131,11 @@ impl<
             return;
         }
 
+        // Ensure digest is well-formed
+        let Ok(payload) = D::try_from(&proposal.payload) else {
+            return;
+        };
+
         // Parse signature
         let Some(signature) = notarize.signature.as_ref() else {
             return;
@@ -1148,7 +1153,7 @@ impl<
         };
 
         // Verify the signature
-        let notarize_message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
+        let notarize_message = proposal_message(proposal.view, proposal.parent, &payload);
         if !C::verify(
             Some(&self.notarize_namespace),
             &notarize_message,
@@ -1159,12 +1164,23 @@ impl<
         }
 
         // Handle notarize
-        self.handle_notarize(&public_key, notarize).await;
+        self.handle_notarize(
+            &public_key,
+            Parsed {
+                message: notarize,
+                digest: payload,
+            },
+        )
+        .await;
     }
 
-    async fn handle_notarize(&mut self, public_key: &PublicKey, notarize: wire::Notarize) {
+    async fn handle_notarize(
+        &mut self,
+        public_key: &PublicKey,
+        notarize: Parsed<wire::Notarize, D>,
+    ) {
         // Check to see if notarize is for proposal in view
-        let view = notarize.proposal.as_ref().unwrap().view;
+        let view = notarize.message.proposal.as_ref().unwrap().view;
         let round = self
             .views
             .entry(view)
@@ -1172,7 +1188,7 @@ impl<
 
         // Handle notarize
         let notarize_bytes = wire::Voter {
-            payload: Some(wire::voter::Payload::Notarize(notarize.clone())),
+            payload: Some(wire::voter::Payload::Notarize(notarize.message.clone())),
         }
         .encode_to_vec()
         .into();
@@ -1197,6 +1213,11 @@ impl<
             return;
         }
 
+        // Ensure digest is well-formed
+        let Ok(payload) = D::try_from(&proposal.payload) else {
+            return;
+        };
+
         // Determine if we already broadcast notarization for this view (in which
         // case we can ignore this message)
         if let Some(ref round) = self.views.get_mut(&proposal.view) {
@@ -1206,25 +1227,33 @@ impl<
         }
 
         // Verify notarization
-        if !verify_notarization::<S, C>(&self.supervisor, &self.notarize_namespace, &notarization) {
+        if !verify_notarization::<S, C, D>(
+            &self.supervisor,
+            &self.notarize_namespace,
+            &notarization,
+        ) {
             return;
         }
 
         // Handle notarization
-        self.handle_notarization(notarization).await;
+        self.handle_notarization(Parsed {
+            message: notarization,
+            digest: payload,
+        })
+        .await;
     }
 
-    async fn handle_notarization(&mut self, notarization: wire::Notarization) {
+    async fn handle_notarization(&mut self, notarization: Parsed<wire::Notarization, D>) {
         // Add signatures to view (needed to broadcast notarization if we get proposal)
-        let view = notarization.proposal.as_ref().unwrap().view;
+        let view = notarization.message.proposal.as_ref().unwrap().view;
         let round = self
             .views
             .entry(view)
             .or_insert_with(|| Round::new(self.supervisor.clone(), view));
         let validators = self.supervisor.participants(view).unwrap();
-        for signature in &notarization.signatures {
+        for signature in &notarization.message.signatures {
             let notarize = wire::Notarize {
-                proposal: Some(notarization.proposal.as_ref().unwrap().clone()),
+                proposal: Some(notarization.message.proposal.as_ref().unwrap().clone()),
                 signature: Some(signature.clone()),
             };
             let notarize_bytes = wire::Voter {
@@ -1233,7 +1262,17 @@ impl<
             .encode_to_vec()
             .into();
             let public_key = validators.get(signature.public_key as usize).unwrap();
-            if round.add_verified_notarize(public_key, notarize).await && self.journal.is_some() {
+            if round
+                .add_verified_notarize(
+                    public_key,
+                    Parsed {
+                        message: notarize,
+                        digest: notarization.digest.clone(),
+                    },
+                )
+                .await
+                && self.journal.is_some()
+            {
                 self.journal
                     .as_mut()
                     .unwrap()
@@ -1249,16 +1288,22 @@ impl<
 
         // If proposal is missing, set it
         if round.proposal.is_none() {
-            let proposal = notarization.proposal.unwrap();
-            let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
-            self.hasher.update(&message);
-            let digest: Digest = self.hasher.finalize().into();
+            let proposal = notarization.message.proposal.unwrap();
+            let message = proposal_message(proposal.view, proposal.parent, &notarization.digest);
+            let proposal_digest = hash(&message);
             debug!(
                 view = proposal.view,
-                digest = hex(&digest),
+                digest = hex(&proposal_digest),
+                payload = hex(&notarization.digest),
                 "setting unverified proposal in notarization"
             );
-            round.proposal = Some((digest, proposal));
+            round.proposal = Some((
+                proposal_digest,
+                Parsed {
+                    message: proposal,
+                    digest: notarization.digest,
+                },
+            ));
         }
 
         // Enter next view
@@ -1336,6 +1381,11 @@ impl<
             return;
         }
 
+        // Ensure digest is well-formed
+        let Ok(payload) = D::try_from(&proposal.payload) else {
+            return;
+        };
+
         // Parse signature
         let Some(signature) = finalize.signature.as_ref() else {
             return;
@@ -1353,7 +1403,7 @@ impl<
         };
 
         // Verify the signature
-        let finalize_message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
+        let finalize_message = proposal_message(proposal.view, proposal.parent, &payload);
         if !C::verify(
             Some(&self.finalize_namespace),
             &finalize_message,
@@ -1364,12 +1414,23 @@ impl<
         }
 
         // Handle finalize
-        self.handle_finalize(&public_key, finalize).await;
+        self.handle_finalize(
+            &public_key,
+            Parsed {
+                message: finalize,
+                digest: payload,
+            },
+        )
+        .await;
     }
 
-    async fn handle_finalize(&mut self, public_key: &PublicKey, finalize: wire::Finalize) {
+    async fn handle_finalize(
+        &mut self,
+        public_key: &PublicKey,
+        finalize: Parsed<wire::Finalize, D>,
+    ) {
         // Get view for finalize
-        let view = finalize.proposal.as_ref().unwrap().view;
+        let view = finalize.message.proposal.as_ref().unwrap().view;
         let round = self
             .views
             .entry(view)
@@ -1377,7 +1438,7 @@ impl<
 
         // Handle finalize
         let finalize_bytes = wire::Voter {
-            payload: Some(wire::voter::Payload::Finalize(finalize.clone())),
+            payload: Some(wire::voter::Payload::Finalize(finalize.message.clone())),
         }
         .encode_to_vec()
         .into();
@@ -1402,6 +1463,11 @@ impl<
             return;
         }
 
+        // Ensure digest is well-formed
+        let Ok(payload) = D::try_from(&proposal.payload) else {
+            return;
+        };
+
         // Determine if we already broadcast finalization for this view (in which
         // case we can ignore this message)
         if let Some(ref round) = self.views.get_mut(&proposal.view) {
@@ -1411,25 +1477,33 @@ impl<
         }
 
         // Verify finalization
-        if !verify_finalization::<S, C>(&self.supervisor, &self.finalize_namespace, &finalization) {
+        if !verify_finalization::<S, C, D>(
+            &self.supervisor,
+            &self.finalize_namespace,
+            &finalization,
+        ) {
             return;
         }
 
         // Process finalization
-        self.handle_finalization(finalization).await;
+        self.handle_finalization(Parsed {
+            message: finalization,
+            digest: payload,
+        })
+        .await;
     }
 
-    async fn handle_finalization(&mut self, finalization: wire::Finalization) {
+    async fn handle_finalization(&mut self, finalization: Parsed<wire::Finalization, D>) {
         // Add signatures to view (needed to broadcast finalization if we get proposal)
-        let view = finalization.proposal.as_ref().unwrap().view;
+        let view = finalization.message.proposal.as_ref().unwrap().view;
         let round = self
             .views
             .entry(view)
             .or_insert_with(|| Round::new(self.supervisor.clone(), view));
         let validators = self.supervisor.participants(view).unwrap();
-        for signature in finalization.signatures.iter() {
+        for signature in finalization.message.signatures.iter() {
             let finalize = wire::Finalize {
-                proposal: Some(finalization.proposal.as_ref().unwrap().clone()),
+                proposal: Some(finalization.message.proposal.as_ref().unwrap().clone()),
                 signature: Some(signature.clone()),
             };
             let finalize_bytes = wire::Voter {
@@ -1438,7 +1512,17 @@ impl<
             .encode_to_vec()
             .into();
             let public_key = validators.get(signature.public_key as usize).unwrap();
-            if round.add_verified_finalize(public_key, finalize).await && self.journal.is_some() {
+            if round
+                .add_verified_finalize(
+                    public_key,
+                    Parsed {
+                        message: finalize,
+                        digest: finalization.digest.clone(),
+                    },
+                )
+                .await
+                && self.journal.is_some()
+            {
                 self.journal
                     .as_mut()
                     .unwrap()
@@ -1450,16 +1534,22 @@ impl<
 
         // If proposal is missing, set it
         if round.proposal.is_none() {
-            let proposal = finalization.proposal.unwrap();
-            let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
-            self.hasher.update(&message);
-            let digest: Digest = self.hasher.finalize().into();
+            let proposal = finalization.message.proposal.unwrap();
+            let message = proposal_message(proposal.view, proposal.parent, &finalization.digest);
+            let proposal_digest = hash(&message);
             debug!(
                 view = proposal.view,
-                digest = hex(&digest),
+                digest = hex(&proposal_digest),
+                payload = hex(&finalization.digest),
                 "setting unverified proposal in finalization"
             );
-            round.proposal = Some((digest, proposal));
+            round.proposal = Some((
+                proposal_digest,
+                Parsed {
+                    message: proposal,
+                    digest: finalization.digest,
+                },
+            ));
         }
 
         // Track view finalized
@@ -1471,7 +1561,7 @@ impl<
         self.enter_view(view + 1);
     }
 
-    fn construct_notarize(&mut self, view: u64) -> Option<wire::Notarize> {
+    fn construct_notarize(&mut self, view: u64) -> Option<Parsed<wire::Notarize, D>> {
         let round = match self.views.get_mut(&view) {
             Some(view) => view,
             None => {
@@ -1491,20 +1581,29 @@ impl<
             .supervisor
             .is_participant(view, &self.crypto.public_key())?;
         let proposal = &round.proposal.as_ref().unwrap().1;
+        let message = proposal_message(
+            proposal.message.view,
+            proposal.message.parent,
+            &proposal.digest,
+        );
         round.broadcast_notarize = true;
-        Some(wire::Notarize {
-            proposal: Some(proposal.clone()),
-            signature: Some(wire::Signature {
-                public_key,
-                signature: self.crypto.sign(
-                    Some(&self.notarize_namespace),
-                    &proposal_message(proposal.view, proposal.parent, &proposal.payload),
-                ),
-            }),
+        Some(Parsed {
+            message: wire::Notarize {
+                proposal: Some(proposal.message.clone()),
+                signature: Some(wire::Signature {
+                    public_key,
+                    signature: self.crypto.sign(Some(&self.notarize_namespace), &message),
+                }),
+            },
+            digest: proposal.digest.clone(),
         })
     }
 
-    fn construct_notarization(&mut self, view: u64, force: bool) -> Option<wire::Notarization> {
+    fn construct_notarization(
+        &mut self,
+        view: u64,
+        force: bool,
+    ) -> Option<Parsed<wire::Notarization, D>> {
         // Get requested view
         let round = match self.views.get_mut(&view) {
             Some(view) => view,
@@ -1525,17 +1624,22 @@ impl<
         let (proposal, notarizes) = round.notarizable(threshold, force)?;
 
         // Construct notarization
+        let mut payload = None;
         let mut signatures = Vec::new();
         for validator in 0..(validators.len() as u32) {
             if let Some(notarize) = notarizes.get(&validator) {
-                signatures.push(notarize.signature.clone().unwrap());
+                payload = Some(notarize.digest.clone());
+                signatures.push(notarize.message.signature.clone().unwrap());
             }
         }
         let notarization = wire::Notarization {
             proposal: Some(proposal),
             signatures,
         };
-        Some(notarization)
+        Some(Parsed {
+            message: notarization,
+            digest: payload.unwrap(),
+        })
     }
 
     fn construct_nullification(&mut self, view: u64, force: bool) -> Option<wire::Nullification> {
@@ -1568,7 +1672,7 @@ impl<
         Some(wire::Nullification { view, signatures })
     }
 
-    fn construct_finalize(&mut self, view: u64) -> Option<wire::Finalize> {
+    fn construct_finalize(&mut self, view: u64) -> Option<Parsed<wire::Finalize, D>> {
         let round = match self.views.get_mut(&view) {
             Some(view) => view,
             None => {
@@ -1598,20 +1702,25 @@ impl<
         let public_key = self
             .supervisor
             .is_participant(view, &self.crypto.public_key())?;
+        let message = proposal_message(view, proposal.message.parent, &proposal.digest);
         round.broadcast_finalize = true;
-        Some(wire::Finalize {
-            proposal: Some(proposal.clone()),
-            signature: Some(wire::Signature {
-                public_key,
-                signature: self.crypto.sign(
-                    Some(&self.finalize_namespace),
-                    &proposal_message(proposal.view, proposal.parent, &proposal.payload),
-                ),
-            }),
+        Some(Parsed {
+            message: wire::Finalize {
+                proposal: Some(proposal.message.clone()),
+                signature: Some(wire::Signature {
+                    public_key,
+                    signature: self.crypto.sign(Some(&self.finalize_namespace), &message),
+                }),
+            },
+            digest: proposal.digest.clone(),
         })
     }
 
-    fn construct_finalization(&mut self, view: u64, force: bool) -> Option<wire::Finalization> {
+    fn construct_finalization(
+        &mut self,
+        view: u64,
+        force: bool,
+    ) -> Option<Parsed<wire::Finalization, D>> {
         let round = match self.views.get_mut(&view) {
             Some(view) => view,
             None => {
@@ -1631,17 +1740,22 @@ impl<
         let (proposal, finalizes) = round.finalizable(threshold, force)?;
 
         // Construct finalization
+        let mut payload = None;
         let mut signatures = Vec::new();
         for validator in 0..(validators.len() as u32) {
             if let Some(finalize) = finalizes.get(&validator) {
-                signatures.push(finalize.signature.clone().unwrap());
+                payload = Some(finalize.digest.clone());
+                signatures.push(finalize.message.signature.clone().unwrap());
             }
         }
         let finalization = wire::Finalization {
             proposal: Some(proposal),
             signatures,
         };
-        Some(finalization)
+        Some(Parsed {
+            message: finalization,
+            digest: payload.unwrap(),
+        })
     }
 
     async fn notify(
@@ -1666,7 +1780,7 @@ impl<
 
             // Broadcast the notarize
             let msg = wire::Voter {
-                payload: Some(wire::voter::Payload::Notarize(notarize)),
+                payload: Some(wire::voter::Payload::Notarize(notarize.message)),
             }
             .encode_to_vec()
             .into();
@@ -1679,7 +1793,7 @@ impl<
         // Attempt to notarization
         if let Some(notarization) = self.construct_notarization(view, false) {
             // Update backfiller
-            backfiller.notarized(notarization.clone()).await;
+            backfiller.notarized(notarization.message.clone()).await;
 
             // Handle the notarization
             self.handle_notarization(notarization.clone()).await;
@@ -1694,23 +1808,18 @@ impl<
 
             // Alert application
             let validators = self.supervisor.participants(view).unwrap();
-            let proposal = notarization.proposal.as_ref().unwrap();
-            let mut signatures = Vec::with_capacity(notarization.signatures.len());
-            for signature in &notarization.signatures {
+            let proposal = notarization.message.proposal.as_ref().unwrap();
+            let mut signatures = Vec::with_capacity(notarization.message.signatures.len());
+            for signature in &notarization.message.signatures {
                 let public_key = validators.get(signature.public_key as usize).unwrap();
                 signatures.push((public_key, &signature.signature));
             }
-            let proof = Prover::<C>::serialize_aggregation(proposal, signatures);
-            self.committer
-                .prepared(
-                    proof,
-                    notarization.proposal.as_ref().unwrap().payload.clone(),
-                )
-                .await;
+            let proof = Prover::<C, D>::serialize_aggregation(proposal, signatures);
+            self.committer.prepared(proof, notarization.digest).await;
 
             // Broadcast the notarization
             let msg = wire::Voter {
-                payload: Some(wire::voter::Payload::Notarization(notarization)),
+                payload: Some(wire::voter::Payload::Notarization(notarization.message)),
             }
             .encode_to_vec()
             .into();
@@ -1784,7 +1893,7 @@ impl<
                     let finalization = self.construct_finalization(self.last_finalized, true);
                     if let Some(finalization) = finalization {
                         let msg = wire::Voter {
-                            payload: Some(wire::voter::Payload::Finalization(finalization)),
+                            payload: Some(wire::voter::Payload::Finalization(finalization.message)),
                         }
                         .encode_to_vec()
                         .into();
@@ -1821,7 +1930,7 @@ impl<
 
             // Broadcast the finalize
             let msg = wire::Voter {
-                payload: Some(wire::voter::Payload::Finalize(finalize)),
+                payload: Some(wire::voter::Payload::Finalize(finalize.message)),
             }
             .encode_to_vec()
             .into();
@@ -1849,23 +1958,18 @@ impl<
 
             // Alert application
             let validators = self.supervisor.participants(view).unwrap();
-            let proposal = finalization.proposal.as_ref().unwrap();
-            let mut signatures = Vec::with_capacity(finalization.signatures.len());
-            for signature in &finalization.signatures {
+            let proposal = finalization.message.proposal.as_ref().unwrap();
+            let mut signatures = Vec::with_capacity(finalization.message.signatures.len());
+            for signature in &finalization.message.signatures {
                 let public_key = validators.get(signature.public_key as usize).unwrap();
                 signatures.push((public_key, &signature.signature));
             }
-            let proof = Prover::<C>::serialize_aggregation(proposal, signatures);
-            self.committer
-                .finalized(
-                    proof,
-                    finalization.proposal.as_ref().unwrap().payload.clone(),
-                )
-                .await;
+            let proof = Prover::<C, D>::serialize_aggregation(proposal, signatures);
+            self.committer.finalized(proof, finalization.digest).await;
 
             // Broadcast the finalization
             let msg = wire::Voter {
-                payload: Some(wire::voter::Payload::Finalization(finalization)),
+                payload: Some(wire::voter::Payload::Finalization(finalization.message)),
             }
             .encode_to_vec()
             .into();
