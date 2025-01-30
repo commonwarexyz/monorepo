@@ -22,6 +22,8 @@ pub type Activity = u8;
 /// Proof is a blob that attests to some data.
 pub type Proof = Bytes;
 
+pub type Parsed<Message, Digest> = (Message, Digest);
+
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
         use commonware_cryptography::{PublicKey};
