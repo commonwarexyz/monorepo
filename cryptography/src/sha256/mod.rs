@@ -150,6 +150,6 @@ mod tests {
 
     #[test]
     fn test_sha256_len() {
-        assert_eq!(size_of::<<Sha256 as Hasher>::Digest>(), DIGEST_LENGTH);
+        assert_eq!(size_of::<Digest>(), DIGEST_LENGTH);
     }
 }
