@@ -146,6 +146,8 @@
 //! * Introduce message rebroadcast to continue making progress if messages from a given view are dropped (only way
 //!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
 
+use commonware_cryptography::Digest;
+
 mod encoder;
 mod prover;
 pub use prover::Prover;
@@ -175,7 +177,7 @@ use crate::Activity;
 
 /// Context is a collection of metadata from consensus about a given payload.
 #[derive(Clone)]
-pub struct Context<Digest> {
+pub struct Context<D: Digest> {
     /// Current view of consensus.
     pub view: View,
 
@@ -185,7 +187,7 @@ pub struct Context<Digest> {
     /// must possess a nullification for each discarded view to safely vote on the proposed
     /// payload (any view without a nullification may eventually be finalized and skipping
     /// it would result in a fork).
-    pub parent: (View, Digest),
+    pub parent: (View, D),
 }
 
 /// Notarize a payload at a given view.
