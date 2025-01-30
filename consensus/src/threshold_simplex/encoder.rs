@@ -1,5 +1,6 @@
 use super::View;
 use bytes::{BufMut, Bytes};
+use commonware_cryptography::Digest;
 use commonware_utils::union;
 
 pub const SEED_SUFFIX: &[u8] = b"_SEED";
@@ -7,7 +8,7 @@ pub const NOTARIZE_SUFFIX: &[u8] = b"_NOTARIZE";
 pub const NULLIFY_SUFFIX: &[u8] = b"_NULLIFY";
 pub const FINALIZE_SUFFIX: &[u8] = b"_FINALIZE";
 
-pub fn proposal_message(view: View, parent: View, payload: &Bytes) -> Bytes {
+pub fn proposal_message<D: Digest>(view: View, parent: View, payload: &D) -> Bytes {
     let mut msg = Vec::with_capacity(8 + 8 + payload.len());
     msg.put_u64(view);
     msg.put_u64(parent);

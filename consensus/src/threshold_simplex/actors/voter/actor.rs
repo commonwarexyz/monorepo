@@ -45,6 +45,8 @@ use tracing::{debug, trace, warn};
 
 const GENESIS_VIEW: View = 0;
 
+type Parsed<Message, Digest> = (Message, Digest);
+
 struct Round<
     C: Scheme,
     D: Digest,
@@ -63,14 +65,14 @@ struct Round<
     nullify_retry: Option<SystemTime>,
 
     // Track one proposal per view (only matters prior to notarization)
-    proposal: Option<(Sha256Digest /* proposal */, wire::Proposal)>,
+    proposal: Option<(Sha256Digest /* proposal */, Parsed<wire::Proposal, D>)>,
     requested_proposal: bool,
     verified_proposal: bool,
 
     // Track notarizes for all proposals (ensuring any participant only has one recorded notarize)
     notaries: HashMap<u32, Sha256Digest>,
-    notarizes: HashMap<Sha256Digest, HashMap<u32, wire::Notarize>>,
-    notarization: Option<wire::Notarization>,
+    notarizes: HashMap<Sha256Digest, HashMap<u32, Parsed<wire::Notarize, D>>>,
+    notarization: Option<Parsed<wire::Notarization, D>>,
     broadcast_notarize: bool,
     broadcast_notarization: bool,
 
@@ -82,8 +84,8 @@ struct Round<
 
     // Track finalizes for all proposals (ensuring any participant only has one recorded finalize)
     finalizers: HashMap<u32, Sha256Digest>,
-    finalizes: HashMap<Sha256Digest, HashMap<u32, wire::Finalize>>,
-    finalization: Option<wire::Finalization>,
+    finalizes: HashMap<Sha256Digest, HashMap<u32, Parsed<wire::Finalize, D>>>,
+    finalization: Option<Parsed<wire::Finalization, D>>,
     broadcast_finalize: bool,
     broadcast_finalization: bool,
 }
@@ -135,13 +137,13 @@ impl<
         self.leader = Some(leader);
     }
 
-    fn add_verified_proposal(&mut self, proposal: wire::Proposal) {
-        let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
+    fn add_verified_proposal(&mut self, proposal: Parsed<wire::Proposal, D>) {
+        let message = proposal_message(proposal.0.view, proposal.0.parent, &proposal.1);
         self.hasher.update(&message);
         let digest = self.hasher.finalize();
         if self.proposal.is_none() {
             debug!(
-                view = proposal.view,
+                view = proposal.0.view,
                 digest = hex(&digest),
                 "setting unverified proposal in notarization"
             );
@@ -149,7 +151,7 @@ impl<
         } else if let Some((previous_digest, _)) = &self.proposal {
             if digest != *previous_digest {
                 warn!(
-                    view = proposal.view,
+                    view = proposal.0.view,
                     previous_digest = hex(previous_digest),
                     digest = hex(&digest),
                     "proposal in notarization does not match stored proposal"
@@ -161,13 +163,13 @@ impl<
     async fn add_verified_notarize(
         &mut self,
         public_key_index: u32,
-        notarize: wire::Notarize,
+        notarize: Parsed<wire::Notarize, D>,
     ) -> bool {
         // Get proposal
-        let proposal = notarize.proposal.as_ref().unwrap();
+        let proposal = notarize.0.proposal.as_ref().unwrap();
 
         // Compute proposal digest
-        let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
+        let message = proposal_message(proposal.view, proposal.parent, &notarize.1);
         self.hasher.update(&message);
         let digest = self.hasher.finalize();
 
@@ -190,15 +192,15 @@ impl<
                 .unwrap()
                 .get(&public_key_index)
                 .unwrap();
-            let previous_proposal = previous_notarize.proposal.as_ref().unwrap();
-            let proof = Prover::<D>::serialize_conflicting_notarize(
+            let previous_proposal = previous_notarize.0.proposal.as_ref().unwrap();
+            let proof = Prover::serialize_conflicting_notarize(
                 self.view,
                 previous_proposal.parent,
-                &previous_proposal.payload,
-                &previous_notarize.proposal_signature,
+                &previous_notarize.1,
+                &previous_notarize.0.proposal_signature,
                 proposal.parent,
-                &proposal.payload,
-                &notarize.proposal_signature,
+                &notarize.1,
+                &notarize.0.proposal_signature,
             );
             self.supervisor.report(CONFLICTING_NOTARIZE, proof).await;
             warn!(
@@ -219,7 +221,7 @@ impl<
             return false;
         }
         let entry = self.notarizes.entry(digest).or_default();
-        let proof = Prover::serialize_proposal(proposal, &notarize.proposal_signature);
+        let proof = Prover::<D>::serialize_proposal(proposal, &notarize.0.proposal_signature);
         entry.insert(public_key_index, notarize);
         self.supervisor.report(NOTARIZE, proof).await;
         true
@@ -245,12 +247,12 @@ impl<
             .unwrap()
             .get(&public_key_index)
             .unwrap();
-        let finalize_proposal = finalize.proposal.as_ref().unwrap();
+        let finalize_proposal = finalize.0.proposal.as_ref().unwrap();
         let proof = Prover::serialize_nullify_finalize(
             self.view,
             finalize_proposal.parent,
-            &finalize_proposal.payload,
-            &finalize.proposal_signature,
+            &finalize.1,
+            &finalize.0.proposal_signature,
             &nullify.view_signature,
         );
         self.supervisor.report(NULLIFY_AND_FINALIZE, proof).await;
@@ -266,18 +268,18 @@ impl<
     async fn add_verified_finalize(
         &mut self,
         public_key_index: u32,
-        finalize: wire::Finalize,
+        finalize: Parsed<wire::Finalize, D>,
     ) -> bool {
         // Check if also issued nullify
-        let proposal = finalize.proposal.as_ref().unwrap();
+        let proposal = finalize.0.proposal.as_ref().unwrap();
         let null = self.nullifies.get(&public_key_index);
         if let Some(null) = null {
             // Create fault
             let proof = Prover::serialize_nullify_finalize(
                 self.view,
                 proposal.parent,
-                &proposal.payload,
-                &finalize.proposal_signature,
+                &finalize.1,
+                &finalize.0.proposal_signature,
                 &null.view_signature,
             );
             self.supervisor.report(NULLIFY_AND_FINALIZE, proof).await;
@@ -290,7 +292,7 @@ impl<
             return false;
         }
         // Compute proposal digest
-        let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
+        let message = proposal_message(proposal.view, proposal.parent, &finalize.1);
         self.hasher.update(&message);
         let digest = self.hasher.finalize();
 
@@ -313,15 +315,15 @@ impl<
                 .unwrap()
                 .get(&public_key_index)
                 .unwrap();
-            let previous_proposal = previous_finalize.proposal.as_ref().unwrap();
+            let previous_proposal = previous_finalize.0.proposal.as_ref().unwrap();
             let proof = Prover::serialize_conflicting_finalize(
                 self.view,
                 previous_proposal.parent,
-                &previous_proposal.payload,
-                &previous_finalize.proposal_signature,
+                &previous_finalize.1,
+                &previous_finalize.0.proposal_signature,
                 proposal.parent,
-                &proposal.payload,
-                &finalize.proposal_signature,
+                &finalize.1,
+                &finalize.0.proposal_signature,
             );
             self.supervisor.report(CONFLICTING_FINALIZE, proof).await;
             warn!(
@@ -342,14 +344,14 @@ impl<
             return false;
         }
         let entry = self.finalizes.entry(digest).or_default();
-        let signature = &finalize.proposal_signature;
-        let proof = Prover::serialize_proposal(proposal, signature);
+        let signature = &finalize.0.proposal_signature;
+        let proof = Prover::<D>::serialize_proposal(proposal, signature);
         entry.insert(public_key_index, finalize);
         self.supervisor.report(FINALIZE, proof).await;
         true
     }
 
-    fn add_verified_notarization(&mut self, notarization: wire::Notarization) -> bool {
+    fn add_verified_notarization(&mut self, notarization: Parsed<wire::Notarization, D>) -> bool {
         // If already have notarization, ignore
         if self.notarization.is_some() {
             return false;
@@ -360,8 +362,8 @@ impl<
         self.advance_deadline = None;
 
         // If proposal is missing, set it
-        let proposal = notarization.proposal.as_ref().unwrap().clone();
-        self.add_verified_proposal(proposal);
+        let proposal = notarization.0.proposal.as_ref().unwrap().clone();
+        self.add_verified_proposal((proposal, notarization.1.clone()));
 
         // Store the notarization
         self.notarization = Some(notarization);
@@ -383,7 +385,7 @@ impl<
         true
     }
 
-    fn add_verified_finalization(&mut self, finalization: wire::Finalization) -> bool {
+    fn add_verified_finalization(&mut self, finalization: Parsed<wire::Finalization, D>) -> bool {
         // If already have finalization, ignore
         if self.finalization.is_some() {
             return false;
@@ -394,8 +396,8 @@ impl<
         self.advance_deadline = None;
 
         // If proposal is missing, set it
-        let proposal = finalization.proposal.as_ref().unwrap().clone();
-        self.add_verified_proposal(proposal);
+        let proposal = finalization.0.proposal.as_ref().unwrap().clone();
+        self.add_verified_proposal((proposal, finalization.1.clone()));
 
         // Store the finalization
         self.finalization = Some(finalization);
@@ -412,7 +414,7 @@ impl<
         // If already constructed, return
         if let Some(notarization) = &self.notarization {
             self.broadcast_notarization = true;
-            return Some(notarization.clone());
+            return Some(notarization.0.clone());
         }
 
         // Attempt to construct notarization
@@ -435,6 +437,7 @@ impl<
                 .values()
                 .next()
                 .unwrap()
+                .0
                 .proposal
                 .as_ref()
                 .unwrap()
@@ -444,9 +447,9 @@ impl<
             let mut notarization = Vec::new();
             let mut seed = Vec::new();
             for notarize in notarizes.values() {
-                let eval = Eval::deserialize(&notarize.proposal_signature).unwrap();
+                let eval = Eval::deserialize(&notarize.0.proposal_signature).unwrap();
                 notarization.push(eval);
-                let eval = Eval::deserialize(&notarize.seed_signature).unwrap();
+                let eval = Eval::deserialize(&notarize.0.seed_signature).unwrap();
                 seed.push(eval);
             }
             let proposal_signature = ops::threshold_signature_recover(threshold, notarization)
@@ -526,7 +529,7 @@ impl<
         // If already constructed, return
         if let Some(finalization) = &self.finalization {
             self.broadcast_finalization = true;
-            return Some(finalization.clone());
+            return Some(finalization.0.clone());
         }
 
         // Attempt to construct finalization
@@ -539,14 +542,14 @@ impl<
             let Some(notarization) = &self.notarization else {
                 continue;
             };
-            let seed_signature = notarization.seed_signature.clone();
+            let seed_signature = notarization.0.seed_signature.clone();
 
             // Check notarization and finalization proposal match
-            let notarization_proposal = notarization.proposal.as_ref().unwrap();
+            let notarization_proposal = notarization.0.proposal.as_ref().unwrap();
             let message = proposal_message(
                 notarization_proposal.view,
                 notarization_proposal.parent,
-                &notarization_proposal.payload,
+                &notarization.1,
             );
             self.hasher.update(&message);
             let digest = self.hasher.finalize();
@@ -573,6 +576,7 @@ impl<
                 .values()
                 .next()
                 .unwrap()
+                .0
                 .proposal
                 .as_ref()
                 .unwrap()
@@ -581,7 +585,7 @@ impl<
             // Recover threshold signature
             let mut finalization = Vec::new();
             for finalize in finalizes.values() {
-                let eval = Eval::deserialize(&finalize.proposal_signature).unwrap();
+                let eval = Eval::deserialize(&finalize.0.proposal_signature).unwrap();
                 finalization.push(eval);
             }
             let proposal_signature = ops::threshold_signature_recover(threshold, finalization)
@@ -615,6 +619,7 @@ impl<
                 .values()
                 .next()
                 .unwrap()
+                .0
                 .proposal
                 .as_ref()
                 .unwrap()
@@ -629,7 +634,8 @@ pub struct Actor<
     B: Blob,
     E: Clock + Rng + Spawner + Storage<B>,
     C: Scheme,
-    A: Automaton<Context = Context>,
+    D: Digest,
+    A: Automaton<Context = Context<D>>,
     R: Relay,
     F: Committer,
     S: ThresholdSupervisor<
@@ -651,7 +657,7 @@ pub struct Actor<
     replay_concurrency: usize,
     journal: Option<Journal<B, E>>,
 
-    genesis: Option<Digest>,
+    genesis: Option<D>,
 
     seed_namespace: Vec<u8>,
     notarize_namespace: Vec<u8>,
@@ -667,7 +673,7 @@ pub struct Actor<
 
     last_finalized: View,
     view: View,
-    views: BTreeMap<View, Round<C, S>>,
+    views: BTreeMap<View, Round<C, D, S>>,
 
     current_view: Gauge,
     tracked_views: Gauge,
@@ -679,7 +685,8 @@ impl<
         B: Blob,
         E: Clock + Rng + Spawner + Storage<B>,
         C: Scheme,
-        A: Automaton<Context = Context>,
+        D: Digest,
+        A: Automaton<Context = Context<D>>,
         R: Relay,
         F: Committer,
         S: ThresholdSupervisor<
@@ -688,7 +695,7 @@ impl<
             Index = View,
             Share = group::Share,
         >,
-    > Actor<B, E, C, A, R, F, S>
+    > Actor<B, E, C, D, A, R, F, S>
 {
     pub fn new(runtime: E, journal: Journal<B, E>, cfg: Config<C, A, R, F, S>) -> (Self, Mailbox) {
         // Assert correctness of timeouts
