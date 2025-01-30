@@ -12,10 +12,10 @@ use crate::{
         wire, Context, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE, NOTARIZE,
         NULLIFY_AND_FINALIZE,
     },
-    Automaton, Committer, Digest, Parsed, Relay, Supervisor,
+    Automaton, Committer, Parsed, Relay, Supervisor,
 };
 use commonware_cryptography::{
-    sha256::hash, sha256::Digest as Sha256Digest, Hasher, PublicKey, Scheme,
+    sha256::hash, sha256::Digest as Sha256Digest, Digest, Hasher, PublicKey, Scheme,
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
@@ -428,9 +428,10 @@ pub struct Actor<
     B: Blob,
     E: Clock + Rng + Spawner + Storage<B>,
     C: Scheme,
-    A: Automaton<Context = Context>,
-    R: Relay,
-    F: Committer,
+    D: Digest,
+    A: Automaton<Context = Context<D>, Digest = D>,
+    R: Relay<Digest = D>,
+    F: Committer<Digest = D>,
     S: Supervisor<Index = View>,
 > {
     runtime: E,
@@ -440,12 +441,10 @@ pub struct Actor<
     committer: F,
     supervisor: S,
 
-    hasher: Sha256,
-
     replay_concurrency: usize,
     journal: Option<Journal<B, E>>,
 
-    genesis: Option<Digest>,
+    genesis: Option<D>,
 
     notarize_namespace: Vec<u8>,
     nullify_namespace: Vec<u8>,
@@ -456,11 +455,11 @@ pub struct Actor<
     nullify_retry: Duration,
     activity_timeout: View,
 
-    mailbox_receiver: mpsc::Receiver<Message>,
+    mailbox_receiver: mpsc::Receiver<Message<D>>,
 
     last_finalized: View,
     view: View,
-    views: BTreeMap<View, Round<C, S>>,
+    views: BTreeMap<View, Round<C, D, S>>,
 
     current_view: Gauge,
     tracked_views: Gauge,
@@ -472,13 +471,18 @@ impl<
         B: Blob,
         E: Clock + Rng + Spawner + Storage<B>,
         C: Scheme,
-        A: Automaton<Context = Context>,
-        R: Relay,
-        F: Committer,
+        D: Digest,
+        A: Automaton<Context = Context<D>, Digest = D>,
+        R: Relay<Digest = D>,
+        F: Committer<Digest = D>,
         S: Supervisor<Index = View>,
-    > Actor<B, E, C, A, R, F, S>
+    > Actor<B, E, C, D, A, R, F, S>
 {
-    pub fn new(runtime: E, journal: Journal<B, E>, cfg: Config<C, A, R, F, S>) -> (Self, Mailbox) {
+    pub fn new(
+        runtime: E,
+        journal: Journal<B, E>,
+        cfg: Config<C, D, A, R, F, S>,
+    ) -> (Self, Mailbox<D>) {
         // Assert correctness of timeouts
         if cfg.leader_timeout > cfg.notarization_timeout {
             panic!("leader timeout must be less than or equal to notarization timeout");
@@ -517,8 +521,6 @@ impl<
                 committer: cfg.committer,
                 supervisor: cfg.supervisor,
 
-                hasher: Sha256::new(),
-
                 replay_concurrency: cfg.replay_concurrency,
                 journal: Some(journal),
 
@@ -549,7 +551,7 @@ impl<
         )
     }
 
-    fn is_notarized(&self, view: View) -> Option<&wire::Proposal> {
+    fn is_notarized(&self, view: View) -> Option<&D> {
         let round = self.views.get(&view)?;
         let (digest, proposal) = round.proposal.as_ref()?;
         let notarizes = round.notarizes.get(digest)?;
@@ -558,7 +560,7 @@ impl<
         if notarizes.len() < threshold as usize {
             return None;
         }
-        Some(proposal)
+        Some(&proposal.digest)
     }
 
     fn is_nullified(&self, view: View) -> bool {
@@ -577,7 +579,7 @@ impl<
         round.nullifies.len() >= threshold as usize
     }
 
-    fn is_finalized(&self, view: View) -> Option<&wire::Proposal> {
+    fn is_finalized(&self, view: View) -> Option<&D> {
         let round = self.views.get(&view)?;
         let (digest, proposal) = round.proposal.as_ref()?;
         let finalizes = round.finalizes.get(digest)?;
@@ -586,10 +588,10 @@ impl<
         if finalizes.len() < threshold as usize {
             return None;
         }
-        Some(proposal)
+        Some(&proposal.digest)
     }
 
-    fn find_parent(&self) -> Result<(View, Digest), View> {
+    fn find_parent(&self) -> Result<(View, D), View> {
         let mut cursor = self.view - 1; // self.view always at least 1
         loop {
             if cursor == 0 {
@@ -599,7 +601,7 @@ impl<
             // If have notarization, return
             let parent = self.is_notarized(cursor);
             if let Some(parent) = parent {
-                return Ok((cursor, parent.payload.clone()));
+                return Ok((cursor, parent.clone()));
             }
 
             // If have finalization, return
@@ -607,7 +609,7 @@ impl<
             // We never want to build on some view less than finalized and this prevents that
             let parent = self.is_finalized(cursor);
             if let Some(parent) = parent {
-                return Ok((cursor, parent.payload.clone()));
+                return Ok((cursor, parent.clone()));
             }
 
             // If have nullification, continue
@@ -634,7 +636,7 @@ impl<
     async fn propose(
         &mut self,
         backfiller: &mut resolver::Mailbox,
-    ) -> Option<(Context, oneshot::Receiver<Digest>)> {
+    ) -> Option<(Context<D>, oneshot::Receiver<D>)> {
         // Check if we are leader
         {
             let round = self.views.get_mut(&self.view).unwrap();
@@ -849,14 +851,21 @@ impl<
         }
     }
 
-    async fn our_proposal(&mut self, digest: Digest, proposal: wire::Proposal) -> bool {
+    async fn our_proposal(
+        &mut self,
+        digest: Sha256Digest,
+        proposal: Parsed<wire::Proposal, D>,
+    ) -> bool {
         // Store the proposal
-        let round = self.views.get_mut(&proposal.view).expect("view missing");
+        let round = self
+            .views
+            .get_mut(&proposal.message.view)
+            .expect("view missing");
 
         // Check if view timed out
         if round.broadcast_nullify {
             debug!(
-                view = proposal.view,
+                view = proposal.message.view,
                 reason = "view timed out",
                 "dropping our proposal"
             );
@@ -865,8 +874,8 @@ impl<
 
         // Store the proposal
         debug!(
-            view = proposal.view,
-            parent = proposal.parent,
+            view = proposal.message.view,
+            parent = proposal.message.parent,
             digest = hex(&digest),
             "generated proposal"
         );
@@ -877,7 +886,7 @@ impl<
     }
 
     // Attempt to set proposal from each message received over the wire
-    async fn peer_proposal(&mut self) -> Option<(Context, oneshot::Receiver<bool>)> {
+    async fn peer_proposal(&mut self) -> Option<(Context<D>, oneshot::Receiver<bool>)> {
         // Get round
         let (proposal_digest, proposal) = {
             // Get view or exit
@@ -899,12 +908,8 @@ impl<
 
             // Check if leader has signed a digest
             let proposal_digest = round.notaries.get(&leader_index)?;
-            let proposal = round
-                .notarizes
-                .get(proposal_digest)?
-                .get(&leader_index)?
-                .proposal
-                .as_ref()?;
+            let notarize = round.notarizes.get(proposal_digest)?.get(&leader_index)?;
+            let proposal = notarize.message.proposal.as_ref()?;
 
             // Check parent validity
             if proposal.view <= proposal.parent {
@@ -913,7 +918,13 @@ impl<
             if proposal.parent < self.last_finalized {
                 return None;
             }
-            (proposal_digest, proposal)
+            (
+                proposal_digest,
+                Parsed {
+                    message: proposal.clone(),
+                    digest: notarize.digest.clone(),
+                },
+            )
         };
 
         // Ensure we have required notarizations
@@ -924,9 +935,9 @@ impl<
             _ => self.view - 1,
         };
         let parent_payload = loop {
-            if cursor == proposal.parent {
+            if cursor == proposal.message.parent {
                 // Check if first block
-                if proposal.parent == GENESIS_VIEW {
+                if proposal.message.parent == GENESIS_VIEW {
                     break self.genesis.as_ref().unwrap().clone();
                 }
 
@@ -940,7 +951,7 @@ impl<
                 };
 
                 // Peer proposal references a valid parent
-                break parent_proposal.payload.clone();
+                break parent_proposal.clone();
             }
 
             // Check nullification exists in gap
@@ -955,23 +966,23 @@ impl<
         };
 
         // Request verification
-        let payload = proposal.payload.clone();
         debug!(
-            view = proposal.view,
+            view = proposal.message.view,
             digest = hex(proposal_digest),
-            payload = hex(&payload),
+            payload = hex(&proposal.digest),
             "requested proposal verification",
         );
         let context = Context {
-            view: proposal.view,
-            parent: (proposal.parent, parent_payload),
+            view: proposal.message.view,
+            parent: (proposal.message.parent, parent_payload),
         };
-        let proposal = Some((proposal_digest.clone(), proposal.clone()));
+        let payload = proposal.digest.clone();
+        let round_proposal = Some((proposal_digest.clone(), proposal));
         let round = self.views.get_mut(&context.view).unwrap();
-        round.proposal = proposal;
+        round.proposal = round_proposal;
         Some((
             context.clone(),
-            self.automaton.verify(context, payload.clone()).await,
+            self.automaton.verify(context, payload).await,
         ))
     }
 

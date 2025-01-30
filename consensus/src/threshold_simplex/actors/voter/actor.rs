@@ -12,7 +12,7 @@ use crate::{
         wire, Context, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE, NOTARIZE,
         NULLIFY_AND_FINALIZE,
     },
-    Automaton, Committer, Digest, Parsed, Relay, ThresholdSupervisor,
+    Automaton, Committer, Parsed, Relay, ThresholdSupervisor,
 };
 use commonware_cryptography::{
     bls12381::primitives::{
@@ -22,7 +22,7 @@ use commonware_cryptography::{
     },
     hash,
     sha256::Digest as Sha256Digest,
-    PublicKey, Scheme,
+    Digest, PublicKey, Scheme,
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
@@ -1190,7 +1190,13 @@ impl<
                 );
                 return None;
             }
-            (proposal_digest, (proposal.clone(), notarize.digest.clone()))
+            (
+                proposal_digest,
+                Parsed {
+                    message: proposal.clone(),
+                    digest: notarize.digest.clone(),
+                },
+            )
         };
 
         // Ensure we have required notarizations
@@ -1201,9 +1207,9 @@ impl<
             _ => self.view - 1,
         };
         let parent_payload = loop {
-            if cursor == proposal.0.parent {
+            if cursor == proposal.message.parent {
                 // Check if first block
-                if proposal.0.parent == GENESIS_VIEW {
+                if proposal.message.parent == GENESIS_VIEW {
                     break self.genesis.as_ref().unwrap().clone();
                 }
 
@@ -1233,27 +1239,22 @@ impl<
 
         // Request verification
         debug!(
-            view = proposal.0.view,
+            view = proposal.message.view,
             digest = hex(proposal_digest),
-            payload = hex(&proposal.1),
+            payload = hex(&proposal.digest),
             "requested proposal verification",
         );
         let context = Context {
-            view: proposal.0.view,
-            parent: (proposal.0.parent, parent_payload),
+            view: proposal.message.view,
+            parent: (proposal.message.parent, parent_payload),
         };
-        let round_proposal = Some((
-            proposal_digest.clone(),
-            Parsed {
-                message: proposal.0,
-                digest: proposal.1.clone(),
-            },
-        ));
+        let payload = proposal.digest.clone();
+        let round_proposal = Some((proposal_digest.clone(), proposal));
         let round = self.views.get_mut(&context.view).unwrap();
         round.proposal = round_proposal;
         Some((
             context.clone(),
-            self.automaton.verify(context, proposal.1).await,
+            self.automaton.verify(context, payload).await,
         ))
     }
 
