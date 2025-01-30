@@ -15,14 +15,19 @@ use commonware_cryptography::{
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Blob, Clock, Spawner, Storage};
-use commonware_storage::journal::Journal;
+use commonware_storage::journal::{self, Journal};
 use futures::{
     channel::{mpsc, oneshot},
     future::Either,
-    StreamExt,
+    pin_mut, StreamExt,
 };
+use prometheus_client::registry::Registry;
 use prost::Message as _;
-use std::time::{Duration, SystemTime};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::{Duration, SystemTime},
+};
 use tracing::{debug, error};
 
 pub struct Actor<
@@ -40,11 +45,6 @@ pub struct Actor<
     runtime: E,
     crypto: C,
     hasher: H,
-
-    ////////////////////////////////////////
-    // Storage
-    ////////////////////////////////////////
-    journal: Option<Journal<B, E>>,
 
     ////////////////////////////////////////
     // Threshold
@@ -74,10 +74,10 @@ pub struct Actor<
     rebroadcast_deadline: Option<SystemTime>,
 
     // The configured timeout for pruning old evidence
-    prune_timeout: Option<Duration>,
+    prune_acks_timeout: Option<Duration>,
 
     // The system time at which the prune deadline is reached
-    prune_deadline: Option<SystemTime>,
+    prune_acks_deadline: Option<SystemTime>,
 
     ////////////////////////////////////////
     // Pruning
@@ -97,12 +97,20 @@ pub struct Actor<
     mailbox_receiver: mpsc::Receiver<Message>,
 
     ////////////////////////////////////////
+    // Storage
+    ////////////////////////////////////////
+    journal_entries_per_section: u64,
+    journal_replay_concurrency: usize,
+    journal_naming_fn: fn(&PublicKey) -> String,
+    journals: HashMap<PublicKey, Journal<B, E>>,
+
+    ////////////////////////////////////////
     // State
     ////////////////////////////////////////
-    tipman: TipManager,
+    tip_man: TipManager,
 
     // Handles acknowledgements for chunks.
-    ackman: AckManager,
+    ack_man: AckManager,
 }
 
 impl<
@@ -115,7 +123,7 @@ impl<
         S: ThresholdCoordinator<Index = Epoch, Share = group::Share, Identity = poly::Public>,
     > Actor<B, E, C, H, A, Z, S>
 {
-    pub fn new(runtime: E, journal: Journal<B, E>, cfg: Config<C, H, A, Z, S>) -> (Self, Mailbox) {
+    pub fn new(runtime: E, cfg: Config<C, H, A, Z, S>) -> (Self, Mailbox) {
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::new(mailbox_sender);
         let result = Self {
@@ -125,22 +133,37 @@ impl<
             coordinator: cfg.coordinator,
             application: cfg.application,
             collector: cfg.collector,
-            journal: Some(journal),
             chunk_namespace: encoder::chunk_namespace(&cfg.namespace),
             ack_namespace: encoder::ack_namespace(&cfg.namespace),
             rebroadcast_timeout: cfg.rebroadcast_timeout,
             rebroadcast_deadline: None,
-            prune_timeout: cfg.prune_timeout,
-            prune_deadline: None,
+            prune_acks_timeout: cfg.prune_acks_timeout,
+            prune_acks_deadline: None,
             epoch_bounds: cfg.epoch_bounds,
             mailbox_receiver,
-            tipman: TipManager::default(),
-            ackman: AckManager::default(),
+            journal_entries_per_section: cfg.journal_entries_per_section,
+            journal_replay_concurrency: cfg.journal_replay_concurrency,
+            journal_naming_fn: cfg.journal_naming_fn,
+            journals: HashMap::new(),
+            tip_man: TipManager::default(),
+            ack_man: AckManager::default(),
         };
 
         (result, mailbox)
     }
 
+    /// Runs the actor until the runtime is stopped.
+    ///
+    /// The actor will handle:
+    /// - Timeouts
+    ///   - Rebroadcasting Links
+    ///   - Pruning old evidence
+    /// - Mailbox messages from the application:
+    ///   - Broadcast requests
+    ///   - Ack requests
+    /// - Messages from the network:
+    ///   - Links
+    ///   - Acks
     pub async fn run(
         mut self,
         chunk_network: (impl Sender, impl Receiver),
@@ -149,9 +172,10 @@ impl<
         let (mut link_sender, mut link_receiver) = chunk_network;
         let (mut ack_sender, mut ack_receiver) = ack_network;
         let mut shutdown = self.runtime.stopped();
-        let runtime = self.runtime.clone();
-        if let Some(timeout) = self.prune_timeout {
-            self.prune_deadline = Some(runtime.current() + timeout);
+
+        // Initialize pruning
+        if let Some(timeout) = self.prune_acks_timeout {
+            self.prune_acks_deadline = Some(self.runtime.current() + timeout);
         }
 
         loop {
@@ -161,7 +185,7 @@ impl<
                 Some(deadline) => Either::Left(self.runtime.sleep_until(deadline)),
                 None => Either::Right(futures::future::pending()),
             };
-            let prune = match self.prune_deadline {
+            let prune_acks = match self.prune_acks_deadline {
                 Some(deadline) => Either::Left(self.runtime.sleep_until(deadline)),
                 None => Either::Right(futures::future::pending()),
             };
@@ -169,19 +193,16 @@ impl<
             select! {
                 // Handle shutdown signal
                 _ = &mut shutdown => {
-                    debug!("Signer shutting down");
-                    self.journal
-                        .take()
-                        .unwrap()
-                        .close()
-                        .await
-                        .expect("unable to close journal");
+                    debug!("Shutdown");
+                    for (_, journal) in self.journals.drain() {
+                        journal.close().await.expect("unable to close journal");
+                    }
                     return;
                 },
 
                 // Handle rebroadcast deadline
                 _ = rebroadcast => {
-                    debug!("Rebroadcasting");
+                    debug!("Timeout: Rebroadcast");
                     if let Err(e) = self.rebroadcast(&mut link_sender).await {
                         error!("Failed to rebroadcast: {:?}", e);
                         continue;
@@ -189,15 +210,14 @@ impl<
                 },
 
                 // Handle prune deadline
-                _ = prune => {
-                    debug!("Pruning");
-                    let epoch = self.coordinator.index();
-                    self.ackman.prune_epoch(epoch);
+                _ = prune_acks => {
+                    debug!("Timeout: Prune Acks");
+                    self.prune_acks();
                 },
 
                 // Handle incoming links
                 msg = link_receiver.recv() => {
-                    debug!("Received link");
+                    debug!("Network: Link");
                     // Error handling
                     let Ok((sender, msg)) = msg else {
                         error!("link_receiver failed");
@@ -212,8 +232,11 @@ impl<
                         continue;
                     };
 
+                    // Initialize journal for sequencer if it does not exist
+                    self.journal_prepare(&sender).await;
+
+                    // Handle the link
                     if let Some(parent) = link.parent.as_ref() {
-                        debug!("Received parent");
                         let parent_chunk = wire::Chunk {
                             sequencer: sender.clone(),
                             height: link.chunk.as_ref().unwrap().height.checked_sub(1).unwrap(),
@@ -230,7 +253,7 @@ impl<
 
                 // Handle incoming acks
                 msg = ack_receiver.recv() => {
-                    debug!("Received ack");
+                    debug!("Network: Ack");
                     // Error handling
                     let Ok((sender, msg)) = msg else {
                         error!("ack_receiver failed");
@@ -255,7 +278,6 @@ impl<
 
                 // Handle mailbox messages
                 mail = self.mailbox_receiver.next() => {
-                    debug!("Mailbox: ...parsing");
                     let msg = match mail {
                         Some(msg) => msg,
                         None => {
@@ -266,6 +288,10 @@ impl<
                     match msg {
                         Message::Broadcast{ payload, result } => {
                             debug!("Mailbox: Broadcast");
+                            // Initialize my journal if it does not exist
+                            self.journal_prepare(&self.crypto.public_key()).await;
+
+                            // Broadcast the message
                             if let Err(e) = self.broadcast_new(payload, result, &mut link_sender).await {
                                 error!("Failed to broadcast new: {:?}", e);
                                 continue;
@@ -284,6 +310,10 @@ impl<
         }
     }
 
+    ////////////////////////////////////////
+    // Handling
+    ////////////////////////////////////////
+
     /// Handles a verified message from the application.
     ///
     /// This is called when the application has verified a payload.
@@ -295,7 +325,7 @@ impl<
         ack_sender: &mut impl Sender,
     ) -> Result<(), Error> {
         // Get the tip
-        let Some(chunk) = self.tipman.get_chunk(&context.sequencer) else {
+        let Some(chunk) = self.tip_man.get_chunk(&context.sequencer) else {
             return Err(Error::AppVerifiedNoTip);
         };
 
@@ -321,6 +351,10 @@ impl<
             ops::partial_sign_message(share, Some(&self.ack_namespace), &ack_digest)
                 .serialize()
                 .into();
+
+        // Sync the journal to prevent ever acking two conflicting chunks at
+        // the same height, even if the node crashes and restarts.
+        self.journal_sync(&context.sequencer, context.height).await;
 
         // Send the ack to the network
         let ack = wire::Ack {
@@ -349,7 +383,7 @@ impl<
         threshold: group::Signature,
     ) {
         // Check if the threshold signature is already known
-        let evidence = self.ackman.get_or_init(epoch, chunk);
+        let evidence = self.ack_man.get_or_init(epoch, chunk);
         if let Evidence::Threshold(_) = evidence {
             return;
         }
@@ -396,7 +430,7 @@ impl<
         let quorum = identity.required();
 
         // Get the partial signatures, returning early if we already have a threshold
-        let evidence = self.ackman.get_or_init(ack_epoch, chunk);
+        let evidence = self.ack_man.get_or_init(ack_epoch, chunk);
         let Evidence::Partials(partials) = evidence else {
             return Ok(());
         };
@@ -436,11 +470,11 @@ impl<
         let epoch = self.coordinator.index();
 
         // Store the tip
-        self.tipman.put(link.clone());
+        self.tip_man.put(link.clone());
 
         // Prune old evidence
         let chunk = link.chunk.as_ref().unwrap();
-        self.ackman
+        self.ack_man
             .prune_height(epoch, &chunk.sequencer, chunk.height);
 
         // Verify the chunk with the application
@@ -452,8 +486,15 @@ impl<
             .verify(context, chunk.payload_digest.clone())
             .await;
 
+        // Append to journal
+        self.journal_append(link).await;
+
         Ok(())
     }
+
+    ////////////////////////////////////////
+    // Broadcasting
+    ////////////////////////////////////////
 
     /// Broadcast a message to the network.
     ///
@@ -471,9 +512,9 @@ impl<
         // Get parent Chunk and threshold signature
         let mut height = 0;
         let mut parent = None;
-        if let Some(chunk_tip) = self.tipman.get_chunk(&me) {
+        if let Some(chunk_tip) = self.tip_man.get_chunk(&me) {
             // Get threshold or return early
-            let Evidence::Threshold(threshold) = self.ackman.get_or_init(epoch, &chunk_tip) else {
+            let Evidence::Threshold(threshold) = self.ack_man.get_or_init(epoch, &chunk_tip) else {
                 let _ = result.send(false);
                 return Err(Error::NoThresholdForTip(chunk_tip.height));
             };
@@ -510,7 +551,9 @@ impl<
             return Err(e);
         }
 
-        debug!("Broadcasting link");
+        // Sync the journal to prevent ever broadcasting two conflicting chunks
+        // at the same height, even if the node crashes and restarts
+        self.journal_sync(&me, height).await;
 
         // Broadcast to network
         if let Err(e) = self.broadcast(&link, link_sender, epoch).await {
@@ -543,13 +586,13 @@ impl<
         }
 
         // Return if no chunk to rebroadcast
-        let Some(link_tip) = self.tipman.get(&me) else {
+        let Some(link_tip) = self.tip_man.get(&me) else {
             return Err(Error::NothingToRebroadcast);
         };
 
         // Return if threshold already collected
         if let Evidence::Threshold(_) = self
-            .ackman
+            .ack_man
             .get_or_init(epoch, link_tip.chunk.as_ref().unwrap())
         {
             return Err(Error::ThresholdAlreadyExists);
@@ -588,6 +631,10 @@ impl<
 
         Ok(())
     }
+
+    ////////////////////////////////////////
+    // Validation
+    ////////////////////////////////////////
 
     /// Takes a raw link (from sender) from the p2p network and validates it.
     ///
@@ -708,7 +755,7 @@ impl<
         }
 
         // Verify height
-        if let Some(chunk_tip) = self.tipman.get_chunk(&chunk.sequencer) {
+        if let Some(chunk_tip) = self.tip_man.get_chunk(&chunk.sequencer) {
             // Height must be at least the tip height
             match chunk.height.cmp(&chunk_tip.height) {
                 std::cmp::Ordering::Less => {
@@ -731,6 +778,118 @@ impl<
 
         Ok(chunk)
     }
+
+    ////////////////////////////////////////
+    // Journal
+    ////////////////////////////////////////
+
+    /// Returns the section of the journal for the given height.
+    fn get_journal_section(&self, height: u64) -> u64 {
+        height / self.journal_entries_per_section
+    }
+
+    /// Ensures the journal exists and is initialized for the given sequencer.
+    /// If the journal does not exist, it is created and replayed.
+    /// Else, no action is taken.
+    async fn journal_prepare(&mut self, sequencer: &PublicKey) {
+        // Return early if the journal already exists
+        if self.journals.contains_key(sequencer) {
+            return;
+        }
+
+        // Initialize journal
+        let cfg = journal::Config {
+            registry: Arc::new(Mutex::new(Registry::default())),
+            partition: (self.journal_naming_fn)(sequencer),
+        };
+        let mut journal = Journal::init(self.runtime.clone(), cfg)
+            .await
+            .expect("unable to init journal");
+
+        // Replay journal
+        {
+            // Prepare the stream
+            let stream = journal
+                .replay(self.journal_replay_concurrency, None)
+                .await
+                .expect("unable to replay journal");
+            pin_mut!(stream);
+
+            // Read from the stream, which may be in arbitrary order.
+            // Remember the highest link height
+            let mut tip: Option<wire::Link> = None;
+            while let Some(msg) = stream.next().await {
+                let (_, _, _, msg) = msg.expect("unable to decode journal message");
+                let link = wire::Link::decode(msg).expect("journal message is unexpected format");
+                let height = link.chunk.as_ref().unwrap().height;
+                if tip.is_none() || height > tip.as_ref().unwrap().chunk.as_ref().unwrap().height {
+                    tip = Some(link);
+                }
+            }
+
+            // Set the tip
+            if let Some(link) = tip.take() {
+                self.tip_man.put(link.clone());
+            }
+        }
+
+        // Store journal
+        self.journals.insert(sequencer.clone(), journal);
+    }
+
+    /// Write a link to the appropriate journal.
+    ///
+    /// The journal must already be open and replayed.
+    async fn journal_append(&mut self, link: &wire::Link) {
+        let chunk = link.chunk.as_ref().unwrap();
+        let section = self.get_journal_section(chunk.height);
+        self.journals
+            .get_mut(&chunk.sequencer)
+            .expect("journal does not exist")
+            .append(section, link.encode_to_vec().into())
+            .await
+            .expect("unable to append to journal");
+    }
+
+    /// Syncs (ensures all data is written to disk) and prunes the journal for the given sequencer and height.
+    async fn journal_sync(&mut self, sequencer: &PublicKey, height: u64) {
+        let section = self.get_journal_section(height);
+
+        // Get journal
+        let journal = self
+            .journals
+            .get_mut(sequencer)
+            .expect("journal does not exist");
+
+        // Sync journal
+        journal.sync(section).await.expect("unable to sync journal");
+
+        // Prune journal, ignoring errors
+        let _ = journal.prune(section).await;
+    }
+    ////////////////////////////////////////
+    // Pruning
+    ////////////////////////////////////////
+
+    /// Prune old evidence.
+    fn prune_acks(&mut self) {
+        // Prune old evidence
+        let epoch_to_prune = {
+            let (eb_lo, _) = self.epoch_bounds;
+            let epoch = self.coordinator.index();
+            epoch.saturating_sub(eb_lo)
+        };
+        self.ack_man.prune_epoch(epoch_to_prune);
+
+        // Set timeout for next prune
+        if let Some(timeout) = self.prune_acks_timeout {
+            self.prune_acks_deadline = Some(self.runtime.current() + timeout);
+        }
+    }
+
+    ////////////////////////////////////////
+    // Hashing
+    ////////////////////////////////////////
 
     /// Returns the digest of the given chunk
     fn hash_chunk(&mut self, chunk: &wire::Chunk) -> Digest {

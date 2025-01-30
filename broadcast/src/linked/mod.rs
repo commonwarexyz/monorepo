@@ -35,7 +35,6 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{deterministic::Executor, Clock, Runner, Spawner};
-    use commonware_storage::journal::{self, Journal};
     use commonware_utils::hex;
     use futures::channel::oneshot;
     use prometheus_client::registry::Registry;
@@ -175,26 +174,21 @@ mod tests {
                     mailboxes.insert(validator.clone(), app_mailbox.clone());
 
                     // Signer
-                    let cfg = journal::Config {
-                        registry: Arc::new(Mutex::new(Registry::default())),
-                        partition: hex(validator),
-                    };
-                    let journal = Journal::init(runtime.clone(), cfg)
-                        .await
-                        .expect("Failed to initialize journal");
                     let (signer, signer_mailbox) = signer::Actor::new(
                         runtime.clone(),
-                        journal,
                         signer::Config {
                             crypto: scheme.clone(),
                             application: app_mailbox.clone(),
                             collector: collector_mailbox.clone(),
                             coordinator,
-                            mailbox_size: 1,
+                            mailbox_size: 1024,
                             hasher: Sha256::default(),
                             namespace: b"test".to_vec(),
                             epoch_bounds: (1, 1),
-                            prune_timeout: None,
+                            prune_acks_timeout: None,
+                            journal_entries_per_section: 100,
+                            journal_replay_concurrency: 1,
+                            journal_naming_fn: |v| "seq".to_string() + &hex(v),
                             rebroadcast_timeout: Some(Duration::from_secs(5)),
                         },
                     );

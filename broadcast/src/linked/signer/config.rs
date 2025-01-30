@@ -4,7 +4,7 @@ use crate::{
     linked::{Context, Epoch},
     Application, Collector, ThresholdCoordinator,
 };
-use commonware_cryptography::{Hasher, Scheme};
+use commonware_cryptography::{Hasher, PublicKey, Scheme};
 
 pub struct Config<
     C: Scheme,
@@ -21,6 +21,9 @@ pub struct Config<
     pub mailbox_size: usize,
     pub namespace: Vec<u8>,
     pub rebroadcast_timeout: Option<Duration>,
-    pub prune_timeout: Option<Duration>,
+    pub prune_acks_timeout: Option<Duration>,
     pub epoch_bounds: (u64, u64),
+    pub journal_naming_fn: fn(&PublicKey) -> String,
+    pub journal_entries_per_section: u64,
+    pub journal_replay_concurrency: usize,
 }

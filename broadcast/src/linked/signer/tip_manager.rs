@@ -16,8 +16,15 @@ pub struct TipManager {
 impl TipManager {
     /// Inserts a new tip.
     pub fn put(&mut self, link: wire::Link) {
-        self.tips
+        let new_height = link.chunk.as_ref().unwrap().height;
+        let old = self
+            .tips
             .insert(link.chunk.as_ref().unwrap().sequencer.clone(), link);
+        if let Some(old) = old {
+            if old.chunk.as_ref().unwrap().height > new_height {
+                panic!("Attempted to insert a lower-height tip");
+            }
+        }
     }
 
     /// Returns the tip for the given sequencer.
