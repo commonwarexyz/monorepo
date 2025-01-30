@@ -6,7 +6,6 @@ fn main() -> Result<()> {
     config.bytes(&[
         "Signature.public_key",
         "Signature.signature",
-        "Parent.digest",
         "Proposal.payload",
     ]);
     config.compile_protos(&["src/simplex/wire.proto"], &["src/simplex/"])?;
