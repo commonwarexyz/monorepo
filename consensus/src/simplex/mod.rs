@@ -177,7 +177,7 @@ pub const NULLIFY_AND_FINALIZE: Activity = 4;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::{Ed25519, Hasher, PublicKey, Scheme, Sha256};
+    use commonware_cryptography::{sha256, Ed25519, PublicKey, Scheme, Sha256};
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{
@@ -199,6 +199,8 @@ mod tests {
         time::Duration,
     };
     use tracing::debug;
+
+    const DIGEST_LENGTH: usize = size_of::<sha256::Digest>();
 
     /// Registers all validators using the oracle.
     async fn register_validators(
@@ -322,7 +324,7 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
             // Create engines
-            let prover = Prover::new(&namespace, Sha256::DIGEST_LENGTH);
+            let prover = Prover::new(&namespace, DIGEST_LENGTH);
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -548,7 +550,7 @@ mod tests {
                 link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
                 // Create engines
-                let prover = Prover::new(&namespace, Sha256::DIGEST_LENGTH);
+                let prover = Prover::new(&namespace, DIGEST_LENGTH);
                 let relay = Arc::new(mocks::relay::Relay::new());
                 let mut supervisors = HashMap::new();
                 let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -757,7 +759,7 @@ mod tests {
             .await;
 
             // Create engines
-            let prover = Prover::new(&namespace, Sha256::DIGEST_LENGTH);
+            let prover = Prover::new(&namespace, DIGEST_LENGTH);
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -1041,7 +1043,7 @@ mod tests {
             .await;
 
             // Create engines
-            let prover = Prover::new(&namespace, Sha256::DIGEST_LENGTH);
+            let prover = Prover::new(&namespace, DIGEST_LENGTH);
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -1219,7 +1221,7 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
             // Create engines
-            let prover = Prover::new(&namespace, Sha256::DIGEST_LENGTH);
+            let prover = Prover::new(&namespace, DIGEST_LENGTH);
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -1403,7 +1405,7 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
             // Create engines
-            let prover = Prover::new(&namespace, Sha256::DIGEST_LENGTH);
+            let prover = Prover::new(&namespace, DIGEST_LENGTH);
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -1569,7 +1571,7 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(link.clone()), None).await;
 
             // Create engines
-            let prover = Prover::new(&namespace, Sha256::DIGEST_LENGTH);
+            let prover = Prover::new(&namespace, DIGEST_LENGTH);
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -1792,7 +1794,7 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(degraded_link), None).await;
 
             // Create engines
-            let prover = Prover::new(&namespace, Sha256::DIGEST_LENGTH);
+            let prover = Prover::new(&namespace, DIGEST_LENGTH);
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -1964,7 +1966,7 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
             // Create engines
-            let prover = Prover::new(&namespace, Sha256::DIGEST_LENGTH);
+            let prover = Prover::new(&namespace, DIGEST_LENGTH);
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -2148,7 +2150,7 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
             // Create engines
-            let prover = Prover::new(&namespace, Sha256::DIGEST_LENGTH);
+            let prover = Prover::new(&namespace, DIGEST_LENGTH);
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();

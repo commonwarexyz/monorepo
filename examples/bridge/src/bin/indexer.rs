@@ -4,7 +4,7 @@ use commonware_bridge::{wire, APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_N
 use commonware_consensus::{threshold_simplex::Prover, Digest};
 use commonware_cryptography::{
     bls12381::primitives::group::{self, Element},
-    Ed25519, Hasher, Scheme, Sha256,
+    sha256, Ed25519, Hasher, Scheme, Sha256,
 };
 use commonware_runtime::{tokio::Executor, Listener, Network, Runner, Spawner};
 use commonware_stream::{
@@ -117,7 +117,7 @@ fn main() {
         let network = from_hex(network).expect("Network not well-formed");
         let public = group::Public::deserialize(&network).expect("Network not well-formed");
         let namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
-        let prover = Prover::new(public, &namespace, Sha256::DIGEST_LENGTH);
+        let prover = Prover::new(public, &namespace, size_of::<sha256::Digest>());
         provers.insert(network.clone(), prover);
         blocks.insert(network.clone(), HashMap::new());
         finalizations.insert(network, BTreeMap::new());

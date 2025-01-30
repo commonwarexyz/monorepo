@@ -4,7 +4,7 @@ use crate::{Error, Hasher};
 use bytes::Bytes;
 use rand::{CryptoRng, Rng};
 use sha2::{Digest as _, Sha256 as ISha256};
-use std::ops::Deref;
+use std::ops::{Deref, DerefMut};
 
 const DIGEST_LENGTH: usize = 32;
 
@@ -29,7 +29,6 @@ impl Clone for Sha256 {
 
 impl Hasher for Sha256 {
     type Digest = Digest;
-    const DIGEST_LENGTH: usize = DIGEST_LENGTH;
 
     fn new() -> Self {
         Self {
@@ -52,12 +51,13 @@ impl Hasher for Sha256 {
     }
 
     fn random<R: Rng + CryptoRng>(rng: &mut R) -> Self::Digest {
-        let mut digest = [0u8; Self::DIGEST_LENGTH];
+        let mut digest = [0u8; DIGEST_LENGTH];
         rng.fill_bytes(&mut digest);
         Self::Digest::from(digest)
     }
 }
 
+/// Digest of a SHA-256 hashing operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 #[repr(transparent)]
 pub struct Digest([u8; DIGEST_LENGTH]);
@@ -114,6 +114,12 @@ impl Deref for Digest {
     }
 }
 
+impl DerefMut for Digest {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        &mut self.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,6 +151,6 @@ mod tests {
 
     #[test]
     fn test_sha256_len() {
-        assert_eq!(Sha256::DIGEST_LENGTH, DIGEST_LENGTH);
+        assert_eq!(size_of::<Digest>(), DIGEST_LENGTH);
     }
 }

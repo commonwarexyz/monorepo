@@ -270,7 +270,7 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
                 parsed_view, context.view
             ));
         }
-        let parsed_parent: Digest = contents.copy_to_bytes(H::DIGEST_LENGTH);
+        let parsed_parent: Digest = contents.copy_to_bytes(size_of::<H::Digest>());
         if parsed_parent != context.parent.1 {
             self.panic(&format!(
                 "invalid parent (in payload): {} != {}",

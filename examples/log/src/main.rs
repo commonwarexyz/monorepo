@@ -49,7 +49,7 @@ mod gui;
 
 use clap::{value_parser, Arg, Command};
 use commonware_consensus::simplex::{self, Engine, Prover};
-use commonware_cryptography::{Ed25519, Hasher, Scheme, Sha256};
+use commonware_cryptography::{sha256::Digest, Ed25519, Scheme, Sha256};
 use commonware_p2p::authenticated::{self, Network};
 use commonware_runtime::{
     tokio::{self, Executor},
@@ -204,7 +204,7 @@ fn main() {
 
         // Initialize application
         let namespace = union(APPLICATION_NAMESPACE, b"_CONSENSUS");
-        let prover: Prover<Ed25519> = Prover::new(&namespace, Sha256::DIGEST_LENGTH);
+        let prover: Prover<Ed25519> = Prover::new(&namespace, size_of::<Digest>());
         let (application, supervisor, mailbox) = application::Application::new(
             runtime.clone(),
             application::Config {

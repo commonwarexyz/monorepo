@@ -440,10 +440,12 @@ mod tests {
             dkg::ops::generate_shares,
             primitives::group::{self, Share},
         },
-        Hasher, Sha256,
+        sha256,
     };
     use ops::{keypair, partial_sign_message, sign_message};
     use rand::{rngs::StdRng, SeedableRng};
+
+    const DIGEST_LENGTH: usize = size_of::<sha256::Digest>();
 
     fn generate_threshold() -> (group::Public, poly::Public, Vec<Share>) {
         let mut sampler = StdRng::seed_from_u64(0);
@@ -460,8 +462,8 @@ mod tests {
     fn test_deserialize_proposal() {
         // Create valid signature
         let (public, poly, shares) = generate_threshold();
-        let prover = Prover::new(public, b"test", Sha256::DIGEST_LENGTH);
-        let payload = Digest::from(vec![0; Sha256::DIGEST_LENGTH]);
+        let prover = Prover::new(public, b"test", DIGEST_LENGTH);
+        let payload = Digest::from(vec![0; DIGEST_LENGTH]);
         let signature = partial_sign_message(
             &shares[0],
             Some(&prover.seed_namespace),
@@ -487,8 +489,8 @@ mod tests {
     fn test_deserialize_proposal_invalid() {
         // Create valid signature
         let (public, poly, shares) = generate_threshold();
-        let prover = Prover::new(public, b"test", Sha256::DIGEST_LENGTH);
-        let payload = Digest::from(vec![0; Sha256::DIGEST_LENGTH]);
+        let prover = Prover::new(public, b"test", DIGEST_LENGTH);
+        let payload = Digest::from(vec![0; DIGEST_LENGTH]);
         let signature = partial_sign_message(
             &shares[0],
             Some(&prover.seed_namespace),
@@ -514,8 +516,8 @@ mod tests {
     fn test_deserialize_proposal_underflow() {
         // Create valid signature
         let (public, _, shares) = generate_threshold();
-        let prover = Prover::new(public, b"test", Sha256::DIGEST_LENGTH);
-        let payload = Digest::from(vec![0; Sha256::DIGEST_LENGTH]);
+        let prover = Prover::new(public, b"test", DIGEST_LENGTH);
+        let payload = Digest::from(vec![0; DIGEST_LENGTH]);
         let signature = partial_sign_message(
             &shares[0],
             Some(&prover.seed_namespace),
@@ -542,8 +544,8 @@ mod tests {
     fn test_deserialize_proposal_overflow() {
         // Create valid signature
         let (public, _, shares) = generate_threshold();
-        let prover = Prover::new(public, b"test", Sha256::DIGEST_LENGTH);
-        let payload = Digest::from(vec![0; Sha256::DIGEST_LENGTH]);
+        let prover = Prover::new(public, b"test", DIGEST_LENGTH);
+        let payload = Digest::from(vec![0; DIGEST_LENGTH]);
         let signature = partial_sign_message(
             &shares[0],
             Some(&prover.seed_namespace),
@@ -570,10 +572,10 @@ mod tests {
     fn test_deserialize_threshold() {
         // Create valid signature
         let (private, public) = generate_keypair();
-        let prover = Prover::new(public, b"test", Sha256::DIGEST_LENGTH);
+        let prover = Prover::new(public, b"test", DIGEST_LENGTH);
 
         // Generate a valid signature
-        let payload = Digest::from(vec![0; Sha256::DIGEST_LENGTH]);
+        let payload = Digest::from(vec![0; DIGEST_LENGTH]);
         let proposal_signature = sign_message(
             &private,
             Some(&prover.notarize_namespace),
@@ -600,10 +602,10 @@ mod tests {
     fn test_deserialize_threshold_invalid() {
         // Create valid signature
         let (private, public) = generate_keypair();
-        let prover = Prover::new(public, b"test", Sha256::DIGEST_LENGTH);
+        let prover = Prover::new(public, b"test", DIGEST_LENGTH);
 
         // Generate a valid signature
-        let payload = Digest::from(vec![0; Sha256::DIGEST_LENGTH]);
+        let payload = Digest::from(vec![0; DIGEST_LENGTH]);
         let proposal_signature = sign_message(
             &private,
             Some(&prover.notarize_namespace),
@@ -630,10 +632,10 @@ mod tests {
     fn test_deserialize_threshold_underflow() {
         // Create valid signature
         let (private, public) = generate_keypair();
-        let prover = Prover::new(public, b"test", Sha256::DIGEST_LENGTH);
+        let prover = Prover::new(public, b"test", DIGEST_LENGTH);
 
         // Generate a valid signature
-        let payload = Digest::from(vec![0; Sha256::DIGEST_LENGTH]);
+        let payload = Digest::from(vec![0; DIGEST_LENGTH]);
         let proposal_signature = sign_message(
             &private,
             Some(&prover.notarize_namespace),
@@ -663,10 +665,10 @@ mod tests {
     fn test_deserialize_threshold_overflow() {
         // Create valid signature
         let (private, public) = generate_keypair();
-        let prover = Prover::new(public, b"test", Sha256::DIGEST_LENGTH);
+        let prover = Prover::new(public, b"test", DIGEST_LENGTH);
 
         // Generate a valid signature
-        let payload = Digest::from(vec![0; Sha256::DIGEST_LENGTH]);
+        let payload = Digest::from(vec![0; DIGEST_LENGTH]);
         let proposal_signature = sign_message(
             &private,
             Some(&prover.notarize_namespace),

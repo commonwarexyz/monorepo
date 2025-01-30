@@ -210,7 +210,7 @@ mod tests {
     use super::*;
     use commonware_cryptography::{
         bls12381::{dkg::ops, primitives::poly},
-        Ed25519, Hasher, PublicKey, Scheme, Sha256,
+        sha256, Ed25519, PublicKey, Scheme, Sha256,
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};
@@ -232,6 +232,8 @@ mod tests {
         time::Duration,
     };
     use tracing::debug;
+
+    const DIGEST_LENGTH: usize = size_of::<sha256::Digest>();
 
     /// Registers all validators using the oracle.
     async fn register_validators(
@@ -356,7 +358,7 @@ mod tests {
             // Derive threshold
             let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
             let pk = poly::public(&public);
-            let prover = Prover::new(pk, &namespace, Sha256::DIGEST_LENGTH);
+            let prover = Prover::new(pk, &namespace, DIGEST_LENGTH);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -593,7 +595,7 @@ mod tests {
                 link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
                 // Create engines
-                let prover = Prover::new(pk, &namespace, Sha256::DIGEST_LENGTH);
+                let prover = Prover::new(pk, &namespace, DIGEST_LENGTH);
                 let relay = Arc::new(mocks::relay::Relay::new());
                 let mut supervisors = HashMap::new();
                 let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -812,7 +814,7 @@ mod tests {
             // Derive threshold
             let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
             let pk = poly::public(&public);
-            let prover = Prover::new(pk, &namespace, Sha256::DIGEST_LENGTH);
+            let prover = Prover::new(pk, &namespace, DIGEST_LENGTH);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -1106,7 +1108,7 @@ mod tests {
             // Derive threshold
             let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
             let pk = poly::public(&public);
-            let prover = Prover::new(pk, &namespace, Sha256::DIGEST_LENGTH);
+            let prover = Prover::new(pk, &namespace, DIGEST_LENGTH);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -1291,7 +1293,7 @@ mod tests {
             // Derive threshold
             let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
             let pk = poly::public(&public);
-            let prover = Prover::new(pk, &namespace, Sha256::DIGEST_LENGTH);
+            let prover = Prover::new(pk, &namespace, DIGEST_LENGTH);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -1482,7 +1484,7 @@ mod tests {
             // Derive threshold
             let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
             let pk = poly::public(&public);
-            let prover = Prover::new(pk, &namespace, Sha256::DIGEST_LENGTH);
+            let prover = Prover::new(pk, &namespace, DIGEST_LENGTH);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -1655,7 +1657,7 @@ mod tests {
             // Derive threshold
             let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
             let pk = poly::public(&public);
-            let prover = Prover::new(pk, &namespace, Sha256::DIGEST_LENGTH);
+            let prover = Prover::new(pk, &namespace, DIGEST_LENGTH);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -1884,7 +1886,7 @@ mod tests {
             // Derive threshold
             let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
             let pk = poly::public(&public);
-            let prover = Prover::new(pk, &namespace, Sha256::DIGEST_LENGTH);
+            let prover = Prover::new(pk, &namespace, DIGEST_LENGTH);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -2063,7 +2065,7 @@ mod tests {
             // Derive threshold
             let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
             let pk = poly::public(&public);
-            let prover = Prover::new(pk, &namespace, Sha256::DIGEST_LENGTH);
+            let prover = Prover::new(pk, &namespace, DIGEST_LENGTH);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -2248,7 +2250,7 @@ mod tests {
             // Derive threshold
             let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
             let pk = poly::public(&public);
-            let prover = Prover::new(pk, &namespace, Sha256::DIGEST_LENGTH);
+            let prover = Prover::new(pk, &namespace, DIGEST_LENGTH);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
