@@ -7,6 +7,7 @@
 
 use std::fmt::Debug;
 use std::ops::Deref;
+use std::ops::DerefMut;
 
 use bytes::Bytes;
 use rand::{CryptoRng, Rng, RngCore, SeedableRng};
@@ -152,6 +153,8 @@ pub trait Hasher: Clone + Send + Sync + 'static {
         + for<'a> TryFrom<&'a [u8], Error = Error>
         + for<'a> TryFrom<&'a Vec<u8>, Error = Error>
         + Deref<Target = [u8]>
+        + DerefMut<Target = [u8]>
+        + Sized
         + Into<Bytes>
         + Clone
         + Send
@@ -162,9 +165,6 @@ pub trait Hasher: Clone + Send + Sync + 'static {
         + Ord
         + PartialOrd
         + Debug;
-
-    /// The length of the digest in bytes.
-    const DIGEST_LENGTH: usize;
 
     /// Create a new hasher.
     fn new() -> Self;
@@ -440,7 +440,7 @@ mod tests {
         hasher.update(b"hello world");
         let digest = hasher.finalize();
         assert!(H::Digest::try_from(digest.as_ref()).is_ok());
-        assert_eq!(digest.as_ref().len(), H::DIGEST_LENGTH);
+        assert_eq!(digest.as_ref().len(), size_of::<H::Digest>());
 
         // Reuse hasher without reset
         hasher.update(b"hello world");
