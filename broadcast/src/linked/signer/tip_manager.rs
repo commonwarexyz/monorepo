@@ -14,17 +14,30 @@ pub struct TipManager {
 }
 
 impl TipManager {
-    /// Inserts a new tip.
-    pub fn put(&mut self, link: wire::Link) {
-        let new_height = link.chunk.as_ref().unwrap().height;
+    /// Inserts a new tip. Returns true if the tip is new.
+    /// Panics if the new tip is lower-height than the existing tip.
+    pub fn put(&mut self, link: &wire::Link) -> bool {
+        let new_chunk = link.chunk.as_ref().unwrap();
         let old = self
             .tips
-            .insert(link.chunk.as_ref().unwrap().sequencer.clone(), link);
+            .insert(link.chunk.as_ref().unwrap().sequencer.clone(), link.clone());
+
+        // Validate that the replacement is valid
         if let Some(old) = old {
-            if old.chunk.as_ref().unwrap().height > new_height {
+            let old_chunk = old.chunk.as_ref().unwrap();
+            // New chunk cannot be lower
+            if old_chunk.height > new_chunk.height {
                 panic!("Attempted to insert a lower-height tip");
             }
+            // New chunk cannot be the same height with a different payload
+            if old_chunk.height == new_chunk.height {
+                assert!(old_chunk.payload_digest == new_chunk.payload_digest);
+                return false;
+            }
+            return true;
         }
+
+        true
     }
 
     /// Returns the tip for the given sequencer.

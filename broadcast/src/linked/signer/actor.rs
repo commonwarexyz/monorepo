@@ -67,17 +67,13 @@ pub struct Actor<
     // Timeouts
     ////////////////////////////////////////
 
+    // The configured timeout for refreshing the epoch
+    refresh_epoch_timeout: Duration,
+    refresh_epoch_deadline: Option<SystemTime>,
+
     // The configured timeout for rebroadcasting a chunk to all signers
     rebroadcast_timeout: Option<Duration>,
-
-    // The system time at which the rebroadcast deadline is reached
     rebroadcast_deadline: Option<SystemTime>,
-
-    // The configured timeout for pruning old evidence
-    prune_acks_timeout: Option<Duration>,
-
-    // The system time at which the prune deadline is reached
-    prune_acks_deadline: Option<SystemTime>,
 
     ////////////////////////////////////////
     // Pruning
@@ -111,6 +107,9 @@ pub struct Actor<
 
     // Handles acknowledgements for chunks.
     ack_man: AckManager,
+
+    // The current epoch.
+    epoch: Epoch,
 }
 
 impl<
@@ -135,10 +134,10 @@ impl<
             collector: cfg.collector,
             chunk_namespace: encoder::chunk_namespace(&cfg.namespace),
             ack_namespace: encoder::ack_namespace(&cfg.namespace),
+            refresh_epoch_timeout: cfg.refresh_epoch_timeout,
+            refresh_epoch_deadline: None,
             rebroadcast_timeout: cfg.rebroadcast_timeout,
             rebroadcast_deadline: None,
-            prune_acks_timeout: cfg.prune_acks_timeout,
-            prune_acks_deadline: None,
             epoch_bounds: cfg.epoch_bounds,
             mailbox_receiver,
             journal_entries_per_section: cfg.journal_entries_per_section,
@@ -147,6 +146,7 @@ impl<
             journals: HashMap::new(),
             tip_man: TipManager::default(),
             ack_man: AckManager::default(),
+            epoch: 0,
         };
 
         (result, mailbox)
@@ -173,19 +173,17 @@ impl<
         let (mut ack_sender, mut ack_receiver) = ack_network;
         let mut shutdown = self.runtime.stopped();
 
-        // Initialize pruning
-        if let Some(timeout) = self.prune_acks_timeout {
-            self.prune_acks_deadline = Some(self.runtime.current() + timeout);
-        }
-
         loop {
+            // Enter the epoch
+            self.refresh_epoch();
+
             // Create deadline futures.
             // If the deadline is None, the future will never resolve.
             let rebroadcast = match self.rebroadcast_deadline {
                 Some(deadline) => Either::Left(self.runtime.sleep_until(deadline)),
                 None => Either::Right(futures::future::pending()),
             };
-            let prune_acks = match self.prune_acks_deadline {
+            let refresh_epoch = match self.refresh_epoch_deadline {
                 Some(deadline) => Either::Left(self.runtime.sleep_until(deadline)),
                 None => Either::Right(futures::future::pending()),
             };
@@ -210,9 +208,10 @@ impl<
                 },
 
                 // Handle prune deadline
-                _ = prune_acks => {
-                    debug!("Timeout: Prune Acks");
-                    self.prune_acks();
+                _ = refresh_epoch => {
+                    debug!("Timeout: Refresh Epoch");
+                    // Simply continue; the epoch will be refreshed on the next iteration.
+                    continue;
                 },
 
                 // Handle incoming links
@@ -227,28 +226,24 @@ impl<
                         error!("Failed to decode link");
                         continue;
                     };
-                    if let Err(e) = self.validate_link(&link, &sender) {
-                        error!("Failed to validate link: {:?}", e);
-                        continue;
+                    let parent_proof = match self.validate_link(&link, &sender) {
+                        Ok(result) => result,
+                        Err(e) => {
+                            error!("Failed to validate link: {:?}", e);
+                            continue;
+                        }
                     };
 
                     // Initialize journal for sequencer if it does not exist
                     self.journal_prepare(&sender).await;
 
-                    // Handle the link
-                    if let Some(parent) = link.parent.as_ref() {
-                        let parent_chunk = wire::Chunk {
-                            sequencer: sender.clone(),
-                            height: link.chunk.as_ref().unwrap().height.checked_sub(1).unwrap(),
-                            payload_digest: parent.payload_digest.clone(),
-                        };
-                        let threshold = group::Signature::deserialize(&parent.threshold).unwrap();
-                        self.handle_threshold(&parent_chunk, parent.epoch, threshold).await;
+                    // Handle the parent threshold signature
+                    if let Some((chunk, epoch, threshold)) = parent_proof {
+                        self.handle_threshold(&chunk, epoch, threshold).await;
                     }
-                    if let Err(e) = self.handle_link(&link).await {
-                        error!("Failed to handle link: {:?}", e);
-                        continue;
-                    }
+
+                    // Process the new link
+                    self.handle_link(&link).await;
                 },
 
                 // Handle incoming acks
@@ -342,10 +337,9 @@ impl<
         }
 
         // Construct partial signature
-        let epoch = self.coordinator.index();
-        let ack_digest = self.hash_ack(&chunk, epoch);
-        let Some(share) = self.coordinator.share(epoch) else {
-            return Err(Error::UnknownShare(epoch));
+        let ack_digest = self.hash_ack(&chunk, self.epoch);
+        let Some(share) = self.coordinator.share(self.epoch) else {
+            return Err(Error::UnknownShare(self.epoch));
         };
         let partial: Bytes =
             ops::partial_sign_message(share, Some(&self.ack_namespace), &ack_digest)
@@ -359,7 +353,7 @@ impl<
         // Send the ack to the network
         let ack = wire::Ack {
             chunk: Some(chunk.clone()),
-            epoch,
+            epoch: self.epoch,
             partial: partial.clone(),
         };
         ack_sender
@@ -368,7 +362,7 @@ impl<
             .map_err(|_| Error::UnableToSendMessage)?;
 
         // Deal with the ack as if it were received over the network
-        self.handle_ack(&chunk, epoch, partial).await?;
+        self.handle_ack(&chunk, self.epoch, partial).await?;
 
         Ok(())
     }
@@ -462,20 +456,24 @@ impl<
         Ok(())
     }
 
-    /// Handles a link
-    ///
-    /// Returns an error if the chunk is invalid, or can be ignored
-    /// (e.g. height is below the tip, etc.).
-    async fn handle_link(&mut self, link: &wire::Link) -> Result<(), Error> {
-        let epoch = self.coordinator.index();
-
+    /// Handles a valid link message, storing it as the tip.
+    /// Alerts the application of the new link.
+    /// Also appends the link to the journal if it's new.
+    async fn handle_link(&mut self, link: &wire::Link) {
         // Store the tip
-        self.tip_man.put(link.clone());
-
-        // Prune old evidence
+        let is_new = self.tip_man.put(link);
         let chunk = link.chunk.as_ref().unwrap();
-        self.ack_man
-            .prune_height(epoch, &chunk.sequencer, chunk.height);
+
+        // Take actions if the link is new
+        if is_new {
+            // Append to journal
+            self.journal_append(link).await;
+            self.journal_sync(&chunk.sequencer, chunk.height).await;
+
+            // Prune old evidence
+            self.ack_man
+                .prune_height(self.epoch, &chunk.sequencer, chunk.height);
+        }
 
         // Verify the chunk with the application
         let context = Context {
@@ -485,11 +483,6 @@ impl<
         self.application
             .verify(context, chunk.payload_digest.clone())
             .await;
-
-        // Append to journal
-        self.journal_append(link).await;
-
-        Ok(())
     }
 
     ////////////////////////////////////////
@@ -506,7 +499,6 @@ impl<
         result: oneshot::Sender<bool>,
         link_sender: &mut impl Sender,
     ) -> Result<(), Error> {
-        let epoch = self.coordinator.index();
         let me = self.crypto.public_key();
 
         // Get parent Chunk and threshold signature
@@ -514,7 +506,8 @@ impl<
         let mut parent = None;
         if let Some(chunk_tip) = self.tip_man.get_chunk(&me) {
             // Get threshold or return early
-            let Evidence::Threshold(threshold) = self.ack_man.get_or_init(epoch, &chunk_tip) else {
+            let Evidence::Threshold(threshold) = self.ack_man.get_or_init(self.epoch, &chunk_tip)
+            else {
                 let _ = result.send(false);
                 return Err(Error::NoThresholdForTip(chunk_tip.height));
             };
@@ -524,7 +517,7 @@ impl<
             parent = Some(wire::Parent {
                 payload_digest: chunk_tip.payload_digest,
                 threshold: threshold.serialize().into(),
-                epoch: self.coordinator.index(),
+                epoch: self.epoch,
             });
         }
 
@@ -545,18 +538,14 @@ impl<
         };
 
         // Deal with the chunk as if it were received over the network
-        if let Err(e) = self.handle_link(&link).await {
-            error!("Failed to handle link: {:?}", e);
-            let _ = result.send(false);
-            return Err(e);
-        }
+        self.handle_link(&link).await;
 
         // Sync the journal to prevent ever broadcasting two conflicting chunks
         // at the same height, even if the node crashes and restarts
         self.journal_sync(&me, height).await;
 
         // Broadcast to network
-        if let Err(e) = self.broadcast(&link, link_sender, epoch).await {
+        if let Err(e) = self.broadcast(&link, link_sender, self.epoch).await {
             error!("Failed to broadcast link: {:?}", e);
             let _ = result.send(false);
             return Err(e);
@@ -579,10 +568,9 @@ impl<
         self.rebroadcast_deadline = None;
 
         // Return if not a sequencer in the current epoch
-        let epoch = self.coordinator.index();
         let me = self.crypto.public_key();
-        if self.coordinator.is_sequencer(epoch, &me).is_none() {
-            return Err(Error::IAmNotASequencer(epoch));
+        if self.coordinator.is_sequencer(self.epoch, &me).is_none() {
+            return Err(Error::IAmNotASequencer(self.epoch));
         }
 
         // Return if no chunk to rebroadcast
@@ -593,13 +581,13 @@ impl<
         // Return if threshold already collected
         if let Evidence::Threshold(_) = self
             .ack_man
-            .get_or_init(epoch, link_tip.chunk.as_ref().unwrap())
+            .get_or_init(self.epoch, link_tip.chunk.as_ref().unwrap())
         {
             return Err(Error::ThresholdAlreadyExists);
         }
 
         // Broadcast the message
-        self.broadcast(&link_tip, link_sender, epoch).await?;
+        self.broadcast(&link_tip, link_sender, self.epoch).await?;
 
         Ok(())
     }
@@ -638,12 +626,15 @@ impl<
 
     /// Takes a raw link (from sender) from the p2p network and validates it.
     ///
-    /// Returns the chunk if the link is valid.
-    /// Returns an error if the link is invalid.
-    fn validate_link(&mut self, link: &wire::Link, sender: &PublicKey) -> Result<(), Error> {
+    /// If valid, returns the implied parent chunk and its threshold signature.
+    /// Else returns an error if the link is invalid.
+    fn validate_link(
+        &mut self,
+        link: &wire::Link,
+        sender: &PublicKey,
+    ) -> Result<Option<(wire::Chunk, Epoch, group::Signature)>, Error> {
         // Validate chunk
-        let epoch = self.coordinator.index();
-        let chunk = self.validate_chunk(link.chunk.clone(), epoch)?;
+        let chunk = self.validate_chunk(link.chunk.clone(), self.epoch)?;
 
         // Verify the sender
         if chunk.sequencer != sender {
@@ -666,7 +657,7 @@ impl<
             if link.parent.is_some() {
                 return Err(Error::GenesisChunkMustNotHaveParent);
             }
-            return Ok(());
+            return Ok(None);
         }
 
         // Verify parent
@@ -678,8 +669,8 @@ impl<
             height: chunk.height.checked_sub(1).unwrap(),
             payload_digest: parent.payload_digest.clone(),
         };
-        let Some(identity) = self.coordinator.identity(epoch) else {
-            return Err(Error::UnknownIdentity(epoch));
+        let Some(identity) = self.coordinator.identity(parent.epoch) else {
+            return Err(Error::UnknownIdentity(parent.epoch));
         };
         let public_key = poly::public(identity);
         let Some(threshold) = group::Signature::deserialize(&parent.threshold) else {
@@ -694,7 +685,7 @@ impl<
         )
         .map_err(|_| Error::InvalidThresholdSignature)?;
 
-        Ok(())
+        Ok(Some((parent_chunk, parent.epoch, threshold)))
     }
 
     /// Takes a raw ack (from sender) from the p2p network and validates it.
@@ -829,7 +820,8 @@ impl<
 
             // Set the tip
             if let Some(link) = tip.take() {
-                self.tip_man.put(link.clone());
+                let is_new = self.tip_man.put(&link);
+                assert!(is_new);
             }
         }
 
@@ -867,24 +859,37 @@ impl<
         // Prune journal, ignoring errors
         let _ = journal.prune(section).await;
     }
+
     ////////////////////////////////////////
-    // Pruning
+    // Epoch
     ////////////////////////////////////////
 
-    /// Prune old evidence.
-    fn prune_acks(&mut self) {
+    /// Updates the epoch to the value of the coordinator, and sets the refresh epoch deadline.
+    /// Prunes old evidence if moving to a new epoch.
+    fn refresh_epoch(&mut self) {
+        // Set the refresh epoch deadline
+        self.refresh_epoch_deadline = Some(self.runtime.current() + self.refresh_epoch_timeout);
+
+        // Ensure epoch is not before the current epoch
+        let epoch = self.coordinator.index();
+        if epoch < self.epoch {
+            panic!("epoch must be greater than or equal to the current epoch");
+        }
+
+        // Take no action if the epoch is the same
+        if epoch == self.epoch {
+            return;
+        }
+
+        // Update the epoch
+        self.epoch = epoch;
+
         // Prune old evidence
         let epoch_to_prune = {
             let (eb_lo, _) = self.epoch_bounds;
-            let epoch = self.coordinator.index();
             epoch.saturating_sub(eb_lo)
         };
         self.ack_man.prune_epoch(epoch_to_prune);
-
-        // Set timeout for next prune
-        if let Some(timeout) = self.prune_acks_timeout {
-            self.prune_acks_deadline = Some(self.runtime.current() + timeout);
-        }
     }
 
     ////////////////////////////////////////
