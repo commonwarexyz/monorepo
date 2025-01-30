@@ -16,7 +16,7 @@ pub struct Config<C: Scheme, H: Hasher> {
     pub hasher: H,
 
     /// Prover used to decode opaque proofs from consensus.
-    pub prover: Prover<C>,
+    pub prover: Prover<C, H::Digest>,
 
     /// Participants active in consensus.
     pub participants: Vec<PublicKey>,

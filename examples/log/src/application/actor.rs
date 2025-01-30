@@ -3,7 +3,7 @@ use super::{
     supervisor::Supervisor,
     Config,
 };
-use commonware_consensus::{simplex::Prover, Digest};
+use commonware_consensus::simplex::Prover;
 use commonware_cryptography::{Hasher, Scheme};
 use commonware_utils::hex;
 use futures::{channel::mpsc, StreamExt};
@@ -16,14 +16,14 @@ const GENESIS: &[u8] = b"commonware is neat";
 /// Application actor.
 pub struct Application<R: Rng, C: Scheme, H: Hasher> {
     runtime: R,
-    prover: Prover<C>,
+    prover: Prover<C, H::Digest>,
     hasher: H,
-    mailbox: mpsc::Receiver<Message>,
+    mailbox: mpsc::Receiver<Message<H::Digest>>,
 }
 
 impl<R: Rng, C: Scheme, H: Hasher> Application<R, C, H> {
     /// Create a new application actor.
-    pub fn new(runtime: R, config: Config<C, H>) -> (Self, Supervisor, Mailbox) {
+    pub fn new(runtime: R, config: Config<C, H>) -> (Self, Supervisor, Mailbox<H::Digest>) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
         (
             Self {
@@ -49,7 +49,7 @@ impl<R: Rng, C: Scheme, H: Hasher> Application<R, C, H> {
                     // to some parent, this doesn't really do anything
                     // in this example.
                     self.hasher.update(GENESIS);
-                    let digest: Digest = self.hasher.finalize().into();
+                    let digest = self.hasher.finalize();
                     let _ = response.send(digest);
                 }
                 Message::Propose { response } => {
@@ -59,17 +59,18 @@ impl<R: Rng, C: Scheme, H: Hasher> Application<R, C, H> {
 
                     // Hash the message
                     self.hasher.update(&msg);
-                    let digest: Digest = self.hasher.finalize().into();
+                    let digest = self.hasher.finalize();
                     info!(msg = hex(&msg), payload = hex(digest.as_ref()), "proposed");
 
                     // Send digest to consensus
                     let _ = response.send(digest);
                 }
-                Message::Verify { payload, response } => {
+                Message::Verify { response } => {
+                    // Digests are already verified by consensus, so we don't need to check they are valid.
+                    //
                     // If we linked payloads to their parent, we would verify
                     // the parent included in the payload matches the provided context.
-                    let res = H::Digest::try_from(&payload);
-                    let _ = response.send(res.is_ok());
+                    let _ = response.send(true);
                 }
                 Message::Prepared { proof, payload } => {
                     let (view, _, _, _) = self

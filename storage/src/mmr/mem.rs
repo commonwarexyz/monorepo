@@ -327,7 +327,7 @@ mod tests {
 
         // verify root hash
         let root_hash = mmr.root_hash();
-        let peak_hashes = [hash14, hash17, mmr.nodes[18]];
+        let peak_hashes = [hash14, hash17, mmr.nodes[18].clone()];
         let expected_root_hash = mmr_hasher.root_hash(19, peak_hashes.iter());
         assert_eq!(root_hash, expected_root_hash, "incorrect root hash");
 
