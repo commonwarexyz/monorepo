@@ -463,7 +463,7 @@ mod tests {
     use commonware_cryptography::{sha256::Digest as Sha256Digest, Ed25519};
 
     fn test_digest(value: u8) -> Sha256Digest {
-        Sha256Digest::try_from([value; size_of::<Sha256Digest>()]).unwrap()
+        Sha256Digest::from([value; size_of::<Sha256Digest>()])
     }
 
     #[test]

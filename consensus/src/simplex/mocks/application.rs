@@ -318,8 +318,11 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
 
     pub async fn run(mut self) {
         // Setup digest tracking
-        let mut waiters: HashMap<H::Digest, Vec<(Context<H::Digest>, oneshot::Sender<bool>)>> =
-            HashMap::new();
+        #[allow(clippy::type_complexity)]
+        let mut waiters: HashMap<
+            H::Digest,
+            Vec<(Context<H::Digest>, oneshot::Sender<bool>)>,
+        > = HashMap::new();
         let mut seen: HashMap<H::Digest, Bytes> = HashMap::new();
 
         // Handle actions

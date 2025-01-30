@@ -30,7 +30,7 @@ pub struct Config<D: Digest> {
     pub participants: BTreeMap<View, (poly::Poly<group::Public>, Vec<PublicKey>, group::Share)>,
 }
 
-type Participation<D: Digest> = HashMap<View, HashMap<D, HashSet<PublicKey>>>;
+type Participation<D> = HashMap<View, HashMap<D, HashSet<PublicKey>>>;
 type Faults = HashMap<PublicKey, HashMap<View, HashSet<Activity>>>;
 
 #[derive(Clone)]

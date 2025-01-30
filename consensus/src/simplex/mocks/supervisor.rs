@@ -16,7 +16,7 @@ pub struct Config<C: Scheme, D: Digest> {
     pub participants: BTreeMap<View, Vec<PublicKey>>,
 }
 
-type Participation<D: Digest> = HashMap<View, HashMap<D, HashSet<PublicKey>>>;
+type Participation<D> = HashMap<View, HashMap<D, HashSet<PublicKey>>>;
 type Faults = HashMap<PublicKey, HashMap<View, HashSet<Activity>>>;
 
 #[derive(Clone)]
