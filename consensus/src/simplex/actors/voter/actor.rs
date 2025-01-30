@@ -15,7 +15,7 @@ use crate::{
     Automaton, Committer, Parsed, Relay, Supervisor,
 };
 use commonware_cryptography::{
-    sha256::hash, sha256::Digest as Sha256Digest, Digest, Hasher, PublicKey, Scheme,
+    sha256::hash, sha256::Digest as Sha256Digest, Digest, PublicKey, Scheme,
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
@@ -2014,6 +2014,7 @@ impl<
                     wire::voter::Payload::Notarize(notarize) => {
                         // Handle notarize
                         let proposal = notarize.proposal.as_ref().unwrap().clone();
+                        let payload = D::try_from(&proposal.payload).unwrap();
                         let public_key = notarize.signature.as_ref().unwrap().public_key;
                         let public_key = self
                             .supervisor
@@ -2022,17 +2023,29 @@ impl<
                             .get(public_key as usize)
                             .unwrap()
                             .clone();
-                        self.handle_notarize(&public_key, notarize).await;
+                        self.handle_notarize(
+                            &public_key,
+                            Parsed {
+                                message: notarize,
+                                digest: payload.clone(),
+                            },
+                        )
+                        .await;
 
                         // Update round info
                         if public_key == self.crypto.public_key() {
                             observed_view = max(observed_view, proposal.view);
                             let round = self.views.get_mut(&proposal.view).expect("missing round");
                             let proposal_message =
-                                proposal_message(proposal.view, proposal.parent, &proposal.payload);
-                            self.hasher.update(&proposal_message);
-                            let proposal_digest: Digest = self.hasher.finalize().into();
-                            round.proposal = Some((proposal_digest, proposal));
+                                proposal_message(proposal.view, proposal.parent, &payload);
+                            let proposal_digest = hash(&proposal_message);
+                            round.proposal = Some((
+                                proposal_digest,
+                                Parsed {
+                                    message: proposal,
+                                    digest: payload,
+                                },
+                            ));
                             round.verified_proposal = true;
                             round.broadcast_notarize = true;
                         }
@@ -2059,7 +2072,9 @@ impl<
                     }
                     wire::voter::Payload::Finalize(finalize) => {
                         // Handle finalize
-                        let view = finalize.proposal.as_ref().unwrap().view;
+                        let proposal = finalize.proposal.as_ref().unwrap();
+                        let view = proposal.view;
+                        let payload = D::try_from(&proposal.payload).unwrap();
                         let public_key = finalize.signature.as_ref().unwrap().public_key;
                         let public_key = self
                             .supervisor
@@ -2068,7 +2083,14 @@ impl<
                             .get(public_key as usize)
                             .unwrap()
                             .clone();
-                        self.handle_finalize(&public_key, finalize).await;
+                        self.handle_finalize(
+                            &public_key,
+                            Parsed {
+                                message: finalize,
+                                digest: payload,
+                            },
+                        )
+                        .await;
 
                         // Update round info
                         //
@@ -2168,14 +2190,16 @@ impl<
 
                     // Construct proposal
                     let message = proposal_message(context.view, context.parent.0, &proposed);
-                    self.hasher.update(&message);
-                    let proposal_digest: Digest = self.hasher.finalize().into();
+                    let proposal_digest = hash(&message);
                     let proposal = wire::Proposal {
                         view: context.view,
                         parent: context.parent.0,
-                        payload: proposed.clone(),
+                        payload: proposed.to_vec(),
                     };
-                    if !self.our_proposal(proposal_digest, proposal.clone()).await {
+                    if !self.our_proposal(proposal_digest, Parsed{
+                        message: proposal.clone(),
+                        digest: proposed.clone(),
+                    }).await {
                         warn!(view = context.view, "failed to record our container");
                         continue;
                     }
@@ -2213,7 +2237,7 @@ impl<
                     let msg = mailbox.unwrap();
                     match msg {
                         Message::Notarization{ notarization }  => {
-                            view = notarization.proposal.as_ref().unwrap().view;
+                            view = notarization.message.proposal.as_ref().unwrap().view;
                             self.handle_notarization(notarization).await;
                         },
                         Message::Nullification { nullification } => {
