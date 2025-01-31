@@ -108,10 +108,13 @@ pub enum Error {
 /// A trait for reliable replication of messages across a network.
 pub trait Broadcaster {
     type Context;
+    type Digest;
 
     /// Broadcast a message to the network.
-    fn broadcast(&mut self, payload: Bytes)
-        -> impl Future<Output = oneshot::Receiver<bool>> + Send;
+    fn broadcast(
+        &mut self,
+        payload: Self::Digest,
+    ) -> impl Future<Output = oneshot::Receiver<bool>> + Send;
 
     /// Receive notice that a payload is valid.
     fn verified(
@@ -152,9 +155,6 @@ pub trait Collector: Send + 'static {
 
 pub trait Coordinator: Clone + Send + Sync + 'static {
     type Index;
-
-    /// Return the current index of the coordinator.
-    fn index(&self) -> Self::Index;
 
     fn sequencers(&self, index: Self::Index) -> Option<&Vec<PublicKey>>;
     fn is_sequencer(&self, index: Self::Index, candidate: &PublicKey) -> Option<u32>;

@@ -16,6 +16,7 @@ use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Blob, Clock, Spawner, Storage};
 use commonware_storage::journal::{self, Journal};
+use commonware_utils::hex;
 use futures::{
     channel::{mpsc, oneshot},
     future::Either,
@@ -38,6 +39,7 @@ pub struct Actor<
     A: Application<Context = Context>,
     Z: Collector<Context = Context>,
     S: ThresholdCoordinator<Index = Epoch, Share = group::Share, Identity = poly::Public>,
+    J: Fn(&PublicKey) -> String,
 > {
     ////////////////////////////////////////
     // Constants
@@ -67,10 +69,6 @@ pub struct Actor<
     // Timeouts
     ////////////////////////////////////////
 
-    // The configured timeout for refreshing the epoch
-    refresh_epoch_timeout: Duration,
-    refresh_epoch_deadline: Option<SystemTime>,
-
     // The configured timeout for rebroadcasting a chunk to all signers
     rebroadcast_timeout: Option<Duration>,
     rebroadcast_deadline: Option<SystemTime>,
@@ -97,7 +95,7 @@ pub struct Actor<
     ////////////////////////////////////////
     journal_entries_per_section: u64,
     journal_replay_concurrency: usize,
-    journal_naming_fn: fn(&PublicKey) -> String,
+    journal_naming_fn: J,
     journals: HashMap<PublicKey, Journal<B, E>>,
 
     ////////////////////////////////////////
@@ -120,9 +118,10 @@ impl<
         A: Application<Context = Context>,
         Z: Collector<Context = Context>,
         S: ThresholdCoordinator<Index = Epoch, Share = group::Share, Identity = poly::Public>,
-    > Actor<B, E, C, H, A, Z, S>
+        J: Fn(&PublicKey) -> String,
+    > Actor<B, E, C, H, A, Z, S, J>
 {
-    pub fn new(runtime: E, cfg: Config<C, H, A, Z, S>) -> (Self, Mailbox) {
+    pub fn new(runtime: E, cfg: Config<C, H, A, Z, S, J>) -> (Self, Mailbox) {
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::new(mailbox_sender);
         let result = Self {
@@ -134,8 +133,6 @@ impl<
             collector: cfg.collector,
             chunk_namespace: encoder::chunk_namespace(&cfg.namespace),
             ack_namespace: encoder::ack_namespace(&cfg.namespace),
-            refresh_epoch_timeout: cfg.refresh_epoch_timeout,
-            refresh_epoch_deadline: None,
             rebroadcast_timeout: cfg.rebroadcast_timeout,
             rebroadcast_deadline: None,
             epoch_bounds: cfg.epoch_bounds,
@@ -174,16 +171,9 @@ impl<
         let mut shutdown = self.runtime.stopped();
 
         loop {
-            // Enter the epoch
-            self.refresh_epoch();
-
             // Create deadline futures.
             // If the deadline is None, the future will never resolve.
             let rebroadcast = match self.rebroadcast_deadline {
-                Some(deadline) => Either::Left(self.runtime.sleep_until(deadline)),
-                None => Either::Right(futures::future::pending()),
-            };
-            let refresh_epoch = match self.refresh_epoch_deadline {
                 Some(deadline) => Either::Left(self.runtime.sleep_until(deadline)),
                 None => Either::Right(futures::future::pending()),
             };
@@ -205,13 +195,6 @@ impl<
                         error!("Failed to rebroadcast: {:?}", e);
                         continue;
                     }
-                },
-
-                // Handle prune deadline
-                _ = refresh_epoch => {
-                    debug!("Timeout: Refresh Epoch");
-                    // Simply continue; the epoch will be refreshed on the next iteration.
-                    continue;
                 },
 
                 // Handle incoming links
@@ -281,6 +264,10 @@ impl<
                         }
                     };
                     match msg {
+                        Message::EnterEpoch { epoch } => {
+                            debug!("Mailbox: Enter Epoch");
+                            self.enter_epoch(epoch);
+                        }
                         Message::Broadcast{ payload, result } => {
                             debug!("Mailbox: Broadcast");
                             // Initialize my journal if it does not exist
@@ -430,9 +417,11 @@ impl<
     ) -> Result<(), Error> {
         // If the ack is for an epoch that is too old or too new, ignore.
         let (bound_lo, bound_hi) = {
-            let epoch = self.coordinator.index();
             let (eb_lo, eb_hi) = self.epoch_bounds;
-            (epoch.saturating_sub(eb_lo), epoch.saturating_add(eb_hi))
+            (
+                self.epoch.saturating_sub(eb_lo),
+                self.epoch.saturating_add(eb_hi),
+            )
         };
         if ack_epoch < bound_lo || ack_epoch > bound_hi {
             return Err(Error::AckEpochOutsideBounds(ack_epoch, bound_lo, bound_hi));
@@ -821,6 +810,8 @@ impl<
 
         // Replay journal
         {
+            debug!(sequencer = hex(sequencer), "Replaying journal");
+
             // Prepare the stream
             let stream = journal
                 .replay(self.journal_replay_concurrency, None)
@@ -831,12 +822,21 @@ impl<
             // Read from the stream, which may be in arbitrary order.
             // Remember the highest link height
             let mut tip: Option<wire::Link> = None;
+            let mut num_items = 0;
             while let Some(msg) = stream.next().await {
+                num_items += 1;
                 let (_, _, _, msg) = msg.expect("unable to decode journal message");
                 let link = wire::Link::decode(msg).expect("journal message is unexpected format");
                 let height = link.chunk.as_ref().unwrap().height;
-                if tip.is_none() || height > tip.as_ref().unwrap().chunk.as_ref().unwrap().height {
-                    tip = Some(link);
+                match tip {
+                    None => {
+                        tip = Some(link);
+                    }
+                    Some(ref t) => {
+                        if height > t.chunk.as_ref().unwrap().height {
+                            tip = Some(link);
+                        }
+                    }
                 }
             }
 
@@ -845,6 +845,12 @@ impl<
                 let is_new = self.tip_man.put(&link);
                 assert!(is_new);
             }
+
+            debug!(
+                sequencer = hex(sequencer),
+                n = num_items,
+                "Journal replay complete"
+            );
         }
 
         // Store journal
@@ -888,12 +894,8 @@ impl<
 
     /// Updates the epoch to the value of the coordinator, and sets the refresh epoch deadline.
     /// Prunes old evidence if moving to a new epoch.
-    fn refresh_epoch(&mut self) {
-        // Set the refresh epoch deadline
-        self.refresh_epoch_deadline = Some(self.runtime.current() + self.refresh_epoch_timeout);
-
+    fn enter_epoch(&mut self, epoch: Epoch) {
         // Ensure epoch is not before the current epoch
-        let epoch = self.coordinator.index();
         if epoch < self.epoch {
             panic!("epoch must be greater than or equal to the current epoch");
         }

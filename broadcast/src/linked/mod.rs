@@ -164,16 +164,16 @@ mod tests {
                 let mut mailboxes = HashMap::new();
                 for (validator, scheme, share) in validators.iter() {
                     // Coordinator
-                    let mut coordinator =
+                    let coordinator =
                         mocks::coordinator::Coordinator::new(identity.clone(), pks.clone(), *share);
                     debug!("Share index: {}", share.index);
-                    coordinator.set_view(111);
 
                     // Application
                     let (mut app, app_mailbox) = mocks::application::Application::new();
                     mailboxes.insert(validator.clone(), app_mailbox.clone());
 
                     // Signer
+                    let hex_validator = hex(validator);
                     let (signer, signer_mailbox) = signer::Actor::new(
                         runtime.clone(),
                         signer::Config {
@@ -185,11 +185,10 @@ mod tests {
                             hasher: Sha256::default(),
                             namespace: b"test".to_vec(),
                             epoch_bounds: (1, 1),
-                            refresh_epoch_timeout: Duration::from_millis(100),
                             rebroadcast_timeout: Some(Duration::from_secs(5)),
                             journal_entries_per_section: 10,
                             journal_replay_concurrency: 1,
-                            journal_naming_fn: |v| "seq".to_string() + &hex(v),
+                            journal_naming_fn: move |v| format!("seq/{}/{}", hex_validator, hex(v)),
                         },
                     );
 

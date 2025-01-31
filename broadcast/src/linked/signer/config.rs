@@ -12,6 +12,7 @@ pub struct Config<
     A: Application,
     Z: Collector<Context = Context>,
     S: ThresholdCoordinator<Index = Epoch>,
+    J: Fn(&PublicKey) -> String,
 > {
     pub crypto: C,
     pub hasher: H,
@@ -20,10 +21,9 @@ pub struct Config<
     pub collector: Z,
     pub mailbox_size: usize,
     pub namespace: Vec<u8>,
-    pub refresh_epoch_timeout: Duration,
     pub rebroadcast_timeout: Option<Duration>,
     pub epoch_bounds: (u64, u64),
-    pub journal_naming_fn: fn(&PublicKey) -> String,
+    pub journal_naming_fn: J,
     pub journal_entries_per_section: u64,
     pub journal_replay_concurrency: usize,
 }
