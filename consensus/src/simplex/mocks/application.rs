@@ -269,8 +269,9 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
                 parsed_view, context.view
             ));
         }
-        let mut parent = H::Digest::default();
-        contents.copy_to_slice(&mut parent);
+        let Ok(parent) = H::Digest::read_from(&mut contents) else {
+            self.panic("invalid parent");
+        };
         if parent != context.parent.1 {
             self.panic(&format!(
                 "invalid parent (in payload): {} != {}",
