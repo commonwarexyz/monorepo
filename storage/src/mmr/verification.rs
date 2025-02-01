@@ -405,8 +405,7 @@ mod tests {
             }
         }
         // confirm proof fails with invalid root hash
-        let mut invalid_root_hash = test_digest(0);
-        invalid_root_hash[29] = root_hash.as_ref()[29] + 1;
+        let invalid_root_hash = test_digest(1);
         assert!(
             !range_proof.verify_range_inclusion(
                 &mut hasher,
