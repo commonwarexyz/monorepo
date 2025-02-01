@@ -399,8 +399,8 @@ impl<D: Digest> Prover<D> {
         // Decode proof
         let view = proof.get_u64();
         let parent = proof.get_u64();
-        let mut payload = D::default();
-        proof.copy_to_slice(&mut payload);
+        let payload = D::try_from(&proof[..size_of::<D>()]).ok()?;
+        proof.advance(size_of::<D>());
         let signature_finalize = proof.copy_to_bytes(poly::PARTIAL_SIGNATURE_LENGTH);
         let signature_finalize = Eval::deserialize(&signature_finalize)?;
         let signature_null = proof.copy_to_bytes(poly::PARTIAL_SIGNATURE_LENGTH);

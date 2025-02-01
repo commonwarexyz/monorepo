@@ -1,7 +1,7 @@
 use crate::mmr::hasher::Hasher;
 use crate::mmr::iterator::PeakIterator;
 use bytes::{Buf, BufMut};
-use commonware_cryptography::Hasher as CHasher;
+use commonware_cryptography::{Digest, Hasher as CHasher};
 
 /// A `Proof` contains the information necessary for proving the inclusion of an element, or some
 /// range of elements, in the MMR from its root hash. The `hashes` vector contains: (1) the peak
@@ -147,8 +147,7 @@ impl<H: CHasher> Proof<H> {
         }
         let mut hashes = Vec::with_capacity(hashes_len);
         for _ in 0..hashes_len {
-            let mut digest = H::Digest::default();
-            buf.copy_to_slice(&mut digest);
+            let digest = H::Digest::read_from(&mut buf).ok()?;
             hashes.push(digest);
         }
         Some(Self { size, hashes })

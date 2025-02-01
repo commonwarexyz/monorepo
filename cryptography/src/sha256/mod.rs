@@ -3,7 +3,7 @@
 use crate::{Digest as CDigest, Error, Hasher};
 use rand::{CryptoRng, Rng};
 use sha2::{Digest as _, Sha256 as ISha256};
-use std::ops::{Deref, DerefMut};
+use std::ops::Deref;
 
 const DIGEST_LENGTH: usize = 32;
 
@@ -81,9 +81,9 @@ impl TryFrom<&[u8]> for Digest {
         if value.len() != DIGEST_LENGTH {
             return Err(Error::InvalidDigestLength);
         }
-        let mut v = [0u8; DIGEST_LENGTH];
-        v.copy_from_slice(value);
-        Ok(Self(v))
+        let array: &[u8; DIGEST_LENGTH] =
+            value.try_into().map_err(|_| Error::InvalidDigestLength)?;
+        Ok(Self(*array))
     }
 }
 
@@ -97,7 +97,17 @@ impl TryFrom<&Vec<u8>> for Digest {
 impl TryFrom<Vec<u8>> for Digest {
     type Error = Error;
     fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_slice())
+        if value.len() != DIGEST_LENGTH {
+            return Err(Error::InvalidDigestLength);
+        }
+
+        // If the length is correct, we can safely convert the vector into a boxed slice without
+        // any copies.
+        let boxed_slice = value.into_boxed_slice();
+        let boxed_array: Box<[u8; DIGEST_LENGTH]> = boxed_slice
+            .try_into()
+            .map_err(|_| Error::InvalidDigestLength)?;
+        Ok(Self(*boxed_array))
     }
 }
 
@@ -111,12 +121,6 @@ impl Deref for Digest {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
         &self.0
-    }
-}
-
-impl DerefMut for Digest {
-    fn deref_mut(&mut self) -> &mut [u8] {
-        &mut self.0
     }
 }
 
