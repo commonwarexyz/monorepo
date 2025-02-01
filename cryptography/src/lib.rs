@@ -5,13 +5,12 @@
 //! `commonware-cryptography` is **ALPHA** software and is not yet recommended for production use. Developers should
 //! expect breaking changes and occasional instability.
 
+use bytes::Buf;
+use bytes::Bytes;
+use rand::{CryptoRng, Rng, RngCore, SeedableRng};
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::ops::Deref;
-use std::ops::DerefMut;
-
-use bytes::Bytes;
-use rand::{CryptoRng, Rng, RngCore, SeedableRng};
 use thiserror::Error;
 
 pub mod bls12381;
@@ -143,7 +142,6 @@ pub trait Digest:
     + for<'a> TryFrom<&'a Vec<u8>, Error = Error>
     + TryFrom<Vec<u8>, Error = Error>
     + Deref<Target = [u8]>
-    + DerefMut<Target = [u8]>
     + Default
     + Sized
     + Clone
@@ -157,6 +155,27 @@ pub trait Digest:
     + Debug
     + Hash
 {
+    /// Attempts to read a digest from the provided buffer.
+    fn read_from<B: Buf>(buf: &mut B) -> Result<Self, Error> {
+        // Check if there are enough bytes in the buffer to read a digest.
+        let digest_len = size_of::<Self>();
+        if buf.remaining() < digest_len {
+            return Err(Error::InvalidDigestLength);
+        }
+
+        // If there are enough contiguous bytes in the buffer, use them directly.
+        let chunk = buf.chunk();
+        if chunk.len() >= digest_len {
+            let digest = Self::try_from(&chunk[..digest_len])?;
+            buf.advance(digest_len);
+            return Ok(digest);
+        }
+
+        // Otherwise, copy the bytes into a temporary buffer.
+        let mut temp = vec![0u8; digest_len];
+        buf.copy_to_slice(&mut temp);
+        Self::try_from(temp)
+    }
 }
 
 /// Interface that commonware crates rely on for hashing.

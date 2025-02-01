@@ -78,8 +78,7 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
         // Decode proof
         let view = proof.get_u64();
         let parent = proof.get_u64();
-        let mut payload = D::default();
-        proof.copy_to_slice(&mut payload);
+        let payload = D::read_from(&mut proof).ok()?;
         let public_key = proof.copy_to_bytes(public_key_len);
         let signature = proof.copy_to_bytes(signature_len);
 
@@ -140,8 +139,7 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
         // Decode proof prefix
         let view = proof.get_u64();
         let parent = proof.get_u64();
-        let mut payload = D::default();
-        proof.copy_to_slice(&mut payload);
+        let payload = D::read_from(&mut proof).ok()?;
         let count = proof.get_u32();
         if count > max {
             return None;
@@ -278,12 +276,10 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
         let view = proof.get_u64();
         let public_key = proof.copy_to_bytes(public_key_len);
         let parent_1 = proof.get_u64();
-        let mut payload_1 = D::default();
-        proof.copy_to_slice(&mut payload_1);
+        let payload_1 = D::read_from(&mut proof).ok()?;
         let signature_1 = proof.copy_to_bytes(signature_len);
         let parent_2 = proof.get_u64();
-        let mut payload_2 = D::default();
-        proof.copy_to_slice(&mut payload_2);
+        let payload_2 = D::read_from(&mut proof).ok()?;
         let signature_2 = proof.copy_to_bytes(signature_len);
 
         // Verify signatures
@@ -427,8 +423,7 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
         let view = proof.get_u64();
         let public_key = proof.copy_to_bytes(public_key_len);
         let parent = proof.get_u64();
-        let mut payload = D::default();
-        proof.copy_to_slice(&mut payload);
+        let payload = D::read_from(&mut proof).ok()?;
         let signature_finalize = proof.copy_to_bytes(signature_len);
         let signature_null = proof.copy_to_bytes(signature_len);
 
