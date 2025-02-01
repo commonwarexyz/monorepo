@@ -23,7 +23,7 @@ _Examples may include insecure code (i.e. deriving keypairs from an integer argu
 
 * [bridge](./examples/bridge/README.md): Send succinct consensus certificates between two networks.
 * [chat](./examples/chat/README.md): Send encrypted messages to a group of friends.
-* [log](./examples/log/README.md):  Commit to a secret log and agree to its hash.
+* [log](./examples/log/README.md): Commit to a secret log and agree to its hash.
 * [vrf](./examples/vrf/README.md): Generate bias-resistant randomness with untrusted contributors.
 
 ## Miscellaneous
