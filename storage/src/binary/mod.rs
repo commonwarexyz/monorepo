@@ -27,7 +27,7 @@
 //! let txs = [b"tx1", b"tx2", b"tx3", b"tx4"];
 //! let digests: Vec<Digest> = txs.iter().map(|tx| hash(*tx)).collect();
 //! let mut hasher = Sha256::default();
-//! let tree = Tree::new(&mut hasher, &digests).unwrap();
+//! let tree = Tree::new(&mut hasher, digests.clone()).unwrap();
 //! let root = tree.root();
 //!
 //! // Generate a proof for leaf at index 1.
