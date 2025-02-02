@@ -111,14 +111,14 @@ impl<H: CHasher> Proof<H> {
     ///    [8-...): raw bytes of each hash, each of length `H::len()`
     /// ```
     pub fn serialize(&self) -> Vec<u8> {
-        // A proof should never contain more hashes than the depth of the MMR, thus a single byte
-        // for encoding the length of the hashes array still allows serializing MMRs up to 2^255
-        // elements.
+        // There should never be more than 255 hashes in a proof (would mean the MMR
+        // has more than 2^255 leaves).
         assert!(
             self.hashes.len() <= u8::MAX as usize,
             "too many hashes in proof"
         );
 
+        // Serialize the proof as a byte vector.
         let bytes_len = size_of::<u64>() + (self.hashes.len() * size_of::<H::Digest>());
         let mut bytes = Vec::with_capacity(bytes_len);
         bytes.put_u64(self.size);
