@@ -44,8 +44,8 @@ impl<H: Hasher> Tree<H> {
                 let right = if chunk.len() == 2 {
                     chunk[1].clone()
                 } else {
-                    // Duplicate the last element if the count is odd.
-                    left.clone()
+                    // Use the default digest for the right child if no right child exists.
+                    H::Digest::default()
                 };
                 let parent = combine(hasher, left, right);
                 next_level.push(parent);
@@ -79,8 +79,8 @@ impl<H: Hasher> Tree<H> {
             let sibling = if sibling_index < level.len() {
                 level[sibling_index].clone()
             } else {
-                // If no sibling exists (odd count), duplicate the node.
-                level[index].clone()
+                // Use the default digest for the right child if no right child exists.
+                H::Digest::default()
             };
             proof_hashes.push(sibling);
             index /= 2;
