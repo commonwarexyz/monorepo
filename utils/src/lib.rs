@@ -169,7 +169,7 @@ mod tests {
         assert_eq!(from_hex_formatted(h).unwrap(), b.to_vec());
 
         // Test case 7: 0x prefix + different whitespace chars
-        let h = "    \n\n0x\r\n01
+        let h = "    \n\n0x\r\n01\
                             02\t03\n";
         assert_eq!(from_hex_formatted(h).unwrap(), b.to_vec());
     }
