@@ -1,20 +1,26 @@
+//! Stateless binary Merkle Tree.
+
 use commonware_cryptography::{Digest, Hasher};
 use std::mem::size_of;
 
-/// Combines two digests using the provided hasher.
-pub fn combine_hashes<H: Hasher>(left: H::Digest, right: H::Digest) -> H::Digest {
-    let mut hasher = H::new();
+/// Combines two digests into a new digest.
+fn combine<H: Hasher>(hasher: &mut H, left: H::Digest, right: H::Digest) -> H::Digest {
     hasher.update(left.as_ref());
     hasher.update(right.as_ref());
     hasher.finalize()
 }
 
-/// Computes the Merkle root from a slice of leaf digests.
-/// If the slice is empty, returns `None`. For an odd number of nodes at a level, the last node is duplicated.
-pub fn compute_merkle_root<H: Hasher>(digests: &[H::Digest]) -> Option<H::Digest> {
+/// Compute the Merkle root of a slice of leaf digests.
+///
+/// If the slice is empty, returns `None`. For an odd number of nodes at a level,
+/// the last node is duplicated.
+pub fn compute<H: Hasher>(hasher: &mut H, digests: &[H::Digest]) -> Option<H::Digest> {
+    // If there are no leaves, there can be no root.
     if digests.is_empty() {
         return None;
     }
+
+    // Build the Merkle tree from the leaves up to the root.
     let mut current_level = digests.to_vec();
     while current_level.len() > 1 {
         let mut next_level = Vec::with_capacity((current_level.len() + 1) / 2);
@@ -25,7 +31,7 @@ pub fn compute_merkle_root<H: Hasher>(digests: &[H::Digest]) -> Option<H::Digest
             } else {
                 left.clone()
             };
-            let parent = combine_hashes::<H>(left, right);
+            let parent = combine(hasher, left, right);
             next_level.push(parent);
         }
         current_level = next_level;
@@ -58,20 +64,20 @@ impl<H: Hasher> Proof<H> {
     /// The proof consists of sibling hashes stored from the leaf up to the root. At each level, if the current
     /// node is a left child (even index), the sibling is combined to the right; if it is a right child (odd index),
     /// the sibling is combined to the left.
-    pub fn verify_element_inclusion(
+    pub fn verify(
         &self,
-        _hasher: &mut H,
+        hasher: &mut H,
         element: &H::Digest,
-        leaf_index: u64,
+        element_pos: u64,
         root_hash: &H::Digest,
     ) -> bool {
         let mut computed = element.clone();
-        let mut index = leaf_index;
+        let mut index = element_pos;
         for sibling in &self.hashes {
             if index % 2 == 0 {
-                computed = combine_hashes::<H>(computed, sibling.clone());
+                computed = combine(hasher, computed, sibling.clone());
             } else {
-                computed = combine_hashes::<H>(sibling.clone(), computed);
+                computed = combine(hasher, sibling.clone(), computed);
             }
             index /= 2;
         }
@@ -120,8 +126,13 @@ impl<H: Hasher> Proof<H> {
 }
 
 /// Generates a binary Merkle tree proof of inclusion for the leaf at `leaf_index` from a slice of leaf digests.
+///
 /// The tree is constructed by pairing adjacent digests (duplicating the last one if necessary).
-pub fn generate_proof<H: Hasher>(digests: &[H::Digest], leaf_index: usize) -> Option<Proof<H>> {
+pub fn generate_proof<H: Hasher>(
+    hasher: &mut H,
+    digests: &[H::Digest],
+    leaf_index: usize,
+) -> Option<Proof<H>> {
     if digests.is_empty() || leaf_index >= digests.len() {
         return None;
     }
@@ -148,7 +159,7 @@ pub fn generate_proof<H: Hasher>(digests: &[H::Digest], leaf_index: usize) -> Op
                 }
             }
 
-            let parent = combine_hashes::<H>(left, right);
+            let parent = combine(hasher, left, right);
             next_level.push(parent);
         }
         index /= 2;
