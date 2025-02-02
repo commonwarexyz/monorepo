@@ -25,6 +25,11 @@ impl<H: Hasher> Tree<H> {
     /// Builds a Merkle Tree from a slice of leaf digests.
     ///
     /// If `leaves` is empty, returns `None`.
+    ///
+    /// # Warning
+    ///
+    /// It is not safe to insert `H::Digest::default()` as a leaf. This could lead to
+    /// a proof being generated for a non-existent leaf.
     pub fn new(hasher: &mut H, leaves: &[H::Digest]) -> Option<Self> {
         // Ensure there are non-zero leaves.
         if leaves.is_empty() {
@@ -110,7 +115,7 @@ where
 impl<H: Hasher> Eq for Proof<H> where H::Digest: Eq {}
 
 impl<H: Hasher> Proof<H> {
-    /// Verifies that a given leaf (i.e. element digest) at position `leaf_index` is included in the Merkle tree
+    /// Verifies that a given leaf (i.e. element digest) at position `leaf_index` is included in the Binary Merkle Tree
     /// with the expected root hash.
     ///
     /// The proof consists of sibling hashes stored from the leaf up to the root. At each level, if the current
@@ -123,6 +128,12 @@ impl<H: Hasher> Proof<H> {
         element_pos: u64,
         root_hash: &H::Digest,
     ) -> bool {
+        // Ensure element isn't default item
+        if element == &H::Digest::default() {
+            return false;
+        }
+
+        // Compute the root hash by combining the element with each sibling hash in the proof.
         let mut computed = element.clone();
         let mut index = element_pos;
         for sibling in &self.hashes {
@@ -384,6 +395,28 @@ mod tests {
         // to a duplicate leaf that doesn't actually exist) should fail.
         assert!(
             !proof.verify(&mut hasher, &digests[2], 3, &root),
+            "Verification should fail for an invalid duplicate leaf index"
+        );
+    }
+
+    #[test]
+    fn test_odd_tree_default_index_proof() {
+        // Build a tree with an odd number of leaves.
+        let txs = [b"tx1", b"tx2", b"tx3"];
+        let digests: Vec<Digest> = txs.iter().map(|tx| hash(*tx)).collect();
+        let mut hasher = Sha256::default();
+        let tree = Tree::new(&mut hasher, &digests).unwrap();
+        let root = tree.root();
+
+        // The tree was built with 3 leaves; index 2 is the last valid index.
+        let mut proof = tree.prove(2).unwrap();
+
+        // Swap sibling with last valid item
+        proof.hashes[0] = digests[2].clone();
+
+        // Attempting to verify default sibling.
+        assert!(
+            !proof.verify(&mut hasher, &Digest::default(), 3, &root),
             "Verification should fail for an invalid duplicate leaf index"
         );
     }
