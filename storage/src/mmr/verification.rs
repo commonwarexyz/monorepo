@@ -10,8 +10,6 @@ use commonware_cryptography::{Digest, Hasher as CHasher};
 /// their peak hashes from the elements within the range. Both segments are ordered by decreasing
 /// height.
 #[derive(Clone, Debug, Eq)]
-/// A Proof contains the information necessary for proving the inclusion of an element, or some
-/// range of elements, in the MMR.
 pub struct Proof<H: CHasher> {
     /// The total number of nodes in the MMR.
     pub size: u64,
