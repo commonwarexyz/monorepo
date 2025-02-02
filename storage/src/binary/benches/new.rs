@@ -15,10 +15,14 @@ fn bench_new(c: &mut Criterion) {
 
         // Generate Binary Merkle Tree
         c.bench_function(&format!("{}/n={}", module_path!(), n), |b| {
-            b.iter(|| {
-                let mut hasher = Sha256::new();
-                black_box(Tree::<Sha256>::new(&mut hasher, &elements));
-            })
+            b.iter_batched(
+                || elements.clone(),
+                |elements| {
+                    let mut hasher = Sha256::new();
+                    black_box(Tree::<Sha256>::new(&mut hasher, elements));
+                },
+                criterion::BatchSize::SmallInput,
+            )
         });
     }
 }

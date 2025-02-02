@@ -39,9 +39,9 @@ use commonware_cryptography::{Digest, Hasher};
 use std::mem::size_of;
 
 /// Combines two digests into a new digest.
-fn combine<H: Hasher>(hasher: &mut H, left: H::Digest, right: H::Digest) -> H::Digest {
-    hasher.update(left.as_ref());
-    hasher.update(right.as_ref());
+fn combine<H: Hasher>(hasher: &mut H, left: &H::Digest, right: &H::Digest) -> H::Digest {
+    hasher.update(left);
+    hasher.update(right);
     hasher.finalize()
 }
 
@@ -65,7 +65,7 @@ impl<H: Hasher> Tree<H> {
     ///
     /// It is not safe to insert `H::Digest::default()` as a leaf. This could lead to
     /// a proof being generated for a non-existent leaf.
-    pub fn new(hasher: &mut H, leaves: &[H::Digest]) -> Option<Self> {
+    pub fn new(hasher: &mut H, leaves: Vec<H::Digest>) -> Option<Self> {
         // Ensure there are non-zero leaves.
         if leaves.is_empty() {
             return None;
@@ -73,25 +73,24 @@ impl<H: Hasher> Tree<H> {
 
         // Level 0: the leaves.
         let mut levels = Vec::new();
-        levels.push(leaves.to_vec());
-        let mut current_level = leaves.to_vec();
+        levels.push(leaves);
 
         // Build higher levels until we reach the root.
-        while current_level.len() > 1 {
+        while levels.last().unwrap().len() > 1 {
+            let current_level = levels.last().unwrap();
             let mut next_level = Vec::with_capacity((current_level.len() + 1) / 2);
+            let default = H::Digest::default();
             for chunk in current_level.chunks(2) {
-                let left = chunk[0].clone();
+                let left = &chunk[0];
                 let right = if chunk.len() == 2 {
-                    chunk[1].clone()
+                    &chunk[1]
                 } else {
                     // Use the default digest for the right child if no right child exists.
-                    H::Digest::default()
+                    &default
                 };
-                let parent = combine(hasher, left, right);
-                next_level.push(parent);
+                next_level.push(combine(hasher, left, right));
             }
-            levels.push(next_level.clone());
-            current_level = next_level;
+            levels.push(next_level);
         }
         Some(Self { levels })
     }
@@ -173,9 +172,9 @@ impl<H: Hasher> Proof<H> {
         let mut index = element_pos;
         for sibling in &self.hashes {
             if index % 2 == 0 {
-                computed = combine(hasher, computed, sibling.clone());
+                computed = combine(hasher, &computed, sibling);
             } else {
-                computed = combine(hasher, sibling.clone(), computed);
+                computed = combine(hasher, sibling, &computed);
             }
             index /= 2;
         }
@@ -237,7 +236,7 @@ mod tests {
         let tx = b"tx";
         let leaf = hash(tx);
         let mut hasher = Sha256::default();
-        let tree = Tree::new(&mut hasher, &[leaf.clone()]).unwrap();
+        let tree = Tree::new(&mut hasher, vec![leaf.clone()]).unwrap();
 
         // The root should equal the only leaf.
         assert_eq!(tree.root(), leaf);
@@ -253,7 +252,7 @@ mod tests {
         let txs = [b"tx1", b"tx2", b"tx3", b"tx4"];
         let digests: Vec<Digest> = txs.iter().map(|tx| hash(*tx)).collect();
         let mut hasher = Sha256::default();
-        let tree = Tree::new(&mut hasher, &digests).unwrap();
+        let tree = Tree::new(&mut hasher, digests.clone()).unwrap();
         let root = tree.root();
 
         // For each leaf, generate and verify its proof.
@@ -274,7 +273,7 @@ mod tests {
         let txs = [b"tx1", b"tx2", b"tx3"];
         let digests: Vec<Digest> = txs.iter().map(|tx| hash(*tx)).collect();
         let mut hasher = Sha256::default();
-        let tree = Tree::new(&mut hasher, &digests).unwrap();
+        let tree = Tree::new(&mut hasher, digests.clone()).unwrap();
         let root = tree.root();
 
         // Generate a proof for leaf at index 1.
@@ -293,7 +292,7 @@ mod tests {
         let txs = [b"tx1", b"tx2", b"tx3", b"tx4"];
         let digests: Vec<Digest> = txs.iter().map(|tx| hash(*tx)).collect();
         let mut hasher = Sha256::default();
-        let tree = Tree::new(&mut hasher, &digests).unwrap();
+        let tree = Tree::new(&mut hasher, digests.clone()).unwrap();
         let root = tree.root();
 
         // Generate a valid proof for leaf at index 2.
@@ -311,7 +310,7 @@ mod tests {
         let txs = [b"tx1", b"tx2", b"tx3", b"tx4"];
         let digests: Vec<Digest> = txs.iter().map(|tx| hash(*tx)).collect();
         let mut hasher = Sha256::default();
-        let tree = Tree::new(&mut hasher, &digests).unwrap();
+        let tree = Tree::new(&mut hasher, digests.clone()).unwrap();
         let root = tree.root();
 
         // Generate a valid proof for leaf at index 1.
@@ -331,7 +330,7 @@ mod tests {
         let txs = [b"tx1", b"tx2", b"tx3", b"tx4"];
         let digests: Vec<Digest> = txs.iter().map(|tx| hash(*tx)).collect();
         let mut hasher = Sha256::default();
-        let tree = Tree::new(&mut hasher, &digests).unwrap();
+        let tree = Tree::new(&mut hasher, digests.clone()).unwrap();
 
         // Generate a valid proof for leaf at index 0.
         let proof = tree.prove(0).unwrap();
@@ -351,7 +350,7 @@ mod tests {
         let txs = [b"tx1", b"tx2", b"tx3"];
         let digests: Vec<Digest> = txs.iter().map(|tx| hash(*tx)).collect();
         let mut hasher = Sha256::default();
-        let tree = Tree::new(&mut hasher, &digests).unwrap();
+        let tree = Tree::new(&mut hasher, digests.clone()).unwrap();
 
         // Generate a valid proof for leaf at index 1.
         let proof = tree.prove(1).unwrap();
@@ -372,7 +371,7 @@ mod tests {
         let txs = [b"tx1", b"tx2", b"tx3"];
         let digests: Vec<Digest> = txs.iter().map(|tx| hash(*tx)).collect();
         let mut hasher = Sha256::default();
-        let tree = Tree::new(&mut hasher, &digests).unwrap();
+        let tree = Tree::new(&mut hasher, digests.clone()).unwrap();
 
         // Generate a valid proof for leaf at index 1.
         let proof = tree.prove(1).unwrap();
@@ -393,7 +392,7 @@ mod tests {
         let txs = [b"tx1", b"tx2", b"tx3", b"tx4"];
         let digests: Vec<Digest> = txs.iter().map(|tx| hash(*tx)).collect();
         let mut hasher = Sha256::default();
-        let tree = Tree::new(&mut hasher, &digests).unwrap();
+        let tree = Tree::new(&mut hasher, digests.clone()).unwrap();
         let root = tree.root();
 
         // Generate a valid proof for leaf at index 2.
@@ -414,7 +413,7 @@ mod tests {
         let txs = [b"tx1", b"tx2", b"tx3"];
         let digests: Vec<Digest> = txs.iter().map(|tx| hash(*tx)).collect();
         let mut hasher = Sha256::default();
-        let tree = Tree::new(&mut hasher, &digests).unwrap();
+        let tree = Tree::new(&mut hasher, digests.clone()).unwrap();
         let root = tree.root();
 
         // The tree was built with 3 leaves; index 2 is the last valid index.
@@ -440,7 +439,7 @@ mod tests {
         let txs = [b"tx1", b"tx2", b"tx3"];
         let digests: Vec<Digest> = txs.iter().map(|tx| hash(*tx)).collect();
         let mut hasher = Sha256::default();
-        let tree = Tree::new(&mut hasher, &digests).unwrap();
+        let tree = Tree::new(&mut hasher, digests.clone()).unwrap();
         let root = tree.root();
 
         // The tree was built with 3 leaves; index 2 is the last valid index.

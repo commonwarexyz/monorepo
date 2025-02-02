@@ -17,7 +17,7 @@ fn bench_prove_single_element(c: &mut Criterion) {
             queries.push((pos, element));
         }
         let mut hasher = Sha256::new();
-        let tree = Tree::<Sha256>::new(&mut hasher, &elements).unwrap();
+        let tree = Tree::<Sha256>::new(&mut hasher, elements).unwrap();
         let root = tree.root();
 
         // Select SAMPLE_SIZE random elements without replacement and create/verify proofs
