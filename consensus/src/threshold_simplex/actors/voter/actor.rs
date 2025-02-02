@@ -49,13 +49,18 @@ const GENESIS_VIEW: View = 0;
 struct Round<
     C: Scheme,
     D: Digest,
-    S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
+    S: ThresholdSupervisor<
+        Seed = group::Signature,
+        Index = View,
+        Share = group::Share,
+        PublicKey = C::PublicKey,
+    >,
 > {
     supervisor: S,
     _crypto: PhantomData<C>,
     _digest: PhantomData<D>,
 
-    leader: Option<PublicKey>,
+    leader: Option<C::PublicKey>,
 
     view: View,
     leader_deadline: Option<SystemTime>,
@@ -91,7 +96,12 @@ struct Round<
 impl<
         C: Scheme,
         D: Digest,
-        S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
+        S: ThresholdSupervisor<
+            Seed = group::Signature,
+            Index = View,
+            Share = group::Share,
+            PublicKey = C::PublicKey,
+        >,
     > Round<C, D, S>
 {
     pub fn new(supervisor: S, view: View) -> Self {
@@ -192,7 +202,8 @@ impl<
                 .get(&public_key_index)
                 .unwrap();
             let previous_proposal = previous_notarize.message.proposal.as_ref().unwrap();
-            let proof = Prover::serialize_conflicting_notarize(
+
+            let proof = Prover::<D>::serialize_conflicting_notarize(
                 self.view,
                 previous_proposal.parent,
                 &previous_notarize.digest,
@@ -247,7 +258,8 @@ impl<
             .get(&public_key_index)
             .unwrap();
         let finalize_proposal = finalize.message.proposal.as_ref().unwrap();
-        let proof = Prover::serialize_nullify_finalize(
+
+        let proof = Prover::<D>::serialize_nullify_finalize(
             self.view,
             finalize_proposal.parent,
             &finalize.digest,
@@ -274,7 +286,7 @@ impl<
         let null = self.nullifies.get(&public_key_index);
         if let Some(null) = null {
             // Create fault
-            let proof = Prover::serialize_nullify_finalize(
+            let proof = Prover::<D>::serialize_nullify_finalize(
                 self.view,
                 proposal.parent,
                 &finalize.digest,
@@ -314,7 +326,7 @@ impl<
                 .get(&public_key_index)
                 .unwrap();
             let previous_proposal = previous_finalize.message.proposal.as_ref().unwrap();
-            let proof = Prover::serialize_conflicting_finalize(
+            let proof = Prover::<D>::serialize_conflicting_finalize(
                 self.view,
                 previous_proposal.parent,
                 &previous_finalize.digest,
@@ -343,7 +355,7 @@ impl<
         }
         let entry = self.finalizes.entry(proposal_digest).or_default();
         let signature = &finalize.message.proposal_signature;
-        let proof = Prover::<D>::serialize_proposal(proposal, signature);
+        let proof = Prover::<D>::serialize_proposal(proposal, &signature);
         entry.insert(public_key_index, finalize);
         self.supervisor.report(FINALIZE, proof).await;
         true
@@ -646,6 +658,7 @@ pub struct Actor<
         Seed = group::Signature,
         Index = View,
         Share = group::Share,
+        PublicKey = C::PublicKey,
     >,
 > {
     runtime: E,
@@ -695,6 +708,7 @@ impl<
             Seed = group::Signature,
             Index = View,
             Share = group::Share,
+            PublicKey = C::PublicKey,
         >,
     > Actor<B, E, C, D, A, R, F, S>
 {
@@ -1020,7 +1034,7 @@ impl<
         debug!(view = self.view, "broadcasted nullify");
     }
 
-    async fn nullify(&mut self, sender: &PublicKey, nullify: wire::Nullify) {
+    async fn nullify(&mut self, sender: &C::PublicKey, nullify: wire::Nullify) {
         // Ensure we are in the right view to process this message
         if !self.interesting(nullify.view, false) {
             return;
@@ -1397,7 +1411,7 @@ impl<
         }
     }
 
-    async fn notarize(&mut self, sender: &PublicKey, notarize: wire::Notarize) {
+    async fn notarize(&mut self, sender: &C::PublicKey, notarize: wire::Notarize) {
         // Extract proposal
         let Some(proposal) = notarize.proposal.as_ref() else {
             return;
@@ -1625,7 +1639,7 @@ impl<
         self.enter_view(view + 1, seed);
     }
 
-    async fn finalize(&mut self, sender: &PublicKey, finalize: wire::Finalize) {
+    async fn finalize(&mut self, sender: &C::PublicKey, finalize: wire::Finalize) {
         // Extract proposal
         let Some(proposal) = finalize.proposal.as_ref() else {
             return;
@@ -2155,8 +2169,8 @@ impl<
     pub async fn run(
         mut self,
         mut backfiller: resolver::Mailbox,
-        mut sender: impl Sender,
-        mut receiver: impl Receiver,
+        mut sender: impl Sender<PublicKey = C::PublicKey>,
+        mut receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) {
         // Compute genesis
         let genesis = self.automaton.genesis().await;

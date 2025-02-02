@@ -23,24 +23,24 @@ use std::{
 };
 use tracing::{debug, info, warn};
 
-pub struct Arbiter<E: Clock> {
+pub struct Arbiter<E: Clock, C: Scheme> {
     runtime: E,
 
     dkg_frequency: Duration,
     dkg_phase_timeout: Duration,
 
-    contributors: Vec<PublicKey>,
+    contributors: Vec<C::PublicKey>,
     t: u32,
 }
 
 /// Implementation of a "trusted arbiter" that tracks commitments,
 /// acknowledgements, and complaints during a DKG round.
-impl<E: Clock> Arbiter<E> {
+impl<E: Clock, C: Scheme> Arbiter<E, C> {
     pub fn new(
         runtime: E,
         dkg_frequency: Duration,
         dkg_phase_timeout: Duration,
-        mut contributors: Vec<PublicKey>,
+        mut contributors: Vec<C::PublicKey>,
         t: u32,
     ) -> Self {
         contributors.sort();
@@ -55,13 +55,13 @@ impl<E: Clock> Arbiter<E> {
         }
     }
 
-    async fn run_round<C: Scheme>(
+    async fn run_round(
         &self,
         round: u64,
         previous: Option<poly::Public>,
-        sender: &mut impl Sender,
-        receiver: &mut impl Receiver,
-    ) -> (Option<poly::Public>, HashSet<PublicKey>) {
+        sender: &mut impl Sender<PublicKey = C::PublicKey>,
+        receiver: &mut impl Receiver<PublicKey = C::PublicKey>,
+    ) -> (Option<poly::Public>, HashSet<C::PublicKey>) {
         // Create a new round
         let start = self.runtime.current();
         let timeout = start + 4 * self.dkg_phase_timeout; // start -> commitment/share -> ack -> arbiter
@@ -142,7 +142,11 @@ impl<E: Clock> Arbiter<E> {
                                     break;
                                 };
                                 let payload = payload(round, &sender, &msg.commitment);
-                                if !C::verify(Some(ACK_NAMESPACE), &payload, public_key, &ack.signature) {
+                                let Ok(sig) = C::Signature::try_from(ack.signature.as_ref()) else {
+                                    disqualify = true;
+                                    break;
+                                };
+                                if !C::verify(Some(ACK_NAMESPACE), &payload, public_key, &sig) {
                                     disqualify = true;
                                     break;
                                 }
@@ -263,12 +267,16 @@ impl<E: Clock> Arbiter<E> {
         (Some(output.public), disqualified)
     }
 
-    pub async fn run<C: Scheme>(self, mut sender: impl Sender, mut receiver: impl Receiver) {
+    pub async fn run(
+        self,
+        mut sender: impl Sender<PublicKey = C::PublicKey>,
+        mut receiver: impl Receiver<PublicKey = C::PublicKey>,
+    ) {
         let mut round = 0;
         let mut previous = None;
         loop {
             let (public, disqualified) = self
-                .run_round::<C>(round, previous.clone(), &mut sender, &mut receiver)
+                .run_round(round, previous.clone(), &mut sender, &mut receiver)
                 .await;
 
             // Log round results

@@ -35,13 +35,7 @@ use tracing::{error, trace};
 const SIZE_OF_CHANNEL: usize = size_of::<Channel>();
 
 /// Task type representing a message to be sent within the network.
-type Task = (
-    Channel,
-    PublicKey,
-    Recipients,
-    Bytes,
-    oneshot::Sender<Vec<PublicKey>>,
-);
+type Task<Pk> = (Channel, Pk, Recipients<Pk>, Bytes, oneshot::Sender<Vec<Pk>>);
 
 /// Configuration for the simulated network.
 pub struct Config {
@@ -53,7 +47,7 @@ pub struct Config {
 }
 
 /// Implementation of a simulated network.
-pub struct Network<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> {
+pub struct Network<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock, P: PublicKey> {
     runtime: E,
 
     // Maximum size of a message that can be sent over the network
@@ -64,31 +58,31 @@ pub struct Network<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> 
     next_addr: SocketAddr,
 
     // Channel to receive messages from the oracle
-    ingress: mpsc::UnboundedReceiver<ingress::Message>,
+    ingress: mpsc::UnboundedReceiver<ingress::Message<P>>,
 
     // A channel to receive tasks from peers
     // The sender is cloned and given to each peer
     // The receiver is polled in the main loop
-    sender: mpsc::UnboundedSender<Task>,
-    receiver: mpsc::UnboundedReceiver<Task>,
+    sender: mpsc::UnboundedSender<Task<P>>,
+    receiver: mpsc::UnboundedReceiver<Task<P>>,
 
     // A map from a pair of public keys (from, to) to a link between the two peers
-    links: HashMap<(PublicKey, PublicKey), Link>,
+    links: HashMap<(P, P), Link>,
 
     // A map from a public key to a peer
-    peers: BTreeMap<PublicKey, Peer>,
+    peers: BTreeMap<P, Peer<P>>,
 
     // Metrics for received and sent messages
     received_messages: Family<metrics::Message, Counter>,
     sent_messages: Family<metrics::Message, Counter>,
 }
 
-impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
+impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock, P: PublicKey> Network<E, P> {
     /// Create a new simulated network with a given runtime and configuration.
     ///
     /// Returns a tuple containing the network instance and the oracle that can
     /// be used to modify the state of the network during runtime.
-    pub fn new(runtime: E, cfg: Config) -> (Self, Oracle) {
+    pub fn new(runtime: E, cfg: Config) -> (Self, Oracle<P>) {
         let (sender, receiver) = mpsc::unbounded();
         let (oracle_sender, oracle_receiver) = mpsc::unbounded();
         let sent_messages = Family::<metrics::Message, Counter>::default();
@@ -154,7 +148,7 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
     /// Handle an ingress message.
     ///
     /// This method is called when a message is received from the oracle.
-    async fn handle_ingress(&mut self, message: ingress::Message) {
+    async fn handle_ingress(&mut self, message: ingress::Message<P>) {
         // It is important to ensure that no failed receipt of a message will cause us to exit.
         // This could happen if the caller drops the `Oracle` after updating the network topology.
         // Thus, we create a helper function to send the result to the oracle and log any errors.
@@ -178,7 +172,7 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
                 if !self.peers.contains_key(&public_key) {
                     let peer = Peer::new(
                         &mut self.runtime.clone(),
-                        public_key.clone(),
+                        public_key,
                         self.get_next_socket(),
                         self.max_size,
                     );
@@ -219,7 +213,7 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
                 };
 
                 // Require link to not already exist
-                let key = (sender.clone(), receiver);
+                let key = (sender, receiver);
                 if self.links.contains_key(&key) {
                     return send_result(result, Err(Error::LinkExists));
                 }
@@ -253,7 +247,7 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
     ///
     /// This method is called when a task is received from the sender, which can come from
     /// any peer in the network.
-    fn handle_task(&mut self, task: Task) {
+    fn handle_task(&mut self, task: Task<P>) {
         // Collect recipients
         let (channel, origin, recipients, message, reply) = task;
         let recipients = match recipients {
@@ -277,11 +271,7 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
             }
 
             // Determine if there is a link between the sender and recipient
-            let mut link = match self
-                .links
-                .get(&(origin.clone(), recipient.clone()))
-                .cloned()
-            {
+            let mut link = match self.links.get(&(origin, recipient)).cloned() {
                 Some(link) => link,
                 None => {
                     trace!(
@@ -404,21 +394,21 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
 
 /// Implementation of a [`crate::Sender`] for the simulated network.
 #[derive(Clone, Debug)]
-pub struct Sender {
-    me: PublicKey,
+pub struct Sender<P: PublicKey> {
+    me: P,
     channel: Channel,
     max_size: usize,
-    high: mpsc::UnboundedSender<Task>,
-    low: mpsc::UnboundedSender<Task>,
+    high: mpsc::UnboundedSender<Task<P>>,
+    low: mpsc::UnboundedSender<Task<P>>,
 }
 
-impl Sender {
+impl<P: PublicKey> Sender<P> {
     fn new(
         runtime: impl Spawner,
-        me: PublicKey,
+        me: P,
         channel: Channel,
         max_size: usize,
-        mut sender: mpsc::UnboundedSender<Task>,
+        mut sender: mpsc::UnboundedSender<Task<P>>,
     ) -> Self {
         // Listen for messages
         let (high, mut high_receiver) = mpsc::unbounded();
@@ -460,15 +450,16 @@ impl Sender {
     }
 }
 
-impl crate::Sender for Sender {
+impl<P: PublicKey> crate::Sender for Sender<P> {
     type Error = Error;
+    type PublicKey = P;
 
     async fn send(
         &mut self,
-        recipients: Recipients,
+        recipients: Recipients<P>,
         message: Bytes,
         priority: bool,
-    ) -> Result<Vec<PublicKey>, Error> {
+    ) -> Result<Vec<P>, Error> {
         // Check message size
         if message.len() > self.max_size {
             return Err(Error::MessageTooLarge(message.len()));
@@ -485,19 +476,20 @@ impl crate::Sender for Sender {
     }
 }
 
-type MessageReceiver = mpsc::UnboundedReceiver<Message>;
-type MessageReceiverResult = Result<MessageReceiver, Error>;
+type MessageReceiver<Pk> = mpsc::UnboundedReceiver<Message<Pk>>;
+type MessageReceiverResult<P> = Result<MessageReceiver<P>, Error>;
 
 /// Implementation of a [`crate::Receiver`] for the simulated network.
 #[derive(Debug)]
-pub struct Receiver {
-    receiver: MessageReceiver,
+pub struct Receiver<P: PublicKey> {
+    receiver: MessageReceiver<P>,
 }
 
-impl crate::Receiver for Receiver {
+impl<P: PublicKey> crate::Receiver for Receiver<P> {
     type Error = Error;
+    type PublicKey = P;
 
-    async fn recv(&mut self) -> Result<Message, Error> {
+    async fn recv(&mut self) -> Result<Message<Self::PublicKey>, Error> {
         self.receiver.next().await.ok_or(Error::NetworkClosed)
     }
 }
@@ -505,22 +497,22 @@ impl crate::Receiver for Receiver {
 /// A peer in the simulated network.
 ///
 /// The peer can register channels, which allows it to receive messages sent to the channel from other peers.
-struct Peer {
+struct Peer<P: PublicKey> {
     // Socket address that the peer is listening on
     socket: SocketAddr,
 
     // Control to register new channels
-    control: mpsc::UnboundedSender<(Channel, oneshot::Sender<MessageReceiverResult>)>,
+    control: mpsc::UnboundedSender<(Channel, oneshot::Sender<MessageReceiverResult<P>>)>,
 }
 
-impl Peer {
+impl<P: PublicKey> Peer<P> {
     /// Create and return a new peer.
     ///
     /// The peer will listen for incoming connections on the given `socket` address.
     /// `max_size` is the maximum size of a message that can be sent to the peer.
     fn new<E: Spawner + RNetwork<Listener, Sink, Stream>>(
         runtime: &mut E,
-        public_key: PublicKey,
+        public_key: P,
         socket: SocketAddr,
         max_size: usize,
     ) -> Self {
@@ -543,7 +535,7 @@ impl Peer {
                     // Listen for control messages, which are used to register channels
                     control = control_receiver.next() => {
                         // If control is closed, exit
-                        let (channel, result): (Channel, oneshot::Sender<MessageReceiverResult>) = match control {
+                        let (channel, result): (Channel, oneshot::Sender<MessageReceiverResult<P>>) = match control {
                             Some(control) => control,
                             None => break,
                         };
@@ -611,6 +603,10 @@ impl Peer {
                                     return;
                                 }
                             };
+                            let Ok(dialer) = P::try_from(dialer.as_ref()) else {
+                                error!("received public key is invalid");
+                                return;
+                            };
 
                             // Continually receive messages from the dialer and send them to the inbox
                             while let Ok(data) = recv_frame(&mut stream, max_size).await {
@@ -643,7 +639,7 @@ impl Peer {
     ///
     /// This allows the peer to receive messages sent to the channel.
     /// Returns a receiver that can be used to receive messages sent to the channel.
-    async fn register(&mut self, channel: Channel) -> MessageReceiverResult {
+    async fn register(&mut self, channel: Channel) -> MessageReceiverResult<P> {
         let (sender, receiver) = oneshot::channel();
         self.control
             .send((channel, sender))
@@ -663,9 +659,9 @@ struct Link {
 }
 
 impl Link {
-    fn new<E: Spawner + RNetwork<Listener, Sink, Stream>>(
+    fn new<E: Spawner + RNetwork<Listener, Sink, Stream>, P: PublicKey>(
         runtime: &mut E,
-        dialer: PublicKey,
+        dialer: P,
         socket: SocketAddr,
         sampler: Normal<f64>,
         success_rate: f64,
@@ -775,7 +771,12 @@ mod tests {
             max_size: MAX_MESSAGE_SIZE,
         };
         let (_, runtime, _) = Executor::default();
-        let (mut network, _) = Network::new(runtime.clone(), cfg);
+        type PublicKey = <Ed25519 as Scheme>::PublicKey;
+        let (mut network, _) =
+            Network::<commonware_runtime::deterministic::Context, PublicKey>::new(
+                runtime.clone(),
+                cfg,
+            );
 
         // Test that the next socket address is incremented correctly
         let mut original = network.next_addr;

@@ -11,7 +11,7 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit},
     ChaCha20Poly1305,
 };
-use commonware_cryptography::{PublicKey, Scheme};
+use commonware_cryptography::Scheme;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Sink, Spawner, Stream};
 use commonware_utils::SystemTimeExt as _;
@@ -24,7 +24,7 @@ const ENCRYPTION_TAG_LENGTH: usize = 16;
 /// An incoming connection with a verified peer handshake.
 pub struct IncomingConnection<C: Scheme, Si: Sink, St: Stream> {
     config: Config<C>,
-    handshake: IncomingHandshake<Si, St>,
+    handshake: IncomingHandshake<Si, St, C>,
 }
 
 impl<C: Scheme, Si: Sink, St: Stream> IncomingConnection<C, Si, St> {
@@ -51,8 +51,8 @@ impl<C: Scheme, Si: Sink, St: Stream> IncomingConnection<C, Si, St> {
     }
 
     /// The public key of the peer attempting to connect.
-    pub fn peer(&self) -> PublicKey {
-        self.handshake.peer_public_key.clone()
+    pub fn peer(&self) -> C::PublicKey {
+        self.handshake.peer_public_key
     }
 }
 
@@ -94,7 +94,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         mut config: Config<C>,
         mut sink: Si,
         mut stream: St,
-        peer: PublicKey,
+        peer: C::PublicKey,
     ) -> Result<Self, Error> {
         // Set handshake deadline
         let deadline = runtime.current() + config.handshake_timeout;
@@ -109,7 +109,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
             &mut config.crypto,
             &config.namespace,
             timestamp,
-            peer.clone(),
+            peer,
             ephemeral,
         )?;
 
@@ -183,7 +183,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
             &mut config.crypto,
             &config.namespace,
             timestamp,
-            handshake.peer_public_key.clone(),
+            handshake.peer_public_key,
             ephemeral,
         )?;
 

@@ -30,6 +30,7 @@ pub struct Engine<
         Index = View,
         Share = group::Share,
         Identity = poly::Public,
+        PublicKey = C::PublicKey,
     >,
 > {
     runtime: E,
@@ -53,6 +54,7 @@ impl<
             Index = View,
             Share = group::Share,
             Identity = poly::Public,
+            PublicKey = C::PublicKey,
         >,
     > Engine<B, E, C, D, A, R, F, S>
 {
@@ -116,8 +118,14 @@ impl<
     /// This will also rebuild the state of the engine from provided `Journal`.
     pub async fn run(
         self,
-        voter_network: (impl Sender, impl Receiver),
-        resolver_network: (impl Sender, impl Receiver),
+        voter_network: (
+            impl Sender<PublicKey = C::PublicKey>,
+            impl Receiver<PublicKey = C::PublicKey>,
+        ),
+        resolver_network: (
+            impl Sender<PublicKey = C::PublicKey>,
+            impl Receiver<PublicKey = C::PublicKey>,
+        ),
     ) {
         // Start the voter
         let (voter_sender, voter_receiver) = voter_network;

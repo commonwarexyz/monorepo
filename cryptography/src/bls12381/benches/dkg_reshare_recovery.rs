@@ -25,13 +25,7 @@ fn benchmark_dkg_reshare_recovery(c: &mut Criterion) {
         // Create players
         let mut players = Vec::with_capacity(n);
         for con in &contributors {
-            let player = Player::new(
-                con.clone(),
-                None,
-                contributors.clone(),
-                contributors.clone(),
-                1,
-            );
+            let player = Player::new(*con, None, contributors.clone(), contributors.clone(), 1);
             players.push(player);
         }
 
@@ -42,7 +36,7 @@ fn benchmark_dkg_reshare_recovery(c: &mut Criterion) {
             let (_, commitment, shares) = Dealer::new(&mut rng, None, contributors.clone());
             for (player_idx, player) in players.iter_mut().enumerate() {
                 player
-                    .share(dealer.clone(), commitment.clone(), shares[player_idx])
+                    .share(*dealer, commitment.clone(), shares[player_idx])
                     .unwrap();
             }
             commitments.insert(dealer_idx as u32, commitment);
@@ -65,9 +59,9 @@ fn benchmark_dkg_reshare_recovery(c: &mut Criterion) {
                     b.iter_batched(
                         || {
                             // Create player
-                            let me = contributors[0].clone();
+                            let me = contributors[0];
                             let mut player = Player::new(
-                                me.clone(),
+                                me,
                                 Some(outputs[0].public.clone()),
                                 contributors.clone(),
                                 contributors.clone(),
@@ -83,7 +77,7 @@ fn benchmark_dkg_reshare_recovery(c: &mut Criterion) {
                                     contributors.clone(),
                                 );
                                 player
-                                    .share(dealer.clone(), commitment.clone(), shares[0])
+                                    .share(*dealer, commitment.clone(), shares[0])
                                     .unwrap();
                                 commitments.insert(idx as u32, commitment);
                             }

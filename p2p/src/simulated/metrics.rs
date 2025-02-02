@@ -11,7 +11,7 @@ pub struct Message {
 }
 
 impl Message {
-    pub fn new(origin: &PublicKey, recipient: &PublicKey, channel: Channel) -> Self {
+    pub fn new<P: PublicKey>(origin: &P, recipient: &P, channel: Channel) -> Self {
         Self {
             origin: hex(origin),
             recipient: hex(recipient),

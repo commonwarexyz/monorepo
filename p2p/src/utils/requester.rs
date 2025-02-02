@@ -49,18 +49,18 @@ pub struct Requester<E: Clock + GClock + Rng, C: Scheme> {
     timeout: Duration,
 
     // Participants to exclude from requests
-    excluded: HashSet<PublicKey>,
+    excluded: HashSet<C::PublicKey>,
 
     // Rate limiter for participants
     rate_limiter:
-        RateLimiter<PublicKey, HashMapStateStore<PublicKey>, E, NoOpMiddleware<E::Instant>>,
+        RateLimiter<C::PublicKey, HashMapStateStore<C::PublicKey>, E, NoOpMiddleware<E::Instant>>,
     // Participants and their performance (lower is better)
-    participants: PrioritySet<PublicKey, u128>,
+    participants: PrioritySet<C::PublicKey, u128>,
 
     // Next ID to use for a request
     id: ID,
     // Outstanding requests (ID -> (participant, start time))
-    requests: HashMap<ID, (PublicKey, SystemTime)>,
+    requests: HashMap<ID, (C::PublicKey, SystemTime)>,
     // Deadlines for outstanding requests (ID -> deadline)
     deadlines: PrioritySet<ID, SystemTime>,
 }
@@ -71,12 +71,12 @@ pub struct Requester<E: Clock + GClock + Rng, C: Scheme> {
 /// this struct in case we want to `resolve` or `timeout` the request. This approach
 /// makes it impossible to forget to remove a handled request if it doesn't warrant
 /// updating the performance of the participant.
-pub struct Request {
+pub struct Request<P: PublicKey> {
     /// Unique identifier for the request.
     pub id: ID,
 
     /// Participant that handled the request.
-    participant: PublicKey,
+    participant: P,
 
     /// Time the request was issued.
     start: SystemTime,
@@ -104,7 +104,7 @@ impl<E: Clock + GClock + Rng, C: Scheme> Requester<E, C> {
     }
 
     /// Indicate which participants can be sent requests.
-    pub fn reconcile(&mut self, participants: &[PublicKey]) {
+    pub fn reconcile(&mut self, participants: &[C::PublicKey]) {
         self.participants
             .reconcile(participants, self.initial.as_millis());
         self.rate_limiter.shrink_to_fit();
@@ -114,7 +114,7 @@ impl<E: Clock + GClock + Rng, C: Scheme> Requester<E, C> {
     ///
     /// Participants added to this list will never be removed (even if dropped
     /// during `reconcile`, in case they are re-added later).
-    pub fn block(&mut self, participant: PublicKey) {
+    pub fn block(&mut self, participant: C::PublicKey) {
         self.excluded.insert(participant);
     }
 
@@ -123,7 +123,7 @@ impl<E: Clock + GClock + Rng, C: Scheme> Requester<E, C> {
     /// If `shuffle` is true, the order of participants is shuffled before
     /// a request is made. This is typically used when a request to the preferred
     /// participant fails.
-    pub fn request(&mut self, shuffle: bool) -> Option<(PublicKey, ID)> {
+    pub fn request(&mut self, shuffle: bool) -> Option<(C::PublicKey, ID)> {
         // Prepare participant iterator
         let participant_iter = if shuffle {
             let mut participants = self.participants.iter().collect::<Vec<_>>();
@@ -165,7 +165,7 @@ impl<E: Clock + GClock + Rng, C: Scheme> Requester<E, C> {
     }
 
     /// Calculate a participant's new priority using exponential moving average.
-    fn update(&mut self, participant: PublicKey, elapsed: Duration) {
+    fn update(&mut self, participant: C::PublicKey, elapsed: Duration) {
         let Some(past) = self.participants.get(&participant) else {
             return;
         };
@@ -174,7 +174,7 @@ impl<E: Clock + GClock + Rng, C: Scheme> Requester<E, C> {
     }
 
     /// Drop an outstanding request regardless of who it was intended for.
-    pub fn cancel(&mut self, id: ID) -> Option<Request> {
+    pub fn cancel(&mut self, id: ID) -> Option<Request<C::PublicKey>> {
         let (participant, start) = self.requests.remove(&id)?;
         self.deadlines.remove(&id);
         Some(Request {
@@ -189,7 +189,7 @@ impl<E: Clock + GClock + Rng, C: Scheme> Requester<E, C> {
     ///
     /// If the request was outstanding, a `Request` is returned that can
     /// either be resolved or timed out.
-    pub fn handle(&mut self, participant: &PublicKey, id: ID) -> Option<Request> {
+    pub fn handle(&mut self, participant: &C::PublicKey, id: ID) -> Option<Request<C::PublicKey>> {
         // Confirm ID exists and is for the participant
         let (expected, _) = self.requests.get(&id)?;
         if expected != participant {
@@ -201,7 +201,7 @@ impl<E: Clock + GClock + Rng, C: Scheme> Requester<E, C> {
     }
 
     /// Resolve an outstanding request.
-    pub fn resolve(&mut self, request: Request) {
+    pub fn resolve(&mut self, request: Request<C::PublicKey>) {
         // Get elapsed time
         //
         // If we can't compute the elapsed time for some reason (i.e. current time does
@@ -218,7 +218,7 @@ impl<E: Clock + GClock + Rng, C: Scheme> Requester<E, C> {
     }
 
     /// Timeout an outstanding request.
-    pub fn timeout(&mut self, request: Request) {
+    pub fn timeout(&mut self, request: Request<C::PublicKey>) {
         // Update performance
         self.update(request.participant, self.timeout);
     }

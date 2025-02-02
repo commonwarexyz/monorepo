@@ -82,8 +82,8 @@ impl<
 
     async fn dial_peers(
         &self,
-        tracker: &mut tracker::Mailbox<E>,
-        supervisor: &mut spawner::Mailbox<E, Si, St>,
+        tracker: &mut tracker::Mailbox<E, C::PublicKey>,
+        supervisor: &mut spawner::Mailbox<E, Si, St, C::PublicKey>,
     ) {
         for (peer, address, reservation) in tracker.dialable().await {
             // Check if we have hit rate limit for dialing and if so, skip (we don't
@@ -117,21 +117,15 @@ impl<
                     );
 
                     // Upgrade connection
-                    let instance = match Connection::upgrade_dialer(
-                        runtime,
-                        config,
-                        sink,
-                        stream,
-                        peer.clone(),
-                    )
-                    .await
-                    {
-                        Ok(instance) => instance,
-                        Err(e) => {
-                            debug!(peer=hex(&peer), error = ?e, "failed to upgrade connection");
-                            return;
-                        }
-                    };
+                    let instance =
+                        match Connection::upgrade_dialer(runtime, config, sink, stream, peer).await
+                        {
+                            Ok(instance) => instance,
+                            Err(e) => {
+                                debug!(peer=hex(&peer), error = ?e, "failed to upgrade connection");
+                                return;
+                            }
+                        };
                     debug!(peer = hex(&peer), "upgraded connection");
 
                     // Start peer to handle messages
@@ -143,8 +137,8 @@ impl<
 
     pub async fn run(
         mut self,
-        mut tracker: tracker::Mailbox<E>,
-        mut supervisor: spawner::Mailbox<E, Si, St>,
+        mut tracker: tracker::Mailbox<E, C::PublicKey>,
+        mut supervisor: spawner::Mailbox<E, Si, St, C::PublicKey>,
     ) {
         loop {
             // Attempt to dial peers we know about

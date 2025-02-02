@@ -24,22 +24,80 @@ pub use sha256::Sha256;
 pub mod secp256r1;
 pub use secp256r1::Secp256r1;
 
-/// Byte array representing an arbitrary private key.
-pub type PrivateKey = Bytes;
+pub trait PrivateKey:
+    AsRef<[u8]>
+    + for<'a> TryFrom<&'a [u8], Error = Error>
+    + for<'a> TryFrom<&'a Vec<u8>, Error = Error>
+    + TryFrom<Vec<u8>, Error = Error>
+    + Deref<Target = [u8]>
+    + Into<Bytes>
+    + Default
+    + Sized
+    + Copy
+    + Send
+    + Sync
+    + 'static
+    + Eq
+    + PartialEq
+    + Ord
+    + PartialOrd
+    + Debug
+    + Hash
+{
+}
 
-/// Byte array representing an arbitrary public key.
-pub type PublicKey = Bytes;
+pub trait PublicKey:
+    AsRef<[u8]>
+    + for<'a> TryFrom<&'a [u8], Error = Error>
+    + for<'a> TryFrom<&'a Vec<u8>, Error = Error>
+    + TryFrom<Vec<u8>, Error = Error>
+    + Deref<Target = [u8]>
+    + Into<Bytes>
+    + Sized
+    + Copy
+    + Send
+    + Sync
+    + 'static
+    + Eq
+    + PartialEq
+    + Ord
+    + PartialOrd
+    + Debug
+    + Hash
+{
+}
 
-/// Byte array representing an arbitrary signature.
-pub type Signature = Bytes;
+pub trait Signature:
+    AsRef<[u8]>
+    + for<'a> TryFrom<&'a [u8], Error = Error>
+    + for<'a> TryFrom<&'a Vec<u8>, Error = Error>
+    + TryFrom<Vec<u8>, Error = Error>
+    + Deref<Target = [u8]>
+    + Into<Bytes>
+    + Sized
+    + Copy
+    + Send
+    + Sync
+    + 'static
+    + Eq
+    + PartialEq
+    + Ord
+    + PartialOrd
+    + Debug
+    + Hash
+{
+}
 
 /// Interface that commonware crates rely on for most cryptographic operations.
 pub trait Scheme: Clone + Send + Sync + 'static {
+    type PrivateKey: PrivateKey;
+    type PublicKey: PublicKey;
+    type Signature: Signature;
     /// Returns a new instance of the scheme.
     fn new<R: Rng + CryptoRng>(rng: &mut R) -> Self;
 
     /// Returns a new instance of the scheme from a secret key.
-    fn from(private_key: PrivateKey) -> Option<Self>;
+    fn from(private_key: Self::PrivateKey) -> Option<Self>;
 
     /// Returns a new instance of the scheme from a provided seed.
     ///
@@ -53,13 +111,10 @@ pub trait Scheme: Clone + Send + Sync + 'static {
     }
 
     /// Returns the serialized private key of the signer.
-    fn private_key(&self) -> PrivateKey;
+    fn private_key(&self) -> Self::PrivateKey;
 
     /// Returns the serialized public key of the signer.
-    fn public_key(&self) -> PublicKey;
-
-    /// Verify that a public key is well-formatted.
-    fn validate(public_key: &PublicKey) -> bool;
+    fn public_key(&self) -> Self::PublicKey;
 
     /// Sign the given message.
     ///
@@ -70,7 +125,7 @@ pub trait Scheme: Clone + Send + Sync + 'static {
     /// that a signature meant for one context cannot be used unexpectedly in another (i.e. signing
     /// a message on the network layer can't accidentally spend funds on the execution layer). See
     /// [union_unique](commonware_utils::union_unique) for details.
-    fn sign(&mut self, namespace: Option<&[u8]>, message: &[u8]) -> Signature;
+    fn sign(&mut self, namespace: Option<&[u8]>, message: &[u8]) -> Self::Signature;
 
     /// Check that a signature is valid for the given message and public key.
     ///
@@ -82,8 +137,8 @@ pub trait Scheme: Clone + Send + Sync + 'static {
     fn verify(
         namespace: Option<&[u8]>,
         message: &[u8],
-        public_key: &PublicKey,
-        signature: &Signature,
+        public_key: &Self::PublicKey,
+        signature: &Self::Signature,
     ) -> bool;
 
     /// Returns the size of a public key and signature in bytes.
@@ -92,6 +147,9 @@ pub trait Scheme: Clone + Send + Sync + 'static {
 
 /// Interface that commonware crates rely on for batched cryptographic operations.
 pub trait BatchScheme {
+    type PublicKey: PublicKey;
+    type Signature: Signature;
+
     /// Create a new batch scheme.
     fn new() -> Self;
 
@@ -108,8 +166,8 @@ pub trait BatchScheme {
         &mut self,
         namespace: Option<&[u8]>,
         message: &[u8],
-        public_key: &PublicKey,
-        signature: &Signature,
+        public_key: &Self::PublicKey,
+        signature: &Self::Signature,
     ) -> bool;
 
     /// Verify all items added to the batch.
@@ -129,10 +187,18 @@ pub trait BatchScheme {
 }
 
 /// Errors that can occur when interacting with cryptographic primitives.
-#[derive(Error, Debug)]
+#[derive(Error, Debug, PartialEq)]
 pub enum Error {
     #[error("invalid digest length")]
     InvalidDigestLength,
+    #[error("invalid private key length")]
+    InvalidPrivateKeyLength,
+    #[error("invalid public key length")]
+    InvalidPublicKeyLength,
+    #[error("invalid signature length")]
+    InvalidSignatureLength,
+    #[error("invalid public key")]
+    InvalidPublicKey,
 }
 
 /// Byte array representing an arbitrary hash digest.
@@ -226,7 +292,7 @@ mod tests {
     fn test_validate<C: Scheme>() {
         let signer = C::new(&mut OsRng);
         let public_key = signer.public_key();
-        assert!(C::validate(&public_key));
+        assert!(C::PublicKey::try_from(public_key.as_ref()).is_ok());
     }
 
     fn test_from_valid_private_key<C: Scheme>() {
@@ -238,8 +304,8 @@ mod tests {
     }
 
     fn test_validate_invalid_public_key<C: Scheme>() {
-        let public_key = PublicKey::from(vec![0; 1024]);
-        assert!(!C::validate(&public_key));
+        let result = C::PublicKey::try_from(vec![0; 1024]);
+        assert_eq!(result, Err(Error::InvalidPublicKeyLength));
     }
 
     fn test_sign_and_verify<C: Scheme>() {
@@ -302,13 +368,13 @@ mod tests {
         assert_eq!(signature_1, signature_2);
     }
 
-    fn test_invalid_signature_length<C: Scheme>() {
+    fn test_invalid_signature_publickey_pair<C: Scheme>() {
         let mut signer = C::from_seed(0);
+        let signer_2 = C::from_seed(1);
         let namespace = Some(&b"test_namespace"[..]);
         let message = b"test_message";
-        let mut signature = signer.sign(namespace, message);
-        signature.truncate(signature.len() - 1); // Invalidate the signature
-        let public_key = signer.public_key();
+        let signature = signer.sign(namespace, message);
+        let public_key = signer_2.public_key();
         assert!(!C::verify(namespace, message, &public_key, &signature));
     }
 
@@ -353,8 +419,8 @@ mod tests {
     }
 
     #[test]
-    fn test_ed25519_invalid_signature_length() {
-        test_invalid_signature_length::<Ed25519>();
+    fn test_ed25519_invalid_signature_publickey_pair() {
+        test_invalid_signature_publickey_pair::<Ed25519>();
     }
 
     #[test]
@@ -403,8 +469,8 @@ mod tests {
     }
 
     #[test]
-    fn test_bls12381_invalid_signature_length() {
-        test_invalid_signature_length::<Bls12381>();
+    fn test_bls12381_invalid_signature_publickey_pair() {
+        test_invalid_signature_publickey_pair::<Bls12381>();
     }
 
     #[test]
@@ -453,8 +519,8 @@ mod tests {
     }
 
     #[test]
-    fn test_secp256r1_invalid_signature_length() {
-        test_invalid_signature_length::<Secp256r1>();
+    fn test_secp256r1_invalid_signature_publickey_pair() {
+        test_invalid_signature_publickey_pair::<Secp256r1>();
     }
 
     #[test]

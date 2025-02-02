@@ -1,7 +1,7 @@
 use super::{wire, x25519};
 use crate::{utils::codec::recv_frame, Error};
 use bytes::{BufMut, Bytes};
-use commonware_cryptography::{PublicKey, Scheme};
+use commonware_cryptography::Scheme;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Sink, Spawner, Stream};
 use commonware_utils::SystemTimeExt;
@@ -15,7 +15,7 @@ pub fn create_handshake<C: Scheme>(
     crypto: &mut C,
     namespace: &[u8],
     timestamp: u64,
-    recipient_public_key: PublicKey,
+    recipient_public_key: C::PublicKey,
     ephemeral_public_key: x25519_dalek::PublicKey,
 ) -> Result<Bytes, Error> {
     // Sign their public key
@@ -30,25 +30,25 @@ pub fn create_handshake<C: Scheme>(
 
     // Send handshake
     Ok(wire::Handshake {
-        recipient_public_key,
+        recipient_public_key: recipient_public_key.into(),
         ephemeral_public_key: x25519::encode_public_key(ephemeral_public_key),
         timestamp,
         signature: Some(wire::Signature {
-            public_key: crypto.public_key(),
-            signature,
+            public_key: crypto.public_key().into(),
+            signature: signature.into(),
         }),
     }
     .encode_to_vec()
     .into())
 }
 
-pub struct Handshake {
+pub struct Handshake<C: Scheme> {
     pub ephemeral_public_key: x25519_dalek::PublicKey,
-    pub peer_public_key: PublicKey,
+    pub peer_public_key: C::PublicKey,
 }
 
-impl Handshake {
-    pub fn verify<E: Clock, C: Scheme>(
+impl<C: Scheme> Handshake<C> {
+    pub fn verify<E: Clock>(
         runtime: &E,
         crypto: &C,
         namespace: &[u8],
@@ -68,10 +68,8 @@ impl Handshake {
         // If we didn't verify this, it would be trivial for any peer to impersonate another peer (even though
         // they would not be able to decrypt any messages from the shared secret). This would prevent us
         // from making a legitimate connection to the intended peer.
-        let our_public_key: PublicKey = handshake.recipient_public_key;
-        if !C::validate(&our_public_key) {
-            return Err(Error::InvalidChannelPublicKey);
-        }
+        let our_public_key = C::PublicKey::try_from(handshake.recipient_public_key.as_ref())
+            .map_err(|_| Error::InvalidChannelPublicKey)?;
         if crypto.public_key() != our_public_key {
             return Err(Error::HandshakeNotForUs);
         }
@@ -94,10 +92,8 @@ impl Handshake {
 
         // Get signature from peer
         let signature = handshake.signature.ok_or(Error::MissingSignature)?;
-        let public_key: PublicKey = signature.public_key;
-        if !C::validate(&public_key) {
-            return Err(Error::InvalidPeerPublicKey);
-        }
+        let public_key: C::PublicKey = C::PublicKey::try_from(signature.public_key.as_ref())
+            .map_err(|_| Error::InvalidPeerPublicKey)?;
 
         // Construct signing payload (ephemeral public key + my public key + timestamp)
         let payload_len =
@@ -108,7 +104,10 @@ impl Handshake {
         payload.put_u64(handshake.timestamp);
 
         // Verify signature
-        if !C::verify(Some(namespace), &payload, &public_key, &signature.signature) {
+        let signature = C::Signature::try_from(signature.signature.as_ref())
+            .map_err(|_| Error::InvalidSignature)?;
+
+        if !C::verify(Some(namespace), &payload, &public_key, &signature) {
             return Err(Error::InvalidSignature);
         }
 
@@ -119,17 +118,17 @@ impl Handshake {
     }
 }
 
-pub struct IncomingHandshake<Si: Sink, St: Stream> {
+pub struct IncomingHandshake<Si: Sink, St: Stream, C: Scheme> {
     pub sink: Si,
     pub stream: St,
     pub deadline: SystemTime,
     pub ephemeral_public_key: x25519_dalek::PublicKey,
-    pub peer_public_key: PublicKey,
+    pub peer_public_key: C::PublicKey,
 }
 
-impl<Si: Sink, St: Stream> IncomingHandshake<Si, St> {
+impl<Si: Sink, St: Stream, C: Scheme> IncomingHandshake<Si, St, C> {
     #[allow(clippy::too_many_arguments)]
-    pub async fn verify<E: Clock + Spawner, C: Scheme>(
+    pub async fn verify<E: Clock + Spawner>(
         runtime: &E,
         crypto: &C,
         namespace: &[u8],
@@ -215,9 +214,16 @@ mod tests {
             let current_timestamp = Duration::from_millis(epoch_millis);
             assert!(handshake_timestamp <= current_timestamp + synchrony_bound);
             assert!(handshake_timestamp + max_handshake_age >= current_timestamp);
+            let handshake_recipient_public_key =
+                <Ed25519 as Scheme>::PublicKey::try_from(handshake.recipient_public_key.as_ref())
+                    .unwrap();
+            let handshake_signature = <Ed25519 as Scheme>::Signature::try_from(
+                handshake.signature.unwrap().signature.as_ref(),
+            )
+            .unwrap();
 
             // Verify the signature
-            assert_eq!(handshake.recipient_public_key, recipient.public_key());
+            assert_eq!(handshake_recipient_public_key, recipient.public_key());
             assert_eq!(
                 handshake.ephemeral_public_key,
                 x25519::encode_public_key(ephemeral_public_key)
@@ -232,7 +238,7 @@ mod tests {
                 Some(TEST_NAMESPACE),
                 &payload,
                 &sender.public_key(),
-                &handshake.signature.unwrap().signature,
+                &handshake_signature,
             ));
 
             // Verify using the handshake struct
@@ -640,7 +646,7 @@ mod tests {
                 &mut crypto,
                 TEST_NAMESPACE,
                 SYNCHRONY_BOUND_MILLIS,
-                recipient_public_key.clone(),
+                recipient_public_key,
                 ephemeral_public_key,
             ).unwrap();
 

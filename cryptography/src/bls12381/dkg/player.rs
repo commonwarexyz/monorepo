@@ -25,33 +25,33 @@ pub struct Output {
 }
 
 /// Track commitments and dealings distributed by dealers.
-pub struct Player {
+pub struct Player<P: PublicKey> {
     me: u32,
     dealer_threshold: u32,
     player_threshold: u32,
     previous: Option<poly::Public>,
     concurrency: usize,
 
-    dealers: HashMap<PublicKey, u32>,
+    dealers: HashMap<P, u32>,
 
     dealings: HashMap<u32, (poly::Public, Share)>,
 }
 
-impl Player {
+impl<P: PublicKey> Player<P> {
     /// Create a new player for a DKG/Resharing procedure.
     pub fn new(
-        me: PublicKey,
+        me: P,
         previous: Option<poly::Public>,
-        mut dealers: Vec<PublicKey>,
-        mut recipients: Vec<PublicKey>,
+        mut dealers: Vec<P>,
+        mut recipients: Vec<P>,
         concurrency: usize,
     ) -> Self {
         dealers.sort();
         let dealers = dealers
             .iter()
             .enumerate()
-            .map(|(i, pk)| (pk.clone(), i as u32))
-            .collect::<HashMap<PublicKey, _>>();
+            .map(|(i, pk)| (*pk, i as u32))
+            .collect::<HashMap<P, _>>();
         recipients.sort();
         let mut me_idx = None;
         for (idx, recipient) in recipients.iter().enumerate() {
@@ -76,7 +76,7 @@ impl Player {
     /// Verify and track a commitment from a dealer.
     pub fn share(
         &mut self,
-        dealer: PublicKey,
+        dealer: P,
         commitment: poly::Public,
         share: Share,
     ) -> Result<(), Error> {

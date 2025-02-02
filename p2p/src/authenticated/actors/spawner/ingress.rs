@@ -4,28 +4,28 @@ use commonware_runtime::{Clock, Sink, Spawner, Stream};
 use commonware_stream::public_key::Connection;
 use futures::{channel::mpsc, SinkExt};
 
-pub enum Message<E: Spawner + Clock, Si: Sink, St: Stream> {
+pub enum Message<E: Spawner + Clock, Si: Sink, St: Stream, P: PublicKey> {
     Spawn {
-        peer: PublicKey,
+        peer: P,
         connection: Connection<Si, St>,
-        reservation: tracker::Reservation<E>,
+        reservation: tracker::Reservation<E, P>,
     },
 }
 
-pub struct Mailbox<E: Spawner + Clock, Si: Sink, St: Stream> {
-    sender: mpsc::Sender<Message<E, Si, St>>,
+pub struct Mailbox<E: Spawner + Clock, Si: Sink, St: Stream, P: PublicKey> {
+    sender: mpsc::Sender<Message<E, Si, St, P>>,
 }
 
-impl<E: Spawner + Clock, Si: Sink, St: Stream> Mailbox<E, Si, St> {
-    pub fn new(sender: mpsc::Sender<Message<E, Si, St>>) -> Self {
+impl<E: Spawner + Clock, Si: Sink, St: Stream, P: PublicKey> Mailbox<E, Si, St, P> {
+    pub fn new(sender: mpsc::Sender<Message<E, Si, St, P>>) -> Self {
         Self { sender }
     }
 
     pub async fn spawn(
         &mut self,
-        peer: PublicKey,
+        peer: P,
         connection: Connection<Si, St>,
-        reservation: tracker::Reservation<E>,
+        reservation: tracker::Reservation<E, P>,
     ) {
         self.sender
             .send(Message::Spawn {
@@ -38,7 +38,7 @@ impl<E: Spawner + Clock, Si: Sink, St: Stream> Mailbox<E, Si, St> {
     }
 }
 
-impl<E: Spawner + Clock, Si: Sink, St: Stream> Clone for Mailbox<E, Si, St> {
+impl<E: Spawner + Clock, Si: Sink, St: Stream, P: PublicKey> Clone for Mailbox<E, Si, St, P> {
     /// Clone the mailbox.
     ///
     /// We manually implement `clone` because the auto-generated `derive` would

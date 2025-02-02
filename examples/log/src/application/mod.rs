@@ -19,7 +19,7 @@ pub struct Config<C: Scheme, H: Hasher> {
     pub prover: Prover<C, H::Digest>,
 
     /// Participants active in consensus.
-    pub participants: Vec<PublicKey>,
+    pub participants: Vec<C::PublicKey>,
 
     /// Number of messages from consensus to hold in our backlog
     /// before blocking.

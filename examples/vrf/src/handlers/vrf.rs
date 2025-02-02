@@ -24,21 +24,21 @@ const VRF_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_VRF_";
 
 /// Generate bias-resistant, verifiable randomness using BLS12-381
 /// Threshold Signatures.
-pub struct Vrf<E: Clock> {
+pub struct Vrf<E: Clock, P: PublicKey> {
     runtime: E,
     timeout: Duration,
     threshold: u32,
-    contributors: Vec<PublicKey>,
-    ordered_contributors: HashMap<PublicKey, u32>,
+    contributors: Vec<P>,
+    ordered_contributors: HashMap<P, u32>,
     requests: mpsc::Receiver<(u64, Output)>,
 }
 
-impl<E: Clock> Vrf<E> {
+impl<E: Clock, P: PublicKey> Vrf<E, P> {
     pub fn new(
         runtime: E,
         timeout: Duration,
         threshold: u32,
-        mut contributors: Vec<PublicKey>,
+        mut contributors: Vec<P>,
         requests: mpsc::Receiver<(u64, Output)>,
     ) -> Self {
         contributors.sort();
@@ -61,8 +61,8 @@ impl<E: Clock> Vrf<E> {
         &self,
         output: &Output,
         round: u64,
-        sender: &mut impl Sender,
-        receiver: &mut impl Receiver,
+        sender: &mut impl Sender<PublicKey = P>,
+        receiver: &mut impl Receiver<PublicKey = P>,
     ) -> Option<group::Signature> {
         // Construct payload
         let payload = round.to_be_bytes();
@@ -160,7 +160,11 @@ impl<E: Clock> Vrf<E> {
         }
     }
 
-    pub async fn run(mut self, mut sender: impl Sender, mut receiver: impl Receiver) {
+    pub async fn run(
+        mut self,
+        mut sender: impl Sender<PublicKey = P>,
+        mut receiver: impl Receiver<PublicKey = P>,
+    ) {
         loop {
             let (round, output) = match self.requests.next().await {
                 Some(request) => request,

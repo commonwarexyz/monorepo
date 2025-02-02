@@ -25,10 +25,10 @@ pub struct Contributor<E: Clock + Rng, C: Scheme> {
     runtime: E,
     crypto: C,
     dkg_phase_timeout: Duration,
-    arbiter: PublicKey,
+    arbiter: C::PublicKey,
     t: u32,
-    contributors: Vec<PublicKey>,
-    contributors_ordered: HashMap<PublicKey, u32>,
+    contributors: Vec<C::PublicKey>,
+    contributors_ordered: HashMap<C::PublicKey, u32>,
 
     corrupt: bool,
     lazy: bool,
@@ -43,14 +43,14 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
         runtime: E,
         crypto: C,
         dkg_phase_timeout: Duration,
-        arbiter: PublicKey,
-        mut contributors: Vec<PublicKey>,
+        arbiter: C::PublicKey,
+        mut contributors: Vec<C::PublicKey>,
         corrupt: bool,
         lazy: bool,
         forger: bool,
     ) -> (Self, mpsc::Receiver<(u64, Output)>) {
         contributors.sort();
-        let contributors_ordered: HashMap<PublicKey, u32> = contributors
+        let contributors_ordered: HashMap<C::PublicKey, u32> = contributors
             .iter()
             .enumerate()
             .map(|(idx, pk)| (pk.clone(), idx as u32))
@@ -79,8 +79,8 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
     async fn run_round(
         &mut self,
         previous: Option<&Output>,
-        sender: &mut impl Sender,
-        receiver: &mut impl Receiver,
+        sender: &mut impl Sender<PublicKey = C::PublicKey>,
+        receiver: &mut impl Receiver<PublicKey = C::PublicKey>,
     ) -> (u64, Option<Output>) {
         // Configure me
         let me = self.crypto.public_key();
@@ -213,7 +213,8 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                     let _ = dealer.ack(player.clone());
                     let mut signature = vec![0u8; C::len().1];
                     self.runtime.fill_bytes(&mut signature);
-                    acks.insert(idx as u32, signature.into());
+                    let signature = C::Signature::try_from(&signature).unwrap();
+                    acks.insert(idx as u32, signature);
                     warn!(
                         round,
                         player = hex(player),
@@ -314,7 +315,11 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
 
                                         // Verify signature on incoming ack
                                         let payload = payload(round, &me, commitment);
-                                        if !C::verify(Some(ACK_NAMESPACE), &payload, &s, &msg.signature) {
+                                        let Ok(signature) = C::Signature::try_from(msg.signature.as_ref()) else {
+                                            warn!(round, sender = hex(&s), "received invalid ack signature");
+                                            continue;
+                                        };
+                                        if !C::verify(Some(ACK_NAMESPACE), &payload, &s, &signature) {
                                             warn!(round, sender = hex(&s), "received invalid ack signature");
                                             continue;
                                         }
@@ -324,7 +329,7 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                                             warn!(round, error = ?e, sender = hex(&s), "failed to record ack");
                                             continue;
                                         }
-                                        acks.insert(msg.public_key, msg.signature);
+                                        acks.insert(msg.public_key, signature);
 
                                     },
                                     Some(wire::dkg::Payload::Share(msg)) => {
@@ -362,7 +367,7 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                                                     round,
                                                     payload: Some(wire::dkg::Payload::Ack(wire::Ack {
                                                         public_key: me_idx,
-                                                        signature,
+                                                        signature: signature.into(),
                                                     })),
                                                 }
                                                 .encode_to_vec()
@@ -396,7 +401,7 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                     Some(signature) => {
                         ack_vec.push(wire::Ack {
                             public_key: idx,
-                            signature: signature.clone(),
+                            signature: signature.clone().into(),
                         });
                     }
                     None => {
@@ -508,7 +513,11 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
         }
     }
 
-    pub async fn run(mut self, mut sender: impl Sender, mut receiver: impl Receiver) {
+    pub async fn run(
+        mut self,
+        mut sender: impl Sender<PublicKey = C::PublicKey>,
+        mut receiver: impl Receiver<PublicKey = C::PublicKey>,
+    ) {
         if self.corrupt {
             warn!("running as corrupt");
         }

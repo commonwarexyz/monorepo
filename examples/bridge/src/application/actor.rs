@@ -1,3 +1,5 @@
+use std::marker::PhantomData;
+
 use crate::wire;
 
 use super::{
@@ -9,7 +11,7 @@ use bytes::BufMut;
 use commonware_consensus::threshold_simplex::Prover;
 use commonware_cryptography::{
     bls12381::primitives::{group::Element, poly},
-    Hasher,
+    Hasher, PublicKey,
 };
 use commonware_runtime::{Sink, Stream};
 use commonware_stream::{public_key::Connection, Receiver, Sender};
@@ -36,7 +38,10 @@ pub struct Application<R: Rng, H: Hasher, Si: Sink, St: Stream> {
 
 impl<R: Rng, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St> {
     /// Create a new application actor.
-    pub fn new(runtime: R, config: Config<H, Si, St>) -> (Self, Supervisor, Mailbox<H::Digest>) {
+    pub fn new<P: PublicKey>(
+        runtime: R,
+        config: Config<H, Si, St, P>,
+    ) -> (Self, Supervisor<P>, Mailbox<H::Digest>) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
         (
             Self {

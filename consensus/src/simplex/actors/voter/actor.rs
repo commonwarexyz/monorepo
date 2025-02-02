@@ -50,7 +50,7 @@ struct Round<C: Scheme, D: Digest, S: Supervisor<Index = View>> {
     _digest: PhantomData<D>,
 
     view: View,
-    leader: PublicKey,
+    leader: C::PublicKey,
     leader_deadline: Option<SystemTime>,
     advance_deadline: Option<SystemTime>,
     nullify_retry: Option<SystemTime>,
@@ -78,7 +78,7 @@ struct Round<C: Scheme, D: Digest, S: Supervisor<Index = View>> {
     broadcast_finalization: bool,
 }
 
-impl<C: Scheme, D: Digest, S: Supervisor<Index = View>> Round<C, D, S> {
+impl<C: Scheme, D: Digest, S: Supervisor<Index = View, PublicKey = C::PublicKey>> Round<C, D, S> {
     pub fn new(supervisor: S, view: View) -> Self {
         let leader = supervisor.leader(view).expect("unable to compute leader");
         Self {
@@ -114,7 +114,7 @@ impl<C: Scheme, D: Digest, S: Supervisor<Index = View>> Round<C, D, S> {
 
     async fn add_verified_notarize(
         &mut self,
-        public_key: &PublicKey,
+        public_key: &C::PublicKey,
         notarize: Parsed<wire::Notarize, D>,
     ) -> bool {
         // Get proposal
@@ -123,6 +123,19 @@ impl<C: Scheme, D: Digest, S: Supervisor<Index = View>> Round<C, D, S> {
         // Compute proposal digest
         let message = proposal_message(proposal.view, proposal.parent, &notarize.digest);
         let proposal_digest = hash(&message);
+
+        // Get Signature
+        let Ok(notarize_signature) = C::Signature::try_from(
+            notarize
+                .message
+                .signature
+                .as_ref()
+                .unwrap()
+                .signature
+                .as_ref(),
+        ) else {
+            return false;
+        };
 
         // Check if already notarized
         let public_key_index = notarize.message.signature.as_ref().unwrap().public_key;
@@ -145,20 +158,27 @@ impl<C: Scheme, D: Digest, S: Supervisor<Index = View>> Round<C, D, S> {
                 .get(&public_key_index)
                 .unwrap();
             let previous_proposal = previous_notarize.message.proposal.as_ref().unwrap();
+            let Ok(previous_notarize_signature) = C::Signature::try_from(
+                previous_notarize
+                    .message
+                    .signature
+                    .as_ref()
+                    .unwrap()
+                    .signature
+                    .as_ref(),
+            ) else {
+                return false;
+            };
+
             let proof = Prover::<C, D>::serialize_conflicting_notarize(
                 self.view,
                 public_key,
                 previous_proposal.parent,
                 &previous_notarize.digest,
-                &previous_notarize
-                    .message
-                    .signature
-                    .as_ref()
-                    .unwrap()
-                    .signature,
+                &previous_notarize_signature,
                 proposal.parent,
                 &notarize.digest,
-                &notarize.message.signature.as_ref().unwrap().signature,
+                &notarize_signature,
             );
             self.supervisor.report(CONFLICTING_NOTARIZE, proof).await;
             warn!(
@@ -179,8 +199,7 @@ impl<C: Scheme, D: Digest, S: Supervisor<Index = View>> Round<C, D, S> {
             return false;
         }
         let entry = self.notarizes.entry(proposal_digest).or_default();
-        let signature = &notarize.message.signature.as_ref().unwrap().signature;
-        let proof = Prover::<C, D>::serialize_proposal(proposal, public_key, signature);
+        let proof = Prover::<C, D>::serialize_proposal(proposal, public_key, &notarize_signature);
         entry.insert(public_key_index, notarize);
         self.supervisor.report(NOTARIZE, proof).await;
         true
@@ -188,7 +207,7 @@ impl<C: Scheme, D: Digest, S: Supervisor<Index = View>> Round<C, D, S> {
 
     async fn add_verified_nullify(
         &mut self,
-        public_key: &PublicKey,
+        public_key: &C::PublicKey,
         nullify: wire::Nullify,
     ) -> bool {
         // Check if already issued finalize
@@ -207,14 +226,32 @@ impl<C: Scheme, D: Digest, S: Supervisor<Index = View>> Round<C, D, S> {
             .unwrap()
             .get(&public_key_index)
             .unwrap();
+        let Ok(finalize_signature) = C::Signature::try_from(
+            finalize
+                .message
+                .signature
+                .as_ref()
+                .unwrap()
+                .signature
+                .as_ref(),
+        ) else {
+            return false;
+        };
+
+        let Ok(nullify_signature) =
+            C::Signature::try_from(nullify.signature.as_ref().unwrap().signature.as_ref())
+        else {
+            return false;
+        };
+
         let finalize_proposal = finalize.message.proposal.as_ref().unwrap();
         let proof = Prover::<C, D>::serialize_nullify_finalize(
             self.view,
             public_key,
             finalize_proposal.parent,
             &finalize.digest,
-            &finalize.message.signature.as_ref().unwrap().signature,
-            &nullify.signature.as_ref().unwrap().signature,
+            &finalize_signature,
+            &nullify_signature,
         );
         self.supervisor.report(NULLIFY_AND_FINALIZE, proof).await;
         warn!(
@@ -273,22 +310,39 @@ impl<C: Scheme, D: Digest, S: Supervisor<Index = View>> Round<C, D, S> {
 
     async fn add_verified_finalize(
         &mut self,
-        public_key: &PublicKey,
+        public_key: &C::PublicKey,
         finalize: Parsed<wire::Finalize, D>,
     ) -> bool {
         // Check if also issued nullify
         let proposal = finalize.message.proposal.as_ref().unwrap();
         let public_key_index = finalize.message.signature.as_ref().unwrap().public_key;
+        let Ok(finalize_signature) = C::Signature::try_from(
+            finalize
+                .message
+                .signature
+                .as_ref()
+                .unwrap()
+                .signature
+                .as_ref(),
+        ) else {
+            return false;
+        };
+
         let null = self.nullifies.get(&public_key_index);
         if let Some(null) = null {
+            let Ok(null_signature) =
+                C::Signature::try_from(null.signature.as_ref().unwrap().signature.as_ref())
+            else {
+                return false;
+            };
             // Create fault
             let proof = Prover::<C, D>::serialize_nullify_finalize(
                 self.view,
                 public_key,
                 proposal.parent,
                 &finalize.digest,
-                &finalize.message.signature.as_ref().unwrap().signature,
-                &null.signature.as_ref().unwrap().signature,
+                &finalize_signature,
+                &null_signature,
             );
             self.supervisor.report(NULLIFY_AND_FINALIZE, proof).await;
             warn!(
@@ -323,20 +377,26 @@ impl<C: Scheme, D: Digest, S: Supervisor<Index = View>> Round<C, D, S> {
                 .get(&public_key_index)
                 .unwrap();
             let previous_proposal = previous_finalize.message.proposal.as_ref().unwrap();
+            let Ok(previous_finalize_signature) = C::Signature::try_from(
+                previous_finalize
+                    .message
+                    .signature
+                    .as_ref()
+                    .unwrap()
+                    .signature
+                    .as_ref(),
+            ) else {
+                return false;
+            };
             let proof = Prover::<C, D>::serialize_conflicting_finalize(
                 self.view,
                 public_key,
                 previous_proposal.parent,
                 &previous_finalize.digest,
-                &previous_finalize
-                    .message
-                    .signature
-                    .as_ref()
-                    .unwrap()
-                    .signature,
+                &previous_finalize_signature,
                 proposal.parent,
                 &finalize.digest,
-                &finalize.message.signature.as_ref().unwrap().signature,
+                &finalize_signature,
             );
             self.supervisor.report(CONFLICTING_FINALIZE, proof).await;
             warn!(
@@ -357,8 +417,7 @@ impl<C: Scheme, D: Digest, S: Supervisor<Index = View>> Round<C, D, S> {
             return false;
         }
         let entry = self.finalizes.entry(proposal_digest).or_default();
-        let signature = &finalize.message.signature.as_ref().unwrap().signature;
-        let proof = Prover::<C, D>::serialize_proposal(proposal, public_key, signature);
+        let proof = Prover::<C, D>::serialize_proposal(proposal, public_key, &finalize_signature);
         entry.insert(public_key_index, finalize);
         self.supervisor.report(FINALIZE, proof).await;
         true
@@ -430,7 +489,7 @@ pub struct Actor<
     A: Automaton<Context = Context<D>, Digest = D>,
     R: Relay<Digest = D>,
     F: Committer<Digest = D>,
-    S: Supervisor<Index = View>,
+    S: Supervisor<Index = View, PublicKey = C::PublicKey>,
 > {
     runtime: E,
     crypto: C,
@@ -473,7 +532,7 @@ impl<
         A: Automaton<Context = Context<D>, Digest = D>,
         R: Relay<Digest = D>,
         F: Committer<Digest = D>,
-        S: Supervisor<Index = View>,
+        S: Supervisor<Index = View, PublicKey = C::PublicKey>,
     > Actor<B, E, C, D, A, R, F, S>
 {
     pub fn new(
@@ -760,7 +819,10 @@ impl<
             view: self.view,
             signature: Some(wire::Signature {
                 public_key: public_key_index,
-                signature: self.crypto.sign(Some(&self.nullify_namespace), &message),
+                signature: self
+                    .crypto
+                    .sign(Some(&self.nullify_namespace), &message)
+                    .into(),
             }),
         };
 
@@ -812,11 +874,14 @@ impl<
 
         // Verify the signature
         let nullify_message = nullify_message(nullify.view);
+        let Ok(sig) = C::Signature::try_from(signature.signature.as_ref()) else {
+            return;
+        };
         if !C::verify(
             Some(&self.nullify_namespace),
             &nullify_message,
             &public_key,
-            &signature.signature,
+            &sig,
         ) {
             return;
         }
@@ -825,7 +890,7 @@ impl<
         self.handle_nullify(&public_key, nullify).await;
     }
 
-    async fn handle_nullify(&mut self, public_key: &PublicKey, nullify: wire::Nullify) {
+    async fn handle_nullify(&mut self, public_key: &C::PublicKey, nullify: wire::Nullify) {
         // Check to see if nullify is for proposal in view
         let view = nullify.view;
         let round = self
@@ -1150,13 +1215,16 @@ impl<
             return;
         };
 
+        let Ok(sig) = C::Signature::try_from(signature.signature.as_ref()) else {
+            return;
+        };
         // Verify the signature
         let notarize_message = proposal_message(proposal.view, proposal.parent, &payload);
         if !C::verify(
             Some(&self.notarize_namespace),
             &notarize_message,
             &public_key,
-            &signature.signature,
+            &sig,
         ) {
             return;
         }
@@ -1174,7 +1242,7 @@ impl<
 
     async fn handle_notarize(
         &mut self,
-        public_key: &PublicKey,
+        public_key: &C::PublicKey,
         notarize: Parsed<wire::Notarize, D>,
     ) {
         // Check to see if notarize is for proposal in view
@@ -1400,13 +1468,16 @@ impl<
             return;
         };
 
+        let Ok(sig) = C::Signature::try_from(signature.signature.as_ref()) else {
+            return;
+        };
         // Verify the signature
         let finalize_message = proposal_message(proposal.view, proposal.parent, &payload);
         if !C::verify(
             Some(&self.finalize_namespace),
             &finalize_message,
             &public_key,
-            &signature.signature,
+            &sig,
         ) {
             return;
         }
@@ -1424,7 +1495,7 @@ impl<
 
     async fn handle_finalize(
         &mut self,
-        public_key: &PublicKey,
+        public_key: &C::PublicKey,
         finalize: Parsed<wire::Finalize, D>,
     ) {
         // Get view for finalize
@@ -1590,7 +1661,10 @@ impl<
                 proposal: Some(proposal.message.clone()),
                 signature: Some(wire::Signature {
                     public_key,
-                    signature: self.crypto.sign(Some(&self.notarize_namespace), &message),
+                    signature: self
+                        .crypto
+                        .sign(Some(&self.notarize_namespace), &message)
+                        .into(),
                 }),
             },
             digest: proposal.digest.clone(),
@@ -1707,7 +1781,10 @@ impl<
                 proposal: Some(proposal.message.clone()),
                 signature: Some(wire::Signature {
                     public_key,
-                    signature: self.crypto.sign(Some(&self.finalize_namespace), &message),
+                    signature: self
+                        .crypto
+                        .sign(Some(&self.finalize_namespace), &message)
+                        .into(),
                 }),
             },
             digest: proposal.digest.clone(),
@@ -1810,9 +1887,14 @@ impl<
             let mut signatures = Vec::with_capacity(notarization.message.signatures.len());
             for signature in &notarization.message.signatures {
                 let public_key = validators.get(signature.public_key as usize).unwrap();
-                signatures.push((public_key, &signature.signature));
+                // TODO : manage error.
+                let signature = C::Signature::try_from(signature.signature.as_ref()).unwrap();
+                signatures.push((public_key, signature));
             }
-            let proof = Prover::<C, D>::serialize_aggregation(proposal, signatures);
+            let proof = Prover::<C, D>::serialize_aggregation(
+                proposal,
+                signatures.iter().map(|(pk, sig)| (*pk, sig)).collect(),
+            );
             self.committer.prepared(proof, notarization.digest).await;
 
             // Broadcast the notarization
@@ -1960,9 +2042,14 @@ impl<
             let mut signatures = Vec::with_capacity(finalization.message.signatures.len());
             for signature in &finalization.message.signatures {
                 let public_key = validators.get(signature.public_key as usize).unwrap();
-                signatures.push((public_key, &signature.signature));
+                // TODO: manage error.
+                let signature = C::Signature::try_from(signature.signature.as_ref()).unwrap();
+                signatures.push((public_key, signature));
             }
-            let proof = Prover::<C, D>::serialize_aggregation(proposal, signatures);
+            let proof = Prover::<C, D>::serialize_aggregation(
+                proposal,
+                signatures.iter().map(|(pk, sig)| (*pk, sig)).collect(),
+            );
             self.committer.finalized(proof, finalization.digest).await;
 
             // Broadcast the finalization

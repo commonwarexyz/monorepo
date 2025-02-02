@@ -40,8 +40,8 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
     /// Serialize a proposal proof.
     pub fn serialize_proposal(
         proposal: &wire::Proposal,
-        public_key: &PublicKey,
-        signature: &Signature,
+        public_key: &C::PublicKey,
+        signature: &C::Signature,
     ) -> Proof {
         // Setup proof
         let len = size_of::<u64>()
@@ -66,7 +66,7 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
         mut proof: Proof,
         check_sig: bool,
         namespace: &[u8],
-    ) -> Option<(View, View, D, PublicKey)> {
+    ) -> Option<(View, View, D, C::PublicKey)> {
         // Ensure proof is big enough
         let (public_key_len, signature_len) = C::len();
         if proof.len()
@@ -79,15 +79,13 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
         let view = proof.get_u64();
         let parent = proof.get_u64();
         let payload = D::read_from(&mut proof).ok()?;
-        let public_key = proof.copy_to_bytes(public_key_len);
-        let signature = proof.copy_to_bytes(signature_len);
+        let public_key =
+            C::PublicKey::try_from(proof.copy_to_bytes(public_key_len).as_ref()).ok()?;
+        let signature = C::Signature::try_from(proof.copy_to_bytes(signature_len).as_ref()).ok()?;
 
         // Verify signature
         let proposal_message = proposal_message(view, parent, &payload);
         if check_sig {
-            if !C::validate(&public_key) {
-                return None;
-            }
             if !C::verify(Some(namespace), &proposal_message, &public_key, &signature) {
                 return None;
             }
@@ -99,7 +97,7 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
     /// Serialize an aggregation proof.
     pub fn serialize_aggregation(
         proposal: &wire::Proposal,
-        signatures: Vec<(&PublicKey, &Signature)>,
+        signatures: Vec<(&C::PublicKey, &C::Signature)>,
     ) -> Proof {
         // Setup proof
         let (public_key_len, signature_len) = C::len();
@@ -129,7 +127,7 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
         max: u32,
         check_sigs: bool,
         namespace: &[u8],
-    ) -> Option<(View, View, D, Vec<PublicKey>)> {
+    ) -> Option<(View, View, D, Vec<C::PublicKey>)> {
         // Ensure proof prefix is big enough
         let len = size_of::<u64>() + size_of::<u64>() + size_of::<D>() + size_of::<u32>();
         if proof.len() < len {
@@ -159,18 +157,17 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
         let mut seen = HashSet::with_capacity(count);
         for _ in 0..count {
             // Check if already saw public key
-            let public_key = proof.copy_to_bytes(public_key_len);
+            let public_key =
+                C::PublicKey::try_from(proof.copy_to_bytes(public_key_len).as_ref()).ok()?;
             if seen.contains(&public_key) {
                 return None;
             }
             seen.insert(public_key.clone());
 
             // Verify signature
-            let signature = proof.copy_to_bytes(signature_len);
             if check_sigs {
-                if !C::validate(&public_key) {
-                    return None;
-                }
+                let signature =
+                    C::Signature::try_from(proof.copy_to_bytes(signature_len).as_ref()).ok()?;
                 if !C::verify(Some(namespace), &message, &public_key, &signature) {
                     return None;
                 }
@@ -184,7 +181,7 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
         &self,
         proof: Proof,
         check_sig: bool,
-    ) -> Option<(View, View, D, PublicKey)> {
+    ) -> Option<(View, View, D, C::PublicKey)> {
         self.deserialize_proposal(proof, check_sig, &self.notarize_namespace)
     }
 
@@ -194,7 +191,7 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
         proof: Proof,
         max: u32,
         check_sigs: bool,
-    ) -> Option<(View, View, D, Vec<PublicKey>)> {
+    ) -> Option<(View, View, D, Vec<C::PublicKey>)> {
         self.deserialize_aggregation(proof, max, check_sigs, &self.notarize_namespace)
     }
 
@@ -203,7 +200,7 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
         &self,
         proof: Proof,
         check_sig: bool,
-    ) -> Option<(View, View, D, PublicKey)> {
+    ) -> Option<(View, View, D, C::PublicKey)> {
         self.deserialize_proposal(proof, check_sig, &self.finalize_namespace)
     }
 
@@ -213,20 +210,20 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
         proof: Proof,
         max: u32,
         check_sigs: bool,
-    ) -> Option<(View, View, D, Vec<PublicKey>)> {
+    ) -> Option<(View, View, D, Vec<C::PublicKey>)> {
         self.deserialize_aggregation(proof, max, check_sigs, &self.finalize_namespace)
     }
 
     #[allow(clippy::too_many_arguments)]
     pub fn serialize_conflicting_proposal(
         view: View,
-        public_key: &PublicKey,
+        public_key: &C::PublicKey,
         parent_1: View,
         payload_1: &D,
-        signature_1: &Signature,
+        signature_1: &C::Signature,
         parent_2: View,
         payload_2: &D,
-        signature_2: &Signature,
+        signature_2: &C::Signature,
     ) -> Proof {
         // Setup proof
         let (public_key_len, signature_len) = C::len();
@@ -257,7 +254,7 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
         mut proof: Proof,
         check_sig: bool,
         namespace: &[u8],
-    ) -> Option<(PublicKey, View)> {
+    ) -> Option<(C::PublicKey, View)> {
         // Ensure proof is big enough
         let (public_key_len, signature_len) = C::len();
         let len = size_of::<u64>()
@@ -274,19 +271,19 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
 
         // Decode proof
         let view = proof.get_u64();
-        let public_key = proof.copy_to_bytes(public_key_len);
+        let public_key =
+            C::PublicKey::try_from(proof.copy_to_bytes(public_key_len).as_ref()).ok()?;
         let parent_1 = proof.get_u64();
         let payload_1 = D::read_from(&mut proof).ok()?;
-        let signature_1 = proof.copy_to_bytes(signature_len);
+        let signature_1 =
+            C::Signature::try_from(proof.copy_to_bytes(signature_len).as_ref()).ok()?;
         let parent_2 = proof.get_u64();
         let payload_2 = D::read_from(&mut proof).ok()?;
-        let signature_2 = proof.copy_to_bytes(signature_len);
+        let signature_2 =
+            C::Signature::try_from(proof.copy_to_bytes(signature_len).as_ref()).ok()?;
 
         // Verify signatures
         if check_sig {
-            if !C::validate(&public_key) {
-                return None;
-            }
             let proposal_message_1 = proposal_message(view, parent_1, &payload_1);
             let proposal_message_2 = proposal_message(view, parent_2, &payload_2);
             if !C::verify(
@@ -310,13 +307,13 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
     #[allow(clippy::too_many_arguments)]
     pub fn serialize_conflicting_notarize(
         view: View,
-        public_key: &PublicKey,
+        public_key: &C::PublicKey,
         parent_1: View,
         payload_1: &D,
-        signature_1: &Signature,
+        signature_1: &C::Signature,
         parent_2: View,
         payload_2: &D,
-        signature_2: &Signature,
+        signature_2: &C::Signature,
     ) -> Proof {
         Self::serialize_conflicting_proposal(
             view,
@@ -335,7 +332,7 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
         &self,
         proof: Proof,
         check_sig: bool,
-    ) -> Option<(PublicKey, View)> {
+    ) -> Option<(C::PublicKey, View)> {
         self.deserialize_conflicting_proposal(proof, check_sig, &self.notarize_namespace)
     }
 
@@ -343,13 +340,13 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
     #[allow(clippy::too_many_arguments)]
     pub fn serialize_conflicting_finalize(
         view: View,
-        public_key: &PublicKey,
+        public_key: &C::PublicKey,
         parent_1: View,
         payload_1: &D,
-        signature_1: &Signature,
+        signature_1: &C::Signature,
         parent_2: View,
         payload_2: &D,
-        signature_2: &Signature,
+        signature_2: &C::Signature,
     ) -> Proof {
         Self::serialize_conflicting_proposal(
             view,
@@ -368,18 +365,18 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
         &self,
         proof: Proof,
         check_sig: bool,
-    ) -> Option<(PublicKey, View)> {
+    ) -> Option<(C::PublicKey, View)> {
         self.deserialize_conflicting_proposal(proof, check_sig, &self.finalize_namespace)
     }
 
     /// Serialize a conflicting nullify and finalize proof.
     pub fn serialize_nullify_finalize(
         view: View,
-        public_key: &PublicKey,
+        public_key: &C::PublicKey,
         parent: View,
         payload: &D,
-        signature_finalize: &Signature,
-        signature_null: &Signature,
+        signature_finalize: &C::Signature,
+        signature_null: &C::Signature,
     ) -> Proof {
         // Setup proof
         let (public_key_len, signature_len) = C::len();
@@ -406,7 +403,7 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
         &self,
         mut proof: Proof,
         check_sig: bool,
-    ) -> Option<(PublicKey, View)> {
+    ) -> Option<(C::PublicKey, View)> {
         // Ensure proof is big enough
         let (public_key_len, signature_len) = C::len();
         let len = size_of::<u64>()
@@ -421,17 +418,17 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
 
         // Decode proof
         let view = proof.get_u64();
-        let public_key = proof.copy_to_bytes(public_key_len);
+        let public_key =
+            C::PublicKey::try_from(proof.copy_to_bytes(public_key_len).as_ref()).ok()?;
         let parent = proof.get_u64();
         let payload = D::read_from(&mut proof).ok()?;
-        let signature_finalize = proof.copy_to_bytes(signature_len);
-        let signature_null = proof.copy_to_bytes(signature_len);
+        let signature_finalize =
+            C::Signature::try_from(proof.copy_to_bytes(signature_len).as_ref()).ok()?;
+        let signature_null =
+            C::Signature::try_from(proof.copy_to_bytes(signature_len).as_ref()).ok()?;
 
         // Verify signatures
         if check_sig {
-            if !C::validate(&public_key) {
-                return None;
-            }
             let finalize_message = proposal_message(view, parent, &payload);
             let null_message = nullify_message(view);
             if !C::verify(

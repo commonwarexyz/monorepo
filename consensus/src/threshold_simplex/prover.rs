@@ -1,5 +1,6 @@
 use std::marker::PhantomData;
 
+use super::Signature;
 use super::{
     encoder::{
         finalize_namespace, notarize_namespace, nullify_message, nullify_namespace,
@@ -15,7 +16,7 @@ use commonware_cryptography::{
         ops,
         poly::{self, Eval},
     },
-    Digest, Signature,
+    Digest, Ed25519, Scheme,
 };
 
 type Callback = Box<dyn Fn(&poly::Poly<group::Public>) -> Option<u32>>;

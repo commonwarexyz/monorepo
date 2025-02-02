@@ -9,7 +9,7 @@ pub struct Peer {
 }
 
 impl Peer {
-    pub fn new(peer: &PublicKey) -> Self {
+    pub fn new<P: PublicKey>(peer: &P) -> Self {
         Self { peer: hex(peer) }
     }
 }
@@ -25,25 +25,25 @@ impl Message {
     const PEERS_TYPE: i32 = -2;
     const UNKNOWN_TYPE: i32 = i32::MIN;
 
-    pub fn new_bit_vec(peer: &PublicKey) -> Self {
+    pub fn new_bit_vec<P: PublicKey>(peer: &P) -> Self {
         Self {
             peer: hex(peer),
             message: Self::BIT_VEC_TYPE,
         }
     }
-    pub fn new_peers(peer: &PublicKey) -> Self {
+    pub fn new_peers<P: PublicKey>(peer: &P) -> Self {
         Self {
             peer: hex(peer),
             message: Self::PEERS_TYPE,
         }
     }
-    pub fn new_data(peer: &PublicKey, channel: Channel) -> Self {
+    pub fn new_data<P: PublicKey>(peer: &P, channel: Channel) -> Self {
         Self {
             peer: hex(peer),
             message: channel as i32,
         }
     }
-    pub fn new_unknown(peer: &PublicKey) -> Self {
+    pub fn new_unknown<P: PublicKey>(peer: &P) -> Self {
         Self {
             peer: hex(peer),
             message: Self::UNKNOWN_TYPE,

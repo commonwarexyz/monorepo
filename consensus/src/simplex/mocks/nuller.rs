@@ -14,13 +14,13 @@ use prost::Message;
 use std::marker::PhantomData;
 use tracing::debug;
 
-pub struct Config<C: Scheme, S: Supervisor<Index = View>> {
+pub struct Config<C: Scheme, S: Supervisor<Index = View, PublicKey = C::PublicKey>> {
     pub crypto: C,
     pub supervisor: S,
     pub namespace: Vec<u8>,
 }
 
-pub struct Nuller<C: Scheme, H: Hasher, S: Supervisor<Index = View>> {
+pub struct Nuller<C: Scheme, H: Hasher, S: Supervisor<Index = View, PublicKey = C::PublicKey>> {
     crypto: C,
     supervisor: S,
     _hasher: PhantomData<H>,
@@ -29,7 +29,7 @@ pub struct Nuller<C: Scheme, H: Hasher, S: Supervisor<Index = View>> {
     finalize_namespace: Vec<u8>,
 }
 
-impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Nuller<C, H, S> {
+impl<C: Scheme, H: Hasher, S: Supervisor<Index = View, PublicKey = C::PublicKey>> Nuller<C, H, S> {
     pub fn new(cfg: Config<C, S>) -> Self {
         Self {
             crypto: cfg.crypto,
@@ -91,7 +91,7 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Nuller<C, H, S> {
                         view,
                         signature: Some(wire::Signature {
                             public_key: public_key_index,
-                            signature: self.crypto.sign(Some(&self.nullify_namespace), &msg),
+                            signature: self.crypto.sign(Some(&self.nullify_namespace), &msg).into(),
                         }),
                     };
                     let msg = wire::Voter {
@@ -109,7 +109,10 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Nuller<C, H, S> {
                         proposal: Some(proposal.clone()),
                         signature: Some(wire::Signature {
                             public_key: public_key_index,
-                            signature: self.crypto.sign(Some(&self.finalize_namespace), &msg),
+                            signature: self
+                                .crypto
+                                .sign(Some(&self.finalize_namespace), &msg)
+                                .into(),
                         }),
                     };
                     let msg = wire::Voter {

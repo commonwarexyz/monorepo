@@ -1,4 +1,4 @@
-use commonware_cryptography::{PublicKey, Scheme};
+use commonware_cryptography::Scheme;
 use governor::Quota;
 use prometheus_client::registry::Registry;
 use std::{
@@ -9,7 +9,7 @@ use std::{
 };
 
 /// Known peer and its accompanying address that will be dialed on startup.
-pub type Bootstrapper = (PublicKey, SocketAddr);
+pub type Bootstrapper<Pk> = (Pk, SocketAddr);
 
 /// Configuration for the peer-to-peer instance.
 ///
@@ -36,7 +36,7 @@ pub struct Config<C: Scheme> {
     pub dialable: SocketAddr,
 
     /// Peers dialed on startup.
-    pub bootstrappers: Vec<Bootstrapper>,
+    pub bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
 
     /// Whether or not to allow connections with private IP addresses.
     pub allow_private_ips: bool,
@@ -113,7 +113,7 @@ impl<C: Scheme> Config<C> {
         namespace: &[u8],
         registry: Arc<Mutex<Registry>>,
         listen: SocketAddr,
-        bootstrappers: Vec<Bootstrapper>,
+        bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
         max_message_size: usize,
     ) -> Self {
         Self {
@@ -152,7 +152,7 @@ impl<C: Scheme> Config<C> {
         namespace: &[u8],
         registry: Arc<Mutex<Registry>>,
         listen: SocketAddr,
-        bootstrappers: Vec<Bootstrapper>,
+        bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
         max_message_size: usize,
     ) -> Self {
         Self {
@@ -186,7 +186,7 @@ impl<C: Scheme> Config<C> {
         crypto: C,
         registry: Arc<Mutex<Registry>>,
         listen: SocketAddr,
-        bootstrappers: Vec<Bootstrapper>,
+        bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
         max_message_size: usize,
     ) -> Self {
         Self {

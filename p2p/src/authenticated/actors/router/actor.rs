@@ -14,15 +14,15 @@ use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::collections::BTreeMap;
 use tracing::debug;
 
-pub struct Actor {
-    control: mpsc::Receiver<Message>,
-    connections: BTreeMap<PublicKey, peer::Relay>,
+pub struct Actor<P: PublicKey> {
+    control: mpsc::Receiver<Message<P>>,
+    connections: BTreeMap<P, peer::Relay>,
 
     messages_dropped: Family<metrics::Message, Counter>,
 }
 
-impl Actor {
-    pub fn new(cfg: Config) -> (Self, Mailbox, Messenger) {
+impl<P: PublicKey> Actor<P> {
+    pub fn new(cfg: Config) -> (Self, Mailbox<P>, Messenger<P>) {
         let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
 
         // Create metrics
@@ -49,11 +49,11 @@ impl Actor {
 
     async fn send_to_recipient(
         &mut self,
-        recipient: &PublicKey,
+        recipient: &P,
         channel: Channel,
         message: Bytes,
         priority: bool,
-        sent: &mut Vec<PublicKey>,
+        sent: &mut Vec<P>,
     ) {
         if let Some(messenger) = self.connections.get_mut(recipient) {
             if messenger
@@ -61,7 +61,7 @@ impl Actor {
                 .await
                 .is_ok()
             {
-                sent.push(recipient.clone());
+                sent.push(*recipient);
             } else {
                 self.messages_dropped
                     .get_or_create(&metrics::Message::new_data(recipient, channel))
@@ -74,7 +74,7 @@ impl Actor {
         }
     }
 
-    pub async fn run(mut self, routing: Channels) {
+    pub async fn run(mut self, routing: Channels<P>) {
         while let Some(msg) = self.control.next().await {
             match msg {
                 Message::Ready {
@@ -125,7 +125,7 @@ impl Actor {
                                     .await
                                     .is_ok()
                                 {
-                                    sent.push(recipient.clone());
+                                    sent.push(*recipient);
                                 } else {
                                     self.messages_dropped
                                         .get_or_create(&metrics::Message::new_data(

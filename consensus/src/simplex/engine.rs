@@ -22,7 +22,7 @@ pub struct Engine<
     A: Automaton<Context = Context<D>, Digest = D>,
     R: Relay<Digest = D>,
     F: Committer<Digest = D>,
-    S: Supervisor<Index = View>,
+    S: Supervisor<Index = View, PublicKey = C::PublicKey>,
 > {
     runtime: E,
 
@@ -40,7 +40,7 @@ impl<
         A: Automaton<Context = Context<D>, Digest = D>,
         R: Relay<Digest = D>,
         F: Committer<Digest = D>,
-        S: Supervisor<Index = View>,
+        S: Supervisor<Index = View, PublicKey = C::PublicKey>,
     > Engine<B, E, C, D, A, R, F, S>
 {
     /// Create a new `simplex` consensus engine.
@@ -103,8 +103,14 @@ impl<
     /// This will also rebuild the state of the engine from provided `Journal`.
     pub async fn run(
         self,
-        voter_network: (impl Sender, impl Receiver),
-        resolver_network: (impl Sender, impl Receiver),
+        voter_network: (
+            impl Sender<PublicKey = C::PublicKey>,
+            impl Receiver<PublicKey = C::PublicKey>,
+        ),
+        resolver_network: (
+            impl Sender<PublicKey = C::PublicKey>,
+            impl Receiver<PublicKey = C::PublicKey>,
+        ),
     ) {
         // Start the voter
         let (voter_sender, voter_receiver) = voter_network;

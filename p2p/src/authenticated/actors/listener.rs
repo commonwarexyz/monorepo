@@ -91,8 +91,8 @@ impl<
         stream_cfg: StreamConfig<C>,
         sink: Si,
         stream: St,
-        mut tracker: tracker::Mailbox<E>,
-        mut supervisor: spawner::Mailbox<E, Si, St>,
+        mut tracker: tracker::Mailbox<E, C::PublicKey>,
+        mut supervisor: spawner::Mailbox<E, Si, St, C::PublicKey>,
     ) {
         // Wait for the peer to send us their public key
         //
@@ -110,7 +110,7 @@ impl<
         //
         // Reserve also checks if the peer is authorized.
         let peer = incoming.peer();
-        let reservation = match tracker.reserve(peer.clone()).await {
+        let reservation = match tracker.reserve(peer).await {
             Some(reservation) => reservation,
             None => {
                 debug!(peer = hex(&peer), "unable to reserve connection to peer");
@@ -132,7 +132,11 @@ impl<
         supervisor.spawn(peer, stream, reservation).await;
     }
 
-    pub async fn run(self, tracker: tracker::Mailbox<E>, supervisor: spawner::Mailbox<E, Si, St>) {
+    pub async fn run(
+        self,
+        tracker: tracker::Mailbox<E, C::PublicKey>,
+        supervisor: spawner::Mailbox<E, Si, St, C::PublicKey>,
+    ) {
         // Start listening for incoming connections
         let mut listener = self
             .runtime

@@ -8,13 +8,17 @@ use commonware_utils::{hex, quorum};
 use std::collections::HashSet;
 use tracing::debug;
 
-pub fn threshold(validators: &[PublicKey]) -> Option<(u32, u32)> {
+pub fn threshold<P: PublicKey>(validators: &[P]) -> Option<(u32, u32)> {
     let len = validators.len() as u32;
     let threshold = quorum(len).expect("not enough validators for a quorum");
     Some((threshold, len))
 }
 
-pub fn verify_notarization<S: Supervisor<Index = View>, C: Scheme, D: Digest>(
+pub fn verify_notarization<
+    S: Supervisor<Index = View, PublicKey = C::PublicKey>,
+    C: Scheme,
+    D: Digest,
+>(
     supervisor: &S,
     namespace: &[u8],
     notarization: &wire::Notarization,
@@ -106,7 +110,10 @@ pub fn verify_notarization<S: Supervisor<Index = View>, C: Scheme, D: Digest>(
         seen.insert(signature.public_key);
 
         // Verify signature
-        if !C::verify(Some(namespace), &message, public_key, &signature.signature) {
+        let Ok(signature) = C::Signature::try_from(signature.signature.as_ref()) else {
+            return false;
+        };
+        if !C::verify(Some(namespace), &message, public_key, &signature) {
             debug!(reason = "invalid signature", "dropping notarization");
             return false;
         }
@@ -115,7 +122,7 @@ pub fn verify_notarization<S: Supervisor<Index = View>, C: Scheme, D: Digest>(
     true
 }
 
-pub fn verify_nullification<S: Supervisor<Index = View>, C: Scheme>(
+pub fn verify_nullification<S: Supervisor<Index = View, PublicKey = C::PublicKey>, C: Scheme>(
     supervisor: &S,
     namespace: &[u8],
     nullification: &wire::Nullification,
@@ -192,7 +199,10 @@ pub fn verify_nullification<S: Supervisor<Index = View>, C: Scheme>(
         seen.insert(signature.public_key);
 
         // Verify signature
-        if !C::verify(Some(namespace), &message, public_key, &signature.signature) {
+        let Ok(signature) = C::Signature::try_from(signature.signature.as_ref()) else {
+            return false;
+        };
+        if !C::verify(Some(namespace), &message, public_key, &signature) {
             debug!(reason = "invalid signature", "dropping nullification");
             return false;
         }
@@ -201,7 +211,11 @@ pub fn verify_nullification<S: Supervisor<Index = View>, C: Scheme>(
     true
 }
 
-pub fn verify_finalization<S: Supervisor<Index = View>, C: Scheme, D: Digest>(
+pub fn verify_finalization<
+    S: Supervisor<Index = View, PublicKey = C::PublicKey>,
+    C: Scheme,
+    D: Digest,
+>(
     supervisor: &S,
     namespace: &[u8],
     finalization: &wire::Finalization,
@@ -293,7 +307,10 @@ pub fn verify_finalization<S: Supervisor<Index = View>, C: Scheme, D: Digest>(
         seen.insert(signature.public_key);
 
         // Verify signature
-        if !C::verify(Some(namespace), &message, public_key, &signature.signature) {
+        let Ok(signature) = C::Signature::try_from(signature.signature.as_ref()) else {
+            return false;
+        };
+        if !C::verify(Some(namespace), &message, public_key, &signature) {
             debug!(reason = "invalid signature", "dropping finalization");
             return false;
         }

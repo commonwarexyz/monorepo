@@ -18,7 +18,7 @@ use rand::{CryptoRng, Rng};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tracing::debug;
 
-pub struct Actor<E: Spawner + Clock + ReasonablyRealtime> {
+pub struct Actor<E: Spawner + Clock + ReasonablyRealtime, P: PublicKey> {
     runtime: E,
 
     gossip_bit_vec_frequency: Duration,
@@ -35,11 +35,11 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime> {
     rate_limited: Family<metrics::Message, Counter>,
 
     // When reservation goes out-of-scope, the tracker will be notified.
-    _reservation: tracker::Reservation<E>,
+    _reservation: tracker::Reservation<E, P>,
 }
 
-impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
-    pub fn new(runtime: E, cfg: Config, reservation: tracker::Reservation<E>) -> (Self, Relay) {
+impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng, P: PublicKey> Actor<E, P> {
+    pub fn new(runtime: E, cfg: Config, reservation: tracker::Reservation<E, P>) -> (Self, Relay) {
         let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
         let (low_sender, low_receiver) = mpsc::channel(cfg.mailbox_size);
@@ -96,10 +96,10 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
 
     pub async fn run<Si: Sink, St: Stream>(
         mut self,
-        peer: PublicKey,
+        peer: P,
         connection: Connection<Si, St>,
-        mut tracker: tracker::Mailbox<E>,
-        channels: Channels,
+        mut tracker: tracker::Mailbox<E, P>,
+        channels: Channels<P>,
     ) -> Error {
         // Instantiate rate limiters for each message type
         let mut rate_limits = HashMap::new();
@@ -116,7 +116,6 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
         let mut send_handler: Handle<Result<(), Error>> = self.runtime.spawn("sender", {
             let runtime = self.runtime.clone();
             let mut tracker = tracker.clone();
-            let peer = peer.clone();
             let mailbox = self.mailbox.clone();
             let rate_limits = rate_limits.clone();
             async move {
@@ -125,7 +124,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
                     select! {
                         _ = runtime.sleep_until(deadline) => {
                             // Get latest bitset from tracker (also used as ping)
-                            tracker.construct(peer.clone(), mailbox.clone()).await;
+                            tracker.construct(peer, mailbox.clone()).await;
 
                             // Reset ticker
                             deadline = runtime.current() + self.gossip_bit_vec_frequency;
@@ -248,7 +247,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
                             // close the peer (as other channels may still be open).
                             let sender = senders.get_mut(&data.channel).unwrap();
                             if let Err(e) = sender
-                                .send((peer.clone(), data.message))
+                                .send((peer, data.message))
                                 .await
                                 .map_err(|_| Error::ChannelClosed(data.channel))
                             {

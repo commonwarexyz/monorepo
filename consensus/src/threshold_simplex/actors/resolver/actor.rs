@@ -100,7 +100,7 @@ pub struct Actor<
     E: Clock + GClock + Rng,
     C: Scheme,
     D: Digest,
-    S: ThresholdSupervisor<Index = View, Identity = poly::Public>,
+    S: ThresholdSupervisor<Index = View, Identity = poly::Public, PublicKey = C::PublicKey>,
 > {
     runtime: E,
     supervisor: S,
@@ -135,7 +135,7 @@ impl<
         E: Clock + GClock + Rng,
         C: Scheme,
         D: Digest,
-        S: ThresholdSupervisor<Index = View, Identity = poly::Public>,
+        S: ThresholdSupervisor<Index = View, Identity = poly::Public, PublicKey = C::PublicKey>,
     > Actor<E, C, D, S>
 {
     pub fn new(runtime: E, cfg: Config<C, S>) -> (Self, Mailbox) {
@@ -204,7 +204,7 @@ impl<
     }
 
     /// Concurrent indicates whether we should send a new request (only if we see a request for the first time)
-    async fn send(&mut self, shuffle: bool, sender: &mut impl Sender) {
+    async fn send(&mut self, shuffle: bool, sender: &mut impl Sender<PublicKey = C::PublicKey>) {
         // Clear retry
         self.retry = None;
 
@@ -306,8 +306,8 @@ impl<
     pub async fn run(
         mut self,
         mut voter: voter::Mailbox<D>,
-        mut sender: impl Sender,
-        mut receiver: impl Receiver,
+        mut sender: impl Sender<PublicKey = C::PublicKey>,
+        mut receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) {
         // Wait for an event
         let mut current_view = 0;

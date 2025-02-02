@@ -133,31 +133,31 @@ pub enum Progress<D: Digest> {
     Finalized(Proof, D),
 }
 
-pub struct Config<H: Hasher> {
+pub struct Config<H: Hasher, P: PublicKey> {
     pub hasher: H,
 
-    pub relay: Arc<Relay<H::Digest>>,
+    pub relay: Arc<Relay<H::Digest, P>>,
 
     /// The public key of the participant.
     ///
     /// It is common to use multiple instances of an application in a single simulation, this
     /// helps to identify the source of both progress and errors.
-    pub participant: PublicKey,
+    pub participant: P,
 
     pub propose_latency: Latency,
     pub verify_latency: Latency,
 
-    pub tracker: mpsc::UnboundedSender<(PublicKey, Progress<H::Digest>)>,
+    pub tracker: mpsc::UnboundedSender<(P, Progress<H::Digest>)>,
 }
 
-pub struct Application<E: Clock + RngCore, H: Hasher> {
+pub struct Application<E: Clock + RngCore, H: Hasher, P: PublicKey> {
     runtime: E,
     hasher: H,
-    participant: PublicKey,
+    participant: P,
 
-    relay: Arc<Relay<H::Digest>>,
+    relay: Arc<Relay<H::Digest, P>>,
     broadcast: mpsc::UnboundedReceiver<(H::Digest, Bytes)>,
-    tracker: mpsc::UnboundedSender<(PublicKey, Progress<H::Digest>)>,
+    tracker: mpsc::UnboundedSender<(P, Progress<H::Digest>)>,
 
     mailbox: mpsc::Receiver<Message<H::Digest>>,
 
@@ -171,8 +171,8 @@ pub struct Application<E: Clock + RngCore, H: Hasher> {
     finalized_views: HashSet<H::Digest>,
 }
 
-impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
-    pub fn new(runtime: E, cfg: Config<H>) -> (Self, Mailbox<H::Digest>) {
+impl<E: Clock + RngCore, H: Hasher, P: PublicKey> Application<E, H, P> {
+    pub fn new(runtime: E, cfg: Config<H, P>) -> (Self, Mailbox<H::Digest>) {
         // Register self on relay
         let broadcast = cfg.relay.register(cfg.participant.clone());
 

@@ -7,13 +7,17 @@ use crate::{
         actors::voter,
         encoder::{notarize_namespace, nullify_namespace},
         verifier::{verify_notarization, verify_nullification},
-        wire, View,
+        wire::{self, Request},
+        View,
     },
     Parsed, Supervisor,
 };
 use commonware_cryptography::{Digest, Scheme};
 use commonware_macros::select;
-use commonware_p2p::{utils::requester, Receiver, Recipients, Sender};
+use commonware_p2p::{
+    utils::requester::{self, Requester},
+    Receiver, Recipients, Sender,
+};
 use commonware_runtime::Clock;
 use commonware_utils::hex;
 use futures::{channel::mpsc, future::Either, StreamExt};
@@ -96,7 +100,12 @@ impl Inflight {
 }
 
 /// Requests are made concurrently to multiple peers.
-pub struct Actor<E: Clock + GClock + Rng, C: Scheme, D: Digest, S: Supervisor<Index = View>> {
+pub struct Actor<
+    E: Clock + GClock + Rng,
+    C: Scheme,
+    D: Digest,
+    S: Supervisor<Index = View, PublicKey = C::PublicKey>,
+> {
     runtime: E,
     supervisor: S,
     _digest: PhantomData<D>,
@@ -125,7 +134,13 @@ pub struct Actor<E: Clock + GClock + Rng, C: Scheme, D: Digest, S: Supervisor<In
     served: Counter,
 }
 
-impl<E: Clock + GClock + Rng, C: Scheme, D: Digest, S: Supervisor<Index = View>> Actor<E, C, D, S> {
+impl<
+        E: Clock + GClock + Rng,
+        C: Scheme,
+        D: Digest,
+        S: Supervisor<Index = View, PublicKey = C::PublicKey>,
+    > Actor<E, C, D, S>
+{
     pub fn new(runtime: E, cfg: Config<C, S>) -> (Self, Mailbox) {
         // Initialize requester
         let config = requester::Config {
@@ -134,7 +149,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, D: Digest, S: Supervisor<Index = View>>
             initial: cfg.fetch_timeout / 2,
             timeout: cfg.fetch_timeout,
         };
-        let requester = requester::Requester::new(runtime.clone(), config);
+        let requester: Requester<E, C> = requester::Requester::new(runtime.clone(), config);
 
         // Initialize metrics
         let unfulfilled = Gauge::default();
@@ -191,7 +206,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, D: Digest, S: Supervisor<Index = View>>
     }
 
     /// Concurrent indicates whether we should send a new request (only if we see a request for the first time)
-    async fn send(&mut self, shuffle: bool, sender: &mut impl Sender) {
+    async fn send(&mut self, shuffle: bool, sender: &mut impl Sender<PublicKey = C::PublicKey>) {
         // Clear retry
         self.retry = None;
 
@@ -293,8 +308,8 @@ impl<E: Clock + GClock + Rng, C: Scheme, D: Digest, S: Supervisor<Index = View>>
     pub async fn run(
         mut self,
         mut voter: voter::Mailbox<D>,
-        mut sender: impl Sender,
-        mut receiver: impl Receiver,
+        mut sender: impl Sender<PublicKey = C::PublicKey>,
+        mut receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) {
         // Wait for an event
         let mut current_view = 0;

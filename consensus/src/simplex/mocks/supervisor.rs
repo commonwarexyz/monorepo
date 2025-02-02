@@ -13,21 +13,21 @@ use std::{
 
 pub struct Config<C: Scheme, D: Digest> {
     pub prover: Prover<C, D>,
-    pub participants: BTreeMap<View, Vec<PublicKey>>,
+    pub participants: BTreeMap<View, Vec<C::PublicKey>>,
 }
 
-type Participation<D> = HashMap<View, HashMap<D, HashSet<PublicKey>>>;
-type Faults = HashMap<PublicKey, HashMap<View, HashSet<Activity>>>;
+type Participation<D, P: PublicKey> = HashMap<View, HashMap<D, HashSet<P>>>;
+type Faults<P: PublicKey> = HashMap<P, HashMap<View, HashSet<Activity>>>;
 
 #[derive(Clone)]
 pub struct Supervisor<C: Scheme, D: Digest> {
-    participants: BTreeMap<View, (HashMap<PublicKey, u32>, Vec<PublicKey>)>,
+    participants: BTreeMap<View, (HashMap<C::PublicKey, u32>, Vec<C::PublicKey>)>,
 
     prover: Prover<C, D>,
 
-    pub notarizes: Arc<Mutex<Participation<D>>>,
-    pub finalizes: Arc<Mutex<Participation<D>>>,
-    pub faults: Arc<Mutex<Faults>>,
+    pub notarizes: Arc<Mutex<Participation<D, C::PublicKey>>>,
+    pub finalizes: Arc<Mutex<Participation<D, C::PublicKey>>>,
+    pub faults: Arc<Mutex<Faults<C::PublicKey>>>,
 }
 
 impl<C: Scheme, D: Digest> Supervisor<C, D> {
@@ -53,8 +53,9 @@ impl<C: Scheme, D: Digest> Supervisor<C, D> {
 
 impl<C: Scheme, D: Digest> Su for Supervisor<C, D> {
     type Index = View;
+    type PublicKey = C::PublicKey;
 
-    fn leader(&self, index: Self::Index) -> Option<PublicKey> {
+    fn leader(&self, index: Self::Index) -> Option<Self::PublicKey> {
         let closest = match self.participants.range(..=index).next_back() {
             Some((_, p)) => p,
             None => {
@@ -64,7 +65,7 @@ impl<C: Scheme, D: Digest> Su for Supervisor<C, D> {
         Some(closest.1[index as usize % closest.1.len()].clone())
     }
 
-    fn participants(&self, index: Self::Index) -> Option<&Vec<PublicKey>> {
+    fn participants(&self, index: Self::Index) -> Option<&Vec<Self::PublicKey>> {
         let closest = match self.participants.range(..=index).next_back() {
             Some((_, p)) => p,
             None => {
@@ -74,7 +75,7 @@ impl<C: Scheme, D: Digest> Su for Supervisor<C, D> {
         Some(&closest.1)
     }
 
-    fn is_participant(&self, index: Self::Index, candidate: &PublicKey) -> Option<u32> {
+    fn is_participant(&self, index: Self::Index, candidate: &Self::PublicKey) -> Option<u32> {
         let closest = match self.participants.range(..=index).next_back() {
             Some((_, p)) => p,
             None => {

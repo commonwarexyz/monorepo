@@ -1,10 +1,15 @@
-use crate::{BatchScheme, PrivateKey, PublicKey, Scheme, Signature};
+use crate::{
+    BatchScheme, Error, PrivateKey as CPrivateKey, PublicKey as CPublicKey, Scheme,
+    Signature as CSignature,
+};
+use bytes::Bytes;
 use commonware_utils::union_unique;
-use ed25519_consensus;
+use ed25519_consensus::{self, VerificationKey, VerificationKeyBytes};
 use rand::{CryptoRng, Rng, RngCore};
 use std::borrow::Cow;
+use std::ops::Deref;
 
-const SECRET_KEY_LENGTH: usize = 32;
+const PRIVATE_KEY_LENGTH: usize = 32;
 const PUBLIC_KEY_LENGTH: usize = 32;
 const SIGNATURE_LENGTH: usize = 64;
 
@@ -15,67 +20,32 @@ pub struct Ed25519 {
     verifier: PublicKey,
 }
 
-fn parse_private_key(private_key: &PrivateKey) -> Option<ed25519_consensus::SigningKey> {
-    let private_key: [u8; SECRET_KEY_LENGTH] = match private_key.as_ref().try_into() {
-        Ok(key) => key,
-        Err(_) => return None,
-    };
-    Some(ed25519_consensus::SigningKey::from(private_key))
-}
-
-fn public_key_extract(public_key: &PublicKey) -> Option<[u8; PUBLIC_KEY_LENGTH]> {
-    let public_key: [u8; PUBLIC_KEY_LENGTH] = match public_key.as_ref().try_into() {
-        Ok(key) => key,
-        Err(_) => return None,
-    };
-    Some(public_key)
-}
-
-fn parse_public_key(public_key: &PublicKey) -> Option<ed25519_consensus::VerificationKey> {
-    let public_key = public_key_extract(public_key)?;
-    ed25519_consensus::VerificationKey::try_from(public_key).ok()
-}
-
-fn parse_public_key_bytes(
-    public_key: &PublicKey,
-) -> Option<ed25519_consensus::VerificationKeyBytes> {
-    let public_key = public_key_extract(public_key)?;
-    Some(ed25519_consensus::VerificationKeyBytes::from(public_key))
-}
-
-fn parse_signature(signature: &Signature) -> Option<ed25519_consensus::Signature> {
-    let signature: [u8; SIGNATURE_LENGTH] = match signature.as_ref().try_into() {
-        Ok(sig) => sig,
-        Err(_) => return None,
-    };
-    Some(ed25519_consensus::Signature::from(signature))
-}
-
 impl Scheme for Ed25519 {
+    type PrivateKey = PrivateKey;
+    type PublicKey = PublicKey;
+    type Signature = Signature;
+
     fn new<R: CryptoRng + Rng>(r: &mut R) -> Self {
         let signer = ed25519_consensus::SigningKey::new(r);
         let verifier = signer.verification_key();
         Self {
             signer,
-            verifier: verifier.to_bytes().to_vec().into(),
+            verifier: PublicKey::from(&verifier),
         }
     }
 
     fn from(private_key: PrivateKey) -> Option<Self> {
-        let signer = parse_private_key(&private_key)?;
-        let verifier = signer.verification_key();
-        Some(Self {
-            signer,
-            verifier: verifier.to_bytes().to_vec().into(),
-        })
+        let signer = ed25519_consensus::SigningKey::from(private_key.0);
+        let verifier = PublicKey::from(&signer.verification_key());
+        Some(Self { signer, verifier })
     }
 
     fn private_key(&self) -> PrivateKey {
-        self.signer.to_bytes().to_vec().into()
+        PrivateKey::from(&self.signer)
     }
 
     fn public_key(&self) -> PublicKey {
-        self.verifier.clone()
+        self.verifier
     }
 
     fn sign(&mut self, namespace: Option<&[u8]>, message: &[u8]) -> Signature {
@@ -83,25 +53,20 @@ impl Scheme for Ed25519 {
             Some(namespace) => self.signer.sign(&union_unique(namespace, message)),
             None => self.signer.sign(message),
         };
-        sig.to_bytes().to_vec().into()
-    }
-
-    fn validate(public_key: &PublicKey) -> bool {
-        parse_public_key(public_key).is_some()
+        Signature::from(&sig)
     }
 
     fn verify(
         namespace: Option<&[u8]>,
         message: &[u8],
-        public_key: &PublicKey,
-        signature: &Signature,
+        public_key: &Self::PublicKey,
+        signature: &Self::Signature,
     ) -> bool {
-        let Some(public_key) = parse_public_key(public_key) else {
+        let Ok(public_key) = VerificationKey::try_from(public_key.0) else {
             return false;
         };
-        let Some(signature) = parse_signature(signature) else {
-            return false;
-        };
+        let signature = ed25519_consensus::Signature::from(signature.0);
+
         match namespace {
             Some(namespace) => {
                 let payload = union_unique(namespace, message);
@@ -122,6 +87,9 @@ pub struct Ed25519Batch {
 }
 
 impl BatchScheme for Ed25519Batch {
+    type PublicKey = PublicKey;
+    type Signature = Signature;
+
     fn new() -> Self {
         Ed25519Batch {
             verifier: ed25519_consensus::batch::Verifier::new(),
@@ -132,15 +100,11 @@ impl BatchScheme for Ed25519Batch {
         &mut self,
         namespace: Option<&[u8]>,
         message: &[u8],
-        public_key: &PublicKey,
-        signature: &Signature,
+        public_key: &Self::PublicKey,
+        signature: &Self::Signature,
     ) -> bool {
-        let Some(public_key) = parse_public_key_bytes(public_key) else {
-            return false;
-        };
-        let Some(signature) = parse_signature(signature) else {
-            return false;
-        };
+        let public_key = VerificationKeyBytes::from(public_key.0);
+        let signature = ed25519_consensus::Signature::from(signature.0);
         let payload = match namespace {
             Some(namespace) => Cow::Owned(union_unique(namespace, message)),
             None => Cow::Borrowed(message),
@@ -155,10 +119,199 @@ impl BatchScheme for Ed25519Batch {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[repr(transparent)]
+pub struct PrivateKey([u8; PRIVATE_KEY_LENGTH]);
+
+impl CPrivateKey for PrivateKey {}
+
+impl AsRef<[u8]> for PrivateKey {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl Deref for PrivateKey {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl Default for PrivateKey {
+    fn default() -> Self {
+        Self([0u8; PRIVATE_KEY_LENGTH])
+    }
+}
+
+impl From<[u8; PRIVATE_KEY_LENGTH]> for PrivateKey {
+    fn from(value: [u8; PRIVATE_KEY_LENGTH]) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&ed25519_consensus::SigningKey> for PrivateKey {
+    fn from(value: &ed25519_consensus::SigningKey) -> Self {
+        Self(value.to_bytes())
+    }
+}
+
+impl TryFrom<&[u8]> for PrivateKey {
+    type Error = Error;
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        if value.len() != PRIVATE_KEY_LENGTH {
+            return Err(Error::InvalidPrivateKeyLength);
+        }
+        let array: &[u8; PRIVATE_KEY_LENGTH] = value
+            .try_into()
+            .map_err(|_| Error::InvalidPrivateKeyLength)?;
+        Ok(Self(*array))
+    }
+}
+
+impl TryFrom<&Vec<u8>> for PrivateKey {
+    type Error = Error;
+    fn try_from(value: &Vec<u8>) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_slice())
+    }
+}
+
+impl TryFrom<Vec<u8>> for PrivateKey {
+    type Error = Error;
+    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_slice())
+    }
+}
+
+#[allow(clippy::from_over_into)]
+impl Into<Bytes> for PrivateKey {
+    fn into(self) -> Bytes {
+        Bytes::copy_from_slice(self.as_ref())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[repr(transparent)]
+pub struct PublicKey([u8; PUBLIC_KEY_LENGTH]);
+
+impl CPublicKey for PublicKey {}
+
+impl AsRef<[u8]> for PublicKey {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl Deref for PublicKey {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl From<&VerificationKey> for PublicKey {
+    fn from(verifier: &VerificationKey) -> Self {
+        Self(verifier.to_bytes())
+    }
+}
+
+impl TryFrom<&[u8]> for PublicKey {
+    type Error = Error;
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        if value.len() != PUBLIC_KEY_LENGTH {
+            return Err(Error::InvalidPublicKeyLength);
+        }
+        let verifier = VerificationKey::try_from(value).map_err(|_| Error::InvalidPublicKey)?;
+        Ok(Self::from(&verifier))
+    }
+}
+
+impl TryFrom<&Vec<u8>> for PublicKey {
+    type Error = Error;
+    fn try_from(value: &Vec<u8>) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_slice())
+    }
+}
+
+impl TryFrom<Vec<u8>> for PublicKey {
+    type Error = Error;
+    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_slice())
+    }
+}
+
+#[allow(clippy::from_over_into)]
+impl Into<Bytes> for PublicKey {
+    fn into(self) -> Bytes {
+        Bytes::copy_from_slice(self.as_ref())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[repr(transparent)]
+pub struct Signature([u8; SIGNATURE_LENGTH]);
+
+impl CSignature for Signature {}
+
+impl AsRef<[u8]> for Signature {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl Deref for Signature {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl From<&ed25519_consensus::Signature> for Signature {
+    fn from(value: &ed25519_consensus::Signature) -> Self {
+        Self(value.to_bytes())
+    }
+}
+
+impl TryFrom<&[u8]> for Signature {
+    type Error = Error;
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        if value.len() != SIGNATURE_LENGTH {
+            return Err(Error::InvalidSignatureLength);
+        }
+        let array: &[u8; SIGNATURE_LENGTH] = value
+            .try_into()
+            .map_err(|_| Error::InvalidSignatureLength)?;
+
+        Ok(Self(*array))
+    }
+}
+
+impl TryFrom<&Vec<u8>> for Signature {
+    type Error = Error;
+    fn try_from(value: &Vec<u8>) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_slice())
+    }
+}
+
+impl TryFrom<Vec<u8>> for Signature {
+    type Error = Error;
+    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_slice())
+    }
+}
+
+#[allow(clippy::from_over_into)]
+impl Into<Bytes> for Signature {
+    fn into(self) -> Bytes {
+        Bytes::copy_from_slice(self.as_ref())
+    }
+}
+
 /// Test vectors sourced from https://datatracker.ietf.org/doc/html/rfc8032#section-7.1.
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::rngs::OsRng;
 
     fn test_sign_and_verify(
         private_key: PrivateKey,
@@ -172,80 +325,80 @@ mod tests {
         assert!(Ed25519::verify(
             None,
             message,
-            &PublicKey::from(public_key.to_vec()),
+            &PublicKey::try_from(public_key.to_vec()).unwrap(),
             &computed_signature
         ));
+    }
+
+    fn parse_private_key(private_key: &str) -> PrivateKey {
+        PrivateKey::try_from(commonware_utils::from_hex_formatted(private_key).unwrap()).unwrap()
+    }
+
+    fn parse_public_key(public_key: &str) -> PublicKey {
+        PublicKey::try_from(commonware_utils::from_hex_formatted(public_key).unwrap()).unwrap()
+    }
+
+    fn parse_signature(signature: &str) -> Signature {
+        Signature::try_from(commonware_utils::from_hex_formatted(signature).unwrap()).unwrap()
     }
 
     fn vector_1() -> (PrivateKey, PublicKey, Vec<u8>, Signature) {
         (
             // secret key
-            commonware_utils::from_hex_formatted(
+            parse_private_key(
                 "
                 9d61b19deffd5a60ba844af492ec2cc4
                 4449c5697b326919703bac031cae7f60
                 ",
-            )
-            .unwrap()
-            .into(),
+            ),
             // public key
-            commonware_utils::from_hex_formatted(
+            parse_public_key(
                 "
                 d75a980182b10ab7d54bfed3c964073a
                 0ee172f3daa62325af021a68f707511a
                 ",
-            )
-            .unwrap()
-            .into(),
+            ),
             // message
             b"".to_vec(),
             // signature
-            commonware_utils::from_hex_formatted(
+            parse_signature(
                 "
                 e5564300c360ac729086e2cc806e828a
                 84877f1eb8e5d974d873e06522490155
                 5fb8821590a33bacc61e39701cf9b46b
                 d25bf5f0595bbe24655141438e7a100b
                 ",
-            )
-            .unwrap()
-            .into(),
+            ),
         )
     }
 
     fn vector_2() -> (PrivateKey, PublicKey, Vec<u8>, Signature) {
         (
             // secret key
-            commonware_utils::from_hex_formatted(
+            parse_private_key(
                 "
                 4ccd089b28ff96da9db6c346ec114e0f
                 5b8a319f35aba624da8cf6ed4fb8a6fb
                 ",
-            )
-            .unwrap()
-            .into(),
+            ),
             // public key
-            commonware_utils::from_hex_formatted(
+            parse_public_key(
                 "
                 3d4017c3e843895a92b70aa74d1b7ebc
                 9c982ccf2ec4968cc0cd55f12af4660c
                 ",
-            )
-            .unwrap()
-            .into(),
+            ),
             // message
             [0x72].to_vec(),
             // signature
-            commonware_utils::from_hex_formatted(
+            parse_signature(
                 "
                 92a009a9f0d4cab8720e820b5f642540
                 a2b27b5416503f8fb3762223ebdb69da
                 085ac1e43e15996e458f3613d0f11d8c
                 387b2eaeb4302aeeb00d291612bb0c00
                 ",
-            )
-            .unwrap()
-            .into(),
+            ),
         )
     }
 
@@ -259,10 +412,10 @@ mod tests {
     #[test]
     #[should_panic]
     fn bad_signature() {
-        let (private_key, public_key, message, signature) = vector_1();
-        let mut bad_signature = signature.to_vec();
-        bad_signature[3] = 0xff;
-        test_sign_and_verify(private_key, public_key, &message, bad_signature.into());
+        let (private_key, public_key, message, _) = vector_1();
+        let mut signer = <Ed25519 as Scheme>::new(&mut OsRng);
+        let bad_signature = signer.sign(None, message.as_ref());
+        test_sign_and_verify(private_key, public_key, &message, bad_signature);
     }
 
     // sanity check the test infra rejects non-matching messages
@@ -282,54 +435,44 @@ mod tests {
 
     #[test]
     fn rfc8032_test_vector_3() {
-        let private_key = commonware_utils::from_hex_formatted(
+        let private_key = parse_private_key(
             "
             c5aa8df43f9f837bedb7442f31dcb7b1
             66d38535076f094b85ce3a2e0b4458f7
             ",
-        )
-        .unwrap();
-        let public_key = commonware_utils::from_hex_formatted(
+        );
+        let public_key = parse_public_key(
             "
             fc51cd8e6218a1a38da47ed00230f058
             0816ed13ba3303ac5deb911548908025
             ",
-        )
-        .unwrap();
+        );
         let message: [u8; 2] = [0xaf, 0x82];
-        let signature = commonware_utils::from_hex_formatted(
+        let signature = parse_signature(
             "
             6291d657deec24024827e69c3abe01a3
             0ce548a284743a445e3680d7db5ac3ac
             18ff9b538d16f290ae67f760984dc659
             4a7c15e9716ed28dc027beceea1ec40a
             ",
-        )
-        .unwrap();
-        test_sign_and_verify(
-            private_key.into(),
-            public_key.into(),
-            &message,
-            signature.into(),
-        )
+        );
+        test_sign_and_verify(private_key, public_key, &message, signature)
     }
 
     #[test]
     fn rfc8032_test_vector_1024() {
-        let private_key = commonware_utils::from_hex_formatted(
+        let private_key = parse_private_key(
             "
             f5e5767cf153319517630f226876b86c
             8160cc583bc013744c6bf255f5cc0ee5
             ",
-        )
-        .unwrap();
-        let public_key = commonware_utils::from_hex_formatted(
+        );
+        let public_key = parse_public_key(
             "
             278117fc144c72340f67d0f2316e8386
             ceffbf2b2428c9c51fef7c597f1d426e
             ",
-        )
-        .unwrap();
+        );
         let message = commonware_utils::from_hex_formatted(
             "
             08b8b2b733424243760fe426a4b54908
@@ -399,21 +542,15 @@ mod tests {
             ",
         )
         .unwrap();
-        let signature = commonware_utils::from_hex_formatted(
+        let signature = parse_signature(
             "
             0aab4c900501b3e24d7cdf4663326a3a
             87df5e4843b2cbdb67cbf6e460fec350
             aa5371b1508f9f4528ecea23c436d94b
             5e8fcd4f681e30a6ac00a9704a188a03
             ",
-        )
-        .unwrap();
-        test_sign_and_verify(
-            private_key.into(),
-            public_key.into(),
-            &message,
-            signature.into(),
-        )
+        );
+        test_sign_and_verify(private_key, public_key, &message, signature)
     }
 
     #[test]
@@ -451,10 +588,10 @@ mod tests {
         )
         .unwrap();
         test_sign_and_verify(
-            private_key.into(),
-            public_key.into(),
+            PrivateKey::try_from(private_key).unwrap(),
+            PublicKey::try_from(public_key).unwrap(),
             &message,
-            signature.into(),
+            Signature::try_from(signature).unwrap(),
         )
     }
 
@@ -463,8 +600,8 @@ mod tests {
         let v1 = vector_1();
         let v2 = vector_2();
         let mut batch = Ed25519Batch::new();
-        assert!(batch.add(None, &v1.2, &PublicKey::from(v1.1), &Signature::from(v1.3)));
-        assert!(batch.add(None, &v2.2, &PublicKey::from(v2.1), &Signature::from(v2.3)));
+        assert!(batch.add(None, &v1.2, &v1.1, &v1.3));
+        assert!(batch.add(None, &v2.2, &v2.1, &v2.3));
         assert!(batch.verify(&mut rand::thread_rng()));
     }
 
@@ -477,16 +614,12 @@ mod tests {
 
         let mut batch = Ed25519Batch::new();
         assert!(batch.add(None, &v1.2, &v1.1, &v1.3));
-        assert!(batch.add(None, &v2.2, &v2.1, &Signature::from(bad_signature)));
+        assert!(batch.add(
+            None,
+            &v2.2,
+            &v2.1,
+            &Signature::try_from(bad_signature).unwrap()
+        ));
         assert!(!batch.verify(&mut rand::thread_rng()));
-    }
-
-    #[test]
-    fn batch_add_invalid_item() {
-        let v1 = vector_1();
-        let mut invalid_signature = v1.3.to_vec();
-        invalid_signature.push(0xff);
-        let mut batch = Ed25519Batch::new();
-        assert!(!batch.add(None, &v1.2, &v1.1, &Signature::from(invalid_signature)));
     }
 }

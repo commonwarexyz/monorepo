@@ -1,4 +1,7 @@
-use crate::{PrivateKey, PublicKey, Scheme, Signature};
+use crate::{
+    Error, PrivateKey as CPrivateKey, PublicKey as CPublicKey, Scheme, Signature as CSignature,
+};
+use bytes::Bytes;
 use commonware_utils::union_unique;
 use p256::{
     ecdsa::{
@@ -9,6 +12,7 @@ use p256::{
 };
 use rand::{CryptoRng, Rng};
 use std::borrow::Cow;
+use std::ops::Deref;
 
 const PRIVATE_KEY_LENGTH: usize = 32;
 const PUBLIC_KEY_LENGTH: usize = 33; // Y-Parity || X
@@ -22,6 +26,10 @@ pub struct Secp256r1 {
 }
 
 impl Scheme for Secp256r1 {
+    type PrivateKey = PrivateKey;
+    type PublicKey = PublicKey;
+    type Signature = Signature;
+
     fn new<R: CryptoRng + Rng>(r: &mut R) -> Self {
         let signer = SigningKey::random(r);
         let verifier = signer.verifying_key().to_owned();
@@ -42,11 +50,12 @@ impl Scheme for Secp256r1 {
     }
 
     fn private_key(&self) -> PrivateKey {
-        self.signer.to_bytes().to_vec().into()
+        let array: [u8; PRIVATE_KEY_LENGTH] = self.signer.to_bytes().into();
+        PrivateKey::from(array)
     }
 
     fn public_key(&self) -> PublicKey {
-        self.verifier.to_encoded_point(true).to_bytes().into()
+        PublicKey::from(&self.verifier)
     }
 
     fn sign(&mut self, namespace: Option<&[u8]>, message: &[u8]) -> Signature {
@@ -58,15 +67,7 @@ impl Scheme for Secp256r1 {
             Some(normalized) => normalized,
             None => signature,
         };
-        signature.to_vec().into()
-    }
-
-    fn validate(public_key: &PublicKey) -> bool {
-        let public_key: [u8; PUBLIC_KEY_LENGTH] = match public_key.as_ref().try_into() {
-            Ok(sig) => sig,
-            Err(_) => return false,
-        };
-        VerifyingKey::from_sec1_bytes(&public_key).is_ok()
+        Signature::from(&signature)
     }
 
     fn verify(
@@ -107,6 +108,198 @@ impl Scheme for Secp256r1 {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[repr(transparent)]
+pub struct PrivateKey([u8; PRIVATE_KEY_LENGTH]);
+
+impl CPrivateKey for PrivateKey {}
+
+impl AsRef<[u8]> for PrivateKey {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl Deref for PrivateKey {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl Default for PrivateKey {
+    fn default() -> Self {
+        Self([0u8; PRIVATE_KEY_LENGTH])
+    }
+}
+
+impl From<[u8; PRIVATE_KEY_LENGTH]> for PrivateKey {
+    fn from(value: [u8; PRIVATE_KEY_LENGTH]) -> Self {
+        Self(value)
+    }
+}
+
+impl TryFrom<&[u8]> for PrivateKey {
+    type Error = Error;
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        if value.len() != PRIVATE_KEY_LENGTH {
+            return Err(Error::InvalidPrivateKeyLength);
+        }
+        let array: &[u8; PRIVATE_KEY_LENGTH] = value
+            .try_into()
+            .map_err(|_| Error::InvalidPrivateKeyLength)?;
+        Ok(Self(*array))
+    }
+}
+
+impl TryFrom<&Vec<u8>> for PrivateKey {
+    type Error = Error;
+    fn try_from(value: &Vec<u8>) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_slice())
+    }
+}
+
+impl TryFrom<Vec<u8>> for PrivateKey {
+    type Error = Error;
+    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_slice())
+    }
+}
+
+#[allow(clippy::from_over_into)]
+impl Into<Bytes> for PrivateKey {
+    fn into(self) -> Bytes {
+        Bytes::copy_from_slice(self.as_ref())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[repr(transparent)]
+pub struct PublicKey([u8; PUBLIC_KEY_LENGTH]);
+
+impl CPublicKey for PublicKey {}
+
+impl AsRef<[u8]> for PublicKey {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl Deref for PublicKey {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl From<&VerifyingKey> for PublicKey {
+    fn from(verifier: &VerifyingKey) -> Self {
+        let mut array: [u8; PUBLIC_KEY_LENGTH] = [0u8; PUBLIC_KEY_LENGTH];
+        array.copy_from_slice(verifier.to_encoded_point(true).as_bytes());
+        Self(array)
+    }
+}
+
+impl TryFrom<&[u8]> for PublicKey {
+    type Error = Error;
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        if value.len() != PUBLIC_KEY_LENGTH {
+            return Err(Error::InvalidPublicKeyLength);
+        }
+        let array: &[u8; PUBLIC_KEY_LENGTH] = value
+            .try_into()
+            .map_err(|_| Error::InvalidPublicKeyLength)?;
+
+        if VerifyingKey::from_sec1_bytes(array).is_err() {
+            return Err(Error::InvalidPublicKey);
+        }
+        Ok(Self(*array))
+    }
+}
+
+impl TryFrom<&Vec<u8>> for PublicKey {
+    type Error = Error;
+    fn try_from(value: &Vec<u8>) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_slice())
+    }
+}
+
+impl TryFrom<Vec<u8>> for PublicKey {
+    type Error = Error;
+    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_slice())
+    }
+}
+
+#[allow(clippy::from_over_into)]
+impl Into<Bytes> for PublicKey {
+    fn into(self) -> Bytes {
+        Bytes::copy_from_slice(self.as_ref())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[repr(transparent)]
+pub struct Signature([u8; SIGNATURE_LENGTH]);
+
+impl CSignature for Signature {}
+
+impl AsRef<[u8]> for Signature {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl Deref for Signature {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl From<&p256::ecdsa::Signature> for Signature {
+    fn from(value: &p256::ecdsa::Signature) -> Self {
+        let mut array: [u8; SIGNATURE_LENGTH] = [0u8; SIGNATURE_LENGTH];
+        array.copy_from_slice(&value.to_bytes());
+        Self(array)
+    }
+}
+
+impl TryFrom<&[u8]> for Signature {
+    type Error = Error;
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        if value.len() != SIGNATURE_LENGTH {
+            return Err(Error::InvalidSignatureLength);
+        }
+        let array: &[u8; SIGNATURE_LENGTH] = value
+            .try_into()
+            .map_err(|_| Error::InvalidSignatureLength)?;
+
+        Ok(Self(*array))
+    }
+}
+
+impl TryFrom<&Vec<u8>> for Signature {
+    type Error = Error;
+    fn try_from(value: &Vec<u8>) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_slice())
+    }
+}
+
+impl TryFrom<Vec<u8>> for Signature {
+    type Error = Error;
+    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_slice())
+    }
+}
+
+#[allow(clippy::from_over_into)]
+impl Into<Bytes> for Signature {
+    fn into(self) -> Bytes {
+        Bytes::copy_from_slice(self.as_ref())
+    }
+}
+
 /// Test vectors sourced from (FIPS 186-4)
 /// https://csrc.nist.gov/projects/cryptographic-algorithm-validation-program/digital-signatures.
 #[cfg(test)]
@@ -118,7 +311,8 @@ mod tests {
         (
             commonware_utils::from_hex_formatted(private_key)
                 .unwrap()
-                .into(),
+                .try_into()
+                .unwrap(),
             public_key,
         )
     }
@@ -142,10 +336,16 @@ mod tests {
         let f1 = p256::FieldBytes::from_slice(&vec_r);
         let f2 = p256::FieldBytes::from_slice(&vec_s);
         let s = p256::ecdsa::Signature::from_scalars(*f1, *f2).unwrap();
-        s.to_vec().into()
+        s.to_vec().try_into().unwrap()
     }
 
     fn parse_public_key_as_compressed(qx: &str, qy: &str) -> PublicKey {
+        parse_public_key_as_compressed_vector(qx, qy)
+            .try_into()
+            .unwrap()
+    }
+
+    fn parse_public_key_as_compressed_vector(qx: &str, qy: &str) -> Vec<u8> {
         let qx = commonware_utils::from_hex_formatted(&padding_odd_length_hex(qx)).unwrap();
         let qy = commonware_utils::from_hex_formatted(&padding_odd_length_hex(qy)).unwrap();
         let mut compressed = Vec::with_capacity(qx.len() + 1);
@@ -155,17 +355,17 @@ mod tests {
             compressed.push(0x03);
         }
         compressed.extend_from_slice(&qx);
-        compressed.into()
+        compressed
     }
 
-    fn parse_public_key_as_uncompressed(qx: &str, qy: &str) -> PublicKey {
+    fn parse_public_key_as_uncompressed_vector(qx: &str, qy: &str) -> Vec<u8> {
         let qx = commonware_utils::from_hex_formatted(qx).unwrap();
         let qy = commonware_utils::from_hex_formatted(qy).unwrap();
         let mut uncompressed_public_key = Vec::with_capacity(65);
         uncompressed_public_key.push(0x04);
         uncompressed_public_key.extend_from_slice(&qx);
         uncompressed_public_key.extend_from_slice(&qy);
-        uncompressed_public_key.into()
+        uncompressed_public_key
     }
 
     fn padding_odd_length_hex(value: &str) -> String {
@@ -181,7 +381,8 @@ mod tests {
             "519b423d715f8b581f4fa8ee59f4771a5b44c8130b4e3eacca54a56dda72b464",
         )
         .unwrap()
-        .into();
+        .try_into()
+        .unwrap();
         let message = commonware_utils::from_hex_formatted(
             "5905238877c77421f73e43ee3da6f2d9e2ccad5fc942dcec0cbd25482935faaf416983fe165b1a045e
             e2bcd2e6dca3bdf46c4310a7461f9a37960ca672d3feb5473e253605fb1ddfd28065b53cb5858a8ad28175bf
@@ -204,7 +405,8 @@ mod tests {
         let private_key_hex = "519b423d715f8b581f4fa8ee59f4771a5b44c8130b4e3eacca54a56dda72b464";
         let private_key: PrivateKey = commonware_utils::from_hex_formatted(private_key_hex)
             .unwrap()
-            .into();
+            .try_into()
+            .unwrap();
         let signer = <Secp256r1 as Scheme>::from(private_key).unwrap();
         let exported_private_key = signer.private_key();
         assert_eq!(
@@ -220,7 +422,8 @@ mod tests {
             "c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721",
         )
         .unwrap()
-        .into();
+        .try_into()
+        .unwrap();
 
         let (message, exp_sig) = (
             b"sample",
@@ -258,62 +461,13 @@ mod tests {
         let qx_hex = "d0720dc691aa80096ba32fed1cb97c2b620690d06de0317b8618d5ce65eb728f";
         let qy_hex = "d0720dc691aa80096ba32fed1cb97c2b620690d06de0317b8618d5ce65eb728f";
 
-        let uncompressed_public_key = parse_public_key_as_uncompressed(qx_hex, qy_hex);
-        assert!(!Secp256r1::validate(&uncompressed_public_key));
+        let uncompressed_public_key = parse_public_key_as_uncompressed_vector(qx_hex, qy_hex);
+        let public_key = <Secp256r1 as Scheme>::PublicKey::try_from(&uncompressed_public_key);
+        assert_eq!(public_key, Err(Error::InvalidPublicKeyLength));
 
-        let compressed_public_key = parse_public_key_as_compressed(qx_hex, qy_hex);
-        assert!(Secp256r1::validate(&compressed_public_key));
-    }
-
-    #[test]
-    fn test_scheme_verify_public_key_too_long() {
-        let private_key: PrivateKey = commonware_utils::from_hex_formatted(
-            "c9806898a0334916c860748880a541f093b579a9b1f32934d86c363c39800357",
-        )
-        .unwrap()
-        .into();
-        let qx_hex = "d0720dc691aa80096ba32fed1cb97c2b620690d06de0317b8618d5ce65eb728f";
-        let qy_hex = "d0720dc691aa80096ba32fed1cb97c2b620690d06de0317b8618d5ce65eb728f";
-        let message = b"sample";
-        let mut signer = <Secp256r1 as Scheme>::from(private_key).unwrap();
-        let signature = signer.sign(None, message);
-
-        let uncompressed_public_key = parse_public_key_as_uncompressed(qx_hex, qy_hex);
-        assert!(!Secp256r1::verify(
-            None,
-            message,
-            &uncompressed_public_key,
-            &signature
-        ));
-
-        let compressed_public_key = parse_public_key_as_compressed(qx_hex, qy_hex);
-        assert!(Secp256r1::verify(
-            None,
-            message,
-            &compressed_public_key,
-            &signature
-        ));
-    }
-
-    #[test]
-    fn test_scheme_verify_signature_too_long() {
-        let private_key: PrivateKey = commonware_utils::from_hex_formatted(
-            "c9806898a0334916c860748880a541f093b579a9b1f32934d86c363c39800357",
-        )
-        .unwrap()
-        .into();
-        let message = b"sample";
-        let mut signer = <Secp256r1 as Scheme>::from(private_key).unwrap();
-        let signature = signer.sign(None, message);
-        let mut signature = signature.to_vec();
-        signature.push(0x01);
-
-        assert!(!Secp256r1::verify(
-            None,
-            message,
-            &signer.public_key(),
-            &signature.into()
-        ));
+        let compressed_public_key = parse_public_key_as_compressed_vector(qx_hex, qy_hex);
+        let public_key = <Secp256r1 as Scheme>::PublicKey::try_from(&compressed_public_key);
+        assert!(public_key.is_ok());
     }
 
     #[test]
@@ -322,7 +476,8 @@ mod tests {
             "c9806898a0334916c860748880a541f093b579a9b1f32934d86c363c39800357",
         )
         .unwrap()
-        .into();
+        .try_into()
+        .unwrap();
         let message = b"sample";
         let mut signer = <Secp256r1 as Scheme>::from(private_key).unwrap();
         let signature = signer.sign(None, message);
@@ -334,7 +489,7 @@ mod tests {
             None,
             message,
             &signer.public_key(),
-            &signature.into(),
+            &signature.try_into().unwrap(),
         ));
     }
 
@@ -344,7 +499,8 @@ mod tests {
             "c9806898a0334916c860748880a541f093b579a9b1f32934d86c363c39800357",
         )
         .unwrap()
-        .into();
+        .try_into()
+        .unwrap();
         let message = b"sample";
         let mut signer = <Secp256r1 as Scheme>::from(private_key).unwrap();
         let signature = signer.sign(None, message);
@@ -357,7 +513,7 @@ mod tests {
             None,
             message,
             &signer.public_key(),
-            &signature.into(),
+            &signature.try_into().unwrap(),
         ));
     }
 
@@ -410,9 +566,10 @@ mod tests {
 
         for (n, test) in cases.iter() {
             let (public_key, exp_valid) = test;
+            let res = <Secp256r1 as Scheme>::PublicKey::try_from(public_key);
             assert_eq!(
                 *exp_valid,
-                Secp256r1::validate(public_key),
+                res.is_ok(),
                 "vector_public_key_validation_{}",
                 n
             );
@@ -441,7 +598,7 @@ mod tests {
 
         for (index, test) in cases.iter().enumerate() {
             let (public_key, sig, message, exp_success) = test;
-            let mut sig = sig.clone();
+            let mut sig = *sig;
             let exp_success = *exp_success;
             if exp_success {
                 let ecdsa_signature = p256::ecdsa::Signature::from_slice(&sig).unwrap();
@@ -450,7 +607,8 @@ mod tests {
                     assert!(!Secp256r1::verify(None, message, public_key, &sig));
                     // Normalizing sig to test its validity.
                     if let Some(normalized_sig) = ecdsa_signature.normalize_s() {
-                        sig = normalized_sig.to_vec().into();
+                        sig = <Secp256r1 as Scheme>::Signature::try_from(normalized_sig.to_vec())
+                            .unwrap();
                     }
                 }
             }
@@ -544,9 +702,9 @@ mod tests {
         )
     }
 
-    fn vector_public_key_validation_1() -> (PublicKey, bool) {
+    fn vector_public_key_validation_1() -> (Vec<u8>, bool) {
         (
-            parse_public_key_as_compressed(
+            parse_public_key_as_compressed_vector(
                 "e0f7449c5588f24492c338f2bc8f7865f755b958d48edb0f2d0056e50c3fd5b7",
                 "86d7e9255d0f4b6f44fa2cd6f8ba3c0aa828321d6d8cc430ca6284ce1d5b43a0",
             ),
@@ -554,9 +712,9 @@ mod tests {
         )
     }
 
-    fn vector_public_key_validation_3() -> (PublicKey, bool) {
+    fn vector_public_key_validation_3() -> (Vec<u8>, bool) {
         (
-            parse_public_key_as_compressed(
+            parse_public_key_as_compressed_vector(
                 "17875397ae87369365656d490e8ce956911bd97607f2aff41b56f6f3a61989826",
                 "980a3c4f61b9692633fbba5ef04c9cb546dd05cdec9fa8428b8849670e2fba92",
             ),
@@ -564,9 +722,9 @@ mod tests {
         )
     }
 
-    fn vector_public_key_validation_4() -> (PublicKey, bool) {
+    fn vector_public_key_validation_4() -> (Vec<u8>, bool) {
         (
-            parse_public_key_as_compressed(
+            parse_public_key_as_compressed_vector(
                 "f2d1c0dc0852c3d8a2a2500a23a44813ccce1ac4e58444175b440469ffc12273",
                 "32bfe992831b305d8c37b9672df5d29fcb5c29b4a40534683e3ace23d24647dd",
             ),
@@ -574,9 +732,9 @@ mod tests {
         )
     }
 
-    fn vector_public_key_validation_5() -> (PublicKey, bool) {
+    fn vector_public_key_validation_5() -> (Vec<u8>, bool) {
         (
-            parse_public_key_as_compressed(
+            parse_public_key_as_compressed_vector(
                 "10b0ca230fff7c04768f4b3d5c75fa9f6c539bea644dffbec5dc796a213061b58",
                 "f5edf37c11052b75f771b7f9fa050e353e464221fec916684ed45b6fead38205",
             ),
@@ -584,9 +742,9 @@ mod tests {
         )
     }
 
-    fn vector_public_key_validation_6() -> (PublicKey, bool) {
+    fn vector_public_key_validation_6() -> (Vec<u8>, bool) {
         (
-            parse_public_key_as_compressed(
+            parse_public_key_as_compressed_vector(
                 "2c1052f25360a15062d204a056274e93cbe8fc4c4e9b9561134ad5c15ce525da",
                 "ced9783713a8a2a09eff366987639c625753295d9a85d0f5325e32dedbcada0b",
             ),
@@ -594,9 +752,9 @@ mod tests {
         )
     }
 
-    fn vector_public_key_validation_7() -> (PublicKey, bool) {
+    fn vector_public_key_validation_7() -> (Vec<u8>, bool) {
         (
-            parse_public_key_as_compressed(
+            parse_public_key_as_compressed_vector(
                 "a40d077a87dae157d93dcccf3fe3aca9c6479a75aa2669509d2ef05c7de6782f",
                 "503d86b87d743ba20804fd7e7884aa017414a7b5b5963e0d46e3a9611419ddf3",
             ),
@@ -604,9 +762,9 @@ mod tests {
         )
     }
 
-    fn vector_public_key_validation_8() -> (PublicKey, bool) {
+    fn vector_public_key_validation_8() -> (Vec<u8>, bool) {
         (
-            parse_public_key_as_compressed(
+            parse_public_key_as_compressed_vector(
                 "2633d398a3807b1895548adbb0ea2495ef4b930f91054891030817df87d4ac0a",
                 "d6b2f738e3873cc8364a2d364038ce7d0798bb092e3dd77cbdae7c263ba618d2",
             ),
@@ -614,9 +772,9 @@ mod tests {
         )
     }
 
-    fn vector_public_key_validation_9() -> (PublicKey, bool) {
+    fn vector_public_key_validation_9() -> (Vec<u8>, bool) {
         (
-            parse_public_key_as_compressed(
+            parse_public_key_as_compressed_vector(
                 "14bf57f76c260b51ec6bbc72dbd49f02a56eaed070b774dc4bad75a54653c3d56",
                 "7a231a23bf8b3aa31d9600d888a0678677a30e573decd3dc56b33f365cc11236",
             ),
@@ -624,9 +782,9 @@ mod tests {
         )
     }
 
-    fn vector_public_key_validation_10() -> (PublicKey, bool) {
+    fn vector_public_key_validation_10() -> (Vec<u8>, bool) {
         (
-            parse_public_key_as_compressed(
+            parse_public_key_as_compressed_vector(
                 "2fa74931ae816b426f484180e517f5050c92decfc8daf756cd91f54d51b302f1",
                 "5b994346137988c58c14ae2152ac2f6ad96d97decb33099bd8a0210114cd1141",
             ),
@@ -634,9 +792,9 @@ mod tests {
         )
     }
 
-    fn vector_public_key_validation_12() -> (PublicKey, bool) {
+    fn vector_public_key_validation_12() -> (Vec<u8>, bool) {
         (
-            parse_public_key_as_compressed(
+            parse_public_key_as_compressed_vector(
                 "7a81a7e0b015252928d8b36e4ca37e92fdc328eb25c774b4f872693028c4be38",
                 "08862f7335147261e7b1c3d055f9a316e4cab7daf99cc09d1c647f5dd6e7d5bb",
             ),

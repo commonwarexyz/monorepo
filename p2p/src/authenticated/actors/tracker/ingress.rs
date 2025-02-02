@@ -7,16 +7,16 @@ use futures::{
 };
 use std::net::SocketAddr;
 
-pub enum Message<E: Spawner> {
+pub enum Message<E: Spawner, P: PublicKey> {
     // Used by oracle
     Register {
         index: u64,
-        peers: Vec<PublicKey>,
+        peers: Vec<P>,
     },
 
     // Used by peer
     Construct {
-        public_key: PublicKey,
+        public_key: P,
         peer: peer::Mailbox,
     },
     BitVec {
@@ -30,32 +30,32 @@ pub enum Message<E: Spawner> {
 
     // Used by dialer
     Dialable {
-        peers: oneshot::Sender<Vec<(PublicKey, SocketAddr, Reservation<E>)>>,
+        peers: oneshot::Sender<Vec<(P, SocketAddr, Reservation<E, P>)>>,
     },
 
     // Used by listener
     Reserve {
-        peer: PublicKey,
-        reservation: oneshot::Sender<Option<Reservation<E>>>,
+        peer: P,
+        reservation: oneshot::Sender<Option<Reservation<E, P>>>,
     },
 
     // Used by peer
     Release {
-        peer: PublicKey,
+        peer: P,
     },
 }
 
 #[derive(Clone)]
-pub struct Mailbox<E: Spawner> {
-    sender: mpsc::Sender<Message<E>>,
+pub struct Mailbox<E: Spawner, P: PublicKey> {
+    sender: mpsc::Sender<Message<E, P>>,
 }
 
-impl<E: Spawner> Mailbox<E> {
-    pub(super) fn new(sender: mpsc::Sender<Message<E>>) -> Self {
+impl<E: Spawner, P: PublicKey> Mailbox<E, P> {
+    pub(super) fn new(sender: mpsc::Sender<Message<E, P>>) -> Self {
         Self { sender }
     }
 
-    pub async fn construct(&mut self, public_key: PublicKey, peer: peer::Mailbox) {
+    pub async fn construct(&mut self, public_key: P, peer: peer::Mailbox) {
         self.sender
             .send(Message::Construct { public_key, peer })
             .await
@@ -76,7 +76,7 @@ impl<E: Spawner> Mailbox<E> {
             .unwrap();
     }
 
-    pub async fn dialable(&mut self) -> Vec<(PublicKey, SocketAddr, Reservation<E>)> {
+    pub async fn dialable(&mut self) -> Vec<(P, SocketAddr, Reservation<E, P>)> {
         let (response, receiver) = oneshot::channel();
         self.sender
             .send(Message::Dialable { peers: response })
@@ -85,7 +85,7 @@ impl<E: Spawner> Mailbox<E> {
         receiver.await.unwrap()
     }
 
-    pub async fn reserve(&mut self, peer: PublicKey) -> Option<Reservation<E>> {
+    pub async fn reserve(&mut self, peer: P) -> Option<Reservation<E, P>> {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(Message::Reserve {
@@ -97,7 +97,7 @@ impl<E: Spawner> Mailbox<E> {
         rx.await.unwrap()
     }
 
-    pub async fn release(&mut self, peer: PublicKey) {
+    pub async fn release(&mut self, peer: P) {
         self.sender.send(Message::Release { peer }).await.unwrap();
     }
 }
@@ -107,12 +107,12 @@ impl<E: Spawner> Mailbox<E> {
 /// Peers that are not explicitly authorized
 /// will be blocked by commonware-p2p.
 #[derive(Clone)]
-pub struct Oracle<E: Spawner> {
-    sender: mpsc::Sender<Message<E>>,
+pub struct Oracle<E: Spawner, P: PublicKey> {
+    sender: mpsc::Sender<Message<E, P>>,
 }
 
-impl<E: Spawner> Oracle<E> {
-    pub(super) fn new(sender: mpsc::Sender<Message<E>>) -> Self {
+impl<E: Spawner, P: PublicKey> Oracle<E, P> {
+    pub(super) fn new(sender: mpsc::Sender<Message<E, P>>) -> Self {
         Self { sender }
     }
 
@@ -127,18 +127,18 @@ impl<E: Spawner> Oracle<E> {
     /// * `index` - Index of the set of authorized peers (like a blockchain height).
     ///   Should be monotonically increasing.
     /// * `peers` - Vector of authorized peers at an `index` (does not need to be sorted).
-    pub async fn register(&mut self, index: u64, peers: Vec<PublicKey>) {
+    pub async fn register(&mut self, index: u64, peers: Vec<P>) {
         let _ = self.sender.send(Message::Register { index, peers }).await;
     }
 }
 
-pub struct Reservation<E: Spawner> {
+pub struct Reservation<E: Spawner, P: PublicKey> {
     runtime: E,
-    closer: Option<(PublicKey, Mailbox<E>)>,
+    closer: Option<(P, Mailbox<E, P>)>,
 }
 
-impl<E: Spawner> Reservation<E> {
-    pub fn new(runtime: E, peer: PublicKey, mailbox: Mailbox<E>) -> Self {
+impl<E: Spawner, P: PublicKey> Reservation<E, P> {
+    pub fn new(runtime: E, peer: P, mailbox: Mailbox<E, P>) -> Self {
         Self {
             runtime,
             closer: Some((peer, mailbox)),
@@ -146,7 +146,7 @@ impl<E: Spawner> Reservation<E> {
     }
 }
 
-impl<E: Spawner> Drop for Reservation<E> {
+impl<E: Spawner, P: PublicKey> Drop for Reservation<E, P> {
     fn drop(&mut self) {
         let (peer, mut mailbox) = self.closer.take().unwrap();
         self.runtime.spawn("reservation", async move {

@@ -304,17 +304,14 @@ fn main() {
                 DEFAULT_MESSAGE_BACKLOG,
                 COMPRESSION_LEVEL,
             );
-            let arbiter = handlers::Arbiter::new(
+            let arbiter: handlers::Arbiter<_, Ed25519> = handlers::Arbiter::new(
                 runtime.clone(),
                 DKG_FREQUENCY,
                 DKG_PHASE_TIMEOUT,
                 contributors,
                 threshold,
             );
-            runtime.spawn(
-                "arbiter",
-                arbiter.run::<Ed25519>(arbiter_sender, arbiter_receiver),
-            );
+            runtime.spawn("arbiter", arbiter.run(arbiter_sender, arbiter_receiver));
         }
         network.run().await;
     });

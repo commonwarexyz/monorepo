@@ -6,6 +6,7 @@ use crate::authenticated::{
     actors::{peer, router, tracker},
     metrics,
 };
+use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Sink, Spawner, Stream};
 use commonware_utils::hex;
 use futures::{channel::mpsc, StreamExt};
@@ -15,7 +16,7 @@ use rand::{CryptoRng, Rng};
 use std::time::Duration;
 use tracing::{debug, info};
 
-pub struct Actor<E: Spawner + Clock, Si: Sink, St: Stream> {
+pub struct Actor<E: Spawner + Clock, Si: Sink, St: Stream, P: PublicKey> {
     runtime: E,
 
     mailbox_size: usize,
@@ -23,17 +24,21 @@ pub struct Actor<E: Spawner + Clock, Si: Sink, St: Stream> {
     allowed_bit_vec_rate: Quota,
     allowed_peers_rate: Quota,
 
-    receiver: mpsc::Receiver<Message<E, Si, St>>,
+    receiver: mpsc::Receiver<Message<E, Si, St, P>>,
 
     sent_messages: Family<metrics::Message, Counter>,
     received_messages: Family<metrics::Message, Counter>,
     rate_limited: Family<metrics::Message, Counter>,
 }
 
-impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng, Si: Sink, St: Stream>
-    Actor<E, Si, St>
+impl<
+        E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng,
+        Si: Sink,
+        St: Stream,
+        P: PublicKey,
+    > Actor<E, Si, St, P>
 {
-    pub fn new(runtime: E, cfg: Config) -> (Self, Mailbox<E, Si, St>) {
+    pub fn new(runtime: E, cfg: Config) -> (Self, Mailbox<E, Si, St, P>) {
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();
         let rate_limited = Family::<metrics::Message, Counter>::default();
@@ -69,7 +74,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng, Si: Sink, St: St
         )
     }
 
-    pub async fn run(mut self, tracker: tracker::Mailbox<E>, router: router::Mailbox) {
+    pub async fn run(mut self, tracker: tracker::Mailbox<E, P>, router: router::Mailbox<P>) {
         while let Some(msg) = self.receiver.next().await {
             match msg {
                 Message::Spawn {
@@ -105,10 +110,10 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng, Si: Sink, St: St
                             );
 
                             // Register peer with the router
-                            let channels = router.ready(peer.clone(), messenger).await;
+                            let channels = router.ready(peer, messenger).await;
 
                             // Run peer
-                            let e = actor.run(peer.clone(), connection, tracker, channels).await;
+                            let e = actor.run(peer, connection, tracker, channels).await;
 
                             // Let the router know the peer has exited
                             info!(error = ?e, peer=hex(&peer), "peer shutdown");

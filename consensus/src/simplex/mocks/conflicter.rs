@@ -26,7 +26,7 @@ pub struct Conflicter<
     E: Clock + Rng + CryptoRng + Spawner,
     C: Scheme,
     H: Hasher,
-    S: Supervisor<Index = View>,
+    S: Supervisor<Index = View, PublicKey = C::PublicKey>,
 > {
     runtime: E,
     crypto: C,
@@ -37,8 +37,12 @@ pub struct Conflicter<
     finalize_namespace: Vec<u8>,
 }
 
-impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
-    Conflicter<E, C, H, S>
+impl<
+        E: Clock + Rng + CryptoRng + Spawner,
+        C: Scheme,
+        H: Hasher,
+        S: Supervisor<Index = View, PublicKey = C::PublicKey>,
+    > Conflicter<E, C, H, S>
 {
     pub fn new(runtime: E, cfg: Config<C, S>) -> Self {
         Self {
@@ -103,7 +107,10 @@ impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher, S: Supervisor<I
                         proposal: Some(proposal),
                         signature: Some(wire::Signature {
                             public_key: public_key_index,
-                            signature: self.crypto.sign(Some(&self.notarize_namespace), &msg),
+                            signature: self
+                                .crypto
+                                .sign(Some(&self.notarize_namespace), &msg)
+                                .into(),
                         }),
                     };
                     let msg = wire::Voter {
@@ -126,7 +133,10 @@ impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher, S: Supervisor<I
                         }),
                         signature: Some(wire::Signature {
                             public_key: public_key_index,
-                            signature: self.crypto.sign(Some(&self.notarize_namespace), &msg),
+                            signature: self
+                                .crypto
+                                .sign(Some(&self.notarize_namespace), &msg)
+                                .into(),
                         }),
                     };
                     let msg = wire::Voter {
@@ -164,7 +174,10 @@ impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher, S: Supervisor<I
                         proposal: Some(proposal),
                         signature: Some(wire::Signature {
                             public_key: public_key_index,
-                            signature: self.crypto.sign(Some(&self.finalize_namespace), &msg),
+                            signature: self
+                                .crypto
+                                .sign(Some(&self.finalize_namespace), &msg)
+                                .into(),
                         }),
                     };
                     let msg = wire::Voter {
@@ -187,7 +200,10 @@ impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher, S: Supervisor<I
                         }),
                         signature: Some(wire::Signature {
                             public_key: public_key_index,
-                            signature: self.crypto.sign(Some(&self.finalize_namespace), &msg),
+                            signature: self
+                                .crypto
+                                .sign(Some(&self.finalize_namespace), &msg)
+                                .into(),
                         }),
                     };
                     let msg = wire::Voter {

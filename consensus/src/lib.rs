@@ -117,16 +117,17 @@ cfg_if::cfg_if! {
         pub trait Supervisor: Clone + Send + 'static {
             /// Index is the type used to indicate the in-progress consensus decision.
             type Index;
+            type PublicKey: PublicKey;
 
             /// Return the leader at a given index for the provided seed.
-            fn leader(&self, index: Self::Index) -> Option<PublicKey>;
+            fn leader(&self, index: Self::Index) -> Option<Self::PublicKey>;
 
             /// Get the **sorted** participants for the given view. This is called when entering a new view before
             /// listening for proposals or votes. If nothing is returned, the view will not be entered.
-            fn participants(&self, index: Self::Index) -> Option<&Vec<PublicKey>>;
+            fn participants(&self, index: Self::Index) -> Option<&Vec<Self::PublicKey>>;
 
             // Indicate whether some candidate is a participant at the given view.
-            fn is_participant(&self, index: Self::Index, candidate: &PublicKey) -> Option<u32>;
+            fn is_participant(&self, index: Self::Index, candidate: &Self::PublicKey) -> Option<u32>;
 
             /// Report some activity observed by the consensus implementation.
             fn report(&self, activity: Activity, proof: Proof) -> impl Future<Output = ()> + Send;
@@ -149,8 +150,9 @@ cfg_if::cfg_if! {
             /// against `Identity`.
             type Share;
 
+
             /// Return the leader at a given index over the provided seed.
-            fn leader(&self, index: Self::Index, seed: Self::Seed) -> Option<PublicKey>;
+            fn leader(&self, index: Self::Index, seed: Self::Seed) -> Option<Self::PublicKey>;
 
             /// Returns the identity (typically a group polynomial with a fixed constant factor)
             /// at the given index. This is used to verify partial signatures from participants

@@ -20,11 +20,15 @@
 //! ```
 
 use super::primitives::{
-    group::{self, Element, Scalar},
+    group::{self, Element, Scalar, G1},
     ops,
 };
-use crate::{PrivateKey, PublicKey, Scheme, Signature};
+use crate::{
+    Error, PrivateKey as CPrivateKey, PublicKey as CPublicKey, Scheme, Signature as CSignature,
+};
+use bytes::Bytes;
 use rand::{CryptoRng, Rng};
+use std::ops::Deref;
 
 /// BLS12-381 implementation of the `Scheme` trait.
 ///
@@ -39,6 +43,10 @@ pub struct Bls12381 {
 }
 
 impl Scheme for Bls12381 {
+    type PrivateKey = PrivateKey;
+    type PublicKey = PublicKey;
+    type Signature = Signature;
+
     fn new<R: CryptoRng + Rng>(r: &mut R) -> Self {
         let (private, public) = ops::keypair(r);
         Self { private, public }
@@ -56,21 +64,21 @@ impl Scheme for Bls12381 {
     }
 
     fn private_key(&self) -> PrivateKey {
-        self.private.serialize().into()
+        PrivateKey::from(&self.private)
     }
 
     fn public_key(&self) -> PublicKey {
-        self.public.serialize().into()
+        PublicKey::from(&self.public)
     }
 
     fn sign(&mut self, namespace: Option<&[u8]>, message: &[u8]) -> Signature {
         let signature = ops::sign_message(&self.private, namespace, message);
-        signature.serialize().into()
+        Signature::from(&signature)
     }
 
-    fn validate(public_key: &PublicKey) -> bool {
-        group::Public::deserialize(public_key.as_ref()).is_some()
-    }
+    //fn validate(public_key: &PublicKey) -> bool {
+    //    group::Public::deserialize(public_key.as_ref()).is_some()
+    //}
 
     fn verify(
         namespace: Option<&[u8]>,
@@ -94,11 +102,204 @@ impl Scheme for Bls12381 {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[repr(transparent)]
+pub struct PrivateKey([u8; group::PRIVATE_KEY_LENGTH]);
+
+impl CPrivateKey for PrivateKey {}
+
+impl AsRef<[u8]> for PrivateKey {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl Deref for PrivateKey {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl Default for PrivateKey {
+    fn default() -> Self {
+        Self([0u8; group::PRIVATE_KEY_LENGTH])
+    }
+}
+
+impl From<[u8; group::PRIVATE_KEY_LENGTH]> for PrivateKey {
+    fn from(value: [u8; group::PRIVATE_KEY_LENGTH]) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&Scalar> for PrivateKey {
+    fn from(value: &Scalar) -> Self {
+        let mut slice = [0u8; group::PRIVATE_KEY_LENGTH];
+        slice.copy_from_slice(value.serialize().as_ref());
+        Self(slice)
+    }
+}
+
+impl TryFrom<&[u8]> for PrivateKey {
+    type Error = Error;
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        if value.len() != group::PRIVATE_KEY_LENGTH {
+            return Err(Error::InvalidPrivateKeyLength);
+        }
+        let array: &[u8; group::PRIVATE_KEY_LENGTH] = value
+            .try_into()
+            .map_err(|_| Error::InvalidPrivateKeyLength)?;
+        Ok(Self(*array))
+    }
+}
+
+impl TryFrom<&Vec<u8>> for PrivateKey {
+    type Error = Error;
+    fn try_from(value: &Vec<u8>) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_slice())
+    }
+}
+
+impl TryFrom<Vec<u8>> for PrivateKey {
+    type Error = Error;
+    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_slice())
+    }
+}
+
+#[allow(clippy::from_over_into)]
+impl Into<Bytes> for PrivateKey {
+    fn into(self) -> Bytes {
+        Bytes::copy_from_slice(self.as_ref())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[repr(transparent)]
+pub struct PublicKey([u8; group::PUBLIC_KEY_LENGTH]);
+
+impl CPublicKey for PublicKey {}
+
+impl AsRef<[u8]> for PublicKey {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl Deref for PublicKey {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl From<&G1> for PublicKey {
+    fn from(value: &G1) -> Self {
+        let mut slice = [0u8; group::PUBLIC_KEY_LENGTH];
+        slice.copy_from_slice(value.serialize().as_ref());
+        Self(slice)
+    }
+}
+
+impl TryFrom<&[u8]> for PublicKey {
+    type Error = Error;
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        let array: [u8; group::PUBLIC_KEY_LENGTH] = value
+            .try_into()
+            .map_err(|_| Error::InvalidPublicKeyLength)?;
+        if group::Public::deserialize(value).is_none() {
+            return Err(Error::InvalidPublicKey);
+        }
+
+        Ok(Self(array))
+    }
+}
+
+impl TryFrom<&Vec<u8>> for PublicKey {
+    type Error = Error;
+    fn try_from(value: &Vec<u8>) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_slice())
+    }
+}
+
+impl TryFrom<Vec<u8>> for PublicKey {
+    type Error = Error;
+    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_slice())
+    }
+}
+
+#[allow(clippy::from_over_into)]
+impl Into<Bytes> for PublicKey {
+    fn into(self) -> Bytes {
+        Bytes::copy_from_slice(self.as_ref())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[repr(transparent)]
+pub struct Signature([u8; group::SIGNATURE_LENGTH]);
+
+impl CSignature for Signature {}
+
+impl AsRef<[u8]> for Signature {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl Deref for Signature {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl From<&group::G2> for Signature {
+    fn from(value: &group::G2) -> Self {
+        let mut slice = [0u8; group::SIGNATURE_LENGTH];
+        slice.copy_from_slice(value.serialize().as_ref());
+        Self(slice)
+    }
+}
+
+impl TryFrom<&[u8]> for Signature {
+    type Error = Error;
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        let array: [u8; group::SIGNATURE_LENGTH] = value
+            .try_into()
+            .map_err(|_| Error::InvalidSignatureLength)?;
+
+        Ok(Self(array))
+    }
+}
+
+impl TryFrom<&Vec<u8>> for Signature {
+    type Error = Error;
+    fn try_from(value: &Vec<u8>) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_slice())
+    }
+}
+
+impl TryFrom<Vec<u8>> for Signature {
+    type Error = Error;
+    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_slice())
+    }
+}
+
+#[allow(clippy::from_over_into)]
+impl Into<Bytes> for Signature {
+    fn into(self) -> Bytes {
+        Bytes::copy_from_slice(self.as_ref())
+    }
+}
+
 /// Test vectors sourced from https://github.com/ethereum/bls12-381-tests/releases/tag/v0.1.2.
 #[cfg(test)]
 mod tests {
-    use super::{Bls12381, Scheme};
-    use crate::{PrivateKey, PublicKey, Signature};
+    use super::*;
 
     #[test]
     fn test_sign() {
@@ -124,8 +325,7 @@ mod tests {
 
     #[test]
     fn test_sign_zero_private_key() {
-        let v = vector_sign_10();
-        let private_key = PrivateKey::from(v.0);
+        let (private_key, _, _) = vector_sign_10();
         let signer = <Bls12381 as Scheme>::from(private_key);
         assert!(signer.is_none())
     }
@@ -133,7 +333,6 @@ mod tests {
     #[test]
     fn test_verify() {
         let cases = [
-            vector_verify_1(),
             vector_verify_2(),
             vector_verify_3(),
             vector_verify_4(),
@@ -163,6 +362,9 @@ mod tests {
             vector_verify_28(),
             vector_verify_29(),
         ];
+
+        test_vector_verify_1();
+
         for (index, test) in cases.into_iter().enumerate() {
             let (public_key, message, signature, expected) = test;
             let success = Bls12381::verify(None, &message, &public_key, &signature);
@@ -177,14 +379,20 @@ mod tests {
         signature: &str,
     ) -> (PrivateKey, Vec<u8>, Signature) {
         (
-            commonware_utils::from_hex_formatted(private_key)
-                .unwrap()
-                .into(),
+            parse_private_key(private_key).unwrap(),
             commonware_utils::from_hex_formatted(msg).unwrap(),
-            commonware_utils::from_hex_formatted(signature)
-                .unwrap()
-                .into(),
+            parse_signature(signature).unwrap(),
         )
+    }
+
+    fn parse_private_key(private_key: &str) -> Result<PrivateKey, Error> {
+        PrivateKey::try_from(commonware_utils::from_hex_formatted(private_key).unwrap())
+    }
+    fn parse_public_key(public_key: &str) -> Result<PublicKey, Error> {
+        PublicKey::try_from(commonware_utils::from_hex_formatted(public_key).unwrap())
+    }
+    fn parse_signature(signature: &str) -> Result<Signature, Error> {
+        Signature::try_from(commonware_utils::from_hex_formatted(signature).unwrap())
     }
 
     // sign_case_8cd3d4d0d9a5b265
@@ -269,11 +477,16 @@ mod tests {
     }
 
     // sign_case_zero_privkey
-    fn vector_sign_10() -> (PrivateKey, Vec<u8>, Signature) {
-        parse_sign_vector(
-            "0x0000000000000000000000000000000000000000000000000000000000000000",
-            "0xabababababababababababababababababababababababababababababababab",
-            "",
+    fn vector_sign_10() -> (PrivateKey, Vec<u8>, String) {
+        (
+            parse_private_key("0x0000000000000000000000000000000000000000000000000000000000000000")
+                .unwrap(),
+            commonware_utils::from_hex_formatted(
+                "0xabababababababababababababababababababababababababababababababab",
+            )
+            .unwrap(),
+            // signature
+            "".to_string(),
         )
     }
 
@@ -284,24 +497,28 @@ mod tests {
         signature: &str,
     ) -> (PublicKey, Vec<u8>, Signature) {
         (
-            commonware_utils::from_hex_formatted(public_key)
-                .unwrap()
-                .into(),
+            parse_public_key(public_key).unwrap(),
             commonware_utils::from_hex_formatted(msg).unwrap(),
-            commonware_utils::from_hex_formatted(signature)
-                .unwrap()
-                .into(),
+            parse_signature(signature).unwrap(),
         )
     }
 
     // verify_infinity_pubkey_and_infinity_signature
-    fn vector_verify_1() -> (PublicKey, Vec<u8>, Signature, bool) {
-        let v = parse_verify_vector(
-            "0xc00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
-            "0x1212121212121212121212121212121212121212121212121212121212121212",
-            "0xc00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
-        );
-        (v.0, v.1, v.2, false)
+    fn vector_verify_1() -> (String, String, String) {
+        (
+"0xc00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".to_string(),
+
+        "0x1212121212121212121212121212121212121212121212121212121212121212".to_string(),
+"0xc00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".to_string(),
+        )
+    }
+
+    fn test_vector_verify_1() {
+        let (public_key, _, signature) = vector_verify_1();
+        let public_key = parse_public_key(&public_key);
+        assert_eq!(public_key.unwrap_err(), Error::InvalidPublicKey);
+        let signature = parse_signature(&signature);
+        assert!(signature.is_ok());
     }
 
     // verify_tampered_signature_case_2ea479adf8c40300

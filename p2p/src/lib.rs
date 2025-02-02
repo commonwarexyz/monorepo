@@ -19,36 +19,40 @@ pub mod utils;
 ///
 /// This message is guaranteed to adhere to the configuration of the channel and
 /// will already be decrypted and authenticated.
-pub type Message = (PublicKey, Bytes);
+pub type Message<Pk> = (Pk, Bytes);
 
 /// Alias for identifying communication channels.
 pub type Channel = u32;
 
 /// Enum indicating the set of recipients to send a message to.
 #[derive(Clone)]
-pub enum Recipients {
+pub enum Recipients<P: PublicKey> {
     All,
-    Some(Vec<PublicKey>),
-    One(PublicKey),
+    Some(Vec<P>),
+    One(P),
 }
 
 /// Interface for sending messages to a set of recipients.
 pub trait Sender: Clone + Debug + Send + 'static {
     type Error: Debug + StdError + Send;
+    type PublicKey: PublicKey;
 
     /// Send a message to a set of recipients.
     fn send(
         &mut self,
-        recipients: Recipients,
+        recipients: Recipients<Self::PublicKey>,
         message: Bytes,
         priority: bool,
-    ) -> impl Future<Output = Result<Vec<PublicKey>, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<Vec<Self::PublicKey>, Self::Error>> + Send;
 }
 
 /// Interface for receiving messages from arbitrary recipients.
 pub trait Receiver: Debug + Send + 'static {
     type Error: Debug + StdError + Send;
+    type PublicKey: PublicKey;
 
     /// Receive a message from an arbitrary recipient.
-    fn recv(&mut self) -> impl Future<Output = Result<Message, Self::Error>> + Send;
+    fn recv(
+        &mut self,
+    ) -> impl Future<Output = Result<Message<Self::PublicKey>, Self::Error>> + Send;
 }
