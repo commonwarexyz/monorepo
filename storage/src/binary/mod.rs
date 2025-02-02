@@ -76,10 +76,10 @@ impl<H: Hasher> Tree<H> {
         levels.push(leaves);
 
         // Build higher levels until we reach the root.
+        let default = H::Digest::default();
         while levels.last().unwrap().len() > 1 {
             let current_level = levels.last().unwrap();
             let mut next_level = Vec::with_capacity((current_level.len() + 1) / 2);
-            let default = H::Digest::default();
             for chunk in current_level.chunks(2) {
                 let left = &chunk[0];
                 let right = if chunk.len() == 2 {
