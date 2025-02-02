@@ -6,7 +6,7 @@ use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 const SAMPLE_SIZE: usize = 100;
 
 fn bench_prove_single_element(c: &mut Criterion) {
-    for n in [10_000, 100_000, 1_000_000, 5_000_000, 10_000_000] {
+    for n in [100, 1_000, 5_000, 10_000, 25_000, 50_000, 100_000] {
         // Populate Binary Merkle Tree
         let mut elements = Vec::with_capacity(n);
         let mut queries = Vec::with_capacity(n);

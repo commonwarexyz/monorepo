@@ -4,7 +4,7 @@ use criterion::{black_box, criterion_group, Criterion};
 use rand::{rngs::StdRng, SeedableRng};
 
 fn bench_new(c: &mut Criterion) {
-    for n in [10_000, 100_000, 1_000_000, 5_000_000, 10_000_000] {
+    for n in [100, 1_000, 5_000, 10_000, 25_000, 50_000, 100_000] {
         // Generate random elements
         let mut elements = Vec::with_capacity(n);
         let mut sampler = StdRng::seed_from_u64(0);
