@@ -68,9 +68,12 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
         namespace: &[u8],
     ) -> Option<(View, View, D, C::PublicKey)> {
         // Ensure proof is big enough
-        let (public_key_len, signature_len) = C::len();
         if proof.len()
-            != size_of::<u64>() + size_of::<u64>() + size_of::<D>() + public_key_len + signature_len
+            != size_of::<u64>()
+                + size_of::<u64>()
+                + size_of::<D>()
+                + size_of::<C::PublicKey>()
+                + size_of::<C::Signature>()
         {
             return None;
         }
@@ -80,8 +83,9 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
         let parent = proof.get_u64();
         let payload = D::read_from(&mut proof).ok()?;
         let public_key =
-            C::PublicKey::try_from(proof.copy_to_bytes(public_key_len).as_ref()).ok()?;
-        let signature = C::Signature::try_from(proof.copy_to_bytes(signature_len).as_ref()).ok()?;
+            C::PublicKey::try_from(proof.copy_to_bytes(size_of::<C::PublicKey>()).as_ref()).ok()?;
+        let signature =
+            C::Signature::try_from(proof.copy_to_bytes(size_of::<C::Signature>()).as_ref()).ok()?;
 
         // Verify signature
         let proposal_message = proposal_message(view, parent, &payload);
@@ -98,12 +102,11 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
         signatures: Vec<(&C::PublicKey, &C::Signature)>,
     ) -> Proof {
         // Setup proof
-        let (public_key_len, signature_len) = C::len();
         let len = size_of::<u64>()
             + size_of::<u64>()
             + proposal.payload.len()
             + size_of::<u32>()
-            + signatures.len() * (public_key_len + signature_len);
+            + signatures.len() * (size_of::<C::PublicKey>() + size_of::<C::Signature>());
 
         // Encode proof
         let mut proof = Vec::with_capacity(len);
@@ -144,8 +147,7 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
         let message = proposal_message(view, parent, &payload);
 
         // Check for integer overflow in size calculation
-        let (public_key_len, signature_len) = C::len();
-        let item_size = public_key_len.checked_add(signature_len)?;
+        let item_size = size_of::<C::PublicKey>().checked_add(size_of::<C::Signature>())?;
         let total_size = count.checked_mul(item_size)?;
         if proof.remaining() != total_size {
             return None;
@@ -156,7 +158,8 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
         for _ in 0..count {
             // Check if already saw public key
             let public_key =
-                C::PublicKey::try_from(proof.copy_to_bytes(public_key_len).as_ref()).ok()?;
+                C::PublicKey::try_from(proof.copy_to_bytes(size_of::<C::PublicKey>()).as_ref())
+                    .ok()?;
             if seen.contains(&public_key) {
                 return None;
             }
@@ -165,7 +168,8 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
             // Verify signature
             if check_sigs {
                 let signature =
-                    C::Signature::try_from(proof.copy_to_bytes(signature_len).as_ref()).ok()?;
+                    C::Signature::try_from(proof.copy_to_bytes(size_of::<C::Signature>()).as_ref())
+                        .ok()?;
                 if !C::verify(Some(namespace), &message, &public_key, &signature) {
                     return None;
                 }
@@ -224,15 +228,14 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
         signature_2: &C::Signature,
     ) -> Proof {
         // Setup proof
-        let (public_key_len, signature_len) = C::len();
         let len = size_of::<u64>()
-            + public_key_len
+            + size_of::<C::PublicKey>()
             + size_of::<u64>()
             + payload_1.len()
-            + signature_len
+            + size_of::<C::Signature>()
             + size_of::<u64>()
             + payload_2.len()
-            + signature_len;
+            + size_of::<C::Signature>();
 
         // Encode proof
         let mut proof = Vec::with_capacity(len);
@@ -254,15 +257,14 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
         namespace: &[u8],
     ) -> Option<(C::PublicKey, View)> {
         // Ensure proof is big enough
-        let (public_key_len, signature_len) = C::len();
         let len = size_of::<u64>()
-            + public_key_len
+            + size_of::<C::PublicKey>()
             + size_of::<u64>()
             + size_of::<D>()
-            + signature_len
+            + size_of::<C::Signature>()
             + size_of::<u64>()
             + size_of::<D>()
-            + signature_len;
+            + size_of::<C::Signature>();
         if proof.len() != len {
             return None;
         }
@@ -270,15 +272,15 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
         // Decode proof
         let view = proof.get_u64();
         let public_key =
-            C::PublicKey::try_from(proof.copy_to_bytes(public_key_len).as_ref()).ok()?;
+            C::PublicKey::try_from(proof.copy_to_bytes(size_of::<C::PublicKey>()).as_ref()).ok()?;
         let parent_1 = proof.get_u64();
         let payload_1 = D::read_from(&mut proof).ok()?;
         let signature_1 =
-            C::Signature::try_from(proof.copy_to_bytes(signature_len).as_ref()).ok()?;
+            C::Signature::try_from(proof.copy_to_bytes(size_of::<C::Signature>()).as_ref()).ok()?;
         let parent_2 = proof.get_u64();
         let payload_2 = D::read_from(&mut proof).ok()?;
         let signature_2 =
-            C::Signature::try_from(proof.copy_to_bytes(signature_len).as_ref()).ok()?;
+            C::Signature::try_from(proof.copy_to_bytes(size_of::<C::Signature>()).as_ref()).ok()?;
 
         // Verify signatures
         if check_sig {
@@ -377,13 +379,12 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
         signature_null: &C::Signature,
     ) -> Proof {
         // Setup proof
-        let (public_key_len, signature_len) = C::len();
         let len = size_of::<u64>()
-            + public_key_len
+            + size_of::<C::PublicKey>()
             + size_of::<u64>()
             + payload.len()
-            + signature_len
-            + signature_len;
+            + size_of::<C::Signature>()
+            + size_of::<C::Signature>();
 
         // Encode proof
         let mut proof = Vec::with_capacity(len);
@@ -403,13 +404,12 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
         check_sig: bool,
     ) -> Option<(C::PublicKey, View)> {
         // Ensure proof is big enough
-        let (public_key_len, signature_len) = C::len();
         let len = size_of::<u64>()
-            + public_key_len
+            + size_of::<C::PublicKey>()
             + size_of::<u64>()
             + size_of::<D>()
-            + signature_len
-            + signature_len;
+            + size_of::<C::Signature>()
+            + size_of::<C::Signature>();
         if proof.len() != len {
             return None;
         }
@@ -417,13 +417,13 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
         // Decode proof
         let view = proof.get_u64();
         let public_key =
-            C::PublicKey::try_from(proof.copy_to_bytes(public_key_len).as_ref()).ok()?;
+            C::PublicKey::try_from(proof.copy_to_bytes(size_of::<C::PublicKey>()).as_ref()).ok()?;
         let parent = proof.get_u64();
         let payload = D::read_from(&mut proof).ok()?;
         let signature_finalize =
-            C::Signature::try_from(proof.copy_to_bytes(signature_len).as_ref()).ok()?;
+            C::Signature::try_from(proof.copy_to_bytes(size_of::<C::Signature>()).as_ref()).ok()?;
         let signature_null =
-            C::Signature::try_from(proof.copy_to_bytes(signature_len).as_ref()).ok()?;
+            C::Signature::try_from(proof.copy_to_bytes(size_of::<C::Signature>()).as_ref()).ok()?;
 
         // Verify signatures
         if check_sig {

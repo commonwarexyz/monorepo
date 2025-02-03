@@ -76,10 +76,6 @@ impl Scheme for Bls12381 {
         Signature::from(&signature)
     }
 
-    //fn validate(public_key: &PublicKey) -> bool {
-    //    group::Public::deserialize(public_key.as_ref()).is_some()
-    //}
-
     fn verify(
         namespace: Option<&[u8]>,
         message: &[u8],
@@ -95,10 +91,6 @@ impl Scheme for Bls12381 {
             None => return false,
         };
         ops::verify_message(&public, namespace, message, &signature).is_ok()
-    }
-
-    fn len() -> (usize, usize) {
-        (group::G1_ELEMENT_BYTE_LENGTH, group::G2_ELEMENT_BYTE_LENGTH)
     }
 }
 

@@ -6,7 +6,8 @@ use commonware_cryptography::{
     bls12381::{
         dkg::{player::Output, Dealer, Player},
         primitives::{group, poly},
-    }, Scheme,
+    },
+    Scheme,
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
@@ -195,9 +196,7 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                 // Send to self
                 let share = shares[idx];
                 if idx == me_idx as usize {
-                    player_obj
-                        .share(me, commitment.clone(), share)
-                        .unwrap();
+                    player_obj.share(me, commitment.clone(), share).unwrap();
                     dealer.ack(me).unwrap();
                     let payload = payload(round, &me, serialized_commitment);
                     let signature = self.crypto.sign(Some(ACK_NAMESPACE), &payload);
@@ -210,7 +209,7 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                 if self.forger {
                     // If we are a forger, don't send any shares and instead create fake signatures.
                     let _ = dealer.ack(*player);
-                    let mut signature = vec![0u8; C::len().1];
+                    let mut signature = vec![0u8; size_of::<C::Signature>()];
                     self.runtime.fill_bytes(&mut signature);
                     let signature = C::Signature::try_from(&signature).unwrap();
                     acks.insert(idx as u32, signature);

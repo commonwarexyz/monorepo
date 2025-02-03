@@ -140,9 +140,6 @@ pub trait Scheme: Clone + Send + Sync + 'static {
         public_key: &Self::PublicKey,
         signature: &Self::Signature,
     ) -> bool;
-
-    /// Returns the size of a public key and signature in bytes.
-    fn len() -> (usize, usize);
 }
 
 /// Interface that commonware crates rely on for batched cryptographic operations.
@@ -425,7 +422,8 @@ mod tests {
 
     #[test]
     fn test_ed25519_len() {
-        assert_eq!(Ed25519::len(), (32, 64));
+        assert_eq!(size_of::<<Ed25519 as Scheme>::PublicKey>(), 32);
+        assert_eq!(size_of::<<Ed25519 as Scheme>::Signature>(), 64);
     }
 
     #[test]
@@ -475,7 +473,8 @@ mod tests {
 
     #[test]
     fn test_bls12381_len() {
-        assert_eq!(Bls12381::len(), (48, 96));
+        assert_eq!(size_of::<<Bls12381 as Scheme>::PublicKey>(), 48);
+        assert_eq!(size_of::<<Bls12381 as Scheme>::Signature>(), 96);
     }
 
     #[test]
@@ -525,7 +524,8 @@ mod tests {
 
     #[test]
     fn test_secp256r1_len() {
-        assert_eq!(Secp256r1::len(), (33, 64));
+        assert_eq!(size_of::<<Secp256r1 as Scheme>::PublicKey>(), 33);
+        assert_eq!(size_of::<<Secp256r1 as Scheme>::Signature>(), 64);
     }
 
     fn test_hasher_multiple_runs<H: Hasher>() {

@@ -102,10 +102,6 @@ impl Scheme for Secp256r1 {
         };
         verifier.verify(&payload, &signature).is_ok()
     }
-
-    fn len() -> (usize, usize) {
-        (PUBLIC_KEY_LENGTH, SIGNATURE_LENGTH)
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]

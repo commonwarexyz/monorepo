@@ -75,10 +75,6 @@ impl Scheme for Ed25519 {
             None => public_key.verify(&signature, message).is_ok(),
         }
     }
-
-    fn len() -> (usize, usize) {
-        (PUBLIC_KEY_LENGTH, SIGNATURE_LENGTH)
-    }
 }
 
 /// Ed25519 Batch Verifier.
