@@ -1,46 +1,47 @@
-use bytes::Bytes;
+use commonware_cryptography::Digest;
 use futures::{channel::mpsc, SinkExt, StreamExt};
 
 use crate::{
     linked::{signer, Context},
-    Application as A, Broadcaster, Digest,
+    Application as A, Broadcaster,
 };
 
-enum Message {
-    Broadcast(Bytes),
-    Verify(Context, Digest),
+enum Message<D: Digest> {
+    Broadcast(D),
+    Verify(Context, D),
 }
 
 #[derive(Clone)]
-pub struct Mailbox {
-    sender: mpsc::Sender<Message>,
+pub struct Mailbox<D: Digest> {
+    sender: mpsc::Sender<Message<D>>,
 }
 
-impl Mailbox {
-    pub async fn broadcast(&mut self, payload: Bytes) {
+impl<D: Digest> Mailbox<D> {
+    pub async fn broadcast(&mut self, payload: D) {
         let _ = self.sender.send(Message::Broadcast(payload)).await;
     }
 }
 
-impl A for Mailbox {
+impl<D: Digest> A for Mailbox<D> {
     type Context = Context;
+    type Digest = D;
 
-    async fn verify(&mut self, context: Self::Context, payload: Digest) {
+    async fn verify(&mut self, context: Self::Context, payload: Self::Digest) {
         let _ = self.sender.send(Message::Verify(context, payload)).await;
     }
 }
 
-pub struct Application {
-    mailbox: mpsc::Receiver<Message>,
+pub struct Application<D: Digest> {
+    mailbox: mpsc::Receiver<Message<D>>,
 }
 
-impl Application {
-    pub fn new() -> (Self, Mailbox) {
+impl<D: Digest> Application<D> {
+    pub fn new() -> (Self, Mailbox<D>) {
         let (sender, receiver) = mpsc::channel(1024);
         (Application { mailbox: receiver }, Mailbox { sender })
     }
 
-    pub async fn run(&mut self, mut signer: signer::Mailbox) {
+    pub async fn run(&mut self, mut signer: signer::Mailbox<D>) {
         while let Some(msg) = self.mailbox.next().await {
             match msg {
                 Message::Broadcast(payload) => {

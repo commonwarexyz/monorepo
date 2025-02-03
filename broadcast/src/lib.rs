@@ -9,7 +9,6 @@ use thiserror::Error;
 
 pub mod linked;
 
-pub type Digest = Bytes;
 pub type Proof = Bytes;
 
 /// Errors that can occur when interacting with a stream.
@@ -95,6 +94,8 @@ pub enum Error {
     // Ignorable Message Errors
     #[error("Invalid ack epoch {0} outside bounds {1} - {2}")]
     AckEpochOutsideBounds(u64, u64, u64),
+    #[error("Invalid ack height {0} outside bounds {1} - {2}")]
+    AckHeightOutsideBounds(u64, u64, u64),
     #[error("Threshold already exists")]
     ThresholdAlreadyExists,
     #[error("Partial already exists")]
@@ -120,7 +121,7 @@ pub trait Broadcaster {
     fn verified(
         &mut self,
         context: Self::Context,
-        payload_digest: Digest,
+        payload_digest: Self::Digest,
     ) -> impl Future<Output = ()> + Send;
 }
 
@@ -130,6 +131,8 @@ pub trait Application: Send + 'static {
     /// This includes things like the sequencer, height, parent, etc.
     type Context;
 
+    type Digest;
+
     /// Verify and store (long-term storage) a proposed payload received from the network.
     ///
     /// If it is possible to verify the payload, a boolean should be returned indicating whether
@@ -137,24 +140,28 @@ pub trait Application: Send + 'static {
     fn verify(
         &mut self,
         context: Self::Context,
-        payload: Digest,
+        payload: Self::Digest,
     ) -> impl Future<Output = ()> + Send;
 }
 
 pub trait Collector: Send + 'static {
     type Context;
+    type Digest;
 
     /// Event that a payload has been successfully broadcasted to a threshold of signers in the network.
     fn acknowledged(
         &mut self,
         context: Self::Context,
-        payload: Digest,
+        payload: Self::Digest,
         proof: Proof,
     ) -> impl Future<Output = ()> + Send;
 }
 
 pub trait Coordinator: Clone + Send + Sync + 'static {
     type Index;
+
+    /// Return the current index of the coordinator.
+    fn index(&self) -> Self::Index;
 
     fn sequencers(&self, index: Self::Index) -> Option<&Vec<PublicKey>>;
     fn is_sequencer(&self, index: Self::Index, candidate: &PublicKey) -> Option<u32>;

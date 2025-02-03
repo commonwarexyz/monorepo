@@ -2,3 +2,4 @@
 *.DS_Store
 /target
 *.vscode
+.github/copilot-instructions.md

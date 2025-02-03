@@ -1,29 +1,29 @@
-use crate::{linked::Context, Collector as Z, Digest, Proof};
-use commonware_cryptography::PublicKey;
+use crate::{linked::Context, Collector as Z, Proof};
+use commonware_cryptography::{Digest, PublicKey};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
 };
 use std::collections::{BTreeMap, HashMap};
 
-enum Message {
-    Acknowledged(Context, Digest, Proof),
+enum Message<D: Digest> {
+    Acknowledged(Context, D, Proof),
     GetTip(PublicKey, oneshot::Sender<Option<u64>>),
-    Get(PublicKey, u64, oneshot::Sender<Option<Digest>>),
+    Get(PublicKey, u64, oneshot::Sender<Option<D>>),
 }
 
-pub struct Collector {
-    mailbox: mpsc::Receiver<Message>,
+pub struct Collector<D: Digest> {
+    mailbox: mpsc::Receiver<Message<D>>,
 
     // All known digests
-    map: HashMap<PublicKey, BTreeMap<u64, Digest>>,
+    map: HashMap<PublicKey, BTreeMap<u64, D>>,
 
     // Highest contiguous known height for each sequencer
     hi: HashMap<PublicKey, u64>,
 }
 
-impl Collector {
-    pub fn new() -> (Self, Mailbox) {
+impl<D: Digest> Collector<D> {
+    pub fn new() -> (Self, Mailbox<D>) {
         let (sender, receiver) = mpsc::channel(1024);
         (
             Collector {
@@ -75,13 +75,14 @@ impl Collector {
 }
 
 #[derive(Clone)]
-pub struct Mailbox {
-    sender: mpsc::Sender<Message>,
+pub struct Mailbox<D: Digest> {
+    sender: mpsc::Sender<Message<D>>,
 }
 
-impl Z for Mailbox {
+impl<D: Digest> Z for Mailbox<D> {
     type Context = Context;
-    async fn acknowledged(&mut self, context: Self::Context, payload: Digest, proof: Proof) {
+    type Digest = D;
+    async fn acknowledged(&mut self, context: Self::Context, payload: Self::Digest, proof: Proof) {
         self.sender
             .send(Message::Acknowledged(context, payload, proof))
             .await
@@ -89,7 +90,7 @@ impl Z for Mailbox {
     }
 }
 
-impl Mailbox {
+impl<D: Digest> Mailbox<D> {
     pub async fn get_tip(&mut self, sequencer: PublicKey) -> Option<u64> {
         let (sender, receiver) = oneshot::channel();
         self.sender
@@ -99,7 +100,7 @@ impl Mailbox {
         receiver.await.unwrap()
     }
 
-    pub async fn get(&mut self, sequencer: PublicKey, height: u64) -> Option<Digest> {
+    pub async fn get(&mut self, sequencer: PublicKey, height: u64) -> Option<D> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Message::Get(sequencer, height, sender))

@@ -1,6 +1,7 @@
 use commonware_cryptography::PublicKey;
 
 mod encoder;
+mod serializer;
 
 #[cfg(test)]
 pub mod mocks;
@@ -31,7 +32,10 @@ mod tests {
 
     use super::{mocks, signer};
     use bytes::Bytes;
-    use commonware_cryptography::{bls12381::dkg::ops, Ed25519, Hasher, PublicKey, Scheme, Sha256};
+    use commonware_cryptography::{
+        bls12381::dkg::ops, sha256::Digest as Sha256Digest, Ed25519, Hasher, PublicKey, Scheme,
+        Sha256,
+    };
     use commonware_macros::test_traced;
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{deterministic::Executor, Clock, Runner, Spawner};
@@ -157,16 +161,18 @@ mod tests {
                 link_validators(&mut oracle, &pks, Action::Link(link), None).await;
 
                 // Create collections
-                let (collector, collector_mailbox) = mocks::collector::Collector::new();
+                let (collector, collector_mailbox) =
+                    mocks::collector::Collector::<Sha256Digest>::new();
                 runtime.spawn("collector", collector.run());
 
                 // Create engines
                 let mut mailboxes = HashMap::new();
                 for (validator, scheme, share) in validators.iter() {
                     // Coordinator
-                    let coordinator =
+                    let mut coordinator =
                         mocks::coordinator::Coordinator::new(identity.clone(), pks.clone(), *share);
                     debug!("Share index: {}", share.index);
+                    coordinator.set_view(111);
 
                     // Application
                     let (mut app, app_mailbox) = mocks::application::Application::new();
@@ -182,9 +188,10 @@ mod tests {
                             collector: collector_mailbox.clone(),
                             coordinator,
                             mailbox_size: 1024,
-                            hasher: Sha256::default(),
                             namespace: b"test".to_vec(),
                             epoch_bounds: (1, 1),
+                            height_bound: 2,
+                            refresh_epoch_timeout: Duration::from_millis(100),
                             rebroadcast_timeout: Some(Duration::from_secs(5)),
                             journal_entries_per_section: 10,
                             journal_replay_concurrency: 1,
@@ -217,7 +224,7 @@ mod tests {
                                 ));
                                 hasher.update(&payload);
                                 let digest = hasher.finalize();
-                                mailbox.broadcast(digest.into()).await;
+                                mailbox.broadcast(digest).await;
                             }
                             runtime.sleep(Duration::from_millis(250)).await;
                         }

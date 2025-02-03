@@ -49,4 +49,11 @@ impl TipManager {
     pub fn get_chunk(&self, sequencer: &PublicKey) -> Option<wire::Chunk> {
         self.tips.get(sequencer).and_then(|link| link.chunk.clone())
     }
+
+    /// Returns the height of the tip for the given sequencer.
+    pub fn get_height(&self, sequencer: &PublicKey) -> Option<u64> {
+        self.tips
+            .get(sequencer)
+            .map(|link| link.chunk.as_ref().unwrap().height)
+    }
 }

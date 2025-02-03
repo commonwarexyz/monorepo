@@ -1,30 +1,31 @@
-use super::{encoder, wire, Context, Epoch};
-use crate::{Digest, Proof};
+use crate::Proof;
+
+use super::{encoder, serializer, wire, Context, Epoch};
 use bytes::{Buf, BufMut};
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{self, Element},
         ops,
     },
-    Hasher, Scheme,
+    Digest, Scheme,
 };
 use std::marker::PhantomData;
 
 #[derive(Clone)]
-pub struct Prover<C: Scheme, H: Hasher> {
+pub struct Prover<C: Scheme, D: Digest> {
     _crypto: PhantomData<C>,
-    _hasher: PhantomData<H>,
+    _digest: PhantomData<D>,
 
     public: group::Public,
     namespace: Vec<u8>,
 }
 
-impl<C: Scheme, H: Hasher> Prover<C, H> {
+impl<C: Scheme, D: Digest> Prover<C, D> {
     /// Create a new prover with the given signing `namespace`.
     pub fn new(public: group::Public, namespace: &[u8]) -> Self {
         Self {
             _crypto: PhantomData,
-            _hasher: PhantomData,
+            _digest: PhantomData,
             public,
             namespace: encoder::ack_namespace(namespace),
         }
@@ -35,7 +36,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
     /// - the public key
     /// - the signature
     fn get_len() -> (usize, (usize, usize, usize)) {
-        let len_digest = size_of::<H::Digest>();
+        let len_digest = size_of::<D>();
         let (len_public_key, len_signature) = C::len();
 
         let mut len = 0;
@@ -50,11 +51,11 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
 
     pub fn serialize_threshold(
         context: &Context,
-        payload_digest: &Digest,
+        payload_digest: &D,
         epoch: Epoch,
         threshold: &group::Signature,
     ) -> Proof {
-        let (len, _) = Prover::<C, H>::get_len();
+        let (len, _) = Prover::<C, D>::get_len();
         let mut proof = Vec::with_capacity(len);
 
         // Encode proof
@@ -69,8 +70,8 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
     pub fn deserialize_threshold(
         &self,
         mut proof: Proof,
-    ) -> Option<(Context, Digest, group::Signature)> {
-        let (len, (digest_len, public_key_len, signature_len)) = Prover::<C, H>::get_len();
+    ) -> Option<(Context, D, group::Signature)> {
+        let (len, (digest_len, public_key_len, signature_len)) = Prover::<C, D>::get_len();
 
         // Ensure proof is the right size
         if proof.len() != len {
@@ -85,17 +86,22 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         let threshold = proof.copy_to_bytes(signature_len);
         let threshold = group::Signature::deserialize(&threshold)?;
 
+        // Ensure digest is valid
+        let Ok(digest) = D::read_from(&mut payload_digest.clone()) else {
+            return None;
+        };
+
         // Verify signature
         let chunk = wire::Chunk {
             sequencer: sequencer.clone(),
             height,
-            payload_digest: payload_digest.clone(),
+            payload_digest,
         };
-        let msg = encoder::serialize(&chunk, Some(epoch));
+        let msg = serializer::ack(&chunk, epoch);
         if ops::verify_message(&self.public, Some(&self.namespace), &msg, &threshold).is_err() {
             return None;
         }
 
-        Some((Context { sequencer, height }, payload_digest, threshold))
+        Some((Context { sequencer, height }, digest, threshold))
     }
 }
