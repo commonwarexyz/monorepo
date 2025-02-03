@@ -7,7 +7,7 @@ use super::{
 };
 use crate::Proof;
 use bytes::{Buf, BufMut};
-use commonware_cryptography::{Digest, PublicKey, Scheme, Signature};
+use commonware_cryptography::{Digest, Scheme};
 use std::{collections::HashSet, marker::PhantomData};
 
 /// Encode and decode proofs of activity.
@@ -85,10 +85,8 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
 
         // Verify signature
         let proposal_message = proposal_message(view, parent, &payload);
-        if check_sig {
-            if !C::verify(Some(namespace), &proposal_message, &public_key, &signature) {
-                return None;
-            }
+        if check_sig && !C::verify(Some(namespace), &proposal_message, &public_key, &signature) {
+            return None;
         }
 
         Some((view, parent, payload, public_key))
@@ -162,7 +160,7 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
             if seen.contains(&public_key) {
                 return None;
             }
-            seen.insert(public_key.clone());
+            seen.insert(public_key);
 
             // Verify signature
             if check_sigs {

@@ -15,7 +15,7 @@ impl<P: PublicKey> Supervisor<P> {
         participants.sort();
         let mut participants_map = HashMap::new();
         for (index, validator) in participants.iter().enumerate() {
-            participants_map.insert(validator.clone(), index as u32);
+            participants_map.insert(*validator, index as u32);
         }
 
         // Return supervisor
@@ -31,7 +31,7 @@ impl<P: PublicKey> Su for Supervisor<P> {
     type PublicKey = P;
 
     fn leader(&self, index: Self::Index) -> Option<Self::PublicKey> {
-        Some(self.participants[index as usize % self.participants.len()].clone())
+        Some(self.participants[index as usize % self.participants.len()])
     }
 
     fn participants(&self, _: Self::Index) -> Option<&Vec<Self::PublicKey>> {

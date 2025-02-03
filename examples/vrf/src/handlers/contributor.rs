@@ -6,8 +6,7 @@ use commonware_cryptography::{
     bls12381::{
         dkg::{player::Output, Dealer, Player},
         primitives::{group, poly},
-    },
-    PublicKey, Scheme,
+    }, Scheme,
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
@@ -53,7 +52,7 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
         let contributors_ordered: HashMap<C::PublicKey, u32> = contributors
             .iter()
             .enumerate()
-            .map(|(idx, pk)| (pk.clone(), idx as u32))
+            .map(|(idx, pk)| (*pk, idx as u32))
             .collect();
         let (sender, receiver) = mpsc::channel(32);
         (
@@ -182,7 +181,7 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
 
         // Create player
         let mut player_obj = Player::new(
-            me.clone(),
+            me,
             public.clone(),
             self.contributors.clone(),
             self.contributors.clone(),
@@ -197,9 +196,9 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                 let share = shares[idx];
                 if idx == me_idx as usize {
                     player_obj
-                        .share(me.clone(), commitment.clone(), share)
+                        .share(me, commitment.clone(), share)
                         .unwrap();
-                    dealer.ack(me.clone()).unwrap();
+                    dealer.ack(me).unwrap();
                     let payload = payload(round, &me, serialized_commitment);
                     let signature = self.crypto.sign(Some(ACK_NAMESPACE), &payload);
                     acks.insert(me_idx, signature);
@@ -210,7 +209,7 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                 let mut serialized_share = shares[idx].serialize();
                 if self.forger {
                     // If we are a forger, don't send any shares and instead create fake signatures.
-                    let _ = dealer.ack(player.clone());
+                    let _ = dealer.ack(*player);
                     let mut signature = vec![0u8; C::len().1];
                     self.runtime.fill_bytes(&mut signature);
                     let signature = C::Signature::try_from(&signature).unwrap();
@@ -243,7 +242,7 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                 }
                 let success = sender
                     .send(
-                        Recipients::One(player.clone()),
+                        Recipients::One(*player),
                         wire::Dkg {
                             round,
                             payload: Some(wire::dkg::Payload::Share(wire::Share {
@@ -325,7 +324,7 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                                         }
 
                                         // Store ack
-                                        if let Err(e) = dealer.ack(s.clone()) {
+                                        if let Err(e) = dealer.ack(s) {
                                             warn!(round, error = ?e, sender = hex(&s), "failed to record ack");
                                             continue;
                                         }
@@ -352,7 +351,7 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                                         };
 
                                         // Store share
-                                        if let Err(e) = player_obj.share(s.clone(), commitment, share){
+                                        if let Err(e) = player_obj.share(s, commitment, share){
                                             warn!(round, error = ?e, "failed to store share");
                                             continue;
                                         }
@@ -417,7 +416,7 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
             );
             sender
                 .send(
-                    Recipients::One(self.arbiter.clone()),
+                    Recipients::One(self.arbiter),
                     wire::Dkg {
                         round,
                         payload: Some(wire::dkg::Payload::Commitment(wire::Commitment {

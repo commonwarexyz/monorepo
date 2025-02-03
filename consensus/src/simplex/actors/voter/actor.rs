@@ -15,7 +15,7 @@ use crate::{
     Automaton, Committer, Parsed, Relay, Supervisor,
 };
 use commonware_cryptography::{
-    sha256::hash, sha256::Digest as Sha256Digest, Digest, PublicKey, Scheme,
+    sha256::hash, sha256::Digest as Sha256Digest, Digest, Scheme,
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
@@ -1100,7 +1100,7 @@ impl<
         info!(view, "entered view");
 
         // Check if we should fast exit this view
-        let leader = round.leader.clone();
+        let leader = round.leader;
         if view < self.activity_timeout || leader == self.crypto.public_key() {
             // Don't fast exit the view
             return;
@@ -2101,13 +2101,12 @@ impl<
                         let proposal = notarize.proposal.as_ref().unwrap().clone();
                         let payload = D::try_from(&proposal.payload).unwrap();
                         let public_key = notarize.signature.as_ref().unwrap().public_key;
-                        let public_key = self
+                        let public_key = *self
                             .supervisor
                             .participants(proposal.view)
                             .unwrap()
                             .get(public_key as usize)
-                            .unwrap()
-                            .clone();
+                            .unwrap();
                         self.handle_notarize(
                             &public_key,
                             Parsed {
@@ -2139,13 +2138,12 @@ impl<
                         // Handle nullify
                         let view = nullify.view;
                         let public_key = nullify.signature.as_ref().unwrap().public_key;
-                        let public_key = self
+                        let public_key = *self
                             .supervisor
                             .participants(view)
                             .unwrap()
                             .get(public_key as usize)
-                            .unwrap()
-                            .clone();
+                            .unwrap();
                         self.handle_nullify(&public_key, nullify).await;
 
                         // Update round info
@@ -2161,13 +2159,12 @@ impl<
                         let view = proposal.view;
                         let payload = D::try_from(&proposal.payload).unwrap();
                         let public_key = finalize.signature.as_ref().unwrap().public_key;
-                        let public_key = self
+                        let public_key = *self
                             .supervisor
                             .participants(view)
                             .unwrap()
                             .get(public_key as usize)
-                            .unwrap()
-                            .clone();
+                            .unwrap();
                         self.handle_finalize(
                             &public_key,
                             Parsed {

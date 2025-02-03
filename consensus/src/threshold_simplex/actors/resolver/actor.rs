@@ -278,7 +278,7 @@ impl<
 
                 // Try to send
                 if sender
-                    .send(Recipients::One(recipient.clone()), encoded, false)
+                    .send(Recipients::One(recipient), encoded, false)
                     .await
                     .unwrap()
                     .is_empty()
@@ -459,7 +459,7 @@ impl<
                             // Ensure too many notarizations/nullifications aren't requested
                             if request.notarizations.len() + request.nullifications.len() > self.max_fetch_count {
                                 warn!(sender = hex(&s), "request too large");
-                                self.requester.block(s.clone());
+                                self.requester.block(s);
                                 continue;
                             }
 
@@ -507,7 +507,7 @@ impl<
                             .encode_to_vec()
                             .into();
                             sender
-                                .send(Recipients::One(s.clone()), response, false)
+                                .send(Recipients::One(s), response, false)
                                 .await
                                 .unwrap();
                         },
@@ -538,14 +538,14 @@ impl<
                                     Some(proposal) => proposal,
                                     None => {
                                         warn!(sender = hex(&s), "missing proposal");
-                                        self.requester.block(s.clone());
+                                        self.requester.block(s);
                                         continue;
                                     },
                                 };
                                 let view = proposal.view;
                                 let Ok(payload) = D::try_from(&proposal.payload) else {
                                     warn!(view, sender = hex(&s), "invalid proposal");
-                                    self.requester.block(s.clone());
+                                    self.requester.block(s);
                                     continue;
                                 };
                                 let entry = Entry { task: Task::Notarization, view };
@@ -555,7 +555,7 @@ impl<
                                 }
                                 if !verify_notarization::<D, S>(&self.supervisor, &self.notarize_namespace, &self.seed_namespace, &notarization) {
                                     warn!(view, sender = hex(&s), "invalid notarization");
-                                    self.requester.block(s.clone());
+                                    self.requester.block(s);
                                     continue;
                                 }
                                 self.required.remove(&entry);
@@ -577,7 +577,7 @@ impl<
                                 }
                                 if !verify_nullification::<S>(&self.supervisor, &self.nullify_namespace, &self.seed_namespace, &nullification) {
                                     warn!(view, sender = hex(&s), "invalid nullification");
-                                    self.requester.block(s.clone());
+                                    self.requester.block(s);
                                     continue;
                                 }
                                 self.required.remove(&entry);

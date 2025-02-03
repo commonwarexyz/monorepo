@@ -174,7 +174,7 @@ pub struct Application<E: Clock + RngCore, H: Hasher, P: PublicKey> {
 impl<E: Clock + RngCore, H: Hasher, P: PublicKey> Application<E, H, P> {
     pub fn new(runtime: E, cfg: Config<H, P>) -> (Self, Mailbox<H::Digest>) {
         // Register self on relay
-        let broadcast = cfg.relay.register(cfg.participant.clone());
+        let broadcast = cfg.relay.register(cfg.participant);
 
         // Generate samplers
         let propose_latency = Normal::new(cfg.propose_latency.0, cfg.propose_latency.1).unwrap();
@@ -298,7 +298,7 @@ impl<E: Clock + RngCore, H: Hasher, P: PublicKey> Application<E, H, P> {
         let _ = self
             .tracker
             .send((
-                self.participant.clone(),
+                self.participant,
                 Progress::Notarized(proof, payload),
             ))
             .await;
@@ -311,7 +311,7 @@ impl<E: Clock + RngCore, H: Hasher, P: PublicKey> Application<E, H, P> {
         let _ = self
             .tracker
             .send((
-                self.participant.clone(),
+                self.participant,
                 Progress::Finalized(proof, payload),
             ))
             .await;

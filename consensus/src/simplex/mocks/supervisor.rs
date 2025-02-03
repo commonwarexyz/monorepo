@@ -16,8 +16,8 @@ pub struct Config<C: Scheme, D: Digest> {
     pub participants: BTreeMap<View, Vec<C::PublicKey>>,
 }
 
-type Participation<D, P: PublicKey> = HashMap<View, HashMap<D, HashSet<P>>>;
-type Faults<P: PublicKey> = HashMap<P, HashMap<View, HashSet<Activity>>>;
+type Participation<D, P> = HashMap<View, HashMap<D, HashSet<P>>>;
+type Faults<P> = HashMap<P, HashMap<View, HashSet<Activity>>>;
 
 #[derive(Clone)]
 pub struct Supervisor<C: Scheme, D: Digest> {
@@ -36,7 +36,7 @@ impl<C: Scheme, D: Digest> Supervisor<C, D> {
         for (view, mut validators) in cfg.participants.into_iter() {
             let mut map = HashMap::new();
             for (index, validator) in validators.iter().enumerate() {
-                map.insert(validator.clone(), index as u32);
+                map.insert(*validator, index as u32);
             }
             validators.sort();
             parsed_participants.insert(view, (map, validators));
@@ -62,7 +62,7 @@ impl<C: Scheme, D: Digest> Su for Supervisor<C, D> {
                 panic!("no participants in required range");
             }
         };
-        Some(closest.1[index as usize % closest.1.len()].clone())
+        Some(closest.1[index as usize % closest.1.len()])
     }
 
     fn participants(&self, index: Self::Index) -> Option<&Vec<Self::PublicKey>> {

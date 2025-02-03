@@ -22,7 +22,7 @@ use commonware_cryptography::{
     },
     hash,
     sha256::Digest as Sha256Digest,
-    Digest, PublicKey, Scheme,
+    Digest, Scheme,
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
@@ -355,7 +355,7 @@ impl<
         }
         let entry = self.finalizes.entry(proposal_digest).or_default();
         let signature = &finalize.message.proposal_signature;
-        let proof = Prover::<D>::serialize_proposal(proposal, &signature);
+        let proof = Prover::<D>::serialize_proposal(proposal, signature);
         entry.insert(public_key_index, finalize);
         self.supervisor.report(FINALIZE, proof).await;
         true
@@ -1328,7 +1328,7 @@ impl<
         }
 
         // Check if we should fast exit this view
-        let leader = round.leader.as_ref().unwrap().clone();
+        let leader = *round.leader.as_ref().unwrap();
         if view < self.activity_timeout || leader == self.crypto.public_key() {
             // Don't fast exit the view
             return;
@@ -2203,13 +2203,12 @@ impl<
                         let signature: Eval<group::Signature> =
                             Eval::deserialize(&notarize.proposal_signature).unwrap();
                         let public_key_index = signature.index;
-                        let public_key = self
+                        let public_key = *self
                             .supervisor
                             .participants(proposal.view)
                             .unwrap()
                             .get(public_key_index as usize)
-                            .unwrap()
-                            .clone();
+                            .unwrap();
                         self.handle_notarize(
                             public_key_index,
                             Parsed {
@@ -2256,13 +2255,12 @@ impl<
                         let signature: Eval<group::Signature> =
                             Eval::deserialize(&nullify.view_signature).unwrap();
                         let public_key_index = signature.index;
-                        let public_key = self
+                        let public_key = *self
                             .supervisor
                             .participants(view)
                             .unwrap()
                             .get(public_key_index as usize)
-                            .unwrap()
-                            .clone();
+                            .unwrap();
                         self.handle_nullify(public_key_index, nullify).await;
 
                         // Update round info
@@ -2288,13 +2286,12 @@ impl<
                         let signature: Eval<group::Signature> =
                             Eval::deserialize(&finalize.proposal_signature).unwrap();
                         let public_key_index = signature.index;
-                        let public_key = self
+                        let public_key = *self
                             .supervisor
                             .participants(proposal.view)
                             .unwrap()
                             .get(public_key_index as usize)
-                            .unwrap()
-                            .clone();
+                            .unwrap();
                         self.handle_finalize(
                             public_key_index,
                             Parsed {

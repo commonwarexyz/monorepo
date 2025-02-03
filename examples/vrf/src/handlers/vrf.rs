@@ -45,7 +45,7 @@ impl<E: Clock, P: PublicKey> Vrf<E, P> {
         let ordered_contributors = contributors
             .iter()
             .enumerate()
-            .map(|(i, pk)| (pk.clone(), i as u32))
+            .map(|(i, pk)| (*pk, i as u32))
             .collect();
         Self {
             runtime,

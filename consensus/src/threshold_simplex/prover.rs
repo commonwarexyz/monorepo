@@ -16,7 +16,7 @@ use commonware_cryptography::{
         ops,
         poly::{self, Eval},
     },
-    Digest, Ed25519, Scheme,
+    Digest, Scheme,
 };
 
 type Callback = Box<dyn Fn(&poly::Poly<group::Public>) -> Option<u32>>;

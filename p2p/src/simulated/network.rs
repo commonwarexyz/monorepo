@@ -176,7 +176,7 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock, P: PublicKey> 
                         self.get_next_socket(),
                         self.max_size,
                     );
-                    self.peers.insert(public_key.clone(), peer);
+                    self.peers.insert(public_key, peer);
                 }
 
                 // Create a receiver that allows receiving messages from the network for a certain channel
@@ -303,10 +303,10 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock, P: PublicKey> 
             // Send message
             self.runtime.spawn("messenger", {
                 let runtime = self.runtime.clone();
-                let recipient = recipient.clone();
+                let recipient = recipient;
                 let message = message.clone();
                 let mut acquired_sender = acquired_sender.clone();
-                let origin = origin.clone();
+                let origin = origin;
                 let received_messages = self.received_messages.clone();
                 async move {
                     // Mark as sent as soon as soon as execution starts
@@ -469,7 +469,7 @@ impl<P: PublicKey> crate::Sender for Sender<P> {
         let (sender, receiver) = oneshot::channel();
         let mut channel = if priority { &self.high } else { &self.low };
         channel
-            .send((self.channel, self.me.clone(), recipients, message, sender))
+            .send((self.channel, self.me, recipients, message, sender))
             .await
             .map_err(|_| Error::NetworkClosed)?;
         receiver.await.map_err(|_| Error::NetworkClosed)
@@ -615,7 +615,7 @@ impl<P: PublicKey> Peer<P> {
                                 );
                                 let message = data.slice(SIZE_OF_CHANNEL..);
                                 if let Err(err) = inbox_sender
-                                    .send((channel, (dialer.clone(), message)))
+                                    .send((channel, (dialer, message)))
                                     .await
                                 {
                                     error!(?err, "failed to send message to mailbox");

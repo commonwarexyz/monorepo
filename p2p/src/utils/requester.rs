@@ -156,10 +156,10 @@ impl<E: Clock + GClock + Rng, C: Scheme> Requester<E, C> {
 
             // Record request issuance time
             let now = self.runtime.current();
-            self.requests.insert(id, (participant.clone(), now));
+            self.requests.insert(id, (*participant, now));
             let deadline = now.checked_add(self.timeout).expect("time overflowed");
             self.deadlines.put(id, deadline);
-            return Some((participant.clone(), id));
+            return Some((*participant, id));
         }
         None
     }
@@ -170,7 +170,7 @@ impl<E: Clock + GClock + Rng, C: Scheme> Requester<E, C> {
             return;
         };
         let next = past.saturating_add(elapsed.as_millis()) / 2;
-        self.participants.put(participant.clone(), next);
+        self.participants.put(participant, next);
     }
 
     /// Drop an outstanding request regardless of who it was intended for.

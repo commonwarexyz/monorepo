@@ -3,7 +3,7 @@
 //! participants are active at a given view.
 
 use commonware_consensus::simplex::Prover;
-use commonware_cryptography::{Hasher, PublicKey, Scheme};
+use commonware_cryptography::{Hasher, Scheme};
 
 mod actor;
 pub use actor::Application;
