@@ -745,7 +745,7 @@ mod tests {
             assert!(matches!(msg, peer::Message::Kill));
 
             // Find sorted indices
-            let mut peers = vec![peer0.public_key(), peer1, peer2.clone(), peer3.clone()];
+            let mut peers = vec![peer0.public_key(), peer1, peer2, peer3];
             peers.sort();
             let me_idx = peers
                 .iter()
@@ -807,7 +807,7 @@ mod tests {
             }
 
             // Register new peers
-            oracle.register(1, vec![peer2.clone(), peer3.clone()]).await;
+            oracle.register(1, vec![peer2, peer3]).await;
 
             // Request bit vector until both indexes returned
             let mut index_0_returned = false;
@@ -842,7 +842,7 @@ mod tests {
             }
 
             // Register some peers
-            oracle.register(2, vec![peer2.clone()]).await;
+            oracle.register(2, vec![peer2]).await;
 
             // Ensure peer1 has been evicted from the peer tracker and should die
             mailbox.construct(peer1, peer_mailbox.clone()).await;
@@ -853,7 +853,7 @@ mod tests {
             let mut index_1_returned = false;
             let mut index_2_returned = false;
             while !index_1_returned || !index_2_returned {
-                mailbox.construct(peer2.clone(), peer_mailbox.clone()).await; // peer1 no longer allowed
+                mailbox.construct(peer2, peer_mailbox.clone()).await; // peer1 no longer allowed
                 let msg = peer_receiver.next().await.unwrap();
                 let bit_vec = match msg {
                     peer::Message::BitVec { bit_vec } => bit_vec,

@@ -303,10 +303,8 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock, P: PublicKey> 
             // Send message
             self.runtime.spawn("messenger", {
                 let runtime = self.runtime.clone();
-                let recipient = recipient;
                 let message = message.clone();
                 let mut acquired_sender = acquired_sender.clone();
-                let origin = origin;
                 let received_messages = self.received_messages.clone();
                 async move {
                     // Mark as sent as soon as soon as execution starts
@@ -614,9 +612,8 @@ impl<P: PublicKey> Peer<P> {
                                     data[..SIZE_OF_CHANNEL].try_into().unwrap(),
                                 );
                                 let message = data.slice(SIZE_OF_CHANNEL..);
-                                if let Err(err) = inbox_sender
-                                    .send((channel, (dialer, message)))
-                                    .await
+                                if let Err(err) =
+                                    inbox_sender.send((channel, (dialer, message))).await
                                 {
                                     error!(?err, "failed to send message to mailbox");
                                     break;
@@ -734,14 +731,14 @@ mod tests {
             let pk2 = Ed25519::from_seed(2).public_key();
 
             // Register
-            oracle.register(pk1.clone(), 0).await.unwrap();
-            oracle.register(pk1.clone(), 1).await.unwrap();
-            oracle.register(pk2.clone(), 0).await.unwrap();
-            oracle.register(pk2.clone(), 1).await.unwrap();
+            oracle.register(pk1, 0).await.unwrap();
+            oracle.register(pk1, 1).await.unwrap();
+            oracle.register(pk2, 0).await.unwrap();
+            oracle.register(pk2, 1).await.unwrap();
 
             // Expect error when registering again
             assert!(matches!(
-                oracle.register(pk1.clone(), 1).await,
+                oracle.register(pk1, 1).await,
                 Err(Error::ChannelAlreadyRegistered(_))
             ));
 
@@ -751,14 +748,11 @@ mod tests {
                 jitter: 1.0,
                 success_rate: 0.9,
             };
-            oracle
-                .add_link(pk1.clone(), pk2.clone(), link.clone())
-                .await
-                .unwrap();
+            oracle.add_link(pk1, pk2, link.clone()).await.unwrap();
 
             // Expect error when adding link again
             assert!(matches!(
-                oracle.add_link(pk1.clone(), pk2.clone(), link).await,
+                oracle.add_link(pk1, pk2, link).await,
                 Err(Error::LinkExists)
             ));
         });

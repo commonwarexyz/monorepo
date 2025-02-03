@@ -275,7 +275,7 @@ mod tests {
 
             // Initialize requester
             let other = Ed25519::from_seed(1).public_key();
-            requester.reconcile(&[me.clone(), other.clone()]);
+            requester.reconcile(&[me, other]);
 
             // Get request
             let current = runtime.current();
@@ -380,7 +380,7 @@ mod tests {
             // Initialize requester
             let other1 = Ed25519::from_seed(1).public_key();
             let other2 = Ed25519::from_seed(2).public_key();
-            requester.reconcile(&[me.clone(), other1.clone(), other2.clone()]);
+            requester.reconcile(&[me, other1, other2]);
 
             // Get request
             let (participant, id) = requester.request(false).expect("failed to get participant");
@@ -423,7 +423,7 @@ mod tests {
 
             // Add another participant
             let other3 = Ed25519::from_seed(3).public_key();
-            requester.reconcile(&[me, other1.clone(), other2.clone(), other3.clone()]);
+            requester.reconcile(&[me, other1, other2, other3]);
 
             // Get request (new should be prioritized because lower default time)
             let (participant, id) = requester.request(false).expect("failed to get participant");

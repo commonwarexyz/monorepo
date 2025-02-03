@@ -254,7 +254,7 @@ mod tests {
             let mut bootstrappers = Vec::new();
             if i > 0 {
                 bootstrappers.push((
-                    addresses[0].clone(),
+                    addresses[0],
                     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port),
                 ));
             }
@@ -316,11 +316,7 @@ mod tests {
                                 // Loop until success
                                 loop {
                                     let sent = sender
-                                        .send(
-                                            Recipients::One(recipient.clone()),
-                                            msg.clone().into(),
-                                            true,
-                                        )
+                                        .send(Recipients::One(*recipient), msg.into(), true)
                                         .await
                                         .unwrap();
                                     if sent.len() != 1 {
@@ -341,11 +337,7 @@ mod tests {
                             // Loop until all peer sends successful
                             loop {
                                 let mut sent = sender
-                                    .send(
-                                        Recipients::Some(recipients.clone()),
-                                        msg.clone().into(),
-                                        true,
-                                    )
+                                    .send(Recipients::Some(recipients.clone()), msg.into(), true)
                                     .await
                                     .unwrap();
                                 if sent.len() != n - 1 {
@@ -368,7 +360,7 @@ mod tests {
                             // Loop until all peer sends successful
                             loop {
                                 let mut sent = sender
-                                    .send(Recipients::All, msg.clone().into(), true)
+                                    .send(Recipients::All, msg.into(), true)
                                     .await
                                     .unwrap();
                                 if sent.len() != n - 1 {
@@ -479,7 +471,7 @@ mod tests {
                 let mut bootstrappers = Vec::new();
                 if i > 0 {
                     bootstrappers.push((
-                        addresses[0].clone(),
+                        addresses[0],
                         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port),
                     ));
                 }
@@ -497,10 +489,8 @@ mod tests {
                 let (mut network, mut oracle) = Network::new(runtime.clone(), config);
 
                 // Register peers at separate indices
-                oracle.register(0, vec![addresses[0].clone()]).await;
-                oracle
-                    .register(1, vec![addresses[1].clone(), addresses[2].clone()])
-                    .await;
+                oracle.register(0, vec![addresses[0]]).await;
+                oracle.register(1, vec![addresses[1], addresses[2]]).await;
                 oracle
                     .register(2, addresses.iter().skip(2).cloned().collect())
                     .await;
@@ -525,7 +515,7 @@ mod tests {
                             let msg = signer.public_key();
                             loop {
                                 if sender
-                                    .send(Recipients::All, msg.clone().into(), true)
+                                    .send(Recipients::All, msg.into(), true)
                                     .await
                                     .unwrap()
                                     .len()
@@ -602,7 +592,7 @@ mod tests {
             runtime.fill(&mut msg[..]);
 
             // Send message
-            let recipient = Recipients::One(addresses[1].clone());
+            let recipient = Recipients::One(addresses[1]);
             let result = sender.send(recipient, msg.into(), true).await;
             assert!(matches!(result, Err(Error::MessageTooLarge(_))));
         });
