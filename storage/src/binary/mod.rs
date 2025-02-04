@@ -39,39 +39,6 @@ use bytes::{Buf, BufMut};
 use commonware_cryptography::{Digest, Hasher};
 use std::mem::size_of;
 
-fn combine_root<H: Hasher>(
-    hasher: &mut H,
-    leaves: u32,
-    left: &H::Digest,
-    right: &H::Digest,
-) -> H::Digest {
-    hasher.update(&leaves.to_be_bytes());
-    hasher.update(left);
-    hasher.update(right);
-    hasher.finalize()
-}
-
-/// Combines two digests into a new digest.
-fn combine_branches<H: Hasher>(hasher: &mut H, left: &H::Digest, right: &H::Digest) -> H::Digest {
-    hasher.update(left);
-    hasher.update(right);
-    hasher.finalize()
-}
-
-fn combine_leaves<H: Hasher>(
-    hasher: &mut H,
-    left: &H::Digest,
-    left_pos: u32,
-    right: &H::Digest,
-    right_pos: u32,
-) -> H::Digest {
-    hasher.update(&left_pos.to_be_bytes());
-    hasher.update(left);
-    hasher.update(&right_pos.to_be_bytes());
-    hasher.update(right);
-    hasher.finalize()
-}
-
 /// A stateless Binary Merkle Tree that computes a root over an arbitrary set
 /// of [commonware_cryptography::Digest].
 #[derive(Clone, Debug)]
@@ -117,16 +84,25 @@ impl<H: Hasher> Tree<H> {
                     &chunk[0]
                 };
 
-                // Combine the children into a parent node based on their location in the tree.
+                // If first level, combine leaves with positional data.
                 if levels.len() == 1 {
-                    next_level.push(combine_leaves(hasher, left, pos, right, pos + 1));
-                    pos += 2;
-                } else if next_level_len != 1 {
-                    next_level.push(combine_branches(hasher, left, right));
-                } else {
-                    // FIXME: if the tree has only two leaves, the leaves_len is never encoded in the root.
-                    next_level.push(combine_root(hasher, leaves_len, left, right));
+                    hasher.update(&pos.to_be_bytes());
+                    pos += 1;
+                    hasher.update(&pos.to_be_bytes());
+                    pos += 1;
                 }
+
+                // Combine the children into a parent node.
+                hasher.update(left);
+                hasher.update(right);
+
+                // If this will be the root, encode the number of leaves in the tree.
+                if next_level_len == 1 {
+                    hasher.update(&leaves_len.to_be_bytes());
+                }
+
+                // Reset the hasher for the next iteration.
+                next_level.push(hasher.finalize());
             }
 
             // Add the next level to the tree
@@ -219,30 +195,32 @@ impl<H: Hasher> Proof<H> {
         // Compute the root hash by combining the element with each sibling hash in the proof.
         let mut computed = element.clone();
         let mut index = element_pos;
-        let proof_len = self.hashes.len();
+        let last = self.hashes.len() - 1;
         for (i, sibling) in self.hashes.iter().enumerate() {
+            // If first level, combine leaves with positional data.
             if i == 0 {
-                // First level: combine leaves with positional data.
-                if index % 2 == 0 {
-                    computed = combine_leaves(hasher, &computed, index, sibling, index + 1);
-                } else {
-                    computed = combine_leaves(hasher, sibling, index - 1, &computed, index);
-                }
-            } else if i == proof_len - 1 && proof_len > 1 {
-                // Final level: use combine_root.
-                if index % 2 == 0 {
-                    computed = combine_root(hasher, self.leaves, &computed, sibling);
-                } else {
-                    computed = combine_root(hasher, self.leaves, sibling, &computed);
-                }
-            } else {
-                // Intermediate levels: use combine_branches.
-                if index % 2 == 0 {
-                    computed = combine_branches(hasher, &computed, sibling);
-                } else {
-                    computed = combine_branches(hasher, sibling, &computed);
-                }
+                let mut start = if index % 2 == 0 { index } else { index - 1 };
+                hasher.update(&start.to_be_bytes());
+                start += 1;
+                hasher.update(&start.to_be_bytes());
             }
+
+            // Combine the children into a parent node.
+            if index % 2 == 0 {
+                hasher.update(&computed);
+                hasher.update(sibling);
+            } else {
+                hasher.update(sibling);
+                hasher.update(&computed);
+            }
+
+            // If this will be the root, encode the number of leaves in the tree.
+            if i == last {
+                hasher.update(&self.leaves.to_be_bytes());
+            }
+
+            // Compute the parent hash.
+            computed = hasher.finalize();
             index /= 2;
         }
         computed == *root_hash
@@ -409,6 +387,46 @@ mod tests {
             proof.leaves = 100;
             assert!(!proof.verify(&mut hasher, leaf, i as u32, &root));
         }
+    }
+
+    #[test]
+    fn test_tampered_proof_no_hashes() {
+        // Build tree
+        let txs = [b"tx1", b"tx2", b"tx3", b"tx4"];
+        let digests: Vec<Digest> = txs.iter().map(|tx| hash(*tx)).collect();
+        let leaf = digests[0].clone();
+        let mut hasher = Sha256::default();
+        let tree = Tree::new(&mut hasher, digests).unwrap();
+        let root = tree.root();
+
+        // Build proof
+        let mut proof = tree.prove(0).unwrap();
+
+        // Tamper with proof
+        proof.hashes = Vec::new();
+
+        // Fail verification with an empty proof.
+        assert!(!proof.verify(&mut hasher, &leaf, 0, &root));
+    }
+
+    #[test]
+    fn test_tampered_proof_no_leaves() {
+        // Build tree
+        let txs = [b"tx1", b"tx2", b"tx3", b"tx4"];
+        let digests: Vec<Digest> = txs.iter().map(|tx| hash(*tx)).collect();
+        let leaf = digests[0].clone();
+        let mut hasher = Sha256::default();
+        let tree = Tree::new(&mut hasher, digests).unwrap();
+        let root = tree.root();
+
+        // Build proof
+        let mut proof = tree.prove(0).unwrap();
+
+        // Tamper with proof
+        proof.leaves = 0;
+
+        // Fail verification with an empty proof.
+        assert!(!proof.verify(&mut hasher, &leaf, 0, &root));
     }
 
     #[test]
