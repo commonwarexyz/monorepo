@@ -19,7 +19,7 @@ _Primitives are designed for deployment in adversarial environments. If you find
 
 ## Examples
 
-_Examples may include insecure code (i.e. deriving keypairs from an integer arguments) to make them easier to run. Examples are not intended to be used directly in production._
+_Examples may include insecure code (i.e. deriving keypairs from integer arguments) to make them easier to run. Examples are not intended to be used directly in production._
 
 * [bridge](./examples/bridge/README.md): Send succinct consensus certificates between two networks.
 * [chat](./examples/chat/README.md): Send encrypted messages to a group of friends.
