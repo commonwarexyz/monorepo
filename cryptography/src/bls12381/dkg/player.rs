@@ -1,14 +1,16 @@
 //! Participants in a DKG/Resharing procedure that receive dealings from dealers
 //! and eventually maintain a share of a shared secret.
 
-use crate::bls12381::{
-    dkg::{ops, Error},
-    primitives::{
-        group::{self, Element, Share},
-        poly::{self, Eval},
+use crate::{
+    bls12381::{
+        dkg::{ops, Error},
+        primitives::{
+            group::{self, Element, Share},
+            poly::{self, Eval},
+        },
     },
+    Component,
 };
-use crate::PublicKey;
 use commonware_utils::quorum;
 use std::collections::{BTreeMap, HashMap};
 
@@ -25,7 +27,7 @@ pub struct Output {
 }
 
 /// Track commitments and dealings distributed by dealers.
-pub struct Player<P: PublicKey> {
+pub struct Player<P: Component> {
     me: u32,
     dealer_threshold: u32,
     player_threshold: u32,
@@ -37,7 +39,7 @@ pub struct Player<P: PublicKey> {
     dealings: HashMap<u32, (poly::Public, Share)>,
 }
 
-impl<P: PublicKey> Player<P> {
+impl<P: Component> Player<P> {
     /// Create a new player for a DKG/Resharing procedure.
     pub fn new(
         me: P,

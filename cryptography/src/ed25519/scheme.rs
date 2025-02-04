@@ -58,11 +58,8 @@ impl Scheme for Ed25519 {
         public_key: &Self::PublicKey,
         signature: &Self::Signature,
     ) -> bool {
-        let Ok(public_key) = VerificationKey::try_from(public_key.0) else {
-            return false;
-        };
-        let signature = ed25519_consensus::Signature::from(signature.0);
-
+        let public_key = public_key.verifying_key;
+        let signature = signature.signature;
         match namespace {
             Some(namespace) => {
                 let payload = union_unique(namespace, message);
@@ -95,8 +92,8 @@ impl BatchScheme for Ed25519Batch {
         public_key: &Self::PublicKey,
         signature: &Self::Signature,
     ) -> bool {
-        let public_key = VerificationKeyBytes::from(public_key.0);
-        let signature = ed25519_consensus::Signature::from(signature.0);
+        let public_key = public_key.parsed;
+        let signature = signature.signature;
         let payload = match namespace {
             Some(namespace) => Cow::Owned(union_unique(namespace, message)),
             None => Cow::Borrowed(message),
@@ -177,28 +174,22 @@ impl TryFrom<Vec<u8>> for PrivateKey {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct PublicKey {
-    parsed: [u8; PUBLIC_KEY_LENGTH],
-    verifying_key: VerificationKey,
+    raw: VerificationKeyBytes,
+    parsed: VerificationKey,
 }
 
 impl Component for PublicKey {}
 
 impl AsRef<[u8]> for PublicKey {
     fn as_ref(&self) -> &[u8] {
-        &self.0
+        self.raw.as_bytes()
     }
 }
 
 impl Deref for PublicKey {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl From<&VerificationKey> for PublicKey {
-    fn from(verifier: &VerificationKey) -> Self {
-        Self(verifier.to_bytes())
+        self.raw.as_bytes()
     }
 }
 
@@ -208,8 +199,14 @@ impl TryFrom<&[u8]> for PublicKey {
         if value.len() != PUBLIC_KEY_LENGTH {
             return Err(Error::InvalidPublicKeyLength);
         }
-        let verifier = VerificationKey::try_from(value).map_err(|_| Error::InvalidPublicKey)?;
-        Ok(Self::from(&verifier))
+        let verifier_bytes =
+            VerificationKeyBytes::try_from(value).map_err(|_| Error::InvalidPublicKey)?;
+        let verifier =
+            VerificationKey::try_from(verifier_bytes).map_err(|_| Error::InvalidPublicKey)?;
+        Ok(Self {
+            raw: verifier_bytes,
+            parsed: verifier,
+        })
     }
 }
 

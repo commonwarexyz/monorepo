@@ -6,7 +6,7 @@ use crate::{
         dkg::{ops, Error},
         primitives::{group::Share, poly},
     },
-    PublicKey,
+    Component,
 };
 use commonware_utils::quorum;
 use rand::RngCore;
@@ -24,14 +24,14 @@ pub struct Output {
 }
 
 /// Track acknowledgements from players.
-pub struct Dealer<P: PublicKey> {
+pub struct Dealer<P: Component> {
     threshold: u32,
     players: HashMap<P, u32>,
 
     acks: HashSet<u32>,
 }
 
-impl<P: PublicKey> Dealer<P> {
+impl<P: Component> Dealer<P> {
     /// Create a new dealer for a DKG/Resharing procedure.
     pub fn new<R: RngCore>(
         rng: &mut R,
