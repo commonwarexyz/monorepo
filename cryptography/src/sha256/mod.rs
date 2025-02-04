@@ -1,6 +1,6 @@
 //! SHA-256 implementation of the `Hasher` trait.
 
-use crate::{Digest as CDigest, Error, Hasher};
+use crate::{Component, Error, Hasher};
 use rand::{CryptoRng, Rng};
 use sha2::{Digest as _, Sha256 as ISha256};
 use std::ops::Deref;
@@ -63,11 +63,11 @@ impl Hasher for Sha256 {
 }
 
 /// Digest of a SHA-256 hashing operation.
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[repr(transparent)]
 pub struct Digest([u8; DIGEST_LENGTH]);
 
-impl CDigest for Digest {}
+impl Component for Digest {}
 
 impl From<[u8; DIGEST_LENGTH]> for Digest {
     fn from(value: [u8; DIGEST_LENGTH]) -> Self {
@@ -121,12 +121,6 @@ impl Deref for Digest {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
         &self.0
-    }
-}
-
-impl Default for Digest {
-    fn default() -> Self {
-        Self([0u8; DIGEST_LENGTH])
     }
 }
 
