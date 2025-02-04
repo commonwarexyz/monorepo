@@ -1,5 +1,5 @@
 use super::{Config, Error, Translator};
-use crate::journal::Journal;
+use crate::journal::variable::Journal;
 use bytes::{Buf, BufMut, Bytes};
 use commonware_runtime::{Blob, Storage};
 use futures::{pin_mut, StreamExt};
