@@ -8,6 +8,7 @@
 use bytes::Bytes;
 use commonware_cryptography::Digest;
 
+pub mod digest_payload;
 pub mod simplex;
 pub mod threshold_simplex;
 

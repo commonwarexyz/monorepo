@@ -3,6 +3,7 @@ fn main() -> Result<()> {
     // Proto compilation rules for `simplex` dialect
     let mut config = prost_build::Config::new();
     config.bytes(["Signature.public_key", "Signature.signature"]);
+    config.field_attribute("Proposal.payload", "#[prost(with = \"digest_payload\")]");
     config.compile_protos(&["src/simplex/wire.proto"], &["src/simplex/"])?;
 
     // Proto compilation rules for `threshold_simplex` dialect
