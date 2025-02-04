@@ -4,8 +4,6 @@ fn main() -> Result<()> {
     let mut config = prost_build::Config::new();
     config.bytes([
         "Chunk.sequencer",
-        "Chunk.payload_digest",
-        "Parent.payload_digest",
         "Parent.threshold",
         "Link.signature",
         "Ack.partial",

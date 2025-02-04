@@ -41,7 +41,7 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
         let mut len = 0;
         len += len_public_key; // context.sequencer
         len += size_of::<u64>(); // context.height
-        len += len_digest; // payload_digest
+        len += len_digest; // payload
         len += size_of::<u64>(); // epoch
         len += len_signature; // threshold
 
@@ -50,7 +50,7 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
 
     pub fn serialize_threshold(
         context: &Context,
-        payload_digest: &D,
+        payload: &D,
         epoch: Epoch,
         threshold: &group::Signature,
     ) -> Proof {
@@ -60,7 +60,7 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
         // Encode proof
         proof.extend_from_slice(&context.sequencer);
         proof.put_u64(context.height);
-        proof.extend_from_slice(payload_digest);
+        proof.extend_from_slice(payload);
         proof.put_u64(epoch);
         proof.extend_from_slice(&threshold.serialize());
         proof.into()
@@ -70,7 +70,7 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
         &self,
         mut proof: Proof,
     ) -> Option<(Context, D, group::Signature)> {
-        let (len, (digest_len, public_key_len, signature_len)) = Prover::<C, D>::get_len();
+        let (len, (_, public_key_len, signature_len)) = Prover::<C, D>::get_len();
 
         // Ensure proof is the right size
         if proof.len() != len {
@@ -80,27 +80,24 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
         // Decode proof
         let sequencer = proof.copy_to_bytes(public_key_len);
         let height = proof.get_u64();
-        let payload_digest = proof.copy_to_bytes(digest_len);
+        let Ok(payload) = D::read_from(&mut proof) else {
+            return None;
+        };
         let epoch = proof.get_u64();
         let threshold = proof.copy_to_bytes(signature_len);
         let threshold = group::Signature::deserialize(&threshold)?;
-
-        // Ensure digest is valid
-        let Ok(digest) = D::read_from(&mut payload_digest.clone()) else {
-            return None;
-        };
 
         // Verify signature
         let chunk = wire::Chunk {
             sequencer: sequencer.clone(),
             height,
-            payload_digest,
+            payload: payload.to_vec(),
         };
         let msg = serializer::ack(&chunk, epoch);
         if ops::verify_message(&self.public, Some(&self.namespace), &msg, &threshold).is_err() {
             return None;
         }
 
-        Some((Context { sequencer, height }, digest, threshold))
+        Some((Context { sequencer, height }, payload, threshold))
     }
 }

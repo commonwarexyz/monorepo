@@ -31,7 +31,7 @@ impl TipManager {
             }
             // New chunk cannot be the same height with a different payload
             if old_chunk.height == new_chunk.height {
-                assert!(old_chunk.payload_digest == new_chunk.payload_digest);
+                assert!(old_chunk.payload == new_chunk.payload);
                 return false;
             }
             return true;

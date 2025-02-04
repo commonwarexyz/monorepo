@@ -193,7 +193,7 @@ impl<
         self.journal_prepare(&self.crypto.public_key()).await;
         if let Err(e) = self.rebroadcast(&mut link_sender).await {
             // Rebroadcasting my return a non-critical error, so log the error and continue.
-            info!("Failed initial rebroadcast: {:?}", e);
+            info!(err=?e, "Failed initial rebroadcast");
         }
 
         loop {
@@ -232,7 +232,7 @@ impl<
                 _ = rebroadcast => {
                     debug!("Timeout: Rebroadcast");
                     if let Err(e) = self.rebroadcast(&mut link_sender).await {
-                        error!("Failed to rebroadcast: {:?}", e);
+                        error!(err=?e, "Failed to rebroadcast");
                         continue;
                     }
                 },
@@ -252,7 +252,7 @@ impl<
                     let parent_proof = match self.validate_link(&link, &sender) {
                         Ok(result) => result,
                         Err(e) => {
-                            error!("Failed to validate link: {:?}", e);
+                            error!(err=?e, "Failed to validate link");
                             continue;
                         }
                     };
@@ -284,12 +284,12 @@ impl<
                     let (chunk, epoch, partial) = match self.validate_ack(ack, &sender) {
                         Ok(result) => result,
                         Err(e) => {
-                            error!("Failed to validate ack: {:?}", e);
+                            error!(err=?e, "Failed to validate ack");
                             continue;
                         }
                     };
                     if let Err(e) = self.handle_ack(&chunk, epoch, &partial).await {
-                        error!("Failed to handle ack: {:?}", e);
+                        error!(err=?e, "Failed to handle ack");
                         continue;
                     }
                 },
@@ -304,7 +304,7 @@ impl<
                         }
                     };
                     match msg {
-                        Message::Broadcast{ payload_digest, result } => {
+                        Message::Broadcast{ payload, result } => {
                             debug!("Mailbox: Broadcast");
                             if self.coordinator.is_sequencer(self.epoch, &self.crypto.public_key()).is_none() {
                                 error!("Not a sequencer in the current epoch");
@@ -312,15 +312,15 @@ impl<
                             }
 
                             // Broadcast the message
-                            if let Err(e) = self.broadcast_new(payload_digest, result, &mut link_sender).await {
-                                error!("Failed to broadcast new: {:?}", e);
+                            if let Err(e) = self.broadcast_new(payload, result, &mut link_sender).await {
+                                error!(err=?e, "Failed to broadcast new");
                                 continue;
                             }
                         }
-                        Message::Verified{ context, payload_digest } => {
+                        Message::Verified{ context, payload } => {
                             debug!("Mailbox: Verified");
-                            if let Err(e) = self.handle_app_verified(&context, &payload_digest, &mut ack_sender).await {
-                                error!("Failed to handle app-verified: {:?}", e);
+                            if let Err(e) = self.handle_app_verified(&context, &payload, &mut ack_sender).await {
+                                error!(err=?e, "Failed to handle app-verified");
                                 continue;
                             }
                         }
@@ -341,7 +341,7 @@ impl<
     async fn handle_app_verified(
         &mut self,
         context: &Context,
-        payload_digest: &D,
+        payload: &D,
         ack_sender: &mut impl Sender,
     ) -> Result<(), Error> {
         // Get the tip
@@ -355,8 +355,8 @@ impl<
         }
 
         // Return early if the payload digest does not match
-        let chunk_digest = D::read_from(&mut chunk.payload_digest.clone()).unwrap();
-        if chunk_digest != *payload_digest {
+        let chunk_digest = D::try_from(&chunk.payload).unwrap();
+        if chunk_digest != *payload {
             return Err(Error::AppVerifiedPayloadMismatch);
         }
 
@@ -436,7 +436,7 @@ impl<
             sequencer: chunk.sequencer.clone(),
             height: chunk.height,
         };
-        let digest = D::read_from(&mut chunk.payload_digest.clone()).unwrap();
+        let digest = D::try_from(&chunk.payload).unwrap();
         let proof = Prover::<C, D>::serialize_threshold(&context, &digest, epoch, &threshold);
         self.collector.acknowledged(context, digest, proof).await;
     }
@@ -458,7 +458,7 @@ impl<
         let quorum = identity.required();
 
         // Add the partial signature. If a new threshold is formed, handle it.
-        let digest = D::read_from(&mut chunk.payload_digest.clone()).unwrap();
+        let digest = D::try_from(&chunk.payload).unwrap();
         if let Some(threshold) = self.ack_manager.add_partial(
             &chunk.sequencer,
             chunk.height,
@@ -494,7 +494,7 @@ impl<
             sequencer: chunk.sequencer.clone(),
             height: chunk.height,
         };
-        let digest = D::read_from(&mut chunk.payload_digest.clone()).unwrap();
+        let digest = D::try_from(&chunk.payload).unwrap();
         self.application.verify(context, digest).await;
     }
 
@@ -508,7 +508,7 @@ impl<
     /// The broadcast is only successful if the parent Chunk and threshold signature are known.
     async fn broadcast_new(
         &mut self,
-        payload_digest: D,
+        payload: D,
         result: oneshot::Sender<bool>,
         link_sender: &mut impl Sender,
     ) -> Result<(), Error> {
@@ -528,7 +528,7 @@ impl<
             // Update height and parent
             height = chunk_tip.height + 1;
             parent = Some(wire::Parent {
-                payload_digest: chunk_tip.payload_digest,
+                payload: chunk_tip.payload,
                 threshold: threshold.serialize().into(),
                 epoch,
             });
@@ -538,7 +538,7 @@ impl<
         let chunk = wire::Chunk {
             sequencer: me.clone(),
             height,
-            payload_digest: payload_digest.to_vec().into(),
+            payload: payload.to_vec(),
         };
         let signature = self
             .crypto
@@ -558,7 +558,7 @@ impl<
 
         // Broadcast to network
         if let Err(e) = self.broadcast(&link, link_sender, self.epoch).await {
-            error!("Failed to broadcast link: {:?}", e);
+            error!(err=?e, "Failed to broadcast link");
             let _ = result.send(false);
             return Err(e);
         };
@@ -678,7 +678,7 @@ impl<
         let parent_chunk = wire::Chunk {
             sequencer: sender.clone(),
             height: chunk.height.checked_sub(1).unwrap(),
-            payload_digest: parent.payload_digest.clone(),
+            payload: parent.payload.clone(),
         };
         let Some(threshold) = group::Signature::deserialize(&parent.threshold) else {
             return Err(Error::UnableToDeserializeThresholdSignature);
@@ -794,7 +794,7 @@ impl<
                 }
                 std::cmp::Ordering::Equal => {
                     // Ensure this matches the tip if the height is the same
-                    if chunk_tip.payload_digest != chunk.payload_digest {
+                    if chunk_tip.payload != chunk.payload {
                         return Err(Error::ChunkMismatch(chunk.sequencer, chunk.height));
                     }
                 }
@@ -803,7 +803,7 @@ impl<
         }
 
         // Verify digest
-        if D::read_from(&mut chunk.payload_digest.clone()).is_err() {
+        if D::try_from(&chunk.payload).is_err() {
             return Err(Error::InvalidDigest);
         }
 
@@ -928,9 +928,7 @@ impl<
 
         // Ensure epoch is not before the current epoch
         let epoch = self.coordinator.index();
-        if epoch < self.epoch {
-            panic!("epoch must be greater than or equal to the current epoch");
-        }
+        assert!(epoch >= self.epoch);
 
         // Update the epoch
         self.epoch = epoch;

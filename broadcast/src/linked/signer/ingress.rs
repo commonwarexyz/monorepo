@@ -9,12 +9,12 @@ use std::marker::PhantomData;
 // If either of these requests fails, it will not send a reply.
 pub enum Message<D: Digest> {
     Broadcast {
-        payload_digest: D,
+        payload: D,
         result: oneshot::Sender<bool>,
     },
     Verified {
         context: Context,
-        payload_digest: D,
+        payload: D,
     },
 }
 
@@ -37,11 +37,11 @@ impl<D: Digest> Broadcaster for Mailbox<D> {
     type Context = Context;
     type Digest = D;
 
-    async fn broadcast(&mut self, payload_digest: Self::Digest) -> oneshot::Receiver<bool> {
+    async fn broadcast(&mut self, payload: Self::Digest) -> oneshot::Receiver<bool> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Message::Broadcast {
-                payload_digest,
+                payload,
                 result: sender,
             })
             .await
@@ -49,12 +49,9 @@ impl<D: Digest> Broadcaster for Mailbox<D> {
         receiver
     }
 
-    async fn verified(&mut self, context: Self::Context, payload_digest: Self::Digest) {
+    async fn verified(&mut self, context: Self::Context, payload: Self::Digest) {
         self.sender
-            .send(Message::Verified {
-                context,
-                payload_digest,
-            })
+            .send(Message::Verified { context, payload })
             .await
             .expect("Failed to send verified");
     }

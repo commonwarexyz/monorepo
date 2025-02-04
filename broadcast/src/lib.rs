@@ -24,7 +24,7 @@ pub trait Broadcaster {
     /// Returns a future that resolves to a boolean indicating success.
     fn broadcast(
         &mut self,
-        payload_digest: Self::Digest,
+        payload: Self::Digest,
     ) -> impl Future<Output = oneshot::Receiver<bool>> + Send;
 
     /// Receive notice that a payload is valid.
@@ -33,7 +33,7 @@ pub trait Broadcaster {
     fn verified(
         &mut self,
         context: Self::Context,
-        payload_digest: Self::Digest,
+        payload: Self::Digest,
     ) -> impl Future<Output = ()> + Send;
 }
 
@@ -53,7 +53,7 @@ pub trait Application: Send + 'static {
     fn verify(
         &mut self,
         context: Self::Context,
-        payload_digest: Self::Digest,
+        payload: Self::Digest,
     ) -> impl Future<Output = ()> + Send;
 }
 
@@ -72,7 +72,7 @@ pub trait Collector: Send + 'static {
     fn acknowledged(
         &mut self,
         context: Self::Context,
-        payload_digest: Self::Digest,
+        payload: Self::Digest,
         proof: Proof,
     ) -> impl Future<Output = ()> + Send;
 }

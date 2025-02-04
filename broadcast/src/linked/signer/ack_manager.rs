@@ -53,7 +53,7 @@ impl<D: Digest> AckManager<D> {
         sequencer: &PublicKey,
         height: u64,
         epoch: Epoch,
-        payload_digest: &D,
+        payload: &D,
         partial: &PartialSignature,
         quorum: u32,
     ) -> Option<group::Signature> {
@@ -75,7 +75,7 @@ impl<D: Digest> AckManager<D> {
                 }
 
                 // Add the partial
-                let partials = p.sigs.entry(payload_digest.clone()).or_default();
+                let partials = p.sigs.entry(payload.clone()).or_default();
                 partials.push(partial.clone());
 
                 // Return early if no quorum
@@ -84,7 +84,7 @@ impl<D: Digest> AckManager<D> {
                 }
 
                 // Take ownership of the partials, which must exist
-                let partials = p.sigs.remove(payload_digest).unwrap();
+                let partials = p.sigs.remove(payload).unwrap();
 
                 // Construct the threshold signature
                 let threshold = ops::threshold_signature_recover(quorum, partials).unwrap();
@@ -148,12 +148,11 @@ mod tests {
     use crate::linked::{encoder, serializer, wire};
 
     use super::*;
-    use bytes::Bytes;
     use commonware_cryptography::{bls12381::dkg::ops::generate_shares, sha256};
     use commonware_runtime::deterministic::Executor;
 
     #[test]
-    fn test_chunk_different_payload_digests() {
+    fn test_chunk_different_payloads() {
         // Can handle Acks for the same chunk height at different payload digests
     }
 
@@ -179,11 +178,11 @@ mod tests {
         let epoch = 99;
         let sequencer = PublicKey::from(&[1u8; 32][..]);
         let height = 42;
-        let payload_digest: Bytes = sha256::hash(&sequencer).to_vec().into();
+        let payload = sha256::hash(&sequencer).to_vec();
         let chunk = wire::Chunk {
             sequencer: sequencer.clone(),
             height,
-            payload_digest,
+            payload,
         };
 
         // Create partials

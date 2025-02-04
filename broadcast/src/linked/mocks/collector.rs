@@ -20,7 +20,7 @@ pub struct Collector<D: Digest> {
     mailbox: mpsc::Receiver<Message<D>>,
 
     // All known digests
-    map: HashMap<PublicKey, BTreeMap<u64, D>>,
+    digests: HashMap<PublicKey, BTreeMap<u64, D>>,
 
     // Highest contiguous known height for each sequencer
     contiguous: HashMap<PublicKey, u64>,
@@ -35,7 +35,7 @@ impl<D: Digest> Collector<D> {
         (
             Collector {
                 mailbox: receiver,
-                map: HashMap::new(),
+                digests: HashMap::new(),
                 contiguous: HashMap::new(),
                 highest: HashMap::new(),
             },
@@ -50,8 +50,8 @@ impl<D: Digest> Collector<D> {
                     // TODO: check proof
 
                     // Update the collector
-                    let map = self.map.entry(context.sequencer.clone()).or_default();
-                    map.insert(context.height, payload);
+                    let digests = self.digests.entry(context.sequencer.clone()).or_default();
+                    digests.insert(context.height, payload);
 
                     // Update the highest height
                     let highest = self.highest.get(&context.sequencer).copied().unwrap_or(0);
@@ -64,7 +64,7 @@ impl<D: Digest> Collector<D> {
                         || (highest.is_some() && context.height == highest.unwrap() + 1)
                     {
                         let mut contiguous = context.height;
-                        while map.contains_key(&(contiguous + 1)) {
+                        while digests.contains_key(&(contiguous + 1)) {
                             contiguous += 1;
                         }
                         self.contiguous.insert(context.sequencer, contiguous);
@@ -80,7 +80,7 @@ impl<D: Digest> Collector<D> {
                 }
                 Message::Get(sequencer, height, sender) => {
                     let digest = self
-                        .map
+                        .digests
                         .get(&sequencer)
                         .and_then(|map| map.get(&height))
                         .cloned();

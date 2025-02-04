@@ -1,3 +1,4 @@
+/// TODO: Add documentation
 use commonware_cryptography::PublicKey;
 
 mod encoder;
