@@ -70,6 +70,7 @@ impl<H: Hasher> Tree<H> {
 
         // Build higher levels until we reach the root.
         let mut pos = 0u32;
+        // FIXME: if there is only 1 item, we don't encode root with size
         while levels.last().unwrap().len() > 1 {
             let current_level = levels.last().unwrap();
             let next_level_len = (current_level.len() + 1) / 2;
@@ -257,6 +258,11 @@ impl<H: Hasher> Proof<H> {
             return None;
         }
         let leaves = buf.get_u32();
+
+        // If no leaves, nothing to prove
+        if leaves == 0 {
+            return None;
+        }
 
         // Read hashes
         if buf.remaining() % size_of::<H::Digest>() != 0 {
