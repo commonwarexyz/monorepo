@@ -90,11 +90,6 @@ impl<H: Hasher> Tree<H> {
     /// Builds a Merkle Tree from a slice of leaf digests.
     ///
     /// If `leaves` is empty, returns `None`.
-    ///
-    /// # Warning
-    ///
-    /// It is not safe to insert `H::Digest::default()` as a leaf. This could lead to
-    /// a proof being generated for a non-existent leaf.
     pub fn new(hasher: &mut H, leaves: Vec<H::Digest>) -> Option<Self> {
         // Ensure there are non-zero leaves.
         if leaves.is_empty() {
@@ -108,7 +103,6 @@ impl<H: Hasher> Tree<H> {
 
         // Build higher levels until we reach the root.
         let mut pos = 0u32;
-        let default = H::Digest::default();
         while levels.last().unwrap().len() > 1 {
             let current_level = levels.last().unwrap();
             let next_level_len = (current_level.len() + 1) / 2;
@@ -119,8 +113,7 @@ impl<H: Hasher> Tree<H> {
                 let right = if chunk.len() == 2 {
                     &chunk[1]
                 } else {
-                    // Use the default digest for the right child if no right child exists.
-                    &default
+                    &chunk[0]
                 };
 
                 // Combine the children into a parent node based on their location in the tree.
@@ -169,8 +162,8 @@ impl<H: Hasher> Tree<H> {
             let sibling = if sibling_index < level.len() {
                 level[sibling_index].clone()
             } else {
-                // Use the default digest for the right child if no right child exists.
-                H::Digest::default()
+                // Use a duplicate of the current node if no right child exists.
+                level[index as usize].clone()
             };
             proof_hashes.push(sibling);
             index /= 2;
