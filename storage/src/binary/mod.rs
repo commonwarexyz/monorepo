@@ -506,26 +506,4 @@ mod tests {
             "Verification should fail for an invalid duplicate leaf index"
         );
     }
-
-    #[test]
-    fn test_odd_tree_default_index_proof() {
-        // Build a tree with an odd number of leaves.
-        let txs = [b"tx1", b"tx2", b"tx3"];
-        let digests: Vec<Digest> = txs.iter().map(|tx| hash(*tx)).collect();
-        let mut hasher = Sha256::default();
-        let tree = Tree::new(&mut hasher, digests.clone()).unwrap();
-        let root = tree.root();
-
-        // The tree was built with 3 leaves; index 2 is the last valid index.
-        let mut proof = tree.prove(2).unwrap();
-
-        // Swap sibling with last valid item
-        proof.hashes[0] = digests[2].clone();
-
-        // Attempting to verify default sibling.
-        assert!(
-            !proof.verify(&mut hasher, &Digest::default(), 3, &root),
-            "Verification should fail for an invalid duplicate leaf index"
-        );
-    }
 }

@@ -124,12 +124,6 @@ impl Deref for Digest {
     }
 }
 
-impl Default for Digest {
-    fn default() -> Self {
-        Self([0u8; DIGEST_LENGTH])
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
