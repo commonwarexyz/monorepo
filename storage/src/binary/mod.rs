@@ -114,6 +114,7 @@ impl<H: Hasher> Tree<H> {
             let next_level_len = (current_level.len() + 1) / 2;
             let mut next_level = Vec::with_capacity(next_level_len);
             for chunk in current_level.chunks(2) {
+                // Select the left and right children of the current chunk.
                 let left = &chunk[0];
                 let right = if chunk.len() == 2 {
                     &chunk[1]
@@ -121,6 +122,8 @@ impl<H: Hasher> Tree<H> {
                     // Use the default digest for the right child if no right child exists.
                     &default
                 };
+
+                // Combine the children into a parent node based on their location in the tree.
                 if levels.len() == 1 {
                     next_level.push(combine_leaves(hasher, left, pos, right, pos + 1));
                     pos += 2;
