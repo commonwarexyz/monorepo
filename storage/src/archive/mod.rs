@@ -111,14 +111,15 @@
 //!
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, deterministic::Executor};
-//! use commonware_storage::{journal::{Journal, Config as JournalConfig}, archive::{Archive, Config, translator::FourCap}};
+//! use commonware_storage::archive::{Archive, Config, translator::FourCap};
+//! use commonware_storage::journal::{Error, variable::{Config as JConfig, Journal}};
 //! use prometheus_client::registry::Registry;
 //! use std::sync::{Arc, Mutex};
 //!
 //! let (executor, context, _) = Executor::default();
 //! executor.start(async move {
 //!     // Create a journal
-//!     let cfg = JournalConfig {
+//!     let cfg = JConfig {
 //!         registry: Arc::new(Mutex::new(Registry::default())),
 //!         partition: "partition".to_string()
 //!     };
@@ -228,7 +229,8 @@ pub struct Config<T: Translator> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::journal::{Config as JournalConfig, Error as JournalError, Journal};
+    use crate::journal::variable::{Config as JConfig, Journal};
+    use crate::journal::Error as JournalError;
     use bytes::Bytes;
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic::Executor, Blob, Runner, Storage};
@@ -252,7 +254,7 @@ mod tests {
             // Initialize an empty journal
             let journal = Journal::init(
                 context,
-                JournalConfig {
+                JConfig {
                     registry: registry.clone(),
                     partition: "test_partition".into(),
                 },
@@ -363,7 +365,7 @@ mod tests {
             // Initialize an empty journal
             let journal = Journal::init(
                 context.clone(),
-                JournalConfig {
+                JConfig {
                     registry: Arc::new(Mutex::new(Registry::default())),
                     partition: "test_partition".into(),
                 },
@@ -400,7 +402,7 @@ mod tests {
             // Initialize the archive again without compression
             let journal = Journal::init(
                 context,
-                JournalConfig {
+                JConfig {
                     registry: Arc::new(Mutex::new(Registry::default())),
                     partition: "test_partition".into(),
                 },
@@ -447,7 +449,7 @@ mod tests {
             // Initialize an empty journal
             let journal = Journal::init(
                 context,
-                JournalConfig {
+                JConfig {
                     registry: registry.clone(),
                     partition: "test_partition".into(),
                 },
@@ -502,7 +504,7 @@ mod tests {
             // Initialize an empty journal
             let journal = Journal::init(
                 context.clone(),
-                JournalConfig {
+                JConfig {
                     registry: Arc::new(Mutex::new(Registry::default())),
                     partition: "test_partition".into(),
                 },
@@ -550,7 +552,7 @@ mod tests {
             // Initialize the archive again
             let journal = Journal::init(
                 context,
-                JournalConfig {
+                JConfig {
                     registry: Arc::new(Mutex::new(Registry::default())),
                     partition: "test_partition".into(),
                 },
@@ -592,7 +594,7 @@ mod tests {
             // Initialize an empty journal
             let journal = Journal::init(
                 context,
-                JournalConfig {
+                JConfig {
                     registry: registry.clone(),
                     partition: "test_partition".into(),
                 },
@@ -663,7 +665,7 @@ mod tests {
             // Initialize an empty journal
             let journal = Journal::init(
                 context,
-                JournalConfig {
+                JConfig {
                     registry: registry.clone(),
                     partition: "test_partition".into(),
                 },
@@ -721,7 +723,7 @@ mod tests {
             // Initialize an empty journal
             let journal = Journal::init(
                 context,
-                JournalConfig {
+                JConfig {
                     registry: registry.clone(),
                     partition: "test_partition".into(),
                 },
@@ -798,7 +800,7 @@ mod tests {
             // Initialize an empty journal
             let journal = Journal::init(
                 context,
-                JournalConfig {
+                JConfig {
                     registry: registry.clone(),
                     partition: "test_partition".into(),
                 },
@@ -868,7 +870,7 @@ mod tests {
             // Initialize an empty journal
             let journal = Journal::init(
                 context.clone(),
-                JournalConfig {
+                JConfig {
                     registry: registry.clone(),
                     partition: "test_partition".into(),
                 },
@@ -971,7 +973,7 @@ mod tests {
             // Initialize an empty journal
             let journal = Journal::init(
                 context.clone(),
-                JournalConfig {
+                JConfig {
                     registry: registry.clone(),
                     partition: "test_partition".into(),
                 },
@@ -1040,7 +1042,7 @@ mod tests {
             let registry = Arc::new(Mutex::new(Registry::default()));
             let journal = Journal::init(
                 context.clone(),
-                JournalConfig {
+                JConfig {
                     registry: registry.clone(),
                     partition: "test_partition".into(),
                 },
@@ -1146,7 +1148,7 @@ mod tests {
             // Initialize an empty journal
             let journal = Journal::init(
                 context.clone(),
-                JournalConfig {
+                JConfig {
                     registry: registry.clone(),
                     partition: "test_partition".into(),
                 },
@@ -1212,7 +1214,7 @@ mod tests {
 
             let journal = Journal::init(
                 context,
-                JournalConfig {
+                JConfig {
                     registry: Arc::new(Mutex::new(Registry::default())),
                     partition: "test_partition".into(),
                 },
