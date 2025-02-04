@@ -7,7 +7,7 @@ use std::ops::Deref;
 
 const DIGEST_LENGTH: usize = 32;
 
-/// Generate a SHA-256 digest from a message.
+/// Generate an SHA-256 digest from a message.
 pub fn hash(message: &[u8]) -> Digest {
     let array: [u8; DIGEST_LENGTH] = ISha256::digest(message).into();
     Digest::from(array)
@@ -62,7 +62,7 @@ impl Hasher for Sha256 {
     }
 }
 
-/// Digest of a SHA-256 hashing operation.
+/// Digest of an SHA-256 hashing operation.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[repr(transparent)]
 pub struct Digest([u8; DIGEST_LENGTH]);
