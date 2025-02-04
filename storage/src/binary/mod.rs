@@ -124,6 +124,7 @@ impl<H: Hasher> Tree<H> {
                 } else if next_level_len != 1 {
                     next_level.push(combine_branches(hasher, left, right));
                 } else {
+                    // FIXME: if the tree has only two leaves, the leaves_len is never encoded in the root.
                     next_level.push(combine_root(hasher, leaves_len, left, right));
                 }
             }
