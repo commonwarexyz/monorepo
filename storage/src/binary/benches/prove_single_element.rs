@@ -14,7 +14,7 @@ fn bench_prove_single_element(c: &mut Criterion) {
         for pos in 0..n {
             let element = Sha256::random(&mut sampler);
             elements.push(element.clone());
-            queries.push((pos, element));
+            queries.push((pos as u32, element));
         }
         let mut hasher = Sha256::new();
         let tree = Tree::<Sha256>::new(&mut hasher, elements).unwrap();
@@ -36,7 +36,7 @@ fn bench_prove_single_element(c: &mut Criterion) {
                         let mut hasher = Sha256::new();
                         for (pos, element) in samples {
                             let proof = tree.prove(pos).unwrap();
-                            assert!(proof.verify(&mut hasher, &element, pos as u64, &root));
+                            assert!(proof.verify(&mut hasher, &element, pos, &root));
                         }
                     },
                     criterion::BatchSize::SmallInput,
