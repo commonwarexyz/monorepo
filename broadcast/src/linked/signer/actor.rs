@@ -31,7 +31,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 use thiserror::Error;
-use tracing::{debug, error};
+use tracing::{debug, error, info};
 
 pub struct Actor<
     B: Blob,
@@ -187,6 +187,15 @@ impl<
         let (mut ack_sender, mut ack_receiver) = ack_network;
         let mut shutdown = self.runtime.stopped();
 
+        // Before starting on the main runtime loop, initialize my own sequencer journal
+        // and attempt to rebroadcast if necessary.
+        self.refresh_epoch();
+        self.journal_prepare(&self.crypto.public_key()).await;
+        if let Err(e) = self.rebroadcast(&mut link_sender).await {
+            // Rebroadcasting my return a non-critical error, so log the error and continue.
+            info!("Failed initial rebroadcast: {:?}", e);
+        }
+
         loop {
             // Enter the epoch
             self.refresh_epoch();
@@ -301,9 +310,6 @@ impl<
                                 error!("Not a sequencer in the current epoch");
                                 continue;
                             }
-
-                            // Initialize my journal if it does not exist
-                            self.journal_prepare(&self.crypto.public_key()).await;
 
                             // Broadcast the message
                             if let Err(e) = self.broadcast_new(payload_digest, result, &mut link_sender).await {
@@ -512,10 +518,9 @@ impl<
         let mut height = 0;
         let mut parent = None;
         if let Some(chunk_tip) = self.tip_man.get_chunk(&me) {
-            // Get threshold, or, if it doesn't exist, attempt to rebroadcast the old tip
+            // Get threshold, or, if it doesn't exist, return an error
             let Some((epoch, threshold)) = self.ack_man.get_threshold(&me, chunk_tip.height) else {
                 let _ = result.send(false);
-                self.rebroadcast(link_sender).await?;
                 return Err(Error::NoThresholdForTip(chunk_tip.height));
             };
 
