@@ -25,7 +25,7 @@ pub struct Context {
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::HashMap,
+        collections::{HashMap, HashSet},
         sync::{Arc, Mutex},
         time::Duration,
     };
@@ -40,8 +40,8 @@ mod tests {
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{deterministic::Executor, Clock, Runner, Spawner};
     use commonware_utils::hex;
-    use futures::channel::oneshot;
     use prometheus_client::registry::Registry;
+    use rand::Rng;
     use tracing::debug;
 
     /// Registers all validators using the oracle.
@@ -113,7 +113,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_signer() {
+    fn test_all_online() {
         let num_validators = 4;
         let quorum = 3;
         let (executor, mut runtime, _) = Executor::timed(Duration::from_secs(30));
@@ -160,13 +160,9 @@ mod tests {
                 };
                 link_validators(&mut oracle, &pks, Action::Link(link), None).await;
 
-                // Create collections
-                let (collector, collector_mailbox) =
-                    mocks::collector::Collector::<Sha256Digest>::new();
-                runtime.spawn("collector", collector.run());
-
                 // Create engines
                 let mut mailboxes = HashMap::new();
+                let mut collectors = HashMap::new();
                 for (validator, scheme, share) in validators.iter() {
                     // Coordinator
                     let mut coordinator =
@@ -177,6 +173,12 @@ mod tests {
                     // Application
                     let (mut app, app_mailbox) = mocks::application::Application::new();
                     mailboxes.insert(validator.clone(), app_mailbox.clone());
+
+                    // Collector
+                    let (collector, collector_mailbox) =
+                        mocks::collector::Collector::<Sha256Digest>::new();
+                    runtime.spawn("collector", collector.run());
+                    collectors.insert(validator.clone(), collector_mailbox.clone());
 
                     // Signer
                     let hex_validator = hex(validator);
@@ -192,7 +194,7 @@ mod tests {
                             epoch_bounds: (1, 1),
                             height_bound: 2,
                             refresh_epoch_timeout: Duration::from_millis(100),
-                            rebroadcast_timeout: Some(Duration::from_secs(5)),
+                            rebroadcast_timeout: Duration::from_secs(5),
                             journal_entries_per_section: 10,
                             journal_replay_concurrency: 1,
                             journal_naming_fn: move |v| format!("seq/{}/{}", hex_validator, hex(v)),
@@ -231,31 +233,216 @@ mod tests {
                     }
                 });
 
-                // Wait for the acknowledged height of each sequencer to reach 100
-                let (collector_sender, collector_receiver) = oneshot::channel();
-                runtime.spawn("collector", {
-                    let mut collector = collector_mailbox.clone();
-                    let runtime = runtime.clone();
-                    async move {
-                        loop {
-                            let mut min_tip = u64::MAX;
-                            for (v, _, _) in validators.iter() {
-                                let tip = collector.get_tip(v.clone()).await.unwrap_or(0);
+                // For each node, wait for the acknowledged height of each sequencer to reach 100
+                // Put the validator in completed
+                let completed = Arc::new(Mutex::new(HashSet::new()));
+                for (validator, collector_mailbox) in collectors.iter() {
+                    runtime.spawn("collector", {
+                        let mut collector = collector_mailbox.clone();
+                        let runtime = runtime.clone();
+                        let completed = completed.clone();
+                        let validator = validator.clone();
+                        async move {
+                            loop {
+                                let tip = collector.get_tip(validator.clone()).await.unwrap_or(0);
                                 debug!("Collector: tip {}", tip);
-                                min_tip = min_tip.min(tip);
-                            }
-                            if min_tip >= 100 {
-                                collector_sender.send(()).unwrap();
-                                break;
-                            }
-                            debug!("Collector: min tip {}", min_tip);
-                            runtime.sleep(Duration::from_millis(100)).await;
-                        }
-                    }
-                });
 
-                collector_receiver.await.unwrap();
+                                // We are done!
+                                if tip >= 100 {
+                                    completed.lock().unwrap().insert(validator.clone());
+                                    break;
+                                }
+
+                                // Sleep for a bit
+                                runtime.sleep(Duration::from_millis(100)).await;
+                            }
+                        }
+                    });
+                }
+
+                // Wait for all validators to complete
+                while completed.lock().unwrap().len() != num_validators as usize {
+                    runtime.sleep(Duration::from_secs(1)).await;
+                }
             }
         });
+    }
+
+    #[test_traced]
+    fn test_unclean_shutdown() {
+        let num_validators = 4;
+        let quorum = 3;
+        let (mut executor, mut runtime, _) = Executor::timed(Duration::from_secs(30));
+        let (identity, mut shares_vec) =
+            ops::generate_shares(&mut runtime, None, num_validators, quorum);
+        shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
+
+        let completed = Arc::new(Mutex::new(HashSet::new()));
+        let shutdowns: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
+
+        while completed.lock().unwrap().len() != num_validators as usize {
+            executor.start({
+                let mut runtime = runtime.clone();
+                let completed = completed.clone();
+                let shares_vec = shares_vec.clone();
+                let shutdowns = shutdowns.clone();
+                let identity = identity.clone();
+                async move {
+                    // Create network
+                    let (network, mut oracle) = Network::new(
+                        runtime.clone(),
+                        commonware_p2p::simulated::Config {
+                            registry: Arc::new(Mutex::new(Registry::default())),
+                            max_size: 1024 * 1024,
+                        },
+                    );
+                    runtime.spawn("network", network.run());
+
+                    // Create validators
+                    let mut validators = (0..num_validators)
+                        .map(|i| Ed25519::from_seed(i as u64))
+                        .collect::<Vec<_>>();
+                    validators.sort_by_key(|s| s.public_key());
+                    let validators = validators
+                        .iter()
+                        .enumerate()
+                        .map(|(i, scheme)| {
+                            let pk = scheme.public_key();
+                            let share = shares_vec[i];
+                            (pk, scheme.clone(), share)
+                        })
+                        .collect::<Vec<_>>();
+                    let pks = validators
+                        .iter()
+                        .map(|(pk, _, _)| pk.clone())
+                        .collect::<Vec<_>>();
+                    let mut registrations = register_validators(&mut oracle, &pks).await;
+                    let link = Link {
+                        latency: 10.0,
+                        jitter: 1.0,
+                        success_rate: 1.0,
+                    };
+                    link_validators(&mut oracle, &pks, Action::Link(link), None).await;
+
+                    // Create engines
+                    let mut mailboxes = HashMap::new();
+                    let mut collectors = HashMap::new();
+                    for (validator, scheme, share) in validators.iter() {
+                        // Coordinator
+                        let mut coordinator = mocks::coordinator::Coordinator::new(
+                            identity.clone(),
+                            pks.clone(),
+                            *share,
+                        );
+                        debug!("Share index: {}", share.index);
+                        coordinator.set_view(111);
+
+                        // Application
+                        let (mut app, app_mailbox) = mocks::application::Application::new();
+                        mailboxes.insert(validator.clone(), app_mailbox.clone());
+
+                        // Collector
+                        let (collector, collector_mailbox) =
+                            mocks::collector::Collector::<Sha256Digest>::new();
+                        runtime.spawn("collector", collector.run());
+                        collectors.insert(validator.clone(), collector_mailbox.clone());
+
+                        // Signer
+                        let hex_validator = hex(validator);
+                        let (signer, signer_mailbox) = signer::Actor::new(
+                            runtime.clone(),
+                            signer::Config {
+                                crypto: scheme.clone(),
+                                application: app_mailbox.clone(),
+                                collector: collector_mailbox.clone(),
+                                coordinator,
+                                mailbox_size: 1024,
+                                namespace: b"test".to_vec(),
+                                epoch_bounds: (1, 1),
+                                height_bound: 2,
+                                refresh_epoch_timeout: Duration::from_millis(100),
+                                rebroadcast_timeout: Duration::from_millis(1_000),
+                                journal_entries_per_section: 10,
+                                journal_replay_concurrency: 1,
+                                journal_naming_fn: move |v| {
+                                    format!("seq/{}/{}", hex_validator, hex(v))
+                                },
+                            },
+                        );
+
+                        // Run the actors
+                        runtime.spawn("app", async move { app.run(signer_mailbox).await });
+                        let ((a1, a2), (b1, b2)) = registrations.remove(validator).unwrap();
+                        runtime.spawn(
+                            "signer",
+                            async move { signer.run((a1, a2), (b1, b2)).await },
+                        );
+                    }
+
+                    // For each validator, attempt to propose a payload every 250ms
+                    runtime.spawn("proposer", {
+                        let runtime = runtime.clone();
+                        async move {
+                            let mut iter = 0;
+                            let mut hasher = Sha256::default();
+                            loop {
+                                iter += 1;
+                                for (validator, mailbox) in mailboxes.iter_mut() {
+                                    let payload = Bytes::from(format!(
+                                        "hello world from validator {}, iter {}",
+                                        hex(validator),
+                                        iter
+                                    ));
+                                    hasher.update(&payload);
+                                    let digest = hasher.finalize();
+                                    mailbox.broadcast(digest).await;
+                                }
+                                runtime.sleep(Duration::from_millis(250)).await;
+                            }
+                        }
+                    });
+
+                    // For each node, wait for the acknowledged height of each sequencer to reach 100
+                    // Put the validator in completed
+                    for (validator, collector_mailbox) in collectors.iter() {
+                        runtime.spawn("collector", {
+                            let mut collector = collector_mailbox.clone();
+                            let runtime = runtime.clone();
+                            let completed = completed.clone();
+                            let validator = validator.clone();
+                            async move {
+                                loop {
+                                    let tip =
+                                        collector.get_tip(validator.clone()).await.unwrap_or(0);
+                                    debug!("Collector: tip {}", tip);
+
+                                    // We are done!
+                                    if tip >= 100 {
+                                        completed.lock().unwrap().insert(validator.clone());
+                                        break;
+                                    }
+
+                                    // Sleep for a bit
+                                    runtime.sleep(Duration::from_millis(100)).await;
+                                }
+                            }
+                        });
+                    }
+
+                    // Exit at random points for unclean shutdown of entire set
+                    let wait = runtime
+                        .gen_range(Duration::from_millis(1_000)..Duration::from_millis(10_000));
+                    runtime.sleep(wait).await;
+                    {
+                        let mut shutdowns = shutdowns.lock().unwrap();
+                        debug!(shutdowns = *shutdowns, elapsed = ?wait, "restarting");
+                        *shutdowns += 1;
+                    }
+                }
+            });
+
+            // Recover runtime
+            (executor, runtime, _) = runtime.recover();
+        }
     }
 }

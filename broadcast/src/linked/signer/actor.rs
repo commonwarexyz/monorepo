@@ -76,7 +76,7 @@ pub struct Actor<
     refresh_epoch_deadline: Option<SystemTime>,
 
     // The configured timeout for rebroadcasting a chunk to all signers
-    rebroadcast_timeout: Option<Duration>,
+    rebroadcast_timeout: Duration,
     rebroadcast_deadline: Option<SystemTime>,
 
     ////////////////////////////////////////
@@ -512,9 +512,10 @@ impl<
         let mut height = 0;
         let mut parent = None;
         if let Some(chunk_tip) = self.tip_man.get_chunk(&me) {
-            // Get threshold or return early
+            // Get threshold, or, if it doesn't exist, attempt to rebroadcast the old tip
             let Some((epoch, threshold)) = self.ack_man.get_threshold(&me, chunk_tip.height) else {
                 let _ = result.send(false);
+                self.rebroadcast(link_sender).await?;
                 return Err(Error::NoThresholdForTip(chunk_tip.height));
             };
 
@@ -592,7 +593,7 @@ impl<
             return Err(Error::AlreadyBroadcast);
         }
 
-        // Broadcast the message
+        // Broadcast the message, which resets the rebroadcast deadline
         self.broadcast(&link_tip, link_sender, self.epoch).await?;
 
         Ok(())
@@ -619,9 +620,7 @@ impl<
             .map_err(|_| Error::BroadcastFailed)?;
 
         // Set the rebroadcast deadline
-        if let Some(timeout) = self.rebroadcast_timeout {
-            self.rebroadcast_deadline = Some(self.runtime.current() + timeout);
-        }
+        self.rebroadcast_deadline = Some(self.runtime.current() + self.rebroadcast_timeout);
 
         Ok(())
     }

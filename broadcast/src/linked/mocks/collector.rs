@@ -4,11 +4,15 @@ use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
 };
-use std::collections::{BTreeMap, HashMap};
+use std::{
+    cmp::max,
+    collections::{BTreeMap, HashMap},
+};
 
 enum Message<D: Digest> {
     Acknowledged(Context, D, Proof),
     GetTip(PublicKey, oneshot::Sender<Option<u64>>),
+    GetContiguousTip(PublicKey, oneshot::Sender<Option<u64>>),
     Get(PublicKey, u64, oneshot::Sender<Option<D>>),
 }
 
@@ -19,6 +23,9 @@ pub struct Collector<D: Digest> {
     map: HashMap<PublicKey, BTreeMap<u64, D>>,
 
     // Highest contiguous known height for each sequencer
+    hi_contig: HashMap<PublicKey, u64>,
+
+    // Highest known height for each sequencer
     hi: HashMap<PublicKey, u64>,
 }
 
@@ -29,6 +36,7 @@ impl<D: Digest> Collector<D> {
             Collector {
                 mailbox: receiver,
                 map: HashMap::new(),
+                hi_contig: HashMap::new(),
                 hi: HashMap::new(),
             },
             Mailbox { sender },
@@ -45,8 +53,13 @@ impl<D: Digest> Collector<D> {
                     let map = self.map.entry(context.sequencer.clone()).or_default();
                     map.insert(context.height, payload);
 
+                    // Update the highest height
+                    let hi = self.hi.get(&context.sequencer).copied().unwrap_or(0);
+                    self.hi
+                        .insert(context.sequencer.clone(), max(hi, context.height));
+
                     // Update the highest contiguous height
-                    let hi = self.hi.get(&context.sequencer);
+                    let hi = self.hi_contig.get(&context.sequencer);
                     if (hi.is_none() && context.height == 0)
                         || (hi.is_some() && context.height == hi.unwrap() + 1)
                     {
@@ -54,12 +67,16 @@ impl<D: Digest> Collector<D> {
                         while map.contains_key(&(new_hi + 1)) {
                             new_hi += 1;
                         }
-                        self.hi.insert(context.sequencer, new_hi);
+                        self.hi_contig.insert(context.sequencer, new_hi);
                     }
                 }
                 Message::GetTip(sequencer, sender) => {
-                    let tip = self.hi.get(&sequencer).copied();
-                    sender.send(tip).unwrap();
+                    let hi = self.hi.get(&sequencer).copied();
+                    sender.send(hi).unwrap();
+                }
+                Message::GetContiguousTip(sequencer, sender) => {
+                    let hi_contig = self.hi_contig.get(&sequencer).copied();
+                    sender.send(hi_contig).unwrap();
                 }
                 Message::Get(sequencer, height, sender) => {
                     let digest = self
@@ -95,6 +112,15 @@ impl<D: Digest> Mailbox<D> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Message::GetTip(sequencer, sender))
+            .await
+            .unwrap();
+        receiver.await.unwrap()
+    }
+
+    pub async fn get_contiguous_tip(&mut self, sequencer: PublicKey) -> Option<u64> {
+        let (sender, receiver) = oneshot::channel();
+        self.sender
+            .send(Message::GetContiguousTip(sequencer, sender))
             .await
             .unwrap();
         receiver.await.unwrap()

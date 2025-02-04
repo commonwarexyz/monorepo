@@ -21,7 +21,7 @@ pub struct Config<
     pub mailbox_size: usize,
     pub namespace: Vec<u8>,
     pub refresh_epoch_timeout: Duration,
-    pub rebroadcast_timeout: Option<Duration>,
+    pub rebroadcast_timeout: Duration,
     pub epoch_bounds: (u64, u64),
     pub height_bound: u64,
     pub journal_naming_fn: J,
