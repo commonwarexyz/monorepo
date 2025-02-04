@@ -322,6 +322,58 @@ mod tests {
     }
 
     #[test]
+    fn test_tampered_proof_single() {
+        // Build tree
+        let tx = b"tx";
+        let leaf = hash(tx);
+        let mut hasher = Sha256::default();
+        let tree = Tree::new(&mut hasher, vec![leaf.clone()]).unwrap();
+
+        // The root should equal the only leaf.
+        assert_eq!(tree.root(), leaf);
+
+        // Generate a proof and tamper with it
+        let mut proof = tree.prove(0).unwrap();
+        proof.leaves = 100;
+
+        // Proof verification should fail with a tampered proof.
+        assert!(!proof.verify(&mut hasher, &leaf, 0, &leaf));
+    }
+
+    #[test]
+    fn test_merkle_tree_double() {
+        // Build tree
+        let txs = [b"tx1", b"tx2"];
+        let digests: Vec<Digest> = txs.iter().map(|tx| hash(*tx)).collect();
+        let mut hasher = Sha256::default();
+        let tree = Tree::new(&mut hasher, digests.clone()).unwrap();
+        let root = tree.root();
+
+        // For each leaf, generate and verify its proof.
+        for (i, leaf) in digests.iter().enumerate() {
+            let proof = tree.prove(i as u32).unwrap();
+            assert!(proof.verify(&mut hasher, leaf, i as u32, &root));
+        }
+    }
+
+    #[test]
+    fn test_tampered_proof_double() {
+        // Build tree
+        let txs = [b"tx1", b"tx2"];
+        let digests: Vec<Digest> = txs.iter().map(|tx| hash(*tx)).collect();
+        let mut hasher = Sha256::default();
+        let tree = Tree::new(&mut hasher, digests.clone()).unwrap();
+        let root = tree.root();
+
+        // For each leaf, generate and verify its tampered proof.
+        for (i, leaf) in digests.iter().enumerate() {
+            let mut proof = tree.prove(i as u32).unwrap();
+            proof.leaves = 100;
+            assert!(!proof.verify(&mut hasher, leaf, i as u32, &root));
+        }
+    }
+
+    #[test]
     fn test_merkle_tree_multiple() {
         // Build tree
         let txs = [b"tx1", b"tx2", b"tx3", b"tx4"];
@@ -339,6 +391,23 @@ mod tests {
                 "Proof failed for leaf index {}",
                 i
             );
+        }
+    }
+
+    #[test]
+    fn test_tampered_proof_multiple() {
+        // Build tree
+        let txs = [b"tx1", b"tx2", b"tx3", b"tx4"];
+        let digests: Vec<Digest> = txs.iter().map(|tx| hash(*tx)).collect();
+        let mut hasher = Sha256::default();
+        let tree = Tree::new(&mut hasher, digests.clone()).unwrap();
+        let root = tree.root();
+
+        // For each leaf, generate and verify its tampered proof.
+        for (i, leaf) in digests.iter().enumerate() {
+            let mut proof = tree.prove(i as u32).unwrap();
+            proof.leaves = 100;
+            assert!(!proof.verify(&mut hasher, leaf, i as u32, &root));
         }
     }
 
