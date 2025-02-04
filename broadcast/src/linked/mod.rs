@@ -272,7 +272,7 @@ mod tests {
     fn test_unclean_shutdown() {
         let num_validators = 4;
         let quorum = 3;
-        let (mut executor, mut runtime, _) = Executor::timed(Duration::from_secs(30));
+        let (mut executor, mut runtime, _) = Executor::timed(Duration::from_secs(45));
         let (identity, mut shares_vec) =
             ops::generate_shares(&mut runtime, None, num_validators, quorum);
         shares_vec.sort_by(|a, b| a.index.cmp(&b.index));

@@ -115,10 +115,10 @@ pub struct Actor<
     ////////////////////////////////////////
     // State
     ////////////////////////////////////////
-    tip_man: TipManager,
+    tip_manager: TipManager,
 
     // Handles acknowledgements for chunks.
-    ack_man: AckManager<D>,
+    ack_manager: AckManager<D>,
 
     // The current epoch.
     epoch: Epoch,
@@ -158,8 +158,8 @@ impl<
             journal_replay_concurrency: cfg.journal_replay_concurrency,
             journal_naming_fn: cfg.journal_naming_fn,
             journals: HashMap::new(),
-            tip_man: TipManager::default(),
-            ack_man: AckManager::default(),
+            tip_manager: TipManager::default(),
+            ack_manager: AckManager::default(),
             epoch: 0,
         };
 
@@ -345,7 +345,7 @@ impl<
         ack_sender: &mut impl Sender,
     ) -> Result<(), Error> {
         // Get the tip
-        let Some(chunk) = self.tip_man.get_chunk(&context.sequencer) else {
+        let Some(chunk) = self.tip_manager.get_chunk(&context.sequencer) else {
             return Err(Error::AppVerifiedNoTip);
         };
 
@@ -425,7 +425,7 @@ impl<
     ) {
         // Set the threshold signature, returning early if it already exists
         if !self
-            .ack_man
+            .ack_manager
             .add_threshold(&chunk.sequencer, chunk.height, epoch, threshold)
         {
             return;
@@ -459,7 +459,7 @@ impl<
 
         // Add the partial signature. If a new threshold is formed, handle it.
         let digest = D::read_from(&mut chunk.payload_digest.clone()).unwrap();
-        if let Some(threshold) = self.ack_man.add_partial(
+        if let Some(threshold) = self.ack_manager.add_partial(
             &chunk.sequencer,
             chunk.height,
             epoch,
@@ -479,7 +479,7 @@ impl<
     /// Also appends the link to the journal if it's new.
     async fn handle_link(&mut self, link: &wire::Link) {
         // Store the tip
-        let is_new = self.tip_man.put(link);
+        let is_new = self.tip_manager.put(link);
         let chunk = link.chunk.as_ref().unwrap();
 
         // Take actions if the link is new
@@ -517,9 +517,10 @@ impl<
         // Get parent Chunk and threshold signature
         let mut height = 0;
         let mut parent = None;
-        if let Some(chunk_tip) = self.tip_man.get_chunk(&me) {
+        if let Some(chunk_tip) = self.tip_manager.get_chunk(&me) {
             // Get threshold, or, if it doesn't exist, return an error
-            let Some((epoch, threshold)) = self.ack_man.get_threshold(&me, chunk_tip.height) else {
+            let Some((epoch, threshold)) = self.ack_manager.get_threshold(&me, chunk_tip.height)
+            else {
                 let _ = result.send(false);
                 return Err(Error::NoThresholdForTip(chunk_tip.height));
             };
@@ -585,13 +586,13 @@ impl<
         }
 
         // Return if no chunk to rebroadcast
-        let Some(link_tip) = self.tip_man.get(&me) else {
+        let Some(link_tip) = self.tip_manager.get(&me) else {
             return Err(Error::NothingToRebroadcast);
         };
 
         // Return if threshold already collected
         if self
-            .ack_man
+            .ack_manager
             .get_threshold(&me, link_tip.chunk.as_ref().unwrap().height)
             .is_some()
         {
@@ -735,7 +736,7 @@ impl<
 
         // Spam prevention: If the ack is for a height that is too old or too new, ignore.
         {
-            let bound_lo = self.tip_man.get_height(sender).unwrap_or(0);
+            let bound_lo = self.tip_manager.get_height(sender).unwrap_or(0);
             let bound_hi = bound_lo + self.height_bound;
             if chunk.height < bound_lo || chunk.height > bound_hi {
                 return Err(Error::AckHeightOutsideBounds(
@@ -785,7 +786,7 @@ impl<
         }
 
         // Verify height
-        if let Some(chunk_tip) = self.tip_man.get_chunk(&chunk.sequencer) {
+        if let Some(chunk_tip) = self.tip_manager.get_chunk(&chunk.sequencer) {
             // Height must be at least the tip height
             match chunk.height.cmp(&chunk_tip.height) {
                 std::cmp::Ordering::Less => {
@@ -870,7 +871,7 @@ impl<
 
             // Set the tip
             if let Some(link) = tip.take() {
-                let is_new = self.tip_man.put(&link);
+                let is_new = self.tip_manager.put(&link);
                 assert!(is_new);
             }
 

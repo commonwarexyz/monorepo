@@ -1,10 +1,9 @@
-use commonware_cryptography::Digest;
-use futures::{channel::mpsc, SinkExt, StreamExt};
-
 use crate::{
     linked::{signer, Context},
     Application as A, Broadcaster,
 };
+use commonware_cryptography::Digest;
+use futures::{channel::mpsc, SinkExt, StreamExt};
 
 enum Message<D: Digest> {
     Broadcast(D),

@@ -1,11 +1,10 @@
-use std::marker::PhantomData;
-
 use crate::{linked::Context, Broadcaster};
 use commonware_cryptography::Digest;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
 };
+use std::marker::PhantomData;
 
 // If either of these requests fails, it will not send a reply.
 pub enum Message<D: Digest> {

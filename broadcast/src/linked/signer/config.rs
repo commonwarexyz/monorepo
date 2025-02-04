@@ -1,10 +1,9 @@
-use std::time::Duration;
-
 use crate::{
     linked::{Context, Epoch},
     Application, Collector, ThresholdCoordinator,
 };
 use commonware_cryptography::{Digest, PublicKey, Scheme};
+use std::time::Duration;
 
 pub struct Config<
     C: Scheme,

@@ -23,10 +23,10 @@ pub struct Collector<D: Digest> {
     map: HashMap<PublicKey, BTreeMap<u64, D>>,
 
     // Highest contiguous known height for each sequencer
-    hi_contig: HashMap<PublicKey, u64>,
+    contiguous: HashMap<PublicKey, u64>,
 
     // Highest known height for each sequencer
-    hi: HashMap<PublicKey, u64>,
+    highest: HashMap<PublicKey, u64>,
 }
 
 impl<D: Digest> Collector<D> {
@@ -36,8 +36,8 @@ impl<D: Digest> Collector<D> {
             Collector {
                 mailbox: receiver,
                 map: HashMap::new(),
-                hi_contig: HashMap::new(),
-                hi: HashMap::new(),
+                contiguous: HashMap::new(),
+                highest: HashMap::new(),
             },
             Mailbox { sender },
         )
@@ -54,29 +54,29 @@ impl<D: Digest> Collector<D> {
                     map.insert(context.height, payload);
 
                     // Update the highest height
-                    let hi = self.hi.get(&context.sequencer).copied().unwrap_or(0);
-                    self.hi
-                        .insert(context.sequencer.clone(), max(hi, context.height));
+                    let highest = self.highest.get(&context.sequencer).copied().unwrap_or(0);
+                    self.highest
+                        .insert(context.sequencer.clone(), max(highest, context.height));
 
                     // Update the highest contiguous height
-                    let hi = self.hi_contig.get(&context.sequencer);
-                    if (hi.is_none() && context.height == 0)
-                        || (hi.is_some() && context.height == hi.unwrap() + 1)
+                    let highest = self.contiguous.get(&context.sequencer);
+                    if (highest.is_none() && context.height == 0)
+                        || (highest.is_some() && context.height == highest.unwrap() + 1)
                     {
-                        let mut new_hi = context.height;
-                        while map.contains_key(&(new_hi + 1)) {
-                            new_hi += 1;
+                        let mut contiguous = context.height;
+                        while map.contains_key(&(contiguous + 1)) {
+                            contiguous += 1;
                         }
-                        self.hi_contig.insert(context.sequencer, new_hi);
+                        self.contiguous.insert(context.sequencer, contiguous);
                     }
                 }
                 Message::GetTip(sequencer, sender) => {
-                    let hi = self.hi.get(&sequencer).copied();
+                    let hi = self.highest.get(&sequencer).copied();
                     sender.send(hi).unwrap();
                 }
                 Message::GetContiguousTip(sequencer, sender) => {
-                    let hi_contig = self.hi_contig.get(&sequencer).copied();
-                    sender.send(hi_contig).unwrap();
+                    let contiguous = self.contiguous.get(&sequencer).copied();
+                    sender.send(contiguous).unwrap();
                 }
                 Message::Get(sequencer, height, sender) => {
                     let digest = self

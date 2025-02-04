@@ -1,10 +1,10 @@
-use bytes::BufMut;
-
 use super::{wire, Epoch};
+use bytes::BufMut;
 
 /// Serializes an Ack message into a byte array.
 pub fn ack(chunk: &wire::Chunk, epoch: Epoch) -> Vec<u8> {
-    let len = chunk.sequencer.len() + 8 + chunk.payload_digest.len() + 8;
+    let len =
+        chunk.sequencer.len() + size_of::<u64>() + chunk.payload_digest.len() + size_of::<u64>();
     let mut buf = Vec::with_capacity(len);
 
     buf.put(chunk.sequencer.clone());
@@ -16,7 +16,7 @@ pub fn ack(chunk: &wire::Chunk, epoch: Epoch) -> Vec<u8> {
 
 /// Serializes a Chunk message into a byte array.
 pub fn chunk(chunk: &wire::Chunk) -> Vec<u8> {
-    let len = chunk.sequencer.len() + 8 + chunk.payload_digest.len();
+    let len = chunk.sequencer.len() + size_of::<u64>() + chunk.payload_digest.len();
     let mut buf = Vec::with_capacity(len);
 
     buf.put(chunk.sequencer.clone());

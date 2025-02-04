@@ -1,6 +1,5 @@
-use crate::Proof;
-
 use super::{encoder, serializer, wire, Context, Epoch};
+use crate::Proof;
 use bytes::{Buf, BufMut};
 use commonware_cryptography::{
     bls12381::primitives::{
@@ -41,9 +40,9 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
 
         let mut len = 0;
         len += len_public_key; // context.sequencer
-        len += 8; // context.height
+        len += size_of::<u64>(); // context.height
         len += len_digest; // payload_digest
-        len += 8; // epoch
+        len += size_of::<u64>(); // epoch
         len += len_signature; // threshold
 
         (len, (len_digest, len_public_key, len_signature))
