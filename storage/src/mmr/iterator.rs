@@ -13,7 +13,7 @@ pub(crate) struct PeakIterator {
 }
 
 impl PeakIterator {
-    /// Return a new PeakIterator over the peaks of a MMR with the given number of nodes.
+    /// Return a new PeakIterator over the peaks of an MMR with the given number of nodes.
     pub(crate) fn new(size: u64) -> PeakIterator {
         if size == 0 {
             return PeakIterator::default();
