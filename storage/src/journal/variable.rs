@@ -408,7 +408,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
                                 );
                                 Some((
                                     Err(Error::ChecksumMismatch(expected, found)),
-                                    (section, blob, offset),
+                                    (section, blob, len),
                                 ))
                             }
                             Err(Error::Runtime(RError::BlobInsufficientLength)) => {
@@ -421,14 +421,11 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
                                     old_size = len,
                                     "trailing bytes detected: truncating"
                                 );
-                                blob.truncate(offset as u64 * ITEM_ALIGNMENT)
-                                    .await
-                                    .map_err(Error::Runtime)
-                                    .ok()?;
-                                blob.sync().await.map_err(Error::Runtime).ok()?;
+                                blob.truncate(offset as u64 * ITEM_ALIGNMENT).await.ok()?;
+                                blob.sync().await.ok()?;
                                 None
                             }
-                            Err(err) => Some((Err(err), (section, blob, offset))),
+                            Err(err) => Some((Err(err), (section, blob, len))),
                         }
                     },
                 )
@@ -1133,16 +1130,19 @@ mod tests {
                 .expect("unable to setup replay");
             pin_mut!(stream);
             let mut items = Vec::new();
+            let mut got_checksum_error = false;
             while let Some(result) = stream.next().await {
                 match result {
                     Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
                     Err(err) => {
                         assert!(matches!(err, Error::ChecksumMismatch(_, _)));
-                        return;
+                        got_checksum_error = true;
+                        // We explicitly don't return or break here to test that we won't end up in
+                        // an infinite loop if the replay caller doesn't abort on error.
                     }
                 }
             }
-            panic!("expected checksum mismatch error");
+            assert!(got_checksum_error, "expected checksum mismatch error");
         });
     }
 
