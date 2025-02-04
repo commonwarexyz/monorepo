@@ -113,6 +113,7 @@ impl<H: Hasher> Tree<H> {
                 let right = if chunk.len() == 2 {
                     &chunk[1]
                 } else {
+                    // If the chunk has an odd number of nodes, use a duplicate of the left child.
                     &chunk[0]
                 };
 
