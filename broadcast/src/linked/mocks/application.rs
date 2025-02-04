@@ -3,11 +3,14 @@ use crate::{
     Application as A, Broadcaster,
 };
 use commonware_cryptography::Digest;
-use futures::{channel::mpsc, SinkExt, StreamExt};
+use futures::{
+    channel::{mpsc, oneshot},
+    SinkExt, StreamExt,
+};
 
 enum Message<D: Digest> {
     Broadcast(D),
-    Verify(Context, D),
+    Verify(Context, D, oneshot::Sender<bool>),
 }
 
 #[derive(Clone)]
@@ -25,8 +28,17 @@ impl<D: Digest> A for Mailbox<D> {
     type Context = Context;
     type Digest = D;
 
-    async fn verify(&mut self, context: Self::Context, payload: Self::Digest) {
-        let _ = self.sender.send(Message::Verify(context, payload)).await;
+    async fn verify(
+        &mut self,
+        context: Self::Context,
+        payload: Self::Digest,
+    ) -> oneshot::Receiver<bool> {
+        let (sender, receiver) = oneshot::channel();
+        let _ = self
+            .sender
+            .send(Message::Verify(context, payload, sender))
+            .await;
+        receiver
     }
 }
 
@@ -47,9 +59,8 @@ impl<D: Digest> Application<D> {
                     let receiver = signer.broadcast(payload).await;
                     receiver.await.expect("Failed to broadcast");
                 }
-                Message::Verify(context, payload) => {
-                    // Act as-if the application is verifying the payload.
-                    signer.verified(context, payload).await;
+                Message::Verify(_context, _payload, sender) => {
+                    sender.send(true).expect("Failed to verify");
                 }
             }
         }

@@ -26,15 +26,6 @@ pub trait Broadcaster {
         &mut self,
         payload: Self::Digest,
     ) -> impl Future<Output = oneshot::Receiver<bool>> + Send;
-
-    /// Receive notice that a payload is valid.
-    ///
-    /// This is used to acknowledge that the payload has been verified locally and its data is able to be replicated.
-    fn verified(
-        &mut self,
-        context: Self::Context,
-        payload: Self::Digest,
-    ) -> impl Future<Output = ()> + Send;
 }
 
 /// Application is the interface responsible for processing messages received from the network.
@@ -48,13 +39,13 @@ pub trait Application: Send + 'static {
 
     /// Verify a proposed payload received from the network.
     ///
+    /// Returns a future that resolves to a boolean indicating success.
     /// Part of verification is ensuring that the data is made available, for example by storing it in a database.
-    /// Once the payload is verified, the application should call `verified` on the broadcaster.
     fn verify(
         &mut self,
         context: Self::Context,
         payload: Self::Digest,
-    ) -> impl Future<Output = ()> + Send;
+    ) -> impl Future<Output = oneshot::Receiver<bool>> + Send;
 }
 
 /// Collector is the interface responsible for handling notifications of broadcasted payloads.

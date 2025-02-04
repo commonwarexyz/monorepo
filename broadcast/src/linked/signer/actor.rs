@@ -31,7 +31,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 use thiserror::Error;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 pub struct Actor<
     B: Blob,
@@ -102,6 +102,11 @@ pub struct Actor<
     ////////////////////////////////////////
     // Messaging
     ////////////////////////////////////////
+    
+    // Allows sending messages to self.
+    mailbox_sender: Mailbox<D>,
+
+    // The mailbox for receiving messages (primarily from the application).
     mailbox_receiver: mpsc::Receiver<Message<D>>,
 
     ////////////////////////////////////////
@@ -153,6 +158,7 @@ impl<
             rebroadcast_deadline: None,
             epoch_bounds: cfg.epoch_bounds,
             height_bound: cfg.height_bound,
+            mailbox_sender: mailbox.clone(),
             mailbox_receiver,
             journal_entries_per_section: cfg.journal_entries_per_section,
             journal_replay_concurrency: cfg.journal_replay_concurrency,
@@ -495,7 +501,26 @@ impl<
             height: chunk.height,
         };
         let digest = D::try_from(&chunk.payload).unwrap();
-        self.application.verify(context, digest).await;
+        let receiver = self
+            .application
+            .verify(context.clone(), digest.clone())
+            .await;
+        self.runtime.spawn("app_verify", {
+            let mut mailbox_sender = self.mailbox_sender.clone();
+            async move {
+                match receiver.await {
+                    Err(e) => {
+                        warn!(err=?e, "Application dropped verify request");
+                    }
+                    Ok(false) => {
+                        warn!("Application returned false for verify request");
+                    }
+                    Ok(true) => {
+                        mailbox_sender.verified(context, digest).await;
+                    }
+                }
+            }
+        });
     }
 
     ////////////////////////////////////////

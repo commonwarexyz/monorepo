@@ -33,6 +33,15 @@ impl<D: Digest> Mailbox<D> {
     }
 }
 
+impl<D: Digest> Mailbox<D> {
+    pub async fn verified(&mut self, context: Context, payload: D) {
+        self.sender
+            .send(Message::Verified { context, payload })
+            .await
+            .expect("Failed to send verified");
+    }
+}
+
 impl<D: Digest> Broadcaster for Mailbox<D> {
     type Context = Context;
     type Digest = D;
@@ -47,12 +56,5 @@ impl<D: Digest> Broadcaster for Mailbox<D> {
             .await
             .expect("Failed to send broadcast");
         receiver
-    }
-
-    async fn verified(&mut self, context: Self::Context, payload: Self::Digest) {
-        self.sender
-            .send(Message::Verified { context, payload })
-            .await
-            .expect("Failed to send verified");
     }
 }
