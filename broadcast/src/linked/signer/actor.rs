@@ -1,8 +1,9 @@
 use super::{AckManager, Config, Mailbox, Message, TipManager};
 use crate::{
     linked::{encoder, prover::Prover, serializer, wire, Context, Epoch},
-    Application, Collector, Error, ThresholdCoordinator,
+    Application, Collector, ThresholdCoordinator,
 };
+use bytes::Bytes;
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{self, Element},
@@ -29,6 +30,7 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
+use thiserror::Error;
 use tracing::{debug, error};
 
 pub struct Actor<
@@ -587,7 +589,7 @@ impl<
             .get_threshold(&me, link_tip.chunk.as_ref().unwrap().height)
             .is_some()
         {
-            return Err(Error::ThresholdAlreadyExists);
+            return Err(Error::AlreadyBroadcast);
         }
 
         // Broadcast the message
@@ -708,7 +710,7 @@ impl<
 
         // Validate sender
         let Some(signer_index) = self.coordinator.is_signer(ack.epoch, sender) else {
-            return Err(Error::UnknownSigner);
+            return Err(Error::UnknownSigner(ack.epoch, sender.clone()));
         };
         let Some(partial) = PartialSignature::deserialize(&ack.partial) else {
             return Err(Error::UnableToDeserializePartialSignature);
@@ -783,7 +785,7 @@ impl<
             // Height must be at least the tip height
             match chunk.height.cmp(&chunk_tip.height) {
                 std::cmp::Ordering::Less => {
-                    return Err(Error::HeightTooLow(chunk.height, chunk_tip.height));
+                    return Err(Error::ChunkHeightTooLow(chunk.height, chunk_tip.height));
                 }
                 std::cmp::Ordering::Equal => {
                     // Ensure this matches the tip if the height is the same
@@ -928,4 +930,82 @@ impl<
         // Update the epoch
         self.epoch = epoch;
     }
+}
+
+/// Errors that can occur when running the actor.
+#[derive(Error, Debug)]
+enum Error {
+    // Application Verified Errors
+    #[error("Application verified no tip")]
+    AppVerifiedNoTip,
+    #[error("Application verified height mismatch")]
+    AppVerifiedHeightMismatch,
+    #[error("Application verified payload mismatch")]
+    AppVerifiedPayloadMismatch,
+
+    // P2P Errors
+    #[error("Unable to send message")]
+    UnableToSendMessage,
+
+    // Broadcast errors
+    #[error("Already broadcast")]
+    AlreadyBroadcast,
+    #[error("I am not a sequencer in epoch {0}")]
+    IAmNotASequencer(u64),
+    #[error("Nothing to rebroadcast")]
+    NothingToRebroadcast,
+    #[error("Broadcast failed")]
+    BroadcastFailed,
+    #[error("No threshold for tip")]
+    NoThresholdForTip(u64),
+
+    // Proto Malformed Errors
+    #[error("Missing chunk")]
+    MissingChunk,
+    #[error("Genesis chunk must not have a parent")]
+    GenesisChunkMustNotHaveParent,
+    #[error("Link missing parent")]
+    LinkMissingParent,
+    #[error("Invalid digest")]
+    InvalidDigest,
+
+    // Epoch Errors
+    #[error("Unknown identity at epoch {0}")]
+    UnknownIdentity(u64),
+    #[error("Unknown signers at epoch {0}")]
+    UnknownSigners(u64),
+    #[error("Epoch {0} has no sequencer {1:?}")]
+    UnknownSequencer(u64, Bytes),
+    #[error("Epoch {0} has no signer {1:?}")]
+    UnknownSigner(u64, Bytes),
+    #[error("Unknown share at epoch {0}")]
+    UnknownShare(u64),
+
+    // Peer Errors
+    #[error("Peer mismatch")]
+    PeerMismatch,
+
+    // Signature Errors
+    #[error("Unable to deserialize threshold signature")]
+    UnableToDeserializeThresholdSignature,
+    #[error("Unable to deserialize partial signature")]
+    UnableToDeserializePartialSignature,
+    #[error("Invalid threshold signature")]
+    InvalidThresholdSignature,
+    #[error("Invalid partial signature")]
+    InvalidPartialSignature,
+    #[error("Invalid link signature")]
+    InvalidLinkSignature,
+
+    // Ignorable Message Errors
+    #[error("Invalid ack epoch {0} outside bounds {1} - {2}")]
+    AckEpochOutsideBounds(u64, u64, u64),
+    #[error("Invalid ack height {0} outside bounds {1} - {2}")]
+    AckHeightOutsideBounds(u64, u64, u64),
+    #[error("Chunk height {0} lower than tip height {1}")]
+    ChunkHeightTooLow(u64, u64),
+
+    // Slashable Errors
+    #[error("Chunk mismatch from sender {0:?} with height {1}")]
+    ChunkMismatch(Bytes, u64),
 }

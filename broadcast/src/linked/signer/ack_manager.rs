@@ -5,8 +5,9 @@ use commonware_cryptography::{
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+/// A struct representing a set of partial signatures for a payload digest.
 #[derive(Default)]
-pub struct Partials<D: Digest> {
+struct Partials<D: Digest> {
     // The set of share indices that have signed the payload.
     pub shares: HashSet<u32>,
 
@@ -139,5 +140,80 @@ impl<D: Digest> AckManager<D> {
             m.retain(|&h, _| h >= height);
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::linked::{encoder, serializer, wire};
+
+    use super::*;
+    use bytes::Bytes;
+    use commonware_cryptography::{bls12381::dkg::ops::generate_shares, sha256};
+    use commonware_runtime::deterministic::Executor;
+
+    #[test]
+    fn test_chunk_different_payload_digests() {
+        // Can handle Acks for the same chunk height at different payload digests
+    }
+
+    #[test]
+    fn test_sequencer_different_heights() {
+        // Acks for unknown Chunks are held until receiving that Chunk
+    }
+
+    #[test]
+    fn test_chunk_different_epochs() {
+        // Can handle Acks for the same chunk at different Epochs
+    }
+
+    #[test]
+    fn test_add_threshold() {
+        let num_validators = 4;
+        let quorum = 3;
+        let (_, mut runtime, _) = Executor::default();
+        let (_identity, shares) = generate_shares(&mut runtime, None, num_validators, quorum);
+        let mut acks = AckManager::<sha256::Digest>::default();
+
+        // Create ack
+        let epoch = 99;
+        let sequencer = PublicKey::from(&[1u8; 32][..]);
+        let height = 42;
+        let payload_digest: Bytes = sha256::hash(&sequencer).to_vec().into();
+        let chunk = wire::Chunk {
+            sequencer: sequencer.clone(),
+            height,
+            payload_digest,
+        };
+
+        // Create partials
+        let mut partials = vec![];
+        for i in 0..quorum {
+            let p = ops::partial_sign_message(
+                &shares[i as usize],
+                Some(encoder::ack_namespace(b"1234").as_slice()),
+                &serializer::ack(&chunk, epoch),
+            );
+            partials.push(p);
+        }
+
+        // Generate a threshold signature.
+        let threshold = ops::threshold_signature_recover(quorum, partials).unwrap();
+
+        // Get the threshold signature; it should not exist.
+        let result = acks.get_threshold(&sequencer, height);
+        assert_eq!(result, None);
+
+        // Add the threshold signature.
+        let result = acks.add_threshold(&sequencer, height, epoch, threshold);
+        assert!(result);
+        let result = acks.get_threshold(&sequencer, height);
+        assert_eq!(result, Some((epoch, threshold)));
+
+        // Add the threshold signature again.
+        let result = acks.add_threshold(&sequencer, height, epoch, threshold);
+        assert!(!result);
+        let result = acks.get_threshold(&sequencer, height);
+        assert_eq!(result, Some((epoch, threshold)));
     }
 }

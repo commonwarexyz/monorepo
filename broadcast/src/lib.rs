@@ -1,123 +1,35 @@
 //! Replication of messages across a network.
 
-use std::future::Future;
-
 use bytes::Bytes;
-use commonware_cryptography::PublicKey;
+use commonware_cryptography::{Digest, PublicKey};
 use futures::channel::oneshot;
-use thiserror::Error;
+use std::future::Future;
 
 pub mod linked;
 
+/// Proof is a blob that attests to some data.
 pub type Proof = Bytes;
 
-/// Errors that can occur when interacting with a stream.
-#[derive(Error, Debug)]
-pub enum Error {
-    #[error("Duplicate ack")]
-    DuplicateAck,
-    #[error("Unable to create threshold signature")]
-    ThresholdSignature,
-    #[error("Unknown signer")]
-    UnknownSigner,
-    #[error("Chunk height {0} lower than tip height {1}")]
-    HeightTooLow(u64, u64),
-
-    // Application Verify Errors
-    #[error("Application verify dropped")]
-    ApplicationVerifyDropped,
-    #[error("Application verify failed")]
-    ApplicationVerifyFailed,
-
-    // Application Verified Errors
-    #[error("Application verified no tip")]
-    AppVerifiedNoTip,
-    #[error("Application verified height mismatch")]
-    AppVerifiedHeightMismatch,
-    #[error("Application verified payload mismatch")]
-    AppVerifiedPayloadMismatch,
-
-    // P2P Errors
-    #[error("Unable to send message")]
-    UnableToSendMessage,
-
-    // Broadcast errors
-    #[error("I am not a sequencer in epoch {0}")]
-    IAmNotASequencer(u64),
-    #[error("Nothing to rebroadcast")]
-    NothingToRebroadcast,
-    #[error("Broadcast failed")]
-    BroadcastFailed,
-    #[error("No threshold for tip")]
-    NoThresholdForTip(u64),
-
-    // Proto Malformed Errors
-    #[error("Protobuf decode error")]
-    UnableToDecode,
-    #[error("Missing chunk")]
-    MissingChunk,
-    #[error("Genesis chunk must not have a parent")]
-    GenesisChunkMustNotHaveParent,
-    #[error("Link missing parent")]
-    LinkMissingParent,
-    #[error("Invalid digest")]
-    InvalidDigest,
-
-    // Epoch Errors
-    #[error("Unknown identity at epoch {0}")]
-    UnknownIdentity(u64),
-    #[error("Unknown signers at epoch {0}")]
-    UnknownSigners(u64),
-    #[error("Unknown signer index {0} at epoch {1}")]
-    UnknownSignerIndex(u32, u64),
-    #[error("Epoch {0} has no sequencer {1:?}")]
-    UnknownSequencer(u64, Bytes),
-    #[error("Unknown share at epoch {0}")]
-    UnknownShare(u64),
-
-    // Peer Errors
-    #[error("Peer mismatch")]
-    PeerMismatch,
-
-    // Signature Errors
-    #[error("Unable to deserialize threshold signature")]
-    UnableToDeserializeThresholdSignature,
-    #[error("Unable to deserialize partial signature")]
-    UnableToDeserializePartialSignature,
-    #[error("Invalid threshold signature")]
-    InvalidThresholdSignature,
-    #[error("Invalid partial signature")]
-    InvalidPartialSignature,
-    #[error("Invalid link signature")]
-    InvalidLinkSignature,
-
-    // Ignorable Message Errors
-    #[error("Invalid ack epoch {0} outside bounds {1} - {2}")]
-    AckEpochOutsideBounds(u64, u64, u64),
-    #[error("Invalid ack height {0} outside bounds {1} - {2}")]
-    AckHeightOutsideBounds(u64, u64, u64),
-    #[error("Threshold already exists")]
-    ThresholdAlreadyExists,
-    #[error("Partial already exists")]
-    PartialAlreadyExists,
-
-    // Slashable Errors
-    #[error("Chunk mismatch from sender {0:?} with height {1}")]
-    ChunkMismatch(Bytes, u64),
-}
-
-/// A trait for reliable replication of messages across a network.
+/// Broadcaster is the interface responsible for replication of messages across a network.
 pub trait Broadcaster {
+    /// Context is metadata provided by the broadcast engine to associated with a given payload.
+    /// This could include things like the public key of the sequencer.
     type Context;
-    type Digest;
 
-    /// Broadcast a message to the network.
+    /// Digest is an arbitrary hash digest.
+    type Digest: Digest;
+
+    /// Attempt to broadcast a digest to the network.
+    ///
+    /// Returns a future that resolves to a boolean indicating success.
     fn broadcast(
         &mut self,
-        payload: Self::Digest,
+        payload_digest: Self::Digest,
     ) -> impl Future<Output = oneshot::Receiver<bool>> + Send;
 
     /// Receive notice that a payload is valid.
+    ///
+    /// This is used to acknowledge that the payload has been verified locally and its data is able to be replicated.
     fn verified(
         &mut self,
         context: Self::Context,
@@ -128,55 +40,83 @@ pub trait Broadcaster {
 /// Application is the interface responsible for processing messages received from the network.
 pub trait Application: Send + 'static {
     /// Context is metadata provided by the broadcast engine to associated with a given payload.
-    /// This includes things like the sequencer, height, parent, etc.
+    /// This could include things like the public key of the sequencer.
     type Context;
 
-    type Digest;
+    /// Digest is an arbitrary hash digest.
+    type Digest: Digest;
 
-    /// Verify and store (long-term storage) a proposed payload received from the network.
+    /// Verify a proposed payload received from the network.
     ///
-    /// If it is possible to verify the payload, a boolean should be returned indicating whether
-    /// the payload is valid. If it is not possible to verify the payload, the channel can be dropped.
+    /// Part of verification is ensuring that the data is made available, for example by storing it in a database.
+    /// Once the payload is verified, the application should call `verified` on the broadcaster.
     fn verify(
         &mut self,
         context: Self::Context,
-        payload: Self::Digest,
+        payload_digest: Self::Digest,
     ) -> impl Future<Output = ()> + Send;
 }
 
+/// Collector is the interface responsible for handling notifications of broadcasted payloads.
 pub trait Collector: Send + 'static {
+    /// Context is metadata provided by the broadcast engine to associated with a given payload.
+    /// This could include things like the public key of the sequencer.
     type Context;
-    type Digest;
 
-    /// Event that a payload has been successfully broadcasted to a threshold of signers in the network.
+    /// Digest is an arbitrary hash digest.
+    type Digest: Digest;
+
+    /// Emit that a payload has been successfully broadcasted.
+    /// This is used to acknowledge that the payload has been "received" by the network,
+    /// for example that it has been successfully gossiped to a threshold of validators.
     fn acknowledged(
         &mut self,
         context: Self::Context,
-        payload: Self::Digest,
+        payload_digest: Self::Digest,
         proof: Proof,
     ) -> impl Future<Output = ()> + Send;
 }
 
+/// Coordinator is the interface responsible for managing the active set of sequencers and signers.
+///
+/// It is up to the user to ensure changes in this list are synchronized across nodes in the network
+/// at a given `Index`. Otherwise, "acknowledgement" of a payload by the network may be delayed or never occur.
 pub trait Coordinator: Clone + Send + Sync + 'static {
+    /// Index is the type used to identify a particular set of sequencers and signers.
     type Index;
 
-    /// Return the current index of the coordinator.
+    /// Returns the current index of the coordinator.
     fn index(&self) -> Self::Index;
 
+    /// Get the **sorted** sequencers for the given `Index`.
     fn sequencers(&self, index: Self::Index) -> Option<&Vec<PublicKey>>;
+
+    /// Returns the index of the sequencer (in the list of sorted sequencers) if the candidate is a sequencer at the given `Index`.
     fn is_sequencer(&self, index: Self::Index, candidate: &PublicKey) -> Option<u32>;
 
+    /// Get the **sorted** signers for the given `Index`.
     fn signers(&self, index: Self::Index) -> Option<&Vec<PublicKey>>;
+
+    /// Returns the index of the signer (in the list of sorted signers) if the candidate is a signer at the given `Index`.
     fn is_signer(&self, index: Self::Index, candidate: &PublicKey) -> Option<u32>;
 }
 
+/// ThresholdCoordinator is the interface responsible for managing which `identity` (typically a group polynomial with
+/// a fixed constant factor) and `share` for a signer is active at a given time.
 pub trait ThresholdCoordinator: Coordinator {
+    /// Identity is the type against which partial signatures are verified.
     type Identity;
+
+    /// Share is the type used to generate a partial signature that can be verified
+    /// against `Identity`.
     type Share;
 
-    /// Return the polynomial of the given index.
+    /// Returns the identity (typically a group polynomial with a fixed constant factor)
+    /// at the given index. This is used to verify partial signatures from participants
+    /// enumerated in `Coordinator::signers`.
     fn identity(&self, index: Self::Index) -> Option<&Self::Identity>;
 
-    /// Return my share of the polynomial of the given index.
+    /// Returns share to sign with at a given index. After resharing, the share
+    /// may change (and old shares may be deleted).
     fn share(&self, index: Self::Index) -> Option<&Self::Share>;
 }
