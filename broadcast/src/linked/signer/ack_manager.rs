@@ -145,25 +145,197 @@ impl<D: Digest> AckManager<D> {
 
 #[cfg(test)]
 mod tests {
-    use crate::linked::{namespace, serializer, wire};
-
     use super::*;
+    use crate::linked::{namespace, serializer, wire};
     use commonware_cryptography::{bls12381::dkg::ops::generate_shares, sha256};
     use commonware_runtime::deterministic::Executor;
 
     #[test]
     fn test_chunk_different_payloads() {
-        // Can handle Acks for the same chunk height at different payload digests
+        // Use 6 validators so that two disjoint groups of 3 can sign different payloads.
+        let num_validators = 6;
+        let quorum = 3;
+        let (_, mut runtime, _) = Executor::default();
+        let (_identity, shares) = generate_shares(&mut runtime, None, num_validators, quorum);
+        let mut acks = AckManager::<sha256::Digest>::default();
+
+        let sequencer = PublicKey::from(&[1u8; 32][..]);
+        let height = 10;
+        let epoch = 5;
+
+        // Create two chunks with same sequencer, height but different payloads.
+        let payload1 = sha256::hash(b"payload1");
+        let chunk1 = wire::Chunk {
+            sequencer: sequencer.clone(),
+            height,
+            payload: payload1.to_vec(),
+        };
+        let payload2 = sha256::hash(b"payload2");
+        let chunk2 = wire::Chunk {
+            sequencer: sequencer.clone(),
+            height,
+            payload: payload2.to_vec(),
+        };
+
+        // For payload1, use signers 0,1,2.
+        let mut threshold1 = None;
+        for i in 0..quorum {
+            let partial = ops::partial_sign_message(
+                &shares[i as usize],
+                Some(namespace::ack(b"1234").as_slice()),
+                &serializer::ack(&chunk1, epoch),
+            );
+            let res = acks.add_partial(&sequencer, height, epoch, &payload1, &partial, quorum);
+            if i == (quorum - 1) {
+                assert!(res.is_some());
+                threshold1 = res;
+            } else {
+                assert!(res.is_none());
+            }
+        }
+
+        // For payload2, use disjoint signers 3,4,5.
+        let mut threshold2 = None;
+        for i in quorum..(quorum * 2) {
+            let partial = ops::partial_sign_message(
+                &shares[i as usize],
+                Some(namespace::ack(b"1234").as_slice()),
+                &serializer::ack(&chunk2, epoch),
+            );
+            let res = acks.add_partial(&sequencer, height, epoch, &payload2, &partial, quorum);
+            if i == (quorum * 2 - 1) {
+                assert!(res.is_some());
+                threshold2 = res;
+            } else {
+                assert!(res.is_none());
+            }
+        }
+
+        // Ensure that threshold signatures for different payloads are produced and are distinct.
+        let t1 = threshold1.expect("Expected threshold signature for payload1");
+        let t2 = threshold2.expect("Expected threshold signature for payload2");
+        assert_ne!(t1, t2);
     }
 
     #[test]
     fn test_sequencer_different_heights() {
-        // Acks for unknown Chunks are held until receiving that Chunk
+        // Test that adding a threshold for a higher chunk height prunes older heights.
+        let num_validators = 4;
+        let quorum = 3;
+        let (_, mut runtime, _) = Executor::default();
+        let (_identity, shares) = generate_shares(&mut runtime, None, num_validators, quorum);
+        let mut acks = AckManager::<sha256::Digest>::default();
+
+        let sequencer = PublicKey::from(&[2u8; 32][..]);
+        let epoch = 10;
+        let height1 = 10;
+        let height2 = 20;
+
+        // For height1, create a chunk and threshold.
+        let chunk1 = wire::Chunk {
+            sequencer: sequencer.clone(),
+            height: height1,
+            payload: sha256::hash(b"chunk1").to_vec(),
+        };
+        let mut partials1 = Vec::new();
+        for i in 0..quorum {
+            let partial = ops::partial_sign_message(
+                &shares[i as usize],
+                Some(namespace::ack(b"1234").as_slice()),
+                &serializer::ack(&chunk1, epoch),
+            );
+            partials1.push(partial);
+        }
+        let threshold1 = ops::threshold_signature_recover(quorum, partials1).unwrap();
+        let res = acks.add_threshold(&sequencer, height1, epoch, threshold1);
+        assert!(res);
+        assert_eq!(
+            acks.get_threshold(&sequencer, height1),
+            Some((epoch, threshold1))
+        );
+
+        // For height2, create a new chunk and threshold.
+        let chunk2 = wire::Chunk {
+            sequencer: sequencer.clone(),
+            height: height2,
+            payload: sha256::hash(b"chunk2").to_vec(),
+        };
+        let mut partials2 = Vec::new();
+        for i in 0..quorum {
+            let partial = ops::partial_sign_message(
+                &shares[i as usize],
+                Some(namespace::ack(b"1234").as_slice()),
+                &serializer::ack(&chunk2, epoch),
+            );
+            partials2.push(partial);
+        }
+        let threshold2 = ops::threshold_signature_recover(quorum, partials2).unwrap();
+        let res = acks.add_threshold(&sequencer, height2, epoch, threshold2);
+        assert!(res);
+
+        // After adding height2, the old height1 entry should be pruned.
+        assert_eq!(acks.get_threshold(&sequencer, height1), None);
+        assert_eq!(
+            acks.get_threshold(&sequencer, height2),
+            Some((epoch, threshold2))
+        );
     }
 
     #[test]
     fn test_chunk_different_epochs() {
-        // Can handle Acks for the same chunk at different Epochs
+        // Test that for the same sequencer and height, multiple epochs can be recorded,
+        // and get_threshold returns the one with the highest epoch.
+        let num_validators = 4;
+        let quorum = 3;
+        let (_, mut runtime, _) = Executor::default();
+        let (_identity, shares) = generate_shares(&mut runtime, None, num_validators, quorum);
+        let mut acks = AckManager::<sha256::Digest>::default();
+
+        let sequencer = PublicKey::from(&[3u8; 32][..]);
+        let height = 30;
+        let epoch1 = 1;
+        let epoch2 = 2;
+
+        // Use the same chunk (and thus payload) for both epochs.
+        let chunk = wire::Chunk {
+            sequencer: sequencer.clone(),
+            height,
+            payload: sha256::hash(b"chunk").to_vec(),
+        };
+
+        // Generate threshold signature for epoch1.
+        let mut partials1 = Vec::new();
+        for i in 0..quorum {
+            let partial = ops::partial_sign_message(
+                &shares[i as usize],
+                Some(namespace::ack(b"1234").as_slice()),
+                &serializer::ack(&chunk, epoch1),
+            );
+            partials1.push(partial);
+        }
+        let threshold1 = ops::threshold_signature_recover(quorum, partials1).unwrap();
+        let res1 = acks.add_threshold(&sequencer, height, epoch1, threshold1);
+        assert!(res1);
+
+        // Generate threshold signature for epoch2.
+        let mut partials2 = Vec::new();
+        for i in 0..quorum {
+            let partial = ops::partial_sign_message(
+                &shares[i as usize],
+                Some(namespace::ack(b"1234").as_slice()),
+                &serializer::ack(&chunk, epoch2),
+            );
+            partials2.push(partial);
+        }
+        let threshold2 = ops::threshold_signature_recover(quorum, partials2).unwrap();
+        let res2 = acks.add_threshold(&sequencer, height, epoch2, threshold2);
+        assert!(res2);
+
+        // get_threshold should return the threshold for the highest epoch (epoch2).
+        assert_eq!(
+            acks.get_threshold(&sequencer, height),
+            Some((epoch2, threshold2))
+        );
     }
 
     #[test]
