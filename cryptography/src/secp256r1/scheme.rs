@@ -73,31 +73,22 @@ impl Scheme for Secp256r1 {
         public_key: &PublicKey,
         signature: &Signature,
     ) -> bool {
-        let public_key: [u8; PUBLIC_KEY_LENGTH] = match public_key.as_ref().try_into() {
-            Ok(sig) => sig,
-            Err(_) => return false,
-        };
-        let signature: [u8; SIGNATURE_LENGTH] = match signature.as_ref().try_into() {
-            Ok(sig) => sig,
-            Err(_) => return false,
-        };
-        let signature = match p256::ecdsa::Signature::from_slice(&signature) {
-            Ok(sig) => sig,
-            Err(_) => return false,
-        };
-        if signature.s().is_high().into() {
-            // Reject any signatures with a `s` value in the upper half of the curve order.
+        // Reject any signatures with a `s` value in the upper half of the curve order.
+        if signature.signature.s().is_high().into() {
             return false;
         }
-        let verifier = match VerifyingKey::from_sec1_bytes(&public_key) {
-            Ok(key) => key,
-            Err(_) => return false,
-        };
+
+        // Construct payload
         let payload = match namespace {
             Some(namespace) => Cow::Owned(union_unique(namespace, message)),
             None => Cow::Borrowed(message),
         };
-        verifier.verify(&payload, &signature).is_ok()
+
+        // Verify signature
+        public_key
+            .verifier
+            .verify(&payload, &signature.signature)
+            .is_ok()
     }
 }
 
@@ -159,22 +150,30 @@ impl TryFrom<Vec<u8>> for PrivateKey {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-#[repr(transparent)]
-pub struct PublicKey([u8; PUBLIC_KEY_LENGTH]);
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub struct PublicKey {
+    bytes: [u8; PUBLIC_KEY_LENGTH],
+    verifier: VerifyingKey,
+}
 
 impl Array for PublicKey {}
 
+impl std::hash::Hash for PublicKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.bytes.hash(state);
+    }
+}
+
 impl AsRef<[u8]> for PublicKey {
     fn as_ref(&self) -> &[u8] {
-        &self.0
+        &self.bytes
     }
 }
 
 impl Deref for PublicKey {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
-        &self.0
+        &self.bytes
     }
 }
 
@@ -182,7 +181,10 @@ impl From<&VerifyingKey> for PublicKey {
     fn from(verifier: &VerifyingKey) -> Self {
         let mut array: [u8; PUBLIC_KEY_LENGTH] = [0u8; PUBLIC_KEY_LENGTH];
         array.copy_from_slice(verifier.to_encoded_point(true).as_bytes());
-        Self(array)
+        Self {
+            bytes: array,
+            verifier: *verifier,
+        }
     }
 }
 
@@ -196,10 +198,11 @@ impl TryFrom<&[u8]> for PublicKey {
             .try_into()
             .map_err(|_| Error::InvalidPublicKeyLength)?;
 
-        if VerifyingKey::from_sec1_bytes(array).is_err() {
-            return Err(Error::InvalidPublicKey);
-        }
-        Ok(Self(*array))
+        let verifier = VerifyingKey::from_sec1_bytes(array).map_err(|_| Error::InvalidPublicKey)?;
+        Ok(Self {
+            bytes: *array,
+            verifier,
+        })
     }
 }
 
@@ -217,22 +220,42 @@ impl TryFrom<Vec<u8>> for PublicKey {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-#[repr(transparent)]
-pub struct Signature([u8; SIGNATURE_LENGTH]);
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Signature {
+    bytes: [u8; SIGNATURE_LENGTH],
+    signature: p256::ecdsa::Signature,
+}
 
 impl Array for Signature {}
 
+impl Ord for Signature {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.bytes.cmp(&other.bytes)
+    }
+}
+
+impl PartialOrd for Signature {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl std::hash::Hash for Signature {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.bytes.hash(state);
+    }
+}
+
 impl AsRef<[u8]> for Signature {
     fn as_ref(&self) -> &[u8] {
-        &self.0
+        &self.bytes
     }
 }
 
 impl Deref for Signature {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
-        &self.0
+        &self.bytes
     }
 }
 
@@ -240,7 +263,10 @@ impl From<&p256::ecdsa::Signature> for Signature {
     fn from(value: &p256::ecdsa::Signature) -> Self {
         let mut array: [u8; SIGNATURE_LENGTH] = [0u8; SIGNATURE_LENGTH];
         array.copy_from_slice(&value.to_bytes());
-        Self(array)
+        Self {
+            bytes: array,
+            signature: *value,
+        }
     }
 }
 
@@ -254,7 +280,12 @@ impl TryFrom<&[u8]> for Signature {
             .try_into()
             .map_err(|_| Error::InvalidSignatureLength)?;
 
-        Ok(Self(*array))
+        let signature =
+            p256::ecdsa::Signature::from_slice(array).map_err(|_| Error::InvalidSignatureLength)?;
+        Ok(Self {
+            bytes: *array,
+            signature,
+        })
     }
 }
 
