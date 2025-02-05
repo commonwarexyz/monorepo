@@ -155,12 +155,6 @@ impl Deref for PrivateKey {
     }
 }
 
-impl From<[u8; PRIVATE_KEY_LENGTH]> for PrivateKey {
-    fn from(value: [u8; PRIVATE_KEY_LENGTH]) -> Self {
-        Self::try_from(value).unwrap()
-    }
-}
-
 impl From<ed25519_consensus::SigningKey> for PrivateKey {
     fn from(key: ed25519_consensus::SigningKey) -> Self {
         let raw = key.to_bytes();
@@ -174,8 +168,7 @@ impl TryFrom<&[u8]> for PrivateKey {
         let raw: [u8; PRIVATE_KEY_LENGTH] = value
             .try_into()
             .map_err(|_| Error::InvalidPrivateKeyLength)?;
-        let key =
-            ed25519_consensus::SigningKey::try_from(raw).map_err(|_| Error::InvalidPrivateKey)?;
+        let key = ed25519_consensus::SigningKey::from(raw);
         Ok(Self { raw, key })
     }
 }

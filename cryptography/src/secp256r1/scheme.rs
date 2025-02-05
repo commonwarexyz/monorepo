@@ -40,8 +40,7 @@ impl Scheme for Secp256r1 {
     }
 
     fn private_key(&self) -> PrivateKey {
-        let array: [u8; PRIVATE_KEY_LENGTH] = self.signer.to_bytes().into();
-        PrivateKey::from(array)
+        PrivateKey::from(self.signer.clone())
     }
 
     fn public_key(&self) -> PublicKey {
@@ -116,9 +115,10 @@ impl Deref for PrivateKey {
     }
 }
 
-impl From<[u8; PRIVATE_KEY_LENGTH]> for PrivateKey {
-    fn from(value: [u8; PRIVATE_KEY_LENGTH]) -> Self {
-        Self::try_from(value).unwrap()
+impl From<SigningKey> for PrivateKey {
+    fn from(signer: SigningKey) -> Self {
+        let raw = signer.to_bytes().into();
+        Self { raw, key: signer }
     }
 }
 
@@ -248,7 +248,7 @@ impl Deref for Signature {
 
 impl From<p256::ecdsa::Signature> for Signature {
     fn from(signature: p256::ecdsa::Signature) -> Self {
-        let raw = signature.to_bytes().try_into().unwrap();
+        let raw = signature.to_bytes().into();
         Self { raw, signature }
     }
 }

@@ -20,7 +20,7 @@
 //! ```
 
 use super::primitives::{
-    group::{self, Element, Scalar, G1},
+    group::{self, Element, Scalar},
     ops,
 };
 use crate::{Error, Octets, Scheme};
@@ -115,12 +115,6 @@ impl Deref for PrivateKey {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
         &self.raw
-    }
-}
-
-impl From<[u8; group::PRIVATE_KEY_LENGTH]> for PrivateKey {
-    fn from(value: [u8; group::PRIVATE_KEY_LENGTH]) -> Self {
-        Self::try_from(value).unwrap()
     }
 }
 
