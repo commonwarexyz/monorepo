@@ -23,6 +23,21 @@ pub use sha256::Sha256;
 pub mod secp256r1;
 pub use secp256r1::Secp256r1;
 
+/// Errors that can occur when interacting with cryptographic primitives.
+#[derive(Error, Debug, PartialEq)]
+pub enum Error {
+    #[error("invalid digest length")]
+    InvalidDigestLength,
+    #[error("invalid private key length")]
+    InvalidPrivateKeyLength,
+    #[error("invalid public key length")]
+    InvalidPublicKeyLength,
+    #[error("invalid signature length")]
+    InvalidSignatureLength,
+    #[error("invalid public key")]
+    InvalidPublicKey,
+}
+
 pub trait Array:
     AsRef<[u8]>
     + for<'a> TryFrom<&'a [u8], Error = Error>
@@ -158,21 +173,6 @@ pub trait BatchScheme {
     ///
     /// You can read more about this [here](https://ethresear.ch/t/security-of-bls-batch-verification/10748#the-importance-of-randomness-4).
     fn verify<R: RngCore + CryptoRng>(self, rng: &mut R) -> bool;
-}
-
-/// Errors that can occur when interacting with cryptographic primitives.
-#[derive(Error, Debug, PartialEq)]
-pub enum Error {
-    #[error("invalid digest length")]
-    InvalidDigestLength,
-    #[error("invalid private key length")]
-    InvalidPrivateKeyLength,
-    #[error("invalid public key length")]
-    InvalidPublicKeyLength,
-    #[error("invalid signature length")]
-    InvalidSignatureLength,
-    #[error("invalid public key")]
-    InvalidPublicKey,
 }
 
 /// Interface that commonware crates rely on for hashing.
