@@ -1,7 +1,7 @@
 use bytes::BufMut;
 use commonware_cryptography::{
     bls12381::primitives::{group::Element, poly},
-    PublicKey,
+    Component,
 };
 use commonware_utils::hex;
 use std::mem::size_of;

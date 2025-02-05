@@ -8,7 +8,7 @@ use commonware_cryptography::{
             poly::PartialSignature,
         },
     },
-    PublicKey,
+    Component,
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
@@ -45,7 +45,7 @@ impl<E: Clock, P: Component> Vrf<E, P> {
         let ordered_contributors = contributors
             .iter()
             .enumerate()
-            .map(|(i, pk)| (*pk, i as u32))
+            .map(|(i, pk)| (pk.clone(), i as u32))
             .collect();
         Self {
             runtime,

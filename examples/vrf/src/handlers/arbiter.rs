@@ -9,7 +9,8 @@ use commonware_cryptography::{
             group::{self, Element},
             poly,
         },
-    }, Scheme,
+    },
+    Scheme,
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
@@ -141,7 +142,7 @@ impl<E: Clock, C: Scheme> Arbiter<E, C> {
                                     break;
                                 };
                                 let payload = payload(round, &sender, &msg.commitment);
-                                let Ok(sig) = C::Signature::try_from(ack.signature.as_ref()) else {
+                                let Ok(sig) = C::Signature::try_from(&ack.signature) else {
                                     disqualify = true;
                                     break;
                                 };
@@ -176,7 +177,7 @@ impl<E: Clock, C: Scheme> Arbiter<E, C> {
                             // Check dealer commitment
                             //
                             // Any faults here will be considered as a disqualification.
-                            if let Err(e) = arbiter.commitment(sender, commitment, acks, reveals) {
+                            if let Err(e) = arbiter.commitment(sender.clone(), commitment, acks, reveals) {
                                 warn!(round, error = ?e, sender = hex(&sender), "failed to process commitment");
                                 break;
                             }
@@ -248,7 +249,7 @@ impl<E: Clock, C: Scheme> Arbiter<E, C> {
             let reveals = reveals.remove(&(player_idx as u32)).unwrap_or_default();
             sender
                 .send(
-                    Recipients::One(*player),
+                    Recipients::One(player.clone()),
                     wire::Dkg {
                         round,
                         payload: Some(wire::dkg::Payload::Success(wire::Success {
