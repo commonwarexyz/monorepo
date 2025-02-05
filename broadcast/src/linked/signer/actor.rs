@@ -15,7 +15,7 @@ use commonware_cryptography::{
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Blob, Clock, Spawner, Storage};
-use commonware_storage::journal::{self, Journal};
+use commonware_storage::journal::{self, variable::Journal};
 use commonware_utils::hex;
 use futures::{
     channel::{mpsc, oneshot},
@@ -890,7 +890,7 @@ impl<
         }
 
         // Initialize journal
-        let cfg = journal::Config {
+        let cfg = journal::variable::Config {
             registry: Arc::new(Mutex::new(Registry::default())),
             partition: (self.journal_naming_fn)(sequencer),
         };
