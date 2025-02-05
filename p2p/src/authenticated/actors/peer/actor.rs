@@ -2,7 +2,7 @@ use super::{Config, Error, Mailbox, Message, Relay};
 use crate::authenticated::{
     actors::tracker, channels::Channels, metrics, wire, wire::message::Payload,
 };
-use commonware_cryptography::Array;
+use commonware_cryptography::Octets;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Sink, Spawner, Stream};
 use commonware_stream::{
@@ -18,7 +18,7 @@ use rand::{CryptoRng, Rng};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tracing::debug;
 
-pub struct Actor<E: Spawner + Clock + ReasonablyRealtime, P: Array> {
+pub struct Actor<E: Spawner + Clock + ReasonablyRealtime, P: Octets> {
     runtime: E,
 
     gossip_bit_vec_frequency: Duration,
@@ -38,7 +38,7 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime, P: Array> {
     _reservation: tracker::Reservation<E, P>,
 }
 
-impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng, P: Array> Actor<E, P> {
+impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng, P: Octets> Actor<E, P> {
     pub fn new(runtime: E, cfg: Config, reservation: tracker::Reservation<E, P>) -> (Self, Relay) {
         let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);

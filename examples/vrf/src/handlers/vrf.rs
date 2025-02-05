@@ -8,7 +8,7 @@ use commonware_cryptography::{
             poly::PartialSignature,
         },
     },
-    Array,
+    Octets,
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
@@ -24,7 +24,7 @@ const VRF_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_VRF_";
 
 /// Generate bias-resistant, verifiable randomness using BLS12-381
 /// Threshold Signatures.
-pub struct Vrf<E: Clock, P: Array> {
+pub struct Vrf<E: Clock, P: Octets> {
     runtime: E,
     timeout: Duration,
     threshold: u32,
@@ -33,7 +33,7 @@ pub struct Vrf<E: Clock, P: Array> {
     requests: mpsc::Receiver<(u64, Output)>,
 }
 
-impl<E: Clock, P: Array> Vrf<E, P> {
+impl<E: Clock, P: Octets> Vrf<E, P> {
     pub fn new(
         runtime: E,
         timeout: Duration,

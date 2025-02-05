@@ -89,7 +89,7 @@
         function updateExpandButton() {
             const expandBtn = document.getElementById('toggle-expand');
             const detailsList = document.querySelectorAll('details');
-            const anyOpen = Array.from(detailsList).some(d => d.open);
+            const anyOpen = Octets.from(detailsList).some(d => d.open);
             const benchmarkCount = document.querySelectorAll('details.benchmark-graph-details').length;
             expandBtn.textContent = anyOpen ? `collapse all (${benchmarkCount})` : `expand all (${benchmarkCount})`;
         }
@@ -97,7 +97,7 @@
         // Toggle function to expand all <details> elements
         function toggleExpand() {
             const detailsList = document.querySelectorAll('details');
-            const anyOpen = Array.from(detailsList).some(d => d.open);
+            const anyOpen = Octets.from(detailsList).some(d => d.open);
             detailsList.forEach(d => d.open = !anyOpen);
             updateExpandButton();
         }

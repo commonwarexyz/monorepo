@@ -6,7 +6,7 @@ use super::{
 use crate::{Automaton, Committer, Relay, ThresholdSupervisor};
 use commonware_cryptography::{
     bls12381::primitives::{group, poly},
-    Array, Scheme,
+    Octets, Scheme,
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Sender};
@@ -21,7 +21,7 @@ pub struct Engine<
     B: Blob,
     E: Clock + GClock + Rng + CryptoRng + Spawner + Storage<B>,
     C: Scheme,
-    D: Array,
+    D: Octets,
     A: Automaton<Context = Context<D>, Digest = D>,
     R: Relay<Digest = D>,
     F: Committer<Digest = D>,
@@ -45,7 +45,7 @@ impl<
         B: Blob,
         E: Clock + GClock + Rng + CryptoRng + Spawner + Storage<B>,
         C: Scheme,
-        D: Array,
+        D: Octets,
         A: Automaton<Context = Context<D>, Digest = D>,
         R: Relay<Digest = D>,
         F: Committer<Digest = D>,

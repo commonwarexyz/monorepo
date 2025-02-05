@@ -6,7 +6,7 @@ use crate::authenticated::{
     actors::{peer, router, tracker},
     metrics,
 };
-use commonware_cryptography::Array;
+use commonware_cryptography::Octets;
 use commonware_runtime::{Clock, Sink, Spawner, Stream};
 use commonware_utils::hex;
 use futures::{channel::mpsc, StreamExt};
@@ -16,7 +16,7 @@ use rand::{CryptoRng, Rng};
 use std::time::Duration;
 use tracing::{debug, info};
 
-pub struct Actor<E: Spawner + Clock, Si: Sink, St: Stream, P: Array> {
+pub struct Actor<E: Spawner + Clock, Si: Sink, St: Stream, P: Octets> {
     runtime: E,
 
     mailbox_size: usize,
@@ -31,7 +31,7 @@ pub struct Actor<E: Spawner + Clock, Si: Sink, St: Stream, P: Array> {
     rate_limited: Family<metrics::Message, Counter>,
 }
 
-impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng, Si: Sink, St: Stream, P: Array>
+impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng, Si: Sink, St: Stream, P: Octets>
     Actor<E, Si, St, P>
 {
     pub fn new(runtime: E, cfg: Config) -> (Self, Mailbox<E, Si, St, P>) {

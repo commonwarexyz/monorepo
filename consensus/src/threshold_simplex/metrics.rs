@@ -1,4 +1,4 @@
-use commonware_cryptography::Array;
+use commonware_cryptography::Octets;
 use commonware_utils::hex;
 use prometheus_client::encoding::EncodeLabelSet;
 
@@ -45,42 +45,42 @@ pub struct PeerMessage {
 }
 
 impl PeerMessage {
-    pub fn notarize<P: Array>(peer: &P) -> Self {
+    pub fn notarize<P: Octets>(peer: &P) -> Self {
         Self {
             peer: hex(peer),
             message: NOTARIZE_TYPE,
         }
     }
 
-    pub fn notarization<P: Array>(peer: &P) -> Self {
+    pub fn notarization<P: Octets>(peer: &P) -> Self {
         Self {
             peer: hex(peer),
             message: NOTARIZATION_TYPE,
         }
     }
 
-    pub fn nullify<P: Array>(peer: &P) -> Self {
+    pub fn nullify<P: Octets>(peer: &P) -> Self {
         Self {
             peer: hex(peer),
             message: NULLIFY_TYPE,
         }
     }
 
-    pub fn nullification<P: Array>(peer: &P) -> Self {
+    pub fn nullification<P: Octets>(peer: &P) -> Self {
         Self {
             peer: hex(peer),
             message: NULLIFICATION_TYPE,
         }
     }
 
-    pub fn finalize<P: Array>(peer: &P) -> Self {
+    pub fn finalize<P: Octets>(peer: &P) -> Self {
         Self {
             peer: hex(peer),
             message: FINALIZE_TYPE,
         }
     }
 
-    pub fn finalization<P: Array>(peer: &P) -> Self {
+    pub fn finalization<P: Octets>(peer: &P) -> Self {
         Self {
             peer: hex(peer),
             message: FINALIZATION_TYPE,

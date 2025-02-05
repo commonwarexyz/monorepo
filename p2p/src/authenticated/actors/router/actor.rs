@@ -7,21 +7,21 @@ use crate::{
     Channel, Recipients,
 };
 use bytes::Bytes;
-use commonware_cryptography::Array;
+use commonware_cryptography::Octets;
 use commonware_utils::hex;
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::collections::BTreeMap;
 use tracing::debug;
 
-pub struct Actor<P: Array> {
+pub struct Actor<P: Octets> {
     control: mpsc::Receiver<Message<P>>,
     connections: BTreeMap<P, peer::Relay>,
 
     messages_dropped: Family<metrics::Message, Counter>,
 }
 
-impl<P: Array> Actor<P> {
+impl<P: Octets> Actor<P> {
     pub fn new(cfg: Config) -> (Self, Mailbox<P>, Messenger<P>) {
         let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
 

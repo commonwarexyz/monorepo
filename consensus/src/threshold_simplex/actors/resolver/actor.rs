@@ -11,7 +11,7 @@ use crate::{
     },
     Parsed, ThresholdSupervisor,
 };
-use commonware_cryptography::{bls12381::primitives::poly, Array, Scheme};
+use commonware_cryptography::{bls12381::primitives::poly, Octets, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{utils::requester, Receiver, Recipients, Sender};
 use commonware_runtime::Clock;
@@ -99,7 +99,7 @@ impl Inflight {
 pub struct Actor<
     E: Clock + GClock + Rng,
     C: Scheme,
-    D: Array,
+    D: Octets,
     S: ThresholdSupervisor<Index = View, Identity = poly::Public, PublicKey = C::PublicKey>,
 > {
     runtime: E,
@@ -134,7 +134,7 @@ pub struct Actor<
 impl<
         E: Clock + GClock + Rng,
         C: Scheme,
-        D: Array,
+        D: Octets,
         S: ThresholdSupervisor<Index = View, Identity = poly::Public, PublicKey = C::PublicKey>,
     > Actor<E, C, D, S>
 {

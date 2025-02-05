@@ -9,7 +9,7 @@ use crate::{
             poly::{self, Eval},
         },
     },
-    Array,
+    Octets,
 };
 use commonware_utils::quorum;
 use std::collections::{BTreeMap, HashMap};
@@ -27,7 +27,7 @@ pub struct Output {
 }
 
 /// Track commitments and dealings distributed by dealers.
-pub struct Player<P: Array> {
+pub struct Player<P: Octets> {
     me: u32,
     dealer_threshold: u32,
     player_threshold: u32,
@@ -39,7 +39,7 @@ pub struct Player<P: Array> {
     dealings: HashMap<u32, (poly::Public, Share)>,
 }
 
-impl<P: Array> Player<P> {
+impl<P: Octets> Player<P> {
     /// Create a new player for a DKG/Resharing procedure.
     pub fn new(
         me: P,

@@ -1,9 +1,9 @@
 use crate::{threshold_simplex::wire, Parsed};
-use commonware_cryptography::Array;
+use commonware_cryptography::Octets;
 use futures::{channel::mpsc, SinkExt};
 
 // If either of these requests fails, it will not send a reply.
-pub enum Message<D: Array> {
+pub enum Message<D: Octets> {
     Notarization {
         notarization: Parsed<wire::Notarization, D>,
     },
@@ -13,11 +13,11 @@ pub enum Message<D: Array> {
 }
 
 #[derive(Clone)]
-pub struct Mailbox<D: Array> {
+pub struct Mailbox<D: Octets> {
     sender: mpsc::Sender<Message<D>>,
 }
 
-impl<D: Array> Mailbox<D> {
+impl<D: Octets> Mailbox<D> {
     pub(super) fn new(sender: mpsc::Sender<Message<D>>) -> Self {
         Self { sender }
     }

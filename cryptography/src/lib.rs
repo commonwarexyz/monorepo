@@ -38,7 +38,8 @@ pub enum Error {
     InvalidPublicKey,
 }
 
-pub trait Array:
+/// Arbitrary object that can be represented as a byte array.
+pub trait Octets:
     AsRef<[u8]>
     + for<'a> TryFrom<&'a [u8], Error = Error>
     + for<'a> TryFrom<&'a Vec<u8>, Error = Error>
@@ -81,9 +82,9 @@ pub trait Array:
 
 /// Interface that commonware crates rely on for most cryptographic operations.
 pub trait Scheme: Clone + Send + Sync + 'static {
-    type PrivateKey: Array;
-    type PublicKey: Array;
-    type Signature: Array;
+    type PrivateKey: Octets;
+    type PublicKey: Octets;
+    type Signature: Octets;
 
     /// Returns a new instance of the scheme.
     fn new<R: Rng + CryptoRng>(rng: &mut R) -> Self;
@@ -136,8 +137,8 @@ pub trait Scheme: Clone + Send + Sync + 'static {
 
 /// Interface that commonware crates rely on for batched cryptographic operations.
 pub trait BatchScheme {
-    type PublicKey: Array;
-    type Signature: Array;
+    type PublicKey: Octets;
+    type Signature: Octets;
 
     /// Create a new batch scheme.
     fn new() -> Self;
@@ -189,7 +190,7 @@ pub trait BatchScheme {
 /// after cloning.
 pub trait Hasher: Clone + Send + Sync + 'static {
     /// Byte array representing a hash digest.
-    type Digest: Array;
+    type Digest: Octets;
 
     /// Create a new hasher.
     fn new() -> Self;

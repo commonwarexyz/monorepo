@@ -1,6 +1,6 @@
 use super::{Context, View};
 use crate::{Automaton, Committer, Relay, Supervisor};
-use commonware_cryptography::{Array, Scheme};
+use commonware_cryptography::{Octets, Scheme};
 use governor::Quota;
 use prometheus_client::registry::Registry;
 use std::{
@@ -11,7 +11,7 @@ use std::{
 /// Configuration for the consensus engine.
 pub struct Config<
     C: Scheme,
-    D: Array,
+    D: Octets,
     A: Automaton<Context = Context<D>, Digest = D>,
     R: Relay<Digest = D>,
     F: Committer<Digest = D>,
@@ -81,7 +81,7 @@ pub struct Config<
 
 impl<
         C: Scheme,
-        D: Array,
+        D: Octets,
         A: Automaton<Context = Context<D>, Digest = D>,
         R: Relay<Digest = D>,
         F: Committer<Digest = D>,

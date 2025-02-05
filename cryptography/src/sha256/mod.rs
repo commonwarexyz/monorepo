@@ -1,6 +1,6 @@
 //! SHA-256 implementation of the `Hasher` trait.
 
-use crate::{Array, Error, Hasher};
+use crate::{Error, Hasher, Octets};
 use rand::{CryptoRng, Rng};
 use sha2::{Digest as _, Sha256 as ISha256};
 use std::ops::Deref;
@@ -67,7 +67,7 @@ impl Hasher for Sha256 {
 #[repr(transparent)]
 pub struct Digest([u8; DIGEST_LENGTH]);
 
-impl Array for Digest {}
+impl Octets for Digest {}
 
 impl From<[u8; DIGEST_LENGTH]> for Digest {
     fn from(value: [u8; DIGEST_LENGTH]) -> Self {
