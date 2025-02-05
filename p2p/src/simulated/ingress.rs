@@ -11,6 +11,7 @@ pub enum Message<P: Component> {
     Register {
         public_key: P,
         channel: Channel,
+        #[allow(clippy::type_complexity)]
         result: oneshot::Sender<Result<(Sender<P>, Receiver<P>), Error>>,
     },
     AddLink {

@@ -2,7 +2,6 @@ use std::io::Result;
 fn main() -> Result<()> {
     // Proto compilation rules for `simplex` dialect
     let mut config = prost_build::Config::new();
-    config.bytes(["Signature.public_key", "Signature.signature"]);
     config.compile_protos(&["src/simplex/wire.proto"], &["src/simplex/"])?;
 
     // Proto compilation rules for `threshold_simplex` dialect

@@ -3,7 +3,7 @@ use crate::{
     simplex::encoder::{nullify_message, proposal_message},
     Supervisor,
 };
-use commonware_cryptography::{Component, PublicKey, Scheme};
+use commonware_cryptography::{Component, Scheme};
 use commonware_utils::{hex, quorum};
 use std::collections::HashSet;
 use tracing::debug;
@@ -110,7 +110,7 @@ pub fn verify_notarization<
         seen.insert(signature.public_key);
 
         // Verify signature
-        let Ok(signature) = C::Signature::try_from(signature.signature.as_ref()) else {
+        let Ok(signature) = C::Signature::try_from(&signature.signature) else {
             return false;
         };
         if !C::verify(Some(namespace), &message, public_key, &signature) {
@@ -199,7 +199,7 @@ pub fn verify_nullification<S: Supervisor<Index = View, PublicKey = C::PublicKey
         seen.insert(signature.public_key);
 
         // Verify signature
-        let Ok(signature) = C::Signature::try_from(signature.signature.as_ref()) else {
+        let Ok(signature) = C::Signature::try_from(&signature.signature) else {
             return false;
         };
         if !C::verify(Some(namespace), &message, public_key, &signature) {
@@ -307,7 +307,7 @@ pub fn verify_finalization<
         seen.insert(signature.public_key);
 
         // Verify signature
-        let Ok(signature) = C::Signature::try_from(signature.signature.as_ref()) else {
+        let Ok(signature) = C::Signature::try_from(&signature.signature) else {
             return false;
         };
         if !C::verify(Some(namespace), &message, public_key, &signature) {

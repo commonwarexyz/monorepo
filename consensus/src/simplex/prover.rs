@@ -163,7 +163,7 @@ impl<C: Scheme, D: Component> Prover<C, D> {
             if seen.contains(&public_key) {
                 return None;
             }
-            seen.insert(public_key);
+            seen.insert(public_key.clone());
 
             // Verify signature
             if check_sigs {

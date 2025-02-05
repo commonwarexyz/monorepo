@@ -1,7 +1,7 @@
 use super::relay::Relay;
 use crate::{simplex::Context, Automaton as Au, Committer as Co, Proof, Relay as Re};
 use bytes::{Buf, BufMut, Bytes};
-use commonware_cryptography::{Component, Hasher, PublicKey};
+use commonware_cryptography::{Component, Hasher};
 use commonware_macros::select;
 use commonware_runtime::Clock;
 use commonware_utils::hex;
@@ -80,7 +80,7 @@ impl<D: Component> Au for Mailbox<D> {
     async fn verify(
         &mut self,
         context: Context<Self::Digest>,
-        payload: Self::Component,
+        payload: Self::Digest,
     ) -> oneshot::Receiver<bool> {
         let (response, receiver) = oneshot::channel();
         self.sender
@@ -174,7 +174,7 @@ pub struct Application<E: Clock + RngCore, H: Hasher, P: Component> {
 impl<E: Clock + RngCore, H: Hasher, P: Component> Application<E, H, P> {
     pub fn new(runtime: E, cfg: Config<H, P>) -> (Self, Mailbox<H::Digest>) {
         // Register self on relay
-        let broadcast = cfg.relay.register(cfg.participant);
+        let broadcast = cfg.relay.register(cfg.participant.clone());
 
         // Generate samplers
         let propose_latency = Normal::new(cfg.propose_latency.0, cfg.propose_latency.1).unwrap();
@@ -297,7 +297,10 @@ impl<E: Clock + RngCore, H: Hasher, P: Component> Application<E, H, P> {
         }
         let _ = self
             .tracker
-            .send((self.participant, Progress::Notarized(proof, payload)))
+            .send((
+                self.participant.clone(),
+                Progress::Notarized(proof, payload),
+            ))
             .await;
     }
 
@@ -307,7 +310,10 @@ impl<E: Clock + RngCore, H: Hasher, P: Component> Application<E, H, P> {
         }
         let _ = self
             .tracker
-            .send((self.participant, Progress::Finalized(proof, payload)))
+            .send((
+                self.participant.clone(),
+                Progress::Finalized(proof, payload),
+            ))
             .await;
     }
 

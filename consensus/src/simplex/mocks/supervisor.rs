@@ -21,6 +21,7 @@ type Faults<P> = HashMap<P, HashMap<View, HashSet<Activity>>>;
 
 #[derive(Clone)]
 pub struct Supervisor<C: Scheme, D: Component> {
+    #[allow(clippy::type_complexity)]
     participants: BTreeMap<View, (HashMap<C::PublicKey, u32>, Vec<C::PublicKey>)>,
 
     prover: Prover<C, D>,
@@ -36,7 +37,7 @@ impl<C: Scheme, D: Component> Supervisor<C, D> {
         for (view, mut validators) in cfg.participants.into_iter() {
             let mut map = HashMap::new();
             for (index, validator) in validators.iter().enumerate() {
-                map.insert(*validator, index as u32);
+                map.insert(validator.clone(), index as u32);
             }
             validators.sort();
             parsed_participants.insert(view, (map, validators));
@@ -62,7 +63,7 @@ impl<C: Scheme, D: Component> Su for Supervisor<C, D> {
                 panic!("no participants in required range");
             }
         };
-        Some(closest.1[index as usize % closest.1.len()])
+        Some(closest.1[index as usize % closest.1.len()].clone())
     }
 
     fn participants(&self, index: Self::Index) -> Option<&Vec<Self::PublicKey>> {

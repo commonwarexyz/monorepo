@@ -52,6 +52,7 @@ pub struct Requester<E: Clock + GClock + Rng, C: Scheme> {
     excluded: HashSet<C::PublicKey>,
 
     // Rate limiter for participants
+    #[allow(clippy::type_complexity)]
     rate_limiter:
         RateLimiter<C::PublicKey, HashMapStateStore<C::PublicKey>, E, NoOpMiddleware<E::Instant>>,
     // Participants and their performance (lower is better)

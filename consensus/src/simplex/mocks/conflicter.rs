@@ -110,7 +110,7 @@ impl<
                             signature: self
                                 .crypto
                                 .sign(Some(&self.notarize_namespace), &msg)
-                                .into(),
+                                .to_vec(),
                         }),
                     };
                     let msg = wire::Voter {
@@ -136,7 +136,7 @@ impl<
                             signature: self
                                 .crypto
                                 .sign(Some(&self.notarize_namespace), &msg)
-                                .into(),
+                                .to_vec(),
                         }),
                     };
                     let msg = wire::Voter {
@@ -177,7 +177,7 @@ impl<
                             signature: self
                                 .crypto
                                 .sign(Some(&self.finalize_namespace), &msg)
-                                .into(),
+                                .to_vec(),
                         }),
                     };
                     let msg = wire::Voter {
@@ -203,7 +203,7 @@ impl<
                             signature: self
                                 .crypto
                                 .sign(Some(&self.finalize_namespace), &msg)
-                                .into(),
+                                .to_vec(),
                         }),
                     };
                     let msg = wire::Voter {

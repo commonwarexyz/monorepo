@@ -160,6 +160,7 @@ pub struct Actor<E: Spawner + Rng + GClock, C: Scheme> {
 }
 
 impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
+    #[allow(clippy::type_complexity)]
     pub fn new(
         runtime: E,
         mut cfg: Config<C>,
@@ -328,6 +329,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
         }
     }
 
+    #[allow(clippy::type_complexity)]
     fn handle_dialable(&mut self) -> Vec<(C::PublicKey, SocketAddr, Reservation<E, C::PublicKey>)> {
         // Collect unreserved peers
         let available_peers: Vec<_> = self

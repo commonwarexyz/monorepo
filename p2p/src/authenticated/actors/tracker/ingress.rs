@@ -30,6 +30,7 @@ pub enum Message<E: Spawner, P: Component> {
 
     // Used by dialer
     Dialable {
+        #[allow(clippy::type_complexity)]
         peers: oneshot::Sender<Vec<(P, SocketAddr, Reservation<E, P>)>>,
     },
 

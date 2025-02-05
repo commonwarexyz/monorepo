@@ -125,15 +125,9 @@ impl<C: Scheme, D: Component, S: Supervisor<Index = View, PublicKey = C::PublicK
         let proposal_digest = hash(&message);
 
         // Get Signature
-        let Ok(notarize_signature) = C::Signature::try_from(
-            notarize
-                .message
-                .signature
-                .as_ref()
-                .unwrap()
-                .signature
-                .as_ref(),
-        ) else {
+        let Ok(notarize_signature) =
+            C::Signature::try_from(&notarize.message.signature.as_ref().unwrap().signature)
+        else {
             return false;
         };
 
@@ -159,13 +153,12 @@ impl<C: Scheme, D: Component, S: Supervisor<Index = View, PublicKey = C::PublicK
                 .unwrap();
             let previous_proposal = previous_notarize.message.proposal.as_ref().unwrap();
             let Ok(previous_notarize_signature) = C::Signature::try_from(
-                previous_notarize
+                &previous_notarize
                     .message
                     .signature
                     .as_ref()
                     .unwrap()
-                    .signature
-                    .as_ref(),
+                    .signature,
             ) else {
                 return false;
             };
@@ -226,20 +219,14 @@ impl<C: Scheme, D: Component, S: Supervisor<Index = View, PublicKey = C::PublicK
             .unwrap()
             .get(&public_key_index)
             .unwrap();
-        let Ok(finalize_signature) = C::Signature::try_from(
-            finalize
-                .message
-                .signature
-                .as_ref()
-                .unwrap()
-                .signature
-                .as_ref(),
-        ) else {
+        let Ok(finalize_signature) =
+            C::Signature::try_from(&finalize.message.signature.as_ref().unwrap().signature)
+        else {
             return false;
         };
 
         let Ok(nullify_signature) =
-            C::Signature::try_from(nullify.signature.as_ref().unwrap().signature.as_ref())
+            C::Signature::try_from(&nullify.signature.as_ref().unwrap().signature)
         else {
             return false;
         };
@@ -316,22 +303,16 @@ impl<C: Scheme, D: Component, S: Supervisor<Index = View, PublicKey = C::PublicK
         // Check if also issued nullify
         let proposal = finalize.message.proposal.as_ref().unwrap();
         let public_key_index = finalize.message.signature.as_ref().unwrap().public_key;
-        let Ok(finalize_signature) = C::Signature::try_from(
-            finalize
-                .message
-                .signature
-                .as_ref()
-                .unwrap()
-                .signature
-                .as_ref(),
-        ) else {
+        let Ok(finalize_signature) =
+            C::Signature::try_from(&finalize.message.signature.as_ref().unwrap().signature)
+        else {
             return false;
         };
 
         let null = self.nullifies.get(&public_key_index);
         if let Some(null) = null {
             let Ok(null_signature) =
-                C::Signature::try_from(null.signature.as_ref().unwrap().signature.as_ref())
+                C::Signature::try_from(&null.signature.as_ref().unwrap().signature)
             else {
                 return false;
             };
@@ -378,13 +359,12 @@ impl<C: Scheme, D: Component, S: Supervisor<Index = View, PublicKey = C::PublicK
                 .unwrap();
             let previous_proposal = previous_finalize.message.proposal.as_ref().unwrap();
             let Ok(previous_finalize_signature) = C::Signature::try_from(
-                previous_finalize
+                &previous_finalize
                     .message
                     .signature
                     .as_ref()
                     .unwrap()
-                    .signature
-                    .as_ref(),
+                    .signature,
             ) else {
                 return false;
             };
@@ -822,7 +802,7 @@ impl<
                 signature: self
                     .crypto
                     .sign(Some(&self.nullify_namespace), &message)
-                    .into(),
+                    .to_vec(),
             }),
         };
 
@@ -874,7 +854,7 @@ impl<
 
         // Verify the signature
         let nullify_message = nullify_message(nullify.view);
-        let Ok(sig) = C::Signature::try_from(signature.signature.as_ref()) else {
+        let Ok(sig) = C::Signature::try_from(&signature.signature) else {
             return;
         };
         if !C::verify(
@@ -1100,7 +1080,7 @@ impl<
         info!(view, "entered view");
 
         // Check if we should fast exit this view
-        let leader = round.leader;
+        let leader = round.leader.clone();
         if view < self.activity_timeout || leader == self.crypto.public_key() {
             // Don't fast exit the view
             return;
@@ -1215,7 +1195,7 @@ impl<
             return;
         };
 
-        let Ok(sig) = C::Signature::try_from(signature.signature.as_ref()) else {
+        let Ok(sig) = C::Signature::try_from(&signature.signature) else {
             return;
         };
         // Verify the signature
@@ -1468,7 +1448,7 @@ impl<
             return;
         };
 
-        let Ok(sig) = C::Signature::try_from(signature.signature.as_ref()) else {
+        let Ok(sig) = C::Signature::try_from(&signature.signature) else {
             return;
         };
         // Verify the signature
@@ -1664,7 +1644,7 @@ impl<
                     signature: self
                         .crypto
                         .sign(Some(&self.notarize_namespace), &message)
-                        .into(),
+                        .to_vec(),
                 }),
             },
             digest: proposal.digest.clone(),
@@ -1784,7 +1764,7 @@ impl<
                     signature: self
                         .crypto
                         .sign(Some(&self.finalize_namespace), &message)
-                        .into(),
+                        .to_vec(),
                 }),
             },
             digest: proposal.digest.clone(),
@@ -1887,8 +1867,7 @@ impl<
             let mut signatures = Vec::with_capacity(notarization.message.signatures.len());
             for signature in &notarization.message.signatures {
                 let public_key = validators.get(signature.public_key as usize).unwrap();
-                // TODO : manage error.
-                let signature = C::Signature::try_from(signature.signature.as_ref()).unwrap();
+                let signature = C::Signature::try_from(&signature.signature).unwrap();
                 signatures.push((public_key, signature));
             }
             let proof = Prover::<C, D>::serialize_aggregation(
@@ -2042,8 +2021,7 @@ impl<
             let mut signatures = Vec::with_capacity(finalization.message.signatures.len());
             for signature in &finalization.message.signatures {
                 let public_key = validators.get(signature.public_key as usize).unwrap();
-                // TODO: manage error.
-                let signature = C::Signature::try_from(signature.signature.as_ref()).unwrap();
+                let signature = C::Signature::try_from(&signature.signature).unwrap();
                 signatures.push((public_key, signature));
             }
             let proof = Prover::<C, D>::serialize_aggregation(
@@ -2101,12 +2079,13 @@ impl<
                         let proposal = notarize.proposal.as_ref().unwrap().clone();
                         let payload = D::try_from(&proposal.payload).unwrap();
                         let public_key = notarize.signature.as_ref().unwrap().public_key;
-                        let public_key = *self
+                        let public_key = self
                             .supervisor
                             .participants(proposal.view)
                             .unwrap()
                             .get(public_key as usize)
-                            .unwrap();
+                            .unwrap()
+                            .clone();
                         self.handle_notarize(
                             &public_key,
                             Parsed {
@@ -2138,12 +2117,13 @@ impl<
                         // Handle nullify
                         let view = nullify.view;
                         let public_key = nullify.signature.as_ref().unwrap().public_key;
-                        let public_key = *self
+                        let public_key = self
                             .supervisor
                             .participants(view)
                             .unwrap()
                             .get(public_key as usize)
-                            .unwrap();
+                            .unwrap()
+                            .clone();
                         self.handle_nullify(&public_key, nullify).await;
 
                         // Update round info
@@ -2159,12 +2139,13 @@ impl<
                         let view = proposal.view;
                         let payload = D::try_from(&proposal.payload).unwrap();
                         let public_key = finalize.signature.as_ref().unwrap().public_key;
-                        let public_key = *self
+                        let public_key = self
                             .supervisor
                             .participants(view)
                             .unwrap()
                             .get(public_key as usize)
-                            .unwrap();
+                            .unwrap()
+                            .clone();
                         self.handle_finalize(
                             &public_key,
                             Parsed {
