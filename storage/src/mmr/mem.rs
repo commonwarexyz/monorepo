@@ -40,9 +40,24 @@ impl<H: CHasher> Mmr<H> {
         }
     }
 
+    // Return an `Mmr` initialized with the given nodes and oldest remembered position.
+    pub fn init(nodes: Vec<H::Digest>, oldest_remembered_pos: u64) -> Self {
+        Self {
+            hasher: H::new(),
+            nodes,
+            oldest_remembered_pos,
+        }
+    }
+
     /// Return the total number of nodes in the MMR, independent of any forgetting.
     pub fn size(&self) -> u64 {
         self.nodes.len() as u64 + self.oldest_remembered_pos
+    }
+
+    /// Return the node at the given position in the MMR, if it exists.
+    pub fn get_node(&self, position: u64) -> Option<&H::Digest> {
+        self.nodes
+            .get((position - self.oldest_remembered_pos) as usize)
     }
 
     /// Return the position of the oldest remembered node in the MMR. Proofs can only be generated
@@ -91,20 +106,20 @@ impl<H: CHasher> Mmr<H> {
     }
 
     /// Return an inclusion proof for the specified element. Returns `ElementPruned` error if the
-    /// requested element is not currently stored by this MMR.
+    /// requested element cannot be proven by this MMR due to pruning.
     pub fn proof(&self, element_pos: u64) -> Result<Proof<H>, Error> {
         self.range_proof(element_pos, element_pos)
     }
 
     /// Return an inclusion proof for the specified range of elements. The range is inclusive of
     /// both endpoints. Returns `ElementPruned` if the requested range is outside the range
-    /// currently stored by this MMR.
+    /// currently provable by this MMR.
     pub fn range_proof(
         &self,
         start_element_pos: u64,
         end_element_pos: u64,
     ) -> Result<Proof<H>, Error> {
-        if start_element_pos != 0 && start_element_pos <= self.oldest_remembered_pos {
+        if self.oldest_remembered_pos != 0 && start_element_pos <= self.oldest_remembered_pos {
             return Err(ElementPruned(self.oldest_remembered_pos));
         }
         let mut hashes: Vec<H::Digest> = Vec::new();
@@ -236,7 +251,7 @@ impl<H: CHasher> Mmr<H> {
 mod tests {
     use crate::mmr::hasher::Hasher;
     use crate::mmr::iterator::nodes_needing_parents;
-    use crate::mmr::mem::Mmr;
+    use crate::mmr::{mem::Mmr, Error::*};
     use commonware_cryptography::{Hasher as CHasher, Sha256};
 
     /// Test MMR building by consecutively adding 11 equal elements to a new MMR, producing the
@@ -298,7 +313,7 @@ mod tests {
         let mut mmr_hasher = Hasher::new(&mut hasher);
         for leaf in leaves.iter().by_ref() {
             let hash = mmr_hasher.leaf_hash(*leaf, &element);
-            assert_eq!(mmr.nodes[*leaf as usize], hash);
+            assert_eq!(mmr.get_node(*leaf).unwrap(), &hash);
         }
 
         // verify height=1 hashes
@@ -338,6 +353,12 @@ mod tests {
             "forget_max should forget to right-most leaf of leftmost peak"
         );
         assert_eq!(mmr.oldest_remembered_node_pos(), 11);
+
+        // After forgetting we shouldn't be able to prove elements at or before the oldest remaining.
+        assert!(matches!(mmr.proof(0), Err(ElementPruned(_))));
+        assert!(matches!(mmr.proof(11), Err(ElementPruned(_))));
+        assert!(mmr.proof(15).is_ok());
+
         assert!(
             mmr.forget(12).is_err(),
             "forgetting too many nodes should fail"
@@ -362,6 +383,14 @@ mod tests {
         assert!(
             mmr.range_proof(15, 18).is_ok(),
             "attempts to range_prove over elements following oldest remaining should succeed"
+        );
+
+        // Test that we can initialize a new MMR from another's elements.
+        let mmr_copy = Mmr::<Sha256>::init(mmr.nodes.clone(), mmr.oldest_remembered_node_pos());
+        assert_eq!(mmr_copy.size(), 19);
+        assert_eq!(
+            mmr_copy.oldest_remembered_node_pos(),
+            mmr.oldest_remembered_node_pos()
         );
     }
 }
