@@ -3,12 +3,12 @@ use crate::{
     simplex::encoder::{nullify_message, proposal_message},
     Supervisor,
 };
-use commonware_cryptography::{Component, Scheme};
+use commonware_cryptography::{Array, Scheme};
 use commonware_utils::{hex, quorum};
 use std::collections::HashSet;
 use tracing::debug;
 
-pub fn threshold<P: Component>(validators: &[P]) -> Option<(u32, u32)> {
+pub fn threshold<P: Array>(validators: &[P]) -> Option<(u32, u32)> {
     let len = validators.len() as u32;
     let threshold = quorum(len).expect("not enough validators for a quorum");
     Some((threshold, len))
@@ -17,7 +17,7 @@ pub fn threshold<P: Component>(validators: &[P]) -> Option<(u32, u32)> {
 pub fn verify_notarization<
     S: Supervisor<Index = View, PublicKey = C::PublicKey>,
     C: Scheme,
-    D: Component,
+    D: Array,
 >(
     supervisor: &S,
     namespace: &[u8],
@@ -214,7 +214,7 @@ pub fn verify_nullification<S: Supervisor<Index = View, PublicKey = C::PublicKey
 pub fn verify_finalization<
     S: Supervisor<Index = View, PublicKey = C::PublicKey>,
     C: Scheme,
-    D: Component,
+    D: Array,
 >(
     supervisor: &S,
     namespace: &[u8],

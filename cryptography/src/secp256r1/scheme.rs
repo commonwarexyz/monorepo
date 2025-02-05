@@ -1,4 +1,4 @@
-use crate::{Component, Error, Scheme};
+use crate::{Array, Error, Scheme};
 use commonware_utils::union_unique;
 use p256::{
     ecdsa::{
@@ -105,7 +105,7 @@ impl Scheme for Secp256r1 {
 #[repr(transparent)]
 pub struct PrivateKey([u8; PRIVATE_KEY_LENGTH]);
 
-impl Component for PrivateKey {}
+impl Array for PrivateKey {}
 
 impl AsRef<[u8]> for PrivateKey {
     fn as_ref(&self) -> &[u8] {
@@ -163,7 +163,7 @@ impl TryFrom<Vec<u8>> for PrivateKey {
 #[repr(transparent)]
 pub struct PublicKey([u8; PUBLIC_KEY_LENGTH]);
 
-impl Component for PublicKey {}
+impl Array for PublicKey {}
 
 impl AsRef<[u8]> for PublicKey {
     fn as_ref(&self) -> &[u8] {
@@ -221,7 +221,7 @@ impl TryFrom<Vec<u8>> for PublicKey {
 #[repr(transparent)]
 pub struct Signature([u8; SIGNATURE_LENGTH]);
 
-impl Component for Signature {}
+impl Array for Signature {}
 
 impl AsRef<[u8]> for Signature {
     fn as_ref(&self) -> &[u8] {

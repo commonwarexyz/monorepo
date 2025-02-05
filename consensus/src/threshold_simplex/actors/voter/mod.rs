@@ -7,7 +7,7 @@ use crate::{
 };
 pub use actor::Actor;
 use commonware_cryptography::Scheme;
-use commonware_cryptography::{bls12381::primitives::group, Component};
+use commonware_cryptography::{bls12381::primitives::group, Array};
 pub use ingress::{Mailbox, Message};
 use prometheus_client::registry::Registry;
 use std::sync::{Arc, Mutex};
@@ -15,7 +15,7 @@ use std::time::Duration;
 
 pub struct Config<
     C: Scheme,
-    D: Component,
+    D: Array,
     A: Automaton<Context = Context<D>>,
     R: Relay<Digest = D>,
     F: Committer<Digest = D>,

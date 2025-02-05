@@ -1,7 +1,7 @@
 use crate::mmr::hasher::Hasher;
 use crate::mmr::iterator::PeakIterator;
 use bytes::{Buf, BufMut};
-use commonware_cryptography::{Component, Hasher as CHasher};
+use commonware_cryptography::{Array, Hasher as CHasher};
 
 /// A `Proof` contains the information necessary for proving the inclusion of an element, or some
 /// range of elements, in the MMR from its root hash. The `hashes` vector contains: (1) the peak

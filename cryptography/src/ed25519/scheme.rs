@@ -1,4 +1,4 @@
-use crate::{BatchScheme, Component, Error, Scheme};
+use crate::{BatchScheme, Array, Error, Scheme};
 use commonware_utils::union_unique;
 use ed25519_consensus::{self, VerificationKey, VerificationKeyBytes};
 use rand::{CryptoRng, Rng, RngCore};
@@ -115,7 +115,7 @@ impl BatchScheme for Ed25519Batch {
 #[repr(transparent)]
 pub struct PrivateKey([u8; PRIVATE_KEY_LENGTH]);
 
-impl Component for PrivateKey {}
+impl Array for PrivateKey {}
 
 impl AsRef<[u8]> for PrivateKey {
     fn as_ref(&self) -> &[u8] {
@@ -173,7 +173,7 @@ impl TryFrom<Vec<u8>> for PrivateKey {
 #[repr(transparent)]
 pub struct PublicKey([u8; PUBLIC_KEY_LENGTH]);
 
-impl Component for PublicKey {}
+impl Array for PublicKey {}
 
 impl AsRef<[u8]> for PublicKey {
     fn as_ref(&self) -> &[u8] {
@@ -223,7 +223,7 @@ impl TryFrom<Vec<u8>> for PublicKey {
 #[repr(transparent)]
 pub struct Signature([u8; SIGNATURE_LENGTH]);
 
-impl Component for Signature {}
+impl Array for Signature {}
 
 impl AsRef<[u8]> for Signature {
     fn as_ref(&self) -> &[u8] {

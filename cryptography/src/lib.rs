@@ -23,7 +23,7 @@ pub use sha256::Sha256;
 pub mod secp256r1;
 pub use secp256r1::Secp256r1;
 
-pub trait Component:
+pub trait Array:
     AsRef<[u8]>
     + for<'a> TryFrom<&'a [u8], Error = Error>
     + for<'a> TryFrom<&'a Vec<u8>, Error = Error>
@@ -66,9 +66,9 @@ pub trait Component:
 
 /// Interface that commonware crates rely on for most cryptographic operations.
 pub trait Scheme: Clone + Send + Sync + 'static {
-    type PrivateKey: Component;
-    type PublicKey: Component;
-    type Signature: Component;
+    type PrivateKey: Array;
+    type PublicKey: Array;
+    type Signature: Array;
 
     /// Returns a new instance of the scheme.
     fn new<R: Rng + CryptoRng>(rng: &mut R) -> Self;
@@ -121,8 +121,8 @@ pub trait Scheme: Clone + Send + Sync + 'static {
 
 /// Interface that commonware crates rely on for batched cryptographic operations.
 pub trait BatchScheme {
-    type PublicKey: Component;
-    type Signature: Component;
+    type PublicKey: Array;
+    type Signature: Array;
 
     /// Create a new batch scheme.
     fn new() -> Self;
@@ -189,7 +189,7 @@ pub enum Error {
 /// after cloning.
 pub trait Hasher: Clone + Send + Sync + 'static {
     /// Byte array representing a hash digest.
-    type Digest: Component;
+    type Digest: Array;
 
     /// Create a new hasher.
     fn new() -> Self;

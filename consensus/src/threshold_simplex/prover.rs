@@ -13,7 +13,7 @@ use commonware_cryptography::{
         ops,
         poly::{self, Eval},
     },
-    Component,
+    Array,
 };
 use std::marker::PhantomData;
 
@@ -43,7 +43,7 @@ impl Verifier {
 /// We don't use protobuf for proof encoding because we expect external parties
 /// to decode proofs in constrained environments where protobuf may not be implemented.
 #[derive(Clone)]
-pub struct Prover<D: Component> {
+pub struct Prover<D: Array> {
     public: group::Public,
 
     seed_namespace: Vec<u8>,
@@ -58,7 +58,7 @@ pub struct Prover<D: Component> {
 /// over pre-aggregated data (where the public key of each index can be derived from the group
 /// polynomial). This can be very useful for distributing rewards without including all partial signatures
 /// in a block.
-impl<D: Component> Prover<D> {
+impl<D: Array> Prover<D> {
     /// Create a new prover with the given signing `namespace`.
     pub fn new(public: group::Public, namespace: &[u8]) -> Self {
         Self {

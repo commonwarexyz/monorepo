@@ -12,7 +12,7 @@ use crate::{
     },
     Parsed, Supervisor,
 };
-use commonware_cryptography::{Component, Scheme};
+use commonware_cryptography::{Array, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{
     utils::requester::{self, Requester},
@@ -103,7 +103,7 @@ impl Inflight {
 pub struct Actor<
     E: Clock + GClock + Rng,
     C: Scheme,
-    D: Component,
+    D: Array,
     S: Supervisor<Index = View, PublicKey = C::PublicKey>,
 > {
     runtime: E,
@@ -137,7 +137,7 @@ pub struct Actor<
 impl<
         E: Clock + GClock + Rng,
         C: Scheme,
-        D: Component,
+        D: Array,
         S: Supervisor<Index = View, PublicKey = C::PublicKey>,
     > Actor<E, C, D, S>
 {
