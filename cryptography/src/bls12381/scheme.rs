@@ -50,27 +50,23 @@ impl Scheme for Bls12381 {
     }
 
     fn from(private_key: PrivateKey) -> Option<Self> {
-        let private_key: [u8; group::PRIVATE_KEY_LENGTH] = match private_key.as_ref().try_into() {
-            Ok(key) => key,
-            Err(_) => return None,
-        };
-        let private = Scalar::deserialize(&private_key)?;
+        let private = private_key.key;
         let mut public = group::Public::one();
         public.mul(&private);
         Some(Self { private, public })
     }
 
     fn private_key(&self) -> PrivateKey {
-        PrivateKey::from(&self.private)
+        PrivateKey::from(self.private)
     }
 
     fn public_key(&self) -> PublicKey {
-        PublicKey::from(&self.public)
+        PublicKey::from(self.public)
     }
 
     fn sign(&mut self, namespace: Option<&[u8]>, message: &[u8]) -> Signature {
         let signature = ops::sign_message(&self.private, namespace, message);
-        Signature::from(&signature)
+        Signature::from(signature)
     }
 
     fn verify(
@@ -79,61 +75,70 @@ impl Scheme for Bls12381 {
         public_key: &PublicKey,
         signature: &Signature,
     ) -> bool {
-        let public = match group::Public::deserialize(public_key.as_ref()) {
-            Some(public) => public,
-            None => return false,
-        };
-        let signature = match group::Signature::deserialize(signature.as_ref()) {
-            Some(signature) => signature,
-            None => return false,
-        };
-        ops::verify_message(&public, namespace, message, &signature).is_ok()
+        ops::verify_message(&public_key.key, namespace, message, &signature.signature).is_ok()
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-#[repr(transparent)]
-pub struct PrivateKey([u8; group::PRIVATE_KEY_LENGTH]);
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PrivateKey {
+    raw: [u8; group::PRIVATE_KEY_LENGTH],
+    key: group::Private,
+}
 
 impl Octets for PrivateKey {}
 
+impl std::hash::Hash for PrivateKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.raw.hash(state);
+    }
+}
+
+impl Ord for PrivateKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.raw.cmp(&other.raw)
+    }
+}
+
+impl PartialOrd for PrivateKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 impl AsRef<[u8]> for PrivateKey {
     fn as_ref(&self) -> &[u8] {
-        &self.0
+        &self.raw
     }
 }
 
 impl Deref for PrivateKey {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
-        &self.0
+        &self.raw
     }
 }
 
 impl From<[u8; group::PRIVATE_KEY_LENGTH]> for PrivateKey {
     fn from(value: [u8; group::PRIVATE_KEY_LENGTH]) -> Self {
-        Self(value)
+        Self::try_from(value).unwrap()
     }
 }
 
-impl From<&Scalar> for PrivateKey {
-    fn from(value: &Scalar) -> Self {
-        let mut slice = [0u8; group::PRIVATE_KEY_LENGTH];
-        slice.copy_from_slice(value.serialize().as_ref());
-        Self(slice)
+impl From<Scalar> for PrivateKey {
+    fn from(key: Scalar) -> Self {
+        let raw: [u8; group::PRIVATE_KEY_LENGTH] = key.serialize().try_into().unwrap();
+        Self { raw, key }
     }
 }
 
 impl TryFrom<&[u8]> for PrivateKey {
     type Error = Error;
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        if value.len() != group::PRIVATE_KEY_LENGTH {
-            return Err(Error::InvalidPrivateKeyLength);
-        }
-        let array: &[u8; group::PRIVATE_KEY_LENGTH] = value
+        let raw: [u8; group::PRIVATE_KEY_LENGTH] = value
             .try_into()
             .map_err(|_| Error::InvalidPrivateKeyLength)?;
-        Ok(Self(*array))
+        let key = Scalar::deserialize(value).ok_or(Error::InvalidPrivateKey)?;
+        Ok(Self { raw, key })
     }
 }
 
@@ -151,44 +156,60 @@ impl TryFrom<Vec<u8>> for PrivateKey {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-#[repr(transparent)]
-pub struct PublicKey([u8; group::PUBLIC_KEY_LENGTH]);
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PublicKey {
+    raw: [u8; group::PUBLIC_KEY_LENGTH],
+    key: group::Public,
+}
 
 impl Octets for PublicKey {}
 
+impl std::hash::Hash for PublicKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.raw.hash(state);
+    }
+}
+
+impl Ord for PublicKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.raw.cmp(&other.raw)
+    }
+}
+
+impl PartialOrd for PublicKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 impl AsRef<[u8]> for PublicKey {
     fn as_ref(&self) -> &[u8] {
-        &self.0
+        &self.raw
     }
 }
 
 impl Deref for PublicKey {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
-        &self.0
+        &self.raw
     }
 }
 
-impl From<&G1> for PublicKey {
-    fn from(value: &G1) -> Self {
-        let mut slice = [0u8; group::PUBLIC_KEY_LENGTH];
-        slice.copy_from_slice(value.serialize().as_ref());
-        Self(slice)
+impl From<group::Public> for PublicKey {
+    fn from(key: group::Public) -> Self {
+        let raw = key.serialize().try_into().unwrap();
+        Self { raw, key }
     }
 }
 
 impl TryFrom<&[u8]> for PublicKey {
     type Error = Error;
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        let array: [u8; group::PUBLIC_KEY_LENGTH] = value
+        let raw: [u8; group::PUBLIC_KEY_LENGTH] = value
             .try_into()
             .map_err(|_| Error::InvalidPublicKeyLength)?;
-        if group::Public::deserialize(value).is_none() {
-            return Err(Error::InvalidPublicKey);
-        }
-
-        Ok(Self(array))
+        let key = group::Public::deserialize(value).ok_or(Error::InvalidPublicKey)?;
+        Ok(Self { raw, key })
     }
 }
 
@@ -206,41 +227,60 @@ impl TryFrom<Vec<u8>> for PublicKey {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-#[repr(transparent)]
-pub struct Signature([u8; group::SIGNATURE_LENGTH]);
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Signature {
+    raw: [u8; group::SIGNATURE_LENGTH],
+    signature: group::Signature,
+}
 
 impl Octets for Signature {}
 
+impl std::hash::Hash for Signature {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.raw.hash(state);
+    }
+}
+
+impl Ord for Signature {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.raw.cmp(&other.raw)
+    }
+}
+
+impl PartialOrd for Signature {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 impl AsRef<[u8]> for Signature {
     fn as_ref(&self) -> &[u8] {
-        &self.0
+        &self.raw
     }
 }
 
 impl Deref for Signature {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
-        &self.0
+        &self.raw
     }
 }
 
-impl From<&group::G2> for Signature {
-    fn from(value: &group::G2) -> Self {
-        let mut slice = [0u8; group::SIGNATURE_LENGTH];
-        slice.copy_from_slice(value.serialize().as_ref());
-        Self(slice)
+impl From<group::Signature> for Signature {
+    fn from(signature: group::Signature) -> Self {
+        let raw = signature.serialize().try_into().unwrap();
+        Self { raw, signature }
     }
 }
 
 impl TryFrom<&[u8]> for Signature {
     type Error = Error;
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        let array: [u8; group::SIGNATURE_LENGTH] = value
+        let raw: [u8; group::SIGNATURE_LENGTH] = value
             .try_into()
             .map_err(|_| Error::InvalidSignatureLength)?;
-
-        Ok(Self(array))
+        let signature = group::Signature::deserialize(value).ok_or(Error::InvalidSignature)?;
+        Ok(Self { raw, signature })
     }
 }
 
