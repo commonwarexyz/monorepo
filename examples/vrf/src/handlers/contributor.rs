@@ -53,7 +53,7 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
         let contributors_ordered: HashMap<C::PublicKey, u32> = contributors
             .iter()
             .enumerate()
-            .map(|(idx, pk)| (*pk, idx as u32))
+            .map(|(idx, pk)| (pk.clone(), idx as u32))
             .collect();
         let (sender, receiver) = mpsc::channel(32);
         (
@@ -182,7 +182,7 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
 
         // Create player
         let mut player_obj = Player::new(
-            me,
+            me.clone(),
             public.clone(),
             self.contributors.clone(),
             self.contributors.clone(),
@@ -196,8 +196,10 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                 // Send to self
                 let share = shares[idx];
                 if idx == me_idx as usize {
-                    player_obj.share(me, commitment.clone(), share).unwrap();
-                    dealer.ack(me).unwrap();
+                    player_obj
+                        .share(me.clone(), commitment.clone(), share)
+                        .unwrap();
+                    dealer.ack(me.clone()).unwrap();
                     let payload = payload(round, &me, serialized_commitment);
                     let signature = self.crypto.sign(Some(ACK_NAMESPACE), &payload);
                     acks.insert(me_idx, signature);
@@ -208,7 +210,7 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                 let mut serialized_share = shares[idx].serialize();
                 if self.forger {
                     // If we are a forger, don't send any shares and instead create fake signatures.
-                    let _ = dealer.ack(*player);
+                    let _ = dealer.ack(player.clone());
                     let mut signature = vec![0u8; size_of::<C::Signature>()];
                     self.runtime.fill_bytes(&mut signature);
                     let signature = C::Signature::try_from(&signature).unwrap();
@@ -241,7 +243,7 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                 }
                 let success = sender
                     .send(
-                        Recipients::One(*player),
+                        Recipients::One(player.clone()),
                         wire::Dkg {
                             round,
                             payload: Some(wire::dkg::Payload::Share(wire::Share {
@@ -313,7 +315,7 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
 
                                         // Verify signature on incoming ack
                                         let payload = payload(round, &me, commitment);
-                                        let Ok(signature) = C::Signature::try_from(msg.signature.as_ref()) else {
+                                        let Ok(signature) = C::Signature::try_from(&msg.signature) else {
                                             warn!(round, sender = hex(&s), "received invalid ack signature");
                                             continue;
                                         };
@@ -323,7 +325,7 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                                         }
 
                                         // Store ack
-                                        if let Err(e) = dealer.ack(s) {
+                                        if let Err(e) = dealer.ack(s.clone()) {
                                             warn!(round, error = ?e, sender = hex(&s), "failed to record ack");
                                             continue;
                                         }
@@ -350,7 +352,7 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                                         };
 
                                         // Store share
-                                        if let Err(e) = player_obj.share(s, commitment, share){
+                                        if let Err(e) = player_obj.share(s.clone(), commitment, share){
                                             warn!(round, error = ?e, "failed to store share");
                                             continue;
                                         }
@@ -365,7 +367,7 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                                                     round,
                                                     payload: Some(wire::dkg::Payload::Ack(wire::Ack {
                                                         public_key: me_idx,
-                                                        signature: signature.into(),
+                                                        signature: signature.to_vec(),
                                                     })),
                                                 }
                                                 .encode_to_vec()
@@ -399,7 +401,7 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                     Some(signature) => {
                         ack_vec.push(wire::Ack {
                             public_key: idx,
-                            signature: signature.clone().into(),
+                            signature: signature.clone().to_vec(),
                         });
                     }
                     None => {
@@ -415,7 +417,7 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
             );
             sender
                 .send(
-                    Recipients::One(self.arbiter),
+                    Recipients::One(self.arbiter.clone()),
                     wire::Dkg {
                         round,
                         payload: Some(wire::dkg::Payload::Commitment(wire::Commitment {

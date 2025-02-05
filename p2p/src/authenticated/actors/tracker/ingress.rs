@@ -1,5 +1,5 @@
 use crate::authenticated::{actors::peer, wire};
-use commonware_cryptography::PublicKey;
+use commonware_cryptography::Component;
 use commonware_runtime::Spawner;
 use futures::{
     channel::{mpsc, oneshot},
@@ -7,7 +7,7 @@ use futures::{
 };
 use std::net::SocketAddr;
 
-pub enum Message<E: Spawner, P: PublicKey> {
+pub enum Message<E: Spawner, P: Component> {
     // Used by oracle
     Register {
         index: u64,
@@ -30,6 +30,7 @@ pub enum Message<E: Spawner, P: PublicKey> {
 
     // Used by dialer
     Dialable {
+        #[allow(clippy::type_complexity)]
         peers: oneshot::Sender<Vec<(P, SocketAddr, Reservation<E, P>)>>,
     },
 
@@ -46,11 +47,11 @@ pub enum Message<E: Spawner, P: PublicKey> {
 }
 
 #[derive(Clone)]
-pub struct Mailbox<E: Spawner, P: PublicKey> {
+pub struct Mailbox<E: Spawner, P: Component> {
     sender: mpsc::Sender<Message<E, P>>,
 }
 
-impl<E: Spawner, P: PublicKey> Mailbox<E, P> {
+impl<E: Spawner, P: Component> Mailbox<E, P> {
     pub(super) fn new(sender: mpsc::Sender<Message<E, P>>) -> Self {
         Self { sender }
     }
@@ -107,11 +108,11 @@ impl<E: Spawner, P: PublicKey> Mailbox<E, P> {
 /// Peers that are not explicitly authorized
 /// will be blocked by commonware-p2p.
 #[derive(Clone)]
-pub struct Oracle<E: Spawner, P: PublicKey> {
+pub struct Oracle<E: Spawner, P: Component> {
     sender: mpsc::Sender<Message<E, P>>,
 }
 
-impl<E: Spawner, P: PublicKey> Oracle<E, P> {
+impl<E: Spawner, P: Component> Oracle<E, P> {
     pub(super) fn new(sender: mpsc::Sender<Message<E, P>>) -> Self {
         Self { sender }
     }
@@ -132,12 +133,12 @@ impl<E: Spawner, P: PublicKey> Oracle<E, P> {
     }
 }
 
-pub struct Reservation<E: Spawner, P: PublicKey> {
+pub struct Reservation<E: Spawner, P: Component> {
     runtime: E,
     closer: Option<(P, Mailbox<E, P>)>,
 }
 
-impl<E: Spawner, P: PublicKey> Reservation<E, P> {
+impl<E: Spawner, P: Component> Reservation<E, P> {
     pub fn new(runtime: E, peer: P, mailbox: Mailbox<E, P>) -> Self {
         Self {
             runtime,
@@ -146,7 +147,7 @@ impl<E: Spawner, P: PublicKey> Reservation<E, P> {
     }
 }
 
-impl<E: Spawner, P: PublicKey> Drop for Reservation<E, P> {
+impl<E: Spawner, P: Component> Drop for Reservation<E, P> {
     fn drop(&mut self) {
         let (peer, mut mailbox) = self.closer.take().unwrap();
         self.runtime.spawn("reservation", async move {

@@ -91,7 +91,10 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View, PublicKey = C::PublicKey>
                         view,
                         signature: Some(wire::Signature {
                             public_key: public_key_index,
-                            signature: self.crypto.sign(Some(&self.nullify_namespace), &msg).into(),
+                            signature: self
+                                .crypto
+                                .sign(Some(&self.nullify_namespace), &msg)
+                                .to_vec(),
                         }),
                     };
                     let msg = wire::Voter {
@@ -112,7 +115,7 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View, PublicKey = C::PublicKey>
                             signature: self
                                 .crypto
                                 .sign(Some(&self.finalize_namespace), &msg)
-                                .into(),
+                                .to_vec(),
                         }),
                     };
                     let msg = wire::Voter {

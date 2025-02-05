@@ -52,7 +52,7 @@ impl<C: Scheme, Si: Sink, St: Stream> IncomingConnection<C, Si, St> {
 
     /// The public key of the peer attempting to connect.
     pub fn peer(&self) -> C::PublicKey {
-        self.handshake.peer_public_key
+        self.handshake.peer_public_key.clone()
     }
 }
 
@@ -109,7 +109,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
             &mut config.crypto,
             &config.namespace,
             timestamp,
-            peer,
+            peer.clone(),
             ephemeral,
         )?;
 

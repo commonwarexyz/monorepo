@@ -1,6 +1,6 @@
 //! Make concurrent requests to peers limited by rate and prioritized by performance.
 
-use commonware_cryptography::{PublicKey, Scheme};
+use commonware_cryptography::{Component, Scheme};
 use commonware_runtime::Clock;
 use commonware_utils::PrioritySet;
 use either::Either;
@@ -52,6 +52,7 @@ pub struct Requester<E: Clock + GClock + Rng, C: Scheme> {
     excluded: HashSet<C::PublicKey>,
 
     // Rate limiter for participants
+    #[allow(clippy::type_complexity)]
     rate_limiter:
         RateLimiter<C::PublicKey, HashMapStateStore<C::PublicKey>, E, NoOpMiddleware<E::Instant>>,
     // Participants and their performance (lower is better)
@@ -71,7 +72,7 @@ pub struct Requester<E: Clock + GClock + Rng, C: Scheme> {
 /// this struct in case we want to `resolve` or `timeout` the request. This approach
 /// makes it impossible to forget to remove a handled request if it doesn't warrant
 /// updating the performance of the participant.
-pub struct Request<P: PublicKey> {
+pub struct Request<P: Component> {
     /// Unique identifier for the request.
     pub id: ID,
 
@@ -156,10 +157,10 @@ impl<E: Clock + GClock + Rng, C: Scheme> Requester<E, C> {
 
             // Record request issuance time
             let now = self.runtime.current();
-            self.requests.insert(id, (*participant, now));
+            self.requests.insert(id, (participant.clone(), now));
             let deadline = now.checked_add(self.timeout).expect("time overflowed");
             self.deadlines.put(id, deadline);
-            return Some((*participant, id));
+            return Some((participant.clone(), id));
         }
         None
     }
@@ -275,7 +276,7 @@ mod tests {
 
             // Initialize requester
             let other = Ed25519::from_seed(1).public_key();
-            requester.reconcile(&[me, other]);
+            requester.reconcile(&[me.clone(), other.clone()]);
 
             // Get request
             let current = runtime.current();
@@ -380,7 +381,7 @@ mod tests {
             // Initialize requester
             let other1 = Ed25519::from_seed(1).public_key();
             let other2 = Ed25519::from_seed(2).public_key();
-            requester.reconcile(&[me, other1, other2]);
+            requester.reconcile(&[me.clone(), other1.clone(), other2.clone()]);
 
             // Get request
             let (participant, id) = requester.request(false).expect("failed to get participant");
@@ -423,7 +424,7 @@ mod tests {
 
             // Add another participant
             let other3 = Ed25519::from_seed(3).public_key();
-            requester.reconcile(&[me, other1, other2, other3]);
+            requester.reconcile(&[me, other1, other2.clone(), other3.clone()]);
 
             // Get request (new should be prioritized because lower default time)
             let (participant, id) = requester.request(false).expect("failed to get participant");

@@ -6,7 +6,6 @@
 //! expect breaking changes and occasional instability.
 
 use bytes::Buf;
-use bytes::Bytes;
 use rand::{CryptoRng, Rng, RngCore, SeedableRng};
 use std::fmt::Debug;
 use std::hash::Hash;
@@ -24,16 +23,14 @@ pub use sha256::Sha256;
 pub mod secp256r1;
 pub use secp256r1::Secp256r1;
 
-pub trait PrivateKey:
+pub trait Component:
     AsRef<[u8]>
     + for<'a> TryFrom<&'a [u8], Error = Error>
     + for<'a> TryFrom<&'a Vec<u8>, Error = Error>
     + TryFrom<Vec<u8>, Error = Error>
     + Deref<Target = [u8]>
-    + Into<Bytes>
-    + Default
     + Sized
-    + Copy
+    + Clone
     + Send
     + Sync
     + 'static
@@ -44,55 +41,35 @@ pub trait PrivateKey:
     + Debug
     + Hash
 {
-}
+    /// Attempts to read a digest from the provided buffer.
+    fn read_from<B: Buf>(buf: &mut B) -> Result<Self, Error> {
+        // Check if there are enough bytes in the buffer to read a digest.
+        let digest_len = size_of::<Self>();
+        if buf.remaining() < digest_len {
+            return Err(Error::InvalidDigestLength);
+        }
 
-pub trait PublicKey:
-    AsRef<[u8]>
-    + for<'a> TryFrom<&'a [u8], Error = Error>
-    + for<'a> TryFrom<&'a Vec<u8>, Error = Error>
-    + TryFrom<Vec<u8>, Error = Error>
-    + Deref<Target = [u8]>
-    + Into<Bytes>
-    + Sized
-    + Copy
-    + Send
-    + Sync
-    + 'static
-    + Eq
-    + PartialEq
-    + Ord
-    + PartialOrd
-    + Debug
-    + Hash
-{
-}
+        // If there are enough contiguous bytes in the buffer, use them directly.
+        let chunk = buf.chunk();
+        if chunk.len() >= digest_len {
+            let digest = Self::try_from(&chunk[..digest_len])?;
+            buf.advance(digest_len);
+            return Ok(digest);
+        }
 
-pub trait Signature:
-    AsRef<[u8]>
-    + for<'a> TryFrom<&'a [u8], Error = Error>
-    + for<'a> TryFrom<&'a Vec<u8>, Error = Error>
-    + TryFrom<Vec<u8>, Error = Error>
-    + Deref<Target = [u8]>
-    + Into<Bytes>
-    + Sized
-    + Copy
-    + Send
-    + Sync
-    + 'static
-    + Eq
-    + PartialEq
-    + Ord
-    + PartialOrd
-    + Debug
-    + Hash
-{
+        // Otherwise, copy the bytes into a temporary buffer.
+        let mut temp = vec![0u8; digest_len];
+        buf.copy_to_slice(&mut temp);
+        Self::try_from(temp)
+    }
 }
 
 /// Interface that commonware crates rely on for most cryptographic operations.
 pub trait Scheme: Clone + Send + Sync + 'static {
-    type PrivateKey: PrivateKey;
-    type PublicKey: PublicKey;
-    type Signature: Signature;
+    type PrivateKey: Component;
+    type PublicKey: Component;
+    type Signature: Component;
+
     /// Returns a new instance of the scheme.
     fn new<R: Rng + CryptoRng>(rng: &mut R) -> Self;
 
@@ -144,8 +121,8 @@ pub trait Scheme: Clone + Send + Sync + 'static {
 
 /// Interface that commonware crates rely on for batched cryptographic operations.
 pub trait BatchScheme {
-    type PublicKey: PublicKey;
-    type Signature: Signature;
+    type PublicKey: Component;
+    type Signature: Component;
 
     /// Create a new batch scheme.
     fn new() -> Self;
@@ -198,49 +175,6 @@ pub enum Error {
     InvalidPublicKey,
 }
 
-/// Byte array representing an arbitrary hash digest.
-pub trait Digest:
-    AsRef<[u8]>
-    + for<'a> TryFrom<&'a [u8], Error = Error>
-    + for<'a> TryFrom<&'a Vec<u8>, Error = Error>
-    + TryFrom<Vec<u8>, Error = Error>
-    + Deref<Target = [u8]>
-    + Default
-    + Sized
-    + Clone
-    + Send
-    + Sync
-    + 'static
-    + Eq
-    + PartialEq
-    + Ord
-    + PartialOrd
-    + Debug
-    + Hash
-{
-    /// Attempts to read a digest from the provided buffer.
-    fn read_from<B: Buf>(buf: &mut B) -> Result<Self, Error> {
-        // Check if there are enough bytes in the buffer to read a digest.
-        let digest_len = size_of::<Self>();
-        if buf.remaining() < digest_len {
-            return Err(Error::InvalidDigestLength);
-        }
-
-        // If there are enough contiguous bytes in the buffer, use them directly.
-        let chunk = buf.chunk();
-        if chunk.len() >= digest_len {
-            let digest = Self::try_from(&chunk[..digest_len])?;
-            buf.advance(digest_len);
-            return Ok(digest);
-        }
-
-        // Otherwise, copy the bytes into a temporary buffer.
-        let mut temp = vec![0u8; digest_len];
-        buf.copy_to_slice(&mut temp);
-        Self::try_from(temp)
-    }
-}
-
 /// Interface that commonware crates rely on for hashing.
 ///
 /// Hash functions in commonware primitives are not typically hardcoded
@@ -255,7 +189,7 @@ pub trait Digest:
 /// after cloning.
 pub trait Hasher: Clone + Send + Sync + 'static {
     /// Byte array representing a hash digest.
-    type Digest: Digest;
+    type Digest: Component;
 
     /// Create a new hasher.
     fn new() -> Self;

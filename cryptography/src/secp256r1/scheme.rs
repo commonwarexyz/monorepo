@@ -1,7 +1,4 @@
-use crate::{
-    Error, PrivateKey as CPrivateKey, PublicKey as CPublicKey, Scheme, Signature as CSignature,
-};
-use bytes::Bytes;
+use crate::{Component, Error, Scheme};
 use commonware_utils::union_unique;
 use p256::{
     ecdsa::{
@@ -108,7 +105,7 @@ impl Scheme for Secp256r1 {
 #[repr(transparent)]
 pub struct PrivateKey([u8; PRIVATE_KEY_LENGTH]);
 
-impl CPrivateKey for PrivateKey {}
+impl Component for PrivateKey {}
 
 impl AsRef<[u8]> for PrivateKey {
     fn as_ref(&self) -> &[u8] {
@@ -162,18 +159,11 @@ impl TryFrom<Vec<u8>> for PrivateKey {
     }
 }
 
-#[allow(clippy::from_over_into)]
-impl Into<Bytes> for PrivateKey {
-    fn into(self) -> Bytes {
-        Bytes::copy_from_slice(self.as_ref())
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[repr(transparent)]
 pub struct PublicKey([u8; PUBLIC_KEY_LENGTH]);
 
-impl CPublicKey for PublicKey {}
+impl Component for PublicKey {}
 
 impl AsRef<[u8]> for PublicKey {
     fn as_ref(&self) -> &[u8] {
@@ -227,18 +217,11 @@ impl TryFrom<Vec<u8>> for PublicKey {
     }
 }
 
-#[allow(clippy::from_over_into)]
-impl Into<Bytes> for PublicKey {
-    fn into(self) -> Bytes {
-        Bytes::copy_from_slice(self.as_ref())
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[repr(transparent)]
 pub struct Signature([u8; SIGNATURE_LENGTH]);
 
-impl CSignature for Signature {}
+impl Component for Signature {}
 
 impl AsRef<[u8]> for Signature {
     fn as_ref(&self) -> &[u8] {
@@ -286,13 +269,6 @@ impl TryFrom<Vec<u8>> for Signature {
     type Error = Error;
     fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
         Self::try_from(value.as_slice())
-    }
-}
-
-#[allow(clippy::from_over_into)]
-impl Into<Bytes> for Signature {
-    fn into(self) -> Bytes {
-        Bytes::copy_from_slice(self.as_ref())
     }
 }
 
@@ -594,7 +570,7 @@ mod tests {
 
         for (index, test) in cases.iter().enumerate() {
             let (public_key, sig, message, exp_success) = test;
-            let mut sig = *sig;
+            let mut sig = sig.clone();
             let exp_success = *exp_success;
             if exp_success {
                 let ecdsa_signature = p256::ecdsa::Signature::from_slice(&sig).unwrap();

@@ -12,7 +12,7 @@ use crate::{
     },
     Parsed, Supervisor,
 };
-use commonware_cryptography::{Digest, Scheme};
+use commonware_cryptography::{Component, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{
     utils::requester::{self, Requester},
@@ -103,7 +103,7 @@ impl Inflight {
 pub struct Actor<
     E: Clock + GClock + Rng,
     C: Scheme,
-    D: Digest,
+    D: Component,
     S: Supervisor<Index = View, PublicKey = C::PublicKey>,
 > {
     runtime: E,
@@ -137,7 +137,7 @@ pub struct Actor<
 impl<
         E: Clock + GClock + Rng,
         C: Scheme,
-        D: Digest,
+        D: Component,
         S: Supervisor<Index = View, PublicKey = C::PublicKey>,
     > Actor<E, C, D, S>
 {
@@ -280,7 +280,7 @@ impl<
 
                 // Try to send
                 if sender
-                    .send(Recipients::One(recipient), encoded, false)
+                    .send(Recipients::One(recipient.clone()), encoded, false)
                     .await
                     .unwrap()
                     .is_empty()
@@ -540,14 +540,14 @@ impl<
                                     Some(proposal) => proposal,
                                     None => {
                                         warn!(sender = hex(&s), "missing proposal");
-                                        self.requester.block(s);
+                                        self.requester.block(s.clone());
                                         continue;
                                     },
                                 };
                                 let view = proposal.view;
                                 let Ok(payload) = D::try_from(&proposal.payload) else {
                                     warn!(view, sender = hex(&s), "invalid proposal");
-                                    self.requester.block(s);
+                                    self.requester.block(s.clone());
                                     continue;
                                 };
                                 let entry = Entry { task: Task::Notarization, view };
@@ -557,7 +557,7 @@ impl<
                                 }
                                 if !verify_notarization::<S,C,D>(&self.supervisor, &self.notarize_namespace, &notarization) {
                                     warn!(view, sender = hex(&s), "invalid notarization");
-                                    self.requester.block(s);
+                                    self.requester.block(s.clone());
                                     continue;
                                 }
                                 self.required.remove(&entry);
@@ -579,7 +579,7 @@ impl<
                                 }
                                 if !verify_nullification::<S,C>(&self.supervisor, &self.nullify_namespace, &nullification) {
                                     warn!(view, sender = hex(&s), "invalid nullification");
-                                    self.requester.block(s);
+                                    self.requester.block(s.clone());
                                     continue;
                                 }
                                 self.required.remove(&entry);

@@ -115,7 +115,7 @@
 //! * Introduce message rebroadcast to continue making progress if messages from a given view are dropped (only way
 //!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
 
-use commonware_cryptography::Digest;
+use commonware_cryptography::Component;
 
 mod encoder;
 mod prover;
@@ -146,7 +146,7 @@ use crate::Activity;
 
 /// Context is a collection of metadata from consensus about a given payload.
 #[derive(Clone)]
-pub struct Context<D: Digest> {
+pub struct Context<D: Component> {
     /// Current view of consensus.
     pub view: View,
 
@@ -179,9 +179,7 @@ pub const NULLIFY_AND_FINALIZE: Activity = 4;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::{
-        sha256::Digest as Sha256Digest, Ed25519, PublicKey, Scheme, Sha256,
-    };
+    use commonware_cryptography::{sha256::Digest as Sha256Digest, Ed25519, Scheme, Sha256};
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{
@@ -205,18 +203,18 @@ mod tests {
     use tracing::debug;
 
     /// Registers all validators using the oracle.
-    async fn register_validators<P: PublicKey>(
+    async fn register_validators<P: Component>(
         oracle: &mut Oracle<P>,
         validators: &[P],
     ) -> HashMap<P, ((Sender<P>, Receiver<P>), (Sender<P>, Receiver<P>))> {
         let mut registrations = HashMap::new();
         for validator in validators.iter() {
             let (voter_sender, voter_receiver) =
-                oracle.register(*validator, 0).await.unwrap();
+                oracle.register(validator.clone(), 0).await.unwrap();
             let (resolver_sender, resolver_receiver) =
-                oracle.register(*validator, 1).await.unwrap();
+                oracle.register(validator.clone(), 1).await.unwrap();
             registrations.insert(
-                *validator,
+                validator.clone(),
                 (
                     (voter_sender, voter_receiver),
                     (resolver_sender, resolver_receiver),
@@ -238,7 +236,7 @@ mod tests {
     /// The `action` parameter determines the action (e.g. link, unlink) to take.
     /// The `restrict_to` function can be used to restrict the linking to certain connections,
     /// otherwise all validators will be linked to all other validators.
-    async fn link_validators<P: PublicKey>(
+    async fn link_validators<P: Component>(
         oracle: &mut Oracle<P>,
         validators: &[P],
         action: Action,
@@ -261,7 +259,7 @@ mod tests {
                 // Do any unlinking first
                 match action {
                     Action::Update(_) | Action::Unlink => {
-                        oracle.remove_link(*v1, *v2).await.unwrap();
+                        oracle.remove_link(v1.clone(), v2.clone()).await.unwrap();
                     }
                     _ => {}
                 }
@@ -270,7 +268,7 @@ mod tests {
                 match action {
                     Action::Link(ref link) | Action::Update(ref link) => {
                         oracle
-                            .add_link(*v1, *v2, link.clone())
+                            .add_link(v1.clone(), v2.clone(), link.clone())
                             .await
                             .unwrap();
                     }
@@ -344,7 +342,7 @@ mod tests {
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
                     relay: relay.clone(),
-                    participant: validator,
+                    participant: validator.clone(),
                     tracker: done_sender.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
@@ -567,11 +565,11 @@ mod tests {
                     };
                     let supervisor =
                         mocks::supervisor::Supervisor::<Ed25519, Sha256Digest>::new(supervisor_config);
-                    supervisors.insert(validator, supervisor.clone());
+                    supervisors.insert(validator.clone(), supervisor.clone());
                     let application_cfg = mocks::application::Config {
                         hasher: Sha256::default(),
                         relay: relay.clone(),
-                        participant: validator,
+                        participant: validator.clone(),
                         tracker: done_sender.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
@@ -785,7 +783,7 @@ mod tests {
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
                     relay: relay.clone(),
-                    participant: validator,
+                    participant: validator.clone(),
                     tracker: done_sender.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
@@ -920,7 +918,7 @@ mod tests {
             let application_cfg = mocks::application::Config {
                 hasher: Sha256::default(),
                 relay: relay.clone(),
-                participant: validator,
+                participant: validator.clone(),
                 tracker: done_sender.clone(),
                 propose_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
@@ -1071,7 +1069,7 @@ mod tests {
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
                     relay: relay.clone(),
-                    participant: validator,
+                    participant: validator.clone(),
                     tracker: done_sender.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
@@ -1246,7 +1244,7 @@ mod tests {
                     mocks::application::Config {
                         hasher: Sha256::default(),
                         relay: relay.clone(),
-                        participant: validator,
+                        participant: validator.clone(),
                         tracker: done_sender.clone(),
                         propose_latency: (3_000.0, 0.0),
                         verify_latency: (3_000.0, 5.0),
@@ -1255,7 +1253,7 @@ mod tests {
                     mocks::application::Config {
                         hasher: Sha256::default(),
                         relay: relay.clone(),
-                        participant: validator,
+                        participant: validator.clone(),
                         tracker: done_sender.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
@@ -1430,7 +1428,7 @@ mod tests {
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
                     relay: relay.clone(),
-                    participant: validator,
+                    participant: validator.clone(),
                     tracker: done_sender.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
@@ -1597,7 +1595,7 @@ mod tests {
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
                     relay: relay.clone(),
-                    participant: validator,
+                    participant: validator.clone(),
                     tracker: done_sender.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
@@ -1821,7 +1819,7 @@ mod tests {
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
                     relay: relay.clone(),
-                    participant: validator,
+                    participant: validator.clone(),
                     tracker: done_sender.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
@@ -2008,7 +2006,7 @@ mod tests {
                     let application_cfg = mocks::application::Config {
                         hasher: Sha256::default(),
                         relay: relay.clone(),
-                        participant: validator,
+                        participant: validator.clone(),
                         tracker: done_sender.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
@@ -2193,7 +2191,7 @@ mod tests {
                     let application_cfg = mocks::application::Config {
                         hasher: Sha256::default(),
                         relay: relay.clone(),
-                        participant: validator,
+                        participant: validator.clone(),
                         tracker: done_sender.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),

@@ -10,7 +10,7 @@ use commonware_cryptography::{
         group::{self, Element},
         poly,
     },
-    Digest, PublicKey, Scheme,
+    Component,
 };
 use commonware_utils::modulo;
 use std::{
@@ -25,7 +25,7 @@ type ViewInfo<P> = (
     group::Share,
 );
 
-pub struct Config<P: PublicKey, D: Digest> {
+pub struct Config<P: Component, D: Component> {
     pub prover: Prover<D>,
     pub participants: BTreeMap<View, (poly::Poly<group::Public>, Vec<P>, group::Share)>,
 }
@@ -34,7 +34,7 @@ type Participation<D, P> = HashMap<View, HashMap<D, HashSet<P>>>;
 type Faults<P> = HashMap<P, HashMap<View, HashSet<Activity>>>;
 
 #[derive(Clone)]
-pub struct Supervisor<P: PublicKey, D: Digest> {
+pub struct Supervisor<P: Component, D: Component> {
     prover: Prover<D>,
     participants: BTreeMap<View, ViewInfo<P>>,
 
@@ -43,13 +43,13 @@ pub struct Supervisor<P: PublicKey, D: Digest> {
     pub faults: Arc<Mutex<Faults<P>>>,
 }
 
-impl<P: PublicKey, D: Digest> Supervisor<P, D> {
+impl<P: Component, D: Component> Supervisor<P, D> {
     pub fn new(cfg: Config<P, D>) -> Self {
         let mut parsed_participants = BTreeMap::new();
         for (view, (identity, mut validators, share)) in cfg.participants.into_iter() {
             let mut map = HashMap::new();
             for (index, validator) in validators.iter().enumerate() {
-                map.insert(*validator, index as u32);
+                map.insert(validator.clone(), index as u32);
             }
             validators.sort();
             parsed_participants.insert(view, (identity, map, validators, share));
@@ -64,7 +64,7 @@ impl<P: PublicKey, D: Digest> Supervisor<P, D> {
     }
 }
 
-impl<P: PublicKey, D: Digest> Su for Supervisor<P, D> {
+impl<P: Component, D: Component> Su for Supervisor<P, D> {
     type Index = View;
     type PublicKey = P;
 
@@ -106,7 +106,7 @@ impl<P: PublicKey, D: Digest> Su for Supervisor<P, D> {
                     }
                 };
                 let public_key_index = verifier.verify(identity).unwrap();
-                let public_key = validators[public_key_index as usize];
+                let public_key = validators[public_key_index as usize].clone();
                 self.notarizes
                     .lock()
                     .unwrap()
@@ -125,7 +125,7 @@ impl<P: PublicKey, D: Digest> Su for Supervisor<P, D> {
                     }
                 };
                 let public_key_index = verifier.verify(identity).unwrap();
-                let public_key = validators[public_key_index as usize];
+                let public_key = validators[public_key_index as usize].clone();
                 self.finalizes
                     .lock()
                     .unwrap()
@@ -144,7 +144,7 @@ impl<P: PublicKey, D: Digest> Su for Supervisor<P, D> {
                     }
                 };
                 let public_key_index = verifier.verify(identity).unwrap();
-                let public_key = validators[public_key_index as usize];
+                let public_key = validators[public_key_index as usize].clone();
                 self.faults
                     .lock()
                     .unwrap()
@@ -163,7 +163,7 @@ impl<P: PublicKey, D: Digest> Su for Supervisor<P, D> {
                     }
                 };
                 let public_key_index = verifier.verify(identity).unwrap();
-                let public_key = validators[public_key_index as usize];
+                let public_key = validators[public_key_index as usize].clone();
                 self.faults
                     .lock()
                     .unwrap()
@@ -182,7 +182,7 @@ impl<P: PublicKey, D: Digest> Su for Supervisor<P, D> {
                     }
                 };
                 let public_key_index = verifier.verify(identity).unwrap();
-                let public_key = validators[public_key_index as usize];
+                let public_key = validators[public_key_index as usize].clone();
                 self.faults
                     .lock()
                     .unwrap()
@@ -199,7 +199,7 @@ impl<P: PublicKey, D: Digest> Su for Supervisor<P, D> {
     }
 }
 
-impl<P: PublicKey, D: Digest> TSu for Supervisor<P, D> {
+impl<P: Component, D: Component> TSu for Supervisor<P, D> {
     type Seed = group::Signature;
     type Identity = poly::Public;
     type Share = group::Share;
@@ -213,7 +213,7 @@ impl<P: PublicKey, D: Digest> TSu for Supervisor<P, D> {
         };
         let seed = seed.serialize();
         let index = modulo(&seed, closest.len() as u64);
-        Some(closest[index as usize])
+        Some(closest[index as usize].clone())
     }
 
     fn identity(&self, index: Self::Index) -> Option<&Self::Identity> {

@@ -110,7 +110,7 @@ impl<
         //
         // Reserve also checks if the peer is authorized.
         let peer = incoming.peer();
-        let reservation = match tracker.reserve(peer).await {
+        let reservation = match tracker.reserve(peer.clone()).await {
             Some(reservation) => reservation,
             None => {
                 debug!(peer = hex(&peer), "unable to reserve connection to peer");
