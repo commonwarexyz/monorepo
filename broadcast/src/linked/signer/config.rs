@@ -19,6 +19,7 @@ pub struct Config<
     pub collector: Z,
     pub mailbox_size: usize,
     pub namespace: Vec<u8>,
+    pub verify_timeout: Duration,
     pub refresh_epoch_timeout: Duration,
     pub rebroadcast_timeout: Duration,
     pub epoch_bounds: (u64, u64),

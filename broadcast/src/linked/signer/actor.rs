@@ -71,6 +71,9 @@ pub struct Actor<
     // Timeouts
     ////////////////////////////////////////
 
+    // The configured timeout for dropping verify requests to the application
+    verify_timeout: Duration,
+
     // The configured timeout for refreshing the epoch
     refresh_epoch_timeout: Duration,
     refresh_epoch_deadline: Option<SystemTime>,
@@ -102,7 +105,7 @@ pub struct Actor<
     ////////////////////////////////////////
     // Messaging
     ////////////////////////////////////////
-    
+
     // Allows sending messages to self.
     mailbox_sender: Mailbox<D>,
 
@@ -152,6 +155,7 @@ impl<
             collector: cfg.collector,
             chunk_namespace: encoder::chunk_namespace(&cfg.namespace),
             ack_namespace: encoder::ack_namespace(&cfg.namespace),
+            verify_timeout: cfg.verify_timeout,
             refresh_epoch_timeout: cfg.refresh_epoch_timeout,
             refresh_epoch_deadline: None,
             rebroadcast_timeout: cfg.rebroadcast_timeout,
@@ -507,17 +511,26 @@ impl<
             .await;
         self.runtime.spawn("app_verify", {
             let mut mailbox_sender = self.mailbox_sender.clone();
+            let runtime = self.runtime.clone();
+            let verify_timeout = self.verify_timeout;
             async move {
-                match receiver.await {
-                    Err(e) => {
-                        warn!(err=?e, "Application dropped verify request");
-                    }
-                    Ok(false) => {
-                        warn!("Application returned false for verify request");
-                    }
-                    Ok(true) => {
-                        mailbox_sender.verified(context, digest).await;
-                    }
+                select! {
+                    _ = runtime.sleep(verify_timeout) => {
+                        warn!("Verify timed out");
+                    },
+                    result = receiver => {
+                        match result {
+                            Err(e) => {
+                                warn!(err=?e, "Application dropped verify request");
+                            }
+                            Ok(false) => {
+                                warn!("Application returned false for verify request");
+                            }
+                            Ok(true) => {
+                                mailbox_sender.verified(context, digest).await;
+                            }
+                        }
+                    },
                 }
             }
         });
