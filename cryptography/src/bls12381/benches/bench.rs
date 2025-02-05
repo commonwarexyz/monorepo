@@ -11,13 +11,6 @@ mod signature_verification;
 mod threshold_signature_recover;
 
 criterion_main!(
-    dkg_recovery::benches,
-    dkg_reshare_recovery::benches,
-    threshold_signature_recover::benches,
-    aggregate_public_keys::benches,
-    aggregate_signatures::benches,
     signature_generation::benches,
     signature_verification::benches,
-    aggregate_verify_multiple_messages::benches,
-    aggregate_verify_multiple_public_keys::benches,
 );

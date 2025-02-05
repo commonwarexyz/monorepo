@@ -79,15 +79,7 @@ impl Scheme for Bls12381 {
         public_key: &PublicKey,
         signature: &Signature,
     ) -> bool {
-        let public = match group::Public::deserialize(public_key.as_ref()) {
-            Some(public) => public,
-            None => return false,
-        };
-        let signature = match group::Signature::deserialize(signature.as_ref()) {
-            Some(signature) => signature,
-            None => return false,
-        };
-        ops::verify_message(&public, namespace, message, &signature).is_ok()
+        ops::verify_message(&public_key.g1, namespace, message, &signature.g2).is_ok()
     }
 }
 
@@ -157,22 +149,42 @@ impl TryFrom<Vec<u8>> for PrivateKey {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-#[repr(transparent)]
-pub struct PublicKey([u8; group::PUBLIC_KEY_LENGTH]);
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PublicKey {
+    bytes: [u8; group::PUBLIC_KEY_LENGTH],
+    g1: G1,
+}
+
+impl Ord for PublicKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.bytes.cmp(&other.bytes)
+    }
+}
+
+impl PartialOrd for PublicKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl std::hash::Hash for PublicKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.bytes.hash(state);
+    }
+}
 
 impl Array for PublicKey {}
 
 impl AsRef<[u8]> for PublicKey {
     fn as_ref(&self) -> &[u8] {
-        &self.0
+        &self.bytes
     }
 }
 
 impl Deref for PublicKey {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
-        &self.0
+        &self.bytes
     }
 }
 
@@ -180,7 +192,10 @@ impl From<&G1> for PublicKey {
     fn from(value: &G1) -> Self {
         let mut slice = [0u8; group::PUBLIC_KEY_LENGTH];
         slice.copy_from_slice(value.serialize().as_ref());
-        Self(slice)
+        Self {
+            bytes: slice,
+            g1: *value,
+        }
     }
 }
 
@@ -190,11 +205,8 @@ impl TryFrom<&[u8]> for PublicKey {
         let array: [u8; group::PUBLIC_KEY_LENGTH] = value
             .try_into()
             .map_err(|_| Error::InvalidPublicKeyLength)?;
-        if group::Public::deserialize(value).is_none() {
-            return Err(Error::InvalidPublicKey);
-        }
-
-        Ok(Self(array))
+        let g1 = group::Public::deserialize(value).ok_or(Error::InvalidPublicKey)?;
+        Ok(Self { bytes: array, g1 })
     }
 }
 
@@ -212,22 +224,42 @@ impl TryFrom<Vec<u8>> for PublicKey {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-#[repr(transparent)]
-pub struct Signature([u8; group::SIGNATURE_LENGTH]);
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Signature {
+    bytes: [u8; group::SIGNATURE_LENGTH],
+    g2: group::Signature,
+}
+
+impl Ord for Signature {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.bytes.cmp(&other.bytes)
+    }
+}
+
+impl PartialOrd for Signature {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl std::hash::Hash for Signature {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.bytes.hash(state);
+    }
+}
 
 impl Array for Signature {}
 
 impl AsRef<[u8]> for Signature {
     fn as_ref(&self) -> &[u8] {
-        &self.0
+        &self.bytes
     }
 }
 
 impl Deref for Signature {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
-        &self.0
+        &self.bytes
     }
 }
 
@@ -235,7 +267,10 @@ impl From<&group::G2> for Signature {
     fn from(value: &group::G2) -> Self {
         let mut slice = [0u8; group::SIGNATURE_LENGTH];
         slice.copy_from_slice(value.serialize().as_ref());
-        Self(slice)
+        Self {
+            bytes: slice,
+            g2: *value,
+        }
     }
 }
 
@@ -246,7 +281,8 @@ impl TryFrom<&[u8]> for Signature {
             .try_into()
             .map_err(|_| Error::InvalidSignatureLength)?;
 
-        Ok(Self(array))
+        let g2 = group::Signature::deserialize(value).ok_or(Error::InvalidSignatureLength)?;
+        Ok(Self { bytes: array, g2 })
     }
 }
 

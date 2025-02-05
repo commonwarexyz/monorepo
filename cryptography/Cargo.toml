@@ -44,18 +44,3 @@ portable = ["blst/portable"]
 name="bls12381"
 harness = false
 path = "src/bls12381/benches/bench.rs"
-
-[[bench]]
-name = "ed25519"
-harness = false
-path = "src/ed25519/benches/bench.rs"
-
-[[bench]]
-name = "secp256r1"
-harness = false
-path = "src/secp256r1/benches/bench.rs"
-
-[[bench]]
-name = "sha256"
-harness = false
-path = "src/sha256/benches/bench.rs"
