@@ -116,7 +116,7 @@
 //! // Configure bootstrappers
 //! //
 //! // In production, it is likely that the address of bootstrappers will be some public address.
-//! let bootstrappers = vec![(peer1, SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3001))];
+//! let bootstrappers = vec![(peer1.clone(), SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3001))];
 //!
 //! // Configure namespace
 //! //
