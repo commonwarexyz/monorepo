@@ -1,6 +1,3 @@
-use std::marker::PhantomData;
-
-use super::Signature;
 use super::{
     encoder::{
         finalize_namespace, notarize_namespace, nullify_message, nullify_namespace,
@@ -18,6 +15,7 @@ use commonware_cryptography::{
     },
     Component,
 };
+use std::marker::PhantomData;
 
 type Callback = Box<dyn Fn(&poly::Poly<group::Public>) -> Option<u32>>;
 
@@ -76,7 +74,7 @@ impl<D: Component> Prover<D> {
     }
 
     /// Serialize a proposal proof.
-    pub fn serialize_proposal(proposal: &wire::Proposal, partial_signature: &Signature) -> Proof {
+    pub fn serialize_proposal(proposal: &wire::Proposal, partial_signature: &[u8]) -> Proof {
         // Setup proof
         let len =
             size_of::<u64>() + size_of::<u64>() + proposal.payload.len() + partial_signature.len();
@@ -130,11 +128,7 @@ impl<D: Component> Prover<D> {
     }
 
     /// Serialize an aggregation proof.
-    pub fn serialize_threshold(
-        proposal: &wire::Proposal,
-        signature: &Signature,
-        seed: &Signature,
-    ) -> Proof {
+    pub fn serialize_threshold(proposal: &wire::Proposal, signature: &[u8], seed: &[u8]) -> Proof {
         // Setup proof
         let len = size_of::<u64>()
             + size_of::<u64>()
@@ -220,10 +214,10 @@ impl<D: Component> Prover<D> {
         view: View,
         parent_1: View,
         payload_1: &D,
-        signature_1: &Signature,
+        signature_1: &[u8],
         parent_2: View,
         payload_2: &D,
-        signature_2: &Signature,
+        signature_2: &[u8],
     ) -> Proof {
         // Setup proof
         let len = size_of::<u64>()
@@ -311,10 +305,10 @@ impl<D: Component> Prover<D> {
         view: View,
         parent_1: View,
         payload_1: &D,
-        signature_1: &Signature,
+        signature_1: &[u8],
         parent_2: View,
         payload_2: &D,
-        signature_2: &Signature,
+        signature_2: &[u8],
     ) -> Proof {
         Self::serialize_conflicting_proposal(
             view,
@@ -338,10 +332,10 @@ impl<D: Component> Prover<D> {
         view: View,
         parent_1: View,
         payload_1: &D,
-        signature_1: &Signature,
+        signature_1: &[u8],
         parent_2: View,
         payload_2: &D,
-        signature_2: &Signature,
+        signature_2: &[u8],
     ) -> Proof {
         Self::serialize_conflicting_proposal(
             view,
@@ -364,12 +358,15 @@ impl<D: Component> Prover<D> {
         view: View,
         parent: View,
         payload: &D,
-        signature_finalize: &Signature,
-        signature_null: &Signature,
+        signature_finalize: &[u8],
+        signature_null: &[u8],
     ) -> Proof {
         // Setup proof
-        let len =
-            8 + 8 + payload.len() + poly::PARTIAL_SIGNATURE_LENGTH + poly::PARTIAL_SIGNATURE_LENGTH;
+        let len = size_of::<u64>()
+            + size_of::<u64>()
+            + payload.len()
+            + poly::PARTIAL_SIGNATURE_LENGTH
+            + poly::PARTIAL_SIGNATURE_LENGTH;
 
         // Encode proof
         let mut proof = Vec::with_capacity(len);

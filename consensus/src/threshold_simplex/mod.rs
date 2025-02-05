@@ -146,7 +146,6 @@
 //! * Introduce message rebroadcast to continue making progress if messages from a given view are dropped (only way
 //!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
 
-use bytes::Bytes;
 use commonware_cryptography::Component;
 
 mod encoder;
@@ -173,8 +172,6 @@ pub mod mocks;
 
 /// View is a monotonically increasing counter that represents the current focus of consensus.
 pub type View = u64;
-
-type Signature = Bytes;
 
 use crate::Activity;
 

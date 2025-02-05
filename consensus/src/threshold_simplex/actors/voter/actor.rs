@@ -467,12 +467,10 @@ impl<
             }
             let proposal_signature = ops::threshold_signature_recover(threshold, notarization)
                 .unwrap()
-                .serialize()
-                .into();
+                .serialize();
             let seed_signature = ops::threshold_signature_recover(threshold, seed)
                 .unwrap()
-                .serialize()
-                .into();
+                .serialize();
 
             // Construct notarization
             let notarization = wire::Notarization {
@@ -518,12 +516,10 @@ impl<
         }
         let view_signature = ops::threshold_signature_recover(threshold, nullification)
             .unwrap()
-            .serialize()
-            .into();
+            .serialize();
         let seed_signature = ops::threshold_signature_recover(threshold, seed)
             .unwrap()
-            .serialize()
-            .into();
+            .serialize();
 
         // Construct nullification
         let nullification = wire::Nullification {
@@ -602,8 +598,7 @@ impl<
             }
             let proposal_signature = ops::threshold_signature_recover(threshold, finalization)
                 .unwrap()
-                .serialize()
-                .into();
+                .serialize();
 
             // Construct finalization
             let finalization = wire::Finalization {
@@ -997,13 +992,10 @@ impl<
         let share = self.supervisor.share(self.view).unwrap();
         let message = nullify_message(self.view);
         let view_signature =
-            ops::partial_sign_message(share, Some(&self.nullify_namespace), &message)
-                .serialize()
-                .into();
+            ops::partial_sign_message(share, Some(&self.nullify_namespace), &message).serialize();
         let message = seed_message(self.view);
-        let seed_signature = ops::partial_sign_message(share, Some(&self.seed_namespace), &message)
-            .serialize()
-            .into();
+        let seed_signature =
+            ops::partial_sign_message(share, Some(&self.seed_namespace), &message).serialize();
         let null = wire::Nullify {
             view: self.view,
             view_signature,
@@ -1826,13 +1818,10 @@ impl<
             &proposal.digest,
         );
         let proposal_signature =
-            ops::partial_sign_message(share, Some(&self.notarize_namespace), &message)
-                .serialize()
-                .into();
+            ops::partial_sign_message(share, Some(&self.notarize_namespace), &message).serialize();
         let message = seed_message(view);
-        let seed_signature = ops::partial_sign_message(share, Some(&self.seed_namespace), &message)
-            .serialize()
-            .into();
+        let seed_signature =
+            ops::partial_sign_message(share, Some(&self.seed_namespace), &message).serialize();
         round.broadcast_notarize = true;
         Some(Parsed {
             message: wire::Notarize {
@@ -1912,9 +1901,7 @@ impl<
             &proposal.digest,
         );
         let proposal_signature =
-            ops::partial_sign_message(share, Some(&self.finalize_namespace), &message)
-                .serialize()
-                .into();
+            ops::partial_sign_message(share, Some(&self.finalize_namespace), &message).serialize();
         round.broadcast_finalize = true;
         Some(Parsed {
             message: wire::Finalize {
