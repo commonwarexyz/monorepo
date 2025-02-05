@@ -28,10 +28,14 @@ pub use secp256r1::Secp256r1;
 pub enum Error {
     #[error("invalid digest length")]
     InvalidDigestLength,
+    #[error("invalid private key")]
+    InvalidPrivateKey,
     #[error("invalid private key length")]
     InvalidPrivateKeyLength,
     #[error("invalid public key length")]
     InvalidPublicKeyLength,
+    #[error("invalid signature")]
+    InvalidSignature,
     #[error("invalid signature length")]
     InvalidSignatureLength,
     #[error("invalid public key")]

@@ -23,7 +23,7 @@ use super::primitives::{
     group::{self, Element, Scalar, G1},
     ops,
 };
-use crate::{Octets, Error, Scheme};
+use crate::{Error, Octets, Scheme};
 use rand::{CryptoRng, Rng};
 use std::ops::Deref;
 
@@ -107,12 +107,6 @@ impl Deref for PrivateKey {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
         &self.0
-    }
-}
-
-impl Default for PrivateKey {
-    fn default() -> Self {
-        Self([0u8; group::PRIVATE_KEY_LENGTH])
     }
 }
 
