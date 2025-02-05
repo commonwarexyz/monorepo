@@ -217,7 +217,7 @@ impl TryFrom<Vec<u8>> for PublicKey {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[repr(transparent)]
 pub struct Signature([u8; SIGNATURE_LENGTH]);
 
@@ -570,7 +570,7 @@ mod tests {
 
         for (index, test) in cases.iter().enumerate() {
             let (public_key, sig, message, exp_success) = test;
-            let mut sig = *sig;
+            let mut sig = sig.clone();
             let exp_success = *exp_success;
             if exp_success {
                 let ecdsa_signature = p256::ecdsa::Signature::from_slice(&sig).unwrap();

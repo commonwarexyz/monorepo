@@ -25,7 +25,7 @@ fn benchmark_dkg_recovery(c: &mut Criterion) {
                     contributors.sort();
 
                     // Create player
-                    let me = contributors[0];
+                    let me = contributors[0].clone();
                     let mut player = Player::new(
                         me,
                         None,
@@ -40,7 +40,7 @@ fn benchmark_dkg_recovery(c: &mut Criterion) {
                         let (_, commitment, shares) =
                             Dealer::new(&mut rng, None, contributors.clone());
                         player
-                            .share(*dealer, commitment.clone(), shares[0])
+                            .share(dealer.clone(), commitment.clone(), shares[0])
                             .unwrap();
                         commitments.insert(idx as u32, commitment);
                     }

@@ -16,7 +16,7 @@ mod ingress;
 mod supervisor;
 
 /// Configuration for the application.
-pub struct Config<H: Hasher, Si: Sink, St: Stream, P: PublicKey> {
+pub struct Config<H: Hasher, Si: Sink, St: Stream, P: Component> {
     pub indexer: Connection<Si, St>,
 
     /// Hashing scheme to use.

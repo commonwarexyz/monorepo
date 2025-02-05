@@ -133,7 +133,7 @@ pub enum Progress<D: Digest> {
     Finalized(Proof, D),
 }
 
-pub struct Config<H: Hasher, P: PublicKey> {
+pub struct Config<H: Hasher, P: Component> {
     pub hasher: H,
 
     pub relay: Arc<Relay<H::Digest, P>>,
@@ -150,7 +150,7 @@ pub struct Config<H: Hasher, P: PublicKey> {
     pub tracker: mpsc::UnboundedSender<(P, Progress<H::Digest>)>,
 }
 
-pub struct Application<E: Clock + RngCore, H: Hasher, P: PublicKey> {
+pub struct Application<E: Clock + RngCore, H: Hasher, P: Component> {
     runtime: E,
     hasher: H,
     participant: P,
@@ -171,7 +171,7 @@ pub struct Application<E: Clock + RngCore, H: Hasher, P: PublicKey> {
     finalized_views: HashSet<H::Digest>,
 }
 
-impl<E: Clock + RngCore, H: Hasher, P: PublicKey> Application<E, H, P> {
+impl<E: Clock + RngCore, H: Hasher, P: Component> Application<E, H, P> {
     pub fn new(runtime: E, cfg: Config<H, P>) -> (Self, Mailbox<H::Digest>) {
         // Register self on relay
         let broadcast = cfg.relay.register(cfg.participant);

@@ -85,7 +85,7 @@ impl<P: Component> Arbiter<P> {
         let dealers = dealers
             .iter()
             .enumerate()
-            .map(|(i, pk)| (*pk, i as u32))
+            .map(|(i, pk)| (pk.clone(), i as u32))
             .collect::<HashMap<P, _>>();
         players.sort();
         Self {
@@ -228,7 +228,7 @@ impl<P: Component> Arbiter<P> {
             if self.commitments.contains_key(idx) {
                 continue;
             }
-            self.disqualified.insert(*dealer);
+            self.disqualified.insert(dealer.clone());
         }
 
         // Ensure we have enough commitments to proceed

@@ -52,7 +52,7 @@ impl<P: Component> Player<P> {
         let dealers = dealers
             .iter()
             .enumerate()
-            .map(|(i, pk)| (*pk, i as u32))
+            .map(|(i, pk)| (pk.clone(), i as u32))
             .collect::<HashMap<P, _>>();
         recipients.sort();
         let mut me_idx = None;

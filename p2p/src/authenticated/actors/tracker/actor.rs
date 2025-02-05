@@ -5,7 +5,7 @@ pub use super::{
 };
 use crate::authenticated::{ip, metrics, wire};
 use bitvec::prelude::*;
-use commonware_cryptography::{PublicKey, Scheme};
+use commonware_cryptography::{Component, Scheme};
 use commonware_runtime::{Clock, Spawner};
 use commonware_utils::{hex, union, SystemTimeExt};
 use futures::{channel::mpsc, StreamExt};
@@ -30,7 +30,7 @@ use tracing::{debug, trace};
 // Bytes to add to the namespace to prevent replay attacks.
 const NAMESPACE_SUFFIX_IP: &[u8] = b"_IP";
 
-struct PeerSet<P: PublicKey> {
+struct PeerSet<P: Component> {
     index: u64,
     sorted: Vec<P>,
     order: HashMap<P, usize>,
@@ -38,13 +38,13 @@ struct PeerSet<P: PublicKey> {
     msg: wire::BitVec,
 }
 
-impl<P: PublicKey> PeerSet<P> {
+impl<P: Component> PeerSet<P> {
     fn new(index: u64, mut peers: Vec<P>) -> Self {
         // Insert peers in sorted order
         peers.sort();
         let mut order = HashMap::new();
         for (idx, peer) in peers.iter().enumerate() {
-            order.insert(*peer, idx);
+            order.insert(peer.clone(), idx);
         }
 
         // Create bit vector
@@ -173,8 +173,8 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
             socket: socket_bytes,
             timestamp,
             signature: Some(wire::Signature {
-                public_key: cfg.crypto.public_key().into(),
-                signature: ip_signature.into(),
+                public_key: cfg.crypto.public_key().to_vec(),
+                signature: ip_signature.to_vec(),
             }),
         };
 
@@ -299,10 +299,10 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
             if let Some(address) = self.peers.get_mut(peer) {
                 address.increment();
                 if address.has_network() {
-                    set.found(*peer);
+                    set.found(peer.clone());
                 }
             } else {
-                self.peers.insert(*peer, AddressCount::new());
+                self.peers.insert(peer.clone(), AddressCount::new());
             }
         }
 
@@ -341,7 +341,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
         let mut reserved = Vec::new();
         for peer in available_peers {
             // Reserve the connection
-            let reservation = match self.reserve(peer) {
+            let reservation = match self.reserve(peer.clone()) {
                 Some(reservation) => reservation,
                 None => continue, // can happen if rate limited
             };
@@ -380,7 +380,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
 
         // Update peer set knowledge
         for set in self.sets.values_mut() {
-            if set.found(*peer) {
+            if set.found(peer.clone()) {
                 set.update_msg();
             }
         }
@@ -412,13 +412,13 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
             let signature = peer.signature.as_ref().ok_or(Error::PeerUnsigned)?;
 
             // Check if public key is well-formatted and if peer is us
-            let public_key = C::PublicKey::try_from(signature.public_key.as_ref())
+            let public_key = C::PublicKey::try_from(&signature.public_key)
                 .map_err(|_| Error::InvalidPublicKey)?;
             if public_key == self.crypto.public_key() {
                 return Err(Error::ReceivedSelf);
             }
 
-            let signature = C::Signature::try_from(signature.signature.as_ref())
+            let signature = C::Signature::try_from(&signature.signature)
                 .map_err(|_| Error::InvalidSignature)?;
 
             // If any signature is invalid, disconnect from the peer
@@ -545,7 +545,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
         }
 
         // Reserve the connection
-        self.connections.insert(peer);
+        self.connections.insert(peer.clone());
         self.reserved_connections.inc();
         Some(Reservation::new(
             self.runtime.clone(),
@@ -689,16 +689,16 @@ mod tests {
             let peer = Ed25519::from_seed(1).public_key();
 
             // Attempt to reserve peer before allowed
-            let reservation = mailbox.reserve(peer).await;
+            let reservation = mailbox.reserve(peer.clone()).await;
             assert!(reservation.is_none());
 
             // Register and reserve peer
-            oracle.register(0, vec![peer]).await;
-            let reservation = mailbox.reserve(peer).await;
+            oracle.register(0, vec![peer.clone()]).await;
+            let reservation = mailbox.reserve(peer.clone()).await;
             assert!(reservation.is_some());
 
             // Attempt to re-register peer that is already reserved
-            let failed_reservation = mailbox.reserve(peer).await;
+            let failed_reservation = mailbox.reserve(peer.clone()).await;
             assert!(failed_reservation.is_none());
 
             // Release peer
@@ -708,7 +708,7 @@ mod tests {
 
             // Eventually reserve peer again (async release)
             loop {
-                let reservation = mailbox.reserve(peer).await;
+                let reservation = mailbox.reserve(peer.clone()).await;
                 if reservation.is_some() {
                     break;
                 }
@@ -740,12 +740,17 @@ mod tests {
 
             // Request bit vector with unallowed peer
             let (peer_mailbox, mut peer_receiver) = peer::Mailbox::test();
-            mailbox.construct(peer1, peer_mailbox.clone()).await;
+            mailbox.construct(peer1.clone(), peer_mailbox.clone()).await;
             let msg = peer_receiver.next().await.unwrap();
             assert!(matches!(msg, peer::Message::Kill));
 
             // Find sorted indices
-            let mut peers = vec![peer0.public_key(), peer1, peer2, peer3];
+            let mut peers = vec![
+                peer0.public_key(),
+                peer1.clone(),
+                peer2.clone(),
+                peer3.clone(),
+            ];
             peers.sort();
             let me_idx = peers
                 .iter()
@@ -757,7 +762,7 @@ mod tests {
             oracle.register(0, peers).await;
 
             // Request bit vector
-            mailbox.construct(peer1, peer_mailbox.clone()).await;
+            mailbox.construct(peer1.clone(), peer_mailbox.clone()).await;
             let msg = peer_receiver.next().await.unwrap();
             let bit_vec = match msg {
                 peer::Message::BitVec { bit_vec } => bit_vec,
@@ -782,15 +787,15 @@ mod tests {
                     socket: socket_bytes,
                     timestamp: 0,
                     signature: Some(wire::Signature {
-                        public_key: peer1.into(),
-                        signature: ip_signature.into(),
+                        public_key: peer1.to_vec(),
+                        signature: ip_signature.to_vec(),
                     }),
                 }],
             };
             mailbox.peers(peers, peer_mailbox.clone()).await;
 
             // Request bit vector again
-            mailbox.construct(peer1, peer_mailbox.clone()).await;
+            mailbox.construct(peer1.clone(), peer_mailbox.clone()).await;
             let msg = peer_receiver.next().await.unwrap();
             let bit_vec = match msg {
                 peer::Message::BitVec { bit_vec } => bit_vec,
@@ -807,13 +812,13 @@ mod tests {
             }
 
             // Register new peers
-            oracle.register(1, vec![peer2, peer3]).await;
+            oracle.register(1, vec![peer2.clone(), peer3]).await;
 
             // Request bit vector until both indexes returned
             let mut index_0_returned = false;
             let mut index_1_returned = false;
             while !index_0_returned || !index_1_returned {
-                mailbox.construct(peer1, peer_mailbox.clone()).await; // peer1 still allowed
+                mailbox.construct(peer1.clone(), peer_mailbox.clone()).await; // peer1 still allowed
                 let msg = peer_receiver.next().await.unwrap();
                 let bit_vec = match msg {
                     peer::Message::BitVec { bit_vec } => bit_vec,
@@ -842,7 +847,7 @@ mod tests {
             }
 
             // Register some peers
-            oracle.register(2, vec![peer2]).await;
+            oracle.register(2, vec![peer2.clone()]).await;
 
             // Ensure peer1 has been evicted from the peer tracker and should die
             mailbox.construct(peer1, peer_mailbox.clone()).await;
@@ -853,7 +858,7 @@ mod tests {
             let mut index_1_returned = false;
             let mut index_2_returned = false;
             while !index_1_returned || !index_2_returned {
-                mailbox.construct(peer2, peer_mailbox.clone()).await; // peer1 no longer allowed
+                mailbox.construct(peer2.clone(), peer_mailbox.clone()).await; // peer1 no longer allowed
                 let msg = peer_receiver.next().await.unwrap();
                 let bit_vec = match msg {
                     peer::Message::BitVec { bit_vec } => bit_vec,

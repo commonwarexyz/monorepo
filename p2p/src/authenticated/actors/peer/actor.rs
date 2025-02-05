@@ -2,7 +2,7 @@ use super::{Config, Error, Mailbox, Message, Relay};
 use crate::authenticated::{
     actors::tracker, channels::Channels, metrics, wire, wire::message::Payload,
 };
-use commonware_cryptography::PublicKey;
+use commonware_cryptography::Component;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Sink, Spawner, Stream};
 use commonware_stream::{
@@ -18,7 +18,7 @@ use rand::{CryptoRng, Rng};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tracing::debug;
 
-pub struct Actor<E: Spawner + Clock + ReasonablyRealtime, P: PublicKey> {
+pub struct Actor<E: Spawner + Clock + ReasonablyRealtime, P: Component> {
     runtime: E,
 
     gossip_bit_vec_frequency: Duration,
@@ -38,7 +38,7 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime, P: PublicKey> {
     _reservation: tracker::Reservation<E, P>,
 }
 
-impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng, P: PublicKey> Actor<E, P> {
+impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng, P: Component> Actor<E, P> {
     pub fn new(runtime: E, cfg: Config, reservation: tracker::Reservation<E, P>) -> (Self, Relay) {
         let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
@@ -115,6 +115,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng, P: PublicKey> Ac
         let (mut conn_sender, mut conn_receiver) = connection.split();
         let mut send_handler: Handle<Result<(), Error>> = self.runtime.spawn("sender", {
             let runtime = self.runtime.clone();
+            let peer = peer.clone();
             let mut tracker = tracker.clone();
             let mailbox = self.mailbox.clone();
             let rate_limits = rate_limits.clone();
@@ -124,7 +125,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng, P: PublicKey> Ac
                     select! {
                         _ = runtime.sleep_until(deadline) => {
                             // Get latest bitset from tracker (also used as ping)
-                            tracker.construct(peer, mailbox.clone()).await;
+                            tracker.construct(peer.clone(), mailbox.clone()).await;
 
                             // Reset ticker
                             deadline = runtime.current() + self.gossip_bit_vec_frequency;
@@ -247,7 +248,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng, P: PublicKey> Ac
                             // close the peer (as other channels may still be open).
                             let sender = senders.get_mut(&data.channel).unwrap();
                             if let Err(e) = sender
-                                .send((peer, data.message))
+                                .send((peer.clone(), data.message))
                                 .await
                                 .map_err(|_| Error::ChannelClosed(data.channel))
                             {

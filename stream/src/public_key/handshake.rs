@@ -30,12 +30,12 @@ pub fn create_handshake<C: Scheme>(
 
     // Send handshake
     Ok(wire::Handshake {
-        recipient_public_key: recipient_public_key.into(),
-        ephemeral_public_key: x25519::encode_public_key(ephemeral_public_key),
+        recipient_public_key: recipient_public_key.to_vec(),
+        ephemeral_public_key: x25519::encode_public_key(ephemeral_public_key).to_vec(),
         timestamp,
         signature: Some(wire::Signature {
-            public_key: crypto.public_key().into(),
-            signature: signature.into(),
+            public_key: crypto.public_key().to_vec(),
+            signature: signature.to_vec(),
         }),
     }
     .encode_to_vec()
@@ -68,7 +68,7 @@ impl<C: Scheme> Handshake<C> {
         // If we didn't verify this, it would be trivial for any peer to impersonate another peer (even though
         // they would not be able to decrypt any messages from the shared secret). This would prevent us
         // from making a legitimate connection to the intended peer.
-        let our_public_key = C::PublicKey::try_from(handshake.recipient_public_key.as_ref())
+        let our_public_key = C::PublicKey::try_from(handshake.recipient_public_key)
             .map_err(|_| Error::InvalidChannelPublicKey)?;
         if crypto.public_key() != our_public_key {
             return Err(Error::HandshakeNotForUs);
@@ -92,7 +92,7 @@ impl<C: Scheme> Handshake<C> {
 
         // Get signature from peer
         let signature = handshake.signature.ok_or(Error::MissingSignature)?;
-        let public_key: C::PublicKey = C::PublicKey::try_from(signature.public_key.as_ref())
+        let public_key: C::PublicKey = C::PublicKey::try_from(signature.public_key)
             .map_err(|_| Error::InvalidPeerPublicKey)?;
 
         // Construct signing payload (ephemeral public key + my public key + timestamp)
@@ -104,8 +104,8 @@ impl<C: Scheme> Handshake<C> {
         payload.put_u64(handshake.timestamp);
 
         // Verify signature
-        let signature = C::Signature::try_from(signature.signature.as_ref())
-            .map_err(|_| Error::InvalidSignature)?;
+        let signature =
+            C::Signature::try_from(signature.signature).map_err(|_| Error::InvalidSignature)?;
 
         if !C::verify(Some(namespace), &payload, &public_key, &signature) {
             return Err(Error::InvalidSignature);
@@ -215,12 +215,10 @@ mod tests {
             assert!(handshake_timestamp <= current_timestamp + synchrony_bound);
             assert!(handshake_timestamp + max_handshake_age >= current_timestamp);
             let handshake_recipient_public_key =
-                <Ed25519 as Scheme>::PublicKey::try_from(handshake.recipient_public_key.as_ref())
+                <Ed25519 as Scheme>::PublicKey::try_from(&handshake.recipient_public_key).unwrap();
+            let handshake_signature =
+                <Ed25519 as Scheme>::Signature::try_from(&handshake.signature.unwrap().signature)
                     .unwrap();
-            let handshake_signature = <Ed25519 as Scheme>::Signature::try_from(
-                handshake.signature.unwrap().signature.as_ref(),
-            )
-            .unwrap();
 
             // Verify the signature
             assert_eq!(handshake_recipient_public_key, recipient.public_key());
@@ -476,7 +474,7 @@ mod tests {
             let mut public_key = public_key.to_vec();
             public_key.truncate(28);
             handshake.signature = Some(wire::Signature {
-                public_key: public_key.into(),
+                public_key,
                 signature,
             });
 
@@ -515,7 +513,7 @@ mod tests {
                 wire::Handshake::decode(handshake).expect("failed to decode handshake");
             let mut ephemeral_public_key = handshake.ephemeral_public_key.to_vec();
             ephemeral_public_key.truncate(28);
-            handshake.ephemeral_public_key = ephemeral_public_key.into();
+            handshake.ephemeral_public_key = ephemeral_public_key;
 
             // Verify the handshake
             let result = Handshake::verify(
@@ -561,7 +559,7 @@ mod tests {
             signature[0] ^= 0xFF;
             handshake.signature = Some(wire::Signature {
                 public_key,
-                signature: signature.into(),
+                signature,
             });
 
             // Verify the handshake
@@ -646,7 +644,7 @@ mod tests {
                 &mut crypto,
                 TEST_NAMESPACE,
                 SYNCHRONY_BOUND_MILLIS,
-                recipient_public_key,
+                recipient_public_key.clone(),
                 ephemeral_public_key,
             ).unwrap();
 

@@ -239,7 +239,7 @@ mod tests {
     use tracing::debug;
 
     /// Registers all validators using the oracle.
-    async fn register_validators<P: PublicKey>(
+    async fn register_validators<P: Component>(
         oracle: &mut Oracle<P>,
         validators: &[P],
     ) -> HashMap<P, ((Sender<P>, Receiver<P>), (Sender<P>, Receiver<P>))> {
@@ -272,7 +272,7 @@ mod tests {
     /// The `action` parameter determines the action (e.g. link, unlink) to take.
     /// The `restrict_to` function can be used to restrict the linking to certain connections,
     /// otherwise all validators will be linked to all other validators.
-    async fn link_validators<P: PublicKey>(
+    async fn link_validators<P: Component>(
         oracle: &mut Oracle<P>,
         validators: &[P],
         action: Action,

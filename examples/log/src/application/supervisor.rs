@@ -1,15 +1,15 @@
 use commonware_consensus::{simplex::View, Activity, Proof, Supervisor as Su};
-use commonware_cryptography::PublicKey;
+use commonware_cryptography::Component;
 use std::collections::HashMap;
 
 /// Implementation of `commonware-consensus::Supervisor`.
 #[derive(Clone)]
-pub struct Supervisor<P: PublicKey> {
+pub struct Supervisor<P: Component> {
     participants: Vec<P>,
     participants_map: HashMap<P, u32>,
 }
 
-impl<P: PublicKey> Supervisor<P> {
+impl<P: Component> Supervisor<P> {
     pub fn new(mut participants: Vec<P>) -> Self {
         // Setup participants
         participants.sort();
@@ -26,7 +26,7 @@ impl<P: PublicKey> Supervisor<P> {
     }
 }
 
-impl<P: PublicKey> Su for Supervisor<P> {
+impl<P: Component> Su for Supervisor<P> {
     type Index = View;
     type PublicKey = P;
 

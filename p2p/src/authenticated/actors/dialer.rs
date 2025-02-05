@@ -117,15 +117,21 @@ impl<
                     );
 
                     // Upgrade connection
-                    let instance =
-                        match Connection::upgrade_dialer(runtime, config, sink, stream, peer).await
-                        {
-                            Ok(instance) => instance,
-                            Err(e) => {
-                                debug!(peer=hex(&peer), error = ?e, "failed to upgrade connection");
-                                return;
-                            }
-                        };
+                    let instance = match Connection::upgrade_dialer(
+                        runtime,
+                        config,
+                        sink,
+                        stream,
+                        peer.clone(),
+                    )
+                    .await
+                    {
+                        Ok(instance) => instance,
+                        Err(e) => {
+                            debug!(peer=hex(&peer), error = ?e, "failed to upgrade connection");
+                            return;
+                        }
+                    };
                     debug!(peer = hex(&peer), "upgraded connection");
 
                     // Start peer to handle messages

@@ -1,4 +1,3 @@
-
 use crate::wire;
 
 use super::{
@@ -37,7 +36,7 @@ pub struct Application<R: Rng, H: Hasher, Si: Sink, St: Stream> {
 
 impl<R: Rng, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St> {
     /// Create a new application actor.
-    pub fn new<P: PublicKey>(
+    pub fn new<P: Component>(
         runtime: R,
         config: Config<H, Si, St, P>,
     ) -> (Self, Supervisor<P>, Mailbox<H::Digest>) {

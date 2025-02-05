@@ -4,11 +4,11 @@ use futures::{channel::mpsc, SinkExt};
 use std::{collections::BTreeMap, sync::Mutex};
 
 /// Relay is a mock for distributing artifacts between applications.
-pub struct Relay<D: Digest, P: PublicKey> {
+pub struct Relay<D: Digest, P: Component> {
     recipients: Mutex<BTreeMap<P, mpsc::UnboundedSender<(D, Bytes)>>>,
 }
 
-impl<D: Digest, P: PublicKey> Relay<D, P> {
+impl<D: Digest, P: Component> Relay<D, P> {
     pub fn new() -> Self {
         Self {
             recipients: Mutex::new(BTreeMap::new()),
@@ -50,7 +50,7 @@ impl<D: Digest, P: PublicKey> Relay<D, P> {
     }
 }
 
-impl<D: Digest, P: PublicKey> Default for Relay<D, P> {
+impl<D: Digest, P: Component> Default for Relay<D, P> {
     fn default() -> Self {
         Self::new()
     }

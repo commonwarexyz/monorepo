@@ -30,7 +30,7 @@ pub trait Component:
     + TryFrom<Vec<u8>, Error = Error>
     + Deref<Target = [u8]>
     + Sized
-    + Copy
+    + Clone
     + Send
     + Sync
     + 'static
@@ -69,6 +69,7 @@ pub trait Scheme: Clone + Send + Sync + 'static {
     type PrivateKey: Component;
     type PublicKey: Component;
     type Signature: Component;
+
     /// Returns a new instance of the scheme.
     fn new<R: Rng + CryptoRng>(rng: &mut R) -> Self;
 

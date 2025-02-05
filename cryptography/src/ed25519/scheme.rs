@@ -41,7 +41,7 @@ impl Scheme for Ed25519 {
     }
 
     fn public_key(&self) -> PublicKey {
-        self.verifier
+        self.verifier.clone()
     }
 
     fn sign(&mut self, namespace: Option<&[u8]>, message: &[u8]) -> Signature {
@@ -58,8 +58,11 @@ impl Scheme for Ed25519 {
         public_key: &Self::PublicKey,
         signature: &Self::Signature,
     ) -> bool {
-        let public_key = public_key.verifying_key;
-        let signature = signature.signature;
+        let Ok(public_key) = VerificationKey::try_from(public_key.0) else {
+            return false;
+        };
+        let signature = ed25519_consensus::Signature::from(signature.0);
+
         match namespace {
             Some(namespace) => {
                 let payload = union_unique(namespace, message);
@@ -92,8 +95,8 @@ impl BatchScheme for Ed25519Batch {
         public_key: &Self::PublicKey,
         signature: &Self::Signature,
     ) -> bool {
-        let public_key = public_key.parsed;
-        let signature = signature.signature;
+        let public_key = VerificationKeyBytes::from(public_key.0);
+        let signature = ed25519_consensus::Signature::from(signature.0);
         let payload = match namespace {
             Some(namespace) => Cow::Owned(union_unique(namespace, message)),
             None => Cow::Borrowed(message),
@@ -108,7 +111,7 @@ impl BatchScheme for Ed25519Batch {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[repr(transparent)]
 pub struct PrivateKey([u8; PRIVATE_KEY_LENGTH]);
 
@@ -124,12 +127,6 @@ impl Deref for PrivateKey {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
         &self.0
-    }
-}
-
-impl Default for PrivateKey {
-    fn default() -> Self {
-        Self([0u8; PRIVATE_KEY_LENGTH])
     }
 }
 
@@ -172,24 +169,28 @@ impl TryFrom<Vec<u8>> for PrivateKey {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct PublicKey {
-    raw: VerificationKeyBytes,
-    parsed: VerificationKey,
-}
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[repr(transparent)]
+pub struct PublicKey([u8; PUBLIC_KEY_LENGTH]);
 
 impl Component for PublicKey {}
 
 impl AsRef<[u8]> for PublicKey {
     fn as_ref(&self) -> &[u8] {
-        self.raw.as_bytes()
+        &self.0
     }
 }
 
 impl Deref for PublicKey {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
-        self.raw.as_bytes()
+        &self.0
+    }
+}
+
+impl From<&VerificationKey> for PublicKey {
+    fn from(verifier: &VerificationKey) -> Self {
+        Self(verifier.to_bytes())
     }
 }
 
@@ -199,14 +200,8 @@ impl TryFrom<&[u8]> for PublicKey {
         if value.len() != PUBLIC_KEY_LENGTH {
             return Err(Error::InvalidPublicKeyLength);
         }
-        let verifier_bytes =
-            VerificationKeyBytes::try_from(value).map_err(|_| Error::InvalidPublicKey)?;
-        let verifier =
-            VerificationKey::try_from(verifier_bytes).map_err(|_| Error::InvalidPublicKey)?;
-        Ok(Self {
-            raw: verifier_bytes,
-            parsed: verifier,
-        })
+        let verifier = VerificationKey::try_from(value).map_err(|_| Error::InvalidPublicKey)?;
+        Ok(Self::from(&verifier))
     }
 }
 
@@ -224,11 +219,9 @@ impl TryFrom<Vec<u8>> for PublicKey {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct Signature {
-    parsed: [u8; SIGNATURE_LENGTH],
-    signature: ed25519_consensus::Signature,
-}
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[repr(transparent)]
+pub struct Signature([u8; SIGNATURE_LENGTH]);
 
 impl Component for Signature {}
 

@@ -6,7 +6,7 @@ use super::{
 };
 use crate::{Channel, Message, Recipients};
 use bytes::Bytes;
-use commonware_cryptography::PublicKey;
+use commonware_cryptography::Component;
 use commonware_macros::select;
 use commonware_runtime::{
     deterministic::{Listener, Sink, Stream},
@@ -47,7 +47,7 @@ pub struct Config {
 }
 
 /// Implementation of a simulated network.
-pub struct Network<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock, P: PublicKey> {
+pub struct Network<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock, P: Component> {
     runtime: E,
 
     // Maximum size of a message that can be sent over the network
@@ -77,7 +77,7 @@ pub struct Network<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock, 
     sent_messages: Family<metrics::Message, Counter>,
 }
 
-impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock, P: PublicKey> Network<E, P> {
+impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock, P: Component> Network<E, P> {
     /// Create a new simulated network with a given runtime and configuration.
     ///
     /// Returns a tuple containing the network instance and the oracle that can
@@ -172,11 +172,11 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock, P: PublicKey> 
                 if !self.peers.contains_key(&public_key) {
                     let peer = Peer::new(
                         &mut self.runtime.clone(),
-                        public_key,
+                        public_key.clone(),
                         self.get_next_socket(),
                         self.max_size,
                     );
-                    self.peers.insert(public_key, peer);
+                    self.peers.insert(public_key.clone(), peer);
                 }
 
                 // Create a receiver that allows receiving messages from the network for a certain channel
@@ -213,7 +213,7 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock, P: PublicKey> 
                 };
 
                 // Require link to not already exist
-                let key = (sender, receiver);
+                let key = (sender.clone(), receiver);
                 if self.links.contains_key(&key) {
                     return send_result(result, Err(Error::LinkExists));
                 }
@@ -271,7 +271,11 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock, P: PublicKey> 
             }
 
             // Determine if there is a link between the sender and recipient
-            let mut link = match self.links.get(&(origin, recipient)).cloned() {
+            let mut link = match self
+                .links
+                .get(&(origin.clone(), recipient.clone()))
+                .cloned()
+            {
                 Some(link) => link,
                 None => {
                     trace!(
@@ -304,6 +308,8 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock, P: PublicKey> 
             self.runtime.spawn("messenger", {
                 let runtime = self.runtime.clone();
                 let message = message.clone();
+                let recipient = recipient.clone();
+                let origin = origin.clone();
                 let mut acquired_sender = acquired_sender.clone();
                 let received_messages = self.received_messages.clone();
                 async move {
@@ -392,7 +398,7 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock, P: PublicKey> 
 
 /// Implementation of a [`crate::Sender`] for the simulated network.
 #[derive(Clone, Debug)]
-pub struct Sender<P: PublicKey> {
+pub struct Sender<P: Component> {
     me: P,
     channel: Channel,
     max_size: usize,
@@ -400,7 +406,7 @@ pub struct Sender<P: PublicKey> {
     low: mpsc::UnboundedSender<Task<P>>,
 }
 
-impl<P: PublicKey> Sender<P> {
+impl<P: Component> Sender<P> {
     fn new(
         runtime: impl Spawner,
         me: P,
@@ -448,7 +454,7 @@ impl<P: PublicKey> Sender<P> {
     }
 }
 
-impl<P: PublicKey> crate::Sender for Sender<P> {
+impl<P: Component> crate::Sender for Sender<P> {
     type Error = Error;
     type PublicKey = P;
 
@@ -467,7 +473,7 @@ impl<P: PublicKey> crate::Sender for Sender<P> {
         let (sender, receiver) = oneshot::channel();
         let mut channel = if priority { &self.high } else { &self.low };
         channel
-            .send((self.channel, self.me, recipients, message, sender))
+            .send((self.channel, self.me.clone(), recipients, message, sender))
             .await
             .map_err(|_| Error::NetworkClosed)?;
         receiver.await.map_err(|_| Error::NetworkClosed)
@@ -479,11 +485,11 @@ type MessageReceiverResult<P> = Result<MessageReceiver<P>, Error>;
 
 /// Implementation of a [`crate::Receiver`] for the simulated network.
 #[derive(Debug)]
-pub struct Receiver<P: PublicKey> {
+pub struct Receiver<P: Component> {
     receiver: MessageReceiver<P>,
 }
 
-impl<P: PublicKey> crate::Receiver for Receiver<P> {
+impl<P: Component> crate::Receiver for Receiver<P> {
     type Error = Error;
     type PublicKey = P;
 
@@ -495,7 +501,7 @@ impl<P: PublicKey> crate::Receiver for Receiver<P> {
 /// A peer in the simulated network.
 ///
 /// The peer can register channels, which allows it to receive messages sent to the channel from other peers.
-struct Peer<P: PublicKey> {
+struct Peer<P: Component> {
     // Socket address that the peer is listening on
     socket: SocketAddr,
 
@@ -503,7 +509,7 @@ struct Peer<P: PublicKey> {
     control: mpsc::UnboundedSender<(Channel, oneshot::Sender<MessageReceiverResult<P>>)>,
 }
 
-impl<P: PublicKey> Peer<P> {
+impl<P: Component> Peer<P> {
     /// Create and return a new peer.
     ///
     /// The peer will listen for incoming connections on the given `socket` address.
@@ -612,8 +618,9 @@ impl<P: PublicKey> Peer<P> {
                                     data[..SIZE_OF_CHANNEL].try_into().unwrap(),
                                 );
                                 let message = data.slice(SIZE_OF_CHANNEL..);
-                                if let Err(err) =
-                                    inbox_sender.send((channel, (dialer, message))).await
+                                if let Err(err) = inbox_sender
+                                    .send((channel, (dialer.clone(), message)))
+                                    .await
                                 {
                                     error!(?err, "failed to send message to mailbox");
                                     break;
@@ -656,7 +663,7 @@ struct Link {
 }
 
 impl Link {
-    fn new<E: Spawner + RNetwork<Listener, Sink, Stream>, P: PublicKey>(
+    fn new<E: Spawner + RNetwork<Listener, Sink, Stream>, P: Component>(
         runtime: &mut E,
         dialer: P,
         socket: SocketAddr,
@@ -731,14 +738,14 @@ mod tests {
             let pk2 = Ed25519::from_seed(2).public_key();
 
             // Register
-            oracle.register(pk1, 0).await.unwrap();
-            oracle.register(pk1, 1).await.unwrap();
-            oracle.register(pk2, 0).await.unwrap();
-            oracle.register(pk2, 1).await.unwrap();
+            oracle.register(pk1.clone(), 0).await.unwrap();
+            oracle.register(pk1.clone(), 1).await.unwrap();
+            oracle.register(pk2.clone(), 0).await.unwrap();
+            oracle.register(pk2.clone(), 1).await.unwrap();
 
             // Expect error when registering again
             assert!(matches!(
-                oracle.register(pk1, 1).await,
+                oracle.register(pk1.clone(), 1).await,
                 Err(Error::ChannelAlreadyRegistered(_))
             ));
 
@@ -748,7 +755,10 @@ mod tests {
                 jitter: 1.0,
                 success_rate: 0.9,
             };
-            oracle.add_link(pk1, pk2, link.clone()).await.unwrap();
+            oracle
+                .add_link(pk1.clone(), pk2.clone(), link.clone())
+                .await
+                .unwrap();
 
             // Expect error when adding link again
             assert!(matches!(

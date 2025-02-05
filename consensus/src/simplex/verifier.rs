@@ -8,7 +8,7 @@ use commonware_utils::{hex, quorum};
 use std::collections::HashSet;
 use tracing::debug;
 
-pub fn threshold<P: PublicKey>(validators: &[P]) -> Option<(u32, u32)> {
+pub fn threshold<P: Component>(validators: &[P]) -> Option<(u32, u32)> {
     let len = validators.len() as u32;
     let threshold = quorum(len).expect("not enough validators for a quorum");
     Some((threshold, len))

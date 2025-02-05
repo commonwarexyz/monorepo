@@ -6,7 +6,7 @@ use crate::authenticated::{
     actors::{peer, router, tracker},
     metrics,
 };
-use commonware_cryptography::PublicKey;
+use commonware_cryptography::Component;
 use commonware_runtime::{Clock, Sink, Spawner, Stream};
 use commonware_utils::hex;
 use futures::{channel::mpsc, StreamExt};
@@ -16,7 +16,7 @@ use rand::{CryptoRng, Rng};
 use std::time::Duration;
 use tracing::{debug, info};
 
-pub struct Actor<E: Spawner + Clock, Si: Sink, St: Stream, P: PublicKey> {
+pub struct Actor<E: Spawner + Clock, Si: Sink, St: Stream, P: Component> {
     runtime: E,
 
     mailbox_size: usize,
@@ -35,7 +35,7 @@ impl<
         E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng,
         Si: Sink,
         St: Stream,
-        P: PublicKey,
+        P: Component,
     > Actor<E, Si, St, P>
 {
     pub fn new(runtime: E, cfg: Config) -> (Self, Mailbox<E, Si, St, P>) {
@@ -110,10 +110,10 @@ impl<
                             );
 
                             // Register peer with the router
-                            let channels = router.ready(peer, messenger).await;
+                            let channels = router.ready(peer.clone(), messenger).await;
 
                             // Run peer
-                            let e = actor.run(peer, connection, tracker, channels).await;
+                            let e = actor.run(peer.clone(), connection, tracker, channels).await;
 
                             // Let the router know the peer has exited
                             info!(error = ?e, peer=hex(&peer), "peer shutdown");

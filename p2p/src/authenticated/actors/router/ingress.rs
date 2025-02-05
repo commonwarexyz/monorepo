@@ -3,13 +3,13 @@ use crate::{
     Channel, Recipients,
 };
 use bytes::Bytes;
-use commonware_cryptography::PublicKey;
+use commonware_cryptography::Component;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
 };
 
-pub enum Message<P: PublicKey> {
+pub enum Message<P: Component> {
     Ready {
         peer: P,
         relay: peer::Relay,
@@ -28,11 +28,11 @@ pub enum Message<P: PublicKey> {
 }
 
 #[derive(Clone)]
-pub struct Mailbox<P: PublicKey> {
+pub struct Mailbox<P: Component> {
     sender: mpsc::Sender<Message<P>>,
 }
 
-impl<P: PublicKey> Mailbox<P> {
+impl<P: Component> Mailbox<P> {
     pub fn new(sender: mpsc::Sender<Message<P>>) -> Self {
         Self { sender }
     }
@@ -56,11 +56,11 @@ impl<P: PublicKey> Mailbox<P> {
 }
 
 #[derive(Clone, Debug)]
-pub struct Messenger<P: PublicKey> {
+pub struct Messenger<P: Component> {
     sender: mpsc::Sender<Message<P>>,
 }
 
-impl<P: PublicKey> Messenger<P> {
+impl<P: Component> Messenger<P> {
     pub fn new(sender: mpsc::Sender<Message<P>>) -> Self {
         Self { sender }
     }

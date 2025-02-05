@@ -160,7 +160,7 @@ mod tests {
             let (seen_sender, mut seen_receiver) = mpsc::channel(1024);
             for i in 0..size {
                 let pk = Ed25519::from_seed(i as u64).public_key();
-                let (sender, mut receiver) = oracle.register(pk, 0).await.unwrap();
+                let (sender, mut receiver) = oracle.register(pk.clone(), 0).await.unwrap();
                 agents.insert(pk, sender);
                 let mut agent_sender = seen_sender.clone();
                 runtime.spawn("agent_receiver", async move {
@@ -183,8 +183,8 @@ mod tests {
                 for other in agents.keys() {
                     let result = oracle
                         .add_link(
-                            *agent,
-                            *other,
+                            agent.clone(),
+                            other.clone(),
                             Link {
                                 latency: 5.0,
                                 jitter: 2.5,
@@ -275,7 +275,7 @@ mod tests {
             let mut agents = HashMap::new();
             for i in 0..10 {
                 let pk = Ed25519::from_seed(i as u64).public_key();
-                let (sender, _) = oracle.register(pk, 0).await.unwrap();
+                let (sender, _) = oracle.register(pk.clone(), 0).await.unwrap();
                 agents.insert(pk, sender);
             }
 
@@ -314,12 +314,12 @@ mod tests {
 
             // Register agents
             let pk = Ed25519::from_seed(0).public_key();
-            oracle.register(pk, 0).await.unwrap();
+            oracle.register(pk.clone(), 0).await.unwrap();
 
             // Attempt to link self
             let result = oracle
                 .add_link(
-                    pk,
+                    pk.clone(),
                     pk,
                     Link {
                         latency: 5.0,
@@ -352,7 +352,7 @@ mod tests {
 
             // Register agents
             let pk = Ed25519::from_seed(0).public_key();
-            oracle.register(pk, 0).await.unwrap();
+            oracle.register(pk.clone(), 0).await.unwrap();
             let result = oracle.register(pk, 0).await;
 
             // Confirm error is correct
@@ -379,8 +379,8 @@ mod tests {
             // Register agents
             let pk1 = Ed25519::from_seed(0).public_key();
             let pk2 = Ed25519::from_seed(1).public_key();
-            oracle.register(pk1, 0).await.unwrap();
-            oracle.register(pk2, 0).await.unwrap();
+            oracle.register(pk1.clone(), 0).await.unwrap();
+            oracle.register(pk2.clone(), 0).await.unwrap();
 
             // Attempt to link with invalid success rate
             let result = oracle
@@ -419,14 +419,14 @@ mod tests {
             // Register agents
             let pk1 = Ed25519::from_seed(0).public_key();
             let pk2 = Ed25519::from_seed(1).public_key();
-            oracle.register(pk1, 0).await.unwrap();
-            oracle.register(pk2, 0).await.unwrap();
+            oracle.register(pk1.clone(), 0).await.unwrap();
+            oracle.register(pk2.clone(), 0).await.unwrap();
 
             // Attempt to link with invalid jitter
             let result = oracle
                 .add_link(
-                    pk1,
-                    pk2,
+                    pk1.clone(),
+                    pk2.clone(),
                     Link {
                         latency: -5.0,
                         jitter: 2.5,
@@ -475,18 +475,18 @@ mod tests {
             // Register agents
             let pk1 = Ed25519::from_seed(0).public_key();
             let pk2 = Ed25519::from_seed(1).public_key();
-            let (mut sender1, mut receiver1) = oracle.register(pk1, 0).await.unwrap();
-            let (mut sender2, mut receiver2) = oracle.register(pk2, 0).await.unwrap();
+            let (mut sender1, mut receiver1) = oracle.register(pk1.clone(), 0).await.unwrap();
+            let (mut sender2, mut receiver2) = oracle.register(pk2.clone(), 0).await.unwrap();
 
             // Register unused channels
-            let _ = oracle.register(pk1, 1).await.unwrap();
-            let _ = oracle.register(pk2, 2).await.unwrap();
+            let _ = oracle.register(pk1.clone(), 1).await.unwrap();
+            let _ = oracle.register(pk2.clone(), 2).await.unwrap();
 
             // Link agents
             oracle
                 .add_link(
-                    pk1,
-                    pk2,
+                    pk1.clone(),
+                    pk2.clone(),
                     Link {
                         latency: 5.0,
                         jitter: 2.5,
@@ -497,8 +497,8 @@ mod tests {
                 .unwrap();
             oracle
                 .add_link(
-                    pk2,
-                    pk1,
+                    pk2.clone(),
+                    pk1.clone(),
                     Link {
                         latency: 5.0,
                         jitter: 2.5,
@@ -512,11 +512,11 @@ mod tests {
             let msg1 = Bytes::from("hello from pk1");
             let msg2 = Bytes::from("hello from pk2");
             sender1
-                .send(Recipients::One(pk2), msg1.clone(), false)
+                .send(Recipients::One(pk2.clone()), msg1.clone(), false)
                 .await
                 .unwrap();
             sender2
-                .send(Recipients::One(pk1), msg2.clone(), false)
+                .send(Recipients::One(pk1.clone()), msg2.clone(), false)
                 .await
                 .unwrap();
 
@@ -549,14 +549,14 @@ mod tests {
             // Register agents
             let pk1 = Ed25519::from_seed(0).public_key();
             let pk2 = Ed25519::from_seed(1).public_key();
-            let (mut sender1, _) = oracle.register(pk1, 0).await.unwrap();
-            let (_, mut receiver2) = oracle.register(pk2, 1).await.unwrap();
+            let (mut sender1, _) = oracle.register(pk1.clone(), 0).await.unwrap();
+            let (_, mut receiver2) = oracle.register(pk2.clone(), 1).await.unwrap();
 
             // Link agents
             oracle
                 .add_link(
                     pk1,
-                    pk2,
+                    pk2.clone(),
                     Link {
                         latency: 5.0,
                         jitter: 0.0,
@@ -602,14 +602,14 @@ mod tests {
             // Define agents
             let pk1 = Ed25519::from_seed(0).public_key();
             let pk2 = Ed25519::from_seed(1).public_key();
-            let (mut sender1, mut receiver1) = oracle.register(pk1, 0).await.unwrap();
-            let (mut sender2, mut receiver2) = oracle.register(pk2, 0).await.unwrap();
+            let (mut sender1, mut receiver1) = oracle.register(pk1.clone(), 0).await.unwrap();
+            let (mut sender2, mut receiver2) = oracle.register(pk2.clone(), 0).await.unwrap();
 
             // Link agents
             oracle
                 .add_link(
-                    pk1,
-                    pk2,
+                    pk1.clone(),
+                    pk2.clone(),
                     Link {
                         latency: 5.0,
                         jitter: 2.5,
@@ -620,8 +620,8 @@ mod tests {
                 .unwrap();
             oracle
                 .add_link(
-                    pk2,
-                    pk1,
+                    pk2.clone(),
+                    pk1.clone(),
                     Link {
                         latency: 5.0,
                         jitter: 2.5,
@@ -635,11 +635,11 @@ mod tests {
             let msg1 = Bytes::from("attempt 1: hello from pk1");
             let msg2 = Bytes::from("attempt 1: hello from pk2");
             sender1
-                .send(Recipients::One(pk2), msg1.clone(), false)
+                .send(Recipients::One(pk2.clone()), msg1.clone(), false)
                 .await
                 .unwrap();
             sender2
-                .send(Recipients::One(pk1), msg2.clone(), false)
+                .send(Recipients::One(pk1.clone()), msg2.clone(), false)
                 .await
                 .unwrap();
 
@@ -672,18 +672,18 @@ mod tests {
             // Register agents
             let pk1 = Ed25519::from_seed(0).public_key();
             let pk2 = Ed25519::from_seed(1).public_key();
-            let (mut sender1, mut receiver1) = oracle.register(pk1, 0).await.unwrap();
-            let (mut sender2, mut receiver2) = oracle.register(pk2, 0).await.unwrap();
+            let (mut sender1, mut receiver1) = oracle.register(pk1.clone(), 0).await.unwrap();
+            let (mut sender2, mut receiver2) = oracle.register(pk2.clone(), 0).await.unwrap();
 
             // Send messages
             let msg1 = Bytes::from("attempt 1: hello from pk1");
             let msg2 = Bytes::from("attempt 1: hello from pk2");
             sender1
-                .send(Recipients::One(pk2), msg1.clone(), false)
+                .send(Recipients::One(pk2.clone()), msg1.clone(), false)
                 .await
                 .unwrap();
             sender2
-                .send(Recipients::One(pk1), msg2.clone(), false)
+                .send(Recipients::One(pk1.clone()), msg2.clone(), false)
                 .await
                 .unwrap();
 
@@ -701,8 +701,8 @@ mod tests {
             // Link agents
             oracle
                 .add_link(
-                    pk1,
-                    pk2,
+                    pk1.clone(),
+                    pk2.clone(),
                     Link {
                         latency: 5.0,
                         jitter: 2.5,
@@ -713,8 +713,8 @@ mod tests {
                 .unwrap();
             oracle
                 .add_link(
-                    pk2,
-                    pk1,
+                    pk2.clone(),
+                    pk1.clone(),
                     Link {
                         latency: 5.0,
                         jitter: 2.5,
@@ -728,11 +728,11 @@ mod tests {
             let msg1 = Bytes::from("attempt 2: hello from pk1");
             let msg2 = Bytes::from("attempt 2: hello from pk2");
             sender1
-                .send(Recipients::One(pk2), msg1.clone(), false)
+                .send(Recipients::One(pk2.clone()), msg1.clone(), false)
                 .await
                 .unwrap();
             sender2
-                .send(Recipients::One(pk1), msg2.clone(), false)
+                .send(Recipients::One(pk1.clone()), msg2.clone(), false)
                 .await
                 .unwrap();
 
@@ -745,18 +745,18 @@ mod tests {
             assert_eq!(message, msg1);
 
             // Remove links
-            oracle.remove_link(pk1, pk2).await.unwrap();
-            oracle.remove_link(pk2, pk1).await.unwrap();
+            oracle.remove_link(pk1.clone(), pk2.clone()).await.unwrap();
+            oracle.remove_link(pk2.clone(), pk1.clone()).await.unwrap();
 
             // Send messages
             let msg1 = Bytes::from("attempt 3: hello from pk1");
             let msg2 = Bytes::from("attempt 3: hello from pk2");
             sender1
-                .send(Recipients::One(pk2), msg1.clone(), false)
+                .send(Recipients::One(pk2.clone()), msg1.clone(), false)
                 .await
                 .unwrap();
             sender2
-                .send(Recipients::One(pk1), msg2.clone(), false)
+                .send(Recipients::One(pk1.clone()), msg2.clone(), false)
                 .await
                 .unwrap();
 

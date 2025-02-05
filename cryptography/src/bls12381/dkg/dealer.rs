@@ -43,7 +43,7 @@ impl<P: Component> Dealer<P> {
         let players_ordered = players
             .iter()
             .enumerate()
-            .map(|(i, pk)| (*pk, i as u32))
+            .map(|(i, pk)| (pk.clone(), i as u32))
             .collect();
 
         // Generate shares and commitment
