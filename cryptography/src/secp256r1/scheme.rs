@@ -306,20 +306,20 @@ mod tests {
         r: &str,
         s: &str,
         m: &str,
-    ) -> (PublicKey, Signature, Vec<u8>) {
+    ) -> (PublicKey, Vec<u8>, Vec<u8>) {
         let public_key = parse_public_key_as_compressed(qx, qy);
         let signature = parse_signature(r, s);
         let message = commonware_utils::from_hex_formatted(m).unwrap();
         (public_key, signature, message)
     }
 
-    fn parse_signature(r: &str, s: &str) -> Signature {
+    fn parse_signature(r: &str, s: &str) -> Vec<u8> {
         let vec_r = commonware_utils::from_hex_formatted(r).unwrap();
         let vec_s = commonware_utils::from_hex_formatted(s).unwrap();
         let f1 = p256::FieldBytes::from_slice(&vec_r);
         let f2 = p256::FieldBytes::from_slice(&vec_s);
         let s = p256::ecdsa::Signature::from_scalars(*f1, *f2).unwrap();
-        s.to_vec().try_into().unwrap()
+        s.to_vec()
     }
 
     fn parse_public_key_as_compressed(qx: &str, qy: &str) -> PublicKey {
@@ -575,26 +575,29 @@ mod tests {
 
         for (index, test) in cases.iter().enumerate() {
             let (public_key, sig, message, exp_success) = test;
-            let mut sig = sig.clone();
             let exp_success = *exp_success;
             if exp_success {
-                let ecdsa_signature = p256::ecdsa::Signature::from_slice(&sig).unwrap();
+                let mut ecdsa_signature = p256::ecdsa::Signature::from_slice(&sig).unwrap();
                 if ecdsa_signature.s().is_high().into() {
                     // Valid signatures not normalized must be considered invalid.
-                    assert!(!Secp256r1::verify(None, message, public_key, &sig));
+                    assert!(Signature::try_from(sig).is_err());
+
                     // Normalizing sig to test its validity.
                     if let Some(normalized_sig) = ecdsa_signature.normalize_s() {
-                        sig = <Secp256r1 as Scheme>::Signature::try_from(normalized_sig.to_vec())
-                            .unwrap();
+                        ecdsa_signature = normalized_sig;
                     }
                 }
+                let signature = Signature::from(ecdsa_signature);
+                let valid = Secp256r1::verify(None, message, public_key, &signature);
+                assert!(valid, "vector_signature_verification_{}", index + 1);
+                continue;
             }
-            let valid = Secp256r1::verify(None, message, public_key, &sig);
-            assert_eq!(
-                exp_success,
-                valid,
-                "vector_signature_verification_{}",
-                index + 1
+
+            // Either signature must not parse or verification must fail.
+            let signature = Signature::try_from(sig);
+            assert!(
+                signature.is_err()
+                    || !Secp256r1::verify(None, message, public_key, &signature.unwrap())
             );
         }
     }
@@ -779,7 +782,7 @@ mod tests {
         )
     }
 
-    fn vector_sig_verification_1() -> (PublicKey, Signature, Vec<u8>, bool) {
+    fn vector_sig_verification_1() -> (PublicKey, Vec<u8>, Vec<u8>, bool) {
         let (public_key, sig, message) = parse_vector_sig_verification(
             "87f8f2b218f49845f6f10eec3877136269f5c1a54736dbdf69f89940cad41555",
             "e15f369036f49842fac7a86c8a2b0557609776814448b8f5e84aa9f4395205e9",
@@ -792,7 +795,7 @@ mod tests {
         (public_key, sig, message, false)
     }
 
-    fn vector_sig_verification_2() -> (PublicKey, Signature, Vec<u8>, bool) {
+    fn vector_sig_verification_2() -> (PublicKey, Vec<u8>, Vec<u8>, bool) {
         let (public_key, sig, message) = parse_vector_sig_verification(
             "5cf02a00d205bdfee2016f7421807fc38ae69e6b7ccd064ee689fc1a94a9f7d2",
             "ec530ce3cc5c9d1af463f264d685afe2b4db4b5828d7e61b748930f3ce622a85",
@@ -805,7 +808,7 @@ mod tests {
         (public_key, sig, message, false)
     }
 
-    fn vector_sig_verification_3() -> (PublicKey, Signature, Vec<u8>, bool) {
+    fn vector_sig_verification_3() -> (PublicKey, Vec<u8>, Vec<u8>, bool) {
         let (public_key, sig, message) = parse_vector_sig_verification(
             "2ddfd145767883ffbb0ac003ab4a44346d08fa2570b3120dcce94562422244cb",
             "5f70c7d11ac2b7a435ccfbbae02c3df1ea6b532cc0e9db74f93fffca7c6f9a64",
@@ -818,7 +821,7 @@ mod tests {
         (public_key, sig, message, false)
     }
 
-    fn vector_sig_verification_4() -> (PublicKey, Signature, Vec<u8>, bool) {
+    fn vector_sig_verification_4() -> (PublicKey, Vec<u8>, Vec<u8>, bool) {
         let (public_key, sig, message) = parse_vector_sig_verification(
             "e424dc61d4bb3cb7ef4344a7f8957a0c5134e16f7a67c074f82e6e12f49abf3c",
             "970eed7aa2bc48651545949de1dddaf0127e5965ac85d1243d6f60e7dfaee927",
@@ -831,7 +834,7 @@ mod tests {
         (public_key, sig, message, true)
     }
 
-    fn vector_sig_verification_5() -> (PublicKey, Signature, Vec<u8>, bool) {
+    fn vector_sig_verification_5() -> (PublicKey, Vec<u8>, Vec<u8>, bool) {
         let (public_key, sig, message) = parse_vector_sig_verification(
             "e0fc6a6f50e1c57475673ee54e3a57f9a49f3328e743bf52f335e3eeaa3d2864",
             "7f59d689c91e463607d9194d99faf316e25432870816dde63f5d4b373f12f22a",
@@ -845,7 +848,7 @@ mod tests {
         (public_key, sig, message, true)
     }
 
-    fn vector_sig_verification_6() -> (PublicKey, Signature, Vec<u8>, bool) {
+    fn vector_sig_verification_6() -> (PublicKey, Vec<u8>, Vec<u8>, bool) {
         let (public_key, sig, message) = parse_vector_sig_verification(
             "a849bef575cac3c6920fbce675c3b787136209f855de19ffe2e8d29b31a5ad86",
             "bf5fe4f7858f9b805bd8dcc05ad5e7fb889de2f822f3d8b41694e6c55c16b471",
@@ -858,7 +861,7 @@ mod tests {
         (public_key, sig, message, false)
     }
 
-    fn vector_sig_verification_7() -> (PublicKey, Signature, Vec<u8>, bool) {
+    fn vector_sig_verification_7() -> (PublicKey, Vec<u8>, Vec<u8>, bool) {
         let (public_key, sig, message) = parse_vector_sig_verification(
             "3dfb6f40f2471b29b77fdccba72d37c21bba019efa40c1c8f91ec405d7dcc5df",
             "f22f953f1e395a52ead7f3ae3fc47451b438117b1e04d613bc8555b7d6e6d1bb",
@@ -871,7 +874,7 @@ mod tests {
         (public_key, sig, message, false)
     }
 
-    fn vector_sig_verification_8() -> (PublicKey, Signature, Vec<u8>, bool) {
+    fn vector_sig_verification_8() -> (PublicKey, Vec<u8>, Vec<u8>, bool) {
         let (public_key, sig, message) = parse_vector_sig_verification(
             "69b7667056e1e11d6caf6e45643f8b21e7a4bebda463c7fdbc13bc98efbd0214",
             "d3f9b12eb46c7c6fda0da3fc85bc1fd831557f9abc902a3be3cb3e8be7d1aa2f",
@@ -884,7 +887,7 @@ mod tests {
         (public_key, sig, message, false)
     }
 
-    fn vector_sig_verification_9() -> (PublicKey, Signature, Vec<u8>, bool) {
+    fn vector_sig_verification_9() -> (PublicKey, Vec<u8>, Vec<u8>, bool) {
         let (public_key, sig, message) = parse_vector_sig_verification(
             "bf02cbcf6d8cc26e91766d8af0b164fc5968535e84c158eb3bc4e2d79c3cc682",
             "069ba6cb06b49d60812066afa16ecf7b51352f2c03bd93ec220822b1f3dfba03",
@@ -897,7 +900,7 @@ mod tests {
         (public_key, sig, message, false)
     }
 
-    fn vector_sig_verification_10() -> (PublicKey, Signature, Vec<u8>, bool) {
+    fn vector_sig_verification_10() -> (PublicKey, Vec<u8>, Vec<u8>, bool) {
         let (public_key, sig, message) = parse_vector_sig_verification(
             "224a4d65b958f6d6afb2904863efd2a734b31798884801fcab5a590f4d6da9de",
             "178d51fddada62806f097aa615d33b8f2404e6b1479f5fd4859d595734d6d2b9",
@@ -910,7 +913,7 @@ mod tests {
         (public_key, sig, message, false)
     }
 
-    fn vector_sig_verification_11() -> (PublicKey, Signature, Vec<u8>, bool) {
+    fn vector_sig_verification_11() -> (PublicKey, Vec<u8>, Vec<u8>, bool) {
         let (public_key, sig, message) = parse_vector_sig_verification(
             "43691c7795a57ead8c5c68536fe934538d46f12889680a9cb6d055a066228369",
             "f8790110b3c3b281aa1eae037d4f1234aff587d903d93ba3af225c27ddc9ccac",
@@ -923,7 +926,7 @@ mod tests {
         (public_key, sig, message, false)
     }
 
-    fn vector_sig_verification_12() -> (PublicKey, Signature, Vec<u8>, bool) {
+    fn vector_sig_verification_12() -> (PublicKey, Vec<u8>, Vec<u8>, bool) {
         let (public_key, sig, message) = parse_vector_sig_verification(
             "9157dbfcf8cf385f5bb1568ad5c6e2a8652ba6dfc63bc1753edf5268cb7eb596",
             "972570f4313d47fc96f7c02d5594d77d46f91e949808825b3d31f029e8296405",
@@ -936,7 +939,7 @@ mod tests {
         (public_key, sig, message, false)
     }
 
-    fn vector_sig_verification_13() -> (PublicKey, Signature, Vec<u8>, bool) {
+    fn vector_sig_verification_13() -> (PublicKey, Vec<u8>, Vec<u8>, bool) {
         let (public_key, sig, message) = parse_vector_sig_verification(
             "072b10c081a4c1713a294f248aef850e297991aca47fa96a7470abe3b8acfdda",
             "9581145cca04a0fb94cedce752c8f0370861916d2a94e7c647c5373ce6a4c8f5",
@@ -949,7 +952,7 @@ mod tests {
         (public_key, sig, message, false)
     }
 
-    fn vector_sig_verification_14() -> (PublicKey, Signature, Vec<u8>, bool) {
+    fn vector_sig_verification_14() -> (PublicKey, Vec<u8>, Vec<u8>, bool) {
         let (public_key, sig, message) = parse_vector_sig_verification(
             "09308ea5bfad6e5adf408634b3d5ce9240d35442f7fe116452aaec0d25be8c24",
             "f40c93e023ef494b1c3079b2d10ef67f3170740495ce2cc57f8ee4b0618b8ee5",
@@ -962,7 +965,7 @@ mod tests {
         (public_key, sig, message, false)
     }
 
-    fn vector_sig_verification_15() -> (PublicKey, Signature, Vec<u8>, bool) {
+    fn vector_sig_verification_15() -> (PublicKey, Vec<u8>, Vec<u8>, bool) {
         let (public_key, sig, message) = parse_vector_sig_verification(
             "2d98ea01f754d34bbc3003df5050200abf445ec728556d7ed7d5c54c55552b6d",
             "9b52672742d637a32add056dfd6d8792f2a33c2e69dafabea09b960bc61e230a",
