@@ -1,6 +1,6 @@
 use super::{AckManager, Config, Mailbox, Message, TipManager};
 use crate::{
-    linked::{encoder, prover::Prover, serializer, wire, Context, Epoch},
+    linked::{namespace, prover::Prover, serializer, wire, Context, Epoch},
     Application, Collector, ThresholdCoordinator,
 };
 use bytes::Bytes;
@@ -52,27 +52,23 @@ pub struct Actor<
     S: ThresholdCoordinator<Index = Epoch, Share = group::Share, Identity = poly::Public>,
 > {
     ////////////////////////////////////////
-    // Constants
+    // Interfaces
     ////////////////////////////////////////
     runtime: E,
     crypto: C,
-    _digest: PhantomData<D>,
-
-    ////////////////////////////////////////
-    // Threshold
-    ////////////////////////////////////////
     coordinator: S,
-
-    ////////////////////////////////////////
-    // Application Mailboxes
-    ////////////////////////////////////////
     application: A,
     collector: Z,
+    _digest: PhantomData<D>,
 
     ////////////////////////////////////////
     // Namespace Constants
     ////////////////////////////////////////
+
+    // The namespace for chunk signatures.
     chunk_namespace: Vec<u8>,
+
+    // The namespace for ack signatures.
     ack_namespace: Vec<u8>,
 
     ////////////////////////////////////////
@@ -125,17 +121,31 @@ pub struct Actor<
     ////////////////////////////////////////
     // Storage
     ////////////////////////////////////////
-    journal_entries_per_section: u64,
+
+    // The number of heights per each journal section.
+    journal_heights_per_section: u64,
+
+    // The number of concurrent operations when replaying journals.
     journal_replay_concurrency: usize,
+
+    // A function that returns the partition name for a sequencer.
     journal_naming_fn: J,
+
+    // A map of sequencer public keys to their journals.
     journals: HashMap<PublicKey, Journal<B, E>>,
 
     ////////////////////////////////////////
     // State
     ////////////////////////////////////////
+
+    // Tracks the current tip for each sequencer.
+    // The tip is a `Link` which is comprised of a `Chunk` and,
+    // if not the genesis chunk for that sequencer,
+    // a threshold signature over the parent chunk.
     tip_manager: TipManager,
 
-    // Handles acknowledgements for chunks.
+    // Tracks the acknowledgements for chunks.
+    // This is comprised of partial signatures or threshold signatures.
     ack_manager: AckManager<D>,
 
     // The current epoch.
@@ -153,6 +163,8 @@ impl<
         S: ThresholdCoordinator<Index = Epoch, Share = group::Share, Identity = poly::Public>,
     > Actor<B, E, C, D, J, A, Z, S>
 {
+    /// Creates a new actor with the given runtime and configuration.
+    /// Returns the actor and a mailbox for sending messages to the actor.
     pub fn new(runtime: E, cfg: Config<C, D, J, A, Z, S>) -> (Self, Mailbox<D>) {
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::new(mailbox_sender);
@@ -175,8 +187,8 @@ impl<
             coordinator: cfg.coordinator,
             application: cfg.application,
             collector: cfg.collector,
-            chunk_namespace: encoder::chunk_namespace(&cfg.namespace),
-            ack_namespace: encoder::ack_namespace(&cfg.namespace),
+            chunk_namespace: namespace::chunk(&cfg.namespace),
+            ack_namespace: namespace::ack(&cfg.namespace),
             refresh_epoch_timeout: cfg.refresh_epoch_timeout,
             refresh_epoch_deadline: None,
             rebroadcast_timeout: cfg.rebroadcast_timeout,
@@ -186,7 +198,7 @@ impl<
             pending_verifies,
             pending_verify_size: cfg.pending_verify_size,
             mailbox_receiver,
-            journal_entries_per_section: cfg.journal_entries_per_section,
+            journal_heights_per_section: cfg.journal_heights_per_section,
             journal_replay_concurrency: cfg.journal_replay_concurrency,
             journal_naming_fn: cfg.journal_naming_fn,
             journals: HashMap::new(),
@@ -877,7 +889,7 @@ impl<
 
     /// Returns the section of the journal for the given height.
     fn get_journal_section(&self, height: u64) -> u64 {
-        height / self.journal_entries_per_section
+        height / self.journal_heights_per_section
     }
 
     /// Ensures the journal exists and is initialized for the given sequencer.

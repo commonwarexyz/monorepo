@@ -12,10 +12,6 @@ pub type Proof = Bytes;
 
 /// Broadcaster is the interface responsible for replication of messages across a network.
 pub trait Broadcaster: Clone + Send + 'static {
-    /// Context is metadata provided by the broadcast engine to associated with a given payload.
-    /// This could include things like the public key of the sequencer.
-    type Context;
-
     /// Digest is an arbitrary hash digest.
     type Digest: Digest;
 

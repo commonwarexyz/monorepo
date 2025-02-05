@@ -145,7 +145,7 @@ impl<D: Digest> AckManager<D> {
 
 #[cfg(test)]
 mod tests {
-    use crate::linked::{encoder, serializer, wire};
+    use crate::linked::{namespace, serializer, wire};
 
     use super::*;
     use commonware_cryptography::{bls12381::dkg::ops::generate_shares, sha256};
@@ -190,7 +190,7 @@ mod tests {
         for i in 0..quorum {
             let p = ops::partial_sign_message(
                 &shares[i as usize],
-                Some(encoder::ack_namespace(b"1234").as_slice()),
+                Some(namespace::ack(b"1234").as_slice()),
                 &serializer::ack(&chunk, epoch),
             );
             partials.push(p);

@@ -25,6 +25,6 @@ pub struct Config<
     pub epoch_bounds: (u64, u64),
     pub height_bound: u64,
     pub journal_naming_fn: J,
-    pub journal_entries_per_section: u64,
+    pub journal_heights_per_section: u64,
     pub journal_replay_concurrency: usize,
 }

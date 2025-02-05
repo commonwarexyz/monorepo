@@ -1,7 +1,89 @@
-/// TODO: Add documentation
+//! Secure, ordered broadcast protocol with linked messages for consistent network
+//! dissemination using cryptographic proofs, sequential linking, and robust state
+//! management.
+//!
+//! # Core Concepts
+//!
+//! - **Sequential Linking**: Every broadcast message contains a cryptographic reference
+//!   to the previous message, forming an immutable chain.
+//!
+//! - **Threshold Signatures**: Validators produce partial signatures that combine into a
+//!   threshold signature, ensuring a quorum verifies each message.
+//!
+//! - **Epochs**: The protocol is divided into epochs. Each epoch defines the active set of
+//!   signers and sequencers for orderly transitions and consensus.
+//!
+//! - **Storage**: Nodes persist state changes (links, acknowledgements) to a journal.
+//!   This enables reliable recovery and prevents conflicts like duplicate messages.
+//!
+//! # Design
+//!
+//! The system has two sets of nodes: Sequencers and Validators. The sets may overlap.
+//! Sequencers link messages, while Validators verify and sign them. Each message includes a
+//! threshold signature over its predecessor for an unbroken, verifiable chain.
+//!
+//! # Actor Overview and Design
+//!
+//! The core of the protocol is the `Signer` actor. It manages the lifecycle of a secure,
+//! ordered broadcast by:
+//!
+//! 1. **Initializing** storage, networking, and cryptographic settings.
+//! 2. **Processing** incoming messages by validating data and signatures.
+//! 3. **Broadcasting** signed messages to all nodes.
+//! 4. **Verifying** message integrity and order.
+//! 5. **Updating Epochs** based on consensus.
+//!
+//! ## Key Design Principles
+//!
+//! - **Actor-Based Model**:  
+//!   The `Signer` (see `actor.rs`) encapsulates all functions, handling network I/O,
+//!   verification, timeouts, and state updates concurrently.
+//!
+//! - **Event Sourcing & Journaling**:  
+//!   Each new message is logged to a persistent journal. This maintains chain integrity and
+//!   enables reliable recovery after crashes.
+//!
+//! - **Asynchronous Processing**:  
+//!   Using Rust’s async/await, the actor processes tasks simultaneously, including epoch
+//!   refreshes, message rebroadcasts, and verification requests.
+//!
+//! ## Operational Flow
+//!
+//! 1. **Message Chaining**:  
+//!    Each new message includes a threshold signature over the previous message, forming an
+//!    immutable, verifiable chain.
+//!
+//! 2. **Signature Aggregation**:  
+//!    Validators produce partial signatures that combine into a threshold signature,
+//!    ensuring quorum endorsement.
+//!
+//! 3. **Epoch Management**:  
+//!    Epochs define the active set of signers and sequencers. The actor refreshes its epoch and
+//!    enforces strict bounds on accepted messages.
+//!
+//! 4. **Reliable Recovery**:  
+//!    Storage logs all sequencer messages, allowing nodes to replay messages after shutdown.
+//!
+//! 5. **Concurrent Operations**:  
+//!    The actor listens for network events, dispatches verification tasks, and manages timeouts
+//!    for efficient operation.
+//!
+//! # Public Modules
+//!
+//! - **`signer`**: Contains the actor that validates messages, links them, and handles threshold
+//!   signatures.
+//! - **`prover`**: Generates and verifies "proofs" (i.e. threshold signatures over messages).
+//!
+//! # Internal Modules
+//!
+//! - **`namespace`**: Generates namespace IDs for different signature types.
+//! - **`serializer`**: Serializes and deserializes messages.
+//! - **`wire`**: Contains the protocol buffer-generated message definitions.
+//! - **`mocks`**: Provides mock implementations for testing.
+
 use commonware_cryptography::PublicKey;
 
-mod encoder;
+mod namespace;
 mod serializer;
 
 #[cfg(test)]
@@ -14,9 +96,12 @@ mod wire {
 pub mod prover;
 pub mod signer;
 
+/// `Epoch` is used as the `Index` type for the `Coordinator` trait.
+/// Defines the current set of sequencers and signers.
 pub type Epoch = u64;
 
-/// Context is a collection of metadata from consensus about a given payload.
+/// `Context` is used as the `Context` type for the `Application` and `Collector` traits.
+/// Stores a sequencer’s public key and sequential height, defining its unique position in the broadcast chain.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct Context {
     pub sequencer: PublicKey,
@@ -197,7 +282,7 @@ mod tests {
                             height_bound: 2,
                             refresh_epoch_timeout: Duration::from_millis(100),
                             rebroadcast_timeout: Duration::from_secs(5),
-                            journal_entries_per_section: 10,
+                            journal_heights_per_section: 10,
                             journal_replay_concurrency: 1,
                             journal_naming_fn: move |v| format!("seq/{}/{}", hex_validator, hex(v)),
                         },
@@ -365,7 +450,7 @@ mod tests {
                                 height_bound: 2,
                                 refresh_epoch_timeout: Duration::from_millis(100),
                                 rebroadcast_timeout: Duration::from_millis(1_000),
-                                journal_entries_per_section: 10,
+                                journal_heights_per_section: 10,
                                 journal_replay_concurrency: 1,
                                 journal_naming_fn: move |v| {
                                     format!("seq/{}/{}", hex_validator, hex(v))

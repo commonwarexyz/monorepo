@@ -1,4 +1,4 @@
-use super::{encoder, serializer, wire, Context, Epoch};
+use super::{namespace, serializer, wire, Context, Epoch};
 use crate::Proof;
 use bytes::{Buf, BufMut};
 use commonware_cryptography::{
@@ -26,7 +26,7 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
             _crypto: PhantomData,
             _digest: PhantomData,
             public,
-            namespace: encoder::ack_namespace(namespace),
+            namespace: namespace::ack(namespace),
         }
     }
 

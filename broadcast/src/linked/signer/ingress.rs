@@ -1,4 +1,4 @@
-use crate::{linked::Context, Broadcaster};
+use crate::Broadcaster;
 use commonware_cryptography::Digest;
 use futures::{
     channel::{mpsc, oneshot},
@@ -30,7 +30,6 @@ impl<D: Digest> Mailbox<D> {
 }
 
 impl<D: Digest> Broadcaster for Mailbox<D> {
-    type Context = Context;
     type Digest = D;
 
     async fn broadcast(&mut self, payload: Self::Digest) -> oneshot::Receiver<bool> {
