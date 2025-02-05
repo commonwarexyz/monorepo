@@ -19,27 +19,36 @@ use commonware_storage::journal::{self, Journal};
 use commonware_utils::hex;
 use futures::{
     channel::{mpsc, oneshot},
-    future::Either,
-    pin_mut, StreamExt,
+    future::{self, select, Either},
+    pin_mut,
+    stream::FuturesUnordered,
+    StreamExt,
 };
 use prometheus_client::registry::Registry;
 use prost::Message as _;
 use std::{
     collections::HashMap,
+    future::Future,
     marker::PhantomData,
+    pin::Pin,
     sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
+/// A future representing a request to the application to verify a payload.
+type VerifyFuture<D> =
+    Pin<Box<dyn Future<Output = (Context, D, Result<bool, Error>)> + Send>>;
+
+/// The actor that implements the Broadcaster trait.
 pub struct Actor<
     B: Blob,
     E: Clock + Spawner + Storage<B>,
     C: Scheme,
     D: Digest,
     J: Fn(&PublicKey) -> String,
-    A: Application<Context = Context, Digest = D>,
+    A: Application<Context = Context, Digest = D> + Clone,
     Z: Collector<Context = Context, Digest = D>,
     S: ThresholdCoordinator<Index = Epoch, Share = group::Share, Identity = poly::Public>,
 > {
@@ -105,9 +114,11 @@ pub struct Actor<
     ////////////////////////////////////////
     // Messaging
     ////////////////////////////////////////
-
-    // Allows sending messages to self.
-    mailbox_sender: Mailbox<D>,
+    
+    // A stream of futures.
+    // Each future represents a verification request to the application
+    // that will either timeout or resolve with a boolean.
+    pending_verifies: FuturesUnordered<VerifyFuture<D>>,
 
     // The mailbox for receiving messages (primarily from the application).
     mailbox_receiver: mpsc::Receiver<Message<D>>,
@@ -138,7 +149,7 @@ impl<
         C: Scheme,
         D: Digest,
         J: Fn(&PublicKey) -> String,
-        A: Application<Context = Context, Digest = D>,
+        A: Application<Context = Context, Digest = D> + Clone,
         Z: Collector<Context = Context, Digest = D>,
         S: ThresholdCoordinator<Index = Epoch, Share = group::Share, Identity = poly::Public>,
     > Actor<B, E, C, D, J, A, Z, S>
@@ -146,6 +157,18 @@ impl<
     pub fn new(runtime: E, cfg: Config<C, D, J, A, Z, S>) -> (Self, Mailbox<D>) {
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::new(mailbox_sender);
+
+        // Initialize the pending verification futures.
+        let pending_verifies = FuturesUnordered::new();
+        {
+            // Inserts a dummy future (that never resolves) to prevent the stream from being empty.
+            // If the stream were empty, the `select_next_some()` function would return `None`
+            // instantly, front-running all other branches in the `select!` macro.
+            let dummy: VerifyFuture<D> =
+                Box::pin(async { future::pending::<(Context, D, Result<bool, Error>)>().await });
+            pending_verifies.push(dummy);
+        }
+
         let result = Self {
             runtime,
             crypto: cfg.crypto,
@@ -162,7 +185,7 @@ impl<
             rebroadcast_deadline: None,
             epoch_bounds: cfg.epoch_bounds,
             height_bound: cfg.height_bound,
-            mailbox_sender: mailbox.clone(),
+            pending_verifies,
             mailbox_receiver,
             journal_entries_per_section: cfg.journal_entries_per_section,
             journal_replay_concurrency: cfg.journal_replay_concurrency,
@@ -214,11 +237,11 @@ impl<
             // If the deadline is None, the future will never resolve.
             let refresh_epoch = match self.refresh_epoch_deadline {
                 Some(deadline) => Either::Left(self.runtime.sleep_until(deadline)),
-                None => Either::Right(futures::future::pending()),
+                None => Either::Right(future::pending()),
             };
             let rebroadcast = match self.rebroadcast_deadline {
                 Some(deadline) => Either::Left(self.runtime.sleep_until(deadline)),
-                None => Either::Right(futures::future::pending()),
+                None => Either::Right(future::pending()),
             };
 
             select! {
@@ -304,6 +327,25 @@ impl<
                     }
                 },
 
+                // Handle completed verification futures.
+                maybe_verified = self.pending_verifies.select_next_some() => {
+                    let (context, digest, verify_result) = maybe_verified;
+                    match verify_result {
+                        Ok(true) => {
+                            debug!("Verification successful for context: {:?}, digest: {:?}", context, digest);
+                            if let Err(e) = self.handle_app_verified(&context, &digest, &mut ack_sender).await {
+                                error!(err=?e, "Failed to handle app verified");
+                            }
+                        },
+                        Ok(false) => {
+                            warn!("Application returned false for verify request");
+                        },
+                        Err(e) => {
+                            warn!(err=?e, "Verification error or timeout");
+                        },
+                    }
+                },
+
                 // Handle mailbox messages
                 mail = self.mailbox_receiver.next() => {
                     let msg = match mail {
@@ -324,13 +366,6 @@ impl<
                             // Broadcast the message
                             if let Err(e) = self.broadcast_new(payload, result, &mut link_sender).await {
                                 error!(err=?e, "Failed to broadcast new");
-                                continue;
-                            }
-                        }
-                        Message::Verified{ context, payload } => {
-                            debug!("Mailbox: Verified");
-                            if let Err(e) = self.handle_app_verified(&context, &payload, &mut ack_sender).await {
-                                error!(err=?e, "Failed to handle app-verified");
                                 continue;
                             }
                         }
@@ -505,35 +540,31 @@ impl<
             height: chunk.height,
         };
         let digest = D::try_from(&chunk.payload).unwrap();
-        let receiver = self
-            .application
-            .verify(context.clone(), digest.clone())
-            .await;
-        self.runtime.spawn("app_verify", {
-            let mut mailbox_sender = self.mailbox_sender.clone();
-            let runtime = self.runtime.clone();
-            let verify_timeout = self.verify_timeout;
-            async move {
-                select! {
-                    _ = runtime.sleep(verify_timeout) => {
-                        warn!("Verify timed out");
-                    },
-                    result = receiver => {
-                        match result {
-                            Err(e) => {
-                                warn!(err=?e, "Application dropped verify request");
-                            }
-                            Ok(false) => {
-                                warn!("Application returned false for verify request");
-                            }
-                            Ok(true) => {
-                                mailbox_sender.verified(context, digest).await;
-                            }
-                        }
-                    },
+
+        // Capture needed variables for our async verification future.
+        let verify_timeout = self.verify_timeout;
+        let runtime = self.runtime.clone();
+        let mut app_clone = self.application.clone();
+
+        // Build the verification future: we race the verify future against a sleep.
+        let verify_future = Box::pin(async move {
+            let sleep_future = runtime.sleep(verify_timeout);
+            pin_mut!(sleep_future);
+            let verify_fut = app_clone.verify(context.clone(), digest.clone());
+            pin_mut!(verify_fut);
+            match select(sleep_future, verify_fut).await {
+                // If the sleep completes first, we consider it a timeout.
+                Either::Left(((), _)) => (context, digest, Err(Error::AppVerifyTimeout)),
+                // Otherwise, we await the receiver to get the bool and map the error (if any)
+                Either::Right((result, _)) => {
+                    let verify_result = result.await.map_err(Error::AppVerifyCanceled);
+                    (context, digest, verify_result)
                 }
             }
         });
+
+        // Save the verification future.
+        self.pending_verifies.push(verify_future);
     }
 
     ////////////////////////////////////////
@@ -983,6 +1014,12 @@ enum Error {
     AppVerifiedHeightMismatch,
     #[error("Application verified payload mismatch")]
     AppVerifiedPayloadMismatch,
+
+    // Application Verify Errors
+    #[error("Application verify timeout")]
+    AppVerifyTimeout,
+    #[error("Application verify error: {0}")]
+    AppVerifyCanceled(oneshot::Canceled),
 
     // P2P Errors
     #[error("Unable to send message")]

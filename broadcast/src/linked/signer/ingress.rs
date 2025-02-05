@@ -12,10 +12,6 @@ pub enum Message<D: Digest> {
         payload: D,
         result: oneshot::Sender<bool>,
     },
-    Verified {
-        context: Context,
-        payload: D,
-    },
 }
 
 #[derive(Clone)]
@@ -30,15 +26,6 @@ impl<D: Digest> Mailbox<D> {
             sender,
             _digest: PhantomData,
         }
-    }
-}
-
-impl<D: Digest> Mailbox<D> {
-    pub async fn verified(&mut self, context: Context, payload: D) {
-        self.sender
-            .send(Message::Verified { context, payload })
-            .await
-            .expect("Failed to send verified");
     }
 }
 

@@ -11,7 +11,7 @@ pub mod linked;
 pub type Proof = Bytes;
 
 /// Broadcaster is the interface responsible for replication of messages across a network.
-pub trait Broadcaster {
+pub trait Broadcaster: Clone + Send + 'static {
     /// Context is metadata provided by the broadcast engine to associated with a given payload.
     /// This could include things like the public key of the sequencer.
     type Context;
@@ -29,7 +29,7 @@ pub trait Broadcaster {
 }
 
 /// Application is the interface responsible for processing messages received from the network.
-pub trait Application: Send + 'static {
+pub trait Application: Clone + Send + 'static {
     /// Context is metadata provided by the broadcast engine to associated with a given payload.
     /// This could include things like the public key of the sequencer.
     type Context;
@@ -49,7 +49,7 @@ pub trait Application: Send + 'static {
 }
 
 /// Collector is the interface responsible for handling notifications of broadcasted payloads.
-pub trait Collector: Send + 'static {
+pub trait Collector: Clone + Send + 'static {
     /// Context is metadata provided by the broadcast engine to associated with a given payload.
     /// This could include things like the public key of the sequencer.
     type Context;
