@@ -149,7 +149,6 @@ cfg_if::cfg_if! {
             /// against `Identity`.
             type Share;
 
-
             /// Return the leader at a given index over the provided seed.
             fn leader(&self, index: Self::Index, seed: Self::Seed) -> Option<Self::PublicKey>;
 

@@ -37,11 +37,11 @@ use futures::{
 use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
 use prost::Message as _;
 use rand::Rng;
+use std::sync::atomic::AtomicI64;
 use std::{
     collections::{BTreeMap, HashMap},
     time::{Duration, SystemTime},
 };
-use std::{marker::PhantomData, sync::atomic::AtomicI64};
 use tracing::{debug, trace, warn};
 
 const GENESIS_VIEW: View = 0;
@@ -57,8 +57,6 @@ struct Round<
     >,
 > {
     supervisor: S,
-    _crypto: PhantomData<C>,
-    _digest: PhantomData<D>,
 
     leader: Option<C::PublicKey>,
 
@@ -107,8 +105,6 @@ impl<
     pub fn new(supervisor: S, view: View) -> Self {
         Self {
             supervisor,
-            _crypto: PhantomData,
-            _digest: PhantomData,
 
             view,
             leader: None,

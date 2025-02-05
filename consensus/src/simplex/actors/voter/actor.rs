@@ -28,12 +28,12 @@ use futures::{
 use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
 use prost::Message as _;
 use rand::Rng;
+use std::sync::atomic::AtomicI64;
 use std::{
     cmp::max,
     collections::{BTreeMap, HashMap},
     time::{Duration, SystemTime},
 };
-use std::{marker::PhantomData, sync::atomic::AtomicI64};
 use tracing::{debug, info, trace, warn};
 
 type Notarizable<'a, D> = Option<(wire::Proposal, &'a HashMap<u32, Parsed<wire::Notarize, D>>)>;
@@ -44,8 +44,6 @@ const GENESIS_VIEW: View = 0;
 
 struct Round<C: Scheme, D: Array, S: Supervisor<Index = View>> {
     supervisor: S,
-    _crypto: PhantomData<C>,
-    _digest: PhantomData<D>,
 
     view: View,
     leader: C::PublicKey,
@@ -81,8 +79,6 @@ impl<C: Scheme, D: Array, S: Supervisor<Index = View, PublicKey = C::PublicKey>>
         let leader = supervisor.leader(view).expect("unable to compute leader");
         Self {
             supervisor,
-            _crypto: PhantomData,
-            _digest: PhantomData,
 
             view,
             leader,
