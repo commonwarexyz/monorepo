@@ -71,7 +71,7 @@ impl Octets for Digest {}
 
 impl From<[u8; DIGEST_LENGTH]> for Digest {
     fn from(value: [u8; DIGEST_LENGTH]) -> Self {
-        Digest(value)
+        Self(value)
     }
 }
 
@@ -81,9 +81,9 @@ impl TryFrom<&[u8]> for Digest {
         if value.len() != DIGEST_LENGTH {
             return Err(Error::InvalidDigestLength);
         }
-        let array: &[u8; DIGEST_LENGTH] =
+        let array: [u8; DIGEST_LENGTH] =
             value.try_into().map_err(|_| Error::InvalidDigestLength)?;
-        Ok(Self(*array))
+        Ok(Self(array))
     }
 }
 
