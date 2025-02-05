@@ -942,7 +942,8 @@ impl<
                 }
             }
 
-            // Set the tip
+            // Set the tip only once. The items from the journal may be in arbitrary order,
+            // and the tip manager will panic if inserting tips out-of-order.
             if let Some(link) = tip.take() {
                 let is_new = self.tip_manager.put(&link);
                 assert!(is_new);
