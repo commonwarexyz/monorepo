@@ -455,6 +455,7 @@ mod tests {
 
     #[test]
     fn test_scheme_verify_signature_r0() {
+        // Generate bad signature
         let private_key: PrivateKey = commonware_utils::from_hex_formatted(
             "c9806898a0334916c860748880a541f093b579a9b1f32934d86c363c39800357",
         )
@@ -468,16 +469,13 @@ mod tests {
         let mut signature: Vec<u8> = vec![0x00; 32];
         signature.extend_from_slice(s);
 
-        assert!(!Secp256r1::verify(
-            None,
-            message,
-            &signer.public_key(),
-            &signature.try_into().unwrap(),
-        ));
+        // Try to parse signature
+        assert!(Signature::try_from(&signature).is_err());
     }
 
     #[test]
     fn test_scheme_verify_signature_s0() {
+        // Generate bad signature
         let private_key: PrivateKey = commonware_utils::from_hex_formatted(
             "c9806898a0334916c860748880a541f093b579a9b1f32934d86c363c39800357",
         )
@@ -492,12 +490,8 @@ mod tests {
         let mut signature = r.to_vec();
         signature.extend(s);
 
-        assert!(!Secp256r1::verify(
-            None,
-            message,
-            &signer.public_key(),
-            &signature.try_into().unwrap(),
-        ));
+        // Try to parse signature
+        assert!(Signature::try_from(&signature).is_err());
     }
 
     #[test]
