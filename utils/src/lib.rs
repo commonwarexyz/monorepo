@@ -133,7 +133,7 @@ mod tests {
     }
 
     #[test]
-    fn repltest_from_hex_formatted() {
+    fn test_from_hex_formatted() {
         // Test case 0: empty bytes
         let b = &[];
         let h = hex(b);
