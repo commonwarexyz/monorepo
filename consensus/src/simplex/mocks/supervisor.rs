@@ -5,13 +5,13 @@ use crate::{
     },
     Activity, Proof, Supervisor as Su,
 };
-use commonware_cryptography::{Digest, Scheme};
+use commonware_cryptography::{Component, Scheme};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     sync::{Arc, Mutex},
 };
 
-pub struct Config<C: Scheme, D: Digest> {
+pub struct Config<C: Scheme, D: Component> {
     pub prover: Prover<C, D>,
     pub participants: BTreeMap<View, Vec<C::PublicKey>>,
 }
@@ -20,7 +20,7 @@ type Participation<D, P> = HashMap<View, HashMap<D, HashSet<P>>>;
 type Faults<P> = HashMap<P, HashMap<View, HashSet<Activity>>>;
 
 #[derive(Clone)]
-pub struct Supervisor<C: Scheme, D: Digest> {
+pub struct Supervisor<C: Scheme, D: Component> {
     participants: BTreeMap<View, (HashMap<C::PublicKey, u32>, Vec<C::PublicKey>)>,
 
     prover: Prover<C, D>,
@@ -30,7 +30,7 @@ pub struct Supervisor<C: Scheme, D: Digest> {
     pub faults: Arc<Mutex<Faults<C::PublicKey>>>,
 }
 
-impl<C: Scheme, D: Digest> Supervisor<C, D> {
+impl<C: Scheme, D: Component> Supervisor<C, D> {
     pub fn new(cfg: Config<C, D>) -> Self {
         let mut parsed_participants = BTreeMap::new();
         for (view, mut validators) in cfg.participants.into_iter() {
@@ -51,7 +51,7 @@ impl<C: Scheme, D: Digest> Supervisor<C, D> {
     }
 }
 
-impl<C: Scheme, D: Digest> Su for Supervisor<C, D> {
+impl<C: Scheme, D: Component> Su for Supervisor<C, D> {
     type Index = View;
     type PublicKey = C::PublicKey;
 

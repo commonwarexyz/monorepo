@@ -14,9 +14,7 @@ use crate::{
     },
     Automaton, Committer, Parsed, Relay, Supervisor,
 };
-use commonware_cryptography::{
-    sha256::hash, sha256::Digest as Sha256Digest, Digest, Scheme,
-};
+use commonware_cryptography::{sha256::hash, sha256::Digest as Sha256Digest, Component, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Blob, Clock, Spawner, Storage};
@@ -44,7 +42,7 @@ type Finalizable<'a, D> = Option<(wire::Proposal, &'a HashMap<u32, Parsed<wire::
 
 const GENESIS_VIEW: View = 0;
 
-struct Round<C: Scheme, D: Digest, S: Supervisor<Index = View>> {
+struct Round<C: Scheme, D: Component, S: Supervisor<Index = View>> {
     supervisor: S,
     _crypto: PhantomData<C>,
     _digest: PhantomData<D>,
@@ -78,7 +76,9 @@ struct Round<C: Scheme, D: Digest, S: Supervisor<Index = View>> {
     broadcast_finalization: bool,
 }
 
-impl<C: Scheme, D: Digest, S: Supervisor<Index = View, PublicKey = C::PublicKey>> Round<C, D, S> {
+impl<C: Scheme, D: Component, S: Supervisor<Index = View, PublicKey = C::PublicKey>>
+    Round<C, D, S>
+{
     pub fn new(supervisor: S, view: View) -> Self {
         let leader = supervisor.leader(view).expect("unable to compute leader");
         Self {
@@ -485,7 +485,7 @@ pub struct Actor<
     B: Blob,
     E: Clock + Rng + Spawner + Storage<B>,
     C: Scheme,
-    D: Digest,
+    D: Component,
     A: Automaton<Context = Context<D>, Digest = D>,
     R: Relay<Digest = D>,
     F: Committer<Digest = D>,
@@ -528,7 +528,7 @@ impl<
         B: Blob,
         E: Clock + Rng + Spawner + Storage<B>,
         C: Scheme,
-        D: Digest,
+        D: Component,
         A: Automaton<Context = Context<D>, Digest = D>,
         R: Relay<Digest = D>,
         F: Committer<Digest = D>,

@@ -1,9 +1,9 @@
 use crate::{threshold_simplex::wire, Parsed};
-use commonware_cryptography::Digest;
+use commonware_cryptography::Component;
 use futures::{channel::mpsc, SinkExt};
 
 // If either of these requests fails, it will not send a reply.
-pub enum Message<D: Digest> {
+pub enum Message<D: Component> {
     Notarization {
         notarization: Parsed<wire::Notarization, D>,
     },
@@ -13,11 +13,11 @@ pub enum Message<D: Digest> {
 }
 
 #[derive(Clone)]
-pub struct Mailbox<D: Digest> {
+pub struct Mailbox<D: Component> {
     sender: mpsc::Sender<Message<D>>,
 }
 
-impl<D: Digest> Mailbox<D> {
+impl<D: Component> Mailbox<D> {
     pub(super) fn new(sender: mpsc::Sender<Message<D>>) -> Self {
         Self { sender }
     }

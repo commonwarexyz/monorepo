@@ -7,7 +7,7 @@ use super::{
 };
 use crate::Proof;
 use bytes::{Buf, BufMut};
-use commonware_cryptography::{Digest, Scheme};
+use commonware_cryptography::{Component, Scheme};
 use std::{collections::HashSet, marker::PhantomData};
 
 /// Encode and decode proofs of activity.
@@ -15,7 +15,7 @@ use std::{collections::HashSet, marker::PhantomData};
 /// We don't use protobuf for proof encoding because we expect external parties
 /// to decode proofs in constrained environments where protobuf may not be implemented.
 #[derive(Clone)]
-pub struct Prover<C: Scheme, D: Digest> {
+pub struct Prover<C: Scheme, D: Component> {
     notarize_namespace: Vec<u8>,
     nullify_namespace: Vec<u8>,
     finalize_namespace: Vec<u8>,
@@ -24,7 +24,7 @@ pub struct Prover<C: Scheme, D: Digest> {
     _digest: PhantomData<D>,
 }
 
-impl<C: Scheme, D: Digest> Prover<C, D> {
+impl<C: Scheme, D: Component> Prover<C, D> {
     /// Create a new prover with the given signing `namespace`.
     pub fn new(namespace: &[u8]) -> Self {
         Self {

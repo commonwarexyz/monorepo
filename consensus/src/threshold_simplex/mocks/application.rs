@@ -1,7 +1,7 @@
 use super::relay::Relay;
 use crate::{threshold_simplex::Context, Automaton as Au, Committer as Co, Proof, Relay as Re};
 use bytes::{Buf, BufMut, Bytes};
-use commonware_cryptography::{Digest, Hasher, PublicKey};
+use commonware_cryptography::{Component, Hasher};
 use commonware_macros::select;
 use commonware_runtime::Clock;
 use commonware_utils::hex;
@@ -18,7 +18,7 @@ use std::{
     time::Duration,
 };
 
-pub enum Message<D: Digest> {
+pub enum Message<D: Component> {
     Genesis {
         response: oneshot::Sender<D>,
     },
@@ -45,17 +45,17 @@ pub enum Message<D: Digest> {
 }
 
 #[derive(Clone)]
-pub struct Mailbox<D: Digest> {
+pub struct Mailbox<D: Component> {
     sender: mpsc::Sender<Message<D>>,
 }
 
-impl<D: Digest> Mailbox<D> {
+impl<D: Component> Mailbox<D> {
     pub(super) fn new(sender: mpsc::Sender<Message<D>>) -> Self {
         Self { sender }
     }
 }
 
-impl<D: Digest> Au for Mailbox<D> {
+impl<D: Component> Au for Mailbox<D> {
     type Digest = D;
     type Context = Context<D>;
 
@@ -95,7 +95,7 @@ impl<D: Digest> Au for Mailbox<D> {
     }
 }
 
-impl<D: Digest> Re for Mailbox<D> {
+impl<D: Component> Re for Mailbox<D> {
     type Digest = D;
 
     async fn broadcast(&mut self, payload: Self::Digest) {
@@ -106,7 +106,7 @@ impl<D: Digest> Re for Mailbox<D> {
     }
 }
 
-impl<D: Digest> Co for Mailbox<D> {
+impl<D: Component> Co for Mailbox<D> {
     type Digest = D;
 
     async fn prepared(&mut self, proof: Proof, payload: Self::Digest) {
@@ -128,7 +128,7 @@ const GENESIS_BYTES: &[u8] = b"genesis";
 
 type Latency = (f64, f64);
 
-pub enum Progress<D: Digest> {
+pub enum Progress<D: Component> {
     Notarized(Proof, D),
     Finalized(Proof, D),
 }
@@ -174,7 +174,7 @@ pub struct Application<E: Clock + RngCore, H: Hasher, P: Component> {
 impl<E: Clock + RngCore, H: Hasher, P: Component> Application<E, H, P> {
     pub fn new(runtime: E, cfg: Config<H, P>) -> (Self, Mailbox<H::Digest>) {
         // Register self on relay
-        let broadcast = cfg.relay.register(cfg.participant);
+        let broadcast = cfg.relay.register(cfg.participant.clone());
 
         // Generate samplers
         let propose_latency = Normal::new(cfg.propose_latency.0, cfg.propose_latency.1).unwrap();
@@ -298,7 +298,7 @@ impl<E: Clock + RngCore, H: Hasher, P: Component> Application<E, H, P> {
         let _ = self
             .tracker
             .send((
-                self.participant,
+                self.participant.clone(),
                 Progress::Notarized(proof, payload),
             ))
             .await;
@@ -311,7 +311,7 @@ impl<E: Clock + RngCore, H: Hasher, P: Component> Application<E, H, P> {
         let _ = self
             .tracker
             .send((
-                self.participant,
+                self.participant.clone(),
                 Progress::Finalized(proof, payload),
             ))
             .await;
