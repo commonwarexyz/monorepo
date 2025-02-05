@@ -7,8 +7,7 @@ use crate::{
         actors::voter,
         encoder::{notarize_namespace, nullify_namespace},
         verifier::{verify_notarization, verify_nullification},
-        wire::{self},
-        View,
+        wire, View,
     },
     Parsed, Supervisor,
 };
