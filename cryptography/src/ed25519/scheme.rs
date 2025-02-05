@@ -1,6 +1,6 @@
-use crate::{Octets, BatchScheme, Error, Scheme};
+use crate::{BatchScheme, Error, Octets, Scheme};
 use commonware_utils::union_unique;
-use ed25519_consensus::{self, VerificationKey, VerificationKeyBytes};
+use ed25519_consensus::{self, VerificationKey};
 use rand::{CryptoRng, Rng, RngCore};
 use std::borrow::Cow;
 use std::ops::Deref;
@@ -13,7 +13,7 @@ const SIGNATURE_LENGTH: usize = 64;
 #[derive(Clone)]
 pub struct Ed25519 {
     signer: ed25519_consensus::SigningKey,
-    verifier: PublicKey,
+    verifier: ed25519_consensus::VerificationKey,
 }
 
 impl Scheme for Ed25519 {
@@ -24,24 +24,21 @@ impl Scheme for Ed25519 {
     fn new<R: CryptoRng + Rng>(r: &mut R) -> Self {
         let signer = ed25519_consensus::SigningKey::new(r);
         let verifier = signer.verification_key();
-        Self {
-            signer,
-            verifier: PublicKey::from(&verifier),
-        }
+        Self { signer, verifier }
     }
 
     fn from(private_key: PrivateKey) -> Option<Self> {
-        let signer = ed25519_consensus::SigningKey::from(private_key.0);
-        let verifier = PublicKey::from(&signer.verification_key());
+        let signer = private_key.key;
+        let verifier = signer.verification_key();
         Some(Self { signer, verifier })
     }
 
     fn private_key(&self) -> PrivateKey {
-        PrivateKey::from(&self.signer)
+        PrivateKey::from(self.signer.clone())
     }
 
     fn public_key(&self) -> PublicKey {
-        self.verifier.clone()
+        PublicKey::from(self.verifier)
     }
 
     fn sign(&mut self, namespace: Option<&[u8]>, message: &[u8]) -> Signature {
@@ -49,7 +46,7 @@ impl Scheme for Ed25519 {
             Some(namespace) => self.signer.sign(&union_unique(namespace, message)),
             None => self.signer.sign(message),
         };
-        Signature::from(&sig)
+        Signature::from(sig)
     }
 
     fn verify(
@@ -58,17 +55,15 @@ impl Scheme for Ed25519 {
         public_key: &Self::PublicKey,
         signature: &Self::Signature,
     ) -> bool {
-        let Ok(public_key) = VerificationKey::try_from(public_key.0) else {
-            return false;
-        };
-        let signature = ed25519_consensus::Signature::from(signature.0);
-
         match namespace {
             Some(namespace) => {
                 let payload = union_unique(namespace, message);
-                public_key.verify(&signature, &payload).is_ok()
+                public_key
+                    .key
+                    .verify(&signature.signature, &payload)
+                    .is_ok()
             }
-            None => public_key.verify(&signature, message).is_ok(),
+            None => public_key.key.verify(&signature.signature, message).is_ok(),
         }
     }
 }
@@ -95,13 +90,15 @@ impl BatchScheme for Ed25519Batch {
         public_key: &Self::PublicKey,
         signature: &Self::Signature,
     ) -> bool {
-        let public_key = VerificationKeyBytes::from(public_key.0);
-        let signature = ed25519_consensus::Signature::from(signature.0);
         let payload = match namespace {
             Some(namespace) => Cow::Owned(union_unique(namespace, message)),
             None => Cow::Borrowed(message),
         };
-        let item = ed25519_consensus::batch::Item::from((public_key, signature, &payload));
+        let item = ed25519_consensus::batch::Item::from((
+            public_key.key.into(),
+            signature.signature,
+            &payload,
+        ));
         self.verifier.queue(item);
         true
     }
@@ -111,47 +108,75 @@ impl BatchScheme for Ed25519Batch {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-#[repr(transparent)]
-pub struct PrivateKey([u8; PRIVATE_KEY_LENGTH]);
+#[derive(Clone, Debug)]
+pub struct PrivateKey {
+    raw: [u8; PRIVATE_KEY_LENGTH],
+    key: ed25519_consensus::SigningKey,
+}
 
 impl Octets for PrivateKey {}
 
+impl Eq for PrivateKey {}
+
+impl std::hash::Hash for PrivateKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.raw.hash(state);
+    }
+}
+
+impl PartialEq for PrivateKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.raw == other.raw
+    }
+}
+
+impl Ord for PrivateKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.raw.cmp(&other.raw)
+    }
+}
+
+impl PartialOrd for PrivateKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 impl AsRef<[u8]> for PrivateKey {
     fn as_ref(&self) -> &[u8] {
-        &self.0
+        &self.raw
     }
 }
 
 impl Deref for PrivateKey {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
-        &self.0
+        &self.raw
     }
 }
 
 impl From<[u8; PRIVATE_KEY_LENGTH]> for PrivateKey {
     fn from(value: [u8; PRIVATE_KEY_LENGTH]) -> Self {
-        Self(value)
+        Self::try_from(value).unwrap()
     }
 }
 
-impl From<&ed25519_consensus::SigningKey> for PrivateKey {
-    fn from(value: &ed25519_consensus::SigningKey) -> Self {
-        Self(value.to_bytes())
+impl From<ed25519_consensus::SigningKey> for PrivateKey {
+    fn from(key: ed25519_consensus::SigningKey) -> Self {
+        let raw = key.to_bytes();
+        Self { raw, key }
     }
 }
 
 impl TryFrom<&[u8]> for PrivateKey {
     type Error = Error;
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        if value.len() != PRIVATE_KEY_LENGTH {
-            return Err(Error::InvalidPrivateKeyLength);
-        }
-        let array: &[u8; PRIVATE_KEY_LENGTH] = value
+        let raw: [u8; PRIVATE_KEY_LENGTH] = value
             .try_into()
             .map_err(|_| Error::InvalidPrivateKeyLength)?;
-        Ok(Self(*array))
+        let key =
+            ed25519_consensus::SigningKey::try_from(raw).map_err(|_| Error::InvalidPrivateKey)?;
+        Ok(Self { raw, key })
     }
 }
 
@@ -170,38 +195,41 @@ impl TryFrom<Vec<u8>> for PrivateKey {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-#[repr(transparent)]
-pub struct PublicKey([u8; PUBLIC_KEY_LENGTH]);
+pub struct PublicKey {
+    raw: [u8; PUBLIC_KEY_LENGTH],
+    key: ed25519_consensus::VerificationKey,
+}
 
 impl Octets for PublicKey {}
 
 impl AsRef<[u8]> for PublicKey {
     fn as_ref(&self) -> &[u8] {
-        &self.0
+        &self.raw
     }
 }
 
 impl Deref for PublicKey {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
-        &self.0
+        &self.raw
     }
 }
 
-impl From<&VerificationKey> for PublicKey {
-    fn from(verifier: &VerificationKey) -> Self {
-        Self(verifier.to_bytes())
+impl From<VerificationKey> for PublicKey {
+    fn from(key: VerificationKey) -> Self {
+        let raw = key.to_bytes();
+        Self { raw, key }
     }
 }
 
 impl TryFrom<&[u8]> for PublicKey {
     type Error = Error;
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        if value.len() != PUBLIC_KEY_LENGTH {
-            return Err(Error::InvalidPublicKeyLength);
-        }
-        let verifier = VerificationKey::try_from(value).map_err(|_| Error::InvalidPublicKey)?;
-        Ok(Self::from(&verifier))
+        let raw: [u8; PUBLIC_KEY_LENGTH] = value
+            .try_into()
+            .map_err(|_| Error::InvalidPublicKeyLength)?;
+        let key = VerificationKey::try_from(value).map_err(|_| Error::InvalidPublicKey)?;
+        Ok(Self { raw, key })
     }
 }
 
@@ -219,42 +247,63 @@ impl TryFrom<Vec<u8>> for PublicKey {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-#[repr(transparent)]
-pub struct Signature([u8; SIGNATURE_LENGTH]);
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Signature {
+    raw: [u8; SIGNATURE_LENGTH],
+    signature: ed25519_consensus::Signature,
+}
 
 impl Octets for Signature {}
 
+impl std::hash::Hash for Signature {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.raw.hash(state);
+    }
+}
+
+impl Ord for Signature {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.raw.cmp(&other.raw)
+    }
+}
+
+impl PartialOrd for Signature {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 impl AsRef<[u8]> for Signature {
     fn as_ref(&self) -> &[u8] {
-        &self.0
+        &self.raw
     }
 }
 
 impl Deref for Signature {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
-        &self.0
+        &self.raw
     }
 }
 
-impl From<&ed25519_consensus::Signature> for Signature {
-    fn from(value: &ed25519_consensus::Signature) -> Self {
-        Self(value.to_bytes())
+impl From<ed25519_consensus::Signature> for Signature {
+    fn from(value: ed25519_consensus::Signature) -> Self {
+        let raw = value.to_bytes();
+        Self {
+            raw,
+            signature: value,
+        }
     }
 }
 
 impl TryFrom<&[u8]> for Signature {
     type Error = Error;
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        if value.len() != SIGNATURE_LENGTH {
-            return Err(Error::InvalidSignatureLength);
-        }
-        let array: &[u8; SIGNATURE_LENGTH] = value
+        let raw: [u8; SIGNATURE_LENGTH] = value
             .try_into()
             .map_err(|_| Error::InvalidSignatureLength)?;
-
-        Ok(Self(*array))
+        let signature = ed25519_consensus::Signature::from(raw);
+        Ok(Self { raw, signature })
     }
 }
 
