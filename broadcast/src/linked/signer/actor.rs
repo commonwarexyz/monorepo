@@ -19,7 +19,7 @@ use commonware_storage::journal::{self, Journal};
 use commonware_utils::hex;
 use futures::{
     channel::{mpsc, oneshot},
-    future::{self, select, Either},
+    future::{self, Either},
     pin_mut,
     stream::FuturesUnordered,
     StreamExt,
@@ -38,8 +38,7 @@ use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
 /// A future representing a request to the application to verify a payload.
-type VerifyFuture<D> =
-    Pin<Box<dyn Future<Output = (Context, D, Result<bool, Error>)> + Send>>;
+type VerifyFuture<D> = Pin<Box<dyn Future<Output = (Context, D, Result<bool, Error>)> + Send>>;
 
 /// The actor that implements the Broadcaster trait.
 pub struct Actor<
@@ -80,9 +79,6 @@ pub struct Actor<
     // Timeouts
     ////////////////////////////////////////
 
-    // The configured timeout for dropping verify requests to the application
-    verify_timeout: Duration,
-
     // The configured timeout for refreshing the epoch
     refresh_epoch_timeout: Duration,
     refresh_epoch_deadline: Option<SystemTime>,
@@ -114,11 +110,14 @@ pub struct Actor<
     ////////////////////////////////////////
     // Messaging
     ////////////////////////////////////////
-    
+
     // A stream of futures.
     // Each future represents a verification request to the application
     // that will either timeout or resolve with a boolean.
     pending_verifies: FuturesUnordered<VerifyFuture<D>>,
+
+    // The maximum number of items in `pending_verifies`.
+    pending_verify_size: usize,
 
     // The mailbox for receiving messages (primarily from the application).
     mailbox_receiver: mpsc::Receiver<Message<D>>,
@@ -178,7 +177,6 @@ impl<
             collector: cfg.collector,
             chunk_namespace: encoder::chunk_namespace(&cfg.namespace),
             ack_namespace: encoder::ack_namespace(&cfg.namespace),
-            verify_timeout: cfg.verify_timeout,
             refresh_epoch_timeout: cfg.refresh_epoch_timeout,
             refresh_epoch_deadline: None,
             rebroadcast_timeout: cfg.rebroadcast_timeout,
@@ -186,6 +184,7 @@ impl<
             epoch_bounds: cfg.epoch_bounds,
             height_bound: cfg.height_bound,
             pending_verifies,
+            pending_verify_size: cfg.pending_verify_size,
             mailbox_receiver,
             journal_entries_per_section: cfg.journal_entries_per_section,
             journal_replay_concurrency: cfg.journal_replay_concurrency,
@@ -527,11 +526,20 @@ impl<
         let is_new = self.tip_manager.put(link);
         let chunk = link.chunk.as_ref().unwrap();
 
-        // Take actions if the link is new
+        // Append to journal if the link is new, making sure to sync the journal
+        // to prevent sending two conflicting chunks to the application, even if
+        // the node crashes and restarts.
         if is_new {
-            // Append to journal
             self.journal_append(link).await;
             self.journal_sync(&chunk.sequencer, chunk.height).await;
+        }
+
+        // Ignore sending the verification request to the application
+        // if the number of pending requests is too high.
+        // We use > instead of >= because the stream always has one dummy future.
+        if self.pending_verifies.len() > self.pending_verify_size {
+            warn!("Too many concurrent requests to application");
+            return;
         }
 
         // Verify the chunk with the application
@@ -540,30 +548,14 @@ impl<
             height: chunk.height,
         };
         let digest = D::try_from(&chunk.payload).unwrap();
-
-        // Capture needed variables for our async verification future.
-        let verify_timeout = self.verify_timeout;
-        let runtime = self.runtime.clone();
         let mut app_clone = self.application.clone();
-
-        // Build the verification future: we race the verify future against a sleep.
         let verify_future = Box::pin(async move {
-            let sleep_future = runtime.sleep(verify_timeout);
-            pin_mut!(sleep_future);
-            let verify_fut = app_clone.verify(context.clone(), digest.clone());
-            pin_mut!(verify_fut);
-            match select(sleep_future, verify_fut).await {
-                // If the sleep completes first, we consider it a timeout.
-                Either::Left(((), _)) => (context, digest, Err(Error::AppVerifyTimeout)),
-                // Otherwise, we await the receiver to get the bool and map the error (if any)
-                Either::Right((result, _)) => {
-                    let verify_result = result.await.map_err(Error::AppVerifyCanceled);
-                    (context, digest, verify_result)
-                }
-            }
+            let receiver = app_clone.verify(context.clone(), digest.clone()).await;
+            let result = receiver.await.map_err(Error::AppVerifyCanceled);
+            (context, digest, result)
         });
 
-        // Save the verification future.
+        // Save the verification future
         self.pending_verifies.push(verify_future);
     }
 
@@ -1007,19 +999,15 @@ impl<
 /// Errors that can occur when running the actor.
 #[derive(Error, Debug)]
 enum Error {
-    // Application Verified Errors
+    // Application Verification Errors
+    #[error("Application verify error: {0}")]
+    AppVerifyCanceled(oneshot::Canceled),
     #[error("Application verified no tip")]
     AppVerifiedNoTip,
     #[error("Application verified height mismatch")]
     AppVerifiedHeightMismatch,
     #[error("Application verified payload mismatch")]
     AppVerifiedPayloadMismatch,
-
-    // Application Verify Errors
-    #[error("Application verify timeout")]
-    AppVerifyTimeout,
-    #[error("Application verify error: {0}")]
-    AppVerifyCanceled(oneshot::Canceled),
 
     // P2P Errors
     #[error("Unable to send message")]
