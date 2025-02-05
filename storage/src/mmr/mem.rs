@@ -33,12 +33,12 @@ impl<H: CHasher> Default for Mmr<H> {
 }
 
 impl<H: CHasher> Storage<H> for Mmr<H> {
-    fn size(&self) -> u64 {
-        self.size()
+    async fn size(&self) -> Result<u64, Error> {
+        Ok(self.size())
     }
 
-    fn get_node(&self, position: u64) -> Option<&H::Digest> {
-        self.nodes.get(self.pos_to_index(position))
+    async fn get_node(&self, position: u64) -> Result<Option<&H::Digest>, Error> {
+        Ok(self.nodes.get(self.pos_to_index(position)))
     }
 }
 
@@ -114,11 +114,11 @@ impl<H: CHasher> Mmr<H> {
         Hasher::new(&mut self.hasher).root_hash(size, peaks)
     }
 
-    pub fn proof(&self, element_pos: u64) -> Result<Proof<H>, Error> {
-        self.range_proof(element_pos, element_pos)
+    pub async fn proof(&self, element_pos: u64) -> Result<Proof<H>, Error> {
+        self.range_proof(element_pos, element_pos).await
     }
 
-    pub fn range_proof(
+    pub async fn range_proof(
         &self,
         start_element_pos: u64,
         end_element_pos: u64,
@@ -128,13 +128,9 @@ impl<H: CHasher> Mmr<H> {
         // strategies we will have to update this logic. See:
         // https://github.com/commonwarexyz/monorepo/issues/459
         if start_element_pos < self.oldest_remembered_pos {
-            return Err(ElementPruned(self.oldest_remembered_pos));
+            return Err(ElementPruned);
         }
-        Ok(Proof::<H>::range_proof::<Mmr<H>>(
-            self,
-            start_element_pos,
-            end_element_pos,
-        ))
+        Proof::<H>::range_proof::<Mmr<H>>(self, start_element_pos, end_element_pos).await
     }
 
     /// Returns the position of the oldest element that must be retained by this MMR in order to
@@ -173,6 +169,7 @@ mod tests {
         {mem::Mmr, Error::*},
     };
     use commonware_cryptography::{hash, Hasher as CHasher, Sha256};
+    use commonware_runtime::{deterministic::Executor, Runner};
     use commonware_utils::hex;
 
     /// Test MMR building by consecutively adding 11 equal elements to a new MMR, producing the
@@ -180,131 +177,134 @@ mod tests {
     /// and 3 peaks.
     #[test]
     fn test_add_eleven_values() {
-        let mut mmr: Mmr<Sha256> = Mmr::<Sha256>::new();
-        assert_eq!(
-            mmr.peak_iterator().next(),
-            None,
-            "empty iterator should have no peaks"
-        );
-        assert_eq!(
-            mmr.forget_max(),
-            0,
-            "forget_max on empty MMR should do nothing"
-        );
-        assert_eq!(
-            mmr.oldest_required_element(),
-            0,
-            "oldest_required_element should return 0 on empty MMR"
-        );
-        let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
-        let mut leaves: Vec<u64> = Vec::new();
-        for _ in 0..11 {
-            leaves.push(mmr.add(&element));
+        let (executor, _, _) = Executor::default();
+        executor.start(async move {
+            let mut mmr: Mmr<Sha256> = Mmr::<Sha256>::new();
+            assert_eq!(
+                mmr.peak_iterator().next(),
+                None,
+                "empty iterator should have no peaks"
+            );
+            assert_eq!(
+                mmr.forget_max(),
+                0,
+                "forget_max on empty MMR should do nothing"
+            );
+            assert_eq!(
+                mmr.oldest_required_element(),
+                0,
+                "oldest_required_element should return 0 on empty MMR"
+            );
+            let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
+            let mut leaves: Vec<u64> = Vec::new();
+            for _ in 0..11 {
+                leaves.push(mmr.add(&element));
+                let peaks: Vec<(u64, u32)> = mmr.peak_iterator().collect();
+                assert_ne!(peaks.len(), 0);
+                assert!(peaks.len() <= mmr.size() as usize);
+                let nodes_needing_parents = nodes_needing_parents(mmr.peak_iterator());
+                assert!(nodes_needing_parents.len() <= peaks.len());
+            }
+            assert_eq!(mmr.oldest_remembered_node_pos(), 0);
+            assert_eq!(mmr.size(), 19, "mmr not of expected size");
+            assert_eq!(
+                leaves,
+                vec![0, 1, 3, 4, 7, 8, 10, 11, 15, 16, 18],
+                "mmr leaf positions not as expected"
+            );
             let peaks: Vec<(u64, u32)> = mmr.peak_iterator().collect();
-            assert_ne!(peaks.len(), 0);
-            assert!(peaks.len() <= mmr.size() as usize);
-            let nodes_needing_parents = nodes_needing_parents(mmr.peak_iterator());
-            assert!(nodes_needing_parents.len() <= peaks.len());
-        }
-        assert_eq!(mmr.oldest_remembered_node_pos(), 0);
-        assert_eq!(mmr.size(), 19, "mmr not of expected size");
-        assert_eq!(
-            leaves,
-            vec![0, 1, 3, 4, 7, 8, 10, 11, 15, 16, 18],
-            "mmr leaf positions not as expected"
-        );
-        let peaks: Vec<(u64, u32)> = mmr.peak_iterator().collect();
-        assert_eq!(
-            peaks,
-            vec![(14, 3), (17, 1), (18, 0)],
-            "mmr peaks not as expected"
-        );
+            assert_eq!(
+                peaks,
+                vec![(14, 3), (17, 1), (18, 0)],
+                "mmr peaks not as expected"
+            );
 
-        // Test nodes_needing_parents on the final MMR. Since there's a height gap between the
-        // highest peak (14) and the next, only the lower two peaks (17, 18) should be returned.
-        let peaks_needing_parents = nodes_needing_parents(mmr.peak_iterator());
-        assert_eq!(
-            peaks_needing_parents,
-            vec![17, 18],
-            "mmr nodes needing parents not as expected"
-        );
+            // Test nodes_needing_parents on the final MMR. Since there's a height gap between the
+            // highest peak (14) and the next, only the lower two peaks (17, 18) should be returned.
+            let peaks_needing_parents = nodes_needing_parents(mmr.peak_iterator());
+            assert_eq!(
+                peaks_needing_parents,
+                vec![17, 18],
+                "mmr nodes needing parents not as expected"
+            );
 
-        // verify leaf hashes
-        let mut hasher = Sha256::default();
-        let mut mmr_hasher = Hasher::new(&mut hasher);
-        for leaf in leaves.iter().by_ref() {
-            let hash = mmr_hasher.leaf_hash(*leaf, &element);
-            assert_eq!(mmr.get_node(*leaf).unwrap(), &hash);
-        }
+            // verify leaf hashes
+            let mut hasher = Sha256::default();
+            let mut mmr_hasher = Hasher::new(&mut hasher);
+            for leaf in leaves.iter().by_ref() {
+                let hash = mmr_hasher.leaf_hash(*leaf, &element);
+                assert_eq!(mmr.get_node(*leaf).await.unwrap().unwrap(), &hash);
+            }
 
-        // verify height=1 hashes
-        let hash2 = mmr_hasher.node_hash(2, &mmr.nodes[0], &mmr.nodes[1]);
-        assert_eq!(mmr.nodes[2], hash2);
-        let hash5 = mmr_hasher.node_hash(5, &mmr.nodes[3], &mmr.nodes[4]);
-        assert_eq!(mmr.nodes[5], hash5);
-        let hash9 = mmr_hasher.node_hash(9, &mmr.nodes[7], &mmr.nodes[8]);
-        assert_eq!(mmr.nodes[9], hash9);
-        let hash12 = mmr_hasher.node_hash(12, &mmr.nodes[10], &mmr.nodes[11]);
-        assert_eq!(mmr.nodes[12], hash12);
-        let hash17 = mmr_hasher.node_hash(17, &mmr.nodes[15], &mmr.nodes[16]);
-        assert_eq!(mmr.nodes[17], hash17);
+            // verify height=1 hashes
+            let hash2 = mmr_hasher.node_hash(2, &mmr.nodes[0], &mmr.nodes[1]);
+            assert_eq!(mmr.nodes[2], hash2);
+            let hash5 = mmr_hasher.node_hash(5, &mmr.nodes[3], &mmr.nodes[4]);
+            assert_eq!(mmr.nodes[5], hash5);
+            let hash9 = mmr_hasher.node_hash(9, &mmr.nodes[7], &mmr.nodes[8]);
+            assert_eq!(mmr.nodes[9], hash9);
+            let hash12 = mmr_hasher.node_hash(12, &mmr.nodes[10], &mmr.nodes[11]);
+            assert_eq!(mmr.nodes[12], hash12);
+            let hash17 = mmr_hasher.node_hash(17, &mmr.nodes[15], &mmr.nodes[16]);
+            assert_eq!(mmr.nodes[17], hash17);
 
-        // verify height=2 hashes
-        let hash6 = mmr_hasher.node_hash(6, &mmr.nodes[2], &mmr.nodes[5]);
-        assert_eq!(mmr.nodes[6], hash6);
-        let hash13 = mmr_hasher.node_hash(13, &mmr.nodes[9], &mmr.nodes[12]);
-        assert_eq!(mmr.nodes[13], hash13);
-        let hash17 = mmr_hasher.node_hash(17, &mmr.nodes[15], &mmr.nodes[16]);
-        assert_eq!(mmr.nodes[17], hash17);
+            // verify height=2 hashes
+            let hash6 = mmr_hasher.node_hash(6, &mmr.nodes[2], &mmr.nodes[5]);
+            assert_eq!(mmr.nodes[6], hash6);
+            let hash13 = mmr_hasher.node_hash(13, &mmr.nodes[9], &mmr.nodes[12]);
+            assert_eq!(mmr.nodes[13], hash13);
+            let hash17 = mmr_hasher.node_hash(17, &mmr.nodes[15], &mmr.nodes[16]);
+            assert_eq!(mmr.nodes[17], hash17);
 
-        // verify topmost hash
-        let hash14 = mmr_hasher.node_hash(14, &mmr.nodes[6], &mmr.nodes[13]);
-        assert_eq!(mmr.nodes[14], hash14);
+            // verify topmost hash
+            let hash14 = mmr_hasher.node_hash(14, &mmr.nodes[6], &mmr.nodes[13]);
+            assert_eq!(mmr.nodes[14], hash14);
 
-        // verify root hash
-        let root_hash = mmr.root();
-        let peak_hashes = [hash14, hash17, mmr.nodes[18].clone()];
-        let expected_root_hash = mmr_hasher.root_hash(19, peak_hashes.iter());
-        assert_eq!(root_hash, expected_root_hash, "incorrect root hash");
+            // verify root hash
+            let root_hash = mmr.root();
+            let peak_hashes = [hash14, hash17, mmr.nodes[18].clone()];
+            let expected_root_hash = mmr_hasher.root_hash(19, peak_hashes.iter());
+            assert_eq!(root_hash, expected_root_hash, "incorrect root hash");
 
-        // forgetting tests
-        assert_eq!(
-            mmr.forget_max(),
-            14,
-            "forget_max should forget to tallest peak"
-        );
-        assert_eq!(mmr.oldest_remembered_node_pos(), 14);
+            // forgetting tests
+            assert_eq!(
+                mmr.forget_max(),
+                14,
+                "forget_max should forget to tallest peak"
+            );
+            assert_eq!(mmr.oldest_remembered_node_pos(), 14);
 
-        // After forgetting we shouldn't be able to prove elements at or before the oldest remaining.
-        assert!(matches!(mmr.proof(0), Err(ElementPruned(_))));
-        assert!(matches!(mmr.proof(11), Err(ElementPruned(_))));
-        assert!(mmr.proof(15).is_ok());
+            // After forgetting we shouldn't be able to prove elements at or before the oldest remaining.
+            assert!(matches!(mmr.proof(0).await, Err(ElementPruned)));
+            assert!(matches!(mmr.proof(11).await, Err(ElementPruned)));
+            assert!(mmr.proof(15).await.is_ok());
 
-        let root_hash_after_forget = mmr.root();
-        assert_eq!(
-            root_hash, root_hash_after_forget,
-            "root hash changed after forgetting"
-        );
-        assert!(
-            mmr.proof(11).is_err(),
-            "attempts to prove elements at or before the oldest remaining should fail"
-        );
-        assert!(
-            mmr.range_proof(10, 15).is_err(),
-            "attempts to range_prove elements at or before the oldest remaining should fail"
-        );
-        assert!(
-            mmr.range_proof(15, 18).is_ok(),
-            "attempts to range_prove over elements following oldest remaining should succeed"
-        );
+            let root_hash_after_forget = mmr.root();
+            assert_eq!(
+                root_hash, root_hash_after_forget,
+                "root hash changed after forgetting"
+            );
+            assert!(
+                mmr.proof(11).await.is_err(),
+                "attempts to prove elements at or before the oldest remaining should fail"
+            );
+            assert!(
+                mmr.range_proof(10, 15).await.is_err(),
+                "attempts to range_prove elements at or before the oldest remaining should fail"
+            );
+            assert!(
+                mmr.range_proof(15, 18).await.is_ok(),
+                "attempts to range_prove over elements following oldest remaining should succeed"
+            );
 
-        // Test that we can initialize a new MMR from another's elements.
-        let mmr_copy = Mmr::<Sha256>::init(mmr.nodes.clone(), mmr.oldest_remembered_node_pos());
-        assert_eq!(mmr_copy.size(), 19);
-        assert_eq!(
-            mmr_copy.oldest_remembered_node_pos(),
-            mmr.oldest_remembered_node_pos()
-        );
+            // Test that we can initialize a new MMR from another's elements.
+            let mmr_copy = Mmr::<Sha256>::init(mmr.nodes.clone(), mmr.oldest_remembered_node_pos());
+            assert_eq!(mmr_copy.size(), 19);
+            assert_eq!(
+                mmr_copy.oldest_remembered_node_pos(),
+                mmr.oldest_remembered_node_pos()
+            );
+        });
     }
 
     /// Test that max-forgetting never breaks adding new nodes.
