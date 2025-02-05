@@ -29,9 +29,12 @@ cfg_if::cfg_if! {
 
         /// Parsed is a wrapper around a message that has a parsable digest.
         #[derive(Clone)]
-        struct Parsed<Message, D: Octets> {
+        struct Parsed<Message, Digest: Octets> {
+            /// Raw message that has some field that can be parsed into a digest.
             pub message: Message,
-            pub digest: D,
+
+            /// Parsed digest.
+            pub digest: Digest,
         }
 
         /// Automaton is the interface responsible for driving the consensus forward by proposing new payloads
@@ -42,7 +45,7 @@ cfg_if::cfg_if! {
             /// This often includes things like the proposer, view number, the height, or the epoch.
             type Context;
 
-            /// Digest is an arbitrary hash digest.
+            /// Hash of an arbitrary payload.
             type Digest: Octets;
 
             /// Payload used to initialize the consensus engine.
@@ -74,7 +77,7 @@ cfg_if::cfg_if! {
         /// The consensus engine is only aware of a payload's digest, not its contents. It is up
         /// to the relay to efficiently broadcast the full payload to other participants.
         pub trait Relay: Clone + Send + 'static {
-            /// Digest is an arbitrary hash digest.
+            /// Hash of an arbitrary payload.
             type Digest: Octets;
 
             /// Called once consensus begins working towards a proposal provided by `Automaton` (i.e.
@@ -87,7 +90,7 @@ cfg_if::cfg_if! {
 
         /// Committer is the interface responsible for handling notifications of payload status.
         pub trait Committer: Clone + Send + 'static {
-            /// Digest is an arbitrary hash digest.
+            /// Hash of an arbitrary payload.
             type Digest: Octets;
 
             /// Event that a payload has made some progress towards finalization but is not yet finalized.
@@ -116,6 +119,8 @@ cfg_if::cfg_if! {
         pub trait Supervisor: Clone + Send + 'static {
             /// Index is the type used to indicate the in-progress consensus decision.
             type Index;
+
+            /// Public key used to identify participants.
             type PublicKey: Octets;
 
             /// Return the leader at a given index for the provided seed.
