@@ -34,7 +34,7 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
     /// - the digest
     /// - the public key
     /// - the signature
-    fn get_len() -> (usize, (usize, usize, usize)) {
+    fn get_len() -> (usize, (usize, usize)) {
         let len_digest = size_of::<D>();
         let (len_public_key, len_signature) = C::len();
 
@@ -45,7 +45,7 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
         len += size_of::<u64>(); // epoch
         len += len_signature; // threshold
 
-        (len, (len_digest, len_public_key, len_signature))
+        (len, (len_public_key, len_signature))
     }
 
     pub fn serialize_threshold(
@@ -70,7 +70,7 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
         &self,
         mut proof: Proof,
     ) -> Option<(Context, D, group::Signature)> {
-        let (len, (_, public_key_len, signature_len)) = Prover::<C, D>::get_len();
+        let (len, (public_key_len, signature_len)) = Prover::<C, D>::get_len();
 
         // Ensure proof is the right size
         if proof.len() != len {
