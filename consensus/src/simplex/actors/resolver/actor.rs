@@ -13,10 +13,7 @@ use crate::{
 };
 use commonware_cryptography::{Array, Scheme};
 use commonware_macros::select;
-use commonware_p2p::{
-    utils::requester::{self, Requester},
-    Receiver, Recipients, Sender,
-};
+use commonware_p2p::{utils::requester, Receiver, Recipients, Sender};
 use commonware_runtime::Clock;
 use commonware_utils::hex;
 use futures::{channel::mpsc, future::Either, StreamExt};
@@ -148,7 +145,7 @@ impl<
             initial: cfg.fetch_timeout / 2,
             timeout: cfg.fetch_timeout,
         };
-        let requester: Requester<E, C> = requester::Requester::new(runtime.clone(), config);
+        let requester = requester::Requester::new(runtime.clone(), config);
 
         // Initialize metrics
         let unfulfilled = Gauge::default();
