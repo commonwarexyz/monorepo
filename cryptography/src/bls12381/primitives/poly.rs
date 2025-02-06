@@ -11,8 +11,9 @@ use crate::bls12381::primitives::{
     Error,
 };
 use bytes::BufMut;
+use commonware_utils::Serializable;
 use rand::{rngs::OsRng, RngCore};
-use std::{collections::BTreeMap, mem::size_of};
+use std::collections::BTreeMap;
 
 /// Private polynomials are used to generate secret shares.
 pub type Private = Poly<group::Private>;
@@ -28,7 +29,7 @@ pub type Signature = Poly<group::Signature>;
 pub type PartialSignature = Eval<group::Signature>;
 
 /// The default partial signature length (G2).
-pub const PARTIAL_SIGNATURE_LENGTH: usize = size_of::<u32>() + group::SIGNATURE_LENGTH;
+pub const PARTIAL_SIGNATURE_LENGTH: usize = 4 + group::SIGNATURE_LENGTH;
 
 /// A polynomial evaluation at a specific index.
 #[derive(Debug, Clone)]
@@ -41,7 +42,7 @@ impl<C: Element> Eval<C> {
     /// Canonically serializes the evaluation.
     pub fn serialize(&self) -> Vec<u8> {
         let value_serialized = self.value.serialize();
-        let mut bytes = Vec::with_capacity(size_of::<u32>() + value_serialized.len());
+        let mut bytes = Vec::with_capacity(u32::encoded_len() + value_serialized.len());
         bytes.put_u32(self.index);
         bytes.extend_from_slice(&value_serialized);
         bytes

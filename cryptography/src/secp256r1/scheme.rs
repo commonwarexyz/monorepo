@@ -1,5 +1,5 @@
 use crate::{Error, Octets, Scheme};
-use commonware_utils::union_unique;
+use commonware_utils::{union_unique, Serializable};
 use p256::{
     ecdsa::{
         signature::{Signer, Verifier},
@@ -84,6 +84,12 @@ pub struct PrivateKey {
 
 impl Octets for PrivateKey {}
 
+impl Serializable for PrivateKey {
+    fn encoded_len() -> usize {
+        PRIVATE_KEY_LENGTH
+    }
+}
+
 impl std::hash::Hash for PrivateKey {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.raw.hash(state);
@@ -155,6 +161,12 @@ pub struct PublicKey {
 
 impl Octets for PublicKey {}
 
+impl Serializable for PublicKey {
+    fn encoded_len() -> usize {
+        PUBLIC_KEY_LENGTH
+    }
+}
+
 impl std::hash::Hash for PublicKey {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.raw.hash(state);
@@ -214,6 +226,12 @@ pub struct Signature {
 }
 
 impl Octets for Signature {}
+
+impl Serializable for Signature {
+    fn encoded_len() -> usize {
+        SIGNATURE_LENGTH
+    }
+}
 
 impl std::hash::Hash for Signature {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {

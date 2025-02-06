@@ -6,6 +6,7 @@
 //! expect breaking changes and occasional instability.
 
 use bytes::Buf;
+use commonware_utils::Serializable;
 use rand::{CryptoRng, Rng, RngCore, SeedableRng};
 use std::fmt::Debug;
 use std::hash::Hash;
@@ -40,16 +41,19 @@ pub enum Error {
     InvalidSignatureLength,
     #[error("invalid public key")]
     InvalidPublicKey,
+    #[error("invalid octets length")]
+    InvalidOctetsLength,
 }
 
 /// Object that can be represented as a fixed-size byte array.
+///
+/// If any validation is required, it should be done in the `TryFrom` implementation.
 pub trait Octets:
     AsRef<[u8]>
     + for<'a> TryFrom<&'a [u8], Error = Error>
     + for<'a> TryFrom<&'a Vec<u8>, Error = Error>
     + TryFrom<Vec<u8>, Error = Error>
     + Deref<Target = [u8]>
-    + Sized
     + Clone
     + Send
     + Sync
@@ -60,25 +64,26 @@ pub trait Octets:
     + PartialOrd
     + Debug
     + Hash
+    + Serializable
 {
     /// Attempts to read some number of octets from the provided buffer.
     fn read_from<B: Buf>(buf: &mut B) -> Result<Self, Error> {
         // Check if there are enough bytes in the buffer to read a digest.
-        let digest_len = size_of::<Self>();
-        if buf.remaining() < digest_len {
-            return Err(Error::InvalidDigestLength);
+        let len = Self::encoded_len();
+        if buf.remaining() < len {
+            return Err(Error::InvalidOctetsLength);
         }
 
         // If there are enough contiguous bytes in the buffer, use them directly.
         let chunk = buf.chunk();
-        if chunk.len() >= digest_len {
-            let digest = Self::try_from(&chunk[..digest_len])?;
-            buf.advance(digest_len);
-            return Ok(digest);
+        if chunk.len() >= len {
+            let octets = Self::try_from(&chunk[..len])?;
+            buf.advance(len);
+            return Ok(octets);
         }
 
         // Otherwise, copy the bytes into a temporary buffer.
-        let mut temp = vec![0u8; digest_len];
+        let mut temp = vec![0u8; len];
         buf.copy_to_slice(&mut temp);
         Self::try_from(temp)
     }
@@ -369,8 +374,8 @@ mod tests {
 
     #[test]
     fn test_ed25519_len() {
-        assert_eq!(size_of::<<Ed25519 as Scheme>::PublicKey>(), 32);
-        assert_eq!(size_of::<<Ed25519 as Scheme>::Signature>(), 64);
+        assert_eq!(<Ed25519 as Scheme>::PublicKey::encoded_len(), 32);
+        assert_eq!(<Ed25519 as Scheme>::Signature::encoded_len(), 64);
     }
 
     #[test]
@@ -420,8 +425,8 @@ mod tests {
 
     #[test]
     fn test_bls12381_len() {
-        assert_eq!(size_of::<<Bls12381 as Scheme>::PublicKey>(), 48);
-        assert_eq!(size_of::<<Bls12381 as Scheme>::Signature>(), 96);
+        assert_eq!(<Bls12381 as Scheme>::PublicKey::encoded_len(), 48);
+        assert_eq!(<Bls12381 as Scheme>::Signature::encoded_len(), 96);
     }
 
     #[test]
@@ -471,8 +476,8 @@ mod tests {
 
     #[test]
     fn test_secp256r1_len() {
-        assert_eq!(size_of::<<Secp256r1 as Scheme>::PublicKey>(), 33);
-        assert_eq!(size_of::<<Secp256r1 as Scheme>::Signature>(), 64);
+        assert_eq!(<Secp256r1 as Scheme>::PublicKey::encoded_len(), 33);
+        assert_eq!(<Secp256r1 as Scheme>::Signature::encoded_len(), 64);
     }
 
     fn test_hasher_multiple_runs<H: Hasher>() {
@@ -481,7 +486,7 @@ mod tests {
         hasher.update(b"hello world");
         let digest = hasher.finalize();
         assert!(H::Digest::try_from(digest.as_ref()).is_ok());
-        assert_eq!(digest.as_ref().len(), size_of::<H::Digest>());
+        assert_eq!(digest.as_ref().len(), H::Digest::encoded_len());
 
         // Reuse hasher without reset
         hasher.update(b"hello world");

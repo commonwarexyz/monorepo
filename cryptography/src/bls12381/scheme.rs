@@ -24,6 +24,7 @@ use super::primitives::{
     ops,
 };
 use crate::{Error, Octets, Scheme};
+use commonware_utils::Serializable;
 use rand::{CryptoRng, Rng};
 use std::ops::Deref;
 
@@ -86,6 +87,12 @@ pub struct PrivateKey {
 }
 
 impl Octets for PrivateKey {}
+
+impl Serializable for PrivateKey {
+    fn encoded_len() -> usize {
+        group::PRIVATE_KEY_LENGTH
+    }
+}
 
 impl std::hash::Hash for PrivateKey {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
@@ -158,6 +165,12 @@ pub struct PublicKey {
 
 impl Octets for PublicKey {}
 
+impl Serializable for PublicKey {
+    fn encoded_len() -> usize {
+        group::PUBLIC_KEY_LENGTH
+    }
+}
+
 impl std::hash::Hash for PublicKey {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.raw.hash(state);
@@ -228,6 +241,12 @@ pub struct Signature {
 }
 
 impl Octets for Signature {}
+
+impl Serializable for Signature {
+    fn encoded_len() -> usize {
+        group::SIGNATURE_LENGTH
+    }
+}
 
 impl std::hash::Hash for Signature {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {

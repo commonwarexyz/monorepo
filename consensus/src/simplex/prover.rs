@@ -8,6 +8,7 @@ use super::{
 use crate::Proof;
 use bytes::{Buf, BufMut};
 use commonware_cryptography::{Octets, Scheme};
+use commonware_utils::Serializable;
 use std::{collections::HashSet, marker::PhantomData};
 
 /// Encode and decode proofs of activity.
@@ -44,11 +45,11 @@ impl<C: Scheme, D: Octets> Prover<C, D> {
         signature: &C::Signature,
     ) -> Proof {
         // Setup proof
-        let len = size_of::<u64>()
-            + size_of::<u64>()
-            + size_of::<D>()
-            + size_of::<C::PublicKey>()
-            + size_of::<C::Signature>();
+        let len = u64::encoded_len()
+            + u64::encoded_len()
+            + D::encoded_len()
+            + C::PublicKey::encoded_len()
+            + C::Signature::encoded_len();
 
         // Encode proof
         let mut proof = Vec::with_capacity(len);
@@ -69,11 +70,11 @@ impl<C: Scheme, D: Octets> Prover<C, D> {
     ) -> Option<(View, View, D, C::PublicKey)> {
         // Ensure proof is big enough
         if proof.len()
-            != size_of::<u64>()
-                + size_of::<u64>()
-                + size_of::<D>()
-                + size_of::<C::PublicKey>()
-                + size_of::<C::Signature>()
+            != u64::encoded_len()
+                + u64::encoded_len()
+                + D::encoded_len()
+                + C::PublicKey::encoded_len()
+                + C::Signature::encoded_len()
         {
             return None;
         }
@@ -100,11 +101,11 @@ impl<C: Scheme, D: Octets> Prover<C, D> {
         signatures: Vec<(&C::PublicKey, &C::Signature)>,
     ) -> Proof {
         // Setup proof
-        let len = size_of::<u64>()
-            + size_of::<u64>()
-            + size_of::<D>()
-            + size_of::<u32>()
-            + signatures.len() * (size_of::<C::PublicKey>() + size_of::<C::Signature>());
+        let len = u64::encoded_len()
+            + u64::encoded_len()
+            + D::encoded_len()
+            + u32::encoded_len()
+            + signatures.len() * (C::PublicKey::encoded_len() + C::Signature::encoded_len());
 
         // Encode proof
         let mut proof = Vec::with_capacity(len);
@@ -128,7 +129,7 @@ impl<C: Scheme, D: Octets> Prover<C, D> {
         namespace: &[u8],
     ) -> Option<(View, View, D, Vec<C::PublicKey>)> {
         // Ensure proof prefix is big enough
-        let len = size_of::<u64>() + size_of::<u64>() + size_of::<D>() + size_of::<u32>();
+        let len = u64::encoded_len() + u64::encoded_len() + D::encoded_len() + u32::encoded_len();
         if proof.len() < len {
             return None;
         }
@@ -145,7 +146,7 @@ impl<C: Scheme, D: Octets> Prover<C, D> {
         let message = proposal_message(view, parent, &payload);
 
         // Check for integer overflow in size calculation
-        let item_size = size_of::<C::PublicKey>().checked_add(size_of::<C::Signature>())?;
+        let item_size = C::PublicKey::encoded_len().checked_add(C::Signature::encoded_len())?;
         let total_size = count.checked_mul(item_size)?;
         if proof.remaining() != total_size {
             return None;
@@ -222,14 +223,14 @@ impl<C: Scheme, D: Octets> Prover<C, D> {
         signature_2: &C::Signature,
     ) -> Proof {
         // Setup proof
-        let len = size_of::<u64>()
-            + size_of::<C::PublicKey>()
-            + size_of::<u64>()
-            + size_of::<D>()
-            + size_of::<C::Signature>()
-            + size_of::<u64>()
-            + size_of::<D>()
-            + size_of::<C::Signature>();
+        let len = u64::encoded_len()
+            + C::PublicKey::encoded_len()
+            + u64::encoded_len()
+            + D::encoded_len()
+            + C::Signature::encoded_len()
+            + u64::encoded_len()
+            + D::encoded_len()
+            + C::Signature::encoded_len();
 
         // Encode proof
         let mut proof = Vec::with_capacity(len);
@@ -251,14 +252,14 @@ impl<C: Scheme, D: Octets> Prover<C, D> {
         namespace: &[u8],
     ) -> Option<(C::PublicKey, View)> {
         // Ensure proof is big enough
-        let len = size_of::<u64>()
-            + size_of::<C::PublicKey>()
-            + size_of::<u64>()
-            + size_of::<D>()
-            + size_of::<C::Signature>()
-            + size_of::<u64>()
-            + size_of::<D>()
-            + size_of::<C::Signature>();
+        let len = u64::encoded_len()
+            + C::PublicKey::encoded_len()
+            + u64::encoded_len()
+            + D::encoded_len()
+            + C::Signature::encoded_len()
+            + u64::encoded_len()
+            + D::encoded_len()
+            + C::Signature::encoded_len();
         if proof.len() != len {
             return None;
         }
@@ -370,12 +371,12 @@ impl<C: Scheme, D: Octets> Prover<C, D> {
         signature_null: &C::Signature,
     ) -> Proof {
         // Setup proof
-        let len = size_of::<u64>()
-            + size_of::<C::PublicKey>()
-            + size_of::<u64>()
-            + size_of::<D>()
-            + size_of::<C::Signature>()
-            + size_of::<C::Signature>();
+        let len = u64::encoded_len()
+            + C::PublicKey::encoded_len()
+            + u64::encoded_len()
+            + D::encoded_len()
+            + C::Signature::encoded_len()
+            + C::Signature::encoded_len();
 
         // Encode proof
         let mut proof = Vec::with_capacity(len);
@@ -395,12 +396,12 @@ impl<C: Scheme, D: Octets> Prover<C, D> {
         check_sig: bool,
     ) -> Option<(C::PublicKey, View)> {
         // Ensure proof is big enough
-        let len = size_of::<u64>()
-            + size_of::<C::PublicKey>()
-            + size_of::<u64>()
-            + size_of::<D>()
-            + size_of::<C::Signature>()
-            + size_of::<C::Signature>();
+        let len = u64::encoded_len()
+            + C::PublicKey::encoded_len()
+            + u64::encoded_len()
+            + D::encoded_len()
+            + C::Signature::encoded_len()
+            + C::Signature::encoded_len();
         if proof.len() != len {
             return None;
         }
@@ -438,10 +439,12 @@ impl<C: Scheme, D: Octets> Prover<C, D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::{sha256::Digest as Sha256Digest, Ed25519};
+    use commonware_cryptography::{sha256::Digest as Sha256Digest, Ed25519, Hasher, Sha256};
 
     fn test_digest(value: u8) -> Sha256Digest {
-        Sha256Digest::from([value; size_of::<Sha256Digest>()])
+        let mut hasher = Sha256::new();
+        hasher.update(&[value]);
+        hasher.finalize()
     }
 
     #[test]

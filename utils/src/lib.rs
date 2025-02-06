@@ -97,6 +97,34 @@ pub fn modulo(bytes: &[u8], n: u64) -> u64 {
     result
 }
 
+pub trait Serializable {
+    fn encoded_len() -> usize;
+}
+
+impl Serializable for u8 {
+    fn encoded_len() -> usize {
+        1
+    }
+}
+
+impl Serializable for u16 {
+    fn encoded_len() -> usize {
+        2
+    }
+}
+
+impl Serializable for u32 {
+    fn encoded_len() -> usize {
+        4
+    }
+}
+
+impl Serializable for u64 {
+    fn encoded_len() -> usize {
+        8
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

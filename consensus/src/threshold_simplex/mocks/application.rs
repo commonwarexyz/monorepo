@@ -4,7 +4,7 @@ use bytes::{Buf, BufMut, Bytes};
 use commonware_cryptography::{Hasher, Octets};
 use commonware_macros::select;
 use commonware_runtime::Clock;
-use commonware_utils::hex;
+use commonware_utils::{hex, Serializable};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
@@ -13,7 +13,6 @@ use rand::{Rng, RngCore};
 use rand_distr::{Distribution, Normal};
 use std::{
     collections::{HashMap, HashSet},
-    mem::size_of,
     sync::Arc,
     time::Duration,
 };
@@ -230,7 +229,7 @@ impl<E: Clock + RngCore, H: Hasher, P: Octets> Application<E, H, P> {
             .await;
 
         // Generate the payload
-        let payload_len = size_of::<u64>() + context.parent.1.len() + size_of::<u64>();
+        let payload_len = u64::encoded_len() + H::Digest::encoded_len() + u64::encoded_len();
         let mut payload = Vec::with_capacity(payload_len);
         payload.put_u64(context.view);
         payload.extend_from_slice(&context.parent.1);

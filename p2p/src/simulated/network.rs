@@ -32,7 +32,7 @@ use std::{
 };
 use tracing::{error, trace};
 
-const SIZE_OF_CHANNEL: usize = size_of::<Channel>();
+const SIZE_OF_CHANNEL: usize = 4; // u32
 
 /// Task type representing a message to be sent within the network.
 type Task<Pk> = (Channel, Pk, Recipients<Pk>, Bytes, oneshot::Sender<Vec<Pk>>);

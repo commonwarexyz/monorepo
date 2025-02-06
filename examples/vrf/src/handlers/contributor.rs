@@ -211,9 +211,7 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                 if self.forger {
                     // If we are a forger, don't send any shares and instead create fake signatures.
                     let _ = dealer.ack(player.clone());
-                    let mut signature = vec![0u8; size_of::<C::Signature>()];
-                    self.runtime.fill_bytes(&mut signature);
-                    let signature = C::Signature::try_from(&signature).unwrap();
+                    let signature = self.crypto.sign(None, b"fake");
                     acks.insert(idx as u32, signature);
                     warn!(
                         round,
