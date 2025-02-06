@@ -18,11 +18,11 @@ pub struct Config<C: Scheme, D: Octets> {
 
 type Participation<D, P> = HashMap<View, HashMap<D, HashSet<P>>>;
 type Faults<P> = HashMap<P, HashMap<View, HashSet<Activity>>>;
+type Participants<P> = BTreeMap<View, (HashMap<P, u32>, Vec<P>)>;
 
 #[derive(Clone)]
 pub struct Supervisor<C: Scheme, D: Octets> {
-    #[allow(clippy::type_complexity)]
-    participants: BTreeMap<View, (HashMap<C::PublicKey, u32>, Vec<C::PublicKey>)>,
+    participants: Participants<C::PublicKey>,
 
     prover: Prover<C, D>,
 
