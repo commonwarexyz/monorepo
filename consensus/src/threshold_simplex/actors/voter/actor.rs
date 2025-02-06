@@ -198,7 +198,6 @@ impl<
                 .get(&public_key_index)
                 .unwrap();
             let previous_proposal = previous_notarize.message.proposal.as_ref().unwrap();
-
             let proof = Prover::<D>::serialize_conflicting_notarize(
                 self.view,
                 previous_proposal.parent,
@@ -254,7 +253,6 @@ impl<
             .get(&public_key_index)
             .unwrap();
         let finalize_proposal = finalize.message.proposal.as_ref().unwrap();
-
         let proof = Prover::<D>::serialize_nullify_finalize(
             self.view,
             finalize_proposal.parent,
