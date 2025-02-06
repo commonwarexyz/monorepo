@@ -573,10 +573,9 @@ mod tests {
             vector_sig_verification_15(),
         ];
 
-        for (index, test) in cases.iter().enumerate() {
-            let (public_key, sig, message, exp_success) = test;
-            let exp_success = *exp_success;
-            if exp_success {
+        for (index, test) in cases.into_iter().enumerate() {
+            let (public_key, sig, message, expected) = test;
+            let expected = if expected {
                 let mut ecdsa_signature = p256::ecdsa::Signature::from_slice(&sig).unwrap();
                 if ecdsa_signature.s().is_high().into() {
                     // Valid signatures not normalized must be considered invalid.
@@ -588,17 +587,13 @@ mod tests {
                     }
                 }
                 let signature = Signature::from(ecdsa_signature);
-                let valid = Secp256r1::verify(None, message, public_key, &signature);
-                assert!(valid, "vector_signature_verification_{}", index + 1);
-                continue;
-            }
-
-            // Either signature must not parse or verification must fail.
-            let signature = Signature::try_from(sig);
-            assert!(
+                Secp256r1::verify(None, &message, &public_key, &signature)
+            } else {
+                let signature = Signature::try_from(sig);
                 signature.is_err()
-                    || !Secp256r1::verify(None, message, public_key, &signature.unwrap())
-            );
+                    || !Secp256r1::verify(None, &message, &public_key, &signature.unwrap())
+            };
+            assert!(expected, "vector_signature_verification_{}", index + 1);
         }
     }
 

@@ -362,25 +362,14 @@ mod tests {
 
         for (index, test) in cases.into_iter().enumerate() {
             let (public_key, message, signature, expected) = test;
-            if !expected {
-                assert!(
-                    public_key.is_err()
-                        || signature.is_err()
-                        || !Bls12381::verify(
-                            None,
-                            &message,
-                            &public_key.unwrap(),
-                            &signature.unwrap()
-                        ),
-                    "vector_verify_{}",
-                    index + 1
-                );
-                continue;
-            }
-            let public_key = public_key.unwrap();
-            let signature = signature.unwrap();
-            let result = Bls12381::verify(None, &message, &public_key, &signature);
-            assert!(result, "vector_verify_{}", index + 1);
+            let expected = if !expected {
+                public_key.is_err()
+                    || signature.is_err()
+                    || !Bls12381::verify(None, &message, &public_key.unwrap(), &signature.unwrap())
+            } else {
+                Bls12381::verify(None, &message, &public_key.unwrap(), &signature.unwrap())
+            };
+            assert!(expected, "vector_verify_{}", index + 1);
         }
     }
 
