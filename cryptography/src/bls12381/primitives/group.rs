@@ -196,8 +196,8 @@ impl Share {
     /// Canonically serializes the share.
     pub fn serialize(&self) -> Vec<u8> {
         let mut bytes = [0u8; u32::ENCODED_LEN + SCALAR_LENGTH];
-        bytes[..4].copy_from_slice(&self.index.to_be_bytes());
-        bytes[4..].copy_from_slice(&self.private.serialize());
+        bytes[..u32::ENCODED_LEN].copy_from_slice(&self.index.to_be_bytes());
+        bytes[u32::ENCODED_LEN..].copy_from_slice(&self.private.serialize());
         bytes.to_vec()
     }
 
@@ -207,7 +207,7 @@ impl Share {
             return None;
         }
         let index = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-        let private = Private::deserialize(&bytes[4..])?;
+        let private = Private::deserialize(&bytes[u32::ENCODED_LEN..])?;
         Some(Self { index, private })
     }
 }
