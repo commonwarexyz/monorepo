@@ -399,7 +399,7 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                     Some(signature) => {
                         ack_vec.push(wire::Ack {
                             public_key: idx,
-                            signature: signature.clone().to_vec(),
+                            signature: signature.to_vec(),
                         });
                     }
                     None => {
