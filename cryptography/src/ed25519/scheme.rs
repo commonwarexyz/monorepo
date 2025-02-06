@@ -1,4 +1,4 @@
-use crate::{BatchScheme, Error, Array, Scheme};
+use crate::{Array, BatchScheme, Error, Scheme};
 use commonware_utils::{union_unique, SizedSerialize};
 use ed25519_consensus::{self, VerificationKey};
 use rand::{CryptoRng, Rng, RngCore};

@@ -1,4 +1,4 @@
-use crate::{Error, Array, Scheme};
+use crate::{Array, Error, Scheme};
 use commonware_utils::{union_unique, SizedSerialize};
 use p256::{
     ecdsa::{

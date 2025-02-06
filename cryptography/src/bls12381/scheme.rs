@@ -23,7 +23,7 @@ use super::primitives::{
     group::{self, Element, Scalar},
     ops,
 };
-use crate::{Error, Array, Scheme};
+use crate::{Array, Error, Scheme};
 use commonware_utils::SizedSerialize;
 use rand::{CryptoRng, Rng};
 use std::{

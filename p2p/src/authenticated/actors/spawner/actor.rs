@@ -31,12 +31,8 @@ pub struct Actor<E: Spawner + Clock, Si: Sink, St: Stream, P: Array> {
     rate_limited: Family<metrics::Message, Counter>,
 }
 
-impl<
-        E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng,
-        Si: Sink,
-        St: Stream,
-        P: Array,
-    > Actor<E, Si, St, P>
+impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng, Si: Sink, St: Stream, P: Array>
+    Actor<E, Si, St, P>
 {
     pub fn new(runtime: E, cfg: Config) -> (Self, Mailbox<E, Si, St, P>) {
         let sent_messages = Family::<metrics::Message, Counter>::default();

@@ -1,6 +1,6 @@
 //! SHA-256 implementation of the `Hasher` trait.
 
-use crate::{Error, Hasher, Array};
+use crate::{Array, Error, Hasher};
 use commonware_utils::SizedSerialize;
 use rand::{CryptoRng, Rng};
 use sha2::{Digest as _, Sha256 as ISha256};
