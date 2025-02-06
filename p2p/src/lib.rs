@@ -34,7 +34,10 @@ pub enum Recipients<P: Octets> {
 
 /// Interface for sending messages to a set of recipients.
 pub trait Sender: Clone + Debug + Send + 'static {
+    /// Error that can occur when sending a message.
     type Error: Debug + StdError + Send;
+
+    /// Public key type used to identify recipients.
     type PublicKey: Octets;
 
     /// Send a message to a set of recipients.
@@ -48,7 +51,10 @@ pub trait Sender: Clone + Debug + Send + 'static {
 
 /// Interface for receiving messages from arbitrary recipients.
 pub trait Receiver: Debug + Send + 'static {
+    /// Error that can occur when receiving a message.
     type Error: Debug + StdError + Send;
+
+    /// Public key type used to identify recipients.
     type PublicKey: Octets;
 
     /// Receive a message from an arbitrary recipient.
