@@ -98,7 +98,7 @@ impl<C: Scheme, D: Octets> Prover<C, D> {
     /// Serialize an aggregation proof.
     pub fn serialize_aggregation(
         proposal: &wire::Proposal,
-        signatures: Vec<(&C::PublicKey, &C::Signature)>,
+        signatures: Vec<(&C::PublicKey, C::Signature)>,
     ) -> Proof {
         // Setup proof
         let len = u64::ENCODED_LEN
@@ -115,7 +115,7 @@ impl<C: Scheme, D: Octets> Prover<C, D> {
         proof.put_u32(signatures.len() as u32);
         for (public_key, signature) in signatures {
             proof.extend_from_slice(public_key);
-            proof.extend_from_slice(signature);
+            proof.extend_from_slice(&signature);
         }
         proof.into()
     }

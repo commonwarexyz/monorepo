@@ -218,13 +218,11 @@ impl<C: Scheme, D: Octets, S: Supervisor<Index = View, PublicKey = C::PublicKey>
         else {
             return false;
         };
-
         let Ok(nullify_signature) =
             C::Signature::try_from(&nullify.signature.as_ref().unwrap().signature)
         else {
             return false;
         };
-
         let finalize_proposal = finalize.message.proposal.as_ref().unwrap();
         let proof = Prover::<C, D>::serialize_nullify_finalize(
             self.view,
@@ -302,15 +300,14 @@ impl<C: Scheme, D: Octets, S: Supervisor<Index = View, PublicKey = C::PublicKey>
         else {
             return false;
         };
-
         let null = self.nullifies.get(&public_key_index);
         if let Some(null) = null {
+            // Create fault
             let Ok(null_signature) =
                 C::Signature::try_from(&null.signature.as_ref().unwrap().signature)
             else {
                 return false;
             };
-            // Create fault
             let proof = Prover::<C, D>::serialize_nullify_finalize(
                 self.view,
                 public_key,
@@ -328,6 +325,7 @@ impl<C: Scheme, D: Octets, S: Supervisor<Index = View, PublicKey = C::PublicKey>
             );
             return false;
         }
+
         // Compute proposal digest
         let message = proposal_message(proposal.view, proposal.parent, &finalize.digest);
         let proposal_digest = hash(&message);
@@ -1189,10 +1187,10 @@ impl<
             return;
         };
 
+        // Verify the signature
         let Ok(signature) = C::Signature::try_from(&signature.signature) else {
             return;
         };
-        // Verify the signature
         let notarize_message = proposal_message(proposal.view, proposal.parent, &payload);
         if !C::verify(
             Some(&self.notarize_namespace),
@@ -1442,10 +1440,10 @@ impl<
             return;
         };
 
+        // Verify the signature
         let Ok(signature) = C::Signature::try_from(&signature.signature) else {
             return;
         };
-        // Verify the signature
         let finalize_message = proposal_message(proposal.view, proposal.parent, &payload);
         if !C::verify(
             Some(&self.finalize_namespace),
@@ -1864,10 +1862,7 @@ impl<
                 let signature = C::Signature::try_from(&signature.signature).unwrap();
                 signatures.push((public_key, signature));
             }
-            let proof = Prover::<C, D>::serialize_aggregation(
-                proposal,
-                signatures.iter().map(|(pk, sig)| (*pk, sig)).collect(),
-            );
+            let proof = Prover::<C, D>::serialize_aggregation(proposal, signatures);
             self.committer.prepared(proof, notarization.digest).await;
 
             // Broadcast the notarization
@@ -2018,10 +2013,7 @@ impl<
                 let signature = C::Signature::try_from(&signature.signature).unwrap();
                 signatures.push((public_key, signature));
             }
-            let proof = Prover::<C, D>::serialize_aggregation(
-                proposal,
-                signatures.iter().map(|(pk, sig)| (*pk, sig)).collect(),
-            );
+            let proof = Prover::<C, D>::serialize_aggregation(proposal, signatures);
             self.committer.finalized(proof, finalization.digest).await;
 
             // Broadcast the finalization
