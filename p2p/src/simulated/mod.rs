@@ -320,7 +320,7 @@ mod tests {
             let result = oracle
                 .add_link(
                     pk.clone(),
-                    pk.clone(),
+                    pk,
                     Link {
                         latency: 5.0,
                         jitter: 2.5,
@@ -385,8 +385,8 @@ mod tests {
             // Attempt to link with invalid success rate
             let result = oracle
                 .add_link(
-                    pk1.clone(),
-                    pk2.clone(),
+                    pk1,
+                    pk2,
                     Link {
                         latency: 5.0,
                         jitter: 2.5,
@@ -441,8 +441,8 @@ mod tests {
             // Attempt to link with invalid jitter
             let result = oracle
                 .add_link(
-                    pk1.clone(),
-                    pk2.clone(),
+                    pk1,
+                    pk2,
                     Link {
                         latency: 5.0,
                         jitter: -2.5,
@@ -555,7 +555,7 @@ mod tests {
             // Link agents
             oracle
                 .add_link(
-                    pk1.clone(),
+                    pk1,
                     pk2.clone(),
                     Link {
                         latency: 5.0,
@@ -569,7 +569,7 @@ mod tests {
             // Send message
             let msg = Bytes::from("hello from pk1");
             sender1
-                .send(Recipients::One(pk2.clone()), msg, false)
+                .send(Recipients::One(pk2), msg, false)
                 .await
                 .unwrap();
 
@@ -772,7 +772,7 @@ mod tests {
             }
 
             // Remove non-existent links
-            let result = oracle.remove_link(pk1.clone(), pk2.clone()).await;
+            let result = oracle.remove_link(pk1, pk2).await;
             assert!(matches!(result, Err(Error::LinkMissing)));
         });
     }

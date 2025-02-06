@@ -1,10 +1,10 @@
 use super::relay::Relay;
 use crate::{simplex::Context, Automaton as Au, Committer as Co, Proof, Relay as Re};
 use bytes::{Buf, BufMut, Bytes};
-use commonware_cryptography::{Digest, Hasher, PublicKey};
+use commonware_cryptography::{Array, Hasher};
 use commonware_macros::select;
 use commonware_runtime::Clock;
-use commonware_utils::hex;
+use commonware_utils::{hex, SizedSerialize};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
@@ -13,12 +13,11 @@ use rand::{Rng, RngCore};
 use rand_distr::{Distribution, Normal};
 use std::{
     collections::{HashMap, HashSet},
-    mem::size_of,
     sync::Arc,
     time::Duration,
 };
 
-pub enum Message<D: Digest> {
+pub enum Message<D: Array> {
     Genesis {
         response: oneshot::Sender<D>,
     },
@@ -45,17 +44,17 @@ pub enum Message<D: Digest> {
 }
 
 #[derive(Clone)]
-pub struct Mailbox<D: Digest> {
+pub struct Mailbox<D: Array> {
     sender: mpsc::Sender<Message<D>>,
 }
 
-impl<D: Digest> Mailbox<D> {
+impl<D: Array> Mailbox<D> {
     pub(super) fn new(sender: mpsc::Sender<Message<D>>) -> Self {
         Self { sender }
     }
 }
 
-impl<D: Digest> Au for Mailbox<D> {
+impl<D: Array> Au for Mailbox<D> {
     type Digest = D;
     type Context = Context<D>;
 
@@ -95,7 +94,7 @@ impl<D: Digest> Au for Mailbox<D> {
     }
 }
 
-impl<D: Digest> Re for Mailbox<D> {
+impl<D: Array> Re for Mailbox<D> {
     type Digest = D;
 
     async fn broadcast(&mut self, payload: Self::Digest) {
@@ -106,7 +105,7 @@ impl<D: Digest> Re for Mailbox<D> {
     }
 }
 
-impl<D: Digest> Co for Mailbox<D> {
+impl<D: Array> Co for Mailbox<D> {
     type Digest = D;
 
     async fn prepared(&mut self, proof: Proof, payload: Self::Digest) {
@@ -128,36 +127,36 @@ const GENESIS_BYTES: &[u8] = b"genesis";
 
 type Latency = (f64, f64);
 
-pub enum Progress<D: Digest> {
+pub enum Progress<D: Array> {
     Notarized(Proof, D),
     Finalized(Proof, D),
 }
 
-pub struct Config<H: Hasher> {
+pub struct Config<H: Hasher, P: Array> {
     pub hasher: H,
 
-    pub relay: Arc<Relay<H::Digest>>,
+    pub relay: Arc<Relay<H::Digest, P>>,
 
     /// The public key of the participant.
     ///
     /// It is common to use multiple instances of an application in a single simulation, this
     /// helps to identify the source of both progress and errors.
-    pub participant: PublicKey,
+    pub participant: P,
 
     pub propose_latency: Latency,
     pub verify_latency: Latency,
 
-    pub tracker: mpsc::UnboundedSender<(PublicKey, Progress<H::Digest>)>,
+    pub tracker: mpsc::UnboundedSender<(P, Progress<H::Digest>)>,
 }
 
-pub struct Application<E: Clock + RngCore, H: Hasher> {
+pub struct Application<E: Clock + RngCore, H: Hasher, P: Array> {
     runtime: E,
     hasher: H,
-    participant: PublicKey,
+    participant: P,
 
-    relay: Arc<Relay<H::Digest>>,
+    relay: Arc<Relay<H::Digest, P>>,
     broadcast: mpsc::UnboundedReceiver<(H::Digest, Bytes)>,
-    tracker: mpsc::UnboundedSender<(PublicKey, Progress<H::Digest>)>,
+    tracker: mpsc::UnboundedSender<(P, Progress<H::Digest>)>,
 
     mailbox: mpsc::Receiver<Message<H::Digest>>,
 
@@ -171,8 +170,8 @@ pub struct Application<E: Clock + RngCore, H: Hasher> {
     finalized_views: HashSet<H::Digest>,
 }
 
-impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
-    pub fn new(runtime: E, cfg: Config<H>) -> (Self, Mailbox<H::Digest>) {
+impl<E: Clock + RngCore, H: Hasher, P: Array> Application<E, H, P> {
+    pub fn new(runtime: E, cfg: Config<H, P>) -> (Self, Mailbox<H::Digest>) {
         // Register self on relay
         let broadcast = cfg.relay.register(cfg.participant.clone());
 
@@ -230,7 +229,7 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
             .await;
 
         // Generate the payload
-        let payload_len = size_of::<u64>() + context.parent.1.len() + size_of::<u64>();
+        let payload_len = u64::SERIALIZED_LEN + H::Digest::SERIALIZED_LEN + u64::SERIALIZED_LEN;
         let mut payload = Vec::with_capacity(payload_len);
         payload.put_u64(context.view);
         payload.extend_from_slice(&context.parent.1);

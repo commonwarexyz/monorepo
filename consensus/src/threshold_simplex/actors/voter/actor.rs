@@ -22,7 +22,7 @@ use commonware_cryptography::{
     },
     hash,
     sha256::Digest as Sha256Digest,
-    Digest, PublicKey, Scheme,
+    Array, Scheme,
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
@@ -37,25 +37,28 @@ use futures::{
 use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
 use prost::Message as _;
 use rand::Rng;
+use std::sync::atomic::AtomicI64;
 use std::{
     collections::{BTreeMap, HashMap},
     time::{Duration, SystemTime},
 };
-use std::{marker::PhantomData, sync::atomic::AtomicI64};
 use tracing::{debug, trace, warn};
 
 const GENESIS_VIEW: View = 0;
 
 struct Round<
     C: Scheme,
-    D: Digest,
-    S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
+    D: Array,
+    S: ThresholdSupervisor<
+        Seed = group::Signature,
+        Index = View,
+        Share = group::Share,
+        PublicKey = C::PublicKey,
+    >,
 > {
     supervisor: S,
-    _crypto: PhantomData<C>,
-    _digest: PhantomData<D>,
 
-    leader: Option<PublicKey>,
+    leader: Option<C::PublicKey>,
 
     view: View,
     leader_deadline: Option<SystemTime>,
@@ -90,15 +93,18 @@ struct Round<
 
 impl<
         C: Scheme,
-        D: Digest,
-        S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
+        D: Array,
+        S: ThresholdSupervisor<
+            Seed = group::Signature,
+            Index = View,
+            Share = group::Share,
+            PublicKey = C::PublicKey,
+        >,
     > Round<C, D, S>
 {
     pub fn new(supervisor: S, view: View) -> Self {
         Self {
             supervisor,
-            _crypto: PhantomData,
-            _digest: PhantomData,
 
             view,
             leader: None,
@@ -192,7 +198,7 @@ impl<
                 .get(&public_key_index)
                 .unwrap();
             let previous_proposal = previous_notarize.message.proposal.as_ref().unwrap();
-            let proof = Prover::serialize_conflicting_notarize(
+            let proof = Prover::<D>::serialize_conflicting_notarize(
                 self.view,
                 previous_proposal.parent,
                 &previous_notarize.digest,
@@ -247,7 +253,7 @@ impl<
             .get(&public_key_index)
             .unwrap();
         let finalize_proposal = finalize.message.proposal.as_ref().unwrap();
-        let proof = Prover::serialize_nullify_finalize(
+        let proof = Prover::<D>::serialize_nullify_finalize(
             self.view,
             finalize_proposal.parent,
             &finalize.digest,
@@ -274,7 +280,7 @@ impl<
         let null = self.nullifies.get(&public_key_index);
         if let Some(null) = null {
             // Create fault
-            let proof = Prover::serialize_nullify_finalize(
+            let proof = Prover::<D>::serialize_nullify_finalize(
                 self.view,
                 proposal.parent,
                 &finalize.digest,
@@ -314,7 +320,7 @@ impl<
                 .get(&public_key_index)
                 .unwrap();
             let previous_proposal = previous_finalize.message.proposal.as_ref().unwrap();
-            let proof = Prover::serialize_conflicting_finalize(
+            let proof = Prover::<D>::serialize_conflicting_finalize(
                 self.view,
                 previous_proposal.parent,
                 &previous_finalize.digest,
@@ -455,12 +461,10 @@ impl<
             }
             let proposal_signature = ops::threshold_signature_recover(threshold, notarization)
                 .unwrap()
-                .serialize()
-                .into();
+                .serialize();
             let seed_signature = ops::threshold_signature_recover(threshold, seed)
                 .unwrap()
-                .serialize()
-                .into();
+                .serialize();
 
             // Construct notarization
             let notarization = wire::Notarization {
@@ -506,12 +510,10 @@ impl<
         }
         let view_signature = ops::threshold_signature_recover(threshold, nullification)
             .unwrap()
-            .serialize()
-            .into();
+            .serialize();
         let seed_signature = ops::threshold_signature_recover(threshold, seed)
             .unwrap()
-            .serialize()
-            .into();
+            .serialize();
 
         // Construct nullification
         let nullification = wire::Nullification {
@@ -590,8 +592,7 @@ impl<
             }
             let proposal_signature = ops::threshold_signature_recover(threshold, finalization)
                 .unwrap()
-                .serialize()
-                .into();
+                .serialize();
 
             // Construct finalization
             let finalization = wire::Finalization {
@@ -637,7 +638,7 @@ pub struct Actor<
     B: Blob,
     E: Clock + Rng + Spawner + Storage<B>,
     C: Scheme,
-    D: Digest,
+    D: Array,
     A: Automaton<Digest = D, Context = Context<D>>,
     R: Relay,
     F: Committer<Digest = D>,
@@ -646,6 +647,7 @@ pub struct Actor<
         Seed = group::Signature,
         Index = View,
         Share = group::Share,
+        PublicKey = C::PublicKey,
     >,
 > {
     runtime: E,
@@ -686,7 +688,7 @@ impl<
         B: Blob,
         E: Clock + Rng + Spawner + Storage<B>,
         C: Scheme,
-        D: Digest,
+        D: Array,
         A: Automaton<Digest = D, Context = Context<D>>,
         R: Relay<Digest = D>,
         F: Committer<Digest = D>,
@@ -695,6 +697,7 @@ impl<
             Seed = group::Signature,
             Index = View,
             Share = group::Share,
+            PublicKey = C::PublicKey,
         >,
     > Actor<B, E, C, D, A, R, F, S>
 {
@@ -983,13 +986,10 @@ impl<
         let share = self.supervisor.share(self.view).unwrap();
         let message = nullify_message(self.view);
         let view_signature =
-            ops::partial_sign_message(share, Some(&self.nullify_namespace), &message)
-                .serialize()
-                .into();
+            ops::partial_sign_message(share, Some(&self.nullify_namespace), &message).serialize();
         let message = seed_message(self.view);
-        let seed_signature = ops::partial_sign_message(share, Some(&self.seed_namespace), &message)
-            .serialize()
-            .into();
+        let seed_signature =
+            ops::partial_sign_message(share, Some(&self.seed_namespace), &message).serialize();
         let null = wire::Nullify {
             view: self.view,
             view_signature,
@@ -1020,7 +1020,7 @@ impl<
         debug!(view = self.view, "broadcasted nullify");
     }
 
-    async fn nullify(&mut self, sender: &PublicKey, nullify: wire::Nullify) {
+    async fn nullify(&mut self, sender: &C::PublicKey, nullify: wire::Nullify) {
         // Ensure we are in the right view to process this message
         if !self.interesting(nullify.view, false) {
             return;
@@ -1397,7 +1397,7 @@ impl<
         }
     }
 
-    async fn notarize(&mut self, sender: &PublicKey, notarize: wire::Notarize) {
+    async fn notarize(&mut self, sender: &C::PublicKey, notarize: wire::Notarize) {
         // Extract proposal
         let Some(proposal) = notarize.proposal.as_ref() else {
             return;
@@ -1625,7 +1625,7 @@ impl<
         self.enter_view(view + 1, seed);
     }
 
-    async fn finalize(&mut self, sender: &PublicKey, finalize: wire::Finalize) {
+    async fn finalize(&mut self, sender: &C::PublicKey, finalize: wire::Finalize) {
         // Extract proposal
         let Some(proposal) = finalize.proposal.as_ref() else {
             return;
@@ -1812,13 +1812,10 @@ impl<
             &proposal.digest,
         );
         let proposal_signature =
-            ops::partial_sign_message(share, Some(&self.notarize_namespace), &message)
-                .serialize()
-                .into();
+            ops::partial_sign_message(share, Some(&self.notarize_namespace), &message).serialize();
         let message = seed_message(view);
-        let seed_signature = ops::partial_sign_message(share, Some(&self.seed_namespace), &message)
-            .serialize()
-            .into();
+        let seed_signature =
+            ops::partial_sign_message(share, Some(&self.seed_namespace), &message).serialize();
         round.broadcast_notarize = true;
         Some(Parsed {
             message: wire::Notarize {
@@ -1898,9 +1895,7 @@ impl<
             &proposal.digest,
         );
         let proposal_signature =
-            ops::partial_sign_message(share, Some(&self.finalize_namespace), &message)
-                .serialize()
-                .into();
+            ops::partial_sign_message(share, Some(&self.finalize_namespace), &message).serialize();
         round.broadcast_finalize = true;
         Some(Parsed {
             message: wire::Finalize {
@@ -2155,8 +2150,8 @@ impl<
     pub async fn run(
         mut self,
         mut backfiller: resolver::Mailbox,
-        mut sender: impl Sender,
-        mut receiver: impl Receiver,
+        mut sender: impl Sender<PublicKey = C::PublicKey>,
+        mut receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) {
         // Compute genesis
         let genesis = self.automaton.genesis().await;

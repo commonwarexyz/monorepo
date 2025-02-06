@@ -1,16 +1,16 @@
 use commonware_consensus::{simplex::View, Activity, Proof, Supervisor as Su};
-use commonware_cryptography::PublicKey;
+use commonware_cryptography::Array;
 use std::collections::HashMap;
 
 /// Implementation of `commonware-consensus::Supervisor`.
 #[derive(Clone)]
-pub struct Supervisor {
-    participants: Vec<PublicKey>,
-    participants_map: HashMap<PublicKey, u32>,
+pub struct Supervisor<P: Array> {
+    participants: Vec<P>,
+    participants_map: HashMap<P, u32>,
 }
 
-impl Supervisor {
-    pub fn new(mut participants: Vec<PublicKey>) -> Self {
+impl<P: Array> Supervisor<P> {
+    pub fn new(mut participants: Vec<P>) -> Self {
         // Setup participants
         participants.sort();
         let mut participants_map = HashMap::new();
@@ -26,18 +26,19 @@ impl Supervisor {
     }
 }
 
-impl Su for Supervisor {
+impl<P: Array> Su for Supervisor<P> {
     type Index = View;
+    type PublicKey = P;
 
-    fn leader(&self, index: Self::Index) -> Option<PublicKey> {
+    fn leader(&self, index: Self::Index) -> Option<Self::PublicKey> {
         Some(self.participants[index as usize % self.participants.len()].clone())
     }
 
-    fn participants(&self, _: Self::Index) -> Option<&Vec<PublicKey>> {
+    fn participants(&self, _: Self::Index) -> Option<&Vec<Self::PublicKey>> {
         Some(&self.participants)
     }
 
-    fn is_participant(&self, _: Self::Index, candidate: &PublicKey) -> Option<u32> {
+    fn is_participant(&self, _: Self::Index, candidate: &Self::PublicKey) -> Option<u32> {
         self.participants_map.get(candidate).cloned()
     }
 

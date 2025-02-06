@@ -115,7 +115,7 @@
 //! * Introduce message rebroadcast to continue making progress if messages from a given view are dropped (only way
 //!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
 
-use commonware_cryptography::Digest;
+use commonware_cryptography::Array;
 
 mod encoder;
 mod prover;
@@ -146,7 +146,7 @@ use crate::Activity;
 
 /// Context is a collection of metadata from consensus about a given payload.
 #[derive(Clone)]
-pub struct Context<D: Digest> {
+pub struct Context<D: Array> {
     /// Current view of consensus.
     pub view: View,
 
@@ -179,9 +179,7 @@ pub const NULLIFY_AND_FINALIZE: Activity = 4;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::{
-        sha256::Digest as Sha256Digest, Ed25519, PublicKey, Scheme, Sha256,
-    };
+    use commonware_cryptography::{sha256::Digest as Sha256Digest, Ed25519, Scheme, Sha256};
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{
@@ -205,10 +203,10 @@ mod tests {
     use tracing::debug;
 
     /// Registers all validators using the oracle.
-    async fn register_validators(
-        oracle: &mut Oracle,
-        validators: &[PublicKey],
-    ) -> HashMap<PublicKey, ((Sender, Receiver), (Sender, Receiver))> {
+    async fn register_validators<P: Array>(
+        oracle: &mut Oracle<P>,
+        validators: &[P],
+    ) -> HashMap<P, ((Sender<P>, Receiver<P>), (Sender<P>, Receiver<P>))> {
         let mut registrations = HashMap::new();
         for validator in validators.iter() {
             let (voter_sender, voter_receiver) =
@@ -238,9 +236,9 @@ mod tests {
     /// The `action` parameter determines the action (e.g. link, unlink) to take.
     /// The `restrict_to` function can be used to restrict the linking to certain connections,
     /// otherwise all validators will be linked to all other validators.
-    async fn link_validators(
-        oracle: &mut Oracle,
-        validators: &[PublicKey],
+    async fn link_validators<P: Array>(
+        oracle: &mut Oracle<P>,
+        validators: &[P],
         action: Action,
         restrict_to: Option<fn(usize, usize, usize) -> bool>,
     ) {

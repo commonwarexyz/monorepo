@@ -23,7 +23,10 @@ pub struct Application<R: Rng, C: Scheme, H: Hasher> {
 
 impl<R: Rng, C: Scheme, H: Hasher> Application<R, C, H> {
     /// Create a new application actor.
-    pub fn new(runtime: R, config: Config<C, H>) -> (Self, Supervisor, Mailbox<H::Digest>) {
+    pub fn new(
+        runtime: R,
+        config: Config<C, H>,
+    ) -> (Self, Supervisor<C::PublicKey>, Mailbox<H::Digest>) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
         (
             Self {

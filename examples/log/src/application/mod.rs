@@ -3,7 +3,7 @@
 //! participants are active at a given view.
 
 use commonware_consensus::simplex::Prover;
-use commonware_cryptography::{Hasher, PublicKey, Scheme};
+use commonware_cryptography::{Hasher, Scheme};
 
 mod actor;
 pub use actor::Application;
@@ -19,7 +19,7 @@ pub struct Config<C: Scheme, H: Hasher> {
     pub prover: Prover<C, H::Digest>,
 
     /// Participants active in consensus.
-    pub participants: Vec<PublicKey>,
+    pub participants: Vec<C::PublicKey>,
 
     /// Number of messages from consensus to hold in our backlog
     /// before blocking.

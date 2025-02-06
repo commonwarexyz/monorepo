@@ -100,13 +100,11 @@ impl<
                     let message = nullify_message(view);
                     let view_signature =
                         ops::partial_sign_message(share, Some(&self.nullify_namespace), &message)
-                            .serialize()
-                            .into();
+                            .serialize();
                     let message = seed_message(view);
                     let seed_signature =
                         ops::partial_sign_message(share, Some(&self.seed_namespace), &message)
-                            .serialize()
-                            .into();
+                            .serialize();
                     let n = wire::Nullify {
                         view,
                         view_signature,
@@ -123,8 +121,7 @@ impl<
                     let message = proposal_message(view, proposal.parent, &payload);
                     let proposal_signature =
                         ops::partial_sign_message(share, Some(&self.finalize_namespace), &message)
-                            .serialize()
-                            .into();
+                            .serialize();
                     let f = wire::Finalize {
                         proposal: Some(proposal.clone()),
                         proposal_signature,

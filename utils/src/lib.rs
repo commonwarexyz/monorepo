@@ -97,6 +97,27 @@ pub fn modulo(bytes: &[u8], n: u64) -> u64 {
     result
 }
 
+/// Types with a constant encoded length.
+pub trait SizedSerialize {
+    const SERIALIZED_LEN: usize;
+}
+
+impl SizedSerialize for u8 {
+    const SERIALIZED_LEN: usize = 1;
+}
+
+impl SizedSerialize for u16 {
+    const SERIALIZED_LEN: usize = 2;
+}
+
+impl SizedSerialize for u32 {
+    const SERIALIZED_LEN: usize = 4;
+}
+
+impl SizedSerialize for u64 {
+    const SERIALIZED_LEN: usize = 8;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

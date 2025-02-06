@@ -1,7 +1,8 @@
 use crate::mmr::hasher::Hasher;
 use crate::mmr::iterator::PeakIterator;
 use bytes::{Buf, BufMut};
-use commonware_cryptography::{Digest, Hasher as CHasher};
+use commonware_cryptography::{Array, Hasher as CHasher};
+use commonware_utils::SizedSerialize;
 
 /// A `Proof` contains the information necessary for proving the inclusion of an element, or some
 /// range of elements, in the MMR from its root hash. The `hashes` vector contains: (1) the peak
@@ -104,7 +105,7 @@ impl<H: CHasher> Proof<H> {
 
     /// Return the maximum size in bytes of any serialized `Proof`.
     pub fn max_serialization_size() -> usize {
-        size_of::<u64>() + (u8::MAX as usize * size_of::<H::Digest>())
+        u64::SERIALIZED_LEN + (u8::MAX as usize * H::Digest::SERIALIZED_LEN)
     }
 
     /// Canonically serializes the `Proof` as:
@@ -113,7 +114,7 @@ impl<H: CHasher> Proof<H> {
     ///    [8-...): raw bytes of each hash, each of length `H::len()`
     /// ```
     pub fn serialize(&self) -> Vec<u8> {
-        let bytes_len = size_of::<u64>() + (self.hashes.len() * size_of::<H::Digest>());
+        let bytes_len = u64::SERIALIZED_LEN + (self.hashes.len() * H::Digest::SERIALIZED_LEN);
         let mut bytes = Vec::with_capacity(bytes_len);
         bytes.put_u64(self.size);
 
@@ -134,15 +135,15 @@ impl<H: CHasher> Proof<H> {
     /// Deserializes a canonically encoded `Proof`. See `serialize` for the serialization format.
     pub fn deserialize(bytes: &[u8]) -> Option<Self> {
         let mut buf = bytes;
-        if buf.len() < size_of::<u64>() {
+        if buf.len() < u64::SERIALIZED_LEN {
             return None;
         }
         let size = buf.get_u64();
 
         // A proof should divide neatly into the hash length and not contain more than 255 hashes.
         let buf_remaining = buf.remaining();
-        let hashes_len = buf_remaining / size_of::<H::Digest>();
-        if buf_remaining % size_of::<H::Digest>() != 0 || hashes_len > u8::MAX as usize {
+        let hashes_len = buf_remaining / H::Digest::SERIALIZED_LEN;
+        if buf_remaining % H::Digest::SERIALIZED_LEN != 0 || hashes_len > u8::MAX as usize {
             return None;
         }
         let mut hashes = Vec::with_capacity(hashes_len);
@@ -227,10 +228,12 @@ fn peak_hash_from_range<'a, H: CHasher>(
 mod tests {
     use super::Proof;
     use crate::mmr::mem::Mmr;
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 
     fn test_digest(v: u8) -> Digest {
-        Digest::from([v; size_of::<Digest>()])
+        let mut hasher = Sha256::new();
+        hasher.update(&[v]);
+        hasher.finalize()
     }
 
     #[test]

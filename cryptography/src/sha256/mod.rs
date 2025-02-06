@@ -1,6 +1,7 @@
 //! SHA-256 implementation of the `Hasher` trait.
 
-use crate::{Digest as CDigest, Error, Hasher};
+use crate::{Array, Error, Hasher};
+use commonware_utils::SizedSerialize;
 use rand::{CryptoRng, Rng};
 use sha2::{Digest as _, Sha256 as ISha256};
 use std::ops::Deref;
@@ -67,11 +68,15 @@ impl Hasher for Sha256 {
 #[repr(transparent)]
 pub struct Digest([u8; DIGEST_LENGTH]);
 
-impl CDigest for Digest {}
+impl Array for Digest {}
+
+impl SizedSerialize for Digest {
+    const SERIALIZED_LEN: usize = DIGEST_LENGTH;
+}
 
 impl From<[u8; DIGEST_LENGTH]> for Digest {
     fn from(value: [u8; DIGEST_LENGTH]) -> Self {
-        Digest(value)
+        Self(value)
     }
 }
 
@@ -81,9 +86,9 @@ impl TryFrom<&[u8]> for Digest {
         if value.len() != DIGEST_LENGTH {
             return Err(Error::InvalidDigestLength);
         }
-        let array: &[u8; DIGEST_LENGTH] =
+        let array: [u8; DIGEST_LENGTH] =
             value.try_into().map_err(|_| Error::InvalidDigestLength)?;
-        Ok(Self(*array))
+        Ok(Self(array))
     }
 }
 
@@ -124,12 +129,6 @@ impl Deref for Digest {
     }
 }
 
-impl Default for Digest {
-    fn default() -> Self {
-        Self([0u8; DIGEST_LENGTH])
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,6 +160,6 @@ mod tests {
 
     #[test]
     fn test_sha256_len() {
-        assert_eq!(size_of::<Digest>(), DIGEST_LENGTH);
+        assert_eq!(Digest::SERIALIZED_LEN, DIGEST_LENGTH);
     }
 }

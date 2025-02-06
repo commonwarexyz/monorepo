@@ -6,25 +6,25 @@ use commonware_cryptography::{
         group::{self, Element},
         poly::{self, Poly},
     },
-    PublicKey,
+    Array,
 };
 use commonware_utils::modulo;
 use std::collections::HashMap;
 
 /// Implementation of `commonware-consensus::Supervisor`.
 #[derive(Clone)]
-pub struct Supervisor {
+pub struct Supervisor<P: Array> {
     identity: Poly<group::Public>,
-    participants: Vec<PublicKey>,
-    participants_map: HashMap<PublicKey, u32>,
+    participants: Vec<P>,
+    participants_map: HashMap<P, u32>,
 
     share: group::Share,
 }
 
-impl Supervisor {
+impl<P: Array> Supervisor<P> {
     pub fn new(
         identity: Poly<group::Public>,
-        mut participants: Vec<PublicKey>,
+        mut participants: Vec<P>,
         share: group::Share,
     ) -> Self {
         // Setup participants
@@ -44,18 +44,19 @@ impl Supervisor {
     }
 }
 
-impl Su for Supervisor {
+impl<P: Array> Su for Supervisor<P> {
     type Index = View;
+    type PublicKey = P;
 
-    fn leader(&self, _: Self::Index) -> Option<PublicKey> {
+    fn leader(&self, _: Self::Index) -> Option<Self::PublicKey> {
         unimplemented!("only defined in supertrait")
     }
 
-    fn participants(&self, _: Self::Index) -> Option<&Vec<PublicKey>> {
+    fn participants(&self, _: Self::Index) -> Option<&Vec<Self::PublicKey>> {
         Some(&self.participants)
     }
 
-    fn is_participant(&self, _: Self::Index, candidate: &PublicKey) -> Option<u32> {
+    fn is_participant(&self, _: Self::Index, candidate: &Self::PublicKey) -> Option<u32> {
         self.participants_map.get(candidate).cloned()
     }
 
@@ -65,12 +66,12 @@ impl Su for Supervisor {
     }
 }
 
-impl TSu for Supervisor {
+impl<P: Array> TSu for Supervisor<P> {
     type Seed = group::Signature;
     type Identity = poly::Public;
     type Share = group::Share;
 
-    fn leader(&self, _: Self::Index, seed: Self::Seed) -> Option<PublicKey> {
+    fn leader(&self, _: Self::Index, seed: Self::Seed) -> Option<Self::PublicKey> {
         let seed = seed.serialize();
         let index = modulo(&seed, self.participants.len() as u64);
         Some(self.participants[index as usize].clone())

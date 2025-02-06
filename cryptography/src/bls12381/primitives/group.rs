@@ -20,6 +20,7 @@ use blst::{
     blst_p2_uncompress, blst_scalar, blst_scalar_from_bendian, blst_scalar_from_fr, blst_sk_check,
     Pairing, BLS12_381_G1, BLS12_381_G2, BLS12_381_NEG_G1, BLST_ERROR,
 };
+use commonware_utils::SizedSerialize;
 use rand::RngCore;
 use std::ptr;
 use zeroize::Zeroize;
@@ -194,19 +195,19 @@ impl Share {
 
     /// Canonically serializes the share.
     pub fn serialize(&self) -> Vec<u8> {
-        let mut bytes = [0u8; SCALAR_LENGTH + 4];
-        bytes[..4].copy_from_slice(&self.index.to_be_bytes());
-        bytes[4..].copy_from_slice(&self.private.serialize());
+        let mut bytes = [0u8; u32::SERIALIZED_LEN + SCALAR_LENGTH];
+        bytes[..u32::SERIALIZED_LEN].copy_from_slice(&self.index.to_be_bytes());
+        bytes[u32::SERIALIZED_LEN..].copy_from_slice(&self.private.serialize());
         bytes.to_vec()
     }
 
     /// Deserializes a canonically encoded share.
     pub fn deserialize(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() != SCALAR_LENGTH + 4 {
+        if bytes.len() != u32::SERIALIZED_LEN + SCALAR_LENGTH {
             return None;
         }
         let index = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-        let private = Private::deserialize(&bytes[4..])?;
+        let private = Private::deserialize(&bytes[u32::SERIALIZED_LEN..])?;
         Some(Self { index, private })
     }
 }

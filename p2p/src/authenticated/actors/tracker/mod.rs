@@ -22,7 +22,7 @@ pub struct Config<C: Scheme> {
     pub namespace: Vec<u8>,
     pub registry: Arc<Mutex<Registry>>,
     pub address: SocketAddr,
-    pub bootstrappers: Vec<Bootstrapper>,
+    pub bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
     pub allow_private_ips: bool,
     pub mailbox_size: usize,
     pub synchrony_bound: Duration,

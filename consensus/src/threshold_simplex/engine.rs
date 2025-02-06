@@ -6,7 +6,7 @@ use super::{
 use crate::{Automaton, Committer, Relay, ThresholdSupervisor};
 use commonware_cryptography::{
     bls12381::primitives::{group, poly},
-    Digest, Scheme,
+    Array, Scheme,
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Sender};
@@ -21,7 +21,7 @@ pub struct Engine<
     B: Blob,
     E: Clock + GClock + Rng + CryptoRng + Spawner + Storage<B>,
     C: Scheme,
-    D: Digest,
+    D: Array,
     A: Automaton<Context = Context<D>, Digest = D>,
     R: Relay<Digest = D>,
     F: Committer<Digest = D>,
@@ -30,6 +30,7 @@ pub struct Engine<
         Index = View,
         Share = group::Share,
         Identity = poly::Public,
+        PublicKey = C::PublicKey,
     >,
 > {
     runtime: E,
@@ -44,7 +45,7 @@ impl<
         B: Blob,
         E: Clock + GClock + Rng + CryptoRng + Spawner + Storage<B>,
         C: Scheme,
-        D: Digest,
+        D: Array,
         A: Automaton<Context = Context<D>, Digest = D>,
         R: Relay<Digest = D>,
         F: Committer<Digest = D>,
@@ -53,6 +54,7 @@ impl<
             Index = View,
             Share = group::Share,
             Identity = poly::Public,
+            PublicKey = C::PublicKey,
         >,
     > Engine<B, E, C, D, A, R, F, S>
 {
@@ -116,8 +118,14 @@ impl<
     /// This will also rebuild the state of the engine from provided `Journal`.
     pub async fn run(
         self,
-        voter_network: (impl Sender, impl Receiver),
-        resolver_network: (impl Sender, impl Receiver),
+        voter_network: (
+            impl Sender<PublicKey = C::PublicKey>,
+            impl Receiver<PublicKey = C::PublicKey>,
+        ),
+        resolver_network: (
+            impl Sender<PublicKey = C::PublicKey>,
+            impl Receiver<PublicKey = C::PublicKey>,
+        ),
     ) {
         // Start the voter
         let (voter_sender, voter_receiver) = voter_network;

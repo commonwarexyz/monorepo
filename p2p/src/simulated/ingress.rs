@@ -1,28 +1,29 @@
 use super::{Error, Receiver, Sender};
 use crate::Channel;
-use commonware_cryptography::PublicKey;
+use commonware_cryptography::Array;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
 };
 use rand_distr::Normal;
 
-pub enum Message {
+pub enum Message<P: Array> {
     Register {
-        public_key: PublicKey,
+        public_key: P,
         channel: Channel,
-        result: oneshot::Sender<Result<(Sender, Receiver), Error>>,
+        #[allow(clippy::type_complexity)]
+        result: oneshot::Sender<Result<(Sender<P>, Receiver<P>), Error>>,
     },
     AddLink {
-        sender: PublicKey,
-        receiver: PublicKey,
+        sender: P,
+        receiver: P,
         sampler: Normal<f64>,
         success_rate: f64,
         result: oneshot::Sender<Result<(), Error>>,
     },
     RemoveLink {
-        sender: PublicKey,
-        receiver: PublicKey,
+        sender: P,
+        receiver: P,
         result: oneshot::Sender<Result<(), Error>>,
     },
 }
@@ -48,12 +49,12 @@ pub struct Link {
 /// At any point, peers can be added/removed and links
 /// between said peers can be modified.
 #[derive(Clone)]
-pub struct Oracle {
-    sender: mpsc::UnboundedSender<Message>,
+pub struct Oracle<P: Array> {
+    sender: mpsc::UnboundedSender<Message<P>>,
 }
 
-impl Oracle {
-    pub(crate) fn new(sender: mpsc::UnboundedSender<Message>) -> Self {
+impl<P: Array> Oracle<P> {
+    pub(crate) fn new(sender: mpsc::UnboundedSender<Message<P>>) -> Self {
         Self { sender }
     }
 
@@ -63,9 +64,9 @@ impl Oracle {
     /// registered on a given channel, it will return an error.
     pub async fn register(
         &mut self,
-        public_key: PublicKey,
+        public_key: P,
         channel: Channel,
-    ) -> Result<(Sender, Receiver), Error> {
+    ) -> Result<(Sender<P>, Receiver<P>), Error> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Message::Register {
@@ -82,12 +83,7 @@ impl Oracle {
     ///
     /// Link can be called multiple times for the same sender/receiver. The latest
     /// setting will be used.
-    pub async fn add_link(
-        &mut self,
-        sender: PublicKey,
-        receiver: PublicKey,
-        config: Link,
-    ) -> Result<(), Error> {
+    pub async fn add_link(&mut self, sender: P, receiver: P, config: Link) -> Result<(), Error> {
         // Sanity checks
         if sender == receiver {
             return Err(Error::LinkingSelf);
@@ -121,11 +117,7 @@ impl Oracle {
     /// Remove a unidirectional link between two peers.
     ///
     /// If no link exists, this will return an error.
-    pub async fn remove_link(
-        &mut self,
-        sender: PublicKey,
-        receiver: PublicKey,
-    ) -> Result<(), Error> {
+    pub async fn remove_link(&mut self, sender: P, receiver: P) -> Result<(), Error> {
         // Sanity checks
         if sender == receiver {
             return Err(Error::LinkingSelf);

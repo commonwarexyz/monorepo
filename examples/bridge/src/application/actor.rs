@@ -9,11 +9,11 @@ use bytes::BufMut;
 use commonware_consensus::threshold_simplex::Prover;
 use commonware_cryptography::{
     bls12381::primitives::{group::Element, poly},
-    Hasher,
+    Array, Hasher,
 };
 use commonware_runtime::{Sink, Stream};
 use commonware_stream::{public_key::Connection, Receiver, Sender};
-use commonware_utils::hex;
+use commonware_utils::{hex, SizedSerialize};
 use futures::{channel::mpsc, StreamExt};
 use prost::Message as _;
 use rand::Rng;
@@ -36,7 +36,10 @@ pub struct Application<R: Rng, H: Hasher, Si: Sink, St: Stream> {
 
 impl<R: Rng, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St> {
     /// Create a new application actor.
-    pub fn new(runtime: R, config: Config<H, Si, St>) -> (Self, Supervisor, Mailbox<H::Digest>) {
+    pub fn new<P: Array>(
+        runtime: R,
+        config: Config<H, Si, St, P>,
+    ) -> (Self, Supervisor<P>, Mailbox<H::Digest>) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
         (
             Self {
@@ -110,7 +113,7 @@ impl<R: Rng, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St> {
                                 .expect("indexer is corrupt");
 
                             // Use certificate as message
-                            let mut msg = Vec::with_capacity(1 + proof.len());
+                            let mut msg = Vec::with_capacity(u8::SERIALIZED_LEN + proof.len());
                             msg.put_u8(1);
                             msg.extend(proof);
                             msg
