@@ -308,6 +308,7 @@ mod tests {
     fn spawn_invalid_signature_proposer(
         runtime: &Context,
         mailboxes: Arc<Mutex<HashMap<PublicKey, mocks::application::Mailbox<Sha256Digest>>>>,
+        invalid_when: fn(u64) -> bool,
     ) {
         runtime.clone().spawn("invalid signature proposer", {
             let runtime = runtime.clone();
@@ -321,7 +322,7 @@ mod tests {
                     };
                     for mut mailbox in mailbox_vec {
                         let payload = Bytes::from(format!("hello world, iter {}", iter));
-                        let digest = if iter == 5 {
+                        let digest = if invalid_when(iter) {
                             Sha256Digest::default()
                         } else {
                             let mut hasher = Sha256::default();
@@ -553,11 +554,11 @@ mod tests {
         });
     }
 
-    #[test_traced]
+    #[test]
     fn test_delayed_delivery() {
         let num_validators: u32 = 4;
         let quorum: u32 = 3;
-        let (runner, mut context, _) = Executor::timed(Duration::from_secs(30));
+        let (runner, mut context, _) = Executor::timed(Duration::from_secs(40));
         let (identity, mut shares_vec) =
             ops::generate_shares(&mut context, None, num_validators, quorum);
         shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
@@ -565,14 +566,15 @@ mod tests {
         runner.start({
             let context = context.clone();
             async move {
-                let (mut oracle, validators, pks, mut registrations) =
+                let (oracle, validators, pks, mut registrations) =
                     initialize_simulation(&context, num_validators, &mut shares_vec).await;
                 let delayed_link = Link {
-                    latency: 10.0,
-                    jitter: 1.0,
-                    success_rate: 0.8,
+                    latency: 50.0,
+                    jitter: 40.0,
+                    success_rate: 0.5,
                 };
-                link_validators(&mut oracle, &pks, Action::Update(delayed_link), None).await;
+                let mut oracle_clone = oracle.clone();
+                link_validators(&mut oracle_clone, &pks, Action::Update(delayed_link), None).await;
 
                 let mailboxes = Arc::new(Mutex::new(HashMap::<
                     PublicKey,
@@ -589,11 +591,11 @@ mod tests {
                     &mut mailboxes.lock().unwrap(),
                     &mut collectors,
                     Duration::from_millis(100),
-                    Duration::from_secs(5),
+                    Duration::from_millis(150),
                 );
 
                 spawn_proposer(&context, mailboxes.clone());
-                await_collectors(&context, &collectors, 100, num_validators as usize).await;
+                await_collectors(&context, &collectors, 40, num_validators as usize).await;
             }
         });
     }
@@ -630,7 +632,7 @@ mod tests {
                     Duration::from_secs(5),
                 );
 
-                spawn_invalid_signature_proposer(&context, mailboxes.clone());
+                spawn_invalid_signature_proposer(&context, mailboxes.clone(), |i| i % 10 == 0);
                 await_collectors(&context, &collectors, 100, num_validators as usize).await;
             }
         });

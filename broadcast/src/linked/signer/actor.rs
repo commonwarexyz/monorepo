@@ -809,7 +809,7 @@ impl<
 
         // Spam prevention: If the ack is for a height that is too old or too new, ignore.
         {
-            let bound_lo = self.tip_manager.get_height(sender).unwrap_or(0);
+            let bound_lo = self.tip_manager.get_height(&chunk.sequencer).unwrap_or(0);
             let bound_hi = bound_lo + self.height_bound;
             if chunk.height < bound_lo || chunk.height > bound_hi {
                 return Err(Error::AckHeightOutsideBounds(
