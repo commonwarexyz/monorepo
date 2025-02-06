@@ -17,7 +17,7 @@ pub fn create_handshake<C: Scheme>(
 ) -> Result<Bytes, Error> {
     // Sign their public key
     let ephemeral_public_key_bytes = ephemeral_public_key.as_bytes();
-    let payload_len = recipient_public_key.len()
+    let payload_len = C::PublicKey::ENCODED_LEN
         + ephemeral_public_key_bytes.len()
         + <u64 as Serializable>::ENCODED_LEN;
     let mut payload = Vec::with_capacity(payload_len);
@@ -94,7 +94,7 @@ impl<C: Scheme> Handshake<C> {
             .map_err(|_| Error::InvalidPeerPublicKey)?;
 
         // Construct signing payload (ephemeral public key + my public key + timestamp)
-        let payload_len = our_public_key.len()
+        let payload_len = C::PublicKey::ENCODED_LEN
             + handshake.ephemeral_public_key.len()
             + <u64 as Serializable>::ENCODED_LEN;
         let mut payload = Vec::with_capacity(payload_len);
@@ -105,11 +105,9 @@ impl<C: Scheme> Handshake<C> {
         // Verify signature
         let signature =
             C::Signature::try_from(signature.signature).map_err(|_| Error::InvalidSignature)?;
-
         if !C::verify(Some(namespace), &payload, &public_key, &signature) {
             return Err(Error::InvalidSignature);
         }
-
         Ok(Self {
             ephemeral_public_key,
             peer_public_key: public_key,
