@@ -33,7 +33,7 @@ use std::{
 use tracing::{error, trace};
 
 /// Task type representing a message to be sent within the network.
-type Task<Pk> = (Channel, Pk, Recipients<Pk>, Bytes, oneshot::Sender<Vec<Pk>>);
+type Task<P> = (Channel, P, Recipients<P>, Bytes, oneshot::Sender<Vec<P>>);
 
 /// Configuration for the simulated network.
 pub struct Config {
@@ -478,7 +478,7 @@ impl<P: Octets> crate::Sender for Sender<P> {
     }
 }
 
-type MessageReceiver<Pk> = mpsc::UnboundedReceiver<Message<Pk>>;
+type MessageReceiver<P> = mpsc::UnboundedReceiver<Message<P>>;
 type MessageReceiverResult<P> = Result<MessageReceiver<P>, Error>;
 
 /// Implementation of a [`crate::Receiver`] for the simulated network.

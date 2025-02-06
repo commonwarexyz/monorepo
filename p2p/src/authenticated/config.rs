@@ -9,7 +9,7 @@ use std::{
 };
 
 /// Known peer and its accompanying address that will be dialed on startup.
-pub type Bootstrapper<Pk> = (Pk, SocketAddr);
+pub type Bootstrapper<P> = (P, SocketAddr);
 
 /// Configuration for the peer-to-peer instance.
 ///

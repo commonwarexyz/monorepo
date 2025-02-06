@@ -19,7 +19,7 @@ pub mod utils;
 ///
 /// This message is guaranteed to adhere to the configuration of the channel and
 /// will already be decrypted and authenticated.
-pub type Message<Pk> = (Pk, Bytes);
+pub type Message<P> = (P, Bytes);
 
 /// Alias for identifying communication channels.
 pub type Channel = u32;
