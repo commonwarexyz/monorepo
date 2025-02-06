@@ -82,10 +82,8 @@ impl<C: Scheme, D: Octets> Prover<C, D> {
         let view = proof.get_u64();
         let parent = proof.get_u64();
         let payload = D::read_from(&mut proof).ok()?;
-        let public_key =
-            C::PublicKey::try_from(proof.copy_to_bytes(size_of::<C::PublicKey>()).as_ref()).ok()?;
-        let signature =
-            C::Signature::try_from(proof.copy_to_bytes(size_of::<C::Signature>()).as_ref()).ok()?;
+        let public_key = C::PublicKey::read_from(&mut proof).ok()?;
+        let signature = C::Signature::read_from(&mut proof).ok()?;
 
         // Verify signature
         let proposal_message = proposal_message(view, parent, &payload);
@@ -157,9 +155,7 @@ impl<C: Scheme, D: Octets> Prover<C, D> {
         let mut seen = HashSet::with_capacity(count);
         for _ in 0..count {
             // Check if already saw public key
-            let public_key =
-                C::PublicKey::try_from(proof.copy_to_bytes(size_of::<C::PublicKey>()).as_ref())
-                    .ok()?;
+            let public_key = C::PublicKey::read_from(&mut proof).ok()?;
             if seen.contains(&public_key) {
                 return None;
             }
@@ -167,9 +163,7 @@ impl<C: Scheme, D: Octets> Prover<C, D> {
 
             // Verify signature
             if check_sigs {
-                let signature =
-                    C::Signature::try_from(proof.copy_to_bytes(size_of::<C::Signature>()).as_ref())
-                        .ok()?;
+                let signature = C::Signature::read_from(&mut proof).ok()?;
                 if !C::verify(Some(namespace), &message, &public_key, &signature) {
                     return None;
                 }
@@ -271,16 +265,13 @@ impl<C: Scheme, D: Octets> Prover<C, D> {
 
         // Decode proof
         let view = proof.get_u64();
-        let public_key =
-            C::PublicKey::try_from(proof.copy_to_bytes(size_of::<C::PublicKey>()).as_ref()).ok()?;
+        let public_key = C::PublicKey::read_from(&mut proof).ok()?;
         let parent_1 = proof.get_u64();
         let payload_1 = D::read_from(&mut proof).ok()?;
-        let signature_1 =
-            C::Signature::try_from(proof.copy_to_bytes(size_of::<C::Signature>()).as_ref()).ok()?;
+        let signature_1 = C::Signature::read_from(&mut proof).ok()?;
         let parent_2 = proof.get_u64();
         let payload_2 = D::read_from(&mut proof).ok()?;
-        let signature_2 =
-            C::Signature::try_from(proof.copy_to_bytes(size_of::<C::Signature>()).as_ref()).ok()?;
+        let signature_2 = C::Signature::read_from(&mut proof).ok()?;
 
         // Verify signatures
         if check_sig {
@@ -416,14 +407,11 @@ impl<C: Scheme, D: Octets> Prover<C, D> {
 
         // Decode proof
         let view = proof.get_u64();
-        let public_key =
-            C::PublicKey::try_from(proof.copy_to_bytes(size_of::<C::PublicKey>()).as_ref()).ok()?;
+        let public_key = C::PublicKey::read_from(&mut proof).ok()?;
         let parent = proof.get_u64();
         let payload = D::read_from(&mut proof).ok()?;
-        let signature_finalize =
-            C::Signature::try_from(proof.copy_to_bytes(size_of::<C::Signature>()).as_ref()).ok()?;
-        let signature_null =
-            C::Signature::try_from(proof.copy_to_bytes(size_of::<C::Signature>()).as_ref()).ok()?;
+        let signature_finalize = C::Signature::read_from(&mut proof).ok()?;
+        let signature_null = C::Signature::read_from(&mut proof).ok()?;
 
         // Verify signatures
         if check_sig {
