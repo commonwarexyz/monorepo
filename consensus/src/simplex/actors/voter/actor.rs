@@ -848,14 +848,14 @@ impl<
 
         // Verify the signature
         let nullify_message = nullify_message(nullify.view);
-        let Ok(sig) = C::Signature::try_from(&signature.signature) else {
+        let Ok(signature) = C::Signature::try_from(&signature.signature) else {
             return;
         };
         if !C::verify(
             Some(&self.nullify_namespace),
             &nullify_message,
             &public_key,
-            &sig,
+            &signature,
         ) {
             return;
         }
@@ -1189,7 +1189,7 @@ impl<
             return;
         };
 
-        let Ok(sig) = C::Signature::try_from(&signature.signature) else {
+        let Ok(signature) = C::Signature::try_from(&signature.signature) else {
             return;
         };
         // Verify the signature
@@ -1198,7 +1198,7 @@ impl<
             Some(&self.notarize_namespace),
             &notarize_message,
             &public_key,
-            &sig,
+            &signature,
         ) {
             return;
         }
@@ -1442,7 +1442,7 @@ impl<
             return;
         };
 
-        let Ok(sig) = C::Signature::try_from(&signature.signature) else {
+        let Ok(signature) = C::Signature::try_from(&signature.signature) else {
             return;
         };
         // Verify the signature
@@ -1451,7 +1451,7 @@ impl<
             Some(&self.finalize_namespace),
             &finalize_message,
             &public_key,
-            &sig,
+            &signature,
         ) {
             return;
         }
