@@ -379,7 +379,7 @@ mod tests {
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
                     relay: relay.clone(),
-                    participant: validator.clone().clone(),
+                    participant: validator.clone(),
                     tracker: done_sender.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
