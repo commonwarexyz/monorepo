@@ -1,7 +1,7 @@
 //! SHA-256 implementation of the `Hasher` trait.
 
 use crate::{Error, Hasher, Octets};
-use commonware_utils::Serializable;
+use commonware_utils::SizedSerialize;
 use rand::{CryptoRng, Rng};
 use sha2::{Digest as _, Sha256 as ISha256};
 use std::ops::Deref;
@@ -70,8 +70,8 @@ pub struct Digest([u8; DIGEST_LENGTH]);
 
 impl Octets for Digest {}
 
-impl Serializable for Digest {
-    const ENCODED_LEN: usize = DIGEST_LENGTH;
+impl SizedSerialize for Digest {
+    const SERIALIZED_LEN: usize = DIGEST_LENGTH;
 }
 
 impl From<[u8; DIGEST_LENGTH]> for Digest {
@@ -160,6 +160,6 @@ mod tests {
 
     #[test]
     fn test_sha256_len() {
-        assert_eq!(Digest::ENCODED_LEN, DIGEST_LENGTH);
+        assert_eq!(Digest::SERIALIZED_LEN, DIGEST_LENGTH);
     }
 }

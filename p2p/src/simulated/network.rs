@@ -13,7 +13,7 @@ use commonware_runtime::{
     Clock, Listener as _, Network as RNetwork, Spawner,
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
-use commonware_utils::{hex, Serializable};
+use commonware_utils::{hex, SizedSerialize};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
@@ -613,9 +613,9 @@ impl<P: Octets> Peer<P> {
                             // Continually receive messages from the dialer and send them to the inbox
                             while let Ok(data) = recv_frame(&mut stream, max_size).await {
                                 let channel = Channel::from_be_bytes(
-                                    data[..Channel::ENCODED_LEN].try_into().unwrap(),
+                                    data[..Channel::SERIALIZED_LEN].try_into().unwrap(),
                                 );
-                                let message = data.slice(Channel::ENCODED_LEN..);
+                                let message = data.slice(Channel::SERIALIZED_LEN..);
                                 if let Err(err) = inbox_sender
                                     .send((channel, (dialer.clone(), message)))
                                     .await
@@ -691,7 +691,7 @@ impl Link {
                 // For any item placed in the inbox, send it to the sink
                 while let Some((channel, message)) = outbox.next().await {
                     let mut data =
-                        bytes::BytesMut::with_capacity(Channel::ENCODED_LEN + message.len());
+                        bytes::BytesMut::with_capacity(Channel::SERIALIZED_LEN + message.len());
                     data.extend_from_slice(&channel.to_be_bytes());
                     data.extend_from_slice(&message);
                     let data = data.freeze();

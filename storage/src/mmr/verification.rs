@@ -2,7 +2,7 @@ use crate::mmr::hasher::Hasher;
 use crate::mmr::iterator::PeakIterator;
 use bytes::{Buf, BufMut};
 use commonware_cryptography::{Hasher as CHasher, Octets};
-use commonware_utils::Serializable;
+use commonware_utils::SizedSerialize;
 
 /// A `Proof` contains the information necessary for proving the inclusion of an element, or some
 /// range of elements, in the MMR from its root hash. The `hashes` vector contains: (1) the peak
@@ -105,7 +105,7 @@ impl<H: CHasher> Proof<H> {
 
     /// Return the maximum size in bytes of any serialized `Proof`.
     pub fn max_serialization_size() -> usize {
-        u64::ENCODED_LEN + (u8::MAX as usize * H::Digest::ENCODED_LEN)
+        u64::SERIALIZED_LEN + (u8::MAX as usize * H::Digest::SERIALIZED_LEN)
     }
 
     /// Canonically serializes the `Proof` as:
@@ -114,7 +114,7 @@ impl<H: CHasher> Proof<H> {
     ///    [8-...): raw bytes of each hash, each of length `H::len()`
     /// ```
     pub fn serialize(&self) -> Vec<u8> {
-        let bytes_len = u64::ENCODED_LEN + (self.hashes.len() * H::Digest::ENCODED_LEN);
+        let bytes_len = u64::SERIALIZED_LEN + (self.hashes.len() * H::Digest::SERIALIZED_LEN);
         let mut bytes = Vec::with_capacity(bytes_len);
         bytes.put_u64(self.size);
 
@@ -135,15 +135,15 @@ impl<H: CHasher> Proof<H> {
     /// Deserializes a canonically encoded `Proof`. See `serialize` for the serialization format.
     pub fn deserialize(bytes: &[u8]) -> Option<Self> {
         let mut buf = bytes;
-        if buf.len() < u64::ENCODED_LEN {
+        if buf.len() < u64::SERIALIZED_LEN {
             return None;
         }
         let size = buf.get_u64();
 
         // A proof should divide neatly into the hash length and not contain more than 255 hashes.
         let buf_remaining = buf.remaining();
-        let hashes_len = buf_remaining / H::Digest::ENCODED_LEN;
-        if buf_remaining % H::Digest::ENCODED_LEN != 0 || hashes_len > u8::MAX as usize {
+        let hashes_len = buf_remaining / H::Digest::SERIALIZED_LEN;
+        if buf_remaining % H::Digest::SERIALIZED_LEN != 0 || hashes_len > u8::MAX as usize {
             return None;
         }
         let mut hashes = Vec::with_capacity(hashes_len);

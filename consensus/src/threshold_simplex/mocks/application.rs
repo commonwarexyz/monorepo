@@ -4,7 +4,7 @@ use bytes::{Buf, BufMut, Bytes};
 use commonware_cryptography::{Hasher, Octets};
 use commonware_macros::select;
 use commonware_runtime::Clock;
-use commonware_utils::{hex, Serializable};
+use commonware_utils::{hex, SizedSerialize};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
@@ -229,7 +229,7 @@ impl<E: Clock + RngCore, H: Hasher, P: Octets> Application<E, H, P> {
             .await;
 
         // Generate the payload
-        let payload_len = u64::ENCODED_LEN + H::Digest::ENCODED_LEN + u64::ENCODED_LEN;
+        let payload_len = u64::SERIALIZED_LEN + H::Digest::SERIALIZED_LEN + u64::SERIALIZED_LEN;
         let mut payload = Vec::with_capacity(payload_len);
         payload.put_u64(context.view);
         payload.extend_from_slice(&context.parent.1);

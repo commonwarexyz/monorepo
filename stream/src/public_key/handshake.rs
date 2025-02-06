@@ -4,7 +4,7 @@ use bytes::{BufMut, Bytes};
 use commonware_cryptography::Scheme;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Sink, Spawner, Stream};
-use commonware_utils::{Serializable, SystemTimeExt};
+use commonware_utils::{SizedSerialize, SystemTimeExt};
 use prost::Message;
 use std::time::{Duration, SystemTime};
 
@@ -17,9 +17,8 @@ pub fn create_handshake<C: Scheme>(
 ) -> Result<Bytes, Error> {
     // Sign their public key
     let ephemeral_public_key_bytes = ephemeral_public_key.as_bytes();
-    let payload_len = C::PublicKey::ENCODED_LEN
-        + ephemeral_public_key_bytes.len()
-        + <u64 as Serializable>::ENCODED_LEN;
+    let payload_len =
+        C::PublicKey::SERIALIZED_LEN + ephemeral_public_key_bytes.len() + u64::SERIALIZED_LEN;
     let mut payload = Vec::with_capacity(payload_len);
     payload.extend_from_slice(&recipient_public_key);
     payload.extend_from_slice(ephemeral_public_key_bytes);
@@ -94,9 +93,9 @@ impl<C: Scheme> Handshake<C> {
             .map_err(|_| Error::InvalidPeerPublicKey)?;
 
         // Construct signing payload (ephemeral public key + my public key + timestamp)
-        let payload_len = C::PublicKey::ENCODED_LEN
+        let payload_len = C::PublicKey::SERIALIZED_LEN
             + handshake.ephemeral_public_key.len()
-            + <u64 as Serializable>::ENCODED_LEN;
+            + u64::SERIALIZED_LEN;
         let mut payload = Vec::with_capacity(payload_len);
         payload.extend_from_slice(&our_public_key);
         payload.extend_from_slice(&handshake.ephemeral_public_key);

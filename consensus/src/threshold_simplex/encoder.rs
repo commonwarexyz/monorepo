@@ -1,7 +1,7 @@
 use super::View;
 use bytes::BufMut;
 use commonware_cryptography::Octets;
-use commonware_utils::{union, Serializable};
+use commonware_utils::{union, SizedSerialize};
 
 pub const SEED_SUFFIX: &[u8] = b"_SEED";
 pub const NOTARIZE_SUFFIX: &[u8] = b"_NOTARIZE";
@@ -9,7 +9,7 @@ pub const NULLIFY_SUFFIX: &[u8] = b"_NULLIFY";
 pub const FINALIZE_SUFFIX: &[u8] = b"_FINALIZE";
 
 pub fn proposal_message<D: Octets>(view: View, parent: View, payload: &D) -> Vec<u8> {
-    let mut msg = Vec::with_capacity(u64::ENCODED_LEN + u64::ENCODED_LEN + D::ENCODED_LEN);
+    let mut msg = Vec::with_capacity(u64::SERIALIZED_LEN + u64::SERIALIZED_LEN + D::SERIALIZED_LEN);
     msg.put_u64(view);
     msg.put_u64(parent);
     msg.extend_from_slice(payload);

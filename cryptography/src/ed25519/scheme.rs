@@ -1,5 +1,5 @@
 use crate::{BatchScheme, Error, Octets, Scheme};
-use commonware_utils::{union_unique, Serializable};
+use commonware_utils::{union_unique, SizedSerialize};
 use ed25519_consensus::{self, VerificationKey};
 use rand::{CryptoRng, Rng, RngCore};
 use std::borrow::Cow;
@@ -116,8 +116,8 @@ pub struct PrivateKey {
 
 impl Octets for PrivateKey {}
 
-impl Serializable for PrivateKey {
-    const ENCODED_LEN: usize = PRIVATE_KEY_LENGTH;
+impl SizedSerialize for PrivateKey {
+    const SERIALIZED_LEN: usize = PRIVATE_KEY_LENGTH;
 }
 
 impl Eq for PrivateKey {}
@@ -199,8 +199,8 @@ pub struct PublicKey {
 
 impl Octets for PublicKey {}
 
-impl Serializable for PublicKey {
-    const ENCODED_LEN: usize = PUBLIC_KEY_LENGTH;
+impl SizedSerialize for PublicKey {
+    const SERIALIZED_LEN: usize = PUBLIC_KEY_LENGTH;
 }
 
 impl AsRef<[u8]> for PublicKey {
@@ -256,8 +256,8 @@ pub struct Signature {
 
 impl Octets for Signature {}
 
-impl Serializable for Signature {
-    const ENCODED_LEN: usize = SIGNATURE_LENGTH;
+impl SizedSerialize for Signature {
+    const SERIALIZED_LEN: usize = SIGNATURE_LENGTH;
 }
 
 impl std::hash::Hash for Signature {
