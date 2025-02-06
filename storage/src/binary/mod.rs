@@ -46,6 +46,8 @@ pub struct Tree<H: Hasher> {
     /// Number of leaves in the tree.
     leaves: u32,
 
+    root: H::Digest,
+
     /// Levels of the tree: level 0 contains the leaves, and each subsequent level
     /// contains the parent nodes computed from the previous level.
     ///
@@ -64,43 +66,32 @@ impl<H: Hasher> Tree<H> {
         }
 
         // Level 0: the leaves.
-        let leaves_len: u32 = leaves.len().try_into().ok()?;
         let mut levels = Vec::new();
         levels.push(leaves);
 
         // Build higher levels until we reach the root.
         let mut pos = 0u32;
-        // FIXME: if there is only 1 item, we don't encode root with size
         while levels.last().unwrap().len() > 1 {
             let current_level = levels.last().unwrap();
             let next_level_len = (current_level.len() + 1) / 2;
             let mut next_level = Vec::with_capacity(next_level_len);
             for chunk in current_level.chunks(2) {
-                // Select the left and right children of the current chunk.
+                // Hash the left child
                 let left = &chunk[0];
+                hasher.update(&pos.to_be_bytes());
+                hasher.update(left);
+                pos += 1;
+
+                // Hash the right child
                 let right = if chunk.len() == 2 {
                     &chunk[1]
                 } else {
                     // If the chunk has an odd number of nodes, use a duplicate of the left child.
                     &chunk[0]
                 };
-
-                // If first level, combine leaves with positional data.
-                if levels.len() == 1 {
-                    hasher.update(&pos.to_be_bytes());
-                    pos += 1;
-                    hasher.update(&pos.to_be_bytes());
-                    pos += 1;
-                }
-
-                // Combine the children into a parent node.
-                hasher.update(left);
+                hasher.update(&pos.to_be_bytes());
                 hasher.update(right);
-
-                // If this will be the root, encode the number of leaves in the tree.
-                if next_level_len == 1 {
-                    hasher.update(&leaves_len.to_be_bytes());
-                }
+                pos += 1;
 
                 // Reset the hasher for the next iteration.
                 next_level.push(hasher.finalize());
@@ -110,22 +101,27 @@ impl<H: Hasher> Tree<H> {
             levels.push(next_level);
         }
 
+        // Hash the root with the number of leaves in the tree
+        hasher.update(&pos.to_be_bytes());
+        hasher.update(levels.last().unwrap().first().unwrap());
+        let root = hasher.finalize();
         Some(Self {
-            leaves: leaves_len,
+            leaves: pos,
+            root,
             levels,
         })
     }
 
     /// Returns a reference to the Merkle root, if the tree is non-empty.
     pub fn root(&self) -> H::Digest {
-        self.levels.last().unwrap().first().unwrap().clone()
+        self.root.clone()
     }
 
     /// Generates a Merkle proof for the leaf at `leaf_index`.
     ///
     /// The proof contains the sibling hash at each level needed to reconstruct the root.
     pub fn prove(&self, leaf_index: u32) -> Option<Proof<H>> {
-        if leaf_index >= self.leaves {
+        if leaf_index > self.leaves {
             return None;
         }
 
@@ -134,14 +130,15 @@ impl<H: Hasher> Tree<H> {
         let mut index = leaf_index;
         for level in &self.levels {
             if level.len() == 1 {
-                break; // Reached the root.
+                // Reached the root
+                break;
             }
             let sibling_index = if index % 2 == 0 { index + 1 } else { index - 1 };
             let sibling_index = sibling_index as usize;
             let sibling = if sibling_index < level.len() {
                 level[sibling_index].clone()
             } else {
-                // Use a duplicate of the current node if no right child exists.
+                // If no right child exists, use a duplicate of the current node.
                 level[index as usize].clone()
             };
             proof_hashes.push(sibling);
@@ -189,42 +186,36 @@ impl<H: Hasher> Proof<H> {
         root_hash: &H::Digest,
     ) -> bool {
         // Ensure element isn't past allowed
-        if element_pos >= self.leaves {
+        if element_pos > self.leaves {
             return false;
         }
 
         // Compute the root hash by combining the element with each sibling hash in the proof.
         let mut computed = element.clone();
         let mut index = element_pos;
-        let last = self.hashes.len() - 1;
-        for (i, sibling) in self.hashes.iter().enumerate() {
-            // If first level, combine leaves with positional data.
-            if i == 0 {
-                let mut start = if index % 2 == 0 { index } else { index - 1 };
-                hasher.update(&start.to_be_bytes());
-                start += 1;
-                hasher.update(&start.to_be_bytes());
-            }
-
+        for sibling in self.hashes.iter() {
             // Combine the children into a parent node.
             if index % 2 == 0 {
+                hasher.update(&index.to_be_bytes());
                 hasher.update(&computed);
+                hasher.update(&(index + 1).to_be_bytes());
                 hasher.update(sibling);
             } else {
+                hasher.update(&(index - 1).to_be_bytes());
                 hasher.update(sibling);
+                hasher.update(&index.to_be_bytes());
                 hasher.update(&computed);
-            }
-
-            // If this will be the root, encode the number of leaves in the tree.
-            if i == last {
-                hasher.update(&self.leaves.to_be_bytes());
             }
 
             // Compute the parent hash.
             computed = hasher.finalize();
             index /= 2;
         }
-        computed == *root_hash
+
+        // Hash the root with the number of leaves in the tree
+        hasher.update(&(self.leaves).to_be_bytes());
+        hasher.update(&computed);
+        hasher.finalize() == *root_hash
     }
 
     /// Returns the maximum number of bytes any serialized proof may occupy.
@@ -296,13 +287,12 @@ mod tests {
         let leaf = hash(tx);
         let mut hasher = Sha256::default();
         let tree = Tree::new(&mut hasher, vec![leaf.clone()]).unwrap();
-
-        // The root should equal the only leaf.
-        assert_eq!(tree.root(), leaf);
+        let root = tree.root();
+        println!("{:?}", root);
 
         // Proof verification: a single-element tree proof verifies against the leaf itself.
         let proof = tree.prove(0).unwrap();
-        assert!(proof.verify(&mut hasher, &leaf, 0, &leaf));
+        assert!(proof.verify(&mut hasher, &leaf, 0, &root));
     }
 
     #[test]
@@ -312,16 +302,14 @@ mod tests {
         let leaf = hash(tx);
         let mut hasher = Sha256::default();
         let tree = Tree::new(&mut hasher, vec![leaf.clone()]).unwrap();
-
-        // The root should equal the only leaf.
-        assert_eq!(tree.root(), leaf);
+        let root = tree.root();
 
         // Generate a proof and tamper with it
         let mut proof = tree.prove(0).unwrap();
         proof.leaves = 100;
 
         // Proof verification should fail with a tampered proof.
-        assert!(!proof.verify(&mut hasher, &leaf, 0, &leaf));
+        assert!(!proof.verify(&mut hasher, &leaf, 0, &root));
     }
 
     #[test]
