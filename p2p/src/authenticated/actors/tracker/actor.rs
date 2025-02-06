@@ -420,10 +420,9 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
                 return Err(Error::ReceivedSelf);
             }
 
+            // If any signature is invalid, disconnect from the peer
             let signature = C::Signature::try_from(&signature.signature)
                 .map_err(|_| Error::InvalidSignature)?;
-
-            // If any signature is invalid, disconnect from the peer
             let payload = wire_peer_payload(&peer);
             if !C::verify(Some(&self.ip_namespace), &payload, &public_key, &signature) {
                 return Err(Error::InvalidSignature);
