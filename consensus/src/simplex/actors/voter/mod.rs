@@ -5,7 +5,7 @@ use crate::simplex::Context;
 use crate::{simplex::View, Automaton, Supervisor};
 use crate::{Committer, Relay};
 pub use actor::Actor;
-use commonware_cryptography::{Octets, Scheme};
+use commonware_cryptography::{FormattedBytes, Scheme};
 pub use ingress::{Mailbox, Message};
 use prometheus_client::registry::Registry;
 use std::sync::{Arc, Mutex};
@@ -13,7 +13,7 @@ use std::time::Duration;
 
 pub struct Config<
     C: Scheme,
-    D: Octets,
+    D: FormattedBytes,
     A: Automaton<Context = Context<D>, Digest = D>,
     R: Relay<Digest = D>,
     F: Committer<Digest = D>,

@@ -1,4 +1,4 @@
-use crate::{Error, Octets, Scheme};
+use crate::{Error, FormattedBytes, Scheme};
 use commonware_utils::{union_unique, SizedSerialize};
 use p256::{
     ecdsa::{
@@ -85,7 +85,7 @@ pub struct PrivateKey {
     key: SigningKey,
 }
 
-impl Octets for PrivateKey {}
+impl FormattedBytes for PrivateKey {}
 
 impl SizedSerialize for PrivateKey {
     const SERIALIZED_LEN: usize = PRIVATE_KEY_LENGTH;
@@ -160,7 +160,7 @@ pub struct PublicKey {
     key: VerifyingKey,
 }
 
-impl Octets for PublicKey {}
+impl FormattedBytes for PublicKey {}
 
 impl SizedSerialize for PublicKey {
     const SERIALIZED_LEN: usize = PUBLIC_KEY_LENGTH;
@@ -224,7 +224,7 @@ pub struct Signature {
     signature: p256::ecdsa::Signature,
 }
 
-impl Octets for Signature {}
+impl FormattedBytes for Signature {}
 
 impl SizedSerialize for Signature {
     const SERIALIZED_LEN: usize = SIGNATURE_LENGTH;

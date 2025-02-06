@@ -41,7 +41,7 @@ use crate::{
         dkg::{ops, Error},
         primitives::{group::Share, poly},
     },
-    Octets,
+    FormattedBytes,
 };
 use commonware_utils::{max_faults, quorum};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -60,7 +60,7 @@ pub struct Output {
 }
 
 /// Gather commitments, acknowledgements, and reveals from all dealers.
-pub struct Arbiter<P: Octets> {
+pub struct Arbiter<P: FormattedBytes> {
     previous: Option<poly::Public>,
     dealer_threshold: u32,
     player_threshold: u32,
@@ -73,7 +73,7 @@ pub struct Arbiter<P: Octets> {
     disqualified: HashSet<P>,
 }
 
-impl<P: Octets> Arbiter<P> {
+impl<P: FormattedBytes> Arbiter<P> {
     /// Create a new arbiter for a DKG/Resharing procedure.
     pub fn new(
         previous: Option<poly::Public>,

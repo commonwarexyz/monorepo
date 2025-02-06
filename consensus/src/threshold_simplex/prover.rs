@@ -13,7 +13,7 @@ use commonware_cryptography::{
         ops,
         poly::{self, Eval},
     },
-    Octets,
+    FormattedBytes,
 };
 use commonware_utils::SizedSerialize;
 use std::marker::PhantomData;
@@ -44,7 +44,7 @@ impl Verifier {
 /// We don't use protobuf for proof encoding because we expect external parties
 /// to decode proofs in constrained environments where protobuf may not be implemented.
 #[derive(Clone)]
-pub struct Prover<D: Octets> {
+pub struct Prover<D: FormattedBytes> {
     public: group::Public,
 
     seed_namespace: Vec<u8>,
@@ -59,7 +59,7 @@ pub struct Prover<D: Octets> {
 /// over pre-aggregated data (where the public key of each index can be derived from the group
 /// polynomial). This can be very useful for distributing rewards without including all partial signatures
 /// in a block.
-impl<D: Octets> Prover<D> {
+impl<D: FormattedBytes> Prover<D> {
     /// Create a new prover with the given signing `namespace`.
     pub fn new(public: group::Public, namespace: &[u8]) -> Self {
         Self {
@@ -77,8 +77,10 @@ impl<D: Octets> Prover<D> {
     /// Serialize a proposal proof.
     pub fn serialize_proposal(proposal: &wire::Proposal, partial_signature: &[u8]) -> Proof {
         // Setup proof
-        let len =
-            u64::SERIALIZED_LEN + u64::SERIALIZED_LEN + D::SERIALIZED_LEN + poly::PARTIAL_SIGNATURE_LENGTH;
+        let len = u64::SERIALIZED_LEN
+            + u64::SERIALIZED_LEN
+            + D::SERIALIZED_LEN
+            + poly::PARTIAL_SIGNATURE_LENGTH;
 
         // Encode proof
         let mut proof = Vec::with_capacity(len);
@@ -96,8 +98,10 @@ impl<D: Octets> Prover<D> {
         namespace: &[u8],
     ) -> Option<(View, View, D, Verifier)> {
         // Ensure proof is big enough
-        let expected_len =
-            u64::SERIALIZED_LEN + u64::SERIALIZED_LEN + D::SERIALIZED_LEN + poly::PARTIAL_SIGNATURE_LENGTH;
+        let expected_len = u64::SERIALIZED_LEN
+            + u64::SERIALIZED_LEN
+            + D::SERIALIZED_LEN
+            + poly::PARTIAL_SIGNATURE_LENGTH;
         if proof.len() != expected_len {
             return None;
         }

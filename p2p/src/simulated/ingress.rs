@@ -1,13 +1,13 @@
 use super::{Error, Receiver, Sender};
 use crate::Channel;
-use commonware_cryptography::Octets;
+use commonware_cryptography::FormattedBytes;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
 };
 use rand_distr::Normal;
 
-pub enum Message<P: Octets> {
+pub enum Message<P: FormattedBytes> {
     Register {
         public_key: P,
         channel: Channel,
@@ -49,11 +49,11 @@ pub struct Link {
 /// At any point, peers can be added/removed and links
 /// between said peers can be modified.
 #[derive(Clone)]
-pub struct Oracle<P: Octets> {
+pub struct Oracle<P: FormattedBytes> {
     sender: mpsc::UnboundedSender<Message<P>>,
 }
 
-impl<P: Octets> Oracle<P> {
+impl<P: FormattedBytes> Oracle<P> {
     pub(crate) fn new(sender: mpsc::UnboundedSender<Message<P>>) -> Self {
         Self { sender }
     }

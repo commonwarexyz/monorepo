@@ -1,14 +1,14 @@
 use bytes::Bytes;
-use commonware_cryptography::Octets;
+use commonware_cryptography::FormattedBytes;
 use futures::{channel::mpsc, SinkExt};
 use std::{collections::BTreeMap, sync::Mutex};
 
 /// Relay is a mock for distributing artifacts between applications.
-pub struct Relay<D: Octets, P: Octets> {
+pub struct Relay<D: FormattedBytes, P: FormattedBytes> {
     recipients: Mutex<BTreeMap<P, mpsc::UnboundedSender<(D, Bytes)>>>,
 }
 
-impl<D: Octets, P: Octets> Relay<D, P> {
+impl<D: FormattedBytes, P: FormattedBytes> Relay<D, P> {
     pub fn new() -> Self {
         Self {
             recipients: Mutex::new(BTreeMap::new()),
@@ -50,7 +50,7 @@ impl<D: Octets, P: Octets> Relay<D, P> {
     }
 }
 
-impl<D: Octets, P: Octets> Default for Relay<D, P> {
+impl<D: FormattedBytes, P: FormattedBytes> Default for Relay<D, P> {
     fn default() -> Self {
         Self::new()
     }

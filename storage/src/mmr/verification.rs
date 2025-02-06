@@ -1,7 +1,7 @@
 use crate::mmr::hasher::Hasher;
 use crate::mmr::iterator::PeakIterator;
 use bytes::{Buf, BufMut};
-use commonware_cryptography::{Hasher as CHasher, Octets};
+use commonware_cryptography::{Hasher as CHasher, FormattedBytes};
 use commonware_utils::SizedSerialize;
 
 /// A `Proof` contains the information necessary for proving the inclusion of an element, or some

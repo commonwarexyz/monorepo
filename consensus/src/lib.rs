@@ -6,7 +6,7 @@
 //! expect breaking changes and occasional instability.
 
 use bytes::Bytes;
-use commonware_cryptography::Octets;
+use commonware_cryptography::FormattedBytes;
 
 pub mod simplex;
 pub mod threshold_simplex;
@@ -29,7 +29,7 @@ cfg_if::cfg_if! {
 
         /// Parsed is a wrapper around a message that has a parsable digest.
         #[derive(Clone)]
-        struct Parsed<Message, Digest: Octets> {
+        struct Parsed<Message, Digest: FormattedBytes> {
             /// Raw message that has some field that can be parsed into a digest.
             pub message: Message,
 
@@ -46,7 +46,7 @@ cfg_if::cfg_if! {
             type Context;
 
             /// Hash of an arbitrary payload.
-            type Digest: Octets;
+            type Digest: FormattedBytes;
 
             /// Payload used to initialize the consensus engine.
             fn genesis(&mut self) -> impl Future<Output = Self::Digest> + Send;
@@ -78,7 +78,7 @@ cfg_if::cfg_if! {
         /// to the relay to efficiently broadcast the full payload to other participants.
         pub trait Relay: Clone + Send + 'static {
             /// Hash of an arbitrary payload.
-            type Digest: Octets;
+            type Digest: FormattedBytes;
 
             /// Called once consensus begins working towards a proposal provided by `Automaton` (i.e.
             /// it isn't dropped).
@@ -91,7 +91,7 @@ cfg_if::cfg_if! {
         /// Committer is the interface responsible for handling notifications of payload status.
         pub trait Committer: Clone + Send + 'static {
             /// Hash of an arbitrary payload.
-            type Digest: Octets;
+            type Digest: FormattedBytes;
 
             /// Event that a payload has made some progress towards finalization but is not yet finalized.
             ///
@@ -121,7 +121,7 @@ cfg_if::cfg_if! {
             type Index;
 
             /// Public key used to identify participants.
-            type PublicKey: Octets;
+            type PublicKey: FormattedBytes;
 
             /// Return the leader at a given index for the provided seed.
             fn leader(&self, index: Self::Index) -> Option<Self::PublicKey>;

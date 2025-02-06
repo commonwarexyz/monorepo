@@ -1,7 +1,7 @@
 use super::{actors::Messenger, Error};
 use crate::{Channel, Message, Recipients};
 use bytes::Bytes;
-use commonware_cryptography::Octets;
+use commonware_cryptography::FormattedBytes;
 use futures::{channel::mpsc, StreamExt};
 use governor::Quota;
 use std::collections::BTreeMap;
@@ -10,14 +10,14 @@ use zstd::bulk::{compress, decompress};
 /// Sender is the mechanism used to send arbitrary bytes to
 /// a set of recipients over a pre-defined channel.
 #[derive(Clone, Debug)]
-pub struct Sender<P: Octets> {
+pub struct Sender<P: FormattedBytes> {
     channel: Channel,
     max_size: usize,
     compression: Option<i32>,
     messenger: Messenger<P>,
 }
 
-impl<P: Octets> Sender<P> {
+impl<P: FormattedBytes> Sender<P> {
     pub(super) fn new(
         channel: Channel,
         max_size: usize,
@@ -33,7 +33,7 @@ impl<P: Octets> Sender<P> {
     }
 }
 
-impl<P: Octets> crate::Sender for Sender<P> {
+impl<P: FormattedBytes> crate::Sender for Sender<P> {
     type Error = Error;
     type PublicKey = P;
 
@@ -84,13 +84,13 @@ impl<P: Octets> crate::Sender for Sender<P> {
 
 /// Channel to asynchronously receive messages from a channel.
 #[derive(Debug)]
-pub struct Receiver<P: Octets> {
+pub struct Receiver<P: FormattedBytes> {
     max_size: usize,
     compression: bool,
     receiver: mpsc::Receiver<Message<P>>,
 }
 
-impl<P: Octets> Receiver<P> {
+impl<P: FormattedBytes> Receiver<P> {
     pub(super) fn new(
         max_size: usize,
         compression: bool,
@@ -104,7 +104,7 @@ impl<P: Octets> Receiver<P> {
     }
 }
 
-impl<P: Octets> crate::Receiver for Receiver<P> {
+impl<P: FormattedBytes> crate::Receiver for Receiver<P> {
     type Error = Error;
     type PublicKey = P;
 
@@ -129,13 +129,13 @@ impl<P: Octets> crate::Receiver for Receiver<P> {
 }
 
 #[derive(Clone)]
-pub struct Channels<P: Octets> {
+pub struct Channels<P: FormattedBytes> {
     messenger: Messenger<P>,
     max_size: usize,
     receivers: BTreeMap<Channel, (Quota, mpsc::Sender<Message<P>>)>,
 }
 
-impl<P: Octets> Channels<P> {
+impl<P: FormattedBytes> Channels<P> {
     pub fn new(messenger: Messenger<P>, max_size: usize) -> Self {
         Self {
             messenger,

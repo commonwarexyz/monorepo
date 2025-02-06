@@ -5,7 +5,7 @@
 use commonware_consensus::threshold_simplex::Prover;
 use commonware_cryptography::{
     bls12381::primitives::{group, poly},
-    Hasher, Octets,
+    Hasher, FormattedBytes,
 };
 
 mod actor;
@@ -16,7 +16,7 @@ mod ingress;
 mod supervisor;
 
 /// Configuration for the application.
-pub struct Config<H: Hasher, Si: Sink, St: Stream, P: Octets> {
+pub struct Config<H: Hasher, Si: Sink, St: Stream, P: FormattedBytes> {
     pub indexer: Connection<Si, St>,
 
     /// Hashing scheme to use.

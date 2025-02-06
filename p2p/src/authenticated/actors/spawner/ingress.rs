@@ -1,10 +1,10 @@
 use crate::authenticated::actors::tracker;
-use commonware_cryptography::Octets;
+use commonware_cryptography::FormattedBytes;
 use commonware_runtime::{Clock, Sink, Spawner, Stream};
 use commonware_stream::public_key::Connection;
 use futures::{channel::mpsc, SinkExt};
 
-pub enum Message<E: Spawner + Clock, Si: Sink, St: Stream, P: Octets> {
+pub enum Message<E: Spawner + Clock, Si: Sink, St: Stream, P: FormattedBytes> {
     Spawn {
         peer: P,
         connection: Connection<Si, St>,
@@ -12,11 +12,11 @@ pub enum Message<E: Spawner + Clock, Si: Sink, St: Stream, P: Octets> {
     },
 }
 
-pub struct Mailbox<E: Spawner + Clock, Si: Sink, St: Stream, P: Octets> {
+pub struct Mailbox<E: Spawner + Clock, Si: Sink, St: Stream, P: FormattedBytes> {
     sender: mpsc::Sender<Message<E, Si, St, P>>,
 }
 
-impl<E: Spawner + Clock, Si: Sink, St: Stream, P: Octets> Mailbox<E, Si, St, P> {
+impl<E: Spawner + Clock, Si: Sink, St: Stream, P: FormattedBytes> Mailbox<E, Si, St, P> {
     pub fn new(sender: mpsc::Sender<Message<E, Si, St, P>>) -> Self {
         Self { sender }
     }
@@ -38,7 +38,7 @@ impl<E: Spawner + Clock, Si: Sink, St: Stream, P: Octets> Mailbox<E, Si, St, P> 
     }
 }
 
-impl<E: Spawner + Clock, Si: Sink, St: Stream, P: Octets> Clone for Mailbox<E, Si, St, P> {
+impl<E: Spawner + Clock, Si: Sink, St: Stream, P: FormattedBytes> Clone for Mailbox<E, Si, St, P> {
     /// Clone the mailbox.
     ///
     /// We manually implement `clone` because the auto-generated `derive` would

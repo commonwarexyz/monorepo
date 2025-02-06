@@ -5,7 +5,7 @@ pub use super::{
 };
 use crate::authenticated::{ip, metrics, wire};
 use bitvec::prelude::*;
-use commonware_cryptography::{Octets, Scheme};
+use commonware_cryptography::{FormattedBytes, Scheme};
 use commonware_runtime::{Clock, Spawner};
 use commonware_utils::{hex, union, SystemTimeExt};
 use futures::{channel::mpsc, StreamExt};
@@ -30,7 +30,7 @@ use tracing::{debug, trace};
 // Bytes to add to the namespace to prevent replay attacks.
 const NAMESPACE_SUFFIX_IP: &[u8] = b"_IP";
 
-struct PeerSet<P: Octets> {
+struct PeerSet<P: FormattedBytes> {
     index: u64,
     sorted: Vec<P>,
     order: HashMap<P, usize>,
@@ -38,7 +38,7 @@ struct PeerSet<P: Octets> {
     msg: wire::BitVec,
 }
 
-impl<P: Octets> PeerSet<P> {
+impl<P: FormattedBytes> PeerSet<P> {
     fn new(index: u64, mut peers: Vec<P>) -> Self {
         // Insert peers in sorted order
         peers.sort();

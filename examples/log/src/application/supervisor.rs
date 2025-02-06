@@ -1,15 +1,15 @@
 use commonware_consensus::{simplex::View, Activity, Proof, Supervisor as Su};
-use commonware_cryptography::Octets;
+use commonware_cryptography::FormattedBytes;
 use std::collections::HashMap;
 
 /// Implementation of `commonware-consensus::Supervisor`.
 #[derive(Clone)]
-pub struct Supervisor<P: Octets> {
+pub struct Supervisor<P: FormattedBytes> {
     participants: Vec<P>,
     participants_map: HashMap<P, u32>,
 }
 
-impl<P: Octets> Supervisor<P> {
+impl<P: FormattedBytes> Supervisor<P> {
     pub fn new(mut participants: Vec<P>) -> Self {
         // Setup participants
         participants.sort();
@@ -26,7 +26,7 @@ impl<P: Octets> Supervisor<P> {
     }
 }
 
-impl<P: Octets> Su for Supervisor<P> {
+impl<P: FormattedBytes> Su for Supervisor<P> {
     type Index = View;
     type PublicKey = P;
 
