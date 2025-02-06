@@ -7,6 +7,7 @@ use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
 };
+use tracing::error;
 
 enum Message<D: Digest> {
     Broadcast(D),
@@ -57,10 +58,22 @@ impl<D: Digest> Application<D> {
             match msg {
                 Message::Broadcast(payload) => {
                     let receiver = signer.broadcast(payload).await;
-                    receiver.await.expect("Failed to broadcast");
+                    let result = receiver.await;
+                    match result {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            error!("broadcast returned false")
+                        }
+                        Err(_) => {
+                            error!("broadcast dropped")
+                        }
+                    }
                 }
                 Message::Verify(_context, _payload, sender) => {
-                    sender.send(true).expect("Failed to verify");
+                    let result = sender.send(true);
+                    if result.is_err() {
+                        error!("verify dropped");
+                    }
                 }
             }
         }

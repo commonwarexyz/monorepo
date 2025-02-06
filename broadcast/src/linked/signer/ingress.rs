@@ -34,13 +34,13 @@ impl<D: Digest> Broadcaster for Mailbox<D> {
 
     async fn broadcast(&mut self, payload: Self::Digest) -> oneshot::Receiver<bool> {
         let (sender, receiver) = oneshot::channel();
-        self.sender
+        let _ = self
+            .sender
             .send(Message::Broadcast {
                 payload,
                 result: sender,
             })
-            .await
-            .expect("Failed to send broadcast");
+            .await;
         receiver
     }
 }
