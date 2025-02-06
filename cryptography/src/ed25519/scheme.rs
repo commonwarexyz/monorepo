@@ -1,4 +1,4 @@
-use crate::{BatchScheme, Error, FormattedArray, Scheme};
+use crate::{BatchScheme, Error, Array, Scheme};
 use commonware_utils::{union_unique, SizedSerialize};
 use ed25519_consensus::{self, VerificationKey};
 use rand::{CryptoRng, Rng, RngCore};
@@ -115,7 +115,7 @@ pub struct PrivateKey {
     key: ed25519_consensus::SigningKey,
 }
 
-impl FormattedArray for PrivateKey {}
+impl Array for PrivateKey {}
 
 impl SizedSerialize for PrivateKey {
     const SERIALIZED_LEN: usize = PRIVATE_KEY_LENGTH;
@@ -198,7 +198,7 @@ pub struct PublicKey {
     key: ed25519_consensus::VerificationKey,
 }
 
-impl FormattedArray for PublicKey {}
+impl Array for PublicKey {}
 
 impl SizedSerialize for PublicKey {
     const SERIALIZED_LEN: usize = PUBLIC_KEY_LENGTH;
@@ -255,7 +255,7 @@ pub struct Signature {
     signature: ed25519_consensus::Signature,
 }
 
-impl FormattedArray for Signature {}
+impl Array for Signature {}
 
 impl SizedSerialize for Signature {
     const SERIALIZED_LEN: usize = SIGNATURE_LENGTH;

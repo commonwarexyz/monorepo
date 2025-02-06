@@ -1,7 +1,7 @@
 use super::{actors::Messenger, Error};
 use crate::{Channel, Message, Recipients};
 use bytes::Bytes;
-use commonware_cryptography::FormattedArray;
+use commonware_cryptography::Array;
 use futures::{channel::mpsc, StreamExt};
 use governor::Quota;
 use std::collections::BTreeMap;
@@ -10,14 +10,14 @@ use zstd::bulk::{compress, decompress};
 /// Sender is the mechanism used to send arbitrary bytes to
 /// a set of recipients over a pre-defined channel.
 #[derive(Clone, Debug)]
-pub struct Sender<P: FormattedArray> {
+pub struct Sender<P: Array> {
     channel: Channel,
     max_size: usize,
     compression: Option<i32>,
     messenger: Messenger<P>,
 }
 
-impl<P: FormattedArray> Sender<P> {
+impl<P: Array> Sender<P> {
     pub(super) fn new(
         channel: Channel,
         max_size: usize,
@@ -33,7 +33,7 @@ impl<P: FormattedArray> Sender<P> {
     }
 }
 
-impl<P: FormattedArray> crate::Sender for Sender<P> {
+impl<P: Array> crate::Sender for Sender<P> {
     type Error = Error;
     type PublicKey = P;
 
@@ -84,13 +84,13 @@ impl<P: FormattedArray> crate::Sender for Sender<P> {
 
 /// Channel to asynchronously receive messages from a channel.
 #[derive(Debug)]
-pub struct Receiver<P: FormattedArray> {
+pub struct Receiver<P: Array> {
     max_size: usize,
     compression: bool,
     receiver: mpsc::Receiver<Message<P>>,
 }
 
-impl<P: FormattedArray> Receiver<P> {
+impl<P: Array> Receiver<P> {
     pub(super) fn new(
         max_size: usize,
         compression: bool,
@@ -104,7 +104,7 @@ impl<P: FormattedArray> Receiver<P> {
     }
 }
 
-impl<P: FormattedArray> crate::Receiver for Receiver<P> {
+impl<P: Array> crate::Receiver for Receiver<P> {
     type Error = Error;
     type PublicKey = P;
 
@@ -129,13 +129,13 @@ impl<P: FormattedArray> crate::Receiver for Receiver<P> {
 }
 
 #[derive(Clone)]
-pub struct Channels<P: FormattedArray> {
+pub struct Channels<P: Array> {
     messenger: Messenger<P>,
     max_size: usize,
     receivers: BTreeMap<Channel, (Quota, mpsc::Sender<Message<P>>)>,
 }
 
-impl<P: FormattedArray> Channels<P> {
+impl<P: Array> Channels<P> {
     pub fn new(messenger: Messenger<P>, max_size: usize) -> Self {
         Self {
             messenger,

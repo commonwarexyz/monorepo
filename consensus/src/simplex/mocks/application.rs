@@ -1,7 +1,7 @@
 use super::relay::Relay;
 use crate::{simplex::Context, Automaton as Au, Committer as Co, Proof, Relay as Re};
 use bytes::{Buf, BufMut, Bytes};
-use commonware_cryptography::{Hasher, FormattedArray};
+use commonware_cryptography::{Array, Hasher};
 use commonware_macros::select;
 use commonware_runtime::Clock;
 use commonware_utils::{hex, SizedSerialize};
@@ -17,7 +17,7 @@ use std::{
     time::Duration,
 };
 
-pub enum Message<D: FormattedArray> {
+pub enum Message<D: Array> {
     Genesis {
         response: oneshot::Sender<D>,
     },
@@ -44,17 +44,17 @@ pub enum Message<D: FormattedArray> {
 }
 
 #[derive(Clone)]
-pub struct Mailbox<D: FormattedArray> {
+pub struct Mailbox<D: Array> {
     sender: mpsc::Sender<Message<D>>,
 }
 
-impl<D: FormattedArray> Mailbox<D> {
+impl<D: Array> Mailbox<D> {
     pub(super) fn new(sender: mpsc::Sender<Message<D>>) -> Self {
         Self { sender }
     }
 }
 
-impl<D: FormattedArray> Au for Mailbox<D> {
+impl<D: Array> Au for Mailbox<D> {
     type Digest = D;
     type Context = Context<D>;
 
@@ -94,7 +94,7 @@ impl<D: FormattedArray> Au for Mailbox<D> {
     }
 }
 
-impl<D: FormattedArray> Re for Mailbox<D> {
+impl<D: Array> Re for Mailbox<D> {
     type Digest = D;
 
     async fn broadcast(&mut self, payload: Self::Digest) {
@@ -105,7 +105,7 @@ impl<D: FormattedArray> Re for Mailbox<D> {
     }
 }
 
-impl<D: FormattedArray> Co for Mailbox<D> {
+impl<D: Array> Co for Mailbox<D> {
     type Digest = D;
 
     async fn prepared(&mut self, proof: Proof, payload: Self::Digest) {
@@ -127,12 +127,12 @@ const GENESIS_BYTES: &[u8] = b"genesis";
 
 type Latency = (f64, f64);
 
-pub enum Progress<D: FormattedArray> {
+pub enum Progress<D: Array> {
     Notarized(Proof, D),
     Finalized(Proof, D),
 }
 
-pub struct Config<H: Hasher, P: FormattedArray> {
+pub struct Config<H: Hasher, P: Array> {
     pub hasher: H,
 
     pub relay: Arc<Relay<H::Digest, P>>,
@@ -149,7 +149,7 @@ pub struct Config<H: Hasher, P: FormattedArray> {
     pub tracker: mpsc::UnboundedSender<(P, Progress<H::Digest>)>,
 }
 
-pub struct Application<E: Clock + RngCore, H: Hasher, P: FormattedArray> {
+pub struct Application<E: Clock + RngCore, H: Hasher, P: Array> {
     runtime: E,
     hasher: H,
     participant: P,
@@ -170,7 +170,7 @@ pub struct Application<E: Clock + RngCore, H: Hasher, P: FormattedArray> {
     finalized_views: HashSet<H::Digest>,
 }
 
-impl<E: Clock + RngCore, H: Hasher, P: FormattedArray> Application<E, H, P> {
+impl<E: Clock + RngCore, H: Hasher, P: Array> Application<E, H, P> {
     pub fn new(runtime: E, cfg: Config<H, P>) -> (Self, Mailbox<H::Digest>) {
         // Register self on relay
         let broadcast = cfg.relay.register(cfg.participant.clone());

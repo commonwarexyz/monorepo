@@ -1,14 +1,14 @@
 use bytes::Bytes;
-use commonware_cryptography::FormattedArray;
+use commonware_cryptography::Array;
 use futures::{channel::mpsc, SinkExt};
 use std::{collections::BTreeMap, sync::Mutex};
 
 /// Relay is a mock for distributing artifacts between applications.
-pub struct Relay<D: FormattedArray, P: FormattedArray> {
+pub struct Relay<D: Array, P: Array> {
     recipients: Mutex<BTreeMap<P, mpsc::UnboundedSender<(D, Bytes)>>>,
 }
 
-impl<D: FormattedArray, P: FormattedArray> Relay<D, P> {
+impl<D: Array, P: Array> Relay<D, P> {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
@@ -51,7 +51,7 @@ impl<D: FormattedArray, P: FormattedArray> Relay<D, P> {
     }
 }
 
-impl<D: FormattedArray, P: FormattedArray> Default for Relay<D, P> {
+impl<D: Array, P: Array> Default for Relay<D, P> {
     fn default() -> Self {
         Self::new()
     }

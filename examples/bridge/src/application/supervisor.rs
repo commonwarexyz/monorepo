@@ -6,14 +6,14 @@ use commonware_cryptography::{
         group::{self, Element},
         poly::{self, Poly},
     },
-    FormattedArray,
+    Array,
 };
 use commonware_utils::modulo;
 use std::collections::HashMap;
 
 /// Implementation of `commonware-consensus::Supervisor`.
 #[derive(Clone)]
-pub struct Supervisor<P: FormattedArray> {
+pub struct Supervisor<P: Array> {
     identity: Poly<group::Public>,
     participants: Vec<P>,
     participants_map: HashMap<P, u32>,
@@ -21,7 +21,7 @@ pub struct Supervisor<P: FormattedArray> {
     share: group::Share,
 }
 
-impl<P: FormattedArray> Supervisor<P> {
+impl<P: Array> Supervisor<P> {
     pub fn new(
         identity: Poly<group::Public>,
         mut participants: Vec<P>,
@@ -44,7 +44,7 @@ impl<P: FormattedArray> Supervisor<P> {
     }
 }
 
-impl<P: FormattedArray> Su for Supervisor<P> {
+impl<P: Array> Su for Supervisor<P> {
     type Index = View;
     type PublicKey = P;
 
@@ -66,7 +66,7 @@ impl<P: FormattedArray> Su for Supervisor<P> {
     }
 }
 
-impl<P: FormattedArray> TSu for Supervisor<P> {
+impl<P: Array> TSu for Supervisor<P> {
     type Seed = group::Signature;
     type Identity = poly::Public;
     type Share = group::Share;

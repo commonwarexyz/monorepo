@@ -4,7 +4,7 @@ use super::{
     Context, View,
 };
 use crate::{Automaton, Committer, Relay, Supervisor};
-use commonware_cryptography::{FormattedArray, Scheme};
+use commonware_cryptography::{Array, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Sender};
 use commonware_runtime::{Blob, Clock, Spawner, Storage};
@@ -18,7 +18,7 @@ pub struct Engine<
     B: Blob,
     E: Clock + GClock + Rng + CryptoRng + Spawner + Storage<B>,
     C: Scheme,
-    D: FormattedArray,
+    D: Array,
     A: Automaton<Context = Context<D>, Digest = D>,
     R: Relay<Digest = D>,
     F: Committer<Digest = D>,
@@ -36,7 +36,7 @@ impl<
         B: Blob,
         E: Clock + GClock + Rng + CryptoRng + Spawner + Storage<B>,
         C: Scheme,
-        D: FormattedArray,
+        D: Array,
         A: Automaton<Context = Context<D>, Digest = D>,
         R: Relay<Digest = D>,
         F: Committer<Digest = D>,

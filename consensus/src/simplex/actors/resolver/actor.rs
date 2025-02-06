@@ -11,7 +11,7 @@ use crate::{
     },
     Parsed, Supervisor,
 };
-use commonware_cryptography::{FormattedArray, Scheme};
+use commonware_cryptography::{Array, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{utils::requester, Receiver, Recipients, Sender};
 use commonware_runtime::Clock;
@@ -99,7 +99,7 @@ impl Inflight {
 pub struct Actor<
     E: Clock + GClock + Rng,
     C: Scheme,
-    D: FormattedArray,
+    D: Array,
     S: Supervisor<Index = View, PublicKey = C::PublicKey>,
 > {
     runtime: E,
@@ -133,7 +133,7 @@ pub struct Actor<
 impl<
         E: Clock + GClock + Rng,
         C: Scheme,
-        D: FormattedArray,
+        D: Array,
         S: Supervisor<Index = View, PublicKey = C::PublicKey>,
     > Actor<E, C, D, S>
 {

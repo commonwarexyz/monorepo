@@ -10,7 +10,7 @@ use commonware_cryptography::{
         group::{self, Element},
         poly,
     },
-    FormattedArray,
+    Array,
 };
 use commonware_utils::modulo;
 use std::{
@@ -25,7 +25,7 @@ type ViewInfo<P> = (
     group::Share,
 );
 
-pub struct Config<P: FormattedArray, D: FormattedArray> {
+pub struct Config<P: Array, D: Array> {
     pub prover: Prover<D>,
     pub participants: BTreeMap<View, (poly::Poly<group::Public>, Vec<P>, group::Share)>,
 }
@@ -34,7 +34,7 @@ type Participation<D, P> = HashMap<View, HashMap<D, HashSet<P>>>;
 type Faults<P> = HashMap<P, HashMap<View, HashSet<Activity>>>;
 
 #[derive(Clone)]
-pub struct Supervisor<P: FormattedArray, D: FormattedArray> {
+pub struct Supervisor<P: Array, D: Array> {
     prover: Prover<D>,
     participants: BTreeMap<View, ViewInfo<P>>,
 
@@ -43,7 +43,7 @@ pub struct Supervisor<P: FormattedArray, D: FormattedArray> {
     pub faults: Arc<Mutex<Faults<P>>>,
 }
 
-impl<P: FormattedArray, D: FormattedArray> Supervisor<P, D> {
+impl<P: Array, D: Array> Supervisor<P, D> {
     pub fn new(cfg: Config<P, D>) -> Self {
         let mut parsed_participants = BTreeMap::new();
         for (view, (identity, mut validators, share)) in cfg.participants.into_iter() {
@@ -64,7 +64,7 @@ impl<P: FormattedArray, D: FormattedArray> Supervisor<P, D> {
     }
 }
 
-impl<P: FormattedArray, D: FormattedArray> Su for Supervisor<P, D> {
+impl<P: Array, D: Array> Su for Supervisor<P, D> {
     type Index = View;
     type PublicKey = P;
 
@@ -199,7 +199,7 @@ impl<P: FormattedArray, D: FormattedArray> Su for Supervisor<P, D> {
     }
 }
 
-impl<P: FormattedArray, D: FormattedArray> TSu for Supervisor<P, D> {
+impl<P: Array, D: Array> TSu for Supervisor<P, D> {
     type Seed = group::Signature;
     type Identity = poly::Public;
     type Share = group::Share;
