@@ -8,8 +8,11 @@ use p256::{
     elliptic_curve::scalar::IsHigh,
 };
 use rand::{CryptoRng, Rng};
-use std::borrow::Cow;
-use std::ops::Deref;
+use std::{
+    borrow::Cow,
+    hash::{Hash, Hasher},
+    ops::Deref,
+};
 
 const PRIVATE_KEY_LENGTH: usize = 32;
 const PUBLIC_KEY_LENGTH: usize = 33; // Y-Parity || X
@@ -88,8 +91,8 @@ impl SizedSerialize for PrivateKey {
     const SERIALIZED_LEN: usize = PRIVATE_KEY_LENGTH;
 }
 
-impl std::hash::Hash for PrivateKey {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+impl Hash for PrivateKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
         self.raw.hash(state);
     }
 }
@@ -163,8 +166,8 @@ impl SizedSerialize for PublicKey {
     const SERIALIZED_LEN: usize = PUBLIC_KEY_LENGTH;
 }
 
-impl std::hash::Hash for PublicKey {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+impl Hash for PublicKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
         self.raw.hash(state);
     }
 }
@@ -227,8 +230,8 @@ impl SizedSerialize for Signature {
     const SERIALIZED_LEN: usize = SIGNATURE_LENGTH;
 }
 
-impl std::hash::Hash for Signature {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+impl Hash for Signature {
+    fn hash<H: Hasher>(&self, state: &mut H) {
         self.raw.hash(state);
     }
 }

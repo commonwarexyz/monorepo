@@ -26,7 +26,10 @@ use super::primitives::{
 use crate::{Error, Octets, Scheme};
 use commonware_utils::SizedSerialize;
 use rand::{CryptoRng, Rng};
-use std::ops::Deref;
+use std::{
+    hash::{Hash, Hasher},
+    ops::Deref,
+};
 
 /// BLS12-381 implementation of the `Scheme` trait.
 ///
@@ -92,8 +95,8 @@ impl SizedSerialize for PrivateKey {
     const SERIALIZED_LEN: usize = group::PRIVATE_KEY_LENGTH;
 }
 
-impl std::hash::Hash for PrivateKey {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+impl Hash for PrivateKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
         self.raw.hash(state);
     }
 }
@@ -167,8 +170,8 @@ impl SizedSerialize for PublicKey {
     const SERIALIZED_LEN: usize = group::PUBLIC_KEY_LENGTH;
 }
 
-impl std::hash::Hash for PublicKey {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+impl Hash for PublicKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
         self.raw.hash(state);
     }
 }
@@ -242,8 +245,8 @@ impl SizedSerialize for Signature {
     const SERIALIZED_LEN: usize = group::SIGNATURE_LENGTH;
 }
 
-impl std::hash::Hash for Signature {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+impl Hash for Signature {
+    fn hash<H: Hasher>(&self, state: &mut H) {
         self.raw.hash(state);
     }
 }

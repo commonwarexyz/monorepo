@@ -8,9 +8,7 @@
 use bytes::Buf;
 use commonware_utils::SizedSerialize;
 use rand::{CryptoRng, Rng, RngCore, SeedableRng};
-use std::fmt::Debug;
-use std::hash::Hash;
-use std::ops::Deref;
+use std::{fmt::Debug, hash::Hash, ops::Deref};
 use thiserror::Error;
 
 pub mod bls12381;
@@ -49,12 +47,7 @@ pub enum Error {
 ///
 /// If any validation is required, it should be done in the `TryFrom` implementation.
 pub trait Octets:
-    AsRef<[u8]>
-    + for<'a> TryFrom<&'a [u8], Error = Error>
-    + for<'a> TryFrom<&'a Vec<u8>, Error = Error>
-    + TryFrom<Vec<u8>, Error = Error>
-    + Deref<Target = [u8]>
-    + Clone
+    Clone
     + Send
     + Sync
     + 'static
@@ -64,6 +57,11 @@ pub trait Octets:
     + PartialOrd
     + Debug
     + Hash
+    + AsRef<[u8]>
+    + for<'a> TryFrom<&'a [u8], Error = Error>
+    + for<'a> TryFrom<&'a Vec<u8>, Error = Error>
+    + TryFrom<Vec<u8>, Error = Error>
+    + Deref<Target = [u8]>
     + SizedSerialize
 {
     /// Attempts to read some number of octets from the provided buffer.
