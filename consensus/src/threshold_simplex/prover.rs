@@ -77,7 +77,7 @@ impl<D: Octets> Prover<D> {
     pub fn serialize_proposal(proposal: &wire::Proposal, partial_signature: &[u8]) -> Proof {
         // Setup proof
         let len =
-            size_of::<u64>() + size_of::<u64>() + proposal.payload.len() + partial_signature.len();
+            size_of::<u64>() + size_of::<u64>() + size_of::<D>() + poly::PARTIAL_SIGNATURE_LENGTH;
 
         // Encode proof
         let mut proof = Vec::with_capacity(len);
@@ -132,7 +132,7 @@ impl<D: Octets> Prover<D> {
         // Setup proof
         let len = size_of::<u64>()
             + size_of::<u64>()
-            + proposal.payload.len()
+            + size_of::<D>()
             + group::SIGNATURE_LENGTH
             + group::SIGNATURE_LENGTH;
 
@@ -222,10 +222,10 @@ impl<D: Octets> Prover<D> {
         // Setup proof
         let len = size_of::<u64>()
             + size_of::<u64>()
-            + payload_1.len()
+            + size_of::<D>()
             + poly::PARTIAL_SIGNATURE_LENGTH
             + size_of::<u64>()
-            + payload_2.len()
+            + size_of::<D>()
             + poly::PARTIAL_SIGNATURE_LENGTH;
 
         // Encode proof
@@ -364,7 +364,7 @@ impl<D: Octets> Prover<D> {
         // Setup proof
         let len = size_of::<u64>()
             + size_of::<u64>()
-            + payload.len()
+            + size_of::<D>()
             + poly::PARTIAL_SIGNATURE_LENGTH
             + poly::PARTIAL_SIGNATURE_LENGTH;
 

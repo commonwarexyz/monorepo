@@ -46,9 +46,9 @@ impl<C: Scheme, D: Octets> Prover<C, D> {
         // Setup proof
         let len = size_of::<u64>()
             + size_of::<u64>()
-            + proposal.payload.len()
-            + public_key.len()
-            + signature.len();
+            + size_of::<D>()
+            + size_of::<C::PublicKey>()
+            + size_of::<C::Signature>();
 
         // Encode proof
         let mut proof = Vec::with_capacity(len);
@@ -104,7 +104,7 @@ impl<C: Scheme, D: Octets> Prover<C, D> {
         // Setup proof
         let len = size_of::<u64>()
             + size_of::<u64>()
-            + proposal.payload.len()
+            + size_of::<D>()
             + size_of::<u32>()
             + signatures.len() * (size_of::<C::PublicKey>() + size_of::<C::Signature>());
 
@@ -231,10 +231,10 @@ impl<C: Scheme, D: Octets> Prover<C, D> {
         let len = size_of::<u64>()
             + size_of::<C::PublicKey>()
             + size_of::<u64>()
-            + payload_1.len()
+            + size_of::<D>()
             + size_of::<C::Signature>()
             + size_of::<u64>()
-            + payload_2.len()
+            + size_of::<D>()
             + size_of::<C::Signature>();
 
         // Encode proof
@@ -382,7 +382,7 @@ impl<C: Scheme, D: Octets> Prover<C, D> {
         let len = size_of::<u64>()
             + size_of::<C::PublicKey>()
             + size_of::<u64>()
-            + payload.len()
+            + size_of::<D>()
             + size_of::<C::Signature>()
             + size_of::<C::Signature>();
 
