@@ -717,7 +717,10 @@ impl Link {
 mod tests {
     use super::*;
     use commonware_cryptography::{Ed25519, Scheme};
-    use commonware_runtime::{deterministic::Executor, Runner};
+    use commonware_runtime::{
+        deterministic::{Context, Executor},
+        Runner,
+    };
 
     const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 
@@ -775,11 +778,7 @@ mod tests {
         };
         let (_, runtime, _) = Executor::default();
         type PublicKey = <Ed25519 as Scheme>::PublicKey;
-        let (mut network, _) =
-            Network::<commonware_runtime::deterministic::Context, PublicKey>::new(
-                runtime.clone(),
-                cfg,
-            );
+        let (mut network, _) = Network::<Context, PublicKey>::new(runtime.clone(), cfg);
 
         // Test that the next socket address is incremented correctly
         let mut original = network.next_addr;
