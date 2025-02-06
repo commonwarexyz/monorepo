@@ -9,12 +9,12 @@ use commonware_cryptography::{
         group::{self, Element},
         poly,
     },
-    FormattedBytes,
+    FormattedArray,
 };
 use tracing::debug;
 
 pub fn verify_notarization<
-    D: FormattedBytes,
+    D: FormattedArray,
     S: ThresholdSupervisor<Index = View, Identity = poly::Public>,
 >(
     supervisor: &S,
@@ -140,7 +140,7 @@ pub fn verify_nullification<S: ThresholdSupervisor<Index = View, Identity = poly
 }
 
 pub fn verify_finalization<
-    D: FormattedBytes,
+    D: FormattedArray,
     S: ThresholdSupervisor<Index = View, Identity = poly::Public>,
 >(
     supervisor: &S,

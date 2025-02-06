@@ -1,9 +1,9 @@
 use crate::{threshold_simplex::wire, Parsed};
-use commonware_cryptography::FormattedBytes;
+use commonware_cryptography::FormattedArray;
 use futures::{channel::mpsc, SinkExt};
 
 // If either of these requests fails, it will not send a reply.
-pub enum Message<D: FormattedBytes> {
+pub enum Message<D: FormattedArray> {
     Notarization {
         notarization: Parsed<wire::Notarization, D>,
     },
@@ -13,11 +13,11 @@ pub enum Message<D: FormattedBytes> {
 }
 
 #[derive(Clone)]
-pub struct Mailbox<D: FormattedBytes> {
+pub struct Mailbox<D: FormattedArray> {
     sender: mpsc::Sender<Message<D>>,
 }
 
-impl<D: FormattedBytes> Mailbox<D> {
+impl<D: FormattedArray> Mailbox<D> {
     pub(super) fn new(sender: mpsc::Sender<Message<D>>) -> Self {
         Self { sender }
     }

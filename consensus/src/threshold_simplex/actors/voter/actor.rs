@@ -22,7 +22,7 @@ use commonware_cryptography::{
     },
     hash,
     sha256::Digest as Sha256Digest,
-    FormattedBytes, Scheme,
+    FormattedArray, Scheme,
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
@@ -48,7 +48,7 @@ const GENESIS_VIEW: View = 0;
 
 struct Round<
     C: Scheme,
-    D: FormattedBytes,
+    D: FormattedArray,
     S: ThresholdSupervisor<
         Seed = group::Signature,
         Index = View,
@@ -93,7 +93,7 @@ struct Round<
 
 impl<
         C: Scheme,
-        D: FormattedBytes,
+        D: FormattedArray,
         S: ThresholdSupervisor<
             Seed = group::Signature,
             Index = View,
@@ -638,7 +638,7 @@ pub struct Actor<
     B: Blob,
     E: Clock + Rng + Spawner + Storage<B>,
     C: Scheme,
-    D: FormattedBytes,
+    D: FormattedArray,
     A: Automaton<Digest = D, Context = Context<D>>,
     R: Relay,
     F: Committer<Digest = D>,
@@ -688,7 +688,7 @@ impl<
         B: Blob,
         E: Clock + Rng + Spawner + Storage<B>,
         C: Scheme,
-        D: FormattedBytes,
+        D: FormattedArray,
         A: Automaton<Digest = D, Context = Context<D>>,
         R: Relay<Digest = D>,
         F: Committer<Digest = D>,

@@ -6,7 +6,7 @@
 //! expect breaking changes and occasional instability.
 
 use bytes::Bytes;
-use commonware_cryptography::FormattedBytes;
+use commonware_cryptography::FormattedArray;
 use std::error::Error as StdError;
 use std::fmt::Debug;
 use std::future::Future;
@@ -26,7 +26,7 @@ pub type Channel = u32;
 
 /// Enum indicating the set of recipients to send a message to.
 #[derive(Clone)]
-pub enum Recipients<P: FormattedBytes> {
+pub enum Recipients<P: FormattedArray> {
     All,
     Some(Vec<P>),
     One(P),
@@ -38,7 +38,7 @@ pub trait Sender: Clone + Debug + Send + 'static {
     type Error: Debug + StdError + Send;
 
     /// Public key type used to identify recipients.
-    type PublicKey: FormattedBytes;
+    type PublicKey: FormattedArray;
 
     /// Send a message to a set of recipients.
     fn send(
@@ -55,7 +55,7 @@ pub trait Receiver: Debug + Send + 'static {
     type Error: Debug + StdError + Send;
 
     /// Public key type used to identify recipients.
-    type PublicKey: FormattedBytes;
+    type PublicKey: FormattedArray;
 
     /// Receive a message from an arbitrary recipient.
     fn recv(

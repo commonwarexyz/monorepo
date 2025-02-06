@@ -7,7 +7,7 @@ use super::{
 };
 use crate::Proof;
 use bytes::{Buf, BufMut};
-use commonware_cryptography::{FormattedBytes, Scheme};
+use commonware_cryptography::{FormattedArray, Scheme};
 use commonware_utils::SizedSerialize;
 use std::{collections::HashSet, marker::PhantomData};
 
@@ -16,7 +16,7 @@ use std::{collections::HashSet, marker::PhantomData};
 /// We don't use protobuf for proof encoding because we expect external parties
 /// to decode proofs in constrained environments where protobuf may not be implemented.
 #[derive(Clone)]
-pub struct Prover<C: Scheme, D: FormattedBytes> {
+pub struct Prover<C: Scheme, D: FormattedArray> {
     notarize_namespace: Vec<u8>,
     nullify_namespace: Vec<u8>,
     finalize_namespace: Vec<u8>,
@@ -25,7 +25,7 @@ pub struct Prover<C: Scheme, D: FormattedBytes> {
     _digest: PhantomData<D>,
 }
 
-impl<C: Scheme, D: FormattedBytes> Prover<C, D> {
+impl<C: Scheme, D: FormattedArray> Prover<C, D> {
     /// Create a new prover with the given signing `namespace`.
     pub fn new(namespace: &[u8]) -> Self {
         Self {

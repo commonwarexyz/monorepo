@@ -1,13 +1,13 @@
 use commonware_consensus::{
     simplex::Context, Automaton as Au, Committer as Co, Proof, Relay as Re,
 };
-use commonware_cryptography::FormattedBytes;
+use commonware_cryptography::FormattedArray;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
 };
 
-pub enum Message<D: FormattedBytes> {
+pub enum Message<D: FormattedArray> {
     Genesis { response: oneshot::Sender<D> },
     Propose { response: oneshot::Sender<D> },
     Verify { response: oneshot::Sender<bool> },
@@ -17,17 +17,17 @@ pub enum Message<D: FormattedBytes> {
 
 /// Mailbox for the application.
 #[derive(Clone)]
-pub struct Mailbox<D: FormattedBytes> {
+pub struct Mailbox<D: FormattedArray> {
     sender: mpsc::Sender<Message<D>>,
 }
 
-impl<D: FormattedBytes> Mailbox<D> {
+impl<D: FormattedArray> Mailbox<D> {
     pub(super) fn new(sender: mpsc::Sender<Message<D>>) -> Self {
         Self { sender }
     }
 }
 
-impl<D: FormattedBytes> Au for Mailbox<D> {
+impl<D: FormattedArray> Au for Mailbox<D> {
     type Digest = D;
     type Context = Context<Self::Digest>;
 
@@ -69,7 +69,7 @@ impl<D: FormattedBytes> Au for Mailbox<D> {
     }
 }
 
-impl<D: FormattedBytes> Re for Mailbox<D> {
+impl<D: FormattedArray> Re for Mailbox<D> {
     type Digest = D;
 
     async fn broadcast(&mut self, _: Self::Digest) {
@@ -80,7 +80,7 @@ impl<D: FormattedBytes> Re for Mailbox<D> {
     }
 }
 
-impl<D: FormattedBytes> Co for Mailbox<D> {
+impl<D: FormattedArray> Co for Mailbox<D> {
     type Digest = D;
 
     async fn prepared(&mut self, proof: Proof, payload: Self::Digest) {

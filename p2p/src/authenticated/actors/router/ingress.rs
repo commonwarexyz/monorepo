@@ -3,13 +3,13 @@ use crate::{
     Channel, Recipients,
 };
 use bytes::Bytes;
-use commonware_cryptography::FormattedBytes;
+use commonware_cryptography::FormattedArray;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
 };
 
-pub enum Message<P: FormattedBytes> {
+pub enum Message<P: FormattedArray> {
     Ready {
         peer: P,
         relay: peer::Relay,
@@ -28,11 +28,11 @@ pub enum Message<P: FormattedBytes> {
 }
 
 #[derive(Clone)]
-pub struct Mailbox<P: FormattedBytes> {
+pub struct Mailbox<P: FormattedArray> {
     sender: mpsc::Sender<Message<P>>,
 }
 
-impl<P: FormattedBytes> Mailbox<P> {
+impl<P: FormattedArray> Mailbox<P> {
     pub fn new(sender: mpsc::Sender<Message<P>>) -> Self {
         Self { sender }
     }
@@ -56,11 +56,11 @@ impl<P: FormattedBytes> Mailbox<P> {
 }
 
 #[derive(Clone, Debug)]
-pub struct Messenger<P: FormattedBytes> {
+pub struct Messenger<P: FormattedArray> {
     sender: mpsc::Sender<Message<P>>,
 }
 
-impl<P: FormattedBytes> Messenger<P> {
+impl<P: FormattedArray> Messenger<P> {
     pub fn new(sender: mpsc::Sender<Message<P>>) -> Self {
         Self { sender }
     }

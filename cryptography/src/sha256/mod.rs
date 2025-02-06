@@ -1,6 +1,6 @@
 //! SHA-256 implementation of the `Hasher` trait.
 
-use crate::{Error, Hasher, FormattedBytes};
+use crate::{Error, Hasher, FormattedArray};
 use commonware_utils::SizedSerialize;
 use rand::{CryptoRng, Rng};
 use sha2::{Digest as _, Sha256 as ISha256};
@@ -68,7 +68,7 @@ impl Hasher for Sha256 {
 #[repr(transparent)]
 pub struct Digest([u8; DIGEST_LENGTH]);
 
-impl FormattedBytes for Digest {}
+impl FormattedArray for Digest {}
 
 impl SizedSerialize for Digest {
     const SERIALIZED_LEN: usize = DIGEST_LENGTH;

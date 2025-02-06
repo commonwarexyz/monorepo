@@ -23,7 +23,7 @@ use super::primitives::{
     group::{self, Element, Scalar},
     ops,
 };
-use crate::{Error, FormattedBytes, Scheme};
+use crate::{Error, FormattedArray, Scheme};
 use commonware_utils::SizedSerialize;
 use rand::{CryptoRng, Rng};
 use std::{
@@ -89,7 +89,7 @@ pub struct PrivateKey {
     key: group::Private,
 }
 
-impl FormattedBytes for PrivateKey {}
+impl FormattedArray for PrivateKey {}
 
 impl SizedSerialize for PrivateKey {
     const SERIALIZED_LEN: usize = group::PRIVATE_KEY_LENGTH;
@@ -164,7 +164,7 @@ pub struct PublicKey {
     key: group::Public,
 }
 
-impl FormattedBytes for PublicKey {}
+impl FormattedArray for PublicKey {}
 
 impl SizedSerialize for PublicKey {
     const SERIALIZED_LEN: usize = group::PUBLIC_KEY_LENGTH;
@@ -239,7 +239,7 @@ pub struct Signature {
     signature: group::Signature,
 }
 
-impl FormattedBytes for Signature {}
+impl FormattedArray for Signature {}
 
 impl SizedSerialize for Signature {
     const SERIALIZED_LEN: usize = group::SIGNATURE_LENGTH;

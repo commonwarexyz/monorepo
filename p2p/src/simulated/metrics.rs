@@ -1,5 +1,5 @@
 use crate::Channel;
-use commonware_cryptography::FormattedBytes;
+use commonware_cryptography::FormattedArray;
 use commonware_utils::hex;
 use prometheus_client::encoding::EncodeLabelSet;
 
@@ -11,7 +11,7 @@ pub struct Message {
 }
 
 impl Message {
-    pub fn new<P: FormattedBytes>(origin: &P, recipient: &P, channel: Channel) -> Self {
+    pub fn new<P: FormattedArray>(origin: &P, recipient: &P, channel: Channel) -> Self {
         Self {
             origin: hex(origin),
             recipient: hex(recipient),

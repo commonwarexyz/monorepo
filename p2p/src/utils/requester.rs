@@ -1,6 +1,6 @@
 //! Make concurrent requests to peers limited by rate and prioritized by performance.
 
-use commonware_cryptography::{FormattedBytes, Scheme};
+use commonware_cryptography::{FormattedArray, Scheme};
 use commonware_runtime::Clock;
 use commonware_utils::PrioritySet;
 use either::Either;
@@ -72,7 +72,7 @@ pub struct Requester<E: Clock + GClock + Rng, C: Scheme> {
 /// this struct in case we want to `resolve` or `timeout` the request. This approach
 /// makes it impossible to forget to remove a handled request if it doesn't warrant
 /// updating the performance of the participant.
-pub struct Request<P: FormattedBytes> {
+pub struct Request<P: FormattedArray> {
     /// Unique identifier for the request.
     pub id: ID,
 

@@ -1,5 +1,5 @@
 use crate::authenticated::{actors::peer, wire};
-use commonware_cryptography::FormattedBytes;
+use commonware_cryptography::FormattedArray;
 use commonware_runtime::Spawner;
 use futures::{
     channel::{mpsc, oneshot},
@@ -7,7 +7,7 @@ use futures::{
 };
 use std::net::SocketAddr;
 
-pub enum Message<E: Spawner, P: FormattedBytes> {
+pub enum Message<E: Spawner, P: FormattedArray> {
     // Used by oracle
     Register {
         index: u64,
@@ -47,11 +47,11 @@ pub enum Message<E: Spawner, P: FormattedBytes> {
 }
 
 #[derive(Clone)]
-pub struct Mailbox<E: Spawner, P: FormattedBytes> {
+pub struct Mailbox<E: Spawner, P: FormattedArray> {
     sender: mpsc::Sender<Message<E, P>>,
 }
 
-impl<E: Spawner, P: FormattedBytes> Mailbox<E, P> {
+impl<E: Spawner, P: FormattedArray> Mailbox<E, P> {
     pub(super) fn new(sender: mpsc::Sender<Message<E, P>>) -> Self {
         Self { sender }
     }
@@ -108,11 +108,11 @@ impl<E: Spawner, P: FormattedBytes> Mailbox<E, P> {
 /// Peers that are not explicitly authorized
 /// will be blocked by commonware-p2p.
 #[derive(Clone)]
-pub struct Oracle<E: Spawner, P: FormattedBytes> {
+pub struct Oracle<E: Spawner, P: FormattedArray> {
     sender: mpsc::Sender<Message<E, P>>,
 }
 
-impl<E: Spawner, P: FormattedBytes> Oracle<E, P> {
+impl<E: Spawner, P: FormattedArray> Oracle<E, P> {
     pub(super) fn new(sender: mpsc::Sender<Message<E, P>>) -> Self {
         Self { sender }
     }
@@ -133,12 +133,12 @@ impl<E: Spawner, P: FormattedBytes> Oracle<E, P> {
     }
 }
 
-pub struct Reservation<E: Spawner, P: FormattedBytes> {
+pub struct Reservation<E: Spawner, P: FormattedArray> {
     runtime: E,
     closer: Option<(P, Mailbox<E, P>)>,
 }
 
-impl<E: Spawner, P: FormattedBytes> Reservation<E, P> {
+impl<E: Spawner, P: FormattedArray> Reservation<E, P> {
     pub fn new(runtime: E, peer: P, mailbox: Mailbox<E, P>) -> Self {
         Self {
             runtime,
@@ -147,7 +147,7 @@ impl<E: Spawner, P: FormattedBytes> Reservation<E, P> {
     }
 }
 
-impl<E: Spawner, P: FormattedBytes> Drop for Reservation<E, P> {
+impl<E: Spawner, P: FormattedArray> Drop for Reservation<E, P> {
     fn drop(&mut self) {
         let (peer, mut mailbox) = self.closer.take().unwrap();
         self.runtime.spawn("reservation", async move {

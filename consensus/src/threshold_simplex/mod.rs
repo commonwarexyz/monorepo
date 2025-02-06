@@ -146,7 +146,7 @@
 //! * Introduce message rebroadcast to continue making progress if messages from a given view are dropped (only way
 //!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
 
-use commonware_cryptography::FormattedBytes;
+use commonware_cryptography::FormattedArray;
 
 mod encoder;
 mod prover;
@@ -177,7 +177,7 @@ use crate::Activity;
 
 /// Context is a collection of metadata from consensus about a given payload.
 #[derive(Clone)]
-pub struct Context<D: FormattedBytes> {
+pub struct Context<D: FormattedArray> {
     /// Current view of consensus.
     pub view: View,
 
@@ -236,7 +236,7 @@ mod tests {
     use tracing::debug;
 
     /// Registers all validators using the oracle.
-    async fn register_validators<P: FormattedBytes>(
+    async fn register_validators<P: FormattedArray>(
         oracle: &mut Oracle<P>,
         validators: &[P],
     ) -> HashMap<P, ((Sender<P>, Receiver<P>), (Sender<P>, Receiver<P>))> {
@@ -269,7 +269,7 @@ mod tests {
     /// The `action` parameter determines the action (e.g. link, unlink) to take.
     /// The `restrict_to` function can be used to restrict the linking to certain connections,
     /// otherwise all validators will be linked to all other validators.
-    async fn link_validators<P: FormattedBytes>(
+    async fn link_validators<P: FormattedArray>(
         oracle: &mut Oracle<P>,
         validators: &[P],
         action: Action,
