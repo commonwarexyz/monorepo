@@ -45,42 +45,42 @@ pub struct PeerMessage {
 }
 
 impl PeerMessage {
-    pub fn notarize<P: Octets>(peer: &P) -> Self {
+    pub fn notarize(peer: &impl Octets) -> Self {
         Self {
             peer: hex(peer),
             message: NOTARIZE_TYPE,
         }
     }
 
-    pub fn notarization<P: Octets>(peer: &P) -> Self {
+    pub fn notarization(peer: &impl Octets) -> Self {
         Self {
             peer: hex(peer),
             message: NOTARIZATION_TYPE,
         }
     }
 
-    pub fn nullify<P: Octets>(peer: &P) -> Self {
+    pub fn nullify(peer: &impl Octets) -> Self {
         Self {
             peer: hex(peer),
             message: NULLIFY_TYPE,
         }
     }
 
-    pub fn nullification<P: Octets>(peer: &P) -> Self {
+    pub fn nullification(peer: &impl Octets) -> Self {
         Self {
             peer: hex(peer),
             message: NULLIFICATION_TYPE,
         }
     }
 
-    pub fn finalize<P: Octets>(peer: &P) -> Self {
+    pub fn finalize(peer: &impl Octets) -> Self {
         Self {
             peer: hex(peer),
             message: FINALIZE_TYPE,
         }
     }
 
-    pub fn finalization<P: Octets>(peer: &P) -> Self {
+    pub fn finalization(peer: &impl Octets) -> Self {
         Self {
             peer: hex(peer),
             message: FINALIZATION_TYPE,
