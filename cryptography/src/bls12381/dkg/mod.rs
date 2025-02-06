@@ -250,11 +250,7 @@ mod tests {
                 // Process share
                 let player_obj = players.get_mut(player).unwrap();
                 player_obj
-                    .share(
-                        dealer.clone().clone(),
-                        commitment.clone(),
-                        shares[player_idx],
-                    )
+                    .share(dealer.clone(), commitment.clone(), shares[player_idx])
                     .unwrap();
 
                 // Collect ack
