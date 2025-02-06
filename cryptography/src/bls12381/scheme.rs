@@ -89,9 +89,7 @@ pub struct PrivateKey {
 impl Octets for PrivateKey {}
 
 impl Serializable for PrivateKey {
-    fn encoded_len() -> usize {
-        group::PRIVATE_KEY_LENGTH
-    }
+    const ENCODED_LEN: usize = group::PRIVATE_KEY_LENGTH;
 }
 
 impl std::hash::Hash for PrivateKey {
@@ -166,9 +164,7 @@ pub struct PublicKey {
 impl Octets for PublicKey {}
 
 impl Serializable for PublicKey {
-    fn encoded_len() -> usize {
-        group::PUBLIC_KEY_LENGTH
-    }
+    const ENCODED_LEN: usize = group::PUBLIC_KEY_LENGTH;
 }
 
 impl std::hash::Hash for PublicKey {
@@ -243,9 +239,7 @@ pub struct Signature {
 impl Octets for Signature {}
 
 impl Serializable for Signature {
-    fn encoded_len() -> usize {
-        group::SIGNATURE_LENGTH
-    }
+    const ENCODED_LEN: usize = group::SIGNATURE_LENGTH;
 }
 
 impl std::hash::Hash for Signature {

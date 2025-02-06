@@ -98,31 +98,23 @@ pub fn modulo(bytes: &[u8], n: u64) -> u64 {
 }
 
 pub trait Serializable {
-    fn encoded_len() -> usize;
+    const ENCODED_LEN: usize;
 }
 
 impl Serializable for u8 {
-    fn encoded_len() -> usize {
-        1
-    }
+    const ENCODED_LEN: usize = 1;
 }
 
 impl Serializable for u16 {
-    fn encoded_len() -> usize {
-        2
-    }
+    const ENCODED_LEN: usize = 2;
 }
 
 impl Serializable for u32 {
-    fn encoded_len() -> usize {
-        4
-    }
+    const ENCODED_LEN: usize = 4;
 }
 
 impl Serializable for u64 {
-    fn encoded_len() -> usize {
-        8
-    }
+    const ENCODED_LEN: usize = 8;
 }
 
 #[cfg(test)]

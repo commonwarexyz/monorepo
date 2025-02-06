@@ -69,7 +69,7 @@ pub trait Octets:
     /// Attempts to read some number of octets from the provided buffer.
     fn read_from<B: Buf>(buf: &mut B) -> Result<Self, Error> {
         // Check if there are enough bytes in the buffer to read a digest.
-        let len = Self::encoded_len();
+        let len = Self::ENCODED_LEN;
         if buf.remaining() < len {
             return Err(Error::InvalidOctetsLength);
         }
@@ -374,8 +374,8 @@ mod tests {
 
     #[test]
     fn test_ed25519_len() {
-        assert_eq!(<Ed25519 as Scheme>::PublicKey::encoded_len(), 32);
-        assert_eq!(<Ed25519 as Scheme>::Signature::encoded_len(), 64);
+        assert_eq!(<Ed25519 as Scheme>::PublicKey::ENCODED_LEN, 32);
+        assert_eq!(<Ed25519 as Scheme>::Signature::ENCODED_LEN, 64);
     }
 
     #[test]
@@ -425,8 +425,8 @@ mod tests {
 
     #[test]
     fn test_bls12381_len() {
-        assert_eq!(<Bls12381 as Scheme>::PublicKey::encoded_len(), 48);
-        assert_eq!(<Bls12381 as Scheme>::Signature::encoded_len(), 96);
+        assert_eq!(<Bls12381 as Scheme>::PublicKey::ENCODED_LEN, 48);
+        assert_eq!(<Bls12381 as Scheme>::Signature::ENCODED_LEN, 96);
     }
 
     #[test]
@@ -476,8 +476,8 @@ mod tests {
 
     #[test]
     fn test_secp256r1_len() {
-        assert_eq!(<Secp256r1 as Scheme>::PublicKey::encoded_len(), 33);
-        assert_eq!(<Secp256r1 as Scheme>::Signature::encoded_len(), 64);
+        assert_eq!(<Secp256r1 as Scheme>::PublicKey::ENCODED_LEN, 33);
+        assert_eq!(<Secp256r1 as Scheme>::Signature::ENCODED_LEN, 64);
     }
 
     fn test_hasher_multiple_runs<H: Hasher>() {
@@ -486,7 +486,7 @@ mod tests {
         hasher.update(b"hello world");
         let digest = hasher.finalize();
         assert!(H::Digest::try_from(digest.as_ref()).is_ok());
-        assert_eq!(digest.as_ref().len(), H::Digest::encoded_len());
+        assert_eq!(digest.as_ref().len(), H::Digest::ENCODED_LEN);
 
         // Reuse hasher without reset
         hasher.update(b"hello world");

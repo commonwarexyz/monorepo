@@ -229,7 +229,7 @@ impl<E: Clock + RngCore, H: Hasher, P: Octets> Application<E, H, P> {
             .await;
 
         // Generate the payload
-        let payload_len = u64::encoded_len() + H::Digest::encoded_len() + u64::encoded_len();
+        let payload_len = u64::ENCODED_LEN + H::Digest::ENCODED_LEN + u64::ENCODED_LEN;
         let mut payload = Vec::with_capacity(payload_len);
         payload.put_u64(context.view);
         payload.extend_from_slice(&context.parent.1);

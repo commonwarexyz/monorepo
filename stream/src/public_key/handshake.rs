@@ -19,7 +19,7 @@ pub fn create_handshake<C: Scheme>(
     let ephemeral_public_key_bytes = ephemeral_public_key.as_bytes();
     let payload_len = recipient_public_key.len()
         + ephemeral_public_key_bytes.len()
-        + <u64 as Serializable>::encoded_len();
+        + <u64 as Serializable>::ENCODED_LEN;
     let mut payload = Vec::with_capacity(payload_len);
     payload.extend_from_slice(&recipient_public_key);
     payload.extend_from_slice(ephemeral_public_key_bytes);
@@ -96,7 +96,7 @@ impl<C: Scheme> Handshake<C> {
         // Construct signing payload (ephemeral public key + my public key + timestamp)
         let payload_len = our_public_key.len()
             + handshake.ephemeral_public_key.len()
-            + <u64 as Serializable>::encoded_len();
+            + <u64 as Serializable>::ENCODED_LEN;
         let mut payload = Vec::with_capacity(payload_len);
         payload.extend_from_slice(&our_public_key);
         payload.extend_from_slice(&handshake.ephemeral_public_key);

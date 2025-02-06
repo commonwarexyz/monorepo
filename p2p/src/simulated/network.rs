@@ -13,7 +13,7 @@ use commonware_runtime::{
     Clock, Listener as _, Network as RNetwork, Spawner,
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
-use commonware_utils::hex;
+use commonware_utils::{hex, Serializable};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
@@ -31,8 +31,6 @@ use std::{
     time::Duration,
 };
 use tracing::{error, trace};
-
-const SIZE_OF_CHANNEL: usize = 4; // u32
 
 /// Task type representing a message to be sent within the network.
 type Task<Pk> = (Channel, Pk, Recipients<Pk>, Bytes, oneshot::Sender<Vec<Pk>>);
@@ -615,9 +613,9 @@ impl<P: Octets> Peer<P> {
                             // Continually receive messages from the dialer and send them to the inbox
                             while let Ok(data) = recv_frame(&mut stream, max_size).await {
                                 let channel = Channel::from_be_bytes(
-                                    data[..SIZE_OF_CHANNEL].try_into().unwrap(),
+                                    data[..Channel::ENCODED_LEN].try_into().unwrap(),
                                 );
-                                let message = data.slice(SIZE_OF_CHANNEL..);
+                                let message = data.slice(Channel::ENCODED_LEN..);
                                 if let Err(err) = inbox_sender
                                     .send((channel, (dialer.clone(), message)))
                                     .await
@@ -692,7 +690,8 @@ impl Link {
 
                 // For any item placed in the inbox, send it to the sink
                 while let Some((channel, message)) = outbox.next().await {
-                    let mut data = bytes::BytesMut::with_capacity(SIZE_OF_CHANNEL + message.len());
+                    let mut data =
+                        bytes::BytesMut::with_capacity(Channel::ENCODED_LEN + message.len());
                     data.extend_from_slice(&channel.to_be_bytes());
                     data.extend_from_slice(&message);
                     let data = data.freeze();
