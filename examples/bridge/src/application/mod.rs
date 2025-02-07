@@ -5,7 +5,7 @@
 use commonware_consensus::threshold_simplex::Prover;
 use commonware_cryptography::{
     bls12381::primitives::{group, poly},
-    Hasher, PublicKey,
+    Array, Hasher,
 };
 
 mod actor;
@@ -16,7 +16,7 @@ mod ingress;
 mod supervisor;
 
 /// Configuration for the application.
-pub struct Config<H: Hasher, Si: Sink, St: Stream> {
+pub struct Config<H: Hasher, Si: Sink, St: Stream, P: Array> {
     pub indexer: Connection<Si, St>,
 
     /// Hashing scheme to use.
@@ -32,7 +32,7 @@ pub struct Config<H: Hasher, Si: Sink, St: Stream> {
     pub other_network: group::Public,
 
     /// Participants active in consensus.
-    pub participants: Vec<PublicKey>,
+    pub participants: Vec<P>,
 
     pub share: group::Share,
 

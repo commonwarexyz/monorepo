@@ -1,11 +1,13 @@
 //! Participants in a DKG/Resharing procedure that distribute dealings
 //! to players and collect their acknowledgements.
 
-use crate::bls12381::{
-    dkg::{ops, Error},
-    primitives::{group::Share, poly},
+use crate::{
+    bls12381::{
+        dkg::{ops, Error},
+        primitives::{group::Share, poly},
+    },
+    Array,
 };
-use crate::PublicKey;
 use commonware_utils::quorum;
 use rand::RngCore;
 use std::collections::{HashMap, HashSet};
@@ -22,19 +24,19 @@ pub struct Output {
 }
 
 /// Track acknowledgements from players.
-pub struct Dealer {
+pub struct Dealer<P: Array> {
     threshold: u32,
-    players: HashMap<PublicKey, u32>,
+    players: HashMap<P, u32>,
 
     acks: HashSet<u32>,
 }
 
-impl Dealer {
+impl<P: Array> Dealer<P> {
     /// Create a new dealer for a DKG/Resharing procedure.
     pub fn new<R: RngCore>(
         rng: &mut R,
         share: Option<Share>,
-        mut players: Vec<PublicKey>,
+        mut players: Vec<P>,
     ) -> (Self, poly::Public, Vec<Share>) {
         // Order players
         players.sort();
@@ -60,7 +62,7 @@ impl Dealer {
     }
 
     /// Track acknowledgement from a player.
-    pub fn ack(&mut self, player: PublicKey) -> Result<(), Error> {
+    pub fn ack(&mut self, player: P) -> Result<(), Error> {
         // Ensure player is valid
         let idx = match self.players.get(&player) {
             Some(player) => *player,

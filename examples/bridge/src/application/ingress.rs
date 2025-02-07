@@ -2,13 +2,13 @@ use commonware_consensus::{
     threshold_simplex::{Context, View},
     Automaton as Au, Committer as Co, Proof, Relay as Re,
 };
-use commonware_cryptography::Digest;
+use commonware_cryptography::Array;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
 };
 
-pub enum Message<D: Digest> {
+pub enum Message<D: Array> {
     Genesis {
         response: oneshot::Sender<D>,
     },
@@ -32,17 +32,17 @@ pub enum Message<D: Digest> {
 
 /// Mailbox for the application.
 #[derive(Clone)]
-pub struct Mailbox<D: Digest> {
+pub struct Mailbox<D: Array> {
     sender: mpsc::Sender<Message<D>>,
 }
 
-impl<D: Digest> Mailbox<D> {
+impl<D: Array> Mailbox<D> {
     pub(super) fn new(sender: mpsc::Sender<Message<D>>) -> Self {
         Self { sender }
     }
 }
 
-impl<D: Digest> Au for Mailbox<D> {
+impl<D: Array> Au for Mailbox<D> {
     type Digest = D;
     type Context = Context<Self::Digest>;
 
@@ -85,7 +85,7 @@ impl<D: Digest> Au for Mailbox<D> {
     }
 }
 
-impl<D: Digest> Re for Mailbox<D> {
+impl<D: Array> Re for Mailbox<D> {
     type Digest = D;
 
     async fn broadcast(&mut self, _: Self::Digest) {
@@ -96,7 +96,7 @@ impl<D: Digest> Re for Mailbox<D> {
     }
 }
 
-impl<D: Digest> Co for Mailbox<D> {
+impl<D: Array> Co for Mailbox<D> {
     type Digest = D;
 
     async fn prepared(&mut self, proof: Proof, payload: Self::Digest) {

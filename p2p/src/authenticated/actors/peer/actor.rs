@@ -2,7 +2,7 @@ use super::{Config, Error, Mailbox, Message, Relay};
 use crate::authenticated::{
     actors::tracker, channels::Channels, metrics, wire, wire::message::Payload,
 };
-use commonware_cryptography::PublicKey;
+use commonware_cryptography::Array;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Sink, Spawner, Stream};
 use commonware_stream::{
@@ -18,7 +18,7 @@ use rand::{CryptoRng, Rng};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tracing::debug;
 
-pub struct Actor<E: Spawner + Clock + ReasonablyRealtime> {
+pub struct Actor<E: Spawner + Clock + ReasonablyRealtime, P: Array> {
     runtime: E,
 
     gossip_bit_vec_frequency: Duration,
@@ -35,11 +35,11 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime> {
     rate_limited: Family<metrics::Message, Counter>,
 
     // When reservation goes out-of-scope, the tracker will be notified.
-    _reservation: tracker::Reservation<E>,
+    _reservation: tracker::Reservation<E, P>,
 }
 
-impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
-    pub fn new(runtime: E, cfg: Config, reservation: tracker::Reservation<E>) -> (Self, Relay) {
+impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng, P: Array> Actor<E, P> {
+    pub fn new(runtime: E, cfg: Config, reservation: tracker::Reservation<E, P>) -> (Self, Relay) {
         let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
         let (low_sender, low_receiver) = mpsc::channel(cfg.mailbox_size);
@@ -96,10 +96,10 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
 
     pub async fn run<Si: Sink, St: Stream>(
         mut self,
-        peer: PublicKey,
+        peer: P,
         connection: Connection<Si, St>,
-        mut tracker: tracker::Mailbox<E>,
-        channels: Channels,
+        mut tracker: tracker::Mailbox<E, P>,
+        channels: Channels<P>,
     ) -> Error {
         // Instantiate rate limiters for each message type
         let mut rate_limits = HashMap::new();
@@ -115,8 +115,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
         let (mut conn_sender, mut conn_receiver) = connection.split();
         let mut send_handler: Handle<Result<(), Error>> = self.runtime.spawn("sender", {
             let runtime = self.runtime.clone();
-            let mut tracker = tracker.clone();
             let peer = peer.clone();
+            let mut tracker = tracker.clone();
             let mailbox = self.mailbox.clone();
             let rate_limits = rate_limits.clone();
             async move {

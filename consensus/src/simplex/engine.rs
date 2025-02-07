@@ -4,7 +4,7 @@ use super::{
     Context, View,
 };
 use crate::{Automaton, Committer, Relay, Supervisor};
-use commonware_cryptography::{Digest, Scheme};
+use commonware_cryptography::{Array, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Sender};
 use commonware_runtime::{Blob, Clock, Spawner, Storage};
@@ -18,11 +18,11 @@ pub struct Engine<
     B: Blob,
     E: Clock + GClock + Rng + CryptoRng + Spawner + Storage<B>,
     C: Scheme,
-    D: Digest,
+    D: Array,
     A: Automaton<Context = Context<D>, Digest = D>,
     R: Relay<Digest = D>,
     F: Committer<Digest = D>,
-    S: Supervisor<Index = View>,
+    S: Supervisor<Index = View, PublicKey = C::PublicKey>,
 > {
     runtime: E,
 
@@ -36,11 +36,11 @@ impl<
         B: Blob,
         E: Clock + GClock + Rng + CryptoRng + Spawner + Storage<B>,
         C: Scheme,
-        D: Digest,
+        D: Array,
         A: Automaton<Context = Context<D>, Digest = D>,
         R: Relay<Digest = D>,
         F: Committer<Digest = D>,
-        S: Supervisor<Index = View>,
+        S: Supervisor<Index = View, PublicKey = C::PublicKey>,
     > Engine<B, E, C, D, A, R, F, S>
 {
     /// Create a new `simplex` consensus engine.
@@ -103,8 +103,14 @@ impl<
     /// This will also rebuild the state of the engine from provided `Journal`.
     pub async fn run(
         self,
-        voter_network: (impl Sender, impl Receiver),
-        resolver_network: (impl Sender, impl Receiver),
+        voter_network: (
+            impl Sender<PublicKey = C::PublicKey>,
+            impl Receiver<PublicKey = C::PublicKey>,
+        ),
+        resolver_network: (
+            impl Sender<PublicKey = C::PublicKey>,
+            impl Receiver<PublicKey = C::PublicKey>,
+        ),
     ) {
         // Start the voter
         let (voter_sender, voter_receiver) = voter_network;

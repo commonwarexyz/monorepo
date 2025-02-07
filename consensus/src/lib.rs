@@ -6,7 +6,7 @@
 //! expect breaking changes and occasional instability.
 
 use bytes::Bytes;
-use commonware_cryptography::Digest;
+use commonware_cryptography::Array;
 
 pub mod simplex;
 pub mod threshold_simplex;
@@ -24,15 +24,17 @@ pub type Proof = Bytes;
 
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
-        use commonware_cryptography::{PublicKey};
         use futures::channel::oneshot;
         use std::future::Future;
 
         /// Parsed is a wrapper around a message that has a parsable digest.
         #[derive(Clone)]
-        struct Parsed<Message, D: Digest> {
+        struct Parsed<Message, Digest: Array> {
+            /// Raw message that has some field that can be parsed into a digest.
             pub message: Message,
-            pub digest: D,
+
+            /// Parsed digest.
+            pub digest: Digest,
         }
 
         /// Automaton is the interface responsible for driving the consensus forward by proposing new payloads
@@ -43,8 +45,8 @@ cfg_if::cfg_if! {
             /// This often includes things like the proposer, view number, the height, or the epoch.
             type Context;
 
-            /// Digest is an arbitrary hash digest.
-            type Digest: Digest;
+            /// Hash of an arbitrary payload.
+            type Digest: Array;
 
             /// Payload used to initialize the consensus engine.
             fn genesis(&mut self) -> impl Future<Output = Self::Digest> + Send;
@@ -75,8 +77,8 @@ cfg_if::cfg_if! {
         /// The consensus engine is only aware of a payload's digest, not its contents. It is up
         /// to the relay to efficiently broadcast the full payload to other participants.
         pub trait Relay: Clone + Send + 'static {
-            /// Digest is an arbitrary hash digest.
-            type Digest: Digest;
+            /// Hash of an arbitrary payload.
+            type Digest: Array;
 
             /// Called once consensus begins working towards a proposal provided by `Automaton` (i.e.
             /// it isn't dropped).
@@ -88,8 +90,8 @@ cfg_if::cfg_if! {
 
         /// Committer is the interface responsible for handling notifications of payload status.
         pub trait Committer: Clone + Send + 'static {
-            /// Digest is an arbitrary hash digest.
-            type Digest: Digest;
+            /// Hash of an arbitrary payload.
+            type Digest: Array;
 
             /// Event that a payload has made some progress towards finalization but is not yet finalized.
             ///
@@ -118,15 +120,18 @@ cfg_if::cfg_if! {
             /// Index is the type used to indicate the in-progress consensus decision.
             type Index;
 
+            /// Public key used to identify participants.
+            type PublicKey: Array;
+
             /// Return the leader at a given index for the provided seed.
-            fn leader(&self, index: Self::Index) -> Option<PublicKey>;
+            fn leader(&self, index: Self::Index) -> Option<Self::PublicKey>;
 
             /// Get the **sorted** participants for the given view. This is called when entering a new view before
             /// listening for proposals or votes. If nothing is returned, the view will not be entered.
-            fn participants(&self, index: Self::Index) -> Option<&Vec<PublicKey>>;
+            fn participants(&self, index: Self::Index) -> Option<&Vec<Self::PublicKey>>;
 
             // Indicate whether some candidate is a participant at the given view.
-            fn is_participant(&self, index: Self::Index, candidate: &PublicKey) -> Option<u32>;
+            fn is_participant(&self, index: Self::Index, candidate: &Self::PublicKey) -> Option<u32>;
 
             /// Report some activity observed by the consensus implementation.
             fn report(&self, activity: Activity, proof: Proof) -> impl Future<Output = ()> + Send;
@@ -150,7 +155,7 @@ cfg_if::cfg_if! {
             type Share;
 
             /// Return the leader at a given index over the provided seed.
-            fn leader(&self, index: Self::Index, seed: Self::Seed) -> Option<PublicKey>;
+            fn leader(&self, index: Self::Index, seed: Self::Seed) -> Option<Self::PublicKey>;
 
             /// Returns the identity (typically a group polynomial with a fixed constant factor)
             /// at the given index. This is used to verify partial signatures from participants

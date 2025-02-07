@@ -3,41 +3,41 @@ use crate::{
     Channel, Recipients,
 };
 use bytes::Bytes;
-use commonware_cryptography::PublicKey;
+use commonware_cryptography::Array;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
 };
 
-pub enum Message {
+pub enum Message<P: Array> {
     Ready {
-        peer: PublicKey,
+        peer: P,
         relay: peer::Relay,
-        channels: oneshot::Sender<Channels>,
+        channels: oneshot::Sender<Channels<P>>,
     },
     Release {
-        peer: PublicKey,
+        peer: P,
     },
     Content {
-        recipients: Recipients,
+        recipients: Recipients<P>,
         channel: Channel,
         message: Bytes,
         priority: bool,
-        success: oneshot::Sender<Vec<PublicKey>>,
+        success: oneshot::Sender<Vec<P>>,
     },
 }
 
 #[derive(Clone)]
-pub struct Mailbox {
-    sender: mpsc::Sender<Message>,
+pub struct Mailbox<P: Array> {
+    sender: mpsc::Sender<Message<P>>,
 }
 
-impl Mailbox {
-    pub fn new(sender: mpsc::Sender<Message>) -> Self {
+impl<P: Array> Mailbox<P> {
+    pub fn new(sender: mpsc::Sender<Message<P>>) -> Self {
         Self { sender }
     }
 
-    pub async fn ready(&mut self, peer: PublicKey, relay: peer::Relay) -> Channels {
+    pub async fn ready(&mut self, peer: P, relay: peer::Relay) -> Channels<P> {
         let (response, receiver) = oneshot::channel();
         self.sender
             .send(Message::Ready {
@@ -50,28 +50,28 @@ impl Mailbox {
         receiver.await.unwrap()
     }
 
-    pub async fn release(&mut self, peer: PublicKey) {
+    pub async fn release(&mut self, peer: P) {
         self.sender.send(Message::Release { peer }).await.unwrap();
     }
 }
 
 #[derive(Clone, Debug)]
-pub struct Messenger {
-    sender: mpsc::Sender<Message>,
+pub struct Messenger<P: Array> {
+    sender: mpsc::Sender<Message<P>>,
 }
 
-impl Messenger {
-    pub fn new(sender: mpsc::Sender<Message>) -> Self {
+impl<P: Array> Messenger<P> {
+    pub fn new(sender: mpsc::Sender<Message<P>>) -> Self {
         Self { sender }
     }
 
     pub async fn content(
         &mut self,
-        recipients: Recipients,
+        recipients: Recipients<P>,
         channel: Channel,
         message: Bytes,
         priority: bool,
-    ) -> Vec<PublicKey> {
+    ) -> Vec<P> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Message::Content {

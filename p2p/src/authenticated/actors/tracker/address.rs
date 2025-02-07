@@ -1,10 +1,8 @@
 use super::Error;
 use crate::authenticated::wire::Peer;
 use bytes::BufMut;
-use std::{
-    mem::size_of,
-    net::{Ipv4Addr, Ipv6Addr, SocketAddr},
-};
+use commonware_utils::SizedSerialize;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 
 #[derive(Clone)]
 pub enum Address {
@@ -22,7 +20,7 @@ pub struct Signature {
 }
 
 pub fn wire_peer_payload(peer: &Peer) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(peer.socket.len() + size_of::<u64>());
+    let mut payload = Vec::with_capacity(peer.socket.len() + u64::SERIALIZED_LEN);
     payload.extend_from_slice(&peer.socket);
     payload.put_u64(peer.timestamp);
     payload
@@ -30,7 +28,7 @@ pub fn wire_peer_payload(peer: &Peer) -> Vec<u8> {
 
 pub fn socket_peer_payload(socket: &SocketAddr, timestamp: u64) -> (Vec<u8>, Vec<u8>) {
     let socket = bytes(socket);
-    let mut payload = Vec::with_capacity(socket.len() + size_of::<u64>());
+    let mut payload = Vec::with_capacity(socket.len() + u64::SERIALIZED_LEN);
     payload.extend_from_slice(&socket);
     payload.put_u64(timestamp);
     (socket, payload)

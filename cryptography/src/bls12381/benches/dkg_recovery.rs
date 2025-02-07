@@ -27,7 +27,7 @@ fn benchmark_dkg_recovery(c: &mut Criterion) {
                     // Create player
                     let me = contributors[0].clone();
                     let mut player = Player::new(
-                        me.clone(),
+                        me,
                         None,
                         contributors.clone(),
                         contributors.clone(),

@@ -107,8 +107,7 @@ impl<
                     let message = proposal_message(proposal.view, parent, &payload);
                     let proposal_signature =
                         ops::partial_sign_message(share, Some(&self.notarize_namespace), &message)
-                            .serialize()
-                            .into();
+                            .serialize();
                     let message = seed_message(view);
                     let seed_signature: Bytes =
                         ops::partial_sign_message(share, Some(&self.seed_namespace), &message)
@@ -117,7 +116,7 @@ impl<
                     let n = wire::Notarize {
                         proposal: Some(proposal),
                         proposal_signature,
-                        seed_signature: seed_signature.clone(),
+                        seed_signature: seed_signature.to_vec(),
                     };
                     let msg = wire::Voter {
                         payload: Some(wire::voter::Payload::Notarize(n)),
@@ -131,8 +130,7 @@ impl<
                     let message = proposal_message(view, parent, &payload);
                     let proposal_signature =
                         ops::partial_sign_message(share, Some(&self.notarize_namespace), &message)
-                            .serialize()
-                            .into();
+                            .serialize();
                     let n = wire::Notarize {
                         proposal: Some(wire::Proposal {
                             view,
@@ -140,7 +138,7 @@ impl<
                             payload: payload.to_vec(),
                         }),
                         proposal_signature,
-                        seed_signature,
+                        seed_signature: seed_signature.to_vec(),
                     };
                     let msg = wire::Voter {
                         payload: Some(wire::voter::Payload::Notarize(n)),
@@ -170,8 +168,7 @@ impl<
                     let message = proposal_message(proposal.view, parent, &payload);
                     let proposal_signature =
                         ops::partial_sign_message(share, Some(&self.finalize_namespace), &message)
-                            .serialize()
-                            .into();
+                            .serialize();
                     let f = wire::Finalize {
                         proposal: Some(proposal),
                         proposal_signature,
@@ -188,7 +185,7 @@ impl<
                     let message = proposal_message(view, parent, &payload);
                     let signature =
                         ops::partial_sign_message(share, Some(&self.finalize_namespace), &message);
-                    let proposal_signature = signature.serialize().into();
+                    let proposal_signature = signature.serialize();
                     let f = wire::Finalize {
                         proposal: Some(wire::Proposal {
                             view,

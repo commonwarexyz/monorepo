@@ -1,5 +1,3 @@
-use std::marker::PhantomData;
-
 use super::{
     encoder::{
         finalize_namespace, notarize_namespace, nullify_message, nullify_namespace,
@@ -15,8 +13,10 @@ use commonware_cryptography::{
         ops,
         poly::{self, Eval},
     },
-    Digest, Signature,
+    Array,
 };
+use commonware_utils::SizedSerialize;
+use std::marker::PhantomData;
 
 type Callback = Box<dyn Fn(&poly::Poly<group::Public>) -> Option<u32>>;
 
@@ -44,7 +44,7 @@ impl Verifier {
 /// We don't use protobuf for proof encoding because we expect external parties
 /// to decode proofs in constrained environments where protobuf may not be implemented.
 #[derive(Clone)]
-pub struct Prover<D: Digest> {
+pub struct Prover<D: Array> {
     public: group::Public,
 
     seed_namespace: Vec<u8>,
@@ -59,7 +59,7 @@ pub struct Prover<D: Digest> {
 /// over pre-aggregated data (where the public key of each index can be derived from the group
 /// polynomial). This can be very useful for distributing rewards without including all partial signatures
 /// in a block.
-impl<D: Digest> Prover<D> {
+impl<D: Array> Prover<D> {
     /// Create a new prover with the given signing `namespace`.
     pub fn new(public: group::Public, namespace: &[u8]) -> Self {
         Self {
@@ -75,10 +75,12 @@ impl<D: Digest> Prover<D> {
     }
 
     /// Serialize a proposal proof.
-    pub fn serialize_proposal(proposal: &wire::Proposal, partial_signature: &Signature) -> Proof {
+    pub fn serialize_proposal(proposal: &wire::Proposal, partial_signature: &[u8]) -> Proof {
         // Setup proof
-        let len =
-            size_of::<u64>() + size_of::<u64>() + proposal.payload.len() + partial_signature.len();
+        let len = u64::SERIALIZED_LEN
+            + u64::SERIALIZED_LEN
+            + D::SERIALIZED_LEN
+            + poly::PARTIAL_SIGNATURE_LENGTH;
 
         // Encode proof
         let mut proof = Vec::with_capacity(len);
@@ -96,8 +98,10 @@ impl<D: Digest> Prover<D> {
         namespace: &[u8],
     ) -> Option<(View, View, D, Verifier)> {
         // Ensure proof is big enough
-        let expected_len =
-            size_of::<u64>() + size_of::<u64>() + size_of::<D>() + poly::PARTIAL_SIGNATURE_LENGTH;
+        let expected_len = u64::SERIALIZED_LEN
+            + u64::SERIALIZED_LEN
+            + D::SERIALIZED_LEN
+            + poly::PARTIAL_SIGNATURE_LENGTH;
         if proof.len() != expected_len {
             return None;
         }
@@ -129,15 +133,11 @@ impl<D: Digest> Prover<D> {
     }
 
     /// Serialize an aggregation proof.
-    pub fn serialize_threshold(
-        proposal: &wire::Proposal,
-        signature: &Signature,
-        seed: &Signature,
-    ) -> Proof {
+    pub fn serialize_threshold(proposal: &wire::Proposal, signature: &[u8], seed: &[u8]) -> Proof {
         // Setup proof
-        let len = size_of::<u64>()
-            + size_of::<u64>()
-            + proposal.payload.len()
+        let len = u64::SERIALIZED_LEN
+            + u64::SERIALIZED_LEN
+            + D::SERIALIZED_LEN
             + group::SIGNATURE_LENGTH
             + group::SIGNATURE_LENGTH;
 
@@ -158,9 +158,9 @@ impl<D: Digest> Prover<D> {
         namespace: &[u8],
     ) -> Option<(View, View, D, group::Signature, group::Signature)> {
         // Ensure proof prefix is big enough
-        let expected_len = size_of::<u64>()
-            + size_of::<u64>()
-            + size_of::<D>()
+        let expected_len = u64::SERIALIZED_LEN
+            + u64::SERIALIZED_LEN
+            + D::SERIALIZED_LEN
             + group::SIGNATURE_LENGTH
             + group::SIGNATURE_LENGTH;
         if proof.len() != expected_len {
@@ -219,18 +219,18 @@ impl<D: Digest> Prover<D> {
         view: View,
         parent_1: View,
         payload_1: &D,
-        signature_1: &Signature,
+        signature_1: &[u8],
         parent_2: View,
         payload_2: &D,
-        signature_2: &Signature,
+        signature_2: &[u8],
     ) -> Proof {
         // Setup proof
-        let len = size_of::<u64>()
-            + size_of::<u64>()
-            + payload_1.len()
+        let len = u64::SERIALIZED_LEN
+            + u64::SERIALIZED_LEN
+            + D::SERIALIZED_LEN
             + poly::PARTIAL_SIGNATURE_LENGTH
-            + size_of::<u64>()
-            + payload_2.len()
+            + u64::SERIALIZED_LEN
+            + D::SERIALIZED_LEN
             + poly::PARTIAL_SIGNATURE_LENGTH;
 
         // Encode proof
@@ -251,12 +251,12 @@ impl<D: Digest> Prover<D> {
         namespace: &[u8],
     ) -> Option<(View, Verifier)> {
         // Ensure proof is big enough
-        let expected_len = size_of::<u64>()
-            + size_of::<u64>()
-            + size_of::<D>()
+        let expected_len = u64::SERIALIZED_LEN
+            + u64::SERIALIZED_LEN
+            + D::SERIALIZED_LEN
             + poly::PARTIAL_SIGNATURE_LENGTH
-            + size_of::<u64>()
-            + size_of::<D>()
+            + u64::SERIALIZED_LEN
+            + D::SERIALIZED_LEN
             + poly::PARTIAL_SIGNATURE_LENGTH;
         if proof.len() != expected_len {
             return None;
@@ -310,10 +310,10 @@ impl<D: Digest> Prover<D> {
         view: View,
         parent_1: View,
         payload_1: &D,
-        signature_1: &Signature,
+        signature_1: &[u8],
         parent_2: View,
         payload_2: &D,
-        signature_2: &Signature,
+        signature_2: &[u8],
     ) -> Proof {
         Self::serialize_conflicting_proposal(
             view,
@@ -337,10 +337,10 @@ impl<D: Digest> Prover<D> {
         view: View,
         parent_1: View,
         payload_1: &D,
-        signature_1: &Signature,
+        signature_1: &[u8],
         parent_2: View,
         payload_2: &D,
-        signature_2: &Signature,
+        signature_2: &[u8],
     ) -> Proof {
         Self::serialize_conflicting_proposal(
             view,
@@ -363,12 +363,15 @@ impl<D: Digest> Prover<D> {
         view: View,
         parent: View,
         payload: &D,
-        signature_finalize: &Signature,
-        signature_null: &Signature,
+        signature_finalize: &[u8],
+        signature_null: &[u8],
     ) -> Proof {
         // Setup proof
-        let len =
-            8 + 8 + payload.len() + poly::PARTIAL_SIGNATURE_LENGTH + poly::PARTIAL_SIGNATURE_LENGTH;
+        let len = u64::SERIALIZED_LEN
+            + u64::SERIALIZED_LEN
+            + D::SERIALIZED_LEN
+            + poly::PARTIAL_SIGNATURE_LENGTH
+            + poly::PARTIAL_SIGNATURE_LENGTH;
 
         // Encode proof
         let mut proof = Vec::with_capacity(len);
@@ -383,9 +386,9 @@ impl<D: Digest> Prover<D> {
     /// Deserialize a conflicting nullify and finalize proof.
     pub fn deserialize_nullify_finalize(&self, mut proof: Proof) -> Option<(View, Verifier)> {
         // Ensure proof is big enough
-        let expected_len = size_of::<u64>()
-            + size_of::<u64>()
-            + size_of::<D>()
+        let expected_len = u64::SERIALIZED_LEN
+            + u64::SERIALIZED_LEN
+            + D::SERIALIZED_LEN
             + poly::PARTIAL_SIGNATURE_LENGTH
             + poly::PARTIAL_SIGNATURE_LENGTH;
         if proof.len() != expected_len {
@@ -395,8 +398,7 @@ impl<D: Digest> Prover<D> {
         // Decode proof
         let view = proof.get_u64();
         let parent = proof.get_u64();
-        let payload = D::try_from(&proof[..size_of::<D>()]).ok()?;
-        proof.advance(size_of::<D>());
+        let payload = D::read_from(&mut proof).ok()?;
         let signature_finalize = proof.copy_to_bytes(poly::PARTIAL_SIGNATURE_LENGTH);
         let signature_finalize = Eval::deserialize(&signature_finalize)?;
         let signature_null = proof.copy_to_bytes(poly::PARTIAL_SIGNATURE_LENGTH);
@@ -444,6 +446,7 @@ mod tests {
             primitives::group::{self, Share},
         },
         sha256::Digest as Sha256Digest,
+        Hasher, Sha256,
     };
     use ops::{keypair, partial_sign_message, sign_message};
     use rand::{rngs::StdRng, SeedableRng};
@@ -460,7 +463,9 @@ mod tests {
     }
 
     fn test_digest(value: u8) -> Sha256Digest {
-        Sha256Digest::try_from(&vec![value; size_of::<Sha256Digest>()]).unwrap()
+        let mut hasher = Sha256::new();
+        hasher.update(&[value]);
+        hasher.finalize()
     }
 
     #[test]

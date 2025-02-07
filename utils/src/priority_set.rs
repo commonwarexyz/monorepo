@@ -1,6 +1,8 @@
-use std::cmp::Ordering;
-use std::collections::{BTreeSet, HashMap, HashSet};
-use std::hash::Hash;
+use std::{
+    cmp::Ordering,
+    collections::{BTreeSet, HashMap, HashSet},
+    hash::Hash,
+};
 
 /// An entry in the `PrioritySet`.
 #[derive(Eq, PartialEq)]

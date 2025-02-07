@@ -5,7 +5,7 @@ pub use super::{
 };
 use crate::authenticated::{ip, metrics, wire};
 use bitvec::prelude::*;
-use commonware_cryptography::{PublicKey, Scheme};
+use commonware_cryptography::{Array, Scheme};
 use commonware_runtime::{Clock, Spawner};
 use commonware_utils::{hex, union, SystemTimeExt};
 use futures::{channel::mpsc, StreamExt};
@@ -30,16 +30,16 @@ use tracing::{debug, trace};
 // Bytes to add to the namespace to prevent replay attacks.
 const NAMESPACE_SUFFIX_IP: &[u8] = b"_IP";
 
-struct PeerSet {
+struct PeerSet<P: Array> {
     index: u64,
-    sorted: Vec<PublicKey>,
-    order: HashMap<PublicKey, usize>,
+    sorted: Vec<P>,
+    order: HashMap<P, usize>,
     knowledge: BitVec<u8, Lsb0>,
     msg: wire::BitVec,
 }
 
-impl PeerSet {
-    fn new(index: u64, mut peers: Vec<PublicKey>) -> Self {
+impl<P: Array> PeerSet<P> {
+    fn new(index: u64, mut peers: Vec<P>) -> Self {
         // Insert peers in sorted order
         peers.sort();
         let mut order = HashMap::new();
@@ -65,7 +65,7 @@ impl PeerSet {
         }
     }
 
-    fn found(&mut self, peer: PublicKey) -> bool {
+    fn found(&mut self, peer: P) -> bool {
         if let Some(idx) = self.order.get(&peer) {
             self.knowledge.set(*idx, true);
             return true;
@@ -142,13 +142,14 @@ pub struct Actor<E: Spawner + Rng + GClock, C: Scheme> {
     tracked_peer_sets: usize,
     peer_gossip_max_count: usize,
 
-    sender: mpsc::Sender<Message<E>>,
-    receiver: mpsc::Receiver<Message<E>>,
-    peers: BTreeMap<PublicKey, AddressCount>,
-    sets: BTreeMap<u64, PeerSet>,
+    sender: mpsc::Sender<Message<E, C::PublicKey>>,
+    receiver: mpsc::Receiver<Message<E, C::PublicKey>>,
+    peers: BTreeMap<C::PublicKey, AddressCount>,
+    sets: BTreeMap<u64, PeerSet<C::PublicKey>>,
+    #[allow(clippy::type_complexity)]
     connections_rate_limiter:
-        RateLimiter<PublicKey, HashMapStateStore<PublicKey>, E, NoOpMiddleware<E::Instant>>,
-    connections: HashSet<PublicKey>,
+        RateLimiter<C::PublicKey, HashMapStateStore<C::PublicKey>, E, NoOpMiddleware<E::Instant>>,
+    connections: HashSet<C::PublicKey>,
 
     tracked_peers: Gauge,
     reserved_connections: Gauge,
@@ -159,7 +160,11 @@ pub struct Actor<E: Spawner + Rng + GClock, C: Scheme> {
 }
 
 impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
-    pub fn new(runtime: E, mut cfg: Config<C>) -> (Self, Mailbox<E>, Oracle<E>) {
+    #[allow(clippy::type_complexity)]
+    pub fn new(
+        runtime: E,
+        mut cfg: Config<C>,
+    ) -> (Self, Mailbox<E, C::PublicKey>, Oracle<E, C::PublicKey>) {
         // Construct IP signature
         let timestamp = runtime.current().epoch_millis();
         let (socket_bytes, payload_bytes) = socket_peer_payload(&cfg.address, timestamp);
@@ -169,8 +174,8 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
             socket: socket_bytes,
             timestamp,
             signature: Some(wire::Signature {
-                public_key: cfg.crypto.public_key(),
-                signature: ip_signature,
+                public_key: cfg.crypto.public_key().to_vec(),
+                signature: ip_signature.to_vec(),
             }),
         };
 
@@ -188,7 +193,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
         if tracked_peer_sets == 0 {
             tracked_peer_sets = 1
         };
-        let sets: BTreeMap<u64, PeerSet> = BTreeMap::new();
+        let sets: BTreeMap<u64, PeerSet<C::PublicKey>> = BTreeMap::new();
 
         // Construct channels
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
@@ -253,7 +258,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
     }
 
     /// Returns whether a peer is not us and in one of the known peer sets.
-    fn allowed(&self, peer: &PublicKey) -> bool {
+    fn allowed(&self, peer: &C::PublicKey) -> bool {
         if *peer == self.crypto.public_key() {
             return false;
         }
@@ -266,7 +271,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
     }
 
     /// Stores a new peer set and increments peer counters.
-    fn store_peer_set(&mut self, index: u64, peers: Vec<PublicKey>) {
+    fn store_peer_set(&mut self, index: u64, peers: Vec<C::PublicKey>) {
         // Check if peer set already exists
         if self.sets.contains_key(&index) {
             debug!(index, "peer set already exists");
@@ -324,7 +329,8 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
         }
     }
 
-    fn handle_dialable(&mut self) -> Vec<(PublicKey, SocketAddr, Reservation<E>)> {
+    #[allow(clippy::type_complexity)]
+    fn handle_dialable(&mut self) -> Vec<(C::PublicKey, SocketAddr, Reservation<E, C::PublicKey>)> {
         // Collect unreserved peers
         let available_peers: Vec<_> = self
             .peers
@@ -348,12 +354,12 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
                 Some(Address::Config(address)) => *address,
                 None => continue,
             };
-            reserved.push((peer.clone(), address, reservation));
+            reserved.push((peer, address, reservation));
         }
         reserved
     }
 
-    fn handle_peer(&mut self, peer: &PublicKey, address: Signature) -> bool {
+    fn handle_peer(&mut self, peer: &C::PublicKey, address: Signature) -> bool {
         // Check if peer is authorized
         if !self.allowed(peer) {
             return false;
@@ -408,22 +414,17 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
             let signature = peer.signature.as_ref().ok_or(Error::PeerUnsigned)?;
 
             // Check if public key is well-formatted and if peer is us
-            let public_key = &signature.public_key;
-            if !C::validate(public_key) {
-                return Err(Error::InvalidPublicKey);
-            }
-            if public_key == &self.crypto.public_key() {
+            let public_key = C::PublicKey::try_from(&signature.public_key)
+                .map_err(|_| Error::InvalidPublicKey)?;
+            if public_key == self.crypto.public_key() {
                 return Err(Error::ReceivedSelf);
             }
 
             // If any signature is invalid, disconnect from the peer
+            let signature = C::Signature::try_from(&signature.signature)
+                .map_err(|_| Error::InvalidSignature)?;
             let payload = wire_peer_payload(&peer);
-            if !C::verify(
-                Some(&self.ip_namespace),
-                &payload,
-                public_key,
-                &signature.signature,
-            ) {
+            if !C::verify(Some(&self.ip_namespace), &payload, &public_key, &signature) {
                 return Err(Error::InvalidSignature);
             }
 
@@ -436,13 +437,13 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
 
             // Attempt to update peer record
             if self.handle_peer(
-                public_key,
+                &public_key,
                 Signature {
                     addr: address,
-                    peer: peer.clone(),
+                    peer,
                 },
             ) {
-                debug!(peer = hex(public_key), "updated peer record");
+                debug!(peer = hex(&public_key), "updated peer record");
                 updated = true;
             }
         }
@@ -527,7 +528,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
         Ok(Some(wire::Peers { peers }))
     }
 
-    fn reserve(&mut self, peer: PublicKey) -> Option<Reservation<E>> {
+    fn reserve(&mut self, peer: C::PublicKey) -> Option<Reservation<E, C::PublicKey>> {
         // Check if we are already reserved
         if self.connections.contains(&peer) {
             return None;
@@ -653,7 +654,10 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    fn test_config<C: Scheme>(crypto: C, bootstrappers: Vec<Bootstrapper>) -> Config<C> {
+    fn test_config<C: Scheme>(
+        crypto: C,
+        bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
+    ) -> Config<C> {
         Config {
             crypto,
             namespace: b"test_namespace".to_vec(),
@@ -784,8 +788,8 @@ mod tests {
                     socket: socket_bytes,
                     timestamp: 0,
                     signature: Some(wire::Signature {
-                        public_key: peer1.clone(),
-                        signature: ip_signature,
+                        public_key: peer1.to_vec(),
+                        signature: ip_signature.to_vec(),
                     }),
                 }],
             };
@@ -809,7 +813,7 @@ mod tests {
             }
 
             // Register new peers
-            oracle.register(1, vec![peer2.clone(), peer3.clone()]).await;
+            oracle.register(1, vec![peer2.clone(), peer3]).await;
 
             // Request bit vector until both indexes returned
             let mut index_0_returned = false;
@@ -847,7 +851,7 @@ mod tests {
             oracle.register(2, vec![peer2.clone()]).await;
 
             // Ensure peer1 has been evicted from the peer tracker and should die
-            mailbox.construct(peer1.clone(), peer_mailbox.clone()).await;
+            mailbox.construct(peer1, peer_mailbox.clone()).await;
             let msg = peer_receiver.next().await.unwrap();
             assert!(matches!(msg, peer::Message::Kill));
 

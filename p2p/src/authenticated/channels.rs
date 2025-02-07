@@ -1,7 +1,7 @@
 use super::{actors::Messenger, Error};
 use crate::{Channel, Message, Recipients};
 use bytes::Bytes;
-use commonware_cryptography::PublicKey;
+use commonware_cryptography::Array;
 use futures::{channel::mpsc, StreamExt};
 use governor::Quota;
 use std::collections::BTreeMap;
@@ -10,19 +10,19 @@ use zstd::bulk::{compress, decompress};
 /// Sender is the mechanism used to send arbitrary bytes to
 /// a set of recipients over a pre-defined channel.
 #[derive(Clone, Debug)]
-pub struct Sender {
+pub struct Sender<P: Array> {
     channel: Channel,
     max_size: usize,
     compression: Option<i32>,
-    messenger: Messenger,
+    messenger: Messenger<P>,
 }
 
-impl Sender {
+impl<P: Array> Sender<P> {
     pub(super) fn new(
         channel: Channel,
         max_size: usize,
         compression: Option<i32>,
-        messenger: Messenger,
+        messenger: Messenger<P>,
     ) -> Self {
         Self {
             channel,
@@ -33,8 +33,9 @@ impl Sender {
     }
 }
 
-impl crate::Sender for Sender {
+impl<P: Array> crate::Sender for Sender<P> {
     type Error = Error;
+    type PublicKey = P;
 
     /// Sends a message to a set of recipients.
     ///
@@ -57,10 +58,10 @@ impl crate::Sender for Sender {
     /// receive the message (connection may no longer be active and we may not know that yet).
     async fn send(
         &mut self,
-        recipients: Recipients,
+        recipients: Recipients<Self::PublicKey>,
         mut message: Bytes,
         priority: bool,
-    ) -> Result<Vec<PublicKey>, Error> {
+    ) -> Result<Vec<Self::PublicKey>, Error> {
         // If compression is enabled, compress the message before sending.
         if let Some(level) = self.compression {
             let compressed = compress(&message, level).map_err(|_| Error::CompressionFailed)?;
@@ -83,17 +84,17 @@ impl crate::Sender for Sender {
 
 /// Channel to asynchronously receive messages from a channel.
 #[derive(Debug)]
-pub struct Receiver {
+pub struct Receiver<P: Array> {
     max_size: usize,
     compression: bool,
-    receiver: mpsc::Receiver<Message>,
+    receiver: mpsc::Receiver<Message<P>>,
 }
 
-impl Receiver {
+impl<P: Array> Receiver<P> {
     pub(super) fn new(
         max_size: usize,
         compression: bool,
-        receiver: mpsc::Receiver<Message>,
+        receiver: mpsc::Receiver<Message<P>>,
     ) -> Self {
         Self {
             max_size,
@@ -103,14 +104,15 @@ impl Receiver {
     }
 }
 
-impl crate::Receiver for Receiver {
+impl<P: Array> crate::Receiver for Receiver<P> {
     type Error = Error;
+    type PublicKey = P;
 
     /// Receives a message from the channel.
     ///
     /// This method will block until a message is received or the underlying
     /// network shuts down.
-    async fn recv(&mut self) -> Result<Message, Error> {
+    async fn recv(&mut self) -> Result<Message<Self::PublicKey>, Error> {
         let (sender, mut message) = self.receiver.next().await.ok_or(Error::NetworkClosed)?;
 
         // If compression is enabled, decompress the message before returning.
@@ -127,14 +129,14 @@ impl crate::Receiver for Receiver {
 }
 
 #[derive(Clone)]
-pub struct Channels {
-    messenger: Messenger,
+pub struct Channels<P: Array> {
+    messenger: Messenger<P>,
     max_size: usize,
-    receivers: BTreeMap<Channel, (Quota, mpsc::Sender<Message>)>,
+    receivers: BTreeMap<Channel, (Quota, mpsc::Sender<Message<P>>)>,
 }
 
-impl Channels {
-    pub fn new(messenger: Messenger, max_size: usize) -> Self {
+impl<P: Array> Channels<P> {
+    pub fn new(messenger: Messenger<P>, max_size: usize) -> Self {
         Self {
             messenger,
             max_size,
@@ -148,7 +150,7 @@ impl Channels {
         rate: governor::Quota,
         backlog: usize,
         compression: Option<i32>,
-    ) -> (Sender, Receiver) {
+    ) -> (Sender<P>, Receiver<P>) {
         let (sender, receiver) = mpsc::channel(backlog);
         if self.receivers.insert(channel, (rate, sender)).is_some() {
             panic!("duplicate channel registration: {}", channel);
@@ -159,7 +161,7 @@ impl Channels {
         )
     }
 
-    pub fn collect(self) -> BTreeMap<u32, (Quota, mpsc::Sender<Message>)> {
+    pub fn collect(self) -> BTreeMap<u32, (Quota, mpsc::Sender<Message<P>>)> {
         self.receivers
     }
 }

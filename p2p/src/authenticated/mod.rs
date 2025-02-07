@@ -296,7 +296,7 @@ mod tests {
                         while received.len() < n - 1 {
                             // Ensure message equals sender identity
                             let (sender, message) = receiver.recv().await.unwrap();
-                            assert_eq!(sender, message);
+                            assert_eq!(sender.as_ref(), message.as_ref());
 
                             // Add to received set
                             received.insert(sender);
@@ -316,14 +316,18 @@ mod tests {
                                 // Loop until success
                                 loop {
                                     let sent = sender
-                                        .send(Recipients::One(recipient.clone()), msg.clone(), true)
+                                        .send(
+                                            Recipients::One(recipient.clone()),
+                                            msg.to_vec().into(),
+                                            true,
+                                        )
                                         .await
                                         .unwrap();
                                     if sent.len() != 1 {
                                         runtime.sleep(Duration::from_millis(100)).await;
                                         continue;
                                     }
-                                    assert_eq!(sent[0], recipient);
+                                    assert_eq!(&sent[0], recipient);
                                     break;
                                 }
                             }
@@ -337,7 +341,11 @@ mod tests {
                             // Loop until all peer sends successful
                             loop {
                                 let mut sent = sender
-                                    .send(Recipients::Some(recipients.clone()), msg.clone(), true)
+                                    .send(
+                                        Recipients::Some(recipients.clone()),
+                                        msg.to_vec().into(),
+                                        true,
+                                    )
                                     .await
                                     .unwrap();
                                 if sent.len() != n - 1 {
@@ -360,7 +368,7 @@ mod tests {
                             // Loop until all peer sends successful
                             loop {
                                 let mut sent = sender
-                                    .send(Recipients::All, msg.clone(), true)
+                                    .send(Recipients::All, msg.to_vec().into(), true)
                                     .await
                                     .unwrap();
                                 if sent.len() != n - 1 {
@@ -517,7 +525,7 @@ mod tests {
                             let msg = signer.public_key();
                             loop {
                                 if sender
-                                    .send(Recipients::All, msg.clone(), true)
+                                    .send(Recipients::All, msg.to_vec().into(), true)
                                     .await
                                     .unwrap()
                                     .len()
@@ -532,7 +540,7 @@ mod tests {
                         } else {
                             // Ensure message equals sender identity
                             let (sender, message) = receiver.recv().await.unwrap();
-                            assert_eq!(sender, message);
+                            assert_eq!(sender.as_ref(), message.as_ref());
                         }
                     }
                 });
