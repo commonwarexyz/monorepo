@@ -35,20 +35,19 @@
 //! assert!(proof.verify(&mut hasher, &digests[0], 0, &root));
 //! ```
 
+use bytes::{Buf, BufMut};
 use commonware_cryptography::{Digest, Hasher};
 use std::mem::size_of;
-
-/// Combines two digests into a new digest.
-fn combine<H: Hasher>(hasher: &mut H, left: &H::Digest, right: &H::Digest) -> H::Digest {
-    hasher.update(left);
-    hasher.update(right);
-    hasher.finalize()
-}
 
 /// A stateless Binary Merkle Tree that computes a root over an arbitrary set
 /// of [commonware_cryptography::Digest].
 #[derive(Clone, Debug)]
 pub struct Tree<H: Hasher> {
+    /// Number of leaves in the tree.
+    leaves: u32,
+
+    root: H::Digest,
+
     /// Levels of the tree: level 0 contains the leaves, and each subsequent level
     /// contains the parent nodes computed from the previous level.
     ///
@@ -60,11 +59,6 @@ impl<H: Hasher> Tree<H> {
     /// Builds a Merkle Tree from a slice of leaf digests.
     ///
     /// If `leaves` is empty, returns `None`.
-    ///
-    /// # Warning
-    ///
-    /// It is not safe to insert `H::Digest::default()` as a leaf. This could lead to
-    /// a proof being generated for a non-existent leaf.
     pub fn new(hasher: &mut H, leaves: Vec<H::Digest>) -> Option<Self> {
         // Ensure there are non-zero leaves.
         if leaves.is_empty() {
@@ -72,59 +66,86 @@ impl<H: Hasher> Tree<H> {
         }
 
         // Level 0: the leaves.
+        let leaves_len = leaves.len() as u32;
         let mut levels = Vec::new();
         levels.push(leaves);
 
         // Build higher levels until we reach the root.
-        let default = H::Digest::default();
+        let mut pos = 0u32;
         while levels.last().unwrap().len() > 1 {
             let current_level = levels.last().unwrap();
-            let mut next_level = Vec::with_capacity((current_level.len() + 1) / 2);
+            let next_level_len = (current_level.len() + 1) / 2;
+            let mut next_level = Vec::with_capacity(next_level_len);
             for chunk in current_level.chunks(2) {
+                // Hash the left child
                 let left = &chunk[0];
+                hasher.update(&pos.to_be_bytes());
+                hasher.update(left);
+                pos += 1;
+
+                // Hash the right child
                 let right = if chunk.len() == 2 {
                     &chunk[1]
                 } else {
-                    // Use the default digest for the right child if no right child exists.
-                    &default
+                    // If the chunk has an odd number of nodes, use a duplicate of the left child.
+                    &chunk[0]
                 };
-                next_level.push(combine(hasher, left, right));
+                hasher.update(&pos.to_be_bytes());
+                hasher.update(right);
+                pos += 1;
+
+                // Reset the hasher for the next iteration.
+                next_level.push(hasher.finalize());
             }
+
+            // Add the next level to the tree
             levels.push(next_level);
         }
-        Some(Self { levels })
+
+        // Hash the root with the number of leaves in the tree
+        hasher.update(&leaves_len.to_be_bytes());
+        hasher.update(levels.last().unwrap().first().unwrap());
+        let root = hasher.finalize();
+        Some(Self {
+            leaves: leaves_len,
+            root,
+            levels,
+        })
     }
 
     /// Returns a reference to the Merkle root, if the tree is non-empty.
     pub fn root(&self) -> H::Digest {
-        self.levels.last().unwrap().first().unwrap().clone()
+        self.root.clone()
     }
 
     /// Generates a Merkle proof for the leaf at `leaf_index`.
     ///
     /// The proof contains the sibling hash at each level needed to reconstruct the root.
-    pub fn prove(&self, leaf_index: usize) -> Option<Proof<H>> {
-        if leaf_index >= self.levels[0].len() {
+    pub fn prove(&self, leaf_index: u32) -> Option<Proof<H>> {
+        if leaf_index >= self.leaves {
             return None;
         }
-        let mut proof_hashes = Vec::new();
-        let mut index = leaf_index;
+
         // For each level (except the root level) record the sibling.
+        let mut proof_hashes = Vec::new();
+        let mut index = leaf_index as usize;
         for level in &self.levels {
             if level.len() == 1 {
-                break; // Reached the root.
+                // Reached the root
+                break;
             }
             let sibling_index = if index % 2 == 0 { index + 1 } else { index - 1 };
             let sibling = if sibling_index < level.len() {
                 level[sibling_index].clone()
             } else {
-                // Use the default digest for the right child if no right child exists.
-                H::Digest::default()
+                // If no right child exists, use a duplicate of the current node.
+                level[index].clone()
             };
             proof_hashes.push(sibling);
             index /= 2;
         }
         Some(Proof {
+            leaves: self.leaves,
             hashes: proof_hashes,
         })
     }
@@ -133,6 +154,8 @@ impl<H: Hasher> Tree<H> {
 /// A binary Merkle tree proof represented solely as a vector of sibling hashes.
 #[derive(Clone, Debug)]
 pub struct Proof<H: Hasher> {
+    pub leaves: u32,
+
     /// The sibling hashes from the leaf up to the root, ordered from bottom (closest to leaf) to top.
     pub hashes: Vec<H::Digest>,
 }
@@ -159,31 +182,51 @@ impl<H: Hasher> Proof<H> {
         &self,
         hasher: &mut H,
         element: &H::Digest,
-        element_pos: u64,
+        element_pos: u32,
         root_hash: &H::Digest,
     ) -> bool {
-        // Ensure element isn't default item
-        if element == &H::Digest::default() {
+        // Ensure element isn't past allowed
+        if element_pos >= self.leaves {
             return false;
         }
 
         // Compute the root hash by combining the element with each sibling hash in the proof.
         let mut computed = element.clone();
         let mut index = element_pos;
-        for sibling in &self.hashes {
+        let mut nodes = self.leaves;
+        let mut cumulative_offset = 0;
+        for sibling in self.hashes.iter() {
+            let pair_index = index / 2;
+            let left_pos = cumulative_offset + 2 * pair_index;
+            let right_pos = left_pos + 1;
+
             if index % 2 == 0 {
-                computed = combine(hasher, &computed, sibling);
+                hasher.update(&left_pos.to_be_bytes());
+                hasher.update(&computed);
+                hasher.update(&right_pos.to_be_bytes());
+                hasher.update(sibling);
             } else {
-                computed = combine(hasher, sibling, &computed);
+                hasher.update(&left_pos.to_be_bytes());
+                hasher.update(sibling);
+                hasher.update(&right_pos.to_be_bytes());
+                hasher.update(&computed);
             }
+
+            computed = hasher.finalize();
+            cumulative_offset += 2 * ((nodes + 1) / 2);
+            nodes = (nodes + 1) / 2;
             index /= 2;
         }
-        computed == *root_hash
+
+        // Hash the root with the number of leaves in the tree
+        hasher.update(&(self.leaves).to_be_bytes());
+        hasher.update(&computed);
+        hasher.finalize() == *root_hash
     }
 
     /// Returns the maximum number of bytes any serialized proof may occupy.
     pub fn max_serialization_size() -> usize {
-        u8::MAX as usize * size_of::<H::Digest>()
+        size_of::<u32>() + u8::MAX as usize * size_of::<H::Digest>()
     }
 
     /// Serializes the proof as the concatenation of each hash.
@@ -196,8 +239,9 @@ impl<H: Hasher> Proof<H> {
         );
 
         // Serialize the proof as the concatenation of each hash.
-        let bytes_len = self.hashes.len() * size_of::<H::Digest>();
+        let bytes_len = size_of::<u32>() + self.hashes.len() * size_of::<H::Digest>();
         let mut bytes = Vec::with_capacity(bytes_len);
+        bytes.put_u32(self.leaves);
         for hash in &self.hashes {
             bytes.extend_from_slice(hash.as_ref());
         }
@@ -206,7 +250,19 @@ impl<H: Hasher> Proof<H> {
 
     /// Deserializes a proof from its canonical serialized representation.
     pub fn deserialize(mut buf: &[u8]) -> Option<Self> {
-        if buf.len() % size_of::<H::Digest>() != 0 {
+        // Get leaves
+        if buf.len() < size_of::<u32>() {
+            return None;
+        }
+        let leaves = buf.get_u32();
+
+        // If no leaves, nothing to prove
+        if leaves == 0 {
+            return None;
+        }
+
+        // Read hashes
+        if buf.remaining() % size_of::<H::Digest>() != 0 {
             return None;
         }
         let num_hashes = buf.len() / size_of::<H::Digest>();
@@ -218,7 +274,7 @@ impl<H: Hasher> Proof<H> {
             let hash = H::Digest::read_from(&mut buf).ok()?;
             hashes.push(hash);
         }
-        Some(Self { hashes })
+        Some(Self { leaves, hashes })
     }
 }
 
@@ -237,13 +293,95 @@ mod tests {
         let leaf = hash(tx);
         let mut hasher = Sha256::default();
         let tree = Tree::new(&mut hasher, vec![leaf.clone()]).unwrap();
-
-        // The root should equal the only leaf.
-        assert_eq!(tree.root(), leaf);
+        let root = tree.root();
+        println!("{:?}", root);
 
         // Proof verification: a single-element tree proof verifies against the leaf itself.
         let proof = tree.prove(0).unwrap();
-        assert!(proof.verify(&mut hasher, &leaf, 0, &leaf));
+        assert!(proof.verify(&mut hasher, &leaf, 0, &root));
+    }
+
+    #[test]
+    fn test_tampered_proof_single() {
+        // Build tree
+        let tx = b"tx";
+        let leaf = hash(tx);
+        let mut hasher = Sha256::default();
+        let tree = Tree::new(&mut hasher, vec![leaf.clone()]).unwrap();
+        let root = tree.root();
+
+        // Generate a proof and tamper with it
+        let mut proof = tree.prove(0).unwrap();
+        proof.leaves = 100;
+
+        // Proof verification should fail with a tampered proof.
+        assert!(!proof.verify(&mut hasher, &leaf, 0, &root));
+    }
+
+    #[test]
+    fn test_merkle_tree_double() {
+        // Build tree
+        let txs = [b"tx1", b"tx2"];
+        let digests: Vec<Digest> = txs.iter().map(|tx| hash(*tx)).collect();
+        let mut hasher = Sha256::default();
+        let tree = Tree::new(&mut hasher, digests.clone()).unwrap();
+        let root = tree.root();
+
+        // For each leaf, generate and verify its proof.
+        for (i, leaf) in digests.iter().enumerate() {
+            let proof = tree.prove(i as u32).unwrap();
+            assert!(proof.verify(&mut hasher, leaf, i as u32, &root));
+        }
+    }
+
+    #[test]
+    fn test_tampered_proof_double() {
+        // Build tree
+        let txs = [b"tx1", b"tx2"];
+        let digests: Vec<Digest> = txs.iter().map(|tx| hash(*tx)).collect();
+        let mut hasher = Sha256::default();
+        let tree = Tree::new(&mut hasher, digests.clone()).unwrap();
+        let root = tree.root();
+
+        // For each leaf, generate and verify its tampered proof.
+        for (i, leaf) in digests.iter().enumerate() {
+            let mut proof = tree.prove(i as u32).unwrap();
+            proof.leaves = 100;
+            assert!(!proof.verify(&mut hasher, leaf, i as u32, &root));
+        }
+    }
+
+    #[test]
+    fn test_merkle_tree_three() {
+        // Build tree
+        let txs = [b"tx1", b"tx2", b"tx3"];
+        let digests: Vec<Digest> = txs.iter().map(|tx| hash(*tx)).collect();
+        let mut hasher = Sha256::default();
+        let tree = Tree::new(&mut hasher, digests.clone()).unwrap();
+        let root = tree.root();
+
+        // For each leaf, generate and verify its proof.
+        for (i, leaf) in digests.iter().enumerate() {
+            let proof = tree.prove(i as u32).unwrap();
+            assert!(proof.verify(&mut hasher, leaf, i as u32, &root));
+        }
+    }
+
+    #[test]
+    fn test_tampered_proof_three() {
+        // Build tree
+        let txs = [b"tx1", b"tx2", b"tx3"];
+        let digests: Vec<Digest> = txs.iter().map(|tx| hash(*tx)).collect();
+        let mut hasher = Sha256::default();
+        let tree = Tree::new(&mut hasher, digests.clone()).unwrap();
+        let root = tree.root();
+
+        // For each leaf, generate and verify its tampered proof.
+        for (i, leaf) in digests.iter().enumerate() {
+            let mut proof = tree.prove(i as u32).unwrap();
+            proof.leaves = 100;
+            assert!(!proof.verify(&mut hasher, leaf, i as u32, &root));
+        }
     }
 
     #[test]
@@ -257,14 +395,92 @@ mod tests {
 
         // For each leaf, generate and verify its proof.
         for (i, leaf) in digests.iter().enumerate() {
-            let proof = tree.prove(i).unwrap();
+            let proof = tree.prove(i as u32).unwrap();
             let mut hasher = Sha256::default();
             assert!(
-                proof.verify(&mut hasher, leaf, i as u64, &root),
+                proof.verify(&mut hasher, leaf, i as u32, &root),
                 "Proof failed for leaf index {}",
                 i
             );
         }
+    }
+
+    #[test]
+    fn test_tampered_proof_multiple() {
+        // Build tree
+        let txs = [b"tx1", b"tx2", b"tx3", b"tx4"];
+        let digests: Vec<Digest> = txs.iter().map(|tx| hash(*tx)).collect();
+        let mut hasher = Sha256::default();
+        let tree = Tree::new(&mut hasher, digests.clone()).unwrap();
+        let root = tree.root();
+
+        // For each leaf, generate and verify its tampered proof.
+        for (i, leaf) in digests.iter().enumerate() {
+            let mut proof = tree.prove(i as u32).unwrap();
+            proof.leaves = 100;
+            assert!(!proof.verify(&mut hasher, leaf, i as u32, &root));
+        }
+    }
+
+    #[test]
+    fn test_merkle_tree_many() {
+        // Build tree
+        let txs: Vec<Vec<u8>> = (0..150).map(|i| format!("tx{}", i).into()).collect();
+        let digests: Vec<Digest> = txs.iter().map(|tx| hash(tx)).collect();
+        let mut hasher = Sha256::default();
+        let tree = Tree::new(&mut hasher, digests.clone()).unwrap();
+        let root = tree.root();
+
+        // For each leaf, generate and verify its proof.
+        for (i, leaf) in digests.iter().enumerate() {
+            let proof = tree.prove(i as u32).unwrap();
+            let mut hasher = Sha256::default();
+            assert!(
+                proof.verify(&mut hasher, leaf, i as u32, &root),
+                "Proof failed for leaf index {}",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn test_tampered_proof_no_hashes() {
+        // Build tree
+        let txs = [b"tx1", b"tx2", b"tx3", b"tx4"];
+        let digests: Vec<Digest> = txs.iter().map(|tx| hash(*tx)).collect();
+        let leaf = digests[0].clone();
+        let mut hasher = Sha256::default();
+        let tree = Tree::new(&mut hasher, digests).unwrap();
+        let root = tree.root();
+
+        // Build proof
+        let mut proof = tree.prove(0).unwrap();
+
+        // Tamper with proof
+        proof.hashes = Vec::new();
+
+        // Fail verification with an empty proof.
+        assert!(!proof.verify(&mut hasher, &leaf, 0, &root));
+    }
+
+    #[test]
+    fn test_tampered_proof_no_leaves() {
+        // Build tree
+        let txs = [b"tx1", b"tx2", b"tx3", b"tx4"];
+        let digests: Vec<Digest> = txs.iter().map(|tx| hash(*tx)).collect();
+        let leaf = digests[0].clone();
+        let mut hasher = Sha256::default();
+        let tree = Tree::new(&mut hasher, digests).unwrap();
+        let root = tree.root();
+
+        // Build proof
+        let mut proof = tree.prove(0).unwrap();
+
+        // Tamper with proof
+        proof.leaves = 0;
+
+        // Fail verification with an empty proof.
+        assert!(!proof.verify(&mut hasher, &leaf, 0, &root));
     }
 
     #[test]
@@ -429,28 +645,6 @@ mod tests {
         // to a duplicate leaf that doesn't actually exist) should fail.
         assert!(
             !proof.verify(&mut hasher, &digests[2], 3, &root),
-            "Verification should fail for an invalid duplicate leaf index"
-        );
-    }
-
-    #[test]
-    fn test_odd_tree_default_index_proof() {
-        // Build a tree with an odd number of leaves.
-        let txs = [b"tx1", b"tx2", b"tx3"];
-        let digests: Vec<Digest> = txs.iter().map(|tx| hash(*tx)).collect();
-        let mut hasher = Sha256::default();
-        let tree = Tree::new(&mut hasher, digests.clone()).unwrap();
-        let root = tree.root();
-
-        // The tree was built with 3 leaves; index 2 is the last valid index.
-        let mut proof = tree.prove(2).unwrap();
-
-        // Swap sibling with last valid item
-        proof.hashes[0] = digests[2].clone();
-
-        // Attempting to verify default sibling.
-        assert!(
-            !proof.verify(&mut hasher, &Digest::default(), 3, &root),
             "Verification should fail for an invalid duplicate leaf index"
         );
     }

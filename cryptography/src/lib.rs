@@ -142,7 +142,6 @@ pub trait Digest:
     + for<'a> TryFrom<&'a Vec<u8>, Error = Error>
     + TryFrom<Vec<u8>, Error = Error>
     + Deref<Target = [u8]>
-    + Default
     + Sized
     + Clone
     + Send
