@@ -83,7 +83,7 @@
 //!
 //! Upon receiving first `(part(v), notarize(c,v))` from `l`:
 //! * Cancel `t_l`
-//! * If the container's parent `c_parent` is notarized at `v_parent` and we have null notarizations for all views
+//! * If the container's parent `c_parent` is notarized at `v_parent` and we have nullifications for all views
 //!   between `v` and `v_parent`, verify `c` and broadcast `(part(v), notarize(c,v))`
 //!
 //! Upon receiving `2f+1` `(part(v), notarize(c,v))`:
@@ -926,7 +926,7 @@ mod tests {
             )
             .await;
 
-            // Wait for null notarizations to accrue
+            // Wait for nullifications to accrue
             runtime.sleep(Duration::from_secs(120)).await;
 
             // Unlink second peer from all (except first)
