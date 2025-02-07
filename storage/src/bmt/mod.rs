@@ -20,7 +20,7 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_storage::binary::{Builder, Tree};
+//! use commonware_storage::bmt::{Builder, Tree};
 //! use commonware_cryptography::{hash, Sha256, sha256::Digest};
 //!
 //! // Create transactions and compute their digests
