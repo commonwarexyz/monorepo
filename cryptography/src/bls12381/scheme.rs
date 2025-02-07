@@ -24,9 +24,10 @@ use super::primitives::{
     ops,
 };
 use crate::{Array, Error, Scheme};
-use commonware_utils::SizedSerialize;
+use commonware_utils::{hex, SizedSerialize};
 use rand::{CryptoRng, Rng};
 use std::{
+    fmt::Display,
     hash::{Hash, Hasher},
     ops::Deref,
 };
@@ -158,6 +159,12 @@ impl TryFrom<Vec<u8>> for PrivateKey {
     }
 }
 
+impl Display for PrivateKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", hex(&self.raw))
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PublicKey {
     raw: [u8; group::PUBLIC_KEY_LENGTH],
@@ -233,6 +240,12 @@ impl TryFrom<Vec<u8>> for PublicKey {
     }
 }
 
+impl Display for PublicKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", hex(&self.raw))
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Signature {
     raw: [u8; group::SIGNATURE_LENGTH],
@@ -305,6 +318,12 @@ impl TryFrom<Vec<u8>> for Signature {
     type Error = Error;
     fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
         Self::try_from(value.as_slice())
+    }
+}
+
+impl Display for Signature {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", hex(&self.raw))
     }
 }
 

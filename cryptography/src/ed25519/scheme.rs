@@ -1,8 +1,9 @@
 use crate::{Array, BatchScheme, Error, Scheme};
-use commonware_utils::{union_unique, SizedSerialize};
+use commonware_utils::{hex, union_unique, SizedSerialize};
 use ed25519_consensus::{self, VerificationKey};
 use rand::{CryptoRng, Rng, RngCore};
 use std::borrow::Cow;
+use std::fmt::Display;
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 
@@ -192,6 +193,12 @@ impl TryFrom<Vec<u8>> for PrivateKey {
     }
 }
 
+impl Display for PrivateKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", hex(&self.raw))
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct PublicKey {
     raw: [u8; PUBLIC_KEY_LENGTH],
@@ -246,6 +253,12 @@ impl TryFrom<Vec<u8>> for PublicKey {
     type Error = Error;
     fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
         Self::try_from(value.as_slice())
+    }
+}
+
+impl Display for PublicKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", hex(&self.raw))
     }
 }
 
@@ -324,6 +337,12 @@ impl TryFrom<Vec<u8>> for Signature {
     type Error = Error;
     fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
         Self::try_from(value.as_slice())
+    }
+}
+
+impl Display for Signature {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", hex(&self.raw))
     }
 }
 
