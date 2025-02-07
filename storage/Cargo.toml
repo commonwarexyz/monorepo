@@ -45,9 +45,9 @@ harness = false
 path = "src/archive/benches/bench.rs"
 
 [[bench]]
-name="binary"
+name="bmt"
 harness = false
-path = "src/binary/benches/bench.rs"
+path = "src/bmt/benches/bench.rs"
 
 [[bench]]
 name="mmr"
