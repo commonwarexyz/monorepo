@@ -9,7 +9,7 @@
 pub mod dkg;
 pub mod primitives;
 mod scheme;
-pub use scheme::Bls12381;
+pub use scheme::{Bls12381, PrivateKey, PublicKey, Signature};
 
 #[cfg(test)]
 mod tests {

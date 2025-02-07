@@ -26,5 +26,4 @@
 
 mod scheme;
 
-pub use scheme::Ed25519;
-pub use scheme::Ed25519Batch;
+pub use scheme::{Ed25519, Ed25519Batch, PrivateKey, PublicKey, Signature};
