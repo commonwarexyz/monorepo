@@ -221,7 +221,7 @@ mod tests {
         Clock, Runner, Spawner,
     };
     use commonware_storage::journal::variable::{Config as JConfig, Journal};
-    use commonware_utils::{hex, quorum};
+    use commonware_utils::quorum;
     use engine::Engine;
     use futures::{channel::mpsc, StreamExt};
     use governor::Quota;
@@ -391,7 +391,7 @@ mod tests {
                 });
                 let cfg = JConfig {
                     registry: Arc::new(Mutex::new(Registry::default())),
-                    partition: hex(&validator),
+                    partition: validator.to_string(),
                 };
                 let journal = Journal::init(runtime.clone(), cfg)
                     .await
@@ -627,7 +627,7 @@ mod tests {
                     });
                     let cfg = JConfig {
                         registry: Arc::new(Mutex::new(Registry::default())),
-                        partition: hex(&validator),
+                        partition: validator.to_string(),
                     };
                     let journal = Journal::init(runtime.clone(), cfg)
                         .await
@@ -852,7 +852,7 @@ mod tests {
                 });
                 let cfg = JConfig {
                     registry: Arc::new(Mutex::new(Registry::default())),
-                    partition: hex(&validator),
+                    partition: validator.to_string(),
                 };
                 let journal = Journal::init(runtime.clone(), cfg)
                     .await
@@ -989,7 +989,7 @@ mod tests {
             });
             let cfg = JConfig {
                 registry: Arc::new(Mutex::new(Registry::default())),
-                partition: hex(&validator),
+                partition: validator.to_string(),
             };
             let journal = Journal::init(runtime.clone(), cfg)
                 .await
@@ -1146,7 +1146,7 @@ mod tests {
                 });
                 let cfg = JConfig {
                     registry: Arc::new(Mutex::new(Registry::default())),
-                    partition: hex(&validator),
+                    partition: validator.to_string(),
                 };
                 let journal = Journal::init(runtime.clone(), cfg)
                     .await
@@ -1337,7 +1337,7 @@ mod tests {
                 });
                 let cfg = JConfig {
                     registry: Arc::new(Mutex::new(Registry::default())),
-                    partition: hex(&validator),
+                    partition: validator.to_string(),
                 };
                 let journal = Journal::init(runtime.clone(), cfg)
                     .await
@@ -1517,7 +1517,7 @@ mod tests {
                 });
                 let cfg = JConfig {
                     registry: Arc::new(Mutex::new(Registry::default())),
-                    partition: hex(&validator),
+                    partition: validator.to_string(),
                 };
                 let journal = Journal::init(runtime.clone(), cfg)
                     .await
@@ -1690,7 +1690,7 @@ mod tests {
                 });
                 let cfg = JConfig {
                     registry: Arc::new(Mutex::new(Registry::default())),
-                    partition: hex(&validator),
+                    partition: validator.to_string(),
                 };
                 let journal = Journal::init(runtime.clone(), cfg)
                     .await
@@ -1919,7 +1919,7 @@ mod tests {
                 });
                 let cfg = JConfig {
                     registry: Arc::new(Mutex::new(Registry::default())),
-                    partition: hex(&validator),
+                    partition: validator.to_string(),
                 };
                 let journal = Journal::init(runtime.clone(), cfg)
                     .await
@@ -2111,7 +2111,7 @@ mod tests {
                     });
                     let cfg = JConfig {
                         registry: Arc::new(Mutex::new(Registry::default())),
-                        partition: hex(&validator),
+                        partition: validator.to_string(),
                     };
                     let journal = Journal::init(runtime.clone(), cfg)
                         .await
@@ -2295,7 +2295,7 @@ mod tests {
                     });
                     let cfg = JConfig {
                         registry: Arc::new(Mutex::new(Registry::default())),
-                        partition: hex(&validator),
+                        partition: validator.to_string(),
                     };
                     let journal = Journal::init(runtime.clone(), cfg)
                         .await

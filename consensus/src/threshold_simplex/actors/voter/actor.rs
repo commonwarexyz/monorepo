@@ -28,7 +28,7 @@ use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Blob, Clock, Spawner, Storage};
 use commonware_storage::journal::variable::Journal;
-use commonware_utils::{hex, quorum};
+use commonware_utils::quorum;
 use futures::{
     channel::{mpsc, oneshot},
     future::Either,
@@ -150,7 +150,7 @@ impl<
         if self.proposal.is_none() {
             debug!(
                 view = proposal.message.view,
-                digest = hex(&proposal_digest),
+                digest = ?proposal_digest,
                 "setting unverified proposal in notarization"
             );
             self.proposal = Some((proposal_digest, proposal));
@@ -158,8 +158,8 @@ impl<
             if proposal_digest != *previous_digest {
                 warn!(
                     view = proposal.message.view,
-                    previous_digest = hex(previous_digest),
-                    digest = hex(&proposal_digest),
+                    ?previous_digest,
+                    digest = ?proposal_digest,
                     "proposal in notarization does not match stored proposal"
                 );
             }
@@ -184,7 +184,7 @@ impl<
                 trace!(
                     view = self.view,
                     signer = public_key_index,
-                    previous_notarize = hex(previous_notarize),
+                    ?previous_notarize,
                     "already notarized"
                 );
                 return false;
@@ -306,7 +306,7 @@ impl<
                 trace!(
                     view = self.view,
                     signer = public_key_index,
-                    previous_finalize = hex(previous_finalize),
+                    ?previous_finalize,
                     "already finalize"
                 );
                 return false;
@@ -441,7 +441,7 @@ impl<
             // matter which one we choose.
             debug!(
                 view = self.view,
-                proposal = hex(proposal),
+                ?proposal,
                 verified = self.verified_proposal,
                 "broadcasting notarization"
             );
@@ -565,8 +565,8 @@ impl<
             if notarization_digest != *proposal_digest {
                 warn!(
                     view = self.view,
-                    proposal = hex(proposal_digest),
-                    notarization = hex(&notarization_digest),
+                    proposal = ?proposal_digest,
+                    notarization = ?notarization_digest,
                     "finalization proposal does not match notarization"
                 );
             }
@@ -575,7 +575,7 @@ impl<
             // matter which one we choose.
             debug!(
                 view = self.view,
-                proposal = hex(proposal_digest),
+                proposal = ?proposal_digest,
                 verified = self.verified_proposal,
                 "broadcasting finalization"
             );
@@ -1129,7 +1129,7 @@ impl<
         debug!(
             view = proposal.message.view,
             parent = proposal.message.parent,
-            digest = hex(&proposal_digest),
+            digest = ?proposal_digest,
             "generated proposal"
         );
         round.proposal = Some((proposal_digest, proposal));
@@ -1240,8 +1240,8 @@ impl<
         // Request verification
         debug!(
             view = proposal.message.view,
-            digest = hex(proposal_digest),
-            payload = hex(&proposal.digest),
+            digest = ?proposal_digest,
+            payload = ?proposal.digest,
             "requested proposal verification",
         );
         let context = Context {
@@ -1344,11 +1344,7 @@ impl<
         }
 
         // Reduce leader deadline to now
-        debug!(
-            view,
-            leader = hex(&leader),
-            "skipping leader timeout due to inactivity"
-        );
+        debug!(view, ?leader, "skipping leader timeout due to inactivity");
         self.views.get_mut(&view).unwrap().leader_deadline = Some(self.runtime.current());
     }
 

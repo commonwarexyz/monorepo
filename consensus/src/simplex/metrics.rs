@@ -1,5 +1,4 @@
 use commonware_cryptography::Array;
-use commonware_utils::hex;
 use prometheus_client::encoding::EncodeLabelSet;
 
 const NOTARIZE_TYPE: i32 = 1;
@@ -47,42 +46,42 @@ pub struct PeerMessage {
 impl PeerMessage {
     pub fn notarize(peer: &impl Array) -> Self {
         Self {
-            peer: hex(peer),
+            peer: peer.to_string(),
             message: NOTARIZE_TYPE,
         }
     }
 
     pub fn notarization(peer: &impl Array) -> Self {
         Self {
-            peer: hex(peer),
+            peer: peer.to_string(),
             message: NOTARIZATION_TYPE,
         }
     }
 
     pub fn nullify(peer: &impl Array) -> Self {
         Self {
-            peer: hex(peer),
+            peer: peer.to_string(),
             message: NULLIFY_TYPE,
         }
     }
 
     pub fn nullification(peer: &impl Array) -> Self {
         Self {
-            peer: hex(peer),
+            peer: peer.to_string(),
             message: NULLIFICATION_TYPE,
         }
     }
 
     pub fn finalize(peer: &impl Array) -> Self {
         Self {
-            peer: hex(peer),
+            peer: peer.to_string(),
             message: FINALIZE_TYPE,
         }
     }
 
     pub fn finalization(peer: &impl Array) -> Self {
         Self {
-            peer: hex(peer),
+            peer: peer.to_string(),
             message: FINALIZATION_TYPE,
         }
     }

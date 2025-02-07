@@ -13,7 +13,7 @@ use commonware_runtime::{
     Clock, Listener as _, Network as RNetwork, Spawner,
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
-use commonware_utils::{hex, SizedSerialize};
+use commonware_utils::SizedSerialize;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
@@ -260,11 +260,7 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock, P: Array> Netw
         for recipient in recipients {
             // Skip self
             if recipient == origin {
-                trace!(
-                    recipient = hex(&recipient),
-                    reason = "self",
-                    "dropping message",
-                );
+                trace!(?recipient, reason = "self", "dropping message",);
                 continue;
             }
 
@@ -276,12 +272,7 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock, P: Array> Netw
             {
                 Some(link) => link,
                 None => {
-                    trace!(
-                        origin = hex(&origin),
-                        recipient = hex(&recipient),
-                        reason = "no link",
-                        "dropping message",
-                    );
+                    trace!(?origin, ?recipient, reason = "no link", "dropping message",);
                     continue;
                 }
             };
@@ -295,12 +286,7 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock, P: Array> Netw
             // Apply link settings
             let delay = link.sampler.sample(&mut self.runtime);
             let should_deliver = self.runtime.gen_bool(link.success_rate);
-            trace!(
-                origin = hex(&origin),
-                recipient = hex(&recipient),
-                ?delay,
-                "sending message",
-            );
+            trace!(?origin, ?recipient, ?delay, "sending message",);
 
             // Send message
             self.runtime.spawn("messenger", {
@@ -323,7 +309,7 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock, P: Array> Netw
                     // Drop message if success rate is too low
                     if !should_deliver {
                         trace!(
-                            recipient = hex(&recipient),
+                            ?recipient,
                             reason = "random link failure",
                             "dropping message",
                         );
@@ -333,12 +319,7 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock, P: Array> Netw
                     // Send message
                     if let Err(err) = link.send(channel, message).await {
                         // This can only happen if the receiver exited.
-                        error!(
-                            origin = hex(&origin),
-                            recipient = hex(&recipient),
-                            ?err,
-                            "failed to send",
-                        );
+                        error!(?origin, ?recipient, ?err, "failed to send",);
                         return;
                     }
 
@@ -571,7 +552,7 @@ impl<P: Array> Peer<P> {
                             }
                             None => {
                                 trace!(
-                                    recipient = hex(&public_key),
+                                    recipient = ?public_key,
                                     channel,
                                     reason = "missing channel",
                                     "dropping message",
