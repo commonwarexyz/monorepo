@@ -72,8 +72,6 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum Error {
-    #[error("invalid element position")]
-    InvalidElementPosition,
-    #[error("requested element does not follow oldest known: {0}")]
+    #[error("a required element has been pruned: {0}")]
     ElementPruned(u64),
 }

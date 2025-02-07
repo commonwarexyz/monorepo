@@ -16,7 +16,7 @@ fn bench_prove_single_element(c: &mut Criterion) {
             let pos = mmr.add(&element);
             elements.push((pos, element));
         }
-        let root_hash = mmr.root_hash();
+        let root_hash = mmr.root();
 
         // Select SAMPLE_SIZE random elements without replacement and create/verify proofs
         c.bench_function(

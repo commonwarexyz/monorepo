@@ -1,21 +1,32 @@
 use crate::mmr::hasher::Hasher;
-use crate::mmr::iterator::PeakIterator;
+use crate::mmr::iterator::{PathIterator, PeakIterator};
 use bytes::{Buf, BufMut};
 use commonware_cryptography::{Array, Hasher as CHasher};
 use commonware_utils::SizedSerialize;
 
-/// A `Proof` contains the information necessary for proving the inclusion of an element, or some
-/// range of elements, in the MMR from its root hash. The `hashes` vector contains: (1) the peak
-/// hashes other than those belonging to trees containing some elements within the range being
-/// proven, followed by: (2) the nodes in the remaining perfect trees necessary for reconstructing
-/// their peak hashes from the elements within the range. Both segments are ordered by decreasing
-/// height.
+/// Contains the information necessary for proving the inclusion of an element, or some range of
+/// elements, in the MMR from its root hash.
+///
+/// The `hashes` vector contains: (1) the peak hashes other than those belonging to trees containing
+/// some elements within the range being proven, followed by: (2) the nodes in the remaining perfect
+/// trees necessary for reconstructing their peak hashes from the elements within the range. Both
+/// segments are ordered by decreasing height.
 #[derive(Clone, Debug, Eq)]
 pub struct Proof<H: CHasher> {
     /// The total number of nodes in the MMR.
     pub size: u64,
-    /// The hashes necessary for proving the inclusion of an element, or range of elements, in the MMR.
+    /// The hashes necessary for proving the inclusion of an element, or range of elements, in the
+    /// MMR.
     pub hashes: Vec<H::Digest>,
+}
+
+// A trait that allows generic generation of an MMR inclusion proof.
+pub trait Storage<H: CHasher> {
+    /// Return the number of elements in the MMR.
+    fn size(&self) -> u64;
+
+    /// Return the specified node of the MMR if it exists & hasn't been pruned.
+    fn get_node(&self, position: u64) -> Option<&H::Digest>;
 }
 
 impl<H: CHasher> PartialEq for Proof<H> {
@@ -59,8 +70,8 @@ impl<H: CHasher> Proof<H> {
         let mut siblings_iter = self.hashes.iter().rev();
         let mut mmr_hasher = Hasher::<H>::new(hasher);
 
-        // Include peak hashes only for trees that have no elements from the range, and keep track of
-        // the starting and ending trees of those that do contain some.
+        // Include peak hashes only for trees that have no elements from the range, and keep track
+        // of the starting and ending trees of those that do contain some.
         let mut peak_hashes: Vec<H::Digest> = Vec::new();
         let mut proof_hashes_used = 0;
         for (peak_pos, height) in PeakIterator::new(self.size) {
@@ -151,6 +162,87 @@ impl<H: CHasher> Proof<H> {
             hashes.push(digest);
         }
         Some(Self { size, hashes })
+    }
+
+    /// Return an inclusion proof for the specified range of elements, inclusive of both endpoints.
+    ///
+    /// Assumes the caller has already verified that the MMR still stores all the nodes required to
+    /// generate a proof the given range.
+    pub fn range_proof<S: Storage<H>>(
+        mmr: &S,
+        start_element_pos: u64,
+        end_element_pos: u64,
+    ) -> Proof<H> {
+        let mut hashes: Vec<H::Digest> = Vec::new();
+        let mut start_tree_with_element = (u64::MAX, 0);
+        let mut end_tree_with_element = (u64::MAX, 0);
+
+        // Include peak hashes only for trees that have no elements from the range, and keep track
+        // of the starting and ending trees of those that do contain some.
+        let mut peak_iterator = PeakIterator::new(mmr.size());
+        while let Some(item) = peak_iterator.next() {
+            if start_tree_with_element.0 == u64::MAX && item.0 >= start_element_pos {
+                // found the first tree to contain an element in the range
+                start_tree_with_element = item;
+                if item.0 >= end_element_pos {
+                    // start and end tree are the same
+                    end_tree_with_element = item;
+                    continue;
+                }
+                for item in peak_iterator.by_ref() {
+                    if item.0 >= end_element_pos {
+                        // found the last tree to contain an element in the range
+                        end_tree_with_element = item;
+                        break;
+                    }
+                }
+            } else {
+                hashes.push(mmr.get_node(item.0).unwrap().clone());
+            }
+        }
+        assert!(start_tree_with_element.0 != u64::MAX);
+        assert!(end_tree_with_element.0 != u64::MAX);
+
+        // For the trees containing elements in the range, add left-sibling hashes of nodes along
+        // the leftmost path, and right-sibling hashes of nodes along the rightmost path, in
+        // decreasing order of the position of the parent node.
+        let left_path_iter = PathIterator::new(
+            start_element_pos,
+            start_tree_with_element.0,
+            start_tree_with_element.1,
+        );
+
+        let mut siblings = Vec::<(u64, u64)>::new();
+        if start_element_pos == end_element_pos {
+            // For the (common) case of a single element range, the right and left path are the
+            // same so no need to process each independently.
+            siblings.extend(left_path_iter);
+        } else {
+            let right_path_iter = PathIterator::new(
+                end_element_pos,
+                end_tree_with_element.0,
+                end_tree_with_element.1,
+            );
+            // filter the right path for right siblings only
+            siblings.extend(right_path_iter.filter(|(parent_pos, pos)| *parent_pos == *pos + 1));
+            // filter the left path for left siblings only
+            siblings.extend(left_path_iter.filter(|(parent_pos, pos)| *parent_pos != *pos + 1));
+
+            // If the range spans more than one tree, then the hashes must already be in the correct
+            // order. Otherwise, we enforce the desired order through sorting.
+            if start_tree_with_element.0 == end_tree_with_element.0 {
+                siblings.sort_by(|a, b| b.0.cmp(&a.0));
+            }
+        }
+        hashes.extend(
+            siblings
+                .iter()
+                .map(|(_, pos)| mmr.get_node(*pos).unwrap().clone()),
+        );
+        Proof {
+            size: mmr.size(),
+            hashes,
+        }
     }
 }
 
@@ -245,7 +337,7 @@ mod tests {
             leaves.push(mmr.add(&element));
         }
 
-        let root_hash = mmr.root_hash();
+        let root_hash = mmr.root();
         let mut hasher = Sha256::default();
 
         // confirm the proof of inclusion for each leaf successfully verifies
@@ -335,7 +427,7 @@ mod tests {
             element_positions.push(mmr.add(elements.last().unwrap()));
         }
         // test range proofs over all possible ranges of at least 2 elements
-        let root_hash = mmr.root_hash();
+        let root_hash = mmr.root();
         let mut hasher = Sha256::default();
         for i in 0..elements.len() {
             for j in i + 1..elements.len() {
@@ -498,11 +590,11 @@ mod tests {
         }
 
         // forget the max # of elements
-        assert_eq!(mmr.forget_max(), 57);
+        assert_eq!(mmr.forget_max(), 62);
 
         // Prune the elements from our lists that can no longer be proven after forgetting.
         for i in 0..elements.len() {
-            if element_positions[i] > 57 {
+            if element_positions[i] > 62 {
                 elements = elements[i..elements.len()].to_vec();
                 element_positions = element_positions[i..element_positions.len()].to_vec();
                 break;
@@ -510,7 +602,7 @@ mod tests {
         }
 
         // test range proofs over all possible ranges of at least 2 elements
-        let root_hash = mmr.root_hash();
+        let root_hash = mmr.root();
         let mut hasher = Sha256::default();
         for i in 0..elements.len() {
             for j in i + 1..elements.len() {
@@ -535,11 +627,11 @@ mod tests {
             elements.push(test_digest(i));
             element_positions.push(mmr.add(elements.last().unwrap()));
         }
-        let updated_root_hash = mmr.root_hash();
-        assert_eq!(mmr.oldest_required_element(), 120);
-        assert!(mmr.forget(120).is_ok());
+        assert_eq!(mmr.forget_max(), 126);
+        assert_eq!(mmr.oldest_remembered_node_pos(), 126);
+        let updated_root_hash = mmr.root();
         for i in 0..elements.len() {
-            if element_positions[i] > 120 {
+            if element_positions[i] > 126 {
                 elements = elements[i..elements.len()].to_vec();
                 element_positions = element_positions[i..element_positions.len()].to_vec();
                 break;
