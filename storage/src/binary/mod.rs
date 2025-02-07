@@ -61,19 +61,19 @@ impl<H: Hasher> Tree<H> {
     ///
     /// If `leaves` is empty, returns `None`.
     pub fn new(hasher: &mut H, leaves: Vec<H::Digest>) -> Option<Self> {
-        // Ensure there are non-zero leaves.
+        // Ensure there are non-zero leaves
         if leaves.is_empty() {
             return None;
         }
 
-        // Initialize the tree with the levels.
+        // Initialize the tree with the levels
         let mut levels = Vec::new();
 
-        // Store the leaves in the first level.
+        // Store the leaves in the first level
         let leaves_len: u32 = leaves.len().try_into().ok()?;
         levels.push(leaves);
 
-        // Build the tree level-by-level
+        // Build the tree
         let mut pos = 0u32;
         while levels.last().unwrap().len() > 1 {
             let current_level = levels.last().unwrap();
@@ -106,6 +106,9 @@ impl<H: Hasher> Tree<H> {
         }
 
         // Hash the top level with the number of leaves in the tree
+        //
+        // We don't do this in the loop because we'd have to special case the handling of
+        // single-node trees.
         let last = levels.last().unwrap().first().unwrap();
         hasher.update(&leaves_len.to_be_bytes());
         hasher.update(last);
@@ -163,7 +166,7 @@ pub struct Proof<H: Hasher> {
     /// The total number of leaves in the tree.
     pub leaves: u32,
 
-    /// The sibling hashes from the leaf up to the root, ordered from bottom (closest to leaf) to top.
+    /// The sibling hashes from the leaf up to the root.
     pub siblings: Vec<H::Digest>,
 }
 
