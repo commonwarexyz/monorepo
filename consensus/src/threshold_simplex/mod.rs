@@ -206,6 +206,8 @@ pub const CONFLICTING_NOTARIZE: Activity = 2;
 pub const CONFLICTING_FINALIZE: Activity = 3;
 /// Nullify and finalize in the same view.
 pub const NULLIFY_AND_FINALIZE: Activity = 4;
+/// Nullify a view.
+pub const NULLIFY: Activity = 5;
 
 #[cfg(test)]
 mod tests {
@@ -730,6 +732,7 @@ mod tests {
                                 }
                                 completed.lock().unwrap().insert(validator);
                             }
+                            mocks::application::Progress::Skipped(_, _) => {}
                         }
                     }
                 });

@@ -175,9 +175,13 @@ pub const CONFLICTING_NOTARIZE: Activity = 2;
 pub const CONFLICTING_FINALIZE: Activity = 3;
 /// Nullify and finalize in the same view.
 pub const NULLIFY_AND_FINALIZE: Activity = 4;
+/// Nullify a view.
+pub const NULLIFY: Activity = 5;
 
 #[cfg(test)]
 mod tests {
+    use crate::simplex::mocks::application::Progress;
+
     use super::*;
     use commonware_cryptography::{sha256::Digest as Sha256Digest, Ed25519, Scheme, Sha256};
     use commonware_macros::{select, test_traced};
@@ -678,6 +682,7 @@ mod tests {
                                 }
                                 completed.lock().unwrap().insert(validator);
                             }
+                            mocks::application::Progress::Skipped(_, _) => {}
                         }
                     }
                 });
@@ -1477,8 +1482,12 @@ mod tests {
             // Wait for a few virtual minutes (shouldn't finalize anything)
             select! {
                 _timeout = runtime.sleep(Duration::from_secs(60)) => {},
-                _done = done_receiver.next() => {
-                    panic!("engine should not notarize or finalize anything");
+                done_progress = done_receiver.next() => {
+                    match done_progress {
+                        Some((_, Progress::Skipped(_, _))) => {},
+                        Some(_) => panic!("engine should not notarize or finalize anything"),
+                        None => {},
+                    }
                 }
             }
 

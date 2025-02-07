@@ -14,7 +14,7 @@ pub struct Config<
     D: Array,
     A: Automaton<Context = Context<D>, Digest = D>,
     R: Relay<Digest = D>,
-    F: Committer<Digest = D>,
+    F: Committer<Digest = D, Index = View>,
     S: Supervisor<Index = View>,
 > {
     /// Cryptographic primitives.
@@ -84,7 +84,7 @@ impl<
         D: Array,
         A: Automaton<Context = Context<D>, Digest = D>,
         R: Relay<Digest = D>,
-        F: Committer<Digest = D>,
+        F: Committer<Digest = D, Index = View>,
         S: Supervisor<Index = View>,
     > Config<C, D, A, R, F, S>
 {

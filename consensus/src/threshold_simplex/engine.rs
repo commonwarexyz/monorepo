@@ -24,7 +24,7 @@ pub struct Engine<
     D: Array,
     A: Automaton<Context = Context<D>, Digest = D>,
     R: Relay<Digest = D>,
-    F: Committer<Digest = D>,
+    F: Committer<Digest = D, Index = View>,
     S: ThresholdSupervisor<
         Seed = group::Signature,
         Index = View,
@@ -48,7 +48,7 @@ impl<
         D: Array,
         A: Automaton<Context = Context<D>, Digest = D>,
         R: Relay<Digest = D>,
-        F: Committer<Digest = D>,
+        F: Committer<Digest = D, Index = View>,
         S: ThresholdSupervisor<
             Seed = group::Signature,
             Index = View,

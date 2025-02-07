@@ -18,7 +18,7 @@ pub struct Config<
     D: Array,
     A: Automaton<Context = Context<D>>,
     R: Relay<Digest = D>,
-    F: Committer<Digest = D>,
+    F: Committer<Digest = D, Index = View>,
     S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
 > {
     pub crypto: C,

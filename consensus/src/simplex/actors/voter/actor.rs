@@ -10,7 +10,7 @@ use crate::{
         prover::Prover,
         verifier::{threshold, verify_finalization, verify_notarization, verify_nullification},
         wire, Context, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE, NOTARIZE,
-        NULLIFY_AND_FINALIZE,
+        NULLIFY, NULLIFY_AND_FINALIZE,
     },
     Automaton, Committer, Parsed, Relay, Supervisor,
 };
@@ -202,7 +202,22 @@ impl<C: Scheme, D: Array, S: Supervisor<Index = View, PublicKey = C::PublicKey>>
         let finalize = self.finalizers.get(&public_key_index);
         if finalize.is_none() {
             // Store the nullify
-            return self.nullifies.insert(public_key_index, nullify).is_none();
+            if self
+                .nullifies
+                .insert(public_key_index, nullify.clone())
+                .is_some()
+            {
+                return false;
+            }
+            let Ok(nullify_signature) =
+                C::Signature::try_from(&nullify.signature.as_ref().unwrap().signature)
+            else {
+                return false;
+            };
+            let proof =
+                Prover::<C, D>::serialize_nullify(self.view, public_key, &nullify_signature);
+            self.supervisor.report(NULLIFY, proof).await;
+            return true;
         }
         let finalize = finalize.unwrap();
 
@@ -460,7 +475,7 @@ pub struct Actor<
     D: Array,
     A: Automaton<Context = Context<D>, Digest = D>,
     R: Relay<Digest = D>,
-    F: Committer<Digest = D>,
+    F: Committer<Digest = D, Index = View>,
     S: Supervisor<Index = View, PublicKey = C::PublicKey>,
 > {
     runtime: E,
@@ -503,7 +518,7 @@ impl<
         D: Array,
         A: Automaton<Context = Context<D>, Digest = D>,
         R: Relay<Digest = D>,
-        F: Committer<Digest = D>,
+        F: Committer<Digest = D, Index = View>,
         S: Supervisor<Index = View, PublicKey = C::PublicKey>,
     > Actor<B, E, C, D, A, R, F, S>
 {
@@ -1890,6 +1905,17 @@ impl<
                 .sync(view)
                 .await
                 .expect("unable to sync journal");
+
+            // Alert application
+            let validators = self.supervisor.participants(view).unwrap();
+            let mut signatures = Vec::with_capacity(nullification.signatures.len());
+            for signature in &nullification.signatures {
+                let public_key = validators.get(signature.public_key as usize).unwrap();
+                let signature = C::Signature::try_from(&signature.signature).unwrap();
+                signatures.push((public_key, signature));
+            }
+            let proof = Prover::<C, D>::serialize_nullification(view, signatures);
+            self.committer.skipped(proof, view as View).await;
 
             // Broadcast the nullification
             let msg = wire::Voter {

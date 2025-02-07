@@ -10,7 +10,7 @@ use crate::{
         prover::Prover,
         verifier::{verify_finalization, verify_notarization, verify_nullification},
         wire, Context, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE, NOTARIZE,
-        NULLIFY_AND_FINALIZE,
+        NULLIFY, NULLIFY_AND_FINALIZE,
     },
     Automaton, Committer, Parsed, Relay, ThresholdSupervisor,
 };
@@ -241,7 +241,16 @@ impl<
         let finalize = self.finalizers.get(&public_key_index);
         if finalize.is_none() {
             // Store the nullify
-            return self.nullifies.insert(public_key_index, nullify).is_none();
+            if self
+                .nullifies
+                .insert(public_key_index, nullify.clone())
+                .is_some()
+            {
+                return false;
+            }
+            let proof = Prover::<D>::serialize_nullify(self.view, &nullify.view_signature);
+            self.supervisor.report(NULLIFY, proof).await;
+            return true;
         }
         let finalize = finalize.unwrap();
 
@@ -641,7 +650,7 @@ pub struct Actor<
     D: Array,
     A: Automaton<Digest = D, Context = Context<D>>,
     R: Relay,
-    F: Committer<Digest = D>,
+    F: Committer<Digest = D, Index = View>,
     S: ThresholdSupervisor<
         Identity = poly::Poly<group::Public>,
         Seed = group::Signature,
@@ -691,7 +700,7 @@ impl<
         D: Array,
         A: Automaton<Digest = D, Context = Context<D>>,
         R: Relay<Digest = D>,
-        F: Committer<Digest = D>,
+        F: Committer<Digest = D, Index = View>,
         S: ThresholdSupervisor<
             Identity = poly::Poly<group::Public>,
             Seed = group::Signature,
@@ -2011,6 +2020,13 @@ impl<
                 .sync(view)
                 .await
                 .expect("unable to sync journal");
+
+            let proof = Prover::<D>::serialize_nullification(
+                view,
+                &nullification.view_signature,
+                &nullification.seed_signature,
+            );
+            self.committer.skipped(proof, view).await;
 
             // Broadcast the nullification
             let msg = wire::Voter {

@@ -326,6 +326,99 @@ impl<D: Array> Prover<D> {
         )
     }
 
+    /// Serialize a nullify proof.
+    pub fn serialize_nullify(view: View, signature: &[u8]) -> Proof {
+        // Compute proof len
+        let len = size_of::<u64>() + poly::PARTIAL_SIGNATURE_LENGTH;
+
+        // Encode proof
+        let mut proof = Vec::with_capacity(len);
+        proof.put_u64(view);
+        proof.extend_from_slice(signature);
+        proof.into()
+    }
+
+    /// Serialize a nullification proof.
+    pub fn serialize_nullification(view: View, signature: &[u8], seed: &[u8]) -> Proof {
+        // Compute proof len
+        let len = size_of::<u64>() + group::SIGNATURE_LENGTH + group::SIGNATURE_LENGTH;
+
+        // Encode proof
+        let mut proof = Vec::with_capacity(len);
+        proof.put_u64(view);
+        proof.extend_from_slice(signature);
+        proof.extend_from_slice(seed);
+        proof.into()
+    }
+
+    // Deserialize a nullify proof.
+    pub fn deserialize_nullify(&self, mut proof: Proof) -> Option<(View, Verifier)> {
+        // Ensure proof is big enough
+        let len = size_of::<u64>() + poly::PARTIAL_SIGNATURE_LENGTH;
+        if proof.len() != len {
+            return None;
+        }
+
+        let view = proof.get_u64();
+        let signature = proof.copy_to_bytes(poly::PARTIAL_SIGNATURE_LENGTH);
+        let signature = poly::Eval::deserialize(&signature)?;
+
+        // Create callback
+        let null_message = nullify_message(view);
+        let namespace = self.nullify_namespace.to_vec();
+        let callback = move |identity: &poly::Poly<group::Public>| -> Option<u32> {
+            if ops::partial_verify_message(identity, Some(&namespace), &null_message, &signature)
+                .is_err()
+            {
+                return None;
+            }
+            Some(signature.index)
+        };
+        Some((view, Verifier::new(callback)))
+    }
+
+    // Deserialize a nullification proof.
+    pub fn deserialize_nullification(
+        &self,
+        mut proof: Proof,
+    ) -> Option<(View, group::Signature, group::Signature)> {
+        // Ensure proof prefix is big enough
+        let len = size_of::<u64>() + group::SIGNATURE_LENGTH + group::SIGNATURE_LENGTH;
+        if proof.len() != len {
+            return None;
+        }
+
+        // Decode proof
+        let view = proof.get_u64();
+        let null_message = nullify_message(view);
+        let signature = proof.copy_to_bytes(group::SIGNATURE_LENGTH);
+        let signature = group::Signature::deserialize(&signature)?;
+        if ops::verify_message(
+            &self.public,
+            Some(&self.nullify_namespace),
+            &null_message,
+            &signature,
+        )
+        .is_err()
+        {
+            return None;
+        }
+        let seed = proof.copy_to_bytes(group::SIGNATURE_LENGTH);
+        let seed = group::Signature::deserialize(&seed)?;
+        if ops::verify_message(
+            &self.public,
+            Some(&self.seed_namespace),
+            &null_message,
+            &seed,
+        )
+        .is_err()
+        {
+            return None;
+        }
+
+        Some((view, signature, seed))
+    }
+
     /// Deserialize a conflicting notarization proof.
     pub fn deserialize_conflicting_notarize(&self, proof: Proof) -> Option<(View, Verifier)> {
         self.deserialize_conflicting_proposal(proof, &self.notarize_namespace)
@@ -440,6 +533,7 @@ impl<D: Array> Prover<D> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::{Bytes, BytesMut};
     use commonware_cryptography::{
         bls12381::{
             dkg::ops::generate_shares,
@@ -466,6 +560,66 @@ mod tests {
         let mut hasher = Sha256::new();
         hasher.update(&[value]);
         hasher.finalize()
+    }
+
+    #[test]
+    fn test_deserialize_nullify() {
+        let (public, poly, shares) = generate_threshold();
+        let prover = Prover::<Sha256Digest>::new(public, b"test");
+        let view: View = 1;
+
+        let message = &nullify_message(view);
+        let signature = partial_sign_message(&shares[0], Some(&prover.nullify_namespace), message);
+        let serialized_signature = Bytes::from(signature.serialize());
+
+        let proof = Prover::<Sha256Digest>::serialize_nullify(view, &serialized_signature);
+        let res = prover.deserialize_nullify(proof);
+        assert!(res.is_some());
+        let (res_view, verifier) = res.unwrap();
+        assert_eq!(view, res_view);
+        assert!(verifier.verify(&poly).is_some());
+    }
+
+    #[test]
+    fn test_deserialize_nullify_invalid_proof_length() {
+        let (public, _, shares) = generate_threshold();
+        let prover = Prover::<Sha256Digest>::new(public, b"test");
+        let view: View = 1;
+
+        let message = &nullify_message(view);
+        let signature = partial_sign_message(&shares[0], Some(&prover.nullify_namespace), message);
+        let serialized_signature = Bytes::from(signature.serialize());
+
+        let proof = Prover::<Sha256Digest>::serialize_nullify(view, &serialized_signature);
+
+        // Using proof overflow.
+        let mut mut_proof = BytesMut::from(proof.clone());
+        mut_proof.put_u8(1);
+        let res = prover.deserialize_nullify(mut_proof.freeze());
+        assert!(res.is_none());
+        // Using proof underflow.
+        let mut mut_proof = BytesMut::from(proof.clone());
+        mut_proof.truncate(mut_proof.len().saturating_sub(1));
+        let res = prover.deserialize_nullify(mut_proof.freeze());
+        assert!(res.is_none());
+    }
+
+    #[test]
+    fn test_deserialize_nullify_invalid_signature() {
+        let (public, poly, shares) = generate_threshold();
+        let prover = Prover::<Sha256Digest>::new(public, b"test");
+        let view: View = 1;
+
+        let message = &nullify_message(view + 1);
+        let signature = partial_sign_message(&shares[0], Some(&prover.nullify_namespace), message);
+        let serialized_signature = Bytes::from(signature.serialize());
+
+        let proof = Prover::<Sha256Digest>::serialize_nullify(view, &serialized_signature);
+        let res = prover.deserialize_nullify(proof);
+        assert!(res.is_some());
+        let (res_view, verifier) = res.unwrap();
+        assert_eq!(view, res_view);
+        assert!(verifier.verify(&poly).is_none());
     }
 
     #[test]
@@ -702,5 +856,142 @@ mod tests {
         // Verify correct proof
         let result = prover.deserialize_threshold(proof.into(), &prover.notarize_namespace);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_deserialize_nullification() {
+        // Create valid signature
+        let (private, public) = generate_keypair();
+        let prover = Prover::<Sha256Digest>::new(public, b"test");
+        let view: View = 1;
+
+        // Generate a valid signature
+        let view_signature = sign_message(
+            &private,
+            Some(&prover.nullify_namespace),
+            &nullify_message(view),
+        );
+        let serialized_view_signature = Bytes::from(view_signature.serialize());
+        let seed_signature = sign_message(
+            &private,
+            Some(&prover.seed_namespace),
+            &nullify_message(view),
+        );
+        let serialized_seed_signature = Bytes::from(seed_signature.serialize());
+
+        let proof = Prover::<Sha256Digest>::serialize_nullification(
+            view,
+            &serialized_view_signature,
+            &serialized_seed_signature,
+        );
+        let res = prover.deserialize_nullification(proof);
+        assert!(res.is_some());
+        let res = res.unwrap();
+        assert_eq!(res.0, view);
+        assert_eq!(res.1, view_signature);
+        assert_eq!(res.2, seed_signature);
+    }
+
+    #[test]
+    fn test_deserialize_nullification_invalid_proof_length() {
+        // Create valid signature
+        let (private, public) = generate_keypair();
+        let prover = Prover::<Sha256Digest>::new(public, b"test");
+        let view: View = 1;
+
+        // Generate a valid signature
+        let view_signature = sign_message(
+            &private,
+            Some(&prover.nullify_namespace),
+            &nullify_message(view),
+        );
+        let serialized_view_signature = Bytes::from(view_signature.serialize());
+        let seed_signature = sign_message(
+            &private,
+            Some(&prover.seed_namespace),
+            &nullify_message(view),
+        );
+        let serialized_seed_signature = Bytes::from(seed_signature.serialize());
+
+        let proof = Prover::<Sha256Digest>::serialize_nullification(
+            view,
+            &serialized_view_signature,
+            &serialized_seed_signature,
+        );
+
+        // Using a proof overflow.
+        let mut mut_proof = BytesMut::from(proof.clone());
+        mut_proof.put_u8(1);
+        let res = prover.deserialize_nullification(mut_proof.freeze());
+        assert!(res.is_none());
+        // Using a proof underflow.
+        let mut mut_proof = BytesMut::from(proof);
+        mut_proof.truncate(mut_proof.len().saturating_sub(1));
+        let res = prover.deserialize_nullification(mut_proof.freeze());
+        assert!(res.is_none());
+    }
+
+    #[test]
+    fn test_deserialize_nullification_invalid_view_signature() {
+        // Create valid signature
+        let (private, public) = generate_keypair();
+        let prover = Prover::<Sha256Digest>::new(public, b"test");
+        let view: View = 1;
+
+        // Generate a valid signature
+        let view_signature = sign_message(
+            &private,
+            Some(&prover.nullify_namespace),
+            &nullify_message(view + 1),
+        );
+        let serialized_view_signature = Bytes::from(view_signature.serialize());
+        let seed_signature = sign_message(
+            &private,
+            Some(&prover.seed_namespace),
+            &nullify_message(view),
+        );
+        let serialized_seed_signature = Bytes::from(seed_signature.serialize());
+
+        let proof = Prover::<Sha256Digest>::serialize_nullification(
+            view,
+            &serialized_view_signature,
+            &serialized_seed_signature,
+        );
+
+        // Using a proof with invalid view signature.
+        let res = prover.deserialize_nullification(proof);
+        assert!(res.is_none());
+    }
+
+    #[test]
+    fn test_deserialize_nullification_invalid_seed_signature() {
+        // Create valid signature
+        let (private, public) = generate_keypair();
+        let prover = Prover::<Sha256Digest>::new(public, b"test");
+        let view: View = 1;
+
+        // Generate a valid signature
+        let view_signature = sign_message(
+            &private,
+            Some(&prover.nullify_namespace),
+            &nullify_message(view),
+        );
+        let serialized_view_signature = Bytes::from(view_signature.serialize());
+        let seed_signature = sign_message(
+            &private,
+            Some(&prover.seed_namespace),
+            &nullify_message(view + 1),
+        );
+        let serialized_seed_signature = Bytes::from(seed_signature.serialize());
+
+        let proof = Prover::<Sha256Digest>::serialize_nullification(
+            view,
+            &serialized_view_signature,
+            &serialized_seed_signature,
+        );
+
+        // Using a proof with invalid seed signature.
+        let res = prover.deserialize_nullification(proof);
+        assert!(res.is_none());
     }
 }

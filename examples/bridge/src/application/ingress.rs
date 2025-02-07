@@ -98,6 +98,7 @@ impl<D: Array> Re for Mailbox<D> {
 
 impl<D: Array> Co for Mailbox<D> {
     type Digest = D;
+    type Index = View;
 
     async fn prepared(&mut self, proof: Proof, payload: Self::Digest) {
         self.sender
@@ -112,4 +113,6 @@ impl<D: Array> Co for Mailbox<D> {
             .await
             .expect("Failed to send finalized");
     }
+
+    async fn skipped(&mut self, _proof: Proof, _index: Self::Index) {}
 }

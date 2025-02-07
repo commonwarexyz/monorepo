@@ -1,5 +1,6 @@
 use commonware_consensus::{
-    simplex::Context, Automaton as Au, Committer as Co, Proof, Relay as Re,
+    simplex::{Context, View},
+    Automaton as Au, Committer as Co, Proof, Relay as Re,
 };
 use commonware_cryptography::Array;
 use futures::{
@@ -13,6 +14,7 @@ pub enum Message<D: Array> {
     Verify { response: oneshot::Sender<bool> },
     Prepared { proof: Proof, payload: D },
     Finalized { proof: Proof, payload: D },
+    Nullified { proof: Proof, view: u64 },
 }
 
 /// Mailbox for the application.
@@ -82,6 +84,7 @@ impl<D: Array> Re for Mailbox<D> {
 
 impl<D: Array> Co for Mailbox<D> {
     type Digest = D;
+    type Index = View;
 
     async fn prepared(&mut self, proof: Proof, payload: Self::Digest) {
         self.sender
@@ -93,6 +96,13 @@ impl<D: Array> Co for Mailbox<D> {
     async fn finalized(&mut self, proof: Proof, payload: Self::Digest) {
         self.sender
             .send(Message::Finalized { proof, payload })
+            .await
+            .expect("Failed to send finalized");
+    }
+
+    async fn skipped(&mut self, proof: Proof, index: Self::Index) {
+        self.sender
+            .send(Message::Nullified { proof, view: index })
             .await
             .expect("Failed to send finalized");
     }

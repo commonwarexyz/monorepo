@@ -1,6 +1,6 @@
 use crate::{
     threshold_simplex::{
-        Prover, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE, NOTARIZE,
+        Prover, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE, NOTARIZE, NULLIFY,
         NULLIFY_AND_FINALIZE,
     },
     Activity, Proof, Supervisor as Su, ThresholdSupervisor as TSu,
@@ -30,6 +30,7 @@ pub struct Config<P: Array, D: Array> {
     pub participants: BTreeMap<View, (poly::Poly<group::Public>, Vec<P>, group::Share)>,
 }
 
+type Nullifies<P> = HashMap<View, HashSet<P>>;
 type Participation<D, P> = HashMap<View, HashMap<D, HashSet<P>>>;
 type Faults<P> = HashMap<P, HashMap<View, HashSet<Activity>>>;
 
@@ -40,6 +41,7 @@ pub struct Supervisor<P: Array, D: Array> {
 
     pub notarizes: Arc<Mutex<Participation<D, P>>>,
     pub finalizes: Arc<Mutex<Participation<D, P>>>,
+    pub nullifies: Arc<Mutex<Nullifies<P>>>,
     pub faults: Arc<Mutex<Faults<P>>>,
 }
 
@@ -59,6 +61,7 @@ impl<P: Array, D: Array> Supervisor<P, D> {
             participants: parsed_participants,
             notarizes: Arc::new(Mutex::new(HashMap::new())),
             finalizes: Arc::new(Mutex::new(HashMap::new())),
+            nullifies: Arc::new(Mutex::new(HashMap::new())),
             faults: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -191,6 +194,23 @@ impl<P: Array, D: Array> Su for Supervisor<P, D> {
                     .entry(view)
                     .or_default()
                     .insert(activity);
+            }
+            NULLIFY => {
+                let (view, verifier) = self.prover.deserialize_nullify(proof).unwrap();
+                let (identity, validators) = match self.participants.range(..=view).next_back() {
+                    Some((_, (p, _, v, _))) => (p, v),
+                    None => {
+                        panic!("no participants in required range")
+                    }
+                };
+                let public_key_index = verifier.verify(identity).unwrap();
+                let public_key = validators[public_key_index as usize].clone();
+                self.nullifies
+                    .lock()
+                    .unwrap()
+                    .entry(view)
+                    .or_default()
+                    .insert(public_key);
             }
             unexpected => {
                 panic!("unexpected activity: {}", unexpected);
