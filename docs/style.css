@@ -155,7 +155,6 @@ details.benchmark-set {
 }
 
 details.benchmark-set summary {
-    font-size: 1.2em;
     cursor: pointer;
     outline: none;
     overflow-wrap: anywhere;
@@ -165,16 +164,16 @@ details.benchmark-set summary {
 }
 
 details.benchmark-set .benchmark-title {
-    font-weight: bold;
+    font-weight: 700;
+    font-size: 1.2em;
     color: -webkit-link;
     text-decoration: underline;
 }
 
 details.benchmark-graph-details {
-    margin-left: 10px;
     margin-top: 10px;
     margin-bottom: 10px;
-    border: 1px solid #eee;
+    border: 1px solid #bbb;
     padding: 8px;
 }
 
@@ -185,8 +184,8 @@ details.benchmark-graph-details {
 }
 
 .benchmark-graph-title {
-    font-size: 1em;
-    font-weight: bold;
+    font-weight: 300;
+    font-size: 0.8em;
     cursor: pointer;
     outline: none;
     overflow-wrap: anywhere;
@@ -202,4 +201,44 @@ details.benchmark-graph-details {
     margin: 10px 0;
     width: 100%;
     max-width: 100%;
+}
+
+details.benchmark-module {
+    margin-top: 10px;
+    margin-bottom: 10px;
+    border: 1px solid #ddd;
+    padding: 8px;
+}
+
+details.benchmark-module summary.module-title {
+    font-size: 1em;
+    font-weight: 500;
+    cursor: pointer;
+    outline: none;
+    overflow-wrap: anywhere;
+    white-space: normal;
+    max-width: 100%;
+    list-style: none;
+    color: -webkit-link;
+    text-decoration: underline;
+}
+
+details.benchmark-function {
+    margin-top: 10px;
+    margin-bottom: 10px;
+    border: 1px solid #ccc;
+    padding: 8px;
+}
+
+summary.function-title {
+    font-size: 0.9em;
+    font-weight: 400;
+    cursor: pointer;
+    outline: none;
+    overflow-wrap: anywhere;
+    white-space: normal;
+    max-width: 100%;
+    list-style: none;
+    color: -webkit-link;
+    text-decoration: underline;
 }
