@@ -62,7 +62,6 @@ use commonware_runtime::{
     tokio::{self, Executor},
     Runner, Spawner,
 };
-use commonware_utils::hex;
 use governor::Quota;
 use prometheus_client::registry::Registry;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -120,7 +119,7 @@ fn main() {
     let parts = me.split('@').collect::<Vec<&str>>();
     let key = parts[0].parse::<u64>().expect("Key not well-formed");
     let signer = Ed25519::from_seed(key);
-    info!(key = hex(&signer.public_key()), "loaded signer");
+    info!(key = ?signer.public_key(), "loaded signer");
 
     // Configure my port
     let port = parts[1].parse::<u16>().expect("Port not well-formed");
@@ -137,7 +136,7 @@ fn main() {
     }
     for peer in allowed_keys {
         let verifier = Ed25519::from_seed(peer).public_key();
-        info!(key = hex(&verifier), "registered authorized key",);
+        info!(key = ?verifier, "registered authorized key");
         recipients.push(verifier);
     }
 
@@ -196,7 +195,7 @@ fn main() {
         // Start chat
         handler::run(
             runtime.clone(),
-            hex(&signer.public_key()),
+            signer.public_key().to_string(),
             runtime_registry,
             p2p_registry,
             logs,

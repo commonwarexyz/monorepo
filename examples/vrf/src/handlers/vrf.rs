@@ -179,7 +179,7 @@ impl<E: Clock, P: Array> Vrf<E, P> {
             {
                 Some(signature) => {
                     let signature = signature.serialize();
-                    info!(round, signature = hex(&signature), "generated signature");
+                    info!(round, ?signature, "generated signature");
                 }
                 None => {
                     warn!(round, "failed to generate signature");

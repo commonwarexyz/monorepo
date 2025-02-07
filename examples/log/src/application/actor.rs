@@ -63,7 +63,7 @@ impl<R: Rng, C: Scheme, H: Hasher> Application<R, C, H> {
                     // Hash the message
                     self.hasher.update(&msg);
                     let digest = self.hasher.finalize();
-                    info!(msg = hex(&msg), payload = hex(digest.as_ref()), "proposed");
+                    info!(?msg, payload = ?digest, "proposed");
 
                     // Send digest to consensus
                     let _ = response.send(digest);
@@ -80,14 +80,14 @@ impl<R: Rng, C: Scheme, H: Hasher> Application<R, C, H> {
                         .prover
                         .deserialize_notarization(proof, u32::MAX, false)
                         .unwrap();
-                    info!(view, payload = hex(&payload), "prepared")
+                    info!(view, ?payload, "prepared")
                 }
                 Message::Finalized { proof, payload } => {
                     let (view, _, _, _) = self
                         .prover
                         .deserialize_finalization(proof, u32::MAX, false)
                         .unwrap();
-                    info!(view, payload = hex(&payload), "finalized")
+                    info!(view, ?payload, "finalized")
                 }
             }
         }

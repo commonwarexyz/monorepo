@@ -106,7 +106,7 @@ impl<
                     let (sink, stream) = match runtime.dial(address).await {
                         Ok(stream) => stream,
                         Err(e) => {
-                            debug!(peer=hex(&peer), error = ?e, "failed to dial peer");
+                            debug!(?peer, error = ?e, "failed to dial peer");
                             return;
                         }
                     };
@@ -124,7 +124,7 @@ impl<
                     {
                         Ok(instance) => instance,
                         Err(e) => {
-                            debug!(peer=hex(&peer), error = ?e, "failed to upgrade connection");
+                            debug!(?peer, error = ?e, "failed to upgrade connection");
                             return;
                         }
                     };

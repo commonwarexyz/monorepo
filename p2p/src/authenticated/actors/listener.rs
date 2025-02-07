@@ -122,7 +122,7 @@ impl<
         let stream = match Connection::upgrade_listener(runtime, incoming).await {
             Ok(connection) => connection,
             Err(e) => {
-                debug!(error = ?e, peer=hex(&peer), "failed to upgrade connection");
+                debug!(error = ?e, ?peer, "failed to upgrade connection");
                 return;
             }
         };

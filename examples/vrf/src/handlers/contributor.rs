@@ -12,7 +12,7 @@ use commonware_cryptography::{
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::Clock;
-use commonware_utils::{hex, quorum};
+use commonware_utils::quorum;
 use futures::{channel::mpsc, SinkExt};
 use prost::Message;
 use rand::Rng;
@@ -213,11 +213,7 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                     let _ = dealer.ack(player.clone());
                     let signature = self.crypto.sign(None, b"fake");
                     acks.insert(idx as u32, signature);
-                    warn!(
-                        round,
-                        player = hex(player),
-                        "not sending share because forger"
-                    );
+                    warn!(round, ?player, "not sending share because forger");
                     continue;
                 }
                 if self.corrupt {
@@ -227,16 +223,12 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                         private: group::Scalar::rand(&mut self.runtime),
                     }
                     .serialize();
-                    warn!(round, player = hex(player), "modified share");
+                    warn!(round, ?player, "modified share");
                 }
                 if self.lazy && sent == self.t - 1 {
                     // This will still lead to the commitment being used (>= t acks) because
                     // the dealer has already acked.
-                    warn!(
-                        round,
-                        player = hex(player),
-                        "not sending share because lazy"
-                    );
+                    warn!(round, ?player, "not sending share because lazy");
                     continue;
                 }
                 let success = sender
@@ -256,9 +248,9 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                     .await
                     .expect("could not send share");
                 if success.is_empty() {
-                    warn!(round, player = hex(player), "failed to send share");
+                    warn!(round, ?player, "failed to send share");
                 } else {
-                    debug!(round, player = hex(player), "sent share");
+                    debug!(round, ?player, "sent share");
                     sent += 1;
                 }
             }

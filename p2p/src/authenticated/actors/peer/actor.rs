@@ -141,7 +141,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng, P: Array> Actor<
                                 Message::Peers { peers: msg } =>
                                     (metrics::Message::new_peers(&peer), Payload::Peers(msg)),
                                 Message::Kill => {
-                                    return Err(Error::PeerKilled(hex(&peer)))
+                                    return Err(Error::PeerKilled(peer.to_string()))
                                 }
                             };
                             Self::send(&mut conn_sender, &self.sent_messages, metric, payload)
