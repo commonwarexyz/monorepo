@@ -314,17 +314,17 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                                         // Verify signature on incoming ack
                                         let payload = payload(round, &me, commitment);
                                         let Ok(signature) = C::Signature::try_from(&msg.signature) else {
-                                            warn!(round, sender = hex(&s), "received invalid ack signature");
+                                            warn!(round, sender = ?s, "received invalid ack signature");
                                             continue;
                                         };
                                         if !C::verify(Some(ACK_NAMESPACE), &payload, &s, &signature) {
-                                            warn!(round, sender = hex(&s), "received invalid ack signature");
+                                            warn!(round, sender = ?s, "received invalid ack signature");
                                             continue;
                                         }
 
                                         // Store ack
                                         if let Err(e) = dealer.ack(s.clone()) {
-                                            warn!(round, error = ?e, sender = hex(&s), "failed to record ack");
+                                            warn!(round, error = ?e, sender = ?s, "failed to record ack");
                                             continue;
                                         }
                                         acks.insert(msg.public_key, signature);

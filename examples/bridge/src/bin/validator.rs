@@ -73,7 +73,7 @@ fn main() {
     }
     let key = parts[0].parse::<u64>().expect("Key not well-formed");
     let signer = Ed25519::from_seed(key);
-    tracing::info!(key = hex(&signer.public_key()), "loaded signer");
+    tracing::info!(key = ?signer.public_key(), "loaded signer");
 
     // Configure my port
     let port = parts[1].parse::<u16>().expect("Port not well-formed");

@@ -72,14 +72,14 @@ impl<
             let msg = match wire::Voter::decode(msg) {
                 Ok(msg) => msg,
                 Err(err) => {
-                    debug!(?err, sender = hex(&s), "failed to decode message");
+                    debug!(?err, sender = ?s, "failed to decode message");
                     continue;
                 }
             };
             let payload = match msg.payload {
                 Some(payload) => payload,
                 None => {
-                    debug!(sender = hex(&s), "message missing payload");
+                    debug!(sender = ?s, "message missing payload");
                     continue;
                 }
             };
@@ -91,12 +91,12 @@ impl<
                     let proposal = match notarize.proposal {
                         Some(proposal) => proposal,
                         None => {
-                            debug!(sender = hex(&s), "notarize missing proposal");
+                            debug!(sender = ?s, "notarize missing proposal");
                             continue;
                         }
                     };
                     let Ok(payload) = H::Digest::try_from(&proposal.payload) else {
-                        debug!(sender = hex(&s), "invalid payload");
+                        debug!(sender = ?s, "invalid payload");
                         continue;
                     };
                     let view = proposal.view;
@@ -152,12 +152,12 @@ impl<
                     let proposal = match finalize.proposal {
                         Some(proposal) => proposal,
                         None => {
-                            debug!(sender = hex(&s), "notarize missing proposal");
+                            debug!(sender = ?s, "notarize missing proposal");
                             continue;
                         }
                     };
                     let Ok(payload) = H::Digest::try_from(&proposal.payload) else {
-                        debug!(sender = hex(&s), "invalid payload");
+                        debug!(sender = ?s, "invalid payload");
                         continue;
                     };
                     let view = proposal.view;

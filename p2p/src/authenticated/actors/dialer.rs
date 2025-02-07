@@ -110,11 +110,7 @@ impl<
                             return;
                         }
                     };
-                    debug!(
-                        peer = hex(&peer),
-                        address = address.to_string(),
-                        "dialed peer"
-                    );
+                    debug!(?peer, address = address.to_string(), "dialed peer");
 
                     // Upgrade connection
                     let instance = match Connection::upgrade_dialer(
@@ -132,7 +128,7 @@ impl<
                             return;
                         }
                     };
-                    debug!(peer = hex(&peer), "upgraded connection");
+                    debug!(?peer, "upgraded connection");
 
                     // Start peer to handle messages
                     supervisor.spawn(peer, instance, reservation).await;

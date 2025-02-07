@@ -13,7 +13,7 @@ use commonware_cryptography::{
 };
 use commonware_runtime::{Sink, Stream};
 use commonware_stream::{public_key::Connection, Receiver, Sender};
-use commonware_utils::{hex, SizedSerialize};
+use commonware_utils::SizedSerialize;
 use futures::{channel::mpsc, StreamExt};
 use prost::Message as _;
 use rand::Rng;
@@ -123,7 +123,7 @@ impl<R: Rng, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St> {
                     // Hash the message
                     self.hasher.update(&msg);
                     let digest = self.hasher.finalize();
-                    info!(msg = hex(&msg), payload = hex(&digest), "proposed");
+                    info!(?msg, payload = ?digest, "proposed");
 
                     // Publish to indexer
                     let msg = wire::PutBlock {
@@ -210,26 +210,14 @@ impl<R: Rng, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St> {
                         self.prover.deserialize_notarization(proof).unwrap();
                     let signature = signature.serialize();
                     let seed = seed.serialize();
-                    info!(
-                        view,
-                        payload = hex(&payload),
-                        signature = hex(&signature),
-                        seed = hex(&seed),
-                        "prepared"
-                    )
+                    info!(view, ?payload, ?signature, ?seed, "prepared")
                 }
                 Message::Finalized { proof, payload } => {
                     let (view, _, _, signature, seed) =
                         self.prover.deserialize_finalization(proof.clone()).unwrap();
                     let signature = signature.serialize();
                     let seed = seed.serialize();
-                    info!(
-                        view,
-                        payload = hex(&payload),
-                        signature = hex(&signature),
-                        seed = hex(&seed),
-                        "finalized"
-                    );
+                    info!(view, ?payload, ?signature, ?seed, "finalized");
 
                     // Post finalization
                     let msg = wire::PutFinalization {

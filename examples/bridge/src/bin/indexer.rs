@@ -12,7 +12,7 @@ use commonware_stream::{
     public_key::{Config, Connection, IncomingConnection},
     Receiver, Sender,
 };
-use commonware_utils::{from_hex, hex, union};
+use commonware_utils::{from_hex, union};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
@@ -82,7 +82,7 @@ fn main() {
     }
     let key = parts[0].parse::<u64>().expect("Key not well-formed");
     let signer = Ed25519::from_seed(key);
-    tracing::info!(key = hex(&signer.public_key()), "loaded signer");
+    tracing::info!(key = ?signer.public_key(), "loaded signer");
 
     // Configure my port
     let port = parts[1].parse::<u16>().expect("Port not well-formed");
@@ -100,7 +100,7 @@ fn main() {
     }
     for peer in participants {
         let verifier = Ed25519::from_seed(peer).public_key();
-        tracing::info!(key = hex(&verifier), "registered authorized key",);
+        tracing::info!(key = ?verifier, "registered authorized key");
         validators.insert(verifier);
     }
 
@@ -150,8 +150,8 @@ fn main() {
                         network.insert(digest.clone(), incoming.data);
                         let _ = response.send(true);
                         info!(
-                            network = hex(&incoming.network),
-                            block = hex(digest.as_ref()),
+                            network = ?incoming.network,
+                            block = ?digest,
                             "stored block"
                         );
                     }
@@ -187,7 +187,7 @@ fn main() {
                         network.insert(view, incoming.data);
                         let _ = response.send(true);
                         info!(
-                            network = hex(&incoming.network),
+                            network = ?incoming.network,
                             view = view,
                             "stored finalization"
                         );
@@ -239,17 +239,17 @@ fn main() {
                 };
             let peer = incoming.peer();
             if !validators.contains(&peer) {
-                debug!(peer = hex(&peer), "unauthorized peer");
+                debug!(?peer, "unauthorized peer");
                 continue;
             }
             let stream = match Connection::upgrade_listener(runtime.clone(), incoming).await {
                 Ok(connection) => connection,
                 Err(e) => {
-                    debug!(error = ?e, peer=hex(&peer), "failed to upgrade connection");
+                    debug!(error = ?e, ?peer, "failed to upgrade connection");
                     continue;
                 }
             };
-            info!(peer = hex(&peer), "upgraded connection");
+            info!(?peer, "upgraded connection");
 
             // Spawn message handler
             runtime.spawn("connection", {
@@ -262,11 +262,11 @@ fn main() {
                     while let Ok(msg) = receiver.receive().await {
                         // Decode message
                         let Ok(msg) = wire::Inbound::decode(msg) else {
-                            debug!(peer = hex(&peer), "failed to decode message");
+                            debug!(?peer, "failed to decode message");
                             return;
                         };
                         let Some(payload) = msg.payload else {
-                            debug!(peer = hex(&peer), "failed to decode payload");
+                            debug!(?peer, "failed to decode payload");
                             return;
                         };
 
@@ -287,7 +287,7 @@ fn main() {
                                 }
                                 .encode_to_vec();
                                 if sender.send(&msg).await.is_err() {
-                                    debug!(peer = hex(&peer), "failed to send message");
+                                    debug!(?peer, "failed to send message");
                                     return;
                                 }
                             }
@@ -310,7 +310,7 @@ fn main() {
                                         }
                                         .encode_to_vec();
                                         if sender.send(&msg).await.is_err() {
-                                            debug!(peer = hex(&peer), "failed to send message");
+                                            debug!(?peer, "failed to send message");
                                             return;
                                         }
                                     }
@@ -320,7 +320,7 @@ fn main() {
                                         }
                                         .encode_to_vec();
                                         if sender.send(&msg).await.is_err() {
-                                            debug!(peer = hex(&peer), "failed to send message");
+                                            debug!(?peer, "failed to send message");
                                             return;
                                         }
                                     }
@@ -341,7 +341,7 @@ fn main() {
                                 }
                                 .encode_to_vec();
                                 if sender.send(&msg).await.is_err() {
-                                    debug!(peer = hex(&peer), "failed to send message");
+                                    debug!(?peer, "failed to send message");
                                     return;
                                 }
                             }
@@ -364,7 +364,7 @@ fn main() {
                                         }
                                         .encode_to_vec();
                                         if sender.send(&msg).await.is_err() {
-                                            debug!(peer = hex(&peer), "failed to send message");
+                                            debug!(?peer, "failed to send message");
                                             return;
                                         }
                                     }
@@ -374,7 +374,7 @@ fn main() {
                                         }
                                         .encode_to_vec();
                                         if sender.send(&msg).await.is_err() {
-                                            debug!(peer = hex(&peer), "failed to send message");
+                                            debug!(?peer, "failed to send message");
                                             return;
                                         }
                                     }

@@ -82,12 +82,12 @@ impl<P: Array> Actor<P> {
                     relay,
                     channels,
                 } => {
-                    debug!(peer = hex(&peer), "peer ready");
+                    debug!(?peer, "peer ready");
                     self.connections.insert(peer, relay);
                     let _ = channels.send(routing.clone());
                 }
                 Message::Release { peer } => {
-                    debug!(peer = hex(&peer), "peer released");
+                    debug!(?peer, "peer released");
                     self.connections.remove(&peer);
                 }
                 Message::Content {

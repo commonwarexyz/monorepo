@@ -113,7 +113,7 @@ impl<
         let reservation = match tracker.reserve(peer.clone()).await {
             Some(reservation) => reservation,
             None => {
-                debug!(peer = hex(&peer), "unable to reserve connection to peer");
+                debug!(?peer, "unable to reserve connection to peer");
                 return;
             }
         };
@@ -126,7 +126,7 @@ impl<
                 return;
             }
         };
-        debug!(peer = hex(&peer), "upgraded connection");
+        debug!(?peer, "upgraded connection");
 
         // Start peer to handle messages
         supervisor.spawn(peer, stream, reservation).await;
