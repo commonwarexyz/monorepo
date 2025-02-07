@@ -66,6 +66,7 @@ impl<H: Hasher> Tree<H> {
         }
 
         // Level 0: the leaves.
+        let leaves_len = leaves.len() as u32;
         let mut levels = Vec::new();
         levels.push(leaves);
 
@@ -102,11 +103,11 @@ impl<H: Hasher> Tree<H> {
         }
 
         // Hash the root with the number of leaves in the tree
-        hasher.update(&pos.to_be_bytes());
+        hasher.update(&leaves_len.to_be_bytes());
         hasher.update(levels.last().unwrap().first().unwrap());
         let root = hasher.finalize();
         Some(Self {
-            leaves: pos,
+            leaves: leaves_len,
             root,
             levels,
         })
@@ -121,25 +122,24 @@ impl<H: Hasher> Tree<H> {
     ///
     /// The proof contains the sibling hash at each level needed to reconstruct the root.
     pub fn prove(&self, leaf_index: u32) -> Option<Proof<H>> {
-        if leaf_index > self.leaves {
+        if leaf_index >= self.leaves {
             return None;
         }
 
         // For each level (except the root level) record the sibling.
         let mut proof_hashes = Vec::new();
-        let mut index = leaf_index;
+        let mut index = leaf_index as usize;
         for level in &self.levels {
             if level.len() == 1 {
                 // Reached the root
                 break;
             }
             let sibling_index = if index % 2 == 0 { index + 1 } else { index - 1 };
-            let sibling_index = sibling_index as usize;
             let sibling = if sibling_index < level.len() {
                 level[sibling_index].clone()
             } else {
                 // If no right child exists, use a duplicate of the current node.
-                level[index as usize].clone()
+                level[index].clone()
             };
             proof_hashes.push(sibling);
             index /= 2;
@@ -186,29 +186,35 @@ impl<H: Hasher> Proof<H> {
         root_hash: &H::Digest,
     ) -> bool {
         // Ensure element isn't past allowed
-        if element_pos > self.leaves {
+        if element_pos >= self.leaves {
             return false;
         }
 
         // Compute the root hash by combining the element with each sibling hash in the proof.
         let mut computed = element.clone();
         let mut index = element_pos;
+        let mut nodes = self.leaves;
+        let mut cumulative_offset = 0;
         for sibling in self.hashes.iter() {
-            // Combine the children into a parent node.
+            let pair_index = index / 2;
+            let left_pos = cumulative_offset + 2 * pair_index;
+            let right_pos = left_pos + 1;
+
             if index % 2 == 0 {
-                hasher.update(&index.to_be_bytes());
+                hasher.update(&left_pos.to_be_bytes());
                 hasher.update(&computed);
-                hasher.update(&(index + 1).to_be_bytes());
+                hasher.update(&right_pos.to_be_bytes());
                 hasher.update(sibling);
             } else {
-                hasher.update(&(index - 1).to_be_bytes());
+                hasher.update(&left_pos.to_be_bytes());
                 hasher.update(sibling);
-                hasher.update(&index.to_be_bytes());
+                hasher.update(&right_pos.to_be_bytes());
                 hasher.update(&computed);
             }
 
-            // Compute the parent hash.
             computed = hasher.finalize();
+            cumulative_offset += 2 * ((nodes + 1) / 2);
+            nodes = (nodes + 1) / 2;
             index /= 2;
         }
 
@@ -346,6 +352,39 @@ mod tests {
     }
 
     #[test]
+    fn test_merkle_tree_three() {
+        // Build tree
+        let txs = [b"tx1", b"tx2", b"tx3"];
+        let digests: Vec<Digest> = txs.iter().map(|tx| hash(*tx)).collect();
+        let mut hasher = Sha256::default();
+        let tree = Tree::new(&mut hasher, digests.clone()).unwrap();
+        let root = tree.root();
+
+        // For each leaf, generate and verify its proof.
+        for (i, leaf) in digests.iter().enumerate() {
+            let proof = tree.prove(i as u32).unwrap();
+            assert!(proof.verify(&mut hasher, leaf, i as u32, &root));
+        }
+    }
+
+    #[test]
+    fn test_tampered_proof_three() {
+        // Build tree
+        let txs = [b"tx1", b"tx2", b"tx3"];
+        let digests: Vec<Digest> = txs.iter().map(|tx| hash(*tx)).collect();
+        let mut hasher = Sha256::default();
+        let tree = Tree::new(&mut hasher, digests.clone()).unwrap();
+        let root = tree.root();
+
+        // For each leaf, generate and verify its tampered proof.
+        for (i, leaf) in digests.iter().enumerate() {
+            let mut proof = tree.prove(i as u32).unwrap();
+            proof.leaves = 100;
+            assert!(!proof.verify(&mut hasher, leaf, i as u32, &root));
+        }
+    }
+
+    #[test]
     fn test_merkle_tree_multiple() {
         // Build tree
         let txs = [b"tx1", b"tx2", b"tx3", b"tx4"];
@@ -380,6 +419,27 @@ mod tests {
             let mut proof = tree.prove(i as u32).unwrap();
             proof.leaves = 100;
             assert!(!proof.verify(&mut hasher, leaf, i as u32, &root));
+        }
+    }
+
+    #[test]
+    fn test_merkle_tree_many() {
+        // Build tree
+        let txs: Vec<Vec<u8>> = (0..150).map(|i| format!("tx{}", i).into()).collect();
+        let digests: Vec<Digest> = txs.iter().map(|tx| hash(tx)).collect();
+        let mut hasher = Sha256::default();
+        let tree = Tree::new(&mut hasher, digests.clone()).unwrap();
+        let root = tree.root();
+
+        // For each leaf, generate and verify its proof.
+        for (i, leaf) in digests.iter().enumerate() {
+            let proof = tree.prove(i as u32).unwrap();
+            let mut hasher = Sha256::default();
+            assert!(
+                proof.verify(&mut hasher, leaf, i as u32, &root),
+                "Proof failed for leaf index {}",
+                i
+            );
         }
     }
 
