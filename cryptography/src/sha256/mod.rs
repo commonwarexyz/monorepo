@@ -1,4 +1,24 @@
 //! SHA-256 implementation of the `Hasher` trait.
+//!
+//! This implementation uses the `sha2` crate to generate SHA-256 digests.
+//!
+//! # Example
+//! ```rust
+//! use commonware_cryptography::{Hasher, Sha256};
+//!
+//! // Create a new SHA-256 hasher
+//! let mut hasher = Sha256::new();
+//!
+//! // Update the hasher with some messages
+//! hasher.update(b"hello,");
+//! hasher.update(b"world!");
+//!
+//! // Finalize the hasher to get the digest
+//! let digest = hasher.finalize();
+//!
+//! // Print the digest
+//! println!("digest: {:?}", digest);
+//! ```
 
 use crate::{Array, Error, Hasher};
 use commonware_utils::{hex, SizedSerialize};
