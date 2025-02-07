@@ -15,14 +15,14 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
-commonware-consensus = { version = "0.0.6", path = "consensus" }
-commonware-cryptography = { version = "0.0.17", path = "cryptography" }
-commonware-macros = { version = "0.0.8", path = "macros" }
-commonware-p2p = { version = "0.0.28", path = "p2p" }
-commonware-runtime = { version = "0.0.14", path = "runtime" }
-commonware-storage = { version = "0.0.9", path = "storage" }
-commonware-stream = { version = "0.0.6", path = "stream" }
-commonware-utils = { version = "0.0.9", path = "utils" }
+commonware-consensus = { version = "0.0.7", path = "consensus" }
+commonware-cryptography = { version = "0.0.18", path = "cryptography" }
+commonware-macros = { version = "0.0.9", path = "macros" }
+commonware-p2p = { version = "0.0.29", path = "p2p" }
+commonware-runtime = { version = "0.0.15", path = "runtime" }
+commonware-storage = { version = "0.0.10", path = "storage" }
+commonware-stream = { version = "0.0.7", path = "stream" }
+commonware-utils = { version = "0.0.10", path = "utils" }
 thiserror = "1.0.63"
 bytes = "1.7.1"
 sha2 = "0.10.8"
