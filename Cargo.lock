@@ -593,7 +593,6 @@ dependencies = [
  "num-bigint",
  "prost",
  "rand",
- "sha2 0.10.8",
 ]
 
 [[package]]

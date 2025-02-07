@@ -11,8 +11,6 @@ use commonware_utils::SizedSerialize;
 /// their peak hashes from the elements within the range. Both segments are ordered by decreasing
 /// height.
 #[derive(Clone, Debug, Eq)]
-/// A Proof contains the information necessary for proving the inclusion of an element, or some
-/// range of elements, in the MMR.
 pub struct Proof<H: CHasher> {
     /// The total number of nodes in the MMR.
     pub size: u64,
@@ -114,10 +112,6 @@ impl<H: CHasher> Proof<H> {
     ///    [8-...): raw bytes of each hash, each of length `H::len()`
     /// ```
     pub fn serialize(&self) -> Vec<u8> {
-        let bytes_len = u64::SERIALIZED_LEN + (self.hashes.len() * H::Digest::SERIALIZED_LEN);
-        let mut bytes = Vec::with_capacity(bytes_len);
-        bytes.put_u64(self.size);
-
         // A proof should never contain more hashes than the depth of the MMR, thus a single byte
         // for encoding the length of the hashes array still allows serializing MMRs up to 2^255
         // elements.
@@ -125,6 +119,11 @@ impl<H: CHasher> Proof<H> {
             self.hashes.len() <= u8::MAX as usize,
             "too many hashes in proof"
         );
+
+        // Serialize the proof as a byte vector.
+        let bytes_len = u64::SERIALIZED_LEN + (self.hashes.len() * H::Digest::SERIALIZED_LEN);
+        let mut bytes = Vec::with_capacity(bytes_len);
+        bytes.put_u64(self.size);
         for hash in self.hashes.iter() {
             bytes.extend_from_slice(hash.as_ref());
         }
