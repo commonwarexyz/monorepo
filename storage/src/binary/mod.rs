@@ -581,6 +581,26 @@ mod tests {
     }
 
     #[test]
+    fn test_tampered_proof_extra_sibling() {
+        // Build tree
+        let txs = [b"tx1", b"tx2", b"tx3", b"tx4"];
+        let digests: Vec<Digest> = txs.iter().map(|tx| hash(*tx)).collect();
+        let leaf = digests[0].clone();
+        let mut hasher = Sha256::default();
+        let tree = Tree::new(&mut hasher, digests).unwrap();
+        let root = tree.root();
+
+        // Build proof
+        let mut proof = tree.proof(0).unwrap();
+
+        // Tamper with proof
+        proof.siblings.push(leaf.clone());
+
+        // Fail verification with an empty proof.
+        assert!(!proof.verify(&mut hasher, &leaf, 0, &root));
+    }
+
+    #[test]
     fn test_tampered_proof_no_leaves() {
         // Build tree
         let txs = [b"tx1", b"tx2", b"tx3", b"tx4"];
