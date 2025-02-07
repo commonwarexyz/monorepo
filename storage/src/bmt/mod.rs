@@ -144,6 +144,9 @@ impl<H: Hasher> Tree<H> {
                 level[sibling_index].clone()
             } else {
                 // If no right child exists, use a duplicate of the current node.
+                //
+                // TODO: this is safe because it isn't possible to construct different proofs
+                // for the same leaf or the same digest at different positions.
                 level[index].clone()
             };
             siblings.push(sibling);
