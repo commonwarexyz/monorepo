@@ -130,7 +130,6 @@ mod tests {
     use commonware_cryptography::{Ed25519, Scheme};
     use commonware_macros::select;
     use commonware_runtime::{deterministic::Executor, Clock, Runner, Spawner};
-    use commonware_utils::hex;
     use futures::{channel::mpsc, SinkExt, StreamExt};
     use prometheus_client::registry::Registry;
     use rand::Rng;
@@ -211,7 +210,7 @@ mod tests {
                     loop {
                         let index = runtime.gen_range(0..keys.len());
                         let sender = keys[index];
-                        let msg = format!("hello from {}", hex(sender));
+                        let msg = format!("hello from {:?}", sender);
                         let msg = Bytes::from(msg);
                         let mut message_sender = agents.get(sender).unwrap().clone();
                         let sent = message_sender

@@ -15,7 +15,6 @@ use commonware_cryptography::{
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::Clock;
-use commonware_utils::hex;
 use prost::Message;
 use std::{
     collections::{HashMap, HashSet},
@@ -71,7 +70,7 @@ impl<E: Clock, C: Scheme> Arbiter<E, C> {
         if let Some(previous) = &previous {
             group = Some(previous.serialize());
             let public = poly::public(previous).serialize();
-            info!(round, public = hex(&public), "starting reshare");
+            info!(round, ?public, "starting reshare");
         } else {
             info!(round, "starting key generation");
         }
@@ -178,7 +177,7 @@ impl<E: Clock, C: Scheme> Arbiter<E, C> {
                             //
                             // Any faults here will be considered as a disqualification.
                             if let Err(e) = arbiter.commitment(sender.clone(), commitment, acks, reveals) {
-                                warn!(round, error = ?e, sender = hex(&sender), "failed to process commitment");
+                                warn!(round, error = ?e, ?sender, "failed to process commitment");
                                 break;
                             }
 
@@ -223,10 +222,10 @@ impl<E: Clock, C: Scheme> Arbiter<E, C> {
         // Send commitments and reveals to all contributors
         info!(
             round,
-            commitments = ?output.commitments.keys().map(|idx| hex(&self.contributors[*idx as usize])).collect::<Vec<_>>(),
+            commitments = ?output.commitments.keys().map(|idx| self.contributors[*idx as usize].to_string()).collect::<Vec<_>>(),
             disqualified = ?disqualified
                 .iter()
-                .map(|pk| hex(pk))
+                .map(|pk| pk.to_string())
                 .collect::<Vec<_>>(),
             "selected commitments"
         );
@@ -285,7 +284,7 @@ impl<E: Clock, C: Scheme> Arbiter<E, C> {
                     info!(
                         round,
                         public = public_hex(&public),
-                        disqualified = ?disqualified.into_iter().map(|pk| hex(&pk)).collect::<Vec<_>>(),
+                        disqualified = ?disqualified.into_iter().map(|pk| pk.to_string()).collect::<Vec<_>>(),
                         "round complete"
                     );
 
@@ -293,7 +292,7 @@ impl<E: Clock, C: Scheme> Arbiter<E, C> {
                     previous = Some(public);
                 }
                 None => {
-                    info!(round, disqualified = ?disqualified.into_iter().map(|pk| hex(&pk)).collect::<Vec<_>>(), "round aborted");
+                    info!(round, disqualified = ?disqualified.into_iter().map(|pk| pk.to_string()).collect::<Vec<_>>(), "round aborted");
                 }
             }
 

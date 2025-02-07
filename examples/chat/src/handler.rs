@@ -277,7 +277,7 @@ pub async fn run(
                                 successful.sort();
                                 let mut friends = String::from_str("[").unwrap();
                                 for friend in successful {
-                                    friends.push_str(&format!("{},", hex(&friend)));
+                                    friends.push_str(&format!("{:?},", friend));
                                 }
                                 friends.pop();
                                 friends.push(']');

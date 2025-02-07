@@ -9,7 +9,6 @@ use commonware_stream::{
     public_key::{Connection, Sender},
     Receiver as _, Sender as _,
 };
-use commonware_utils::hex;
 use futures::{channel::mpsc, SinkExt, StreamExt};
 use governor::{clock::ReasonablyRealtime, Quota, RateLimiter};
 use prometheus_client::metrics::{counter::Counter, family::Family};
@@ -141,7 +140,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng, P: Array> Actor<
                                 Message::Peers { peers: msg } =>
                                     (metrics::Message::new_peers(&peer), Payload::Peers(msg)),
                                 Message::Kill => {
-                                    return Err(Error::PeerKilled(hex(&peer)))
+                                    return Err(Error::PeerKilled(peer.to_string()))
                                 }
                             };
                             Self::send(&mut conn_sender, &self.sent_messages, metric, payload)

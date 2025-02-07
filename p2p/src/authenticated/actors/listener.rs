@@ -4,7 +4,6 @@ use crate::authenticated::actors::{spawner, tracker};
 use commonware_cryptography::Scheme;
 use commonware_runtime::{Clock, Listener, Network, Sink, Spawner, Stream};
 use commonware_stream::public_key::{Config as StreamConfig, Connection, IncomingConnection};
-use commonware_utils::hex;
 use governor::{
     clock::ReasonablyRealtime,
     middleware::NoOpMiddleware,
@@ -113,7 +112,7 @@ impl<
         let reservation = match tracker.reserve(peer.clone()).await {
             Some(reservation) => reservation,
             None => {
-                debug!(peer = hex(&peer), "unable to reserve connection to peer");
+                debug!(?peer, "unable to reserve connection to peer");
                 return;
             }
         };
@@ -122,11 +121,11 @@ impl<
         let stream = match Connection::upgrade_listener(runtime, incoming).await {
             Ok(connection) => connection,
             Err(e) => {
-                debug!(error = ?e, peer=hex(&peer), "failed to upgrade connection");
+                debug!(error = ?e, ?peer, "failed to upgrade connection");
                 return;
             }
         };
-        debug!(peer = hex(&peer), "upgraded connection");
+        debug!(?peer, "upgraded connection");
 
         // Start peer to handle messages
         supervisor.spawn(peer, stream, reservation).await;

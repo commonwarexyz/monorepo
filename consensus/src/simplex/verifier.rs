@@ -4,7 +4,7 @@ use crate::{
     Supervisor,
 };
 use commonware_cryptography::{Array, Scheme};
-use commonware_utils::{hex, quorum};
+use commonware_utils::quorum;
 use std::collections::HashSet;
 use tracing::debug;
 
@@ -101,7 +101,7 @@ pub fn verify_notarization<
         // Ensure we haven't seen this signature before
         if seen.contains(&signature.public_key) {
             debug!(
-                signer = hex(public_key),
+                signer = ?public_key,
                 reason = "duplicate signature",
                 "dropping notarization"
             );
@@ -190,7 +190,7 @@ pub fn verify_nullification<S: Supervisor<Index = View, PublicKey = C::PublicKey
         // Ensure we haven't seen this signature before
         if seen.contains(&signature.public_key) {
             debug!(
-                signer = hex(public_key),
+                signer = ?public_key,
                 reason = "duplicate signature",
                 "dropping nullification"
             );
@@ -298,7 +298,7 @@ pub fn verify_finalization<
         // Ensure we haven't seen this signature before
         if seen.contains(&signature.public_key) {
             debug!(
-                signer = hex(public_key),
+                signer = ?public_key,
                 reason = "duplicate signature",
                 "dropping finalization"
             );

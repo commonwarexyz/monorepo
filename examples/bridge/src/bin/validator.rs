@@ -17,7 +17,7 @@ use commonware_runtime::{
 };
 use commonware_storage::journal::variable::{Config, Journal};
 use commonware_stream::public_key::{self, Connection};
-use commonware_utils::{from_hex, hex, quorum, union};
+use commonware_utils::{from_hex, quorum, union};
 use governor::Quota;
 use prometheus_client::registry::Registry;
 use std::sync::{Arc, Mutex};
@@ -73,7 +73,7 @@ fn main() {
     }
     let key = parts[0].parse::<u64>().expect("Key not well-formed");
     let signer = Ed25519::from_seed(key);
-    tracing::info!(key = hex(&signer.public_key()), "loaded signer");
+    tracing::info!(key = ?signer.public_key(), "loaded signer");
 
     // Configure my port
     let port = parts[1].parse::<u16>().expect("Port not well-formed");
@@ -90,7 +90,7 @@ fn main() {
     }
     for peer in participants {
         let verifier = Ed25519::from_seed(peer).public_key();
-        tracing::info!(key = hex(&verifier), "registered authorized key",);
+        tracing::info!(key = ?verifier, "registered authorized key");
         validators.push(verifier);
     }
 
