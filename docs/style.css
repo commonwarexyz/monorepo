@@ -215,6 +215,7 @@ details.benchmark-module {
 }
 
 details.benchmark-module summary.module-title {
+    font-size: 1em;
     font-weight: 500;
     cursor: pointer;
     outline: none;

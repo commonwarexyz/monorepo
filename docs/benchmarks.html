@@ -165,16 +165,20 @@
                     for (const entry of entries) {
                         const { commit, date, tool, benches } = entry;
                         for (const bench of benches) {
+                            // Get module name
                             const parts = bench.name.split("::");
                             if (parts.length < 2) continue;
                             const moduleName = parts[0];
-                            // Combine remaining parts and split into function and params.
+
+                            // Get function name and params
                             const functionPart = parts.slice(1).join("::");
                             let funcName = functionPart;
                             let params = "";
                             if (functionPart.includes("/")) {
                                 [funcName, params] = functionPart.split("/", 2);
                             }
+
+                            // Populate result
                             const result = { commit, date, tool, bench, params };
                             if (!moduleMap.has(moduleName)) {
                                 moduleMap.set(moduleName, new Map());
@@ -345,16 +349,21 @@
                 }
 
                 function renderBenchSet(testName, benchSet, main) {
+                    // Setup the <details> element for the benchmark set
                     const detailsElem = document.createElement('details');
                     detailsElem.className = 'benchmark-set';
                     main.appendChild(detailsElem);
+
+                    // Listen to "toggle" so button updates if a single set is opened/closed
                     detailsElem.addEventListener('toggle', updateExpandButton);
 
+                    // Create the <summary> element for the benchmark set
                     const summaryElem = document.createElement('summary');
                     summaryElem.className = 'benchmark-title';
                     summaryElem.textContent = testName;
                     detailsElem.appendChild(summaryElem);
 
+                    // Create the container for the modules
                     const moduleContainer = document.createElement('div');
                     moduleContainer.className = 'benchmark-modules';
                     detailsElem.appendChild(moduleContainer);
@@ -402,6 +411,7 @@
                     });
                 }
 
+                // Render all benchmarks
                 const main = document.getElementById('main');
                 for (const { name, dataSet } of dataSets) {
                     renderBenchSet(name, dataSet, main);
