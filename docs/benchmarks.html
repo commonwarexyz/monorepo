@@ -161,20 +161,29 @@
             // Build cases
             function init() {
                 function collectBenchesPerTestCase(entries) {
-                    const map = new Map();
+                    const moduleMap = new Map();
                     for (const entry of entries) {
                         const { commit, date, tool, benches } = entry;
                         for (const bench of benches) {
+                            // Split bench.name into module and function/params.
+                            const parts = bench.name.split("::");
+                            if (parts.length < 2) continue; // or handle benchmarks without a module separator
+                            const moduleName = parts[0];
+                            const funcName = parts.slice(1).join("::");
+
                             const result = { commit, date, tool, bench };
-                            const arr = map.get(bench.name);
-                            if (arr === undefined) {
-                                map.set(bench.name, [result]);
+                            if (!moduleMap.has(moduleName)) {
+                                moduleMap.set(moduleName, new Map());
+                            }
+                            const funcMap = moduleMap.get(moduleName);
+                            if (!funcMap.has(funcName)) {
+                                funcMap.set(funcName, [result]);
                             } else {
-                                arr.push(result);
+                                funcMap.get(funcName).push(result);
                             }
                         }
                     }
-                    return map;
+                    return moduleMap;
                 }
 
                 const data = window.BENCHMARK_DATA;
@@ -332,7 +341,6 @@
                     detailsElem.className = 'benchmark-set';
                     main.appendChild(detailsElem);
 
-                    // Listen to "toggle" so button updates if a single set is opened/closed
                     detailsElem.addEventListener('toggle', updateExpandButton);
 
                     const summaryElem = document.createElement('summary');
@@ -340,14 +348,31 @@
                     summaryElem.textContent = testName;
                     detailsElem.appendChild(summaryElem);
 
-                    const graphsElem = document.createElement('div');
-                    graphsElem.className = 'benchmark-graphs';
-                    detailsElem.appendChild(graphsElem);
+                    const moduleContainer = document.createElement('div');
+                    moduleContainer.className = 'benchmark-modules';
+                    detailsElem.appendChild(moduleContainer);
 
-                    // Render individual graphs within this test set
-                    for (const [benchName, benches] of benchSet.entries()) {
-                        renderGraph(graphsElem, benchName, benches)
-                    }
+                    // Iterate over modules first
+                    benchSet.forEach((funcMap, moduleName) => {
+                        const moduleDetails = document.createElement('details');
+                        moduleDetails.className = 'benchmark-module';
+                        moduleContainer.appendChild(moduleDetails);
+                        moduleDetails.addEventListener('toggle', updateExpandButton);
+
+                        const moduleSummary = document.createElement('summary');
+                        moduleSummary.className = 'module-title';
+                        moduleSummary.textContent = moduleName;
+                        moduleDetails.appendChild(moduleSummary);
+
+                        const benchContainer = document.createElement('div');
+                        benchContainer.className = 'module-benchmarks';
+                        moduleDetails.appendChild(benchContainer);
+
+                        // Now iterate over function/params within the module
+                        funcMap.forEach((benches, funcName) => {
+                            renderGraph(benchContainer, funcName, benches);
+                        });
+                    });
                 }
 
                 const main = document.getElementById('main');
