@@ -38,8 +38,8 @@
 //! ```
 
 use bytes::{Buf, BufMut};
-use commonware_cryptography::{Digest, Hasher};
-use std::mem::size_of;
+use commonware_cryptography::{Array, Hasher};
+use commonware_utils::SizedSerialize;
 
 /// A stateless Binary Merkle Tree that computes a root over an arbitrary set
 /// of [commonware_cryptography::Digest].
@@ -236,7 +236,7 @@ impl<H: Hasher> Proof<H> {
 
     /// Returns the maximum number of bytes any serialized proof can occupy.
     pub fn max_serialization_size() -> usize {
-        size_of::<u32>() + u8::MAX as usize * size_of::<H::Digest>()
+        u32::SERIALIZED_LEN + u8::MAX as usize * H::Digest::SERIALIZED_LEN
     }
 
     /// Serializes the proof as the concatenation of each hash.
@@ -249,7 +249,7 @@ impl<H: Hasher> Proof<H> {
         );
 
         // Serialize the proof as the concatenation of each hash.
-        let bytes_len = size_of::<u32>() + self.siblings.len() * size_of::<H::Digest>();
+        let bytes_len = u32::SERIALIZED_LEN + self.siblings.len() * H::Digest::SERIALIZED_LEN;
         let mut bytes = Vec::with_capacity(bytes_len);
         bytes.put_u32(self.leaves);
         for hash in &self.siblings {
@@ -261,7 +261,7 @@ impl<H: Hasher> Proof<H> {
     /// Deserializes a proof from its canonical serialized representation.
     pub fn deserialize(mut buf: &[u8]) -> Option<Self> {
         // Get leaves
-        if buf.len() < size_of::<u32>() {
+        if buf.len() < u32::SERIALIZED_LEN {
             return None;
         }
         let leaves = buf.get_u32();
@@ -272,12 +272,12 @@ impl<H: Hasher> Proof<H> {
         }
 
         // If the remaining buffer is not a multiple of the hash size, it's invalid.
-        if buf.remaining() % size_of::<H::Digest>() != 0 {
+        if buf.remaining() % H::Digest::SERIALIZED_LEN != 0 {
             return None;
         }
 
         // If the number of siblings is too large, it's invalid.
-        let num_siblings = buf.len() / size_of::<H::Digest>();
+        let num_siblings = buf.len() / H::Digest::SERIALIZED_LEN;
         if num_siblings > u8::MAX as usize {
             return None;
         }
