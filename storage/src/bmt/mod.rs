@@ -34,13 +34,13 @@
 //! for digest in &digests {
 //!    builder.add(digest);
 //! }
-//! let tree = builder.build().unwrap();
+//! let tree = builder.build();
 //! let root = tree.root();
 //!
 //! // Generate a proof for leaf at index 1
 //! let mut hasher = Sha256::default();
 //! let proof = tree.proof(0).unwrap();
-//! assert!(proof.verify(&mut hasher, &digests[0], 0, &root));
+//! assert!(proof.verify(&mut hasher, &digests[0], 0, &root).is_ok());
 //! ```
 
 use bytes::Buf;
