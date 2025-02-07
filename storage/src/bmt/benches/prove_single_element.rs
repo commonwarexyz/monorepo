@@ -1,5 +1,5 @@
 use commonware_cryptography::{Hasher, Sha256};
-use commonware_storage::binary::Tree;
+use commonware_storage::bmt::Builder;
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 
@@ -8,16 +8,15 @@ const SAMPLE_SIZE: usize = 100;
 fn bench_prove_single_element(c: &mut Criterion) {
     for n in [100, 1_000, 5_000, 10_000, 25_000, 50_000, 100_000] {
         // Populate Binary Merkle Tree
-        let mut elements = Vec::with_capacity(n);
+        let mut builder = Builder::<Sha256>::new(n);
         let mut queries = Vec::with_capacity(n);
         let mut sampler = StdRng::seed_from_u64(0);
         for pos in 0..n {
             let element = Sha256::random(&mut sampler);
-            elements.push(element.clone());
+            builder.add(&element);
             queries.push((pos as u32, element));
         }
-        let mut hasher = Sha256::new();
-        let tree = Tree::<Sha256>::new(&mut hasher, elements).unwrap();
+        let tree = builder.build().unwrap();
         let root = tree.root();
 
         // Select SAMPLE_SIZE random elements without replacement and create/verify proofs
