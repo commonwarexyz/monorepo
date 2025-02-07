@@ -1,14 +1,16 @@
 //! A stateless Binary Merkle Tree.
 //!
 //! The tree is constructed level-by-level. Level 0 consists of the leaf nodes. At each higher
-//! level, pairs of nodes are combined using the provided hasher. If a level contains an odd number
-//! of nodes, the missing sibling is replaced with `H::Digest::default()`.
+//! level, pairs of nodes are hashed with their positions in the tree (if a level contains an odd number
+//! of nodes, the last node is duplicated). The root of the tree is the hash of the top level and
+//! the number of leaves in the tree.
 //!
 //! For example, given three leaves A, B, and C, the tree is constructed as follows:
 //!
 //! ```text
-//!     Level 2 (root):       [combine(combine(A,B),combine(C,DEFAULT))]
-//!     Level 1:              [combine(A,B),combine(C,DEFAULT)]
+//!     Root:                 [hash(3, hash(4,hash(0,A,1,B),5,hash(2,C,3,C)))]
+//!     Level 2:              [hash(4,hash(0,A,1,B),5,hash(2,C,3,C))]
+//!     Level 1:              [hash(0,A,1,B),hash(2,C,3,C)]
 //!     Level 0 (leaves):     [A,B,C]
 //! ```
 //!
