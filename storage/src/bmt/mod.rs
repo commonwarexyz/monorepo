@@ -119,7 +119,6 @@ impl<H: Hasher> Tree<H> {
         // can be generated that references it.
         let mut empty = false;
         if leaves.is_empty() {
-            hasher.update(&0u32.to_be_bytes());
             leaves.push(hasher.finalize());
             empty = true;
         }
@@ -393,7 +392,7 @@ mod tests {
     /// We use these pre-generated roots to ensure that we don't silently change
     /// the tree hashing algorithm.
     const ROOTS: [&str; 200] = [
-        "df3f619804a92fdb4057192dc43dd748ea778adc52bc498ce80524c014b81119",
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "50ae5b142a0f31db537ba060ba07e46fafe1ec960ebec7b6f08f03dafe774f52",
         "fce6b9d873d5a92d828695fbddb93d0cecc76747e311035cf7b2a80532f65ea2",
         "33635879d11892586d0735076c9d1b9d661344861d46aa96c36450b71a32300c",
