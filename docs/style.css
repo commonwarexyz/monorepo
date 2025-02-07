@@ -150,7 +150,7 @@ summary {
 details.benchmark-set {
     margin-top: 10px;
     margin-bottom: 10px;
-    border: 1px solid #eee;
+    border: 1px solid #bbb;
     padding: 8px;
 }
 
@@ -171,7 +171,7 @@ details.benchmark-set .benchmark-title {
 }
 
 details.benchmark-graph-details {
-    margin-left: 10px;
+    margin-left: 5px;
     margin-top: 10px;
     margin-bottom: 10px;
     border: 1px solid #eee;
@@ -185,7 +185,7 @@ details.benchmark-graph-details {
 }
 
 .benchmark-graph-title {
-    font-weight: 400;
+    font-weight: 300;
     cursor: pointer;
     outline: none;
     overflow-wrap: anywhere;
@@ -204,14 +204,14 @@ details.benchmark-graph-details {
 }
 
 .benchmark-modules {
-    margin-left: 10px;
+    margin-left: 5px;
 }
 
 details.benchmark-module {
-    margin-top: 5px;
-    margin-bottom: 5px;
-    border: 1px solid #ddd;
-    padding: 6px;
+    margin-top: 10px;
+    margin-bottom: 10px;
+    border: 1px solid #ccc;
+    padding: 8px;
 }
 
 details.benchmark-module summary.module-title {
@@ -226,6 +226,30 @@ details.benchmark-module summary.module-title {
     text-decoration: underline;
 }
 
-.module-benchmarks {
-    margin-left: 10px;
+.module-functions {
+    margin-left: 5px;
+}
+
+details.benchmark-function {
+    margin-top: 10px;
+    margin-bottom: 10px;
+    border: 1px solid #ddd;
+    padding: 8px;
+}
+
+summary.function-title {
+    font-size: 1em;
+    font-weight: 400;
+    cursor: pointer;
+    outline: none;
+    overflow-wrap: anywhere;
+    white-space: normal;
+    max-width: 100%;
+    list-style: none;
+    color: -webkit-link;
+    text-decoration: underline;
+}
+
+.function-params {
+    margin-left: 5px;
 }

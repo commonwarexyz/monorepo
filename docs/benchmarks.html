@@ -165,21 +165,29 @@
                     for (const entry of entries) {
                         const { commit, date, tool, benches } = entry;
                         for (const bench of benches) {
-                            // Split bench.name into module and function/params.
                             const parts = bench.name.split("::");
-                            if (parts.length < 2) continue; // or handle benchmarks without a module separator
+                            if (parts.length < 2) continue;
                             const moduleName = parts[0];
-                            const funcName = parts.slice(1).join("::");
-
-                            const result = { commit, date, tool, bench };
+                            // Combine remaining parts and split into function and params.
+                            const functionPart = parts.slice(1).join("::");
+                            let funcName = functionPart;
+                            let params = "";
+                            if (functionPart.includes("/")) {
+                                [funcName, params] = functionPart.split("/", 2);
+                            }
+                            const result = { commit, date, tool, bench, params };
                             if (!moduleMap.has(moduleName)) {
                                 moduleMap.set(moduleName, new Map());
                             }
-                            const funcMap = moduleMap.get(moduleName);
-                            if (!funcMap.has(funcName)) {
-                                funcMap.set(funcName, [result]);
+                            const functionMap = moduleMap.get(moduleName);
+                            if (!functionMap.has(funcName)) {
+                                functionMap.set(funcName, new Map());
+                            }
+                            const paramsMap = functionMap.get(funcName);
+                            if (!paramsMap.has(params)) {
+                                paramsMap.set(params, [result]);
                             } else {
-                                funcMap.get(funcName).push(result);
+                                paramsMap.get(params).push(result);
                             }
                         }
                     }
@@ -192,7 +200,7 @@
                 document.getElementById('last-update').textContent = new Date(data.lastUpdate).toString();
 
                 // Prepare data points for charts
-                return Object.keys(data.entries).map(name => ({
+                return Object.keys(data.entries).sort().map(name => ({
                     name,
                     dataSet: collectBenchesPerTestCase(data.entries[name]),
                 }));
@@ -340,7 +348,6 @@
                     const detailsElem = document.createElement('details');
                     detailsElem.className = 'benchmark-set';
                     main.appendChild(detailsElem);
-
                     detailsElem.addEventListener('toggle', updateExpandButton);
 
                     const summaryElem = document.createElement('summary');
@@ -352,8 +359,9 @@
                     moduleContainer.className = 'benchmark-modules';
                     detailsElem.appendChild(moduleContainer);
 
-                    // Iterate over modules first
-                    benchSet.forEach((funcMap, moduleName) => {
+                    // Iterate over modules, sorted alphabetically
+                    Array.from(benchSet.keys()).sort().forEach(moduleName => {
+                        const functionMap = benchSet.get(moduleName);
                         const moduleDetails = document.createElement('details');
                         moduleDetails.className = 'benchmark-module';
                         moduleContainer.appendChild(moduleDetails);
@@ -364,13 +372,32 @@
                         moduleSummary.textContent = moduleName;
                         moduleDetails.appendChild(moduleSummary);
 
-                        const benchContainer = document.createElement('div');
-                        benchContainer.className = 'module-benchmarks';
-                        moduleDetails.appendChild(benchContainer);
+                        const functionContainer = document.createElement('div');
+                        functionContainer.className = 'module-functions';
+                        moduleDetails.appendChild(functionContainer);
 
-                        // Now iterate over function/params within the module
-                        funcMap.forEach((benches, funcName) => {
-                            renderGraph(benchContainer, funcName, benches);
+                        // Iterate over functions within the module, sorted alphabetically
+                        Array.from(functionMap.keys()).sort().forEach(funcName => {
+                            const paramsMap = functionMap.get(funcName);
+                            const functionDetails = document.createElement('details');
+                            functionDetails.className = 'benchmark-function';
+                            functionContainer.appendChild(functionDetails);
+                            functionDetails.addEventListener('toggle', updateExpandButton);
+
+                            const functionSummary = document.createElement('summary');
+                            functionSummary.className = 'function-title';
+                            functionSummary.textContent = funcName;
+                            functionDetails.appendChild(functionSummary);
+
+                            const paramsContainer = document.createElement('div');
+                            paramsContainer.className = 'function-params';
+                            functionDetails.appendChild(paramsContainer);
+
+                            // Iterate over parameter sets within the function
+                            paramsMap.forEach((results, params) => {
+                                const chartTitle = params ? params : "default";
+                                renderGraph(paramsContainer, chartTitle, results);
+                            });
                         });
                     });
                 }
