@@ -15,11 +15,9 @@ use thiserror::Error;
 pub mod bls12381;
 pub use bls12381::Bls12381;
 pub mod ed25519;
-pub use ed25519::Ed25519;
-pub use ed25519::Ed25519Batch;
+pub use ed25519::{Ed25519, Ed25519Batch};
 pub mod sha256;
-pub use sha256::hash;
-pub use sha256::Sha256;
+pub use sha256::{hash, Sha256};
 pub mod secp256r1;
 pub use secp256r1::Secp256r1;
 

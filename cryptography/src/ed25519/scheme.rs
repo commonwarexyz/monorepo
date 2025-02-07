@@ -110,6 +110,7 @@ impl BatchScheme for Ed25519Batch {
     }
 }
 
+/// Ed25519 Private Key.
 #[derive(Clone, Debug)]
 pub struct PrivateKey {
     raw: [u8; PRIVATE_KEY_LENGTH],
@@ -199,6 +200,7 @@ impl Display for PrivateKey {
     }
 }
 
+/// Ed25519 Public Key.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct PublicKey {
     raw: [u8; PUBLIC_KEY_LENGTH],
@@ -262,6 +264,7 @@ impl Display for PublicKey {
     }
 }
 
+/// Ed25519 Signature.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Signature {
     raw: [u8; SIGNATURE_LENGTH],

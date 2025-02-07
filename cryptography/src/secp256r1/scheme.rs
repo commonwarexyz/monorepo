@@ -80,6 +80,7 @@ impl Scheme for Secp256r1 {
     }
 }
 
+/// Secp256r1 Private Key.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PrivateKey {
     raw: [u8; PRIVATE_KEY_LENGTH],
@@ -161,6 +162,7 @@ impl Display for PrivateKey {
     }
 }
 
+/// Secp256r1 Public Key.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct PublicKey {
     raw: [u8; PUBLIC_KEY_LENGTH],
@@ -231,6 +233,7 @@ impl Display for PublicKey {
     }
 }
 
+/// Secp256r1 Signature.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Signature {
     raw: [u8; SIGNATURE_LENGTH],

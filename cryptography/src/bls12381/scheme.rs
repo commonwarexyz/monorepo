@@ -84,6 +84,7 @@ impl Scheme for Bls12381 {
     }
 }
 
+/// BLS12-381 private key.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PrivateKey {
     raw: [u8; group::PRIVATE_KEY_LENGTH],
@@ -165,6 +166,7 @@ impl Display for PrivateKey {
     }
 }
 
+/// BLS12-381 public key.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PublicKey {
     raw: [u8; group::PUBLIC_KEY_LENGTH],
@@ -246,6 +248,7 @@ impl Display for PublicKey {
     }
 }
 
+/// BLS12-381 signature.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Signature {
     raw: [u8; group::SIGNATURE_LENGTH],
