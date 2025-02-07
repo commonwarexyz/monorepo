@@ -48,6 +48,7 @@ use commonware_cryptography::{Array, Hasher};
 use commonware_utils::SizedSerialize;
 use thiserror::Error;
 
+/// Errors that can occur when working with a Binary Merkle Tree (BMT).
 #[derive(Error, Debug, PartialEq)]
 pub enum Error {
     #[error("invalid position: {0}")]
