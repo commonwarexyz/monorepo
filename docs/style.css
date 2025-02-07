@@ -150,7 +150,7 @@ summary {
 details.benchmark-set {
     margin-top: 10px;
     margin-bottom: 10px;
-    border: 1px solid #bbb;
+    border: 1px solid #eee;
     padding: 8px;
 }
 
@@ -171,10 +171,9 @@ details.benchmark-set .benchmark-title {
 }
 
 details.benchmark-graph-details {
-    margin-left: 5px;
     margin-top: 10px;
     margin-bottom: 10px;
-    border: 1px solid #eee;
+    border: 1px solid #bbb;
     padding: 8px;
 }
 
@@ -186,6 +185,7 @@ details.benchmark-graph-details {
 
 .benchmark-graph-title {
     font-weight: 300;
+    font-size: 0.8em;
     cursor: pointer;
     outline: none;
     overflow-wrap: anywhere;
@@ -203,14 +203,10 @@ details.benchmark-graph-details {
     max-width: 100%;
 }
 
-.benchmark-modules {
-    margin-left: 5px;
-}
-
 details.benchmark-module {
     margin-top: 10px;
     margin-bottom: 10px;
-    border: 1px solid #ccc;
+    border: 1px solid #ddd;
     padding: 8px;
 }
 
@@ -227,19 +223,15 @@ details.benchmark-module summary.module-title {
     text-decoration: underline;
 }
 
-.module-functions {
-    margin-left: 5px;
-}
-
 details.benchmark-function {
     margin-top: 10px;
     margin-bottom: 10px;
-    border: 1px solid #ddd;
+    border: 1px solid #ccc;
     padding: 8px;
 }
 
 summary.function-title {
-    font-size: 1em;
+    font-size: 0.9em;
     font-weight: 400;
     cursor: pointer;
     outline: none;
@@ -249,8 +241,4 @@ summary.function-title {
     list-style: none;
     color: -webkit-link;
     text-decoration: underline;
-}
-
-.function-params {
-    margin-left: 5px;
 }
