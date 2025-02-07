@@ -19,7 +19,7 @@ use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Blob, Clock, Spawner, Storage};
 use commonware_storage::journal::variable::Journal;
-use commonware_utils::{hex, quorum};
+use commonware_utils::quorum;
 use futures::{
     channel::{mpsc, oneshot},
     future::Either,
@@ -131,8 +131,8 @@ impl<C: Scheme, D: Array, S: Supervisor<Index = View, PublicKey = C::PublicKey>>
             if previous_notarize == &proposal_digest {
                 trace!(
                     view = self.view,
-                    signer = hex(public_key),
-                    previous_notarize = hex(previous_notarize),
+                    signer = ?public_key,
+                    previous_notarize = ?previous_notarize,
                     "already notarized"
                 );
                 return false;
@@ -170,7 +170,7 @@ impl<C: Scheme, D: Array, S: Supervisor<Index = View, PublicKey = C::PublicKey>>
             self.supervisor.report(CONFLICTING_NOTARIZE, proof).await;
             warn!(
                 view = self.view,
-                signer = hex(public_key),
+                signer = ?public_key,
                 activity = CONFLICTING_NOTARIZE,
                 "recorded fault"
             );
@@ -235,7 +235,7 @@ impl<C: Scheme, D: Array, S: Supervisor<Index = View, PublicKey = C::PublicKey>>
         self.supervisor.report(NULLIFY_AND_FINALIZE, proof).await;
         warn!(
             view = self.view,
-            signer = hex(public_key),
+            signer = ?public_key,
             activity = NULLIFY_AND_FINALIZE,
             "recorded fault"
         );
@@ -256,7 +256,7 @@ impl<C: Scheme, D: Array, S: Supervisor<Index = View, PublicKey = C::PublicKey>>
             // matter which one we choose.
             debug!(
                 view = self.view,
-                proposal = hex(proposal),
+                proposal = ?proposal,
                 verified = self.verified_proposal,
                 "broadcasting notarization"
             );
@@ -319,7 +319,7 @@ impl<C: Scheme, D: Array, S: Supervisor<Index = View, PublicKey = C::PublicKey>>
             self.supervisor.report(NULLIFY_AND_FINALIZE, proof).await;
             warn!(
                 view = self.view,
-                signer = hex(public_key),
+                signer = ?public_key,
                 activity = NULLIFY_AND_FINALIZE,
                 "recorded fault"
             );
@@ -335,8 +335,8 @@ impl<C: Scheme, D: Array, S: Supervisor<Index = View, PublicKey = C::PublicKey>>
             if previous_finalize == &proposal_digest {
                 trace!(
                     view = self.view,
-                    signer = hex(public_key),
-                    previous_finalize = hex(previous_finalize),
+                    signer = ?public_key,
+                    ?previous_finalize,
                     "already finalize"
                 );
                 return false;
@@ -373,7 +373,7 @@ impl<C: Scheme, D: Array, S: Supervisor<Index = View, PublicKey = C::PublicKey>>
             self.supervisor.report(CONFLICTING_FINALIZE, proof).await;
             warn!(
                 view = self.view,
-                signer = hex(public_key),
+                signer = ?public_key,
                 activity = CONFLICTING_FINALIZE,
                 "recorded fault"
             );
@@ -409,7 +409,7 @@ impl<C: Scheme, D: Array, S: Supervisor<Index = View, PublicKey = C::PublicKey>>
             // matter which one we choose.
             debug!(
                 view = self.view,
-                proposal = hex(proposal),
+                proposal = ?proposal,
                 verified = self.verified_proposal,
                 "broadcasting finalization"
             );
@@ -911,7 +911,7 @@ impl<
         debug!(
             view = proposal.message.view,
             parent = proposal.message.parent,
-            digest = hex(&proposal_digest),
+            digest = ?proposal_digest,
             "generated proposal"
         );
         round.proposal = Some((proposal_digest, proposal));
@@ -1003,8 +1003,8 @@ impl<
         // Request verification
         debug!(
             view = proposal.message.view,
-            digest = hex(proposal_digest),
-            payload = hex(&proposal.digest),
+            digest = ?proposal_digest,
+            payload = ?proposal.digest,
             "requested proposal verification",
         );
         let context = Context {
@@ -1102,11 +1102,7 @@ impl<
         }
 
         // Reduce leader deadline to now
-        debug!(
-            view,
-            leader = hex(&leader),
-            "skipping leader timeout due to inactivity"
-        );
+        debug!(view, ?leader, "skipping leader timeout due to inactivity");
         self.views.get_mut(&view).unwrap().leader_deadline = Some(self.runtime.current());
     }
 
@@ -1331,8 +1327,8 @@ impl<
             let proposal_digest = hash(&message);
             debug!(
                 view = proposal.view,
-                digest = hex(&proposal_digest),
-                payload = hex(&notarization.digest),
+                digest = ?proposal_digest,
+                payload = ?notarization.digest,
                 "setting unverified proposal in notarization"
             );
             round.proposal = Some((
@@ -1580,8 +1576,8 @@ impl<
             let proposal_digest = hash(&message);
             debug!(
                 view = proposal.view,
-                digest = hex(&proposal_digest),
-                payload = hex(&finalization.digest),
+                digest = ?proposal_digest,
+                payload = ?finalization.digest,
                 "setting unverified proposal in finalization"
             );
             round.proposal = Some((
