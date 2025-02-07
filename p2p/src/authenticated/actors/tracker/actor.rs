@@ -7,7 +7,7 @@ use crate::authenticated::{ip, metrics, wire};
 use bitvec::prelude::*;
 use commonware_cryptography::{Array, Scheme};
 use commonware_runtime::{Clock, Spawner};
-use commonware_utils::{hex, union, SystemTimeExt};
+use commonware_utils::{union, SystemTimeExt};
 use futures::{channel::mpsc, StreamExt};
 use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore,
@@ -373,7 +373,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
         let record = self.peers.get_mut(peer).unwrap();
         let wire_time = address.peer.timestamp;
         if !record.set_network(address) {
-            trace!(peer = hex(peer), wire_time, "stored peer newer");
+            trace!(?peer, wire_time, "stored peer newer");
             return false;
         }
         self.updated_peers
@@ -443,7 +443,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
                     peer,
                 },
             ) {
-                debug!(peer = hex(&public_key), "updated peer record");
+                debug!(peer = ?public_key, "updated peer record");
                 updated = true;
             }
         }
@@ -628,7 +628,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
                         // we don't need to worry about the case that this fails.
                         let _ = reservation.send(self.reserve(peer));
                     } else {
-                        debug!(peer = hex(&peer), "peer not authorized to connect");
+                        debug!(?peer, "peer not authorized to connect");
                         let _ = reservation.send(None);
                     }
                 }

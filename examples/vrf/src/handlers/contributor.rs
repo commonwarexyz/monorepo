@@ -12,7 +12,7 @@ use commonware_cryptography::{
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::Clock;
-use commonware_utils::{hex, quorum};
+use commonware_utils::quorum;
 use futures::{channel::mpsc, SinkExt};
 use prost::Message;
 use rand::Rng;
@@ -213,11 +213,7 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                     let _ = dealer.ack(player.clone());
                     let signature = self.crypto.sign(None, b"fake");
                     acks.insert(idx as u32, signature);
-                    warn!(
-                        round,
-                        player = hex(player),
-                        "not sending share because forger"
-                    );
+                    warn!(round, ?player, "not sending share because forger");
                     continue;
                 }
                 if self.corrupt {
@@ -227,16 +223,12 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                         private: group::Scalar::rand(&mut self.runtime),
                     }
                     .serialize();
-                    warn!(round, player = hex(player), "modified share");
+                    warn!(round, ?player, "modified share");
                 }
                 if self.lazy && sent == self.t - 1 {
                     // This will still lead to the commitment being used (>= t acks) because
                     // the dealer has already acked.
-                    warn!(
-                        round,
-                        player = hex(player),
-                        "not sending share because lazy"
-                    );
+                    warn!(round, ?player, "not sending share because lazy");
                     continue;
                 }
                 let success = sender
@@ -256,9 +248,9 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                     .await
                     .expect("could not send share");
                 if success.is_empty() {
-                    warn!(round, player = hex(player), "failed to send share");
+                    warn!(round, ?player, "failed to send share");
                 } else {
-                    debug!(round, player = hex(player), "sent share");
+                    debug!(round, ?player, "sent share");
                     sent += 1;
                 }
             }
@@ -314,17 +306,17 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                                         // Verify signature on incoming ack
                                         let payload = payload(round, &me, commitment);
                                         let Ok(signature) = C::Signature::try_from(&msg.signature) else {
-                                            warn!(round, sender = hex(&s), "received invalid ack signature");
+                                            warn!(round, sender = ?s, "received invalid ack signature");
                                             continue;
                                         };
                                         if !C::verify(Some(ACK_NAMESPACE), &payload, &s, &signature) {
-                                            warn!(round, sender = hex(&s), "received invalid ack signature");
+                                            warn!(round, sender = ?s, "received invalid ack signature");
                                             continue;
                                         }
 
                                         // Store ack
                                         if let Err(e) = dealer.ack(s.clone()) {
-                                            warn!(round, error = ?e, sender = hex(&s), "failed to record ack");
+                                            warn!(round, error = ?e, sender = ?s, "failed to record ack");
                                             continue;
                                         }
                                         acks.insert(msg.public_key, signature);

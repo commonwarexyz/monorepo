@@ -8,6 +8,7 @@
 use bytes::Buf;
 use commonware_utils::SizedSerialize;
 use rand::{CryptoRng, Rng, RngCore, SeedableRng};
+use std::fmt::Display;
 use std::{fmt::Debug, hash::Hash, ops::Deref};
 use thiserror::Error;
 
@@ -61,6 +62,7 @@ pub trait Array:
     + PartialOrd
     + Debug
     + Hash
+    + Display
     + AsRef<[u8]>
     + Deref<Target = [u8]>
     + for<'a> TryFrom<&'a [u8], Error = Error>

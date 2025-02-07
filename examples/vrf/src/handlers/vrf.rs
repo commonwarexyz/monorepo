@@ -13,7 +13,6 @@ use commonware_cryptography::{
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::Clock;
-use commonware_utils::hex;
 use futures::{channel::mpsc, StreamExt};
 use prost::Message;
 use std::collections::{HashMap, HashSet};
@@ -179,7 +178,7 @@ impl<E: Clock, P: Array> Vrf<E, P> {
             {
                 Some(signature) => {
                     let signature = signature.serialize();
-                    info!(round, signature = hex(&signature), "generated signature");
+                    info!(round, ?signature, "generated signature");
                 }
                 None => {
                     warn!(round, "failed to generate signature");

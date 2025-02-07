@@ -4,7 +4,7 @@ use bytes::{Buf, BufMut, Bytes};
 use commonware_cryptography::{Array, Hasher};
 use commonware_macros::select;
 use commonware_runtime::Clock;
-use commonware_utils::{hex, SizedSerialize};
+use commonware_utils::SizedSerialize;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
@@ -207,7 +207,7 @@ impl<E: Clock + RngCore, H: Hasher, P: Array> Application<E, H, P> {
     }
 
     fn panic(&self, msg: &str) -> ! {
-        panic!("[{}] {}", hex(&self.participant), msg);
+        panic!("[{:?}] {}", self.participant, msg);
     }
 
     fn genesis(&mut self) -> H::Digest {
@@ -273,9 +273,8 @@ impl<E: Clock + RngCore, H: Hasher, P: Array> Application<E, H, P> {
         };
         if parent != context.parent.1 {
             self.panic(&format!(
-                "invalid parent (in payload): {} != {}",
-                hex(&parent),
-                hex(&context.parent.1)
+                "invalid parent (in payload): {:?} != {:?}",
+                parent, context.parent.1
             ));
         }
         // We don't care about the random number

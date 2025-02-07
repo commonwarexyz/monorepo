@@ -1,10 +1,10 @@
 //! SHA-256 implementation of the `Hasher` trait.
 
 use crate::{Array, Error, Hasher};
-use commonware_utils::SizedSerialize;
+use commonware_utils::{hex, SizedSerialize};
 use rand::{CryptoRng, Rng};
 use sha2::{Digest as _, Sha256 as ISha256};
-use std::ops::Deref;
+use std::{fmt::Display, ops::Deref};
 
 const DIGEST_LENGTH: usize = 32;
 
@@ -126,6 +126,12 @@ impl Deref for Digest {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
         &self.0
+    }
+}
+
+impl Display for Digest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", hex(&self.0))
     }
 }
 

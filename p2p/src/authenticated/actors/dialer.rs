@@ -7,7 +7,6 @@ use crate::authenticated::{
 use commonware_cryptography::Scheme;
 use commonware_runtime::{Clock, Listener, Network, Sink, Spawner, Stream};
 use commonware_stream::public_key::{Config as StreamConfig, Connection};
-use commonware_utils::hex;
 use governor::{
     clock::Clock as GClock,
     middleware::NoOpMiddleware,
@@ -106,15 +105,11 @@ impl<
                     let (sink, stream) = match runtime.dial(address).await {
                         Ok(stream) => stream,
                         Err(e) => {
-                            debug!(peer=hex(&peer), error = ?e, "failed to dial peer");
+                            debug!(?peer, error = ?e, "failed to dial peer");
                             return;
                         }
                     };
-                    debug!(
-                        peer = hex(&peer),
-                        address = address.to_string(),
-                        "dialed peer"
-                    );
+                    debug!(?peer, address = address.to_string(), "dialed peer");
 
                     // Upgrade connection
                     let instance = match Connection::upgrade_dialer(
@@ -128,11 +123,11 @@ impl<
                     {
                         Ok(instance) => instance,
                         Err(e) => {
-                            debug!(peer=hex(&peer), error = ?e, "failed to upgrade connection");
+                            debug!(?peer, error = ?e, "failed to upgrade connection");
                             return;
                         }
                     };
-                    debug!(peer = hex(&peer), "upgraded connection");
+                    debug!(?peer, "upgraded connection");
 
                     // Start peer to handle messages
                     supervisor.spawn(peer, instance, reservation).await;

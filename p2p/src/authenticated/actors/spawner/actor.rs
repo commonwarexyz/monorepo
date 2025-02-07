@@ -8,7 +8,6 @@ use crate::authenticated::{
 };
 use commonware_cryptography::Array;
 use commonware_runtime::{Clock, Sink, Spawner, Stream};
-use commonware_utils::hex;
 use futures::{channel::mpsc, StreamExt};
 use governor::{clock::ReasonablyRealtime, Quota};
 use prometheus_client::metrics::{counter::Counter, family::Family};
@@ -90,7 +89,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng, Si: Sink, St: St
                         let runtime = self.runtime.clone();
                         async move {
                             // Create peer
-                            info!(peer = hex(&peer), "peer started");
+                            info!(?peer, "peer started");
                             let (actor, messenger) = peer::Actor::new(
                                 runtime,
                                 peer::Config {
@@ -112,7 +111,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng, Si: Sink, St: St
                             let e = actor.run(peer.clone(), connection, tracker, channels).await;
 
                             // Let the router know the peer has exited
-                            info!(error = ?e, peer=hex(&peer), "peer shutdown");
+                            info!(error = ?e, ?peer, "peer shutdown");
                             router.release(peer).await;
                         }
                     });
