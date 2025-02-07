@@ -7,7 +7,6 @@ use crate::authenticated::{
 use commonware_cryptography::Scheme;
 use commonware_runtime::{Clock, Listener, Network, Sink, Spawner, Stream};
 use commonware_stream::public_key::{Config as StreamConfig, Connection};
-use commonware_utils::hex;
 use governor::{
     clock::Clock as GClock,
     middleware::NoOpMiddleware,

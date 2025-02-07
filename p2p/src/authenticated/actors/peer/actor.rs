@@ -9,7 +9,6 @@ use commonware_stream::{
     public_key::{Connection, Sender},
     Receiver as _, Sender as _,
 };
-use commonware_utils::hex;
 use futures::{channel::mpsc, SinkExt, StreamExt};
 use governor::{clock::ReasonablyRealtime, Quota, RateLimiter};
 use prometheus_client::metrics::{counter::Counter, family::Family};

@@ -4,7 +4,6 @@ use crate::authenticated::actors::{spawner, tracker};
 use commonware_cryptography::Scheme;
 use commonware_runtime::{Clock, Listener, Network, Sink, Spawner, Stream};
 use commonware_stream::public_key::{Config as StreamConfig, Connection, IncomingConnection};
-use commonware_utils::hex;
 use governor::{
     clock::ReasonablyRealtime,
     middleware::NoOpMiddleware,

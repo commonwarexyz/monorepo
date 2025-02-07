@@ -5,7 +5,6 @@ use super::{
 };
 use commonware_consensus::simplex::Prover;
 use commonware_cryptography::{Hasher, Scheme};
-use commonware_utils::hex;
 use futures::{channel::mpsc, StreamExt};
 use rand::Rng;
 use tracing::info;

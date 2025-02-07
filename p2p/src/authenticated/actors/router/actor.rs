@@ -8,7 +8,6 @@ use crate::{
 };
 use bytes::Bytes;
 use commonware_cryptography::Array;
-use commonware_utils::hex;
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::collections::BTreeMap;

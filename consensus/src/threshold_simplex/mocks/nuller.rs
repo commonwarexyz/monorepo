@@ -15,7 +15,6 @@ use commonware_cryptography::{
     Hasher,
 };
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_utils::hex;
 use prost::Message;
 use std::marker::PhantomData;
 use tracing::debug;

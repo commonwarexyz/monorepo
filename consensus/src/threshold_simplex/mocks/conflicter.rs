@@ -16,7 +16,6 @@ use commonware_cryptography::{
 };
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Spawner};
-use commonware_utils::hex;
 use prost::Message;
 use rand::{CryptoRng, Rng};
 use std::marker::PhantomData;
