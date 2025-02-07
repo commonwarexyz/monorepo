@@ -17,6 +17,8 @@
 //! An external process can then use this proof (with some trusted root) to verify that the leaf (at a fixed position)
 //! is part of the tree.
 //!
+//! TODO: cap node
+//!
 //! # Example
 //!
 //! ```rust
@@ -44,6 +46,23 @@
 use bytes::Buf;
 use commonware_cryptography::{Array, Hasher};
 use commonware_utils::SizedSerialize;
+use thiserror::Error;
+
+#[derive(Error, Debug, PartialEq)]
+pub enum Error {
+    #[error("invalid position: {0}")]
+    InvalidPosition(u32),
+    #[error("invalid proof: {0} != {1}")]
+    InvalidProof(String, String),
+    #[error("no leaves")]
+    NoLeaves,
+    #[error("unaligned proof")]
+    UnalignedProof,
+    #[error("too many siblings: {0}")]
+    TooManySiblings(usize),
+    #[error("invalid digest: {0}")]
+    InvalidDigest(commonware_cryptography::Error),
+}
 
 /// Constructor for a Binary Merkle Tree (BMT).
 pub struct Builder<H: Hasher> {
@@ -63,15 +82,19 @@ impl<H: Hasher> Builder<H> {
     /// Adds a leaf to the Binary Merkle Tree.
     ///
     /// When added, the leaf is hashed with its position.
-    pub fn add(&mut self, leaf: &H::Digest) {
+    pub fn add(&mut self, leaf: &H::Digest) -> u32 {
         let position: u32 = self.leaves.len().try_into().expect("too many leaves");
         self.hasher.update(&position.to_be_bytes());
         self.hasher.update(leaf);
         self.leaves.push(self.hasher.finalize());
+        position
     }
 
     /// Builds the Binary Merkle Tree.
-    pub fn build(self) -> Option<Tree<H>> {
+    ///
+    /// It is valid to build a tree with no leaves, in which case
+    /// just an "empty" node is included (no leaves will be provable).
+    pub fn build(self) -> Tree<H> {
         Tree::new(self.hasher, self.leaves)
     }
 }
@@ -79,18 +102,25 @@ impl<H: Hasher> Builder<H> {
 /// Constructed Binary Merkle Tree (BMT).
 #[derive(Clone, Debug)]
 pub struct Tree<H: Hasher> {
+    /// Records whether the tree is empty.
+    empty: bool,
+
     /// The digests at each level of the tree (from leaves to root).
     levels: Vec<Vec<H::Digest>>,
 }
 
 impl<H: Hasher> Tree<H> {
     /// Builds a Merkle Tree from a slice of position-hashed leaf digests.
-    ///
-    /// If `leaves` is empty, returns `None`.
-    fn new(mut hasher: H, leaves: Vec<H::Digest>) -> Option<Self> {
-        // Ensure there are non-zero leaves
+    fn new(mut hasher: H, mut leaves: Vec<H::Digest>) -> Self {
+        // If no leaves, add an empty node.
+        //
+        // Because this node only includes a position, there is no way a valid proof
+        // can be generated that references it.
+        let mut empty = false;
         if leaves.is_empty() {
-            return None;
+            hasher.update(&0u32.to_be_bytes());
+            leaves.push(hasher.finalize());
+            empty = true;
         }
 
         // Create the first level
@@ -121,7 +151,7 @@ impl<H: Hasher> Tree<H> {
             levels.push(next_level);
             current_level = levels.last().unwrap();
         }
-        Some(Self { levels })
+        Self { empty, levels }
     }
 
     /// Returns the root of the tree.
@@ -133,10 +163,10 @@ impl<H: Hasher> Tree<H> {
     ///
     /// The proof contains the sibling digest at each level needed to reconstruct
     /// the root.
-    pub fn proof(&self, position: u32) -> Option<Proof<H>> {
+    pub fn proof(&self, position: u32) -> Result<Proof<H>, Error> {
         // Ensure the position is within bounds
-        if position >= self.levels.first()?.len() as u32 {
-            return None;
+        if self.empty || position >= self.levels.first().unwrap().len() as u32 {
+            return Err(Error::InvalidPosition(position));
         }
 
         // For each level (except the root level) record the sibling
@@ -159,7 +189,7 @@ impl<H: Hasher> Tree<H> {
             siblings.push(sibling);
             index /= 2;
         }
-        Some(Proof { siblings })
+        Ok(Proof { siblings })
     }
 }
 
@@ -192,7 +222,7 @@ impl<H: Hasher> Proof<H> {
         leaf: &H::Digest,
         mut position: u32,
         root: &H::Digest,
-    ) -> bool {
+    ) -> Result<(), Error> {
         // Compute the position-hashed leaf
         hasher.update(&position.to_be_bytes());
         hasher.update(leaf);
@@ -213,7 +243,12 @@ impl<H: Hasher> Proof<H> {
             // Move up the tree
             position /= 2;
         }
-        computed == *root
+        let result = computed == *root;
+        if result {
+            Ok(())
+        } else {
+            Err(Error::InvalidProof(computed.to_string(), root.to_string()))
+        }
     }
 
     /// Serializes the proof as the concatenation of each hash.
@@ -235,30 +270,30 @@ impl<H: Hasher> Proof<H> {
     }
 
     /// Deserializes a proof from its canonical serialized representation.
-    pub fn deserialize(mut buf: &[u8]) -> Option<Self> {
+    pub fn deserialize(mut buf: &[u8]) -> Result<Self, Error> {
         // If no leaves, nothing to prove
         if buf.remaining() == 0 {
-            return None;
+            return Err(Error::NoLeaves);
         }
 
         // If the remaining buffer is not a multiple of the hash size, it's invalid.
         if buf.remaining() % H::Digest::SERIALIZED_LEN != 0 {
-            return None;
+            return Err(Error::UnalignedProof);
         }
 
         // If the number of siblings is too large, it's invalid.
         let num_siblings = buf.len() / H::Digest::SERIALIZED_LEN;
         if num_siblings > u8::MAX as usize {
-            return None;
+            return Err(Error::TooManySiblings(num_siblings));
         }
 
         // Deserialize the siblings
         let mut siblings = Vec::with_capacity(num_siblings);
         for _ in 0..num_siblings {
-            let hash = H::Digest::read_from(&mut buf).ok()?;
+            let hash = H::Digest::read_from(&mut buf).map_err(|e| Error::InvalidDigest(e))?;
             siblings.push(hash);
         }
-        Some(Self { siblings })
+        Ok(Self { siblings })
     }
 }
 
@@ -555,7 +590,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build().unwrap();
+        let tree = builder.build();
         let root = tree.root();
 
         // Build proof
