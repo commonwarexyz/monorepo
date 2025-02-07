@@ -74,17 +74,16 @@ impl<H: Hasher> Tree<H> {
         levels.push(leaves);
 
         // Build the tree
-        let mut pos = 0u32;
-        while levels.last().unwrap().len() > 1 {
-            let current_level = levels.last().unwrap();
-            let next_level_len = (current_level.len() + 1) / 2;
-            let mut next_level = Vec::with_capacity(next_level_len);
+        let mut current_level = levels.last().unwrap();
+        let mut position = 0u32;
+        while current_level.len() > 1 {
+            let mut next_level = Vec::with_capacity((current_level.len() + 1) / 2);
             for chunk in current_level.chunks(2) {
                 // Hash the left child
                 let left = &chunk[0];
-                hasher.update(&pos.to_be_bytes());
+                hasher.update(&position.to_be_bytes());
                 hasher.update(left);
-                pos += 1;
+                position += 1;
 
                 // Hash the right child
                 let right = if chunk.len() == 2 {
@@ -93,9 +92,9 @@ impl<H: Hasher> Tree<H> {
                     // If the chunk has an odd number of nodes, use a duplicate of the left child.
                     &chunk[0]
                 };
-                hasher.update(&pos.to_be_bytes());
+                hasher.update(&position.to_be_bytes());
                 hasher.update(right);
-                pos += 1;
+                position += 1;
 
                 // Reset the hasher for the next iteration.
                 next_level.push(hasher.finalize());
@@ -103,15 +102,16 @@ impl<H: Hasher> Tree<H> {
 
             // Add the computed level to the tree
             levels.push(next_level);
+            current_level = levels.last().unwrap();
         }
 
         // Hash the top level with the number of leaves in the tree
         //
         // We don't do this in the loop because we'd have to special case the handling of
         // single-node trees.
-        let last = levels.last().unwrap().first().unwrap();
+        let top = levels.last().unwrap().first().unwrap();
         hasher.update(&leaves_len.to_be_bytes());
-        hasher.update(last);
+        hasher.update(top);
         let root = hasher.finalize();
         Some(Self {
             leaves: leaves_len,
@@ -137,7 +137,7 @@ impl<H: Hasher> Tree<H> {
         }
 
         // For each level (except the root level) record the sibling.
-        let mut siblings = Vec::new();
+        let mut siblings = Vec::with_capacity(self.levels.len() - 1);
         let mut index = position as usize;
         for level in &self.levels {
             if level.len() == 1 {
