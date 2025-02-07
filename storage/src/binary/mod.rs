@@ -21,17 +21,23 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_storage::binary::Tree;
+//! use commonware_storage::binary::{Builder, Tree};
 //! use commonware_cryptography::{hash, Sha256, sha256::Digest};
 //!
-//! // Build tree
+//! // Create transactions and compute their digests
 //! let txs = [b"tx1", b"tx2", b"tx3", b"tx4"];
 //! let digests: Vec<Digest> = txs.iter().map(|tx| hash(*tx)).collect();
-//! let mut hasher = Sha256::default();
-//! let tree = Tree::new(&mut hasher, digests.clone()).unwrap();
+//!
+//! // Build a Merkle Tree from the digests
+//! let mut builder = Builder::<Sha256>::new(digests.len());
+//! for digest in &digests {
+//!    builder.add(digest);
+//! }
+//! let tree = builder.build().unwrap();
 //! let root = tree.root();
 //!
-//! // Generate a proof for leaf at index 1.
+//! // Generate a proof for leaf at index 1
+//! let mut hasher = Sha256::default();
 //! let proof = tree.proof(0).unwrap();
 //! assert!(proof.verify(&mut hasher, &digests[0], 0, &root));
 //! ```
@@ -39,6 +45,31 @@
 use bytes::Buf;
 use commonware_cryptography::{Array, Hasher};
 use commonware_utils::SizedSerialize;
+
+pub struct Builder<H: Hasher> {
+    hasher: H,
+    leaves: Vec<H::Digest>,
+}
+
+impl<H: Hasher> Builder<H> {
+    pub fn new(leaves: usize) -> Self {
+        Self {
+            hasher: H::new(),
+            leaves: Vec::with_capacity(leaves),
+        }
+    }
+
+    pub fn add(&mut self, leaf: &H::Digest) {
+        let position: u32 = self.leaves.len().try_into().expect("too many leaves");
+        self.hasher.update(&position.to_be_bytes());
+        self.hasher.update(leaf);
+        self.leaves.push(self.hasher.finalize());
+    }
+
+    pub fn build(self) -> Option<Tree<H>> {
+        Tree::new(self.hasher, self.leaves)
+    }
+}
 
 /// A stateless Binary Merkle Tree that computes a root over an arbitrary set
 /// of [commonware_cryptography::Digest].
@@ -52,26 +83,15 @@ impl<H: Hasher> Tree<H> {
     /// Builds a Merkle Tree from a slice of leaf digests.
     ///
     /// If `leaves` is empty, returns `None`.
-    pub fn new(hasher: &mut H, leaves: Vec<H::Digest>) -> Option<Self> {
+    fn new(mut hasher: H, leaves: Vec<H::Digest>) -> Option<Self> {
         // Ensure there are non-zero leaves
         if leaves.is_empty() {
             return None;
         }
 
-        // Initialize the tree with the levels
+        // Initialize the tree with the leaves
         let mut levels = Vec::new();
-
-        // Store position-hashed leaves in the first level
-        //
-        // TODO: this is done to avoid proof attacks...
-        let mut position_leaves = Vec::with_capacity(leaves.len());
-        for (position, leaf) in leaves.iter().enumerate() {
-            let position: u32 = position.try_into().ok()?;
-            hasher.update(&position.to_be_bytes());
-            hasher.update(leaf);
-            position_leaves.push(hasher.finalize());
-        }
-        levels.push(position_leaves);
+        levels.push(leaves);
 
         // Build the tree
         let mut current_level = levels.last().unwrap();
@@ -253,21 +273,26 @@ mod tests {
 
     #[test]
     fn test_merkle_tree_empty() {
-        let mut hasher = Sha256::default();
-        let tree = Tree::new(&mut hasher, Vec::new());
+        let tree = Tree::new(Sha256::new(), Vec::new());
         assert!(tree.is_none());
     }
 
     fn test_merkle_tree(n: usize) -> Digest {
         // Build tree
-        let digests: Vec<Digest> = (0..n).map(|i| hash(&i.to_be_bytes())).collect();
-        let tree = Tree::new(&mut Sha256::default(), digests.clone()).unwrap();
+        let mut digests = Vec::with_capacity(n);
+        let mut builder = Builder::new(n);
+        for i in 0..n {
+            let digest = hash(&i.to_be_bytes());
+            builder.add(&digest);
+            digests.push(digest);
+        }
+        let tree = builder.build().unwrap();
         let root = tree.root();
 
         // For each leaf, generate and verify its proof
+        let mut hasher = Sha256::default();
         for (i, leaf) in digests.iter().enumerate() {
             let proof = tree.proof(i as u32).unwrap();
-            let mut hasher = Sha256::default();
             assert!(
                 proof.verify(&mut hasher, leaf, i as u32, &root),
                 "correct fail for size={} leaf={}",
@@ -520,12 +545,17 @@ mod tests {
 
     #[test]
     fn test_tampered_proof_no_siblings() {
-        // Build tree
+        // Create transactions and digests
         let txs = [b"tx1", b"tx2", b"tx3", b"tx4"];
         let digests: Vec<Digest> = txs.iter().map(|tx| hash(*tx)).collect();
-        let leaf = digests[0].clone();
-        let mut hasher = Sha256::default();
-        let tree = Tree::new(&mut hasher, digests).unwrap();
+        let element = &digests[0];
+
+        // Build tree
+        let mut builder = Builder::new(txs.len());
+        for digest in &digests {
+            builder.add(digest);
+        }
+        let tree = builder.build().unwrap();
         let root = tree.root();
 
         // Build proof
@@ -535,36 +565,48 @@ mod tests {
         proof.siblings = Vec::new();
 
         // Fail verification with an empty proof.
-        assert!(!proof.verify(&mut hasher, &leaf, 0, &root));
+        let mut hasher = Sha256::default();
+        assert!(!proof.verify(&mut hasher, element, 0, &root));
     }
 
     #[test]
     fn test_tampered_proof_extra_sibling() {
-        // Build tree
+        // Create transactions and digests
         let txs = [b"tx1", b"tx2", b"tx3", b"tx4"];
         let digests: Vec<Digest> = txs.iter().map(|tx| hash(*tx)).collect();
-        let leaf = digests[0].clone();
-        let mut hasher = Sha256::default();
-        let tree = Tree::new(&mut hasher, digests).unwrap();
+        let element = &digests[0];
+
+        // Build tree
+        let mut builder = Builder::new(txs.len());
+        for digest in &digests {
+            builder.add(digest);
+        }
+        let tree = builder.build().unwrap();
         let root = tree.root();
 
         // Build proof
         let mut proof = tree.proof(0).unwrap();
 
         // Tamper with proof
-        proof.siblings.push(leaf.clone());
+        proof.siblings.push(element.clone());
 
         // Fail verification with an empty proof.
-        assert!(!proof.verify(&mut hasher, &leaf, 0, &root));
+        let mut hasher = Sha256::default();
+        assert!(!proof.verify(&mut hasher, element, 0, &root));
     }
 
     #[test]
     fn test_proof_serialization() {
-        // Build tree
+        // Create transactions and digests
         let txs = [b"tx1", b"tx2", b"tx3"];
         let digests: Vec<Digest> = txs.iter().map(|tx| hash(*tx)).collect();
-        let mut hasher = Sha256::default();
-        let tree = Tree::new(&mut hasher, digests.clone()).unwrap();
+
+        // Build tree
+        let mut builder = Builder::new(txs.len());
+        for digest in &digests {
+            builder.add(digest);
+        }
+        let tree = builder.build().unwrap();
         let root = tree.root();
 
         // Generate a proof for leaf at index 1.
@@ -574,22 +616,29 @@ mod tests {
         assert_eq!(proof, deserialized);
 
         // Verify the deserialized proof.
+        let mut hasher = Sha256::default();
         deserialized.verify(&mut hasher, &digests[1], 1, &root);
     }
 
     #[test]
     fn test_invalid_proof_wrong_element() {
-        // Build tree
+        // Create transactions and digests
         let txs = [b"tx1", b"tx2", b"tx3", b"tx4"];
         let digests: Vec<Digest> = txs.iter().map(|tx| hash(*tx)).collect();
-        let mut hasher = Sha256::default();
-        let tree = Tree::new(&mut hasher, digests.clone()).unwrap();
+
+        // Build tree
+        let mut builder = Builder::new(txs.len());
+        for digest in &digests {
+            builder.add(digest);
+        }
+        let tree = builder.build().unwrap();
         let root = tree.root();
 
         // Generate a valid proof for leaf at index 2.
         let proof = tree.proof(2).unwrap();
 
         // Use a wrong element (e.g. hash of a different transaction).
+        let mut hasher = Sha256::default();
         let wrong_leaf = hash(b"wrong_tx");
         let valid = proof.verify(&mut hasher, &wrong_leaf, 2, &root);
         assert!(!valid, "Verification should fail with a wrong leaf element");
@@ -597,17 +646,23 @@ mod tests {
 
     #[test]
     fn test_invalid_proof_wrong_index() {
-        // Build tree
+        // Create transactions and digests
         let txs = [b"tx1", b"tx2", b"tx3", b"tx4"];
         let digests: Vec<Digest> = txs.iter().map(|tx| hash(*tx)).collect();
-        let mut hasher = Sha256::default();
-        let tree = Tree::new(&mut hasher, digests.clone()).unwrap();
+
+        // Build tree
+        let mut builder = Builder::new(txs.len());
+        for digest in &digests {
+            builder.add(digest);
+        }
+        let tree = builder.build().unwrap();
         let root = tree.root();
 
         // Generate a valid proof for leaf at index 1.
         let proof = tree.proof(1).unwrap();
 
         // Use an incorrect index (e.g. 2 instead of 1).
+        let mut hasher = Sha256::default();
         let valid = proof.verify(&mut hasher, &digests[1], 2, &root);
         assert!(
             !valid,
@@ -617,16 +672,22 @@ mod tests {
 
     #[test]
     fn test_invalid_proof_wrong_root() {
-        // Build tree
+        // Create transactions and digests
         let txs = [b"tx1", b"tx2", b"tx3", b"tx4"];
         let digests: Vec<Digest> = txs.iter().map(|tx| hash(*tx)).collect();
-        let mut hasher = Sha256::default();
-        let tree = Tree::new(&mut hasher, digests.clone()).unwrap();
+
+        // Build tree
+        let mut builder = Builder::new(txs.len());
+        for digest in &digests {
+            builder.add(digest);
+        }
+        let tree = builder.build().unwrap();
 
         // Generate a valid proof for leaf at index 0.
         let proof = tree.proof(0).unwrap();
 
         // Use a wrong root (hash of a different input).
+        let mut hasher = Sha256::default();
         let wrong_root = hash(b"wrong_root");
         let valid = proof.verify(&mut hasher, &digests[0], 0, &wrong_root);
         assert!(
@@ -637,11 +698,16 @@ mod tests {
 
     #[test]
     fn test_invalid_proof_serialization_truncated() {
-        // Build tree
+        // Create transactions and digests
         let txs = [b"tx1", b"tx2", b"tx3"];
         let digests: Vec<Digest> = txs.iter().map(|tx| hash(*tx)).collect();
-        let mut hasher = Sha256::default();
-        let tree = Tree::new(&mut hasher, digests.clone()).unwrap();
+
+        // Build tree
+        let mut builder = Builder::<Sha256>::new(txs.len());
+        for digest in &digests {
+            builder.add(digest);
+        }
+        let tree = builder.build().unwrap();
 
         // Generate a valid proof for leaf at index 1.
         let proof = tree.proof(1).unwrap();
@@ -658,11 +724,16 @@ mod tests {
 
     #[test]
     fn test_invalid_proof_serialization_extra() {
-        // Build tree
+        // Create transactions and digests
         let txs = [b"tx1", b"tx2", b"tx3"];
         let digests: Vec<Digest> = txs.iter().map(|tx| hash(*tx)).collect();
-        let mut hasher = Sha256::default();
-        let tree = Tree::new(&mut hasher, digests.clone()).unwrap();
+
+        // Build tree
+        let mut builder = Builder::<Sha256>::new(txs.len());
+        for digest in &digests {
+            builder.add(digest);
+        }
+        let tree = builder.build().unwrap();
 
         // Generate a valid proof for leaf at index 1.
         let proof = tree.proof(1).unwrap();
@@ -679,17 +750,23 @@ mod tests {
 
     #[test]
     fn test_invalid_proof_modified_hash() {
-        // Build tree
+        // Create transactions and digests
         let txs = [b"tx1", b"tx2", b"tx3", b"tx4"];
         let digests: Vec<Digest> = txs.iter().map(|tx| hash(*tx)).collect();
-        let mut hasher = Sha256::default();
-        let tree = Tree::new(&mut hasher, digests.clone()).unwrap();
+
+        // Build tree
+        let mut builder = Builder::new(txs.len());
+        for digest in &digests {
+            builder.add(digest);
+        }
+        let tree = builder.build().unwrap();
         let root = tree.root();
 
         // Generate a valid proof for leaf at index 2.
         let mut proof = tree.proof(2).unwrap();
 
         // Modify the first hash in the proof.
+        let mut hasher = Sha256::default();
         proof.siblings[0] = hash(b"modified");
         let valid = proof.verify(&mut hasher, &digests[2], 2, &root);
         assert!(
@@ -700,17 +777,23 @@ mod tests {
 
     #[test]
     fn test_odd_tree_duplicate_index_proof() {
-        // Build a tree with an odd number of leaves.
+        // Create transactions and digests
         let txs = [b"tx1", b"tx2", b"tx3"];
         let digests: Vec<Digest> = txs.iter().map(|tx| hash(*tx)).collect();
-        let mut hasher = Sha256::default();
-        let tree = Tree::new(&mut hasher, digests.clone()).unwrap();
+
+        // Build tree
+        let mut builder = Builder::new(txs.len());
+        for digest in &digests {
+            builder.add(digest);
+        }
+        let tree = builder.build().unwrap();
         let root = tree.root();
 
         // The tree was built with 3 leaves; index 2 is the last valid index.
         let proof = tree.proof(2).unwrap();
 
         // Verification should succeed for the proper index 2.
+        let mut hasher = Sha256::default();
         assert!(proof.verify(&mut hasher, &digests[2], 2, &root));
 
         // Should not be able to generate a proof for an out-of-range index (e.g. 3).
