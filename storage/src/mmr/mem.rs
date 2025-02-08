@@ -53,12 +53,14 @@ impl<H: CHasher> Mmr<H> {
         }
     }
 
-    // Return an `Mmr` initialized with the given nodes and oldest remembered position.
+    /// Return an `Mmr` initialized with the given nodes and oldest remembered position.
     pub fn init(nodes: Vec<H::Digest>, oldest_remembered_pos: u64) -> Self {
-        Self {
+        let s = Self {
             nodes,
             oldest_remembered_pos,
-        }
+        };
+        assert!(PeakIterator::check_validity(s.size()));
+        s
     }
 
     /// Return the total number of nodes in the MMR, independent of any forgetting.
@@ -119,6 +121,9 @@ impl<H: CHasher> Mmr<H> {
         self.range_proof(element_pos, element_pos).await
     }
 
+    /// Return an inclusion proof for the specified range of elements, inclusive of both endpoints.
+    ///
+    /// Returns ElementPruned error if some element needed to generate the proof has been pruned.
     pub async fn range_proof(
         &self,
         start_element_pos: u64,
@@ -163,9 +168,7 @@ impl<H: CHasher> Mmr<H> {
 
 #[cfg(test)]
 mod tests {
-    use crate::mmr::{
-        hasher::Hasher, iterator::nodes_needing_parents, mem::Mmr, verification::Storage, Error::*,
-    };
+    use super::{nodes_needing_parents, Error::*, Hasher, Mmr, PeakIterator, Storage};
     use commonware_cryptography::{hash, Hasher as CHasher, Sha256};
     use commonware_runtime::{deterministic::Executor, Runner};
     use commonware_utils::hex;
@@ -317,6 +320,33 @@ mod tests {
             mmr.forget_max();
             mmr.add(&mut hasher, &element);
         }
+    }
+
+    /// Test that the MMR validity check works as expected.
+    #[test]
+    fn test_mmr_validity() {
+        let (executor, _, _) = Executor::default();
+        executor.start(async move {
+            let mut mmr: Mmr<Sha256> = Mmr::<Sha256>::new();
+            let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
+            let mut hasher = Sha256::default();
+            for _ in 0..1001 {
+                assert!(
+                    PeakIterator::check_validity(mmr.size()),
+                    "mmr of size {} should be valid",
+                    mmr.size()
+                );
+                let old_size = mmr.size();
+                mmr.add(&mut hasher, &element);
+                for size in old_size + 1..mmr.size() {
+                    assert!(
+                        !PeakIterator::check_validity(size),
+                        "mmr of size {} should be invalid",
+                        size
+                    );
+                }
+            }
+        });
     }
 
     /// Roots for all MMRs with 0..200 elements.
