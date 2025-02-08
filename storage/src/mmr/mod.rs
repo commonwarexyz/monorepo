@@ -72,6 +72,6 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum Error {
-    #[error("a required element has been pruned: {0}")]
-    ElementPruned(u64),
+    #[error("an element required for this operation has been pruned")]
+    ElementPruned,
 }

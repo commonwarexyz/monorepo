@@ -1,6 +1,7 @@
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_storage::mmr::mem::Mmr;
 use criterion::{criterion_group, Criterion};
+use futures::executor::block_on;
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 
 const SAMPLE_SIZE: usize = 100;
@@ -47,17 +48,19 @@ fn bench_prove_many_elements(c: &mut Criterion) {
                             samples
                         },
                         |samples| {
-                            let mut hasher = Sha256::new();
-                            for ((start_index, end_index), (start_pos, end_pos)) in samples {
-                                let proof = mmr.range_proof(start_pos, end_pos).unwrap();
-                                assert!(proof.verify_range_inclusion(
-                                    &mut hasher,
-                                    &elements[start_index..=end_index],
-                                    start_pos,
-                                    end_pos,
-                                    &root_hash,
-                                ));
-                            }
+                            block_on(async {
+                                let mut hasher = Sha256::new();
+                                for ((start_index, end_index), (start_pos, end_pos)) in samples {
+                                    let proof = mmr.range_proof(start_pos, end_pos).await.unwrap();
+                                    assert!(proof.verify_range_inclusion(
+                                        &mut hasher,
+                                        &elements[start_index..=end_index],
+                                        start_pos,
+                                        end_pos,
+                                        &root_hash,
+                                    ));
+                                }
+                            });
                         },
                         criterion::BatchSize::SmallInput,
                     )

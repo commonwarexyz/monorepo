@@ -1,6 +1,7 @@
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_storage::mmr::mem::Mmr;
 use criterion::{criterion_group, Criterion};
+use futures::executor::block_on;
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 
 const SAMPLE_SIZE: usize = 100;
@@ -31,16 +32,18 @@ fn bench_prove_single_element(c: &mut Criterion) {
                         samples
                     },
                     |samples| {
-                        let mut hasher = Sha256::new();
-                        for (pos, element) in samples {
-                            let proof = mmr.proof(pos).unwrap();
-                            assert!(proof.verify_element_inclusion(
-                                &mut hasher,
-                                &element,
-                                pos,
-                                &root_hash,
-                            ));
-                        }
+                        block_on(async {
+                            let mut hasher = Sha256::new();
+                            for (pos, element) in samples {
+                                let proof = mmr.proof(pos).await.unwrap();
+                                assert!(proof.verify_element_inclusion(
+                                    &mut hasher,
+                                    &element,
+                                    pos,
+                                    &root_hash,
+                                ));
+                            }
+                        });
                     },
                     criterion::BatchSize::SmallInput,
                 )
