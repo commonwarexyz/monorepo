@@ -65,6 +65,7 @@
 
 mod hasher;
 mod iterator;
+pub mod journaled;
 pub mod mem;
 pub mod verification;
 
@@ -74,4 +75,6 @@ use thiserror::Error;
 pub enum Error {
     #[error("an element required for this operation has been pruned")]
     ElementPruned,
+    #[error("journal error: {0}")]
+    JournalError(#[from] crate::journal::Error),
 }
