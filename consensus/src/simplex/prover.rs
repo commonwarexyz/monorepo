@@ -164,14 +164,11 @@ impl<C: Scheme, D: Array> Prover<C, D> {
             seen.insert(public_key.clone());
 
             // Verify signature
+            let signature = C::Signature::read_from(&mut proof).ok()?;
             if check_sigs {
-                let signature = C::Signature::read_from(&mut proof).ok()?;
                 if !C::verify(Some(namespace), &message, &public_key, &signature) {
                     return None;
                 }
-            } else {
-                // Skip signature
-                let _ = C::Signature::read_from(&mut proof);
             }
         }
         Some((view, parent, payload, seen.into_iter().collect()))
