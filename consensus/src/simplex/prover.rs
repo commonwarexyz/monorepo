@@ -165,11 +165,10 @@ impl<C: Scheme, D: Array> Prover<C, D> {
 
             // Read signature
             let signature = C::Signature::read_from(&mut proof).ok()?;
+
             // Verify signature
-            if check_sigs {
-                if !C::verify(Some(namespace), &message, &public_key, &signature) {
-                    return None;
-                }
+            if check_sigs && !C::verify(Some(namespace), &message, &public_key, &signature) {
+                return None;
             }
         }
         Some((view, parent, payload, seen.into_iter().collect()))
@@ -442,6 +441,7 @@ impl<C: Scheme, D: Array> Prover<C, D> {
 mod tests {
     use super::*;
     use commonware_cryptography::{sha256::Digest as Sha256Digest, Ed25519, Hasher, Sha256};
+    use rand::SeedableRng;
 
     fn test_digest(value: u8) -> Sha256Digest {
         let mut hasher = Sha256::new();
@@ -519,14 +519,8 @@ mod tests {
         const NAMESPACE: &[u8] = b"test";
 
         // Reproduceable test
-        use rand::SeedableRng;
         let mut rng = rand::rngs::StdRng::seed_from_u64(3);
-
-        let mut signers: Vec<Ed25519> = vec![
-            Ed25519::new(&mut rng),
-            Ed25519::new(&mut rng),
-            Ed25519::new(&mut rng),
-        ];
+        let mut signers: Vec<_> = (0..3).map(|_| Ed25519::new(&mut rng)).collect();
         let pub_keys = signers
             .iter()
             .map(|signer| signer.public_key())
