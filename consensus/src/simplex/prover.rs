@@ -163,8 +163,9 @@ impl<C: Scheme, D: Array> Prover<C, D> {
             }
             seen.insert(public_key.clone());
 
-            // Verify signature
+            // Read signature
             let signature = C::Signature::read_from(&mut proof).ok()?;
+            // Verify signature
             if check_sigs {
                 if !C::verify(Some(namespace), &message, &public_key, &signature) {
                     return None;
