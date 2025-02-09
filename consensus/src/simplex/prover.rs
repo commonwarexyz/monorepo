@@ -169,6 +169,9 @@ impl<C: Scheme, D: Array> Prover<C, D> {
                 if !C::verify(Some(namespace), &message, &public_key, &signature) {
                     return None;
                 }
+            } else {
+                // Skip signature
+                let _ = C::Signature::read_from(&mut proof);
             }
         }
         Some((view, parent, payload, seen.into_iter().collect()))
@@ -501,5 +504,41 @@ mod tests {
             &prover.notarize_namespace,
         );
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_serialize_deserialize_aggregation() {
+        // Create a proposal to sign
+        let (view, parent, payload) = (1, 0, test_digest(0));
+        let proposal = wire::Proposal {
+            view,
+            parent,
+            payload: payload.to_vec(),
+        };
+        let message = proposal_message(view, parent, &payload);
+
+        // Create a proof with 3 signers
+        const NAMESPACE: &[u8] = b"test";
+        let mut signers: Vec<Ed25519> = vec![
+            Ed25519::new(&mut rand::thread_rng()),
+            Ed25519::new(&mut rand::thread_rng()),
+            Ed25519::new(&mut rand::thread_rng()),
+        ];
+        let pub_keys = signers
+            .iter()
+            .map(|signer| signer.public_key())
+            .collect::<Vec<_>>();
+        let sigs = signers
+            .iter_mut()
+            .map(|signer| signer.sign(Some(NAMESPACE), &message))
+            .collect::<Vec<_>>();
+        let keys_and_sigs = pub_keys.iter().zip(sigs).collect();
+
+        // Should be able to deserialize the serialized proof
+        let proof =
+            Prover::<Ed25519, Sha256Digest>::serialize_aggregation(&proposal, keys_and_sigs);
+        let prover = Prover::<Ed25519, Sha256Digest>::new(NAMESPACE);
+        let result = prover.deserialize_aggregation(proof, u32::MAX, false, NAMESPACE);
+        assert!(result.is_some());
     }
 }
