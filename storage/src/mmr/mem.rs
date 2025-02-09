@@ -37,8 +37,11 @@ impl<H: CHasher> Storage<H> for Mmr<H> {
         Ok(self.size())
     }
 
-    async fn get_node(&self, position: u64) -> Result<Option<&H::Digest>, Error> {
-        Ok(self.nodes.get(self.pos_to_index(position)))
+    async fn get_node(&self, position: u64) -> Result<Option<H::Digest>, Error> {
+        match self.nodes.get(self.pos_to_index(position)) {
+            Some(node) => Ok(Some(node.clone())),
+            None => Ok(None),
+        }
     }
 }
 
@@ -233,7 +236,7 @@ mod tests {
             let mut mmr_hasher = Hasher::new(&mut hasher);
             for leaf in leaves.iter().by_ref() {
                 let hash = mmr_hasher.leaf_hash(*leaf, &element);
-                assert_eq!(mmr.get_node(*leaf).await.unwrap().unwrap(), &hash);
+                assert_eq!(mmr.get_node(*leaf).await.unwrap().unwrap(), hash);
             }
 
             // verify height=1 hashes

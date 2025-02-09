@@ -34,7 +34,7 @@ pub trait Storage<H: CHasher> {
     fn get_node(
         &self,
         position: u64,
-    ) -> impl Future<Output = Result<Option<&H::Digest>, Error>> + Send;
+    ) -> impl Future<Output = Result<Option<H::Digest>, Error>> + Send;
 }
 
 impl<H: CHasher> PartialEq for Proof<H> {
@@ -246,7 +246,7 @@ impl<H: CHasher> Proof<H> {
         let hash_results = try_join_all(node_futures).await?;
         for hash_result in hash_results {
             match hash_result {
-                Some(hash) => hashes.push(hash.clone()),
+                Some(hash) => hashes.push(hash),
                 // Implementations should check to make sure the range is provable before calling
                 // this function, so this case should not happen in general.
                 None => return Err(Error::ElementPruned),
@@ -293,7 +293,7 @@ fn peak_hash_from_range<'a, H: CHasher>(
             elements,
             sibling_hashes,
         ) {
-            Ok(h) => left_hash = Some(h.clone()),
+            Ok(h) => left_hash = Some(h),
             Err(_) => return Err(()),
         }
     }
@@ -308,7 +308,7 @@ fn peak_hash_from_range<'a, H: CHasher>(
             elements,
             sibling_hashes,
         ) {
-            Ok(h) => right_hash = Some(h.clone()),
+            Ok(h) => right_hash = Some(h),
             Err(_) => return Err(()),
         }
     }
