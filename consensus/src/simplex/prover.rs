@@ -517,10 +517,15 @@ mod tests {
 
         // Create a proof with 3 signers
         const NAMESPACE: &[u8] = b"test";
+
+        // Reproduceable test
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(3);
+
         let mut signers: Vec<Ed25519> = vec![
-            Ed25519::new(&mut rand::thread_rng()),
-            Ed25519::new(&mut rand::thread_rng()),
-            Ed25519::new(&mut rand::thread_rng()),
+            Ed25519::new(&mut rng),
+            Ed25519::new(&mut rng),
+            Ed25519::new(&mut rng),
         ];
         let pub_keys = signers
             .iter()
