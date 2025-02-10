@@ -568,6 +568,7 @@ mod tests {
         let prover = Prover::<Sha256Digest>::new(public, b"test");
         let view: View = 1;
 
+        // Generate a valid signature.
         let message = &nullify_message(view);
         let signature = partial_sign_message(&shares[0], Some(&prover.nullify_namespace), message);
         let serialized_signature = Bytes::from(signature.serialize());
@@ -586,6 +587,7 @@ mod tests {
         let prover = Prover::<Sha256Digest>::new(public, b"test");
         let view: View = 1;
 
+        // Generate a valid signature.
         let message = &nullify_message(view);
         let signature = partial_sign_message(&shares[0], Some(&prover.nullify_namespace), message);
         let serialized_signature = Bytes::from(signature.serialize());
@@ -610,6 +612,7 @@ mod tests {
         let prover = Prover::<Sha256Digest>::new(public, b"test");
         let view: View = 1;
 
+        // Generate an invalid signature.
         let message = &nullify_message(view + 1);
         let signature = partial_sign_message(&shares[0], Some(&prover.nullify_namespace), message);
         let serialized_signature = Bytes::from(signature.serialize());
@@ -860,12 +863,11 @@ mod tests {
 
     #[test]
     fn test_deserialize_nullification() {
-        // Create valid signature
         let (private, public) = generate_keypair();
         let prover = Prover::<Sha256Digest>::new(public, b"test");
         let view: View = 1;
 
-        // Generate a valid signature
+        // Generate valid view and seed signatures.
         let view_signature = sign_message(
             &private,
             Some(&prover.nullify_namespace),
@@ -894,12 +896,11 @@ mod tests {
 
     #[test]
     fn test_deserialize_nullification_invalid_proof_length() {
-        // Create valid signature
         let (private, public) = generate_keypair();
         let prover = Prover::<Sha256Digest>::new(public, b"test");
         let view: View = 1;
 
-        // Generate a valid signature
+        // Generate valid view and seed signatures.
         let view_signature = sign_message(
             &private,
             Some(&prover.nullify_namespace),
@@ -933,17 +934,17 @@ mod tests {
 
     #[test]
     fn test_deserialize_nullification_invalid_view_signature() {
-        // Create valid signature
         let (private, public) = generate_keypair();
         let prover = Prover::<Sha256Digest>::new(public, b"test");
         let view: View = 1;
 
-        // Generate a valid signature
+        // Generate an invalid view signature.
         let view_signature = sign_message(
             &private,
             Some(&prover.nullify_namespace),
             &nullify_message(view + 1),
         );
+        // Generate a valid seed signature.
         let serialized_view_signature = Bytes::from(view_signature.serialize());
         let seed_signature = sign_message(
             &private,
@@ -965,18 +966,18 @@ mod tests {
 
     #[test]
     fn test_deserialize_nullification_invalid_seed_signature() {
-        // Create valid signature
         let (private, public) = generate_keypair();
         let prover = Prover::<Sha256Digest>::new(public, b"test");
         let view: View = 1;
 
-        // Generate a valid signature
+        // Generate a valid view signature.
         let view_signature = sign_message(
             &private,
             Some(&prover.nullify_namespace),
             &nullify_message(view),
         );
         let serialized_view_signature = Bytes::from(view_signature.serialize());
+        // Generate an invalid seed signature.
         let seed_signature = sign_message(
             &private,
             Some(&prover.seed_namespace),
