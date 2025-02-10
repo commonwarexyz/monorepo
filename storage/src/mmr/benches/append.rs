@@ -16,9 +16,10 @@ fn bench_append(c: &mut Criterion) {
         // Append elements to MMR
         c.bench_function(&format!("{}/n={}", module_path!(), n), |b| {
             b.iter(|| {
+                let mut h = Sha256::new();
                 let mut mmr = Mmr::<Sha256>::new();
                 for digest in &elements {
-                    mmr.add(digest);
+                    mmr.add(&mut h, digest);
                 }
             })
         });

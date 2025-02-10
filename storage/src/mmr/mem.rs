@@ -16,7 +16,6 @@ use commonware_cryptography::Hasher as CHasher;
 /// The maximum number of elements that can be stored is usize::MAX
 /// (u32::MAX on 32-bit architectures).
 pub struct Mmr<H: CHasher> {
-    hasher: H,
     // The nodes of the MMR, laid out according to a post-order traversal of the MMR trees, starting
     // from the from tallest tree to shortest.
     nodes: Vec<H::Digest>,
@@ -49,7 +48,6 @@ impl<H: CHasher> Mmr<H> {
     /// Return a new (empty) `Mmr`.
     pub fn new() -> Self {
         Self {
-            hasher: H::new(),
             nodes: Vec::new(),
             oldest_remembered_pos: 0,
         }
@@ -58,7 +56,6 @@ impl<H: CHasher> Mmr<H> {
     // Return an `Mmr` initialized with the given nodes and oldest remembered position.
     pub fn init(nodes: Vec<H::Digest>, oldest_remembered_pos: u64) -> Self {
         Self {
-            hasher: H::new(),
             nodes,
             oldest_remembered_pos,
         }
@@ -90,31 +87,32 @@ impl<H: CHasher> Mmr<H> {
     }
 
     /// Add an element to the MMR and return its position in the MMR.
-    pub fn add(&mut self, element: &H::Digest) -> u64 {
+    pub fn add(&mut self, hasher: &mut H, element: &H::Digest) -> u64 {
         let peaks = nodes_needing_parents(self.peak_iterator());
         let element_pos = self.index_to_pos(self.nodes.len());
 
         // Insert the element into the MMR as a leaf.
-        let mut hash = Hasher::new(&mut self.hasher).leaf_hash(element_pos, element);
+        let mut h = Hasher::new(hasher);
+        let mut hash = h.leaf_hash(element_pos, element);
         self.nodes.push(hash.clone());
 
         // Compute the new parent nodes if any, and insert them into the MMR.
         for sibling_pos in peaks.into_iter().rev() {
             let parent_pos = self.index_to_pos(self.nodes.len());
             let sibling_hash = &self.nodes[self.pos_to_index(sibling_pos)];
-            hash = Hasher::new(&mut self.hasher).node_hash(parent_pos, sibling_hash, &hash);
+            hash = h.node_hash(parent_pos, sibling_hash, &hash);
             self.nodes.push(hash.clone());
         }
         element_pos
     }
 
     /// Computes the root hash of the MMR.
-    pub fn root(&mut self) -> H::Digest {
+    pub fn root(&self, hasher: &mut H) -> H::Digest {
         let peaks = self
             .peak_iterator()
             .map(|(peak_pos, _)| &self.nodes[(peak_pos - self.oldest_remembered_pos) as usize]);
         let size = self.size();
-        Hasher::new(&mut self.hasher).root_hash(size, peaks)
+        Hasher::new(hasher).root_hash(size, peaks)
     }
 
     pub async fn proof(&self, element_pos: u64) -> Result<Proof<H>, Error> {
@@ -166,10 +164,7 @@ impl<H: CHasher> Mmr<H> {
 #[cfg(test)]
 mod tests {
     use crate::mmr::{
-        hasher::Hasher,
-        iterator::nodes_needing_parents,
-        verification::Storage,
-        {mem::Mmr, Error::*},
+        hasher::Hasher, iterator::nodes_needing_parents, mem::Mmr, verification::Storage, Error::*,
     };
     use commonware_cryptography::{hash, Hasher as CHasher, Sha256};
     use commonware_runtime::{deterministic::Executor, Runner};
@@ -200,8 +195,9 @@ mod tests {
             );
             let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
             let mut leaves: Vec<u64> = Vec::new();
+            let mut hasher = Sha256::default();
             for _ in 0..11 {
-                leaves.push(mmr.add(&element));
+                leaves.push(mmr.add(&mut hasher, &element));
                 let peaks: Vec<(u64, u32)> = mmr.peak_iterator().collect();
                 assert_ne!(peaks.len(), 0);
                 assert!(peaks.len() <= mmr.size() as usize);
@@ -264,7 +260,8 @@ mod tests {
             assert_eq!(mmr.nodes[14], hash14);
 
             // verify root hash
-            let root_hash = mmr.root();
+            let mut hasher = Sha256::default();
+            let root_hash = mmr.root(&mut hasher);
             let peak_hashes = [hash14, hash17, mmr.nodes[18].clone()];
             let expected_root_hash = mmr_hasher.root_hash(19, peak_hashes.iter());
             assert_eq!(root_hash, expected_root_hash, "incorrect root hash");
@@ -282,7 +279,7 @@ mod tests {
             assert!(matches!(mmr.proof(11).await, Err(ElementPruned)));
             assert!(mmr.proof(15).await.is_ok());
 
-            let root_hash_after_forget = mmr.root();
+            let root_hash_after_forget = mmr.root(&mut hasher);
             assert_eq!(
                 root_hash, root_hash_after_forget,
                 "root hash changed after forgetting"
@@ -315,9 +312,10 @@ mod tests {
     fn test_forget_max() {
         let mut mmr: Mmr<Sha256> = Mmr::<Sha256>::new();
         let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
+        let mut hasher = Sha256::default();
         for _ in 0..1000 {
             mmr.forget_max();
-            mmr.add(&element);
+            mmr.add(&mut hasher, &element);
         }
     }
 
@@ -532,13 +530,14 @@ mod tests {
     /// roots.
     #[test]
     fn test_root_stability() {
+        let mut hasher = Sha256::new();
         let mut mmr = Mmr::<Sha256>::new();
         for i in 0..200 {
             for _ in 0u64..i {
                 let element = hash(&i.to_be_bytes());
-                mmr.add(&element);
+                mmr.add(&mut hasher, &element);
             }
-            let root = mmr.root();
+            let root = mmr.root(&mut hasher);
             let expected_root = ROOTS[i as usize];
             assert_eq!(hex(&root), expected_root);
         }

@@ -23,15 +23,17 @@ fn bench_append_additional(c: &mut Criterion) {
             c.bench_function(&format!("{}/start={} add={}", module_path!(), n, a), |b| {
                 b.iter_batched(
                     || {
+                        let mut h = Sha256::new();
                         let mut mmr = Mmr::<Sha256>::new();
                         for digest in &elements {
-                            mmr.add(digest);
+                            mmr.add(&mut h, digest);
                         }
                         mmr
                     },
                     |mut mmr| {
+                        let mut h = Sha256::new();
                         for digest in &additional {
-                            mmr.add(digest);
+                            mmr.add(&mut h, digest);
                         }
                     },
                     criterion::BatchSize::SmallInput,

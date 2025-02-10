@@ -349,11 +349,12 @@ mod tests {
             let mut mmr = Mmr::<Sha256>::new();
             let element = Digest::from(*b"01234567012345670123456701234567");
             let mut leaves: Vec<u64> = Vec::new();
+            let mut hasher = Sha256::default();
             for _ in 0..11 {
-                leaves.push(mmr.add(&element));
+                leaves.push(mmr.add(&mut hasher, &element));
             }
 
-            let root_hash = mmr.root();
+            let root_hash = mmr.root(&mut hasher);
             let mut hasher = Sha256::default();
 
             // confirm the proof of inclusion for each leaf successfully verifies
@@ -441,12 +442,13 @@ mod tests {
             let mut mmr: Mmr<Sha256> = Mmr::default();
             let mut elements = Vec::<Digest>::new();
             let mut element_positions = Vec::<u64>::new();
+            let mut hasher = Sha256::default();
             for i in 0..49 {
                 elements.push(test_digest(i));
-                element_positions.push(mmr.add(elements.last().unwrap()));
+                element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));
             }
             // test range proofs over all possible ranges of at least 2 elements
-            let root_hash = mmr.root();
+            let root_hash = mmr.root(&mut hasher);
             let mut hasher = Sha256::default();
 
             for i in 0..elements.len() {
@@ -608,9 +610,10 @@ mod tests {
         let mut mmr: Mmr<Sha256> = Mmr::default();
         let mut elements = Vec::<Digest>::new();
         let mut element_positions = Vec::<u64>::new();
+        let mut hasher = Sha256::default();
         for i in 0..49 {
             elements.push(test_digest(i));
-            element_positions.push(mmr.add(elements.last().unwrap()));
+            element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));
         }
 
         // forget the max # of elements
@@ -626,7 +629,7 @@ mod tests {
         }
 
         // test range proofs over all possible ranges of at least 2 elements
-        let root_hash = mmr.root();
+        let root_hash = mmr.root(&mut hasher);
         let mut hasher = Sha256::default();
         for i in 0..elements.len() {
             for j in i + 1..elements.len() {
@@ -649,11 +652,11 @@ mod tests {
         // add a few more nodes, forget again, and test again to make sure repeated forgetting works
         for i in 0..37 {
             elements.push(test_digest(i));
-            element_positions.push(mmr.add(elements.last().unwrap()));
+            element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));
         }
         assert_eq!(mmr.forget_max(), 126);
         assert_eq!(mmr.oldest_remembered_node_pos(), 126);
-        let updated_root_hash = mmr.root();
+        let updated_root_hash = mmr.root(&mut hasher);
         for i in 0..elements.len() {
             if element_positions[i] > 126 {
                 elements = elements[i..elements.len()].to_vec();
@@ -690,9 +693,10 @@ mod tests {
             let mut mmr: Mmr<Sha256> = Mmr::default();
             let mut elements = Vec::<Digest>::new();
             let mut element_positions = Vec::<u64>::new();
+            let mut hasher = Sha256::default();
             for i in 0..25 {
                 elements.push(test_digest(i));
-                element_positions.push(mmr.add(elements.last().unwrap()));
+                element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));
             }
 
             // Generate proofs over all possible ranges of elements and confirm each
