@@ -505,37 +505,47 @@ mod tests {
     }
 
     #[test]
-    fn test_serialize_deserialize_aggregation() {
-        // Create a proposal to sign
-        let (view, parent, payload) = (1, 0, test_digest(0));
-        let proposal = wire::Proposal {
-            view,
-            parent,
-            payload: payload.to_vec(),
-        };
-        let message = proposal_message(view, parent, &payload);
+    fn test_deserialize_aggregation() {
+        // Verify correctness with and without checking signatures
+        for checked in [true, false] {
+            // Create a proposal to sign
+            let (view, parent, payload) = (1, 0, test_digest(0));
+            let proposal = wire::Proposal {
+                view,
+                parent,
+                payload: payload.to_vec(),
+            };
+            let message = proposal_message(view, parent, &payload);
 
-        // Create a proof with 3 signers
-        const NAMESPACE: &[u8] = b"test";
+            // Sign the message with 3 different signers
+            const NAMESPACE: &[u8] = b"test";
+            let mut rng = rand::rngs::StdRng::seed_from_u64(0);
+            let mut signers: Vec<_> = (0..3).map(|_| Ed25519::new(&mut rng)).collect();
+            let pub_keys = signers
+                .iter()
+                .map(|signer| signer.public_key())
+                .collect::<Vec<_>>();
+            let sigs = signers
+                .iter_mut()
+                .map(|signer| signer.sign(Some(NAMESPACE), &message))
+                .collect::<Vec<_>>();
+            let keys_and_sigs = pub_keys.iter().zip(sigs).collect();
 
-        // Reproduceable test
-        let mut rng = rand::rngs::StdRng::seed_from_u64(3);
-        let mut signers: Vec<_> = (0..3).map(|_| Ed25519::new(&mut rng)).collect();
-        let pub_keys = signers
-            .iter()
-            .map(|signer| signer.public_key())
-            .collect::<Vec<_>>();
-        let sigs = signers
-            .iter_mut()
-            .map(|signer| signer.sign(Some(NAMESPACE), &message))
-            .collect::<Vec<_>>();
-        let keys_and_sigs = pub_keys.iter().zip(sigs).collect();
+            // Should be able to deserialize the serialized proof
+            let proof =
+                Prover::<Ed25519, Sha256Digest>::serialize_aggregation(&proposal, keys_and_sigs);
+            let prover = Prover::<Ed25519, Sha256Digest>::new(NAMESPACE);
+            let result = prover.deserialize_aggregation(proof, u32::MAX, checked, NAMESPACE);
 
-        // Should be able to deserialize the serialized proof
-        let proof =
-            Prover::<Ed25519, Sha256Digest>::serialize_aggregation(&proposal, keys_and_sigs);
-        let prover = Prover::<Ed25519, Sha256Digest>::new(NAMESPACE);
-        let result = prover.deserialize_aggregation(proof, u32::MAX, false, NAMESPACE);
-        assert!(result.is_some());
+            // Deserialized proof should match the content of the original proof
+            let (view, parent, payload, signers) = result.expect("unable to deserialize proof");
+            assert_eq!(view, proposal.view);
+            assert_eq!(parent, proposal.parent);
+            assert_eq!(payload.as_ref(), &proposal.payload);
+            assert_eq!(signers.len(), 3);
+            for public_key in pub_keys.iter() {
+                assert!(signers.contains(public_key));
+            }
+        }
     }
 }
