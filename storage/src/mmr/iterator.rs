@@ -29,6 +29,39 @@ impl PeakIterator {
             two_h,
         }
     }
+
+    /// Return if an MMR of the given `size` has a valid structure.
+    ///
+    /// The implementation verifies that peaks in the MMR of the given size have strictly decreasing
+    /// height, which is a necessary condition for MMR validity.
+    pub(crate) fn check_validity(size: u64) -> bool {
+        if size == 0 {
+            return true;
+        }
+        let start = u64::MAX >> size.leading_zeros();
+        let mut two_h = 1 << start.trailing_ones();
+        let mut node_pos = start - 1;
+        while two_h > 1 {
+            if node_pos < size {
+                if two_h == 2 {
+                    // If this peak is a leaf yet there are more nodes remaining, then this MMR is
+                    // invalid.
+                    return node_pos == size - 1;
+                }
+                // move to the right sibling
+                node_pos += two_h - 1;
+                if node_pos < size {
+                    // If the right sibling is in the MMR, then it is invalid.
+                    return false;
+                }
+                continue;
+            }
+            // descend to the left child
+            two_h >>= 1;
+            node_pos -= two_h;
+        }
+        true
+    }
 }
 
 impl Iterator for PeakIterator {
