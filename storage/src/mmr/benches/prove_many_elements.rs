@@ -13,13 +13,14 @@ fn bench_prove_many_elements(c: &mut Criterion) {
         let mut positions = Vec::with_capacity(n);
         let mut elements = Vec::with_capacity(n);
         let mut sampler = StdRng::seed_from_u64(0);
+        let mut hasher = Sha256::new();
         for i in 0..n {
             let element = Sha256::random(&mut sampler);
-            let pos = mmr.add(&element);
+            let pos = mmr.add(&mut hasher, &element);
             positions.push((i, pos));
             elements.push(element);
         }
-        let root_hash = mmr.root();
+        let root_hash = mmr.root(&mut hasher);
 
         // Generate SAMPLE_SIZE random starts without replacement and create/verify range proofs
         for range in [2, 5, 10, 25, 50, 100, 250, 500, 1_000, 5_000] {

@@ -12,12 +12,13 @@ fn bench_prove_single_element(c: &mut Criterion) {
         let mut mmr = Mmr::<Sha256>::new();
         let mut elements = Vec::with_capacity(n);
         let mut sampler = StdRng::seed_from_u64(0);
+        let mut hasher = Sha256::new();
         for _ in 0..n {
             let element = Sha256::random(&mut sampler);
-            let pos = mmr.add(&element);
+            let pos = mmr.add(&mut hasher, &element);
             elements.push((pos, element));
         }
-        let root_hash = mmr.root();
+        let root_hash = mmr.root(&mut hasher);
 
         // Select SAMPLE_SIZE random elements without replacement and create/verify proofs
         c.bench_function(
