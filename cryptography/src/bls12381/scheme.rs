@@ -27,7 +27,7 @@ use crate::{Array, Error, Scheme};
 use commonware_utils::{hex, SizedSerialize};
 use rand::{CryptoRng, Rng};
 use std::{
-    fmt::Display,
+    fmt::{Debug, Display},
     hash::{Hash, Hasher},
     ops::Deref,
 };
@@ -85,7 +85,7 @@ impl Scheme for Bls12381 {
 }
 
 /// BLS12-381 private key.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct PrivateKey {
     raw: [u8; group::PRIVATE_KEY_LENGTH],
     key: group::Private,
@@ -160,14 +160,20 @@ impl TryFrom<Vec<u8>> for PrivateKey {
     }
 }
 
+impl Debug for PrivateKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PrivateKey({})", hex(&self.raw))
+    }
+}
+
 impl Display for PrivateKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", hex(&self.raw))
+        write!(f, "PrivateKey({})", hex(&self.raw))
     }
 }
 
 /// BLS12-381 public key.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct PublicKey {
     raw: [u8; group::PUBLIC_KEY_LENGTH],
     key: group::Public,
@@ -242,14 +248,20 @@ impl TryFrom<Vec<u8>> for PublicKey {
     }
 }
 
+impl Debug for PublicKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PublicKey({})", hex(&self.raw))
+    }
+}
+
 impl Display for PublicKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", hex(&self.raw))
+        write!(f, "PublicKey({})", hex(&self.raw))
     }
 }
 
 /// BLS12-381 signature.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct Signature {
     raw: [u8; group::SIGNATURE_LENGTH],
     signature: group::Signature,
@@ -324,9 +336,15 @@ impl TryFrom<Vec<u8>> for Signature {
     }
 }
 
+impl Debug for Signature {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Signature({})", hex(&self.raw))
+    }
+}
+
 impl Display for Signature {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", hex(&self.raw))
+        write!(f, "Signature({})", hex(&self.raw))
     }
 }
 
