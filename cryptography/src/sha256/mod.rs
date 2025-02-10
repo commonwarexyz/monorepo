@@ -154,13 +154,13 @@ impl Deref for Digest {
 
 impl Debug for Digest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Digest({})", hex(&self.0))
+        write!(f, "{}", hex(&self.0))
     }
 }
 
 impl Display for Digest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Digest({})", hex(&self.0))
+        write!(f, "{}", hex(&self.0))
     }
 }
 

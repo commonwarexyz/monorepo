@@ -158,13 +158,13 @@ impl TryFrom<Vec<u8>> for PrivateKey {
 
 impl Debug for PrivateKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "PrivateKey({})", hex(&self.raw))
+        write!(f, "{}", hex(&self.raw))
     }
 }
 
 impl Display for PrivateKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "PrivateKey({})", hex(&self.raw))
+        write!(f, "{}", hex(&self.raw))
     }
 }
 
@@ -235,13 +235,13 @@ impl TryFrom<Vec<u8>> for PublicKey {
 
 impl Debug for PublicKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "PublicKey({})", hex(&self.raw))
+        write!(f, "{}", hex(&self.raw))
     }
 }
 
 impl Display for PublicKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "PublicKey({})", hex(&self.raw))
+        write!(f, "{}", hex(&self.raw))
     }
 }
 
@@ -328,13 +328,13 @@ impl TryFrom<Vec<u8>> for Signature {
 
 impl Debug for Signature {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Signature({})", hex(&self.raw))
+        write!(f, "{}", hex(&self.raw))
     }
 }
 
 impl Display for Signature {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Signature({})", hex(&self.raw))
+        write!(f, "{}", hex(&self.raw))
     }
 }
 
