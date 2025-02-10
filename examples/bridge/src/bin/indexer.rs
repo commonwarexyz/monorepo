@@ -12,7 +12,7 @@ use commonware_stream::{
     public_key::{Config, Connection, IncomingConnection},
     Receiver, Sender,
 };
-use commonware_utils::{from_hex, union};
+use commonware_utils::{from_hex, hex, union};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
@@ -150,7 +150,7 @@ fn main() {
                         network.insert(digest.clone(), incoming.data);
                         let _ = response.send(true);
                         info!(
-                            network = ?incoming.network,
+                            network = hex(&incoming.network),
                             block = ?digest,
                             "stored block"
                         );
@@ -187,7 +187,7 @@ fn main() {
                         network.insert(view, incoming.data);
                         let _ = response.send(true);
                         info!(
-                            network = ?incoming.network,
+                            network = hex(&incoming.network),
                             view = view,
                             "stored finalization"
                         );

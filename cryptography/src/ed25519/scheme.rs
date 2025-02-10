@@ -3,7 +3,7 @@ use commonware_utils::{hex, union_unique, SizedSerialize};
 use ed25519_consensus::{self, VerificationKey};
 use rand::{CryptoRng, Rng, RngCore};
 use std::borrow::Cow;
-use std::fmt::Display;
+use std::fmt::{Debug, Display};
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 
@@ -111,7 +111,7 @@ impl BatchScheme for Ed25519Batch {
 }
 
 /// Ed25519 Private Key.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct PrivateKey {
     raw: [u8; PRIVATE_KEY_LENGTH],
     key: ed25519_consensus::SigningKey,
@@ -194,6 +194,12 @@ impl TryFrom<Vec<u8>> for PrivateKey {
     }
 }
 
+impl Debug for PrivateKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", hex(&self.raw))
+    }
+}
+
 impl Display for PrivateKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", hex(&self.raw))
@@ -201,7 +207,7 @@ impl Display for PrivateKey {
 }
 
 /// Ed25519 Public Key.
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct PublicKey {
     raw: [u8; PUBLIC_KEY_LENGTH],
     key: ed25519_consensus::VerificationKey,
@@ -258,6 +264,12 @@ impl TryFrom<Vec<u8>> for PublicKey {
     }
 }
 
+impl Debug for PublicKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", hex(&self.raw))
+    }
+}
+
 impl Display for PublicKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", hex(&self.raw))
@@ -265,7 +277,7 @@ impl Display for PublicKey {
 }
 
 /// Ed25519 Signature.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct Signature {
     raw: [u8; SIGNATURE_LENGTH],
     signature: ed25519_consensus::Signature,
@@ -340,6 +352,12 @@ impl TryFrom<Vec<u8>> for Signature {
     type Error = Error;
     fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
         Self::try_from(value.as_slice())
+    }
+}
+
+impl Debug for Signature {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", hex(&self.raw))
     }
 }
 

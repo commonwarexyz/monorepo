@@ -5,6 +5,7 @@ use super::{
 };
 use commonware_consensus::simplex::Prover;
 use commonware_cryptography::{Hasher, Scheme};
+use commonware_utils::hex;
 use futures::{channel::mpsc, StreamExt};
 use rand::Rng;
 use tracing::info;
@@ -62,7 +63,7 @@ impl<R: Rng, C: Scheme, H: Hasher> Application<R, C, H> {
                     // Hash the message
                     self.hasher.update(&msg);
                     let digest = self.hasher.finalize();
-                    info!(?msg, payload = ?digest, "proposed");
+                    info!(msg = hex(&msg), payload = ?digest, "proposed");
 
                     // Send digest to consensus
                     let _ = response.send(digest);

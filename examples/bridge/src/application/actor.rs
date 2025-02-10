@@ -13,7 +13,7 @@ use commonware_cryptography::{
 };
 use commonware_runtime::{Sink, Stream};
 use commonware_stream::{public_key::Connection, Receiver, Sender};
-use commonware_utils::SizedSerialize;
+use commonware_utils::{hex, SizedSerialize};
 use futures::{channel::mpsc, StreamExt};
 use prost::Message as _;
 use rand::Rng;
@@ -123,7 +123,7 @@ impl<R: Rng, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St> {
                     // Hash the message
                     self.hasher.update(&msg);
                     let digest = self.hasher.finalize();
-                    info!(?msg, payload = ?digest, "proposed");
+                    info!(msg = hex(&msg), payload = ?digest, "proposed");
 
                     // Publish to indexer
                     let msg = wire::PutBlock {
@@ -208,15 +208,15 @@ impl<R: Rng, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St> {
                 Message::Prepared { proof, payload } => {
                     let (view, _, _, signature, seed) =
                         self.prover.deserialize_notarization(proof).unwrap();
-                    let signature = signature.serialize();
-                    let seed = seed.serialize();
+                    let signature = hex(&signature.serialize());
+                    let seed = hex(&seed.serialize());
                     info!(view, ?payload, ?signature, ?seed, "prepared")
                 }
                 Message::Finalized { proof, payload } => {
                     let (view, _, _, signature, seed) =
                         self.prover.deserialize_finalization(proof.clone()).unwrap();
-                    let signature = signature.serialize();
-                    let seed = seed.serialize();
+                    let signature = hex(&signature.serialize());
+                    let seed = hex(&seed.serialize());
                     info!(view, ?payload, ?signature, ?seed, "finalized");
 
                     // Post finalization

@@ -24,7 +24,10 @@ use crate::{Array, Error, Hasher};
 use commonware_utils::{hex, SizedSerialize};
 use rand::{CryptoRng, Rng};
 use sha2::{Digest as _, Sha256 as ISha256};
-use std::{fmt::Display, ops::Deref};
+use std::{
+    fmt::{Debug, Display},
+    ops::Deref,
+};
 
 const DIGEST_LENGTH: usize = 32;
 
@@ -84,7 +87,7 @@ impl Hasher for Sha256 {
 }
 
 /// Digest of a SHA-256 hashing operation.
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[repr(transparent)]
 pub struct Digest([u8; DIGEST_LENGTH]);
 
@@ -146,6 +149,12 @@ impl Deref for Digest {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
         &self.0
+    }
+}
+
+impl Debug for Digest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", hex(&self.0))
     }
 }
 

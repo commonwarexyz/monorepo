@@ -15,6 +15,7 @@ use commonware_cryptography::{
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::Clock;
+use commonware_utils::hex;
 use prost::Message;
 use std::{
     collections::{HashMap, HashSet},
@@ -70,7 +71,7 @@ impl<E: Clock, C: Scheme> Arbiter<E, C> {
         if let Some(previous) = &previous {
             group = Some(previous.serialize());
             let public = poly::public(previous).serialize();
-            info!(round, ?public, "starting reshare");
+            info!(round, public = hex(&public), "starting reshare");
         } else {
             info!(round, "starting key generation");
         }

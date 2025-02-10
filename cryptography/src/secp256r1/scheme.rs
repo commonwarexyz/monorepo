@@ -10,7 +10,7 @@ use p256::{
 use rand::{CryptoRng, Rng};
 use std::{
     borrow::Cow,
-    fmt::Display,
+    fmt::{Debug, Display},
     hash::{Hash, Hasher},
     ops::Deref,
 };
@@ -81,7 +81,7 @@ impl Scheme for Secp256r1 {
 }
 
 /// Secp256r1 Private Key.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct PrivateKey {
     raw: [u8; PRIVATE_KEY_LENGTH],
     key: SigningKey,
@@ -156,6 +156,12 @@ impl TryFrom<Vec<u8>> for PrivateKey {
     }
 }
 
+impl Debug for PrivateKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", hex(&self.raw))
+    }
+}
+
 impl Display for PrivateKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", hex(&self.raw))
@@ -163,7 +169,7 @@ impl Display for PrivateKey {
 }
 
 /// Secp256r1 Public Key.
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct PublicKey {
     raw: [u8; PUBLIC_KEY_LENGTH],
     key: VerifyingKey,
@@ -227,6 +233,12 @@ impl TryFrom<Vec<u8>> for PublicKey {
     }
 }
 
+impl Debug for PublicKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", hex(&self.raw))
+    }
+}
+
 impl Display for PublicKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", hex(&self.raw))
@@ -234,7 +246,7 @@ impl Display for PublicKey {
 }
 
 /// Secp256r1 Signature.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct Signature {
     raw: [u8; SIGNATURE_LENGTH],
     signature: p256::ecdsa::Signature,
@@ -311,6 +323,12 @@ impl TryFrom<Vec<u8>> for Signature {
     type Error = Error;
     fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
         Self::try_from(value.as_slice())
+    }
+}
+
+impl Debug for Signature {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", hex(&self.raw))
     }
 }
 
