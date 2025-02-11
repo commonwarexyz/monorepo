@@ -1,4 +1,4 @@
-use crate::linked::Epoch;
+use crate::linked::{safe, Epoch};
 use commonware_cryptography::{
     bls12381::primitives::{group, ops, poly::PartialSignature},
     Array,
@@ -25,7 +25,10 @@ enum Evidence<D: Array> {
 
 impl<D: Array> Default for Evidence<D> {
     fn default() -> Self {
-        Self::Partials(Partials::<D>::default())
+        Self::Partials(Partials {
+            shares: HashSet::new(),
+            sigs: HashMap::new(),
+        })
     }
 }
 
@@ -45,38 +48,37 @@ pub struct AckManager<D: Array, P: Array> {
 }
 
 impl<D: Array, P: Array> AckManager<D, P> {
+    /// Creates a new `AckManager`.
+    pub fn new() -> Self {
+        Self {
+            acks: HashMap::new(),
+        }
+    }
+
     /// Adds a partial signature to the evidence.
     ///
     /// If-and-only-if the quorum is newly-reached, the threshold signature is returned.
-    pub fn add_partial(
-        &mut self,
-        sequencer: &P,
-        height: u64,
-        epoch: Epoch,
-        payload: &D,
-        partial: &PartialSignature,
-        quorum: u32,
-    ) -> Option<group::Signature> {
+    pub fn add_ack(&mut self, ack: &safe::Ack<D, P>, quorum: u32) -> Option<group::Signature> {
         let evidence = self
             .acks
-            .entry(sequencer.clone())
+            .entry(ack.chunk.sequencer.clone())
             .or_default()
-            .entry(height)
+            .entry(ack.chunk.height)
             .or_default()
-            .entry(epoch)
+            .entry(ack.epoch)
             .or_default();
 
         match evidence {
             Evidence::Threshold(_) => None,
             Evidence::Partials(p) => {
-                if !p.shares.insert(partial.index) {
+                if !p.shares.insert(ack.partial.index) {
                     // Signer already existed
                     return None;
                 }
 
                 // Add the partial
-                let partials = p.sigs.entry(payload.clone()).or_default();
-                partials.push(partial.clone());
+                let partials = p.sigs.entry(ack.chunk.payload.clone()).or_default();
+                partials.push(ack.partial.clone());
 
                 // Return early if no quorum
                 if partials.len() < quorum as usize {
@@ -84,7 +86,7 @@ impl<D: Array, P: Array> AckManager<D, P> {
                 }
 
                 // Take ownership of the partials, which must exist
-                let partials = p.sigs.remove(payload).unwrap();
+                let partials = p.sigs.remove(&ack.chunk.payload).unwrap();
 
                 // Construct the threshold signature
                 let threshold = ops::threshold_signature_recover(quorum, partials).unwrap();
@@ -96,11 +98,7 @@ impl<D: Array, P: Array> AckManager<D, P> {
     /// Returns a tuple of (Epoch, Threshold), if it exists, for the given sequencer and height.
     ///
     /// If multiple epochs have thresholds, the highest epoch is returned.
-    pub fn get_threshold(
-        &self,
-        sequencer: &P,
-        height: u64,
-    ) -> Option<(Epoch, group::Signature)> {
+    pub fn get_threshold(&self, sequencer: &P, height: u64) -> Option<(Epoch, group::Signature)> {
         self.acks
             .get(sequencer)
             .and_then(|m| m.get(&height))
@@ -146,9 +144,10 @@ impl<D: Array, P: Array> AckManager<D, P> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::linked::{namespace, serializer, wire};
-    use commonware_cryptography::{bls12381::dkg::ops::generate_shares, sha256};
+    use crate::linked::{namespace, safe, serializer};
+    use commonware_cryptography::{bls12381::dkg::ops::generate_shares, ed25519, sha256};
     use commonware_runtime::deterministic::Executor;
+    use commonware_utils::SizedSerialize;
 
     #[test]
     fn test_chunk_different_payloads() {
@@ -157,24 +156,25 @@ mod tests {
         let quorum = 3;
         let (_, mut runtime, _) = Executor::default();
         let (_identity, shares) = generate_shares(&mut runtime, None, num_validators, quorum);
-        let mut acks = AckManager::<sha256::Digest>::default();
+        let mut acks = AckManager::<sha256::Digest, ed25519::PublicKey>::new();
 
-        let sequencer = PublicKey::from(&[1u8; 32][..]);
+        let sequencer =
+            ed25519::PublicKey::try_from(&[1u8; ed25519::PublicKey::SERIALIZED_LEN][..]).unwrap();
         let height = 10;
         let epoch = 5;
 
         // Create two chunks with same sequencer, height but different payloads.
         let payload1 = sha256::hash(b"payload1");
-        let chunk1 = wire::Chunk {
+        let chunk1 = safe::Chunk {
             sequencer: sequencer.clone(),
             height,
-            payload: payload1.to_vec(),
+            payload: payload1.clone(),
         };
         let payload2 = sha256::hash(b"payload2");
-        let chunk2 = wire::Chunk {
+        let chunk2 = safe::Chunk {
             sequencer: sequencer.clone(),
             height,
-            payload: payload2.to_vec(),
+            payload: payload2.clone(),
         };
 
         // For payload1, use signers 0,1,2.
@@ -185,7 +185,12 @@ mod tests {
                 Some(namespace::ack(b"1234").as_slice()),
                 &serializer::ack(&chunk1, epoch),
             );
-            let res = acks.add_partial(&sequencer, height, epoch, &payload1, &partial, quorum);
+            let ack = safe::Ack {
+                chunk: chunk1.clone(),
+                epoch,
+                partial: partial.clone(),
+            };
+            let res = acks.add_ack(&ack, quorum);
             if i == (quorum - 1) {
                 assert!(res.is_some());
                 threshold1 = res;
@@ -202,7 +207,12 @@ mod tests {
                 Some(namespace::ack(b"1234").as_slice()),
                 &serializer::ack(&chunk2, epoch),
             );
-            let res = acks.add_partial(&sequencer, height, epoch, &payload2, &partial, quorum);
+            let ack = safe::Ack {
+                chunk: chunk2.clone(),
+                epoch,
+                partial: partial.clone(),
+            };
+            let res = acks.add_ack(&ack, quorum);
             if i == (quorum * 2 - 1) {
                 assert!(res.is_some());
                 threshold2 = res;
@@ -224,18 +234,19 @@ mod tests {
         let quorum = 3;
         let (_, mut runtime, _) = Executor::default();
         let (_identity, shares) = generate_shares(&mut runtime, None, num_validators, quorum);
-        let mut acks = AckManager::<sha256::Digest>::default();
+        let mut acks = AckManager::<sha256::Digest, ed25519::PublicKey>::new();
 
-        let sequencer = PublicKey::from(&[2u8; 32][..]);
+        let sequencer =
+            ed25519::PublicKey::try_from(&[1u8; ed25519::PublicKey::SERIALIZED_LEN][..]).unwrap();
         let epoch = 10;
         let height1 = 10;
         let height2 = 20;
 
         // For height1, create a chunk and threshold.
-        let chunk1 = wire::Chunk {
+        let chunk1 = safe::Chunk {
             sequencer: sequencer.clone(),
             height: height1,
-            payload: sha256::hash(b"chunk1").to_vec(),
+            payload: sha256::hash(b"chunk1"),
         };
         let mut partials1 = Vec::new();
         for i in 0..quorum {
@@ -255,10 +266,10 @@ mod tests {
         );
 
         // For height2, create a new chunk and threshold.
-        let chunk2 = wire::Chunk {
+        let chunk2 = safe::Chunk {
             sequencer: sequencer.clone(),
             height: height2,
-            payload: sha256::hash(b"chunk2").to_vec(),
+            payload: sha256::hash(b"chunk2"),
         };
         let mut partials2 = Vec::new();
         for i in 0..quorum {
@@ -289,18 +300,19 @@ mod tests {
         let quorum = 3;
         let (_, mut runtime, _) = Executor::default();
         let (_identity, shares) = generate_shares(&mut runtime, None, num_validators, quorum);
-        let mut acks = AckManager::<sha256::Digest>::default();
+        let mut acks = AckManager::<sha256::Digest, ed25519::PublicKey>::new();
 
-        let sequencer = PublicKey::from(&[3u8; 32][..]);
+        let sequencer =
+            ed25519::PublicKey::try_from(&[1u8; ed25519::PublicKey::SERIALIZED_LEN][..]).unwrap();
         let height = 30;
         let epoch1 = 1;
         let epoch2 = 2;
 
         // Use the same chunk (and thus payload) for both epochs.
-        let chunk = wire::Chunk {
+        let chunk = safe::Chunk {
             sequencer: sequencer.clone(),
             height,
-            payload: sha256::hash(b"chunk").to_vec(),
+            payload: sha256::hash(b"chunk"),
         };
 
         // Generate threshold signature for epoch1.
@@ -344,17 +356,17 @@ mod tests {
         let quorum = 3;
         let (_, mut runtime, _) = Executor::default();
         let (_identity, shares) = generate_shares(&mut runtime, None, num_validators, quorum);
-        let mut acks = AckManager::<sha256::Digest>::default();
+        let mut acks = AckManager::<sha256::Digest, ed25519::PublicKey>::new();
 
         // Create ack
         let epoch = 99;
-        let sequencer = PublicKey::from(&[1u8; 32][..]);
+        let sequencer =
+            ed25519::PublicKey::try_from(&[1u8; ed25519::PublicKey::SERIALIZED_LEN][..]).unwrap();
         let height = 42;
-        let payload = sha256::hash(&sequencer).to_vec();
-        let chunk = wire::Chunk {
+        let chunk = safe::Chunk {
             sequencer: sequencer.clone(),
             height,
-            payload,
+            payload: sha256::hash(&sequencer),
         };
 
         // Create partials

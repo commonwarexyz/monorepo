@@ -1,4 +1,4 @@
-use super::{namespace, serializer, wire, Context, Epoch};
+use super::{namespace, safe, serializer, Context, Epoch};
 use crate::Proof;
 use bytes::{Buf, BufMut};
 use commonware_cryptography::{
@@ -8,10 +8,11 @@ use commonware_cryptography::{
     },
     Array, Scheme,
 };
+use commonware_utils::SizedSerialize;
 use std::marker::PhantomData;
 
 #[derive(Clone)]
-pub struct Prover<C: Scheme, D: Array, P: Array> {
+pub struct Prover<C: Scheme, D: Array> {
     _crypto: PhantomData<C>,
     _digest: PhantomData<D>,
 
@@ -19,7 +20,7 @@ pub struct Prover<C: Scheme, D: Array, P: Array> {
     namespace: Vec<u8>,
 }
 
-impl<C: Scheme, D: Array, P: Array> Prover<C, D, P> {
+impl<C: Scheme, D: Array> Prover<C, D> {
     /// Create a new prover with the given signing `namespace`.
     pub fn new(public: group::Public, namespace: &[u8]) -> Self {
         Self {
@@ -30,31 +31,24 @@ impl<C: Scheme, D: Array, P: Array> Prover<C, D, P> {
         }
     }
 
-    /// Returns 1) the length of a proof and 2) a tuple with the lengths of:
-    /// - the digest
-    /// - the public key
-    /// - the signature
-    fn get_len() -> (usize, (usize, usize)) {
-        let len_digest = size_of::<D>();
-
+    /// Returns the length of a proof
+    fn proof_len() -> usize {
         let mut len = 0;
-        len += len_public_key; // context.sequencer
-        len += size_of::<u64>(); // context.height
-        len += len_digest; // payload
-        len += size_of::<u64>(); // epoch
-        len += len_signature; // threshold
-
-        (len, (len_public_key, len_signature))
+        len += C::PublicKey::SERIALIZED_LEN; // context.sequencer
+        len += u64::SERIALIZED_LEN; // context.height
+        len += D::SERIALIZED_LEN; // payload
+        len += u64::SERIALIZED_LEN; // epoch
+        len += C::Signature::SERIALIZED_LEN; // threshold
+        len
     }
 
     pub fn serialize_threshold(
-        context: &Context<P>,
+        context: &Context<C::PublicKey>,
         payload: &D,
         epoch: Epoch,
         threshold: &group::Signature,
     ) -> Proof {
-        let (len, _) = Prover::<C, D>::get_len();
-        let mut proof = Vec::with_capacity(len);
+        let mut proof = Vec::with_capacity(Self::proof_len());
 
         // Encode proof
         proof.extend_from_slice(&context.sequencer);
@@ -68,29 +62,28 @@ impl<C: Scheme, D: Array, P: Array> Prover<C, D, P> {
     pub fn deserialize_threshold(
         &self,
         mut proof: Proof,
-    ) -> Option<(Context<P>, D, group::Signature)> {
-        let (len, (public_key_len, signature_len)) = Prover::<C, D>::get_len();
-
+    ) -> Option<(Context<C::PublicKey>, D, group::Signature)> {
         // Ensure proof is the right size
-        if proof.len() != len {
+
+        if proof.len() != Self::proof_len() {
             return None;
         }
 
         // Decode proof
-        let sequencer = proof.copy_to_bytes(public_key_len);
+        let sequencer = C::PublicKey::read_from(&mut proof).ok()?;
         let height = proof.get_u64();
         let Ok(payload) = D::read_from(&mut proof) else {
             return None;
         };
         let epoch = proof.get_u64();
-        let threshold = proof.copy_to_bytes(signature_len);
+        let threshold = proof.copy_to_bytes(C::Signature::SERIALIZED_LEN);
         let threshold = group::Signature::deserialize(&threshold)?;
 
         // Verify signature
-        let chunk = wire::Chunk {
+        let chunk = safe::Chunk::<D, C::PublicKey> {
             sequencer: sequencer.clone(),
             height,
-            payload: payload.to_vec(),
+            payload: payload.clone(),
         };
         let msg = serializer::ack(&chunk, epoch);
         if ops::verify_message(&self.public, Some(&self.namespace), &msg, &threshold).is_err() {

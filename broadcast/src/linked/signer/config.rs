@@ -8,10 +8,9 @@ use std::time::Duration;
 pub struct Config<
     C: Scheme,
     D: Array,
-    P: Array,
-    J: Fn(&P) -> String,
-    A: Application<Context = Context<P>, Digest = D>,
-    Z: Collector<Context = Context<P>, Digest = D>,
+    J: Fn(&C::PublicKey) -> String,
+    A: Application<Context = Context<C::PublicKey>, Digest = D>,
+    Z: Collector<Context = Context<C::PublicKey>, Digest = D>,
     S: ThresholdCoordinator<Index = Epoch>,
 > {
     pub crypto: C,

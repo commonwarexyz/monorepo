@@ -1,14 +1,13 @@
 use super::{AckManager, Config, Mailbox, Message, TipManager};
 use crate::{
-    linked::{namespace, prover::Prover, serializer, wire, Context, Epoch},
+    linked::{namespace, prover::Prover, safe, serializer, Context, Epoch},
     Application, Collector, ThresholdCoordinator,
 };
-use bytes::Bytes;
 use commonware_cryptography::{
     bls12381::primitives::{
-        group::{self, Element},
+        group::{self},
         ops,
-        poly::{self, PartialSignature},
+        poly::{self},
     },
     Array, Scheme,
 };
@@ -16,7 +15,6 @@ use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Blob, Clock, Spawner, Storage};
 use commonware_storage::journal::{self, variable::Journal};
-use commonware_utils::hex;
 use futures::{
     channel::{mpsc, oneshot},
     future::{self, Either},
@@ -25,7 +23,6 @@ use futures::{
     StreamExt,
 };
 use prometheus_client::registry::Registry;
-use prost::Message as _;
 use std::{
     collections::BTreeMap,
     future::Future,
@@ -38,7 +35,8 @@ use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
 /// A future representing a request to the application to verify a payload.
-type VerifyFuture<D> = Pin<Box<dyn Future<Output = (Context, D, Result<bool, Error>)> + Send>>;
+type VerifyFuture<D, P> =
+    Pin<Box<dyn Future<Output = (Context<P>, D, Result<bool, Error>)> + Send>>;
 
 /// The actor that implements the Broadcaster trait.
 pub struct Actor<
@@ -46,11 +44,15 @@ pub struct Actor<
     E: Clock + Spawner + Storage<B>,
     C: Scheme,
     D: Array,
-    P: Array,
-    J: Fn(&P) -> String,
-    A: Application<Context = Context<P>, Digest = D> + Clone,
-    Z: Collector<Context = Context<P>, Digest = D>,
-    S: ThresholdCoordinator<Index = Epoch, Share = group::Share, Identity = poly::Public>,
+    J: Fn(&C::PublicKey) -> String,
+    A: Application<Context = Context<C::PublicKey>, Digest = D> + Clone,
+    Z: Collector<Context = Context<C::PublicKey>, Digest = D>,
+    S: ThresholdCoordinator<
+        Index = Epoch,
+        Share = group::Share,
+        Identity = poly::Public,
+        PublicKey = C::PublicKey,
+    >,
 > {
     ////////////////////////////////////////
     // Interfaces
@@ -111,7 +113,7 @@ pub struct Actor<
     // A stream of futures.
     // Each future represents a verification request to the application
     // that will either timeout or resolve with a boolean.
-    pending_verifies: FuturesUnordered<VerifyFuture<D>>,
+    pending_verifies: FuturesUnordered<VerifyFuture<D, C::PublicKey>>,
 
     // The maximum number of items in `pending_verifies`.
     pending_verify_size: usize,
@@ -133,7 +135,7 @@ pub struct Actor<
     journal_naming_fn: J,
 
     // A map of sequencer public keys to their journals.
-    journals: BTreeMap<P, Journal<B, E>>,
+    journals: BTreeMap<C::PublicKey, Journal<B, E>>,
 
     ////////////////////////////////////////
     // State
@@ -143,11 +145,11 @@ pub struct Actor<
     // The tip is a `Link` which is comprised of a `Chunk` and,
     // if not the genesis chunk for that sequencer,
     // a threshold signature over the parent chunk.
-    tip_manager: TipManager<P>,
+    tip_manager: TipManager<C, D>,
 
     // Tracks the acknowledgements for chunks.
     // This is comprised of partial signatures or threshold signatures.
-    ack_manager: AckManager<D, P>,
+    ack_manager: AckManager<D, C::PublicKey>,
 
     // The current epoch.
     epoch: Epoch,
@@ -158,16 +160,20 @@ impl<
         E: Clock + Spawner + Storage<B>,
         C: Scheme,
         D: Array,
-        P: Array,
-        J: Fn(&P) -> String,
-        A: Application<Context = Context<P>, Digest = D> + Clone,
-        Z: Collector<Context = Context<P>, Digest = D>,
-        S: ThresholdCoordinator<Index = Epoch, Share = group::Share, Identity = poly::Public>,
-    > Actor<B, E, C, D, P, J, A, Z, S>
+        J: Fn(&C::PublicKey) -> String,
+        A: Application<Context = Context<C::PublicKey>, Digest = D> + Clone,
+        Z: Collector<Context = Context<C::PublicKey>, Digest = D>,
+        S: ThresholdCoordinator<
+            Index = Epoch,
+            Share = group::Share,
+            Identity = poly::Public,
+            PublicKey = C::PublicKey,
+        >,
+    > Actor<B, E, C, D, J, A, Z, S>
 {
     /// Creates a new actor with the given runtime and configuration.
     /// Returns the actor and a mailbox for sending messages to the actor.
-    pub fn new(runtime: E, cfg: Config<C, D, P, J, A, Z, S>) -> (Self, Mailbox<D>) {
+    pub fn new(runtime: E, cfg: Config<C, D, J, A, Z, S>) -> (Self, Mailbox<D>) {
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::new(mailbox_sender);
 
@@ -177,8 +183,9 @@ impl<
             // Inserts a dummy future (that never resolves) to prevent the stream from being empty.
             // If the stream were empty, the `select_next_some()` function would return `None`
             // instantly, front-running all other branches in the `select!` macro.
-            let dummy: VerifyFuture<D> =
-                Box::pin(async { future::pending::<(Context<P>, D, Result<bool, Error>)>().await });
+            let dummy: VerifyFuture<D, C::PublicKey> = Box::pin(async {
+                future::pending::<(Context<C::PublicKey>, D, Result<bool, Error>)>().await
+            });
             pending_verifies.push(dummy);
         }
 
@@ -204,8 +211,8 @@ impl<
             journal_replay_concurrency: cfg.journal_replay_concurrency,
             journal_naming_fn: cfg.journal_naming_fn,
             journals: BTreeMap::new(),
-            tip_manager: TipManager::default(),
-            ack_manager: AckManager::default(),
+            tip_manager: TipManager::<C, D>::new(),
+            ack_manager: AckManager::<D, C::PublicKey>::new(),
             epoch: 0,
         };
 
@@ -226,8 +233,14 @@ impl<
     ///   - Acks
     pub async fn run(
         mut self,
-        chunk_network: (impl Sender, impl Receiver),
-        ack_network: (impl Sender, impl Receiver),
+        chunk_network: (
+            impl Sender<PublicKey = C::PublicKey>,
+            impl Receiver<PublicKey = C::PublicKey>,
+        ),
+        ack_network: (
+            impl Sender<PublicKey = C::PublicKey>,
+            impl Receiver<PublicKey = C::PublicKey>,
+        ),
     ) {
         let (mut link_sender, mut link_receiver) = chunk_network;
         let (mut ack_sender, mut ack_receiver) = ack_network;
@@ -291,24 +304,21 @@ impl<
                         error!("link_receiver failed");
                         break;
                     };
-                    let Ok(link) = wire::Link::decode(msg) else {
+                    let Ok(link) = safe::Link::<C, D>::decode(&msg) else {
                         error!("Failed to decode link");
                         continue;
                     };
-                    let parent_proof = match self.validate_link(&link, &sender) {
-                        Ok(result) => result,
-                        Err(e) => {
-                            error!(err=?e, "Failed to validate link");
-                            continue;
-                        }
+                    if let Err(e) = self.validate_link(&link, &sender) {
+                        error!(err=?e, "Failed to validate link");
+                        continue;
                     };
 
                     // Initialize journal for sequencer if it does not exist
                     self.journal_prepare(&sender).await;
 
                     // Handle the parent threshold signature
-                    if let Some((chunk, epoch, threshold)) = parent_proof {
-                        self.handle_threshold(&chunk, epoch, threshold).await;
+                    if let Some(parent) = link.parent.as_ref() {
+                        self.handle_threshold(&link.chunk, parent.epoch, parent.threshold).await;
                     }
 
                     // Process the new link
@@ -323,18 +333,18 @@ impl<
                         error!("ack_receiver failed");
                         break;
                     };
-                    let Ok(ack) = wire::Ack::decode(msg) else {
-                        error!("Failed to decode ack");
-                        continue;
-                    };
-                    let (chunk, epoch, partial) = match self.validate_ack(ack, &sender) {
-                        Ok(result) => result,
+                    let ack = match safe::Ack::decode(&msg) {
+                        Ok(ack) => ack,
                         Err(e) => {
-                            error!(err=?e, "Failed to validate ack");
+                            error!(err=?e, "Failed to decode ack");
                             continue;
                         }
                     };
-                    if let Err(e) = self.handle_ack(&chunk, epoch, &partial).await {
+                    if let Err(e) = self.validate_ack(&ack, &sender) {
+                        error!(err=?e, "Failed to validate ack");
+                        continue;
+                    };
+                    if let Err(e) = self.handle_ack(ack).await {
                         error!(err=?e, "Failed to handle ack");
                         continue;
                     }
@@ -398,23 +408,22 @@ impl<
     /// The chunk will be signed if it matches the current tip.
     async fn handle_app_verified(
         &mut self,
-        context: &Context,
+        context: &Context<C::PublicKey>,
         payload: &D,
-        ack_sender: &mut impl Sender,
+        ack_sender: &mut impl Sender<PublicKey = C::PublicKey>,
     ) -> Result<(), Error> {
         // Get the tip
-        let Some(chunk) = self.tip_manager.get_chunk(&context.sequencer) else {
+        let Some(tip) = self.tip_manager.get(&context.sequencer) else {
             return Err(Error::AppVerifiedNoTip);
         };
 
         // Return early if the height does not match
-        if chunk.height != context.height {
+        if tip.chunk.height != context.height {
             return Err(Error::AppVerifiedHeightMismatch);
         }
 
         // Return early if the payload digest does not match
-        let chunk_digest = D::try_from(&chunk.payload).unwrap();
-        if chunk_digest != *payload {
+        if tip.chunk.payload != *payload {
             return Err(Error::AppVerifiedPayloadMismatch);
         }
 
@@ -425,7 +434,7 @@ impl<
         let partial = ops::partial_sign_message(
             share,
             Some(&self.ack_namespace),
-            &serializer::ack(&chunk, self.epoch),
+            &serializer::ack(&tip.chunk, self.epoch),
         );
 
         // Sync the journal to prevent ever acking two conflicting chunks at
@@ -441,31 +450,31 @@ impl<
             let mut recipients = signers.clone();
             if self
                 .coordinator
-                .is_signer(self.epoch, &chunk.sequencer)
+                .is_signer(self.epoch, &tip.chunk.sequencer)
                 .is_none()
             {
-                recipients.push(chunk.sequencer.clone());
+                recipients.push(tip.chunk.sequencer.clone());
             }
             recipients
         };
 
         // Send the ack to the network
-        let ack = wire::Ack {
-            chunk: Some(chunk.clone()),
+        let ack = safe::Ack::<D, C::PublicKey> {
+            chunk: tip.chunk,
             epoch: self.epoch,
-            partial: partial.serialize().into(),
+            partial,
         };
         ack_sender
             .send(
                 Recipients::Some(recipients),
-                ack.encode_to_vec().into(),
+                ack.encode().map_err(Error::CannotEncode)?,
                 false,
             )
             .await
             .map_err(|_| Error::UnableToSendMessage)?;
 
         // Handle the ack internally
-        self.handle_ack(&chunk, self.epoch, &partial).await?;
+        self.handle_ack(ack).await?;
 
         Ok(())
     }
@@ -477,7 +486,7 @@ impl<
     /// If the threshold is already known, it is ignored.
     async fn handle_threshold(
         &mut self,
-        chunk: &wire::Chunk,
+        chunk: &safe::Chunk<D, C::PublicKey>,
         epoch: Epoch,
         threshold: group::Signature,
     ) {
@@ -494,39 +503,29 @@ impl<
             sequencer: chunk.sequencer.clone(),
             height: chunk.height,
         };
-        let digest = D::try_from(&chunk.payload).unwrap();
-        let proof = Prover::<C, D>::serialize_threshold(&context, &digest, epoch, &threshold);
-        self.collector.acknowledged(context, digest, proof).await;
+        let proof =
+            Prover::<C, D>::serialize_threshold(&context, &chunk.payload, epoch, &threshold);
+        self.collector
+            .acknowledged(context, chunk.payload.clone(), proof)
+            .await;
     }
 
     /// Handles an ack
     ///
     /// Returns an error if the ack is invalid, or can be ignored
     /// (e.g. already exists, threshold already exists, is outside the epoch bounds, etc.).
-    async fn handle_ack(
-        &mut self,
-        chunk: &wire::Chunk,
-        epoch: Epoch,
-        partial: &PartialSignature,
-    ) -> Result<(), Error> {
+    async fn handle_ack(&mut self, ack: safe::Ack<D, C::PublicKey>) -> Result<(), Error> {
         // Get the quorum
-        let Some(identity) = self.coordinator.identity(epoch) else {
-            return Err(Error::UnknownIdentity(epoch));
+        let Some(identity) = self.coordinator.identity(ack.epoch) else {
+            return Err(Error::UnknownIdentity(ack.epoch));
         };
         let quorum = identity.required();
 
         // Add the partial signature. If a new threshold is formed, handle it.
-        let digest = D::try_from(&chunk.payload).unwrap();
-        if let Some(threshold) = self.ack_manager.add_partial(
-            &chunk.sequencer,
-            chunk.height,
-            epoch,
-            &digest,
-            partial,
-            quorum,
-        ) {
+        if let Some(threshold) = self.ack_manager.add_ack(&ack, quorum) {
             // Handle the threshold signature
-            self.handle_threshold(chunk, epoch, threshold).await;
+            self.handle_threshold(&ack.chunk, ack.epoch, threshold)
+                .await;
         }
 
         Ok(())
@@ -535,17 +534,17 @@ impl<
     /// Handles a valid link message, storing it as the tip.
     /// Alerts the application of the new link.
     /// Also appends the link to the journal if it's new.
-    async fn handle_link(&mut self, link: &wire::Link) {
+    async fn handle_link(&mut self, link: &safe::Link<C, D>) {
         // Store the tip
         let is_new = self.tip_manager.put(link);
-        let chunk = link.chunk.as_ref().unwrap();
 
         // Append to journal if the link is new, making sure to sync the journal
         // to prevent sending two conflicting chunks to the application, even if
         // the node crashes and restarts.
         if is_new {
             self.journal_append(link).await;
-            self.journal_sync(&chunk.sequencer, chunk.height).await;
+            self.journal_sync(&link.chunk.sequencer, link.chunk.height)
+                .await;
         }
 
         // Ignore sending the verification request to the application
@@ -558,15 +557,15 @@ impl<
 
         // Verify the chunk with the application
         let context = Context {
-            sequencer: chunk.sequencer.clone(),
-            height: chunk.height,
+            sequencer: link.chunk.sequencer.clone(),
+            height: link.chunk.height,
         };
-        let digest = D::try_from(&chunk.payload).unwrap();
+        let payload = link.chunk.payload.clone();
         let mut app_clone = self.application.clone();
         let verify_future = Box::pin(async move {
-            let receiver = app_clone.verify(context.clone(), digest.clone()).await;
+            let receiver = app_clone.verify(context.clone(), payload.clone()).await;
             let result = receiver.await.map_err(Error::AppVerifyCanceled);
-            (context, digest, result)
+            (context, payload, result)
         });
 
         // Save the verification future
@@ -585,41 +584,41 @@ impl<
         &mut self,
         payload: D,
         result: oneshot::Sender<bool>,
-        link_sender: &mut impl Sender,
+        link_sender: &mut impl Sender<PublicKey = C::PublicKey>,
     ) -> Result<(), Error> {
         let me = self.crypto.public_key();
 
         // Get parent Chunk and threshold signature
         let mut height = 0;
         let mut parent = None;
-        if let Some(chunk_tip) = self.tip_manager.get_chunk(&me) {
+        if let Some(tip) = self.tip_manager.get(&me) {
             // Get threshold, or, if it doesn't exist, return an error
-            let Some((epoch, threshold)) = self.ack_manager.get_threshold(&me, chunk_tip.height)
+            let Some((epoch, threshold)) = self.ack_manager.get_threshold(&me, tip.chunk.height)
             else {
                 let _ = result.send(false);
-                return Err(Error::NoThresholdForTip(chunk_tip.height));
+                return Err(Error::NoThresholdForTip(tip.chunk.height));
             };
 
             // Update height and parent
-            height = chunk_tip.height + 1;
-            parent = Some(wire::Parent {
-                payload: chunk_tip.payload,
-                threshold: threshold.serialize().into(),
+            height = tip.chunk.height + 1;
+            parent = Some(safe::Parent::<D> {
+                payload: tip.chunk.payload,
+                threshold,
                 epoch,
             });
         }
 
         // Construct new link
-        let chunk = wire::Chunk {
+        let chunk = safe::Chunk::<D, C::PublicKey> {
             sequencer: me.clone(),
             height,
-            payload: payload.to_vec(),
+            payload,
         };
         let signature = self
             .crypto
             .sign(Some(&self.chunk_namespace), &serializer::chunk(&chunk));
-        let link = wire::Link {
-            chunk: Some(chunk),
+        let link = safe::Link::<C, D> {
+            chunk,
             signature,
             parent,
         };
@@ -650,7 +649,10 @@ impl<
     /// - this instance is the sequencer for the current epoch.
     /// - this instance has a chunk to rebroadcast.
     /// - this instance has not yet collected the threshold signature for the chunk.
-    async fn rebroadcast(&mut self, link_sender: &mut impl Sender) -> Result<(), Error> {
+    async fn rebroadcast(
+        &mut self,
+        link_sender: &mut impl Sender<PublicKey = C::PublicKey>,
+    ) -> Result<(), Error> {
         // Unset the rebroadcast deadline
         self.rebroadcast_deadline = None;
 
@@ -668,7 +670,7 @@ impl<
         // Return if threshold already collected
         if self
             .ack_manager
-            .get_threshold(&me, link_tip.chunk.as_ref().unwrap().height)
+            .get_threshold(&me, link_tip.chunk.height)
             .is_some()
         {
             return Err(Error::AlreadyBroadcast);
@@ -683,8 +685,8 @@ impl<
     /// Send a link message to all signers in the given epoch.
     async fn broadcast(
         &mut self,
-        link: &wire::Link,
-        link_sender: &mut impl Sender,
+        link: &safe::Link<C, D>,
+        link_sender: &mut impl Sender<PublicKey = C::PublicKey>,
         epoch: Epoch,
     ) -> Result<(), Error> {
         // Send the link to all signers
@@ -694,7 +696,7 @@ impl<
         link_sender
             .send(
                 Recipients::Some(signers.clone()),
-                link.encode_to_vec().into(),
+                link.encode().map_err(Error::CannotEncode)?,
                 false,
             )
             .await
@@ -716,14 +718,14 @@ impl<
     /// Else returns an error if the link is invalid.
     fn validate_link(
         &mut self,
-        link: &wire::Link,
-        sender: &P,
-    ) -> Result<Option<(wire::Chunk, Epoch, group::Signature)>, Error> {
+        link: &safe::Link<C, D>,
+        sender: &C::PublicKey,
+    ) -> Result<(), Error> {
         // Validate chunk
-        let chunk = self.validate_chunk(link.chunk.clone(), self.epoch)?;
+        self.validate_chunk(&link.chunk, self.epoch)?;
 
         // Verify the sender
-        if chunk.sequencer != sender {
+        if link.chunk.sequencer != *sender {
             return Err(Error::PeerMismatch);
         }
 
@@ -731,7 +733,7 @@ impl<
         // TODO (Optimization): If the link is equal to the tip, don't verify
         if !C::verify(
             Some(&self.chunk_namespace),
-            &serializer::chunk(&chunk),
+            &serializer::chunk(&link.chunk),
             sender,
             &link.signature.clone(),
         ) {
@@ -739,24 +741,21 @@ impl<
         }
 
         // Verify no parent
-        if chunk.height == 0 {
+        if link.chunk.height == 0 {
             if link.parent.is_some() {
                 return Err(Error::GenesisChunkMustNotHaveParent);
             }
-            return Ok(None);
+            return Ok(());
         }
 
         // Verify parent
         let Some(parent) = &link.parent else {
             return Err(Error::LinkMissingParent);
         };
-        let parent_chunk = wire::Chunk {
+        let parent_chunk = safe::Chunk::<D, C::PublicKey> {
             sequencer: sender.clone(),
-            height: chunk.height.checked_sub(1).unwrap(),
+            height: link.chunk.height.checked_sub(1).unwrap(),
             payload: parent.payload.clone(),
-        };
-        let Some(threshold) = group::Signature::deserialize(&parent.threshold) else {
-            return Err(Error::UnableToDeserializeThresholdSignature);
         };
 
         // Verify parent threshold signature
@@ -769,11 +768,11 @@ impl<
             &public_key,
             Some(&self.ack_namespace),
             &serializer::ack(&parent_chunk, parent.epoch),
-            &threshold,
+            &parent.threshold,
         )
         .map_err(|_| Error::InvalidThresholdSignature)?;
 
-        Ok(Some((parent_chunk, parent.epoch, threshold)))
+        Ok(())
     }
 
     /// Takes a raw ack (from sender) from the p2p network and validates it.
@@ -781,21 +780,18 @@ impl<
     /// Returns the chunk, epoch, and partial signature if the ack is valid.
     /// Returns an error if the ack is invalid.
     fn validate_ack(
-        &mut self,
-        ack: wire::Ack,
-        sender: &P,
-    ) -> Result<(wire::Chunk, Epoch, PartialSignature), Error> {
+        &self,
+        ack: &safe::Ack<D, C::PublicKey>,
+        sender: &C::PublicKey,
+    ) -> Result<(), Error> {
         // Validate chunk
-        let chunk = self.validate_chunk(ack.chunk, ack.epoch)?;
+        self.validate_chunk(&ack.chunk, ack.epoch)?;
 
         // Validate sender
         let Some(signer_index) = self.coordinator.is_signer(ack.epoch, sender) else {
-            return Err(Error::UnknownSigner(ack.epoch, sender.clone()));
+            return Err(Error::UnknownSigner(ack.epoch, sender.to_string()));
         };
-        let Some(partial) = PartialSignature::deserialize(&ack.partial) else {
-            return Err(Error::UnableToDeserializePartialSignature);
-        };
-        if signer_index != partial.index {
+        if signer_index != ack.partial.index {
             return Err(Error::PeerMismatch);
         }
 
@@ -811,11 +807,15 @@ impl<
 
         // Spam prevention: If the ack is for a height that is too old or too new, ignore.
         {
-            let bound_lo = self.tip_manager.get_height(&chunk.sequencer).unwrap_or(0);
+            let bound_lo = self
+                .tip_manager
+                .get(&ack.chunk.sequencer)
+                .map(|t| t.chunk.height)
+                .unwrap_or(0);
             let bound_hi = bound_lo + self.height_bound;
-            if chunk.height < bound_lo || chunk.height > bound_hi {
+            if ack.chunk.height < bound_lo || ack.chunk.height > bound_hi {
                 return Err(Error::AckHeightOutsideBounds(
-                    chunk.height,
+                    ack.chunk.height,
                     bound_lo,
                     bound_hi,
                 ));
@@ -830,12 +830,12 @@ impl<
         ops::partial_verify_message(
             identity,
             Some(&self.ack_namespace),
-            &serializer::ack(&chunk, ack.epoch),
-            &partial,
+            &serializer::ack(&ack.chunk, ack.epoch),
+            &ack.partial,
         )
         .map_err(|_| Error::InvalidPartialSignature)?;
 
-        Ok((chunk, ack.epoch, partial))
+        Ok(())
     }
 
     /// Takes a raw chunk from the p2p network and validates it against the epoch.
@@ -844,45 +844,39 @@ impl<
     /// Returns an error if the chunk is invalid.
     fn validate_chunk(
         &self,
-        chunk: Option<wire::Chunk>,
+        chunk: &safe::Chunk<D, C::PublicKey>,
         epoch: Epoch,
-    ) -> Result<wire::Chunk, Error> {
-        let Some(chunk) = chunk else {
-            return Err(Error::MissingChunk);
-        };
-
+    ) -> Result<(), Error> {
         // Verify sequencer
         if self
             .coordinator
             .is_sequencer(epoch, &chunk.sequencer)
             .is_none()
         {
-            return Err(Error::UnknownSequencer(epoch, chunk.sequencer.clone()));
+            return Err(Error::UnknownSequencer(epoch, chunk.sequencer.to_string()));
         }
 
         // Verify height
-        if let Some(chunk_tip) = self.tip_manager.get_chunk(&chunk.sequencer) {
+        if let Some(tip) = self.tip_manager.get(&chunk.sequencer) {
             // Height must be at least the tip height
-            match chunk.height.cmp(&chunk_tip.height) {
+            match chunk.height.cmp(&tip.chunk.height) {
                 std::cmp::Ordering::Less => {
-                    return Err(Error::ChunkHeightTooLow(chunk.height, chunk_tip.height));
+                    return Err(Error::ChunkHeightTooLow(chunk.height, tip.chunk.height));
                 }
                 std::cmp::Ordering::Equal => {
                     // Ensure this matches the tip if the height is the same
-                    if chunk_tip.payload != chunk.payload {
-                        return Err(Error::ChunkMismatch(chunk.sequencer, chunk.height));
+                    if tip.chunk.payload != chunk.payload {
+                        return Err(Error::ChunkMismatch(
+                            chunk.sequencer.to_string(),
+                            chunk.height,
+                        ));
                     }
                 }
                 std::cmp::Ordering::Greater => {}
             }
         }
 
-        // Verify digest
-        if D::try_from(&chunk.payload).is_err() {
-            return Err(Error::InvalidDigest);
-        }
-
-        Ok(chunk)
+        Ok(())
     }
 
     ////////////////////////////////////////
@@ -897,7 +891,7 @@ impl<
     /// Ensures the journal exists and is initialized for the given sequencer.
     /// If the journal does not exist, it is created and replayed.
     /// Else, no action is taken.
-    async fn journal_prepare(&mut self, sequencer: &P) {
+    async fn journal_prepare(&mut self, sequencer: &C::PublicKey) {
         // Return early if the journal already exists
         if self.journals.contains_key(sequencer) {
             return;
@@ -914,7 +908,7 @@ impl<
 
         // Replay journal
         {
-            debug!(sequencer = hex(sequencer), "Replaying journal");
+            debug!(?sequencer, "Replaying journal");
 
             // Prepare the stream
             let stream = journal
@@ -925,19 +919,20 @@ impl<
 
             // Read from the stream, which may be in arbitrary order.
             // Remember the highest link height
-            let mut tip: Option<wire::Link> = None;
+            let mut tip: Option<safe::Link<C, D>> = None;
             let mut num_items = 0;
             while let Some(msg) = stream.next().await {
                 num_items += 1;
                 let (_, _, _, msg) = msg.expect("unable to decode journal message");
-                let link = wire::Link::decode(msg).expect("journal message is unexpected format");
-                let height = link.chunk.as_ref().unwrap().height;
+                let link =
+                    safe::Link::<C, D>::decode(&msg).expect("journal message is unexpected format");
+                let height = link.chunk.height;
                 match tip {
                     None => {
                         tip = Some(link);
                     }
                     Some(ref t) => {
-                        if height > t.chunk.as_ref().unwrap().height {
+                        if height > t.chunk.height {
                             tip = Some(link);
                         }
                     }
@@ -951,11 +946,7 @@ impl<
                 assert!(is_new);
             }
 
-            debug!(
-                sequencer = hex(sequencer),
-                n = num_items,
-                "Journal replay complete"
-            );
+            debug!(?sequencer, ?num_items, "Journal replay complete");
         }
 
         // Store journal
@@ -965,19 +956,22 @@ impl<
     /// Write a link to the appropriate journal.
     ///
     /// The journal must already be open and replayed.
-    async fn journal_append(&mut self, link: &wire::Link) {
-        let chunk = link.chunk.as_ref().unwrap();
-        let section = self.get_journal_section(chunk.height);
+    async fn journal_append(&mut self, link: &safe::Link<C, D>) {
+        let section = self.get_journal_section(link.chunk.height);
+        let data = link
+            .encode()
+            .map_err(Error::CannotEncode)
+            .expect("unable to encode link");
         self.journals
-            .get_mut(&chunk.sequencer)
+            .get_mut(&link.chunk.sequencer)
             .expect("journal does not exist")
-            .append(section, link.encode_to_vec().into())
+            .append(section, data)
             .await
             .expect("unable to append to journal");
     }
 
     /// Syncs (ensures all data is written to disk) and prunes the journal for the given sequencer and height.
-    async fn journal_sync(&mut self, sequencer: &P, height: u64) {
+    async fn journal_sync(&mut self, sequencer: &C::PublicKey, height: u64) {
         let section = self.get_journal_section(height);
 
         // Get journal
@@ -1041,24 +1035,22 @@ enum Error {
     NoThresholdForTip(u64),
 
     // Proto Malformed Errors
-    #[error("Missing chunk")]
-    MissingChunk,
     #[error("Genesis chunk must not have a parent")]
     GenesisChunkMustNotHaveParent,
     #[error("Link missing parent")]
     LinkMissingParent,
-    #[error("Invalid digest")]
-    InvalidDigest,
+    #[error("Cannot encode")]
+    CannotEncode(#[from] safe::Error),
 
     // Epoch Errors
     #[error("Unknown identity at epoch {0}")]
     UnknownIdentity(u64),
     #[error("Unknown signers at epoch {0}")]
     UnknownSigners(u64),
-    #[error("Epoch {0} has no sequencer {1:?}")]
-    UnknownSequencer(u64, Bytes),
-    #[error("Epoch {0} has no signer {1:?}")]
-    UnknownSigner(u64, Bytes),
+    #[error("Epoch {0} has no sequencer {1}")]
+    UnknownSequencer(u64, String),
+    #[error("Epoch {0} has no signer {1}")]
+    UnknownSigner(u64, String),
     #[error("Unknown share at epoch {0}")]
     UnknownShare(u64),
 
@@ -1067,10 +1059,6 @@ enum Error {
     PeerMismatch,
 
     // Signature Errors
-    #[error("Unable to deserialize threshold signature")]
-    UnableToDeserializeThresholdSignature,
-    #[error("Unable to deserialize partial signature")]
-    UnableToDeserializePartialSignature,
     #[error("Invalid threshold signature")]
     InvalidThresholdSignature,
     #[error("Invalid partial signature")]
@@ -1087,6 +1075,6 @@ enum Error {
     ChunkHeightTooLow(u64, u64),
 
     // Slashable Errors
-    #[error("Chunk mismatch from sender {0:?} with height {1}")]
-    ChunkMismatch(Bytes, u64),
+    #[error("Chunk mismatch from sender {0} with height {1}")]
+    ChunkMismatch(String, u64),
 }

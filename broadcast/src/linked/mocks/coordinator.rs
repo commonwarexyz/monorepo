@@ -4,22 +4,22 @@ use commonware_cryptography::{
         group::{Public, Share},
         poly::Poly,
     },
-    PublicKey,
+    Array,
 };
 use std::collections::HashMap;
 
 /// Implementation of `commonware-consensus::Coordinator`.
 #[derive(Clone)]
-pub struct Coordinator {
+pub struct Coordinator<P: Array> {
     view: u64,
     identity: Poly<Public>,
-    signers: Vec<PublicKey>,
-    signers_map: HashMap<PublicKey, u32>,
+    signers: Vec<P>,
+    signers_map: HashMap<P, u32>,
     share: Share,
 }
 
-impl Coordinator {
-    pub fn new(identity: Poly<Public>, mut signers: Vec<PublicKey>, share: Share) -> Self {
+impl<P: Array> Coordinator<P> {
+    pub fn new(identity: Poly<Public>, mut signers: Vec<P>, share: Share) -> Self {
         // Setup signers
         signers.sort();
         let mut signers_map = HashMap::new();
@@ -42,31 +42,32 @@ impl Coordinator {
     }
 }
 
-impl S for Coordinator {
+impl<P: Array> S for Coordinator<P> {
     type Index = Epoch;
+    type PublicKey = P;
 
     fn index(&self) -> Self::Index {
         self.view
     }
 
-    fn signers(&self, _: Self::Index) -> Option<&Vec<PublicKey>> {
+    fn signers(&self, _: Self::Index) -> Option<&Vec<Self::PublicKey>> {
         Some(&self.signers)
     }
 
-    fn is_signer(&self, _: Self::Index, candidate: &PublicKey) -> Option<u32> {
+    fn is_signer(&self, _: Self::Index, candidate: &Self::PublicKey) -> Option<u32> {
         self.signers_map.get(candidate).cloned()
     }
 
-    fn sequencers(&self, _: Self::Index) -> Option<&Vec<PublicKey>> {
+    fn sequencers(&self, _: Self::Index) -> Option<&Vec<Self::PublicKey>> {
         Some(&self.signers)
     }
 
-    fn is_sequencer(&self, _: Self::Index, candidate: &PublicKey) -> Option<u32> {
+    fn is_sequencer(&self, _: Self::Index, candidate: &Self::PublicKey) -> Option<u32> {
         self.signers_map.get(candidate).cloned()
     }
 }
 
-impl T for Coordinator {
+impl<P: Array> T for Coordinator<P> {
     type Identity = Poly<Public>;
     type Share = Share;
 

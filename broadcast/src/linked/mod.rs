@@ -79,11 +79,13 @@
 //! - **`namespace`**: Generates namespace IDs for different signature types.
 //! - **`serializer`**: Serializes and deserializes messages.
 //! - **`wire`**: Contains the protocol buffer-generated message definitions.
+//! - **`safe`**: Provides parsed wrappers around wire types.
 //! - **`mocks`**: Provides mock implementations for testing.
 
 use commonware_cryptography::Array;
 
 mod namespace;
+mod safe;
 mod serializer;
 
 #[cfg(test)]
@@ -113,10 +115,13 @@ mod tests {
     use super::{mocks, signer};
     use bytes::Bytes;
     use commonware_cryptography::{
-        bls12381::dkg::ops,
-        bls12381::primitives::{group::Share, poly::Poly},
+        bls12381::{
+            dkg::ops,
+            primitives::{group::Share, poly::Poly},
+        },
+        ed25519::PublicKey,
         sha256::{Digest as Sha256Digest, Sha256},
-        Ed25519, Hasher, Array, Scheme,
+        Ed25519, Hasher, Scheme,
     };
     use commonware_macros::test_traced;
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
@@ -131,9 +136,12 @@ mod tests {
     };
     use tracing::debug;
 
-    type Registrations = BTreeMap<PublicKey, ((Sender, Receiver), (Sender, Receiver))>;
+    type Registrations<P> = BTreeMap<P, ((Sender<P>, Receiver<P>), (Sender<P>, Receiver<P>))>;
 
-    async fn register_validators<P: Array>(oracle: &mut Oracle, validators: &[P]) -> Registrations {
+    async fn register_validators(
+        oracle: &mut Oracle<PublicKey>,
+        validators: &[PublicKey],
+    ) -> Registrations<PublicKey> {
         let mut registrations = BTreeMap::new();
         for validator in validators.iter() {
             let (a1, a2) = oracle.register(validator.clone(), 0).await.unwrap();
@@ -150,9 +158,9 @@ mod tests {
         Unlink,
     }
 
-    async fn link_validators<P: Array>(
-        oracle: &mut Oracle,
-        validators: &[P],
+    async fn link_validators(
+        oracle: &mut Oracle<PublicKey>,
+        validators: &[PublicKey],
         action: Action,
         restrict_to: Option<fn(usize, usize, usize) -> bool>,
     ) {
@@ -179,15 +187,15 @@ mod tests {
         }
     }
 
-    async fn initialize_simulation<P: Array>(
+    async fn initialize_simulation(
         runtime: &Context,
         num_validators: u32,
         shares_vec: &mut [Share],
     ) -> (
-        Oracle,
-        Vec<(P, Ed25519, Share)>,
-        Vec<P>,
-        Registrations,
+        Oracle<PublicKey>,
+        Vec<(PublicKey, Ed25519, Share)>,
+        Vec<PublicKey>,
+        Registrations<PublicKey>,
     ) {
         let (network, mut oracle) = Network::new(
             runtime.clone(),
@@ -223,26 +231,31 @@ mod tests {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn spawn_validator_engines<P: Array>(
+    fn spawn_validator_engines(
         runtime: &Context,
         identity: Poly<commonware_cryptography::bls12381::primitives::group::G1>,
-        pks: &[P],
-        validators: &[(P, Ed25519, Share)],
-        registrations: &mut Registrations,
-        mailboxes: &mut BTreeMap<P, mocks::application::Mailbox<Sha256Digest>>,
-        collectors: &mut BTreeMap<P, mocks::collector::Mailbox<Sha256Digest>>,
+        pks: &[PublicKey],
+        validators: &[(PublicKey, Ed25519, Share)],
+        registrations: &mut Registrations<PublicKey>,
+        mailboxes: &mut BTreeMap<PublicKey, mocks::application::Mailbox<Sha256Digest, PublicKey>>,
+        collectors: &mut BTreeMap<PublicKey, mocks::collector::Mailbox<Sha256Digest, PublicKey>>,
         refresh_epoch_timeout: Duration,
         rebroadcast_timeout: Duration,
     ) {
         for (validator, scheme, share) in validators.iter() {
-            let mut coordinator =
-                mocks::coordinator::Coordinator::new(identity.clone(), pks.to_vec(), *share);
+            let mut coordinator = mocks::coordinator::Coordinator::<PublicKey>::new(
+                identity.clone(),
+                pks.to_vec(),
+                *share,
+            );
             coordinator.set_view(111);
 
-            let (mut app, app_mailbox) = mocks::application::Application::new();
+            let (mut app, app_mailbox) =
+                mocks::application::Application::<Sha256Digest, PublicKey>::new();
             mailboxes.insert(validator.clone(), app_mailbox.clone());
 
-            let (collector, collector_mailbox) = mocks::collector::Collector::<Sha256Digest>::new();
+            let (collector, collector_mailbox) =
+                mocks::collector::Collector::<Sha256Digest, PublicKey>::new();
             runtime.clone().spawn("collector", collector.run());
             collectors.insert(validator.clone(), collector_mailbox);
 
@@ -278,9 +291,11 @@ mod tests {
         }
     }
 
-    fn spawn_proposer<P: Array>(
+    fn spawn_proposer(
         runtime: &Context,
-        mailboxes: Arc<Mutex<BTreeMap<P, mocks::application::Mailbox<Sha256Digest>>>>,
+        mailboxes: Arc<
+            Mutex<BTreeMap<PublicKey, mocks::application::Mailbox<Sha256Digest, PublicKey>>>,
+        >,
         invalid_when: fn(u64) -> bool,
     ) {
         runtime.clone().spawn("invalid signature proposer", {
@@ -289,19 +304,21 @@ mod tests {
                 let mut iter = 0;
                 loop {
                     iter += 1;
-                    let mailbox_vec: Vec<mocks::application::Mailbox<Sha256Digest>> = {
+                    let mailbox_vec: Vec<mocks::application::Mailbox<Sha256Digest, PublicKey>> = {
                         let guard = mailboxes.lock().unwrap();
                         guard.values().cloned().collect()
                     };
                     for mut mailbox in mailbox_vec {
                         let payload = Bytes::from(format!("hello world, iter {}", iter));
-                        let digest = if invalid_when(iter) {
-                            Sha256Digest::default()
-                        } else {
-                            let mut hasher = Sha256::default();
+                        let mut hasher = Sha256::default();
+                        hasher.update(&payload);
+
+                        // Inject an invalid digest by updating with the payload again.
+                        if invalid_when(iter) {
                             hasher.update(&payload);
-                            hasher.finalize()
-                        };
+                        }
+
+                        let digest = hasher.finalize();
                         mailbox.broadcast(digest).await;
                     }
                     runtime.sleep(Duration::from_millis(250)).await;
@@ -310,9 +327,9 @@ mod tests {
         });
     }
 
-    async fn await_collectors<P: Array>(
+    async fn await_collectors(
         runtime: &Context,
-        collectors: &BTreeMap<P, mocks::collector::Mailbox<Sha256Digest>>,
+        collectors: &BTreeMap<PublicKey, mocks::collector::Mailbox<Sha256Digest, PublicKey>>,
         threshold: u64,
         num_validators: usize,
     ) {
@@ -361,10 +378,11 @@ mod tests {
                     initialize_simulation(&context, num_validators, &mut shares_vec).await;
                 let mailboxes = Arc::new(Mutex::new(BTreeMap::<
                     PublicKey,
-                    mocks::application::Mailbox<Sha256Digest>,
+                    mocks::application::Mailbox<Sha256Digest, PublicKey>,
                 >::new()));
                 let mut collectors =
-                    BTreeMap::<PublicKey, mocks::collector::Mailbox<Sha256Digest>>::new();
+                    BTreeMap::<PublicKey, mocks::collector::Mailbox<Sha256Digest, PublicKey>>::new(
+                    );
                 spawn_validator_engines(
                     &context,
                     identity.clone(),
@@ -434,10 +452,12 @@ mod tests {
 
                     let mailboxes = Arc::new(Mutex::new(BTreeMap::<
                         PublicKey,
-                        mocks::application::Mailbox<Sha256Digest>,
+                        mocks::application::Mailbox<Sha256Digest, PublicKey>,
                     >::new()));
-                    let mut collectors =
-                        BTreeMap::<PublicKey, mocks::collector::Mailbox<Sha256Digest>>::new();
+                    let mut collectors = BTreeMap::<
+                        PublicKey,
+                        mocks::collector::Mailbox<Sha256Digest, PublicKey>,
+                    >::new();
                     spawn_validator_engines(
                         &context,
                         identity.clone(),
@@ -451,11 +471,13 @@ mod tests {
                     );
                     spawn_proposer(&context, mailboxes.clone(), |_| false);
 
-                    let collector_pairs: Vec<(PublicKey, mocks::collector::Mailbox<Sha256Digest>)> =
-                        collectors
-                            .iter()
-                            .map(|(v, m)| (v.clone(), m.clone()))
-                            .collect();
+                    let collector_pairs: Vec<(
+                        PublicKey,
+                        mocks::collector::Mailbox<Sha256Digest, PublicKey>,
+                    )> = collectors
+                        .iter()
+                        .map(|(v, m)| (v.clone(), m.clone()))
+                        .collect();
                     for (validator, mut mailbox) in collector_pairs {
                         let context_cloned = context.clone();
                         let completed_clone = completed.clone();
@@ -496,10 +518,11 @@ mod tests {
                     initialize_simulation(&context, num_validators, &mut shares_vec).await;
                 let mailboxes = Arc::new(Mutex::new(BTreeMap::<
                     PublicKey,
-                    mocks::application::Mailbox<Sha256Digest>,
+                    mocks::application::Mailbox<Sha256Digest, PublicKey>,
                 >::new()));
                 let mut collectors =
-                    BTreeMap::<PublicKey, mocks::collector::Mailbox<Sha256Digest>>::new();
+                    BTreeMap::<PublicKey, mocks::collector::Mailbox<Sha256Digest, PublicKey>>::new(
+                    );
                 spawn_validator_engines(
                     &context,
                     identity.clone(),
@@ -555,10 +578,11 @@ mod tests {
 
                 let mailboxes = Arc::new(Mutex::new(BTreeMap::<
                     PublicKey,
-                    mocks::application::Mailbox<Sha256Digest>,
+                    mocks::application::Mailbox<Sha256Digest, PublicKey>,
                 >::new()));
                 let mut collectors =
-                    BTreeMap::<PublicKey, mocks::collector::Mailbox<Sha256Digest>>::new();
+                    BTreeMap::<PublicKey, mocks::collector::Mailbox<Sha256Digest, PublicKey>>::new(
+                    );
                 spawn_validator_engines(
                     &context,
                     identity.clone(),
@@ -610,10 +634,11 @@ mod tests {
                     initialize_simulation(&context, num_validators, &mut shares_vec).await;
                 let mailboxes = Arc::new(Mutex::new(BTreeMap::<
                     PublicKey,
-                    mocks::application::Mailbox<Sha256Digest>,
+                    mocks::application::Mailbox<Sha256Digest, PublicKey>,
                 >::new()));
                 let mut collectors =
-                    BTreeMap::<PublicKey, mocks::collector::Mailbox<Sha256Digest>>::new();
+                    BTreeMap::<PublicKey, mocks::collector::Mailbox<Sha256Digest, PublicKey>>::new(
+                    );
                 spawn_validator_engines(
                     &context,
                     identity.clone(),
