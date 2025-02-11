@@ -110,6 +110,7 @@ impl<B: Blob, E: RStorage<B>, H: Hasher> Mmr<B, E, H> {
         self.mem_mmr.add(h, element)
     }
 
+    /// Return the root hash of the MMR.
     pub fn root(&mut self, h: &mut H) -> H::Digest {
         self.mem_mmr.root(h)
     }
@@ -132,6 +133,9 @@ impl<B: Blob, E: RStorage<B>, H: Hasher> Mmr<B, E, H> {
         self.journal.close().await.map_err(Error::JournalError)
     }
 
+    /// Return an inclusion proof for the specified element.
+    ///
+    /// Returns ElementPruned error if some element needed to generate the proof has been pruned.
     pub async fn proof(&self, element_pos: u64) -> Result<Proof<H>, Error> {
         self.range_proof(element_pos, element_pos).await
     }
@@ -151,16 +155,14 @@ impl<B: Blob, E: RStorage<B>, H: Hasher> Mmr<B, E, H> {
 #[cfg(test)]
 mod tests {
     use super::{Blob, JConfig, Mmr, RStorage, Storage};
-    use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
+    use commonware_cryptography::{hash, sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic::Executor, Runner};
     use prometheus_client::registry::Registry;
     use std::sync::{Arc, Mutex};
 
     fn test_digest(v: u8) -> Digest {
-        let mut hasher = Sha256::new();
-        hasher.update(&[v]);
-        hasher.finalize()
+        hash(&v.to_be_bytes())
     }
 
     #[test_traced]

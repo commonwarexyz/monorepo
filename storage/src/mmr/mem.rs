@@ -117,6 +117,9 @@ impl<H: CHasher> Mmr<H> {
         Hasher::new(hasher).root_hash(size, peaks)
     }
 
+    /// Return an inclusion proof for the specified element.
+    ///
+    /// Returns ElementPruned error if some element needed to generate the proof has been pruned.
     pub async fn proof(&self, element_pos: u64) -> Result<Proof<H>, Error> {
         self.range_proof(element_pos, element_pos).await
     }
