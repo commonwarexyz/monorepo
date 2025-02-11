@@ -2,7 +2,9 @@ use ark_bn254::{Fr as Scalar, G1Affine, G1Projective, G2Affine, G2Projective};
 use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup, PrimeGroup};
 use ark_ff::{AdditiveGroup, UniformRand};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use commonware_cryptography::{Array, Error, PrivateKey, PublicKey, Scheme, Sha256, Signature};
+use commonware_cryptography::{
+    Array, Error, Hasher as _, PrivateKey, PublicKey, Scheme, Sha256, Signature,
+};
 use commonware_utils::{hex, union_unique, SizedSerialize};
 use eigen_crypto_bn254::utils::map_to_curve;
 use rand::{CryptoRng, Rng};
@@ -28,6 +30,10 @@ pub struct Bn254 {
 }
 
 impl Scheme for Bn254 {
+    type PrivateKey = PrivateKey;
+    type PublicKey = PublicKey;
+    type Signature = Signature;
+
     fn new<R: CryptoRng + Rng>(r: &mut R) -> Self {
         let sk = Scalar::rand(r);
         let pk = G2Projective::generator() * sk;
@@ -38,14 +44,7 @@ impl Scheme for Bn254 {
     }
 
     fn from(private_key: PrivateKey) -> Option<Self> {
-        let private_key: [u8; PRIVATE_KEY_LENGTH] = match private_key.as_ref().try_into() {
-            Ok(key) => key,
-            Err(_) => return None,
-        };
-        let sk = Scalar::deserialize_compressed(private_key.as_ref()).ok()?;
-        if sk == Scalar::ZERO {
-            return None;
-        }
+        let sk = private_key.key;
         let pk = G2Projective::generator() * sk;
         Some(Self {
             private: sk,
@@ -54,15 +53,11 @@ impl Scheme for Bn254 {
     }
 
     fn private_key(&self) -> PrivateKey {
-        let mut bytes = Vec::with_capacity(PRIVATE_KEY_LENGTH);
-        self.private.serialize_compressed(&mut bytes).unwrap();
-        bytes.into()
+        PrivateKey::from(self.private)
     }
 
     fn public_key(&self) -> PublicKey {
-        let mut bytes = Vec::with_capacity(PUBLIC_KEY_LENGTH);
-        self.public.serialize_compressed(&mut bytes).unwrap();
-        bytes.into()
+        PublicKey::from(self.public)
     }
 
     fn sign(&mut self, namespace: Option<&[u8]>, message: &[u8]) -> Signature {
@@ -88,20 +83,7 @@ impl Scheme for Bn254 {
         let sig = sig.into_affine();
 
         // Serialize signature
-        let mut bytes = Vec::with_capacity(SIGNATURE_LENGTH);
-        sig.serialize_compressed(&mut bytes).unwrap();
-        bytes.into()
-    }
-
-    fn validate(public_key: &PublicKey) -> bool {
-        let public = G2Affine::deserialize_compressed(public_key.as_ref());
-        if public.is_err() {
-            return false;
-        }
-        let public = public.unwrap();
-        public.is_in_correct_subgroup_assuming_on_curve()
-            && public.is_on_curve()
-            && !public.is_zero()
+        Signature::from(sig)
     }
 
     fn verify(
@@ -110,25 +92,6 @@ impl Scheme for Bn254 {
         public_key: &PublicKey,
         signature: &Signature,
     ) -> bool {
-        let Ok(public) = G2Affine::deserialize_compressed(public_key.as_ref()) else {
-            return false;
-        };
-        if !public.is_in_correct_subgroup_assuming_on_curve()
-            || !public.is_on_curve()
-            || public.is_zero()
-        {
-            return false;
-        }
-        let Ok(signature) = G1Affine::deserialize_compressed(signature.as_ref()) else {
-            return false;
-        };
-        if !signature.is_in_correct_subgroup_assuming_on_curve()
-            || !signature.is_on_curve()
-            || signature.is_zero()
-        {
-            return false;
-        }
-
         // Generate payload
         let hash: [u8; DIGEST_LENGTH] = if namespace.is_none() && message.len() == DIGEST_LENGTH {
             message.try_into().unwrap()
@@ -147,13 +110,9 @@ impl Scheme for Bn254 {
         let msg_on_g1 = map_to_curve(&hash);
 
         // Pairing check
-        let lhs = ark_bn254::Bn254::pairing(msg_on_g1, public);
-        let rhs = ark_bn254::Bn254::pairing(signature, G2Affine::generator());
+        let lhs = ark_bn254::Bn254::pairing(msg_on_g1, public_key.key);
+        let rhs = ark_bn254::Bn254::pairing(signature.sig, G2Affine::generator());
         lhs == rhs
-    }
-
-    fn len() -> (usize, usize) {
-        (PUBLIC_KEY_LENGTH, SIGNATURE_LENGTH)
     }
 }
 
@@ -431,7 +390,7 @@ impl Display for Signature {
 }
 
 impl Bn254 {
-    pub fn public_g1(&self) -> PublicKey {
+    pub fn public_g1(&self) -> Vec<u8> {
         let pk = G1Projective::generator() * self.private;
         let mut raw = [0u8; G1_LENGTH];
         pk.into_affine().serialize_compressed(&mut raw[..]).unwrap();
@@ -505,9 +464,7 @@ pub fn aggregate_signatures(signatures: &[Signature]) -> Option<Signature> {
         }
         agg_signature += signature.into_group();
     }
-    let mut bytes = Vec::with_capacity(SIGNATURE_LENGTH);
-    agg_signature.serialize_compressed(&mut bytes).unwrap();
-    Some(bytes.into())
+    Some(Signature::from(agg_signature.into_affine()))
 }
 
 pub fn aggregate_verify(
@@ -519,20 +476,11 @@ pub fn aggregate_verify(
     // Aggregate public keys
     let mut agg_public = G2Projective::ZERO;
     for public in publics {
-        let Ok(public) = G2Affine::deserialize_compressed(public.as_ref()) else {
-            return false;
-        };
-        if !public.is_in_correct_subgroup_assuming_on_curve()
-            || !public.is_on_curve()
-            || public.is_zero()
-        {
-            return false;
-        }
-        agg_public += public.into_group();
+        agg_public += public.key.into_group();
     }
-    let mut public = Vec::with_capacity(PUBLIC_KEY_LENGTH);
-    agg_public.serialize_compressed(&mut public).unwrap();
+    let agg_public = agg_public.into_affine();
+    let public = PublicKey::from(agg_public);
 
     // Verify signature
-    Bn254::verify(namespace, message, &public.into(), signature)
+    Bn254::verify(namespace, message, &public, signature)
 }
