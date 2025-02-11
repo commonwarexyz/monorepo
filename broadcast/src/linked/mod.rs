@@ -281,33 +281,6 @@ mod tests {
     fn spawn_proposer(
         runtime: &Context,
         mailboxes: Arc<Mutex<BTreeMap<PublicKey, mocks::application::Mailbox<Sha256Digest>>>>,
-    ) {
-        runtime.clone().spawn("proposer", {
-            let runtime = runtime.clone();
-            async move {
-                let mut iter = 0;
-                loop {
-                    iter += 1;
-                    let mailbox_vec: Vec<mocks::application::Mailbox<Sha256Digest>> = {
-                        let guard = mailboxes.lock().unwrap();
-                        guard.values().cloned().collect()
-                    };
-                    for mut mailbox in mailbox_vec {
-                        let payload = Bytes::from(format!("hello world, iter {}", iter));
-                        let mut hasher = Sha256::default();
-                        hasher.update(&payload);
-                        let digest = hasher.finalize();
-                        mailbox.broadcast(digest).await;
-                    }
-                    runtime.sleep(Duration::from_millis(250)).await;
-                }
-            }
-        });
-    }
-
-    fn spawn_invalid_signature_proposer(
-        runtime: &Context,
-        mailboxes: Arc<Mutex<BTreeMap<PublicKey, mocks::application::Mailbox<Sha256Digest>>>>,
         invalid_when: fn(u64) -> bool,
     ) {
         runtime.clone().spawn("invalid signature proposer", {
@@ -403,7 +376,7 @@ mod tests {
                     Duration::from_millis(100),
                     Duration::from_secs(5),
                 );
-                spawn_proposer(&context, mailboxes.clone());
+                spawn_proposer(&context, mailboxes.clone(), |_| false);
                 await_collectors(&context, &collectors, 100, num_validators as usize).await;
             }
         });
@@ -476,7 +449,7 @@ mod tests {
                         Duration::from_millis(100),
                         Duration::from_secs(5),
                     );
-                    spawn_proposer(&context, mailboxes.clone());
+                    spawn_proposer(&context, mailboxes.clone(), |_| false);
 
                     let collector_pairs: Vec<(PublicKey, mocks::collector::Mailbox<Sha256Digest>)> =
                         collectors
@@ -538,7 +511,7 @@ mod tests {
                     Duration::from_millis(100),
                     Duration::from_secs(1),
                 );
-                spawn_proposer(&context, mailboxes.clone());
+                spawn_proposer(&context, mailboxes.clone(), |_| false);
                 // Simulate partition by removing all links.
                 link_validators(&mut oracle, &pks, Action::Unlink, None).await;
                 context.sleep(Duration::from_secs(5)).await;
@@ -598,7 +571,7 @@ mod tests {
                     Duration::from_millis(150),
                 );
 
-                spawn_proposer(&context, mailboxes.clone());
+                spawn_proposer(&context, mailboxes.clone(), |_| false);
                 await_collectors(&context, &collectors, 40, num_validators as usize).await;
             }
         });
@@ -653,7 +626,7 @@ mod tests {
                     Duration::from_secs(5),
                 );
 
-                spawn_invalid_signature_proposer(&context, mailboxes.clone(), |i| i % 10 == 0);
+                spawn_proposer(&context, mailboxes.clone(), |i| i % 10 == 0);
                 await_collectors(&context, &collectors, 100, num_validators as usize).await;
             }
         });
