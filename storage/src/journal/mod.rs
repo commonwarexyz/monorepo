@@ -35,4 +35,6 @@ pub enum Error {
     ItemPruned(u64),
     #[error("invalid item: {0}")]
     InvalidItem(u64),
+    #[error("invalid rewind: {0}")]
+    InvalidRewind(u64),
 }

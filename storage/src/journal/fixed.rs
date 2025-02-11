@@ -51,7 +51,7 @@
 use super::Error;
 use bytes::BufMut;
 use commonware_runtime::{Blob, Error as RError, Storage};
-use commonware_utils::hex;
+use commonware_utils::{hex, SizedSerialize};
 use futures::stream::{self, Stream, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use prometheus_client::registry::Registry;
@@ -90,6 +90,8 @@ pub struct Journal<B: Blob, E: Storage<B>, const N: usize> {
 }
 
 impl<B: Blob, E: Storage<B>, const N: usize> Journal<B, E, N> {
+    const CHUNK_SIZE: usize = u32::SERIALIZED_LEN + N;
+
     /// Initialize a new `Journal` instance.
     ///
     /// All backing blobs are opened but not read during initialization. The `replay` method can be
@@ -146,14 +148,13 @@ impl<B: Blob, E: Storage<B>, const N: usize> Journal<B, E, N> {
         // shutdown.
         let newest_blob = blobs.last_key_value().unwrap().1;
         let blob_len: u64 = newest_blob.len().await?;
-        let chunk_size: usize = size_of::<u32>() + N;
-        if blob_len % chunk_size as u64 != 0 {
+        if blob_len % Self::CHUNK_SIZE as u64 != 0 {
             warn!(
                 "last blob len ({}) is not a multiple of item size, truncating",
                 blob_len
             );
             newest_blob
-                .truncate(blob_len - blob_len % chunk_size as u64)
+                .truncate(blob_len - blob_len % Self::CHUNK_SIZE as u64)
                 .await?;
             newest_blob.sync().await?;
         }
@@ -179,23 +180,21 @@ impl<B: Blob, E: Storage<B>, const N: usize> Journal<B, E, N> {
     /// Returns the total number of items in the journal, ignoring any pruning. The next value
     /// appended to the journal will be at this position.
     pub async fn size(&self) -> Result<u64, Error> {
-        let chunk_size = size_of::<u32>() + N;
         let newest_blob = self.newest_blob();
         let blob_len = newest_blob.1.len().await?;
-        assert_eq!(blob_len % chunk_size as u64, 0);
-        let items_in_blob = blob_len / chunk_size as u64;
+        assert_eq!(blob_len % Self::CHUNK_SIZE as u64, 0);
+        let items_in_blob = blob_len / Self::CHUNK_SIZE as u64;
         Ok(items_in_blob + self.cfg.items_per_blob * newest_blob.0)
     }
 
     /// Append a new item to the journal. Return the item's position in the journal, or error if the
     /// operation fails.
     pub async fn append(&mut self, item: [u8; N]) -> Result<u64, Error> {
-        let chunk_size = size_of::<u32>() + N;
         let mut newest_blob = self.newest_blob();
 
         let mut blob_len = newest_blob.1.len().await?;
-        assert_eq!(blob_len % chunk_size as u64, 0);
-        let items_in_blob = blob_len / chunk_size as u64;
+        assert_eq!(blob_len % Self::CHUNK_SIZE as u64, 0);
+        let items_in_blob = blob_len / Self::CHUNK_SIZE as u64;
 
         // if the blob is full we need to create the next one and use that instead
         if items_in_blob >= self.cfg.items_per_blob {
@@ -214,12 +213,12 @@ impl<B: Blob, E: Storage<B>, const N: usize> Journal<B, E, N> {
             blob_len = 0;
         }
 
-        let mut buf: Vec<u8> = Vec::with_capacity(chunk_size);
+        let mut buf: Vec<u8> = Vec::with_capacity(Self::CHUNK_SIZE);
         let checksum = crc32fast::hash(&item[..]);
         buf.put(&item[..]);
         buf.put_u32(checksum);
 
-        let item_position = blob_len / chunk_size as u64;
+        let item_position = blob_len / Self::CHUNK_SIZE as u64;
         newest_blob.1.write_at(&buf, blob_len).await?;
         trace!(
             blob = newest_blob.0,
@@ -229,9 +228,51 @@ impl<B: Blob, E: Storage<B>, const N: usize> Journal<B, E, N> {
         Ok(item_position + self.cfg.items_per_blob * newest_blob.0)
     }
 
+    /// Rewind the journal to the given `journal_size`.
+    ///
+    /// The journal is not synced after rewinding.
+    pub async fn rewind(&mut self, journal_size: u64) -> Result<(), Error> {
+        let size = self.size().await?;
+        match journal_size.cmp(&size) {
+            std::cmp::Ordering::Greater => return Err(Error::InvalidRewind(journal_size)),
+            std::cmp::Ordering::Equal => return Ok(()),
+            std::cmp::Ordering::Less => {}
+        }
+        let rewind_to_size = journal_size;
+        let rewind_to_blob_index = rewind_to_size / self.cfg.items_per_blob;
+        if rewind_to_blob_index < self.oldest_blob().0 {
+            return Err(Error::ItemPruned(rewind_to_size));
+        }
+
+        let mut current_blob_index = self.newest_blob().0;
+
+        // Remove blobs until we reach the rewind point.
+        while current_blob_index > rewind_to_blob_index {
+            let blob = match self.blobs.remove(&current_blob_index) {
+                Some(blob) => blob,
+                None => return Err(Error::MissingBlob(current_blob_index)),
+            };
+            blob.close().await?;
+            self.runtime
+                .remove(&self.cfg.partition, Some(&current_blob_index.to_be_bytes()))
+                .await?;
+            debug!(blob = current_blob_index, "unwound over blob");
+            self.tracked.dec();
+            current_blob_index -= 1;
+        }
+
+        // Truncate the rewind blob to the correct offset.
+        let rewind_blob = match self.blobs.get_mut(&rewind_to_blob_index) {
+            Some(blob) => blob,
+            None => return Err(Error::MissingBlob(rewind_to_blob_index)),
+        };
+        let rewind_to_offset = (rewind_to_size % self.cfg.items_per_blob) * Self::CHUNK_SIZE as u64;
+        rewind_blob.truncate(rewind_to_offset).await?;
+        Ok(())
+    }
+
     /// Read the item at the given position in the journal.
     pub async fn read(&self, item_position: u64) -> Result<[u8; N], Error> {
-        let chunk_size = size_of::<u32>() + N;
         let blob_index = item_position / self.cfg.items_per_blob;
 
         let blob = match self.blobs.get(&blob_index) {
@@ -247,8 +288,8 @@ impl<B: Blob, E: Storage<B>, const N: usize> Journal<B, E, N> {
         };
 
         let item_index = item_position % self.cfg.items_per_blob;
-        let offset = item_index * chunk_size as u64;
-        let mut buf = vec![0u8; chunk_size];
+        let offset = item_index * Self::CHUNK_SIZE as u64;
+        let mut buf = vec![0u8; Self::CHUNK_SIZE];
         blob.read_at(&mut buf, offset).await?;
 
         // Verify integrity
@@ -279,7 +320,6 @@ impl<B: Blob, E: Storage<B>, const N: usize> Journal<B, E, N> {
         &mut self,
         concurrency: usize,
     ) -> Result<impl Stream<Item = Result<(u64, [u8; N]), Error>> + '_, Error> {
-        let chunk_size = size_of::<u32>() + N;
         // Collect all blobs to replay
         let mut blobs = Vec::with_capacity(self.blobs.len());
         for (index, blob) in self.blobs.iter() {
@@ -287,7 +327,7 @@ impl<B: Blob, E: Storage<B>, const N: usize> Journal<B, E, N> {
                 if *index == (self.blobs.len() - 1) as u64 {
                     blob.len().await?
                 } else {
-                    self.cfg.items_per_blob * chunk_size as u64
+                    self.cfg.items_per_blob * Self::CHUNK_SIZE as u64
                 }
             };
             blobs.push((index, blob, blob_len));
@@ -308,12 +348,12 @@ impl<B: Blob, E: Storage<B>, const N: usize> Journal<B, E, N> {
                         // Get next item
                         let mut buf = vec![0u8; N + size_of::<u32>()];
                         let item = blob.read_at(&mut buf, offset).await.map_err(Error::Runtime);
-                        let next_offset = offset + chunk_size as u64;
+                        let next_offset = offset + Self::CHUNK_SIZE as u64;
                         match item {
                             Ok(_) => match Self::verify_integrity(&buf) {
                                 Ok(item) => Some((
                                     Ok((
-                                        items_per_blob * *index + offset / chunk_size as u64,
+                                        items_per_blob * *index + offset / Self::CHUNK_SIZE as u64,
                                         item,
                                     )),
                                     (index, blob, next_offset),
@@ -759,6 +799,128 @@ mod tests {
             let mut buffer = String::new();
             encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
             assert!(buffer.contains("tracked 2"));
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_rewinding() {
+        let (executor, context, _) = Executor::default();
+        executor.start(async move {
+            // Initialize the journal, allowing a max of 2 items per blob.
+            let cfg = Config {
+                registry: Arc::new(Mutex::new(Registry::default())),
+                partition: "test_partition".into(),
+                items_per_blob: 2,
+            };
+            let mut journal = Journal::init(context.clone(), cfg.clone())
+                .await
+                .expect("failed to initialize journal");
+            assert!(matches!(journal.rewind(0).await, Ok(())));
+            assert!(matches!(
+                journal.rewind(1).await,
+                Err(Error::InvalidRewind(1))
+            ));
+            let mut buffer = String::new();
+
+            // Append an item to the journal
+            journal
+                .append(0u64.to_be_bytes())
+                .await
+                .expect("failed to append data 0");
+            assert_eq!(journal.size().await.unwrap(), 1);
+            assert!(matches!(journal.rewind(1).await, Ok(()))); // should be no-op
+            assert!(matches!(journal.rewind(0).await, Ok(())));
+            assert_eq!(journal.size().await.unwrap(), 0);
+
+            // append 7 items
+            for i in 0u64..7 {
+                let pos = journal
+                    .append(i.to_be_bytes())
+                    .await
+                    .expect("failed to append data");
+                assert_eq!(pos, i);
+            }
+            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            assert!(buffer.contains("tracked 4"));
+            assert_eq!(journal.size().await.unwrap(), 7);
+
+            // rewind back to item #4 and ensure a blob is rewound over
+            assert!(matches!(journal.rewind(4).await, Ok(())));
+            assert_eq!(journal.size().await.unwrap(), 4);
+            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            assert!(buffer.contains("tracked 3"));
+
+            // rewind back to empty and ensure all blobs are rewound over
+            assert!(matches!(journal.rewind(0).await, Ok(())));
+            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            assert!(buffer.contains("tracked 1"));
+            assert_eq!(journal.size().await.unwrap(), 0);
+
+            // stress test: add 100 items, rewind 49, repeat x10.
+            for _ in 0..10 {
+                for i in 0u64..100 {
+                    journal
+                        .append(i.to_be_bytes())
+                        .await
+                        .expect("failed to append data");
+                }
+                journal
+                    .rewind(journal.size().await.unwrap() - 49)
+                    .await
+                    .unwrap();
+            }
+            const ITEMS_REMAINING: u64 = 10 * (100 - 49);
+            assert_eq!(journal.size().await.unwrap(), ITEMS_REMAINING);
+
+            journal.close().await.expect("Failed to close journal");
+
+            // Repeat with a different blob size (3 items per blob)
+            let cfg = Config {
+                registry: Arc::new(Mutex::new(Registry::default())),
+                partition: "test_partition_2".into(),
+                items_per_blob: 3,
+            };
+            let mut journal = Journal::init(context.clone(), cfg.clone())
+                .await
+                .expect("failed to initialize journal");
+            for _ in 0..10 {
+                for i in 0u64..100 {
+                    journal
+                        .append(i.to_be_bytes())
+                        .await
+                        .expect("failed to append data");
+                }
+                journal
+                    .rewind(journal.size().await.unwrap() - 49)
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(journal.size().await.unwrap(), ITEMS_REMAINING);
+
+            journal.close().await.expect("Failed to close journal");
+
+            // Make sure re-opened journal is as expected
+            let mut journal: Journal<_, _, 4> = Journal::init(context.clone(), cfg.clone())
+                .await
+                .expect("failed to re-initialize journal");
+            assert_eq!(journal.size().await.unwrap(), 10 * (100 - 49));
+
+            // Make sure rewinding works after pruning
+            journal.prune(300).await.expect("failed to prune journal");
+            assert_eq!(journal.size().await.unwrap(), ITEMS_REMAINING);
+            assert!(matches!(
+                journal.rewind(299).await,
+                Err(Error::ItemPruned(299))
+            ));
+            assert!(matches!(journal.rewind(301).await, Ok(())));
+            assert_eq!(journal.size().await.unwrap(), 301);
+            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            assert!(buffer.contains("tracked 1"));
+            assert!(matches!(journal.rewind(300).await, Ok(())));
+            assert!(matches!(
+                journal.rewind(299).await,
+                Err(Error::ItemPruned(299))
+            ));
         });
     }
 }
