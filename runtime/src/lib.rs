@@ -11,18 +11,6 @@
 //! `commonware-runtime` is **ALPHA** software and is not yet recommended for production use. Developers should
 //! expect breaking changes and occasional instability.
 
-pub mod deterministic;
-pub mod mocks;
-pub mod tokio;
-
-mod utils;
-pub use utils::{reschedule, Handle, Signal, Signaler};
-
-use std::{
-    future::Future,
-    net::SocketAddr,
-    time::{Duration, SystemTime},
-};
 use thiserror::Error;
 
 #[derive(Error, Debug, PartialEq)]
@@ -67,171 +55,188 @@ pub enum Error {
     OffsetOverflow,
 }
 
-/// Interface that any task scheduler must implement to start
-/// running tasks.
-pub trait Runner {
-    /// Start running a root task.
-    fn start<F>(self, f: F) -> F::Output
-    where
-        F: Future + Send + 'static,
-        F::Output: Send + 'static;
-}
+cfg_if::cfg_if! {
+    if #[cfg(not(target_arch = "wasm32"))] {
+        use std::{
+            future::Future,
+            net::SocketAddr,
+            time::{Duration, SystemTime},
+        };
 
-/// Interface that any task scheduler must implement to spawn
-/// sub-tasks in a given root task.
-pub trait Spawner: Clone + Send + Sync + 'static {
-    /// Enqueues a task to be executed.
-    ///
-    /// Label can be used to track how many instances of a specific type of
-    /// task have been spawned or are running concurrently (and is appended to all
-    /// metrics). Label is automatically appended to the parent task labels (i.e. spawning
-    /// "fun" from "have" will be labeled "have_fun").
-    ///
-    /// Unlike a future, a spawned task will start executing immediately (even if the caller
-    /// does not await the handle).
-    fn spawn<F, T>(&self, label: &str, f: F) -> Handle<T>
-    where
-        F: Future<Output = T> + Send + 'static,
-        T: Send + 'static;
+        pub mod tokio;
+        pub mod deterministic;
+        pub mod mocks;
 
-    /// Signals the runtime to stop execution and that all outstanding tasks
-    /// should perform any required cleanup and exit. This method is idempotent and
-    /// can be called multiple times.
-    ///
-    /// This method does not actually kill any tasks but rather signals to them, using
-    /// the `Signal` returned by `stopped`, that they should exit.
-    fn stop(&self, value: i32);
+        mod utils;
+        pub use utils::{reschedule, Handle, Signal, Signaler};
 
-    /// Returns an instance of a `Signal` that resolves when `stop` is called by
-    /// any task.
-    ///
-    /// If `stop` has already been called, the returned `Signal` will resolve immediately.
-    fn stopped(&self) -> Signal;
-}
+        /// Interface that any task scheduler must implement to start
+        /// running tasks.
+        pub trait Runner {
+            /// Start running a root task.
+            fn start<F>(self, f: F) -> F::Output
+            where
+                F: Future + Send + 'static,
+                F::Output: Send + 'static;
+        }
 
-/// Interface that any task scheduler must implement to provide
-/// time-based operations.
-///
-/// It is necessary to mock time to provide deterministic execution
-/// of arbitrary tasks.
-pub trait Clock: Clone + Send + Sync + 'static {
-    /// Returns the current time.
-    fn current(&self) -> SystemTime;
+        /// Interface that any task scheduler must implement to spawn
+        /// sub-tasks in a given root task.
+        pub trait Spawner: Clone + Send + Sync + 'static {
+            /// Enqueues a task to be executed.
+            ///
+            /// Label can be used to track how many instances of a specific type of
+            /// task have been spawned or are running concurrently (and is appended to all
+            /// metrics). Label is automatically appended to the parent task labels (i.e. spawning
+            /// "fun" from "have" will be labeled "have_fun").
+            ///
+            /// Unlike a future, a spawned task will start executing immediately (even if the caller
+            /// does not await the handle).
+            fn spawn<F, T>(&self, label: &str, f: F) -> Handle<T>
+            where
+                F: Future<Output = T> + Send + 'static,
+                T: Send + 'static;
 
-    /// Sleep for the given duration.
-    fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static;
+            /// Signals the runtime to stop execution and that all outstanding tasks
+            /// should perform any required cleanup and exit. This method is idempotent and
+            /// can be called multiple times.
+            ///
+            /// This method does not actually kill any tasks but rather signals to them, using
+            /// the `Signal` returned by `stopped`, that they should exit.
+            fn stop(&self, value: i32);
 
-    /// Sleep until the given deadline.
-    fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static;
-}
+            /// Returns an instance of a `Signal` that resolves when `stop` is called by
+            /// any task.
+            ///
+            /// If `stop` has already been called, the returned `Signal` will resolve immediately.
+            fn stopped(&self) -> Signal;
+        }
 
-/// Interface that any runtime must implement to create
-/// network connections.
-pub trait Network<L, Si, St>: Clone + Send + Sync + 'static
-where
-    L: Listener<Si, St>,
-    Si: Sink,
-    St: Stream,
-{
-    /// Bind to the given socket address.
-    fn bind(&self, socket: SocketAddr) -> impl Future<Output = Result<L, Error>> + Send;
+        /// Interface that any task scheduler must implement to provide
+        /// time-based operations.
+        ///
+        /// It is necessary to mock time to provide deterministic execution
+        /// of arbitrary tasks.
+        pub trait Clock: Clone + Send + Sync + 'static {
+            /// Returns the current time.
+            fn current(&self) -> SystemTime;
 
-    /// Dial the given socket address.
-    fn dial(&self, socket: SocketAddr) -> impl Future<Output = Result<(Si, St), Error>> + Send;
-}
+            /// Sleep for the given duration.
+            fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static;
 
-/// Interface that any runtime must implement to handle
-/// incoming network connections.
-pub trait Listener<Si, St>: Sync + Send + 'static
-where
-    Si: Sink,
-    St: Stream,
-{
-    /// Accept an incoming connection.
-    fn accept(&mut self) -> impl Future<Output = Result<(SocketAddr, Si, St), Error>> + Send;
-}
+            /// Sleep until the given deadline.
+            fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static;
+        }
 
-/// Interface that any runtime must implement to send
-/// messages over a network connection.
-pub trait Sink: Sync + Send + 'static {
-    /// Send a message to the sink.
-    fn send(&mut self, msg: &[u8]) -> impl Future<Output = Result<(), Error>> + Send;
-}
+        /// Interface that any runtime must implement to create
+        /// network connections.
+        pub trait Network<L, Si, St>: Clone + Send + Sync + 'static
+        where
+            L: Listener<Si, St>,
+            Si: Sink,
+            St: Stream,
+        {
+            /// Bind to the given socket address.
+            fn bind(&self, socket: SocketAddr) -> impl Future<Output = Result<L, Error>> + Send;
 
-/// Interface that any runtime must implement to receive
-/// messages over a network connection.
-pub trait Stream: Sync + Send + 'static {
-    /// Receive a message from the stream, storing it in the given buffer.
-    /// Reads exactly the number of bytes that fit in the buffer.
-    fn recv(&mut self, buf: &mut [u8]) -> impl Future<Output = Result<(), Error>> + Send;
-}
+            /// Dial the given socket address.
+            fn dial(&self, socket: SocketAddr) -> impl Future<Output = Result<(Si, St), Error>> + Send;
+        }
 
-/// Interface to interact with storage.
-///
-///
-/// To support storage implementations that enable concurrent reads and
-/// writes, blobs are responsible for maintaining synchronization.
-///
-/// Storage can be backed by a local filesystem, cloud storage, etc.
-pub trait Storage<B>: Clone + Send + Sync + 'static
-where
-    B: Blob,
-{
-    /// Open an existing blob in a given partition or create a new one.
-    ///
-    /// Multiple instances of the same blob can be opened concurrently, however,
-    /// writing to the same blob concurrently may lead to undefined behavior.
-    fn open(&self, partition: &str, name: &[u8]) -> impl Future<Output = Result<B, Error>> + Send;
+        /// Interface that any runtime must implement to handle
+        /// incoming network connections.
+        pub trait Listener<Si, St>: Sync + Send + 'static
+        where
+            Si: Sink,
+            St: Stream,
+        {
+            /// Accept an incoming connection.
+            fn accept(&mut self) -> impl Future<Output = Result<(SocketAddr, Si, St), Error>> + Send;
+        }
 
-    /// Remove a blob from a given partition.
-    ///
-    /// If no `name` is provided, the entire partition is removed.
-    fn remove(
-        &self,
-        partition: &str,
-        name: Option<&[u8]>,
-    ) -> impl Future<Output = Result<(), Error>> + Send;
+        /// Interface that any runtime must implement to send
+        /// messages over a network connection.
+        pub trait Sink: Sync + Send + 'static {
+            /// Send a message to the sink.
+            fn send(&mut self, msg: &[u8]) -> impl Future<Output = Result<(), Error>> + Send;
+        }
 
-    /// Return all blobs in a given partition.
-    fn scan(&self, partition: &str) -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send;
-}
+        /// Interface that any runtime must implement to receive
+        /// messages over a network connection.
+        pub trait Stream: Sync + Send + 'static {
+            /// Receive a message from the stream, storing it in the given buffer.
+            /// Reads exactly the number of bytes that fit in the buffer.
+            fn recv(&mut self, buf: &mut [u8]) -> impl Future<Output = Result<(), Error>> + Send;
+        }
 
-/// Interface to read and write to a blob.
-///
-/// To support blob implementations that enable concurrent reads and
-/// writes, blobs are responsible for maintaining synchronization.
-///
-/// Cloning a blob is similar to wrapping a single file descriptor in
-/// a lock whereas opening a new blob (of the same name) is similar to
-/// opening a new file descriptor. If multiple blobs are opened with the same
-/// name, they are not expected to coordinate access to underlying storage
-/// and writing to both is undefined behavior.
-#[allow(clippy::len_without_is_empty)]
-pub trait Blob: Clone + Send + Sync + 'static {
-    /// Get the length of the blob.
-    fn len(&self) -> impl Future<Output = Result<u64, Error>> + Send;
+        /// Interface to interact with storage.
+        ///
+        ///
+        /// To support storage implementations that enable concurrent reads and
+        /// writes, blobs are responsible for maintaining synchronization.
+        ///
+        /// Storage can be backed by a local filesystem, cloud storage, etc.
+        pub trait Storage<B>: Clone + Send + Sync + 'static
+        where
+            B: Blob,
+        {
+            /// Open an existing blob in a given partition or create a new one.
+            ///
+            /// Multiple instances of the same blob can be opened concurrently, however,
+            /// writing to the same blob concurrently may lead to undefined behavior.
+            fn open(&self, partition: &str, name: &[u8]) -> impl Future<Output = Result<B, Error>> + Send;
 
-    /// Read from the blob at the given offset.
-    ///
-    /// `read_at` does not return the number of bytes read because it
-    /// only returns once the entire buffer has been filled.
-    fn read_at(
-        &self,
-        buf: &mut [u8],
-        offset: u64,
-    ) -> impl Future<Output = Result<(), Error>> + Send;
+            /// Remove a blob from a given partition.
+            ///
+            /// If no `name` is provided, the entire partition is removed.
+            fn remove(
+                &self,
+                partition: &str,
+                name: Option<&[u8]>,
+            ) -> impl Future<Output = Result<(), Error>> + Send;
 
-    /// Write to the blob at the given offset.
-    fn write_at(&self, buf: &[u8], offset: u64) -> impl Future<Output = Result<(), Error>> + Send;
+            /// Return all blobs in a given partition.
+            fn scan(&self, partition: &str) -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send;
+        }
 
-    /// Truncate the blob to the given length.
-    fn truncate(&self, len: u64) -> impl Future<Output = Result<(), Error>> + Send;
+        /// Interface to read and write to a blob.
+        ///
+        /// To support blob implementations that enable concurrent reads and
+        /// writes, blobs are responsible for maintaining synchronization.
+        ///
+        /// Cloning a blob is similar to wrapping a single file descriptor in
+        /// a lock whereas opening a new blob (of the same name) is similar to
+        /// opening a new file descriptor. If multiple blobs are opened with the same
+        /// name, they are not expected to coordinate access to underlying storage
+        /// and writing to both is undefined behavior.
+        #[allow(clippy::len_without_is_empty)]
+        pub trait Blob: Clone + Send + Sync + 'static {
+            /// Get the length of the blob.
+            fn len(&self) -> impl Future<Output = Result<u64, Error>> + Send;
 
-    /// Ensure all pending data is durably persisted.
-    fn sync(&self) -> impl Future<Output = Result<(), Error>> + Send;
+            /// Read from the blob at the given offset.
+            ///
+            /// `read_at` does not return the number of bytes read because it
+            /// only returns once the entire buffer has been filled.
+            fn read_at(
+                &self,
+                buf: &mut [u8],
+                offset: u64,
+            ) -> impl Future<Output = Result<(), Error>> + Send;
 
-    /// Close the blob.
-    fn close(self) -> impl Future<Output = Result<(), Error>> + Send;
+            /// Write to the blob at the given offset.
+            fn write_at(&self, buf: &[u8], offset: u64) -> impl Future<Output = Result<(), Error>> + Send;
+
+            /// Truncate the blob to the given length.
+            fn truncate(&self, len: u64) -> impl Future<Output = Result<(), Error>> + Send;
+
+            /// Ensure all pending data is durably persisted.
+            fn sync(&self) -> impl Future<Output = Result<(), Error>> + Send;
+
+            /// Close the blob.
+            fn close(self) -> impl Future<Output = Result<(), Error>> + Send;
+        }
+    }
 }
 
 #[cfg(test)]

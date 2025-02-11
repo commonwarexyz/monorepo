@@ -6,12 +6,12 @@
 //! expect breaking changes and occasional instability.
 
 pub mod bmt;
+pub mod journal;
 pub mod mmr;
 
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
         pub mod archive;
-        pub mod journal;
         pub mod metadata;
     }
 }

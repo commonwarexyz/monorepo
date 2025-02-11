@@ -531,6 +531,7 @@ name = "commonware-runtime"
 version = "0.0.16"
 dependencies = [
  "bytes",
+ "cfg-if",
  "commonware-macros",
  "commonware-utils",
  "futures",

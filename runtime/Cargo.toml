@@ -11,13 +11,16 @@ repository = "https://github.com/commonwarexyz/monorepo/tree/main/runtime"
 documentation = "https://docs.rs/commonware-runtime"
 
 [dependencies]
+thiserror = { workspace = true }
+cfg-if = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 commonware-macros = { workspace = true }
 commonware-utils = { workspace = true }
 futures = { workspace = true }
 rand = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
-thiserror = { workspace = true }
 bytes = { workspace = true }
 sha2 = { workspace = true }
 governor = { workspace = true }
@@ -28,3 +31,4 @@ tracing-subscriber = { workspace = true }
 
 [lib]
 bench = false
+crate-type = ["rlib", "cdylib"]

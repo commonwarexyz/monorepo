@@ -5,9 +5,6 @@
 //! to serve as a backing store for some in-memory data structure, or as a building block for a more
 //! complex construction that prescribes some meaning to items in the log.
 
-pub mod fixed;
-pub mod variable;
-
 use thiserror::Error;
 
 /// Errors that can occur when interacting with `Journal`.
@@ -37,4 +34,11 @@ pub enum Error {
     InvalidItem(u64),
     #[error("invalid rewind: {0}")]
     InvalidRewind(u64),
+}
+
+cfg_if::cfg_if! {
+    if #[cfg(not(target_arch = "wasm32"))] {
+        pub mod fixed;
+        pub mod variable;
+    }
 }

@@ -63,13 +63,12 @@
 //! )
 //! ```
 
+use thiserror::Error;
+
 mod hasher;
 mod iterator;
-pub mod journaled;
 pub mod mem;
 pub mod verification;
-
-use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -77,4 +76,10 @@ pub enum Error {
     ElementPruned,
     #[error("journal error: {0}")]
     JournalError(#[from] crate::journal::Error),
+}
+
+cfg_if::cfg_if! {
+    if #[cfg(not(target_arch = "wasm32"))] {
+        pub mod journaled;
+    }
 }
