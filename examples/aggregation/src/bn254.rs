@@ -2,9 +2,7 @@ use ark_bn254::{Fr as Scalar, G1Affine, G1Projective, G2Affine, G2Projective};
 use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup, PrimeGroup};
 use ark_ff::{AdditiveGroup, UniformRand};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use commonware_cryptography::{
-    Array, Error, Hasher as _, PrivateKey, PublicKey, Scheme, Sha256, Signature,
-};
+use commonware_cryptography::{Array, Error, Hasher as _, Scheme, Sha256};
 use commonware_utils::{hex, union_unique, SizedSerialize};
 use eigen_crypto_bn254::utils::map_to_curve;
 use rand::{CryptoRng, Rng};
@@ -389,62 +387,125 @@ impl Display for Signature {
     }
 }
 
-impl Bn254 {
-    pub fn public_g1(&self) -> Vec<u8> {
-        let pk = G1Projective::generator() * self.private;
+// TODO: cleanup handling of G1 vs G2 public keys (+ unify with signature)
+#[derive(Clone, Eq, PartialEq)]
+pub struct G1PublicKey {
+    raw: [u8; G1_LENGTH],
+    key: G1Affine,
+}
+
+impl Array for G1PublicKey {}
+
+impl SizedSerialize for G1PublicKey {
+    const SERIALIZED_LEN: usize = G1_LENGTH;
+}
+
+impl Hash for G1PublicKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.raw.hash(state);
+    }
+}
+
+impl Ord for G1PublicKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.raw.cmp(&other.raw)
+    }
+}
+
+impl PartialOrd for G1PublicKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl AsRef<[u8]> for G1PublicKey {
+    fn as_ref(&self) -> &[u8] {
+        &self.raw
+    }
+}
+
+impl Deref for G1PublicKey {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.raw
+    }
+}
+
+impl From<G1Affine> for G1PublicKey {
+    fn from(key: G1Affine) -> Self {
         let mut raw = [0u8; G1_LENGTH];
-        pk.into_affine().serialize_compressed(&mut raw[..]).unwrap();
-        bytes.into()
+        key.serialize_compressed(&mut raw[..]).unwrap();
+        Self { raw, key }
+    }
+}
+
+impl TryFrom<&[u8]> for G1PublicKey {
+    type Error = Error;
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        let raw: [u8; G1_LENGTH] = value
+            .try_into()
+            .map_err(|_| Error::InvalidPublicKeyLength)?;
+        let key = G1Affine::deserialize_compressed(value).map_err(|_| Error::InvalidPublicKey)?;
+        if !key.is_in_correct_subgroup_assuming_on_curve() || !key.is_on_curve() || key.is_zero() {
+            return Err(Error::InvalidPublicKey);
+        }
+        Ok(Self { raw, key })
+    }
+}
+
+impl TryFrom<&Vec<u8>> for G1PublicKey {
+    type Error = Error;
+    fn try_from(value: &Vec<u8>) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_slice())
+    }
+}
+
+impl TryFrom<Vec<u8>> for G1PublicKey {
+    type Error = Error;
+    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_slice())
+    }
+}
+
+impl Debug for G1PublicKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", hex(&self.raw))
+    }
+}
+
+impl Display for G1PublicKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", hex(&self.raw))
+    }
+}
+
+impl Bn254 {
+    pub fn public_g1(&self) -> G1PublicKey {
+        let pk = G1Projective::generator() * self.private;
+        G1PublicKey::from(pk.into_affine())
     }
 }
 
 pub fn get_points(
-    g1: &[PublicKey],
+    g1: &[G1PublicKey],
     g2: &[PublicKey],
     signatures: &[Signature],
 ) -> Option<(G1Affine, G2Affine, G1Affine)> {
     let mut agg_public_g1 = G1Projective::ZERO;
     for public in g1 {
-        let Ok(public) = G1Affine::deserialize_compressed(public.as_ref()) else {
-            return None;
-        };
-        if !public.is_in_correct_subgroup_assuming_on_curve()
-            || !public.is_on_curve()
-            || public.is_zero()
-        {
-            return None;
-        }
-        agg_public_g1 += public.into_group();
+        agg_public_g1 += public.key.into_group();
     }
     let agg_public_g1 = agg_public_g1.into_affine();
 
     let mut agg_public_g2 = G2Projective::ZERO;
     for public in g2 {
-        let Ok(public) = G2Affine::deserialize_compressed(public.as_ref()) else {
-            return None;
-        };
-        if !public.is_in_correct_subgroup_assuming_on_curve()
-            || !public.is_on_curve()
-            || public.is_zero()
-        {
-            return None;
-        }
-        agg_public_g2 += public.into_group();
+        agg_public_g2 += public.key.into_group();
     }
     let agg_public_g2 = agg_public_g2.into_affine();
 
     let mut agg_signature = G1Projective::ZERO;
     for signature in signatures {
-        let Ok(signature) = G1Affine::deserialize_compressed(signature.as_ref()) else {
-            return None;
-        };
-        if !signature.is_in_correct_subgroup_assuming_on_curve()
-            || !signature.is_on_curve()
-            || signature.is_zero()
-        {
-            return None;
-        }
-        agg_signature += signature.into_group();
+        agg_signature += signature.sig.into_group();
     }
     let agg_signature = agg_signature.into_affine();
     Some((agg_public_g1, agg_public_g2, agg_signature))
@@ -453,16 +514,7 @@ pub fn get_points(
 pub fn aggregate_signatures(signatures: &[Signature]) -> Option<Signature> {
     let mut agg_signature = G1Projective::ZERO;
     for signature in signatures {
-        let Ok(signature) = G1Affine::deserialize_compressed(signature.as_ref()) else {
-            return None;
-        };
-        if !signature.is_in_correct_subgroup_assuming_on_curve()
-            || !signature.is_on_curve()
-            || signature.is_zero()
-        {
-            return None;
-        }
-        agg_signature += signature.into_group();
+        agg_signature += signature.sig.into_group();
     }
     Some(Signature::from(agg_signature.into_affine()))
 }

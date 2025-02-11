@@ -1,4 +1,5 @@
-use commonware_cryptography::{Hasher, PublicKey, Scheme, Sha256};
+use crate::bn254::{G1PublicKey, PublicKey, Signature};
+use commonware_cryptography::{Hasher, Scheme, Sha256};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Sender};
 use commonware_runtime::Clock;
@@ -22,7 +23,7 @@ pub struct Orchestrator<E: Clock> {
     aggregation_frequency: Duration,
 
     contributors: Vec<PublicKey>,
-    g1_map: HashMap<PublicKey, PublicKey>, // g2 (PublicKey) -> g1 (PublicKey)
+    g1_map: HashMap<PublicKey, G1PublicKey>, // g2 (PublicKey) -> g1 (PublicKey)
     ordered_contributors: HashMap<PublicKey, usize>,
     t: usize,
 }
@@ -32,7 +33,7 @@ impl<E: Clock> Orchestrator<E> {
         runtime: E,
         aggregation_frequency: Duration,
         mut contributors: Vec<PublicKey>,
-        g1_map: HashMap<PublicKey, PublicKey>,
+        g1_map: HashMap<PublicKey, G1PublicKey>,
         t: usize,
     ) -> Self {
         contributors.sort();
@@ -50,7 +51,11 @@ impl<E: Clock> Orchestrator<E> {
         }
     }
 
-    pub async fn run(self, mut sender: impl Sender, mut receiver: impl Receiver) {
+    pub async fn run(
+        self,
+        mut sender: impl Sender,
+        mut receiver: impl Receiver<PublicKey = PublicKey>,
+    ) {
         let mut hasher = Sha256::new();
         let mut signatures = HashMap::new();
         loop {
@@ -104,11 +109,16 @@ impl<E: Clock> Orchestrator<E> {
                             continue;
                         }
 
-                        // Verify signature
+                        // Extract signature
                         let signature = match msg.payload {
                             Some(wire::aggregation::Payload::Signature(signature)) => signature.signature,
                             _ => continue,
                         };
+                        let Ok(signature) = Signature::try_from(signature) else {
+                            continue;
+                        };
+
+                        // Verify signature
                         let payload = msg.round.to_be_bytes();
                         hasher.update(&payload);
                         let payload = hasher.finalize();
