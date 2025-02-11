@@ -64,7 +64,7 @@ impl<E: Clock> Orchestrator<E> {
             let current = current.duration_since(UNIX_EPOCH).unwrap().as_secs();
             hasher.update(&current.to_be_bytes());
             let payload = hasher.finalize();
-            info!(round = current, msg = hex(&payload), "generated message",);
+            info!(round = current, msg = hex(&payload), "generated message");
 
             // Broadcast payload
             let message = wire::Aggregation {
@@ -137,7 +137,6 @@ impl<E: Clock> Orchestrator<E> {
                         // Aggregate signatures
                         let mut participating = Vec::new();
                         let mut participating_g1 = Vec::new();
-                        let mut pretty_participating = Vec::new();
                         let mut signatures = Vec::new();
                         for i in 0..self.contributors.len() {
                             let Some(signature) = round.get(&i) else {
@@ -146,7 +145,6 @@ impl<E: Clock> Orchestrator<E> {
                             let contributor = &self.contributors[i];
                             participating_g1.push(self.g1_map[contributor].clone());
                             participating.push(contributor.clone());
-                            pretty_participating.push(hex(contributor));
                             signatures.push(signature.clone());
                         }
                         let agg_signature = bn254::aggregate_signatures(&signatures).unwrap();
@@ -164,8 +162,8 @@ impl<E: Clock> Orchestrator<E> {
                         info!(
                             round = msg.round,
                             msg = hex(&payload),
-                            participants = ?pretty_participating,
-                            signature = hex(&agg_signature),
+                            ?participating,
+                            signature = ?agg_signature,
                             apk_x = ?apk.X,
                             apk_y = ?apk.Y,
                             apk_g2_x = ?apk_g2.X,

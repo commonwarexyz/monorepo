@@ -98,7 +98,6 @@ impl Contributor {
 
                 // Aggregate signatures
                 let mut participating = Vec::new();
-                let mut pretty_participating = Vec::new();
                 let mut sigs = Vec::new();
                 for i in 0..self.contributors.len() {
                     let Some(signature) = signatures.get(&i) else {
@@ -106,7 +105,6 @@ impl Contributor {
                     };
                     let contributor = &self.contributors[i];
                     participating.push(contributor.clone());
-                    pretty_participating.push(hex(contributor));
                     sigs.push(signature.clone());
                 }
                 let agg_signature = bn254::aggregate_signatures(&sigs).unwrap();
@@ -118,8 +116,8 @@ impl Contributor {
                 info!(
                     round,
                     msg = hex(&payload),
-                    participants = ?pretty_participating,
-                    signature = hex(&agg_signature),
+                    ?participating,
+                    signature = ?agg_signature,
                     "aggregated signatures",
                 );
                 continue;
