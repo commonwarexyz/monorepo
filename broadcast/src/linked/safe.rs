@@ -1,5 +1,4 @@
 use super::{wire, Epoch};
-use bytes::Bytes;
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{Element, Signature as ThresholdSignature},
@@ -21,9 +20,9 @@ impl<D: Array, P: Array> Chunk<D, P> {
     /// Returns a `Chunk` from a `wire::Chunk`.
     pub fn from_wire(chunk: wire::Chunk) -> Result<Self, Error> {
         Ok(Self {
-            sequencer: P::try_from(chunk.sequencer).map_err(|_| Error::InvalidPublicKey)?,
+            sequencer: P::try_from(chunk.sequencer).map_err(Error::Cryptography)?,
             height: chunk.height,
-            payload: D::try_from(chunk.payload).map_err(|_| Error::InvalidDigest)?,
+            payload: D::try_from(chunk.payload).map_err(Error::Cryptography)?,
         })
     }
 
@@ -49,7 +48,7 @@ impl<D: Array> Parent<D> {
     /// Returns a `Parent` from a `wire::Parent`.
     pub fn from_wire(parent: wire::Parent) -> Result<Self, Error> {
         Ok(Self {
-            payload: D::try_from(parent.payload).map_err(|_| Error::InvalidDigest)?,
+            payload: D::try_from(parent.payload).map_err(Error::Cryptography)?,
             epoch: parent.epoch,
             threshold: ThresholdSignature::deserialize(&parent.threshold)
                 .ok_or(Error::InvalidThreshold)?,
@@ -86,8 +85,7 @@ impl<C: Scheme, D: Array> Link<C, D> {
         } else if chunk.height > 0 && parent.is_none() {
             return Err(Error::ParentMissing);
         }
-        let signature =
-            C::Signature::try_from(link.signature).map_err(|_| Error::InvalidSignature)?;
+        let signature = C::Signature::try_from(link.signature).map_err(Error::Cryptography)?;
         Ok(Self {
             chunk,
             signature,
@@ -96,21 +94,13 @@ impl<C: Scheme, D: Array> Link<C, D> {
     }
 
     /// Encode a `Link` to bytes.
-    pub fn encode(&self) -> Result<Bytes, Error> {
-        let link = wire::Link {
-            chunk: Some(Chunk::to_wire(&self.chunk)),
+    pub fn encode(&self) -> Vec<u8> {
+        wire::Link {
+            chunk: Some(self.chunk.to_wire()),
             signature: self.signature.to_vec(),
-            parent: self.parent.as_ref().map(|parent| wire::Parent {
-                payload: parent.payload.to_vec(),
-                epoch: parent.epoch,
-                threshold: parent.threshold.serialize(),
-            }),
-        };
-
-        let mut buf = Vec::new();
-        link.encode(&mut buf)?;
-
-        Ok(buf.into())
+            parent: self.parent.as_ref().map(|parent| parent.to_wire()),
+        }
+        .encode_to_vec()
     }
 }
 
@@ -137,15 +127,13 @@ impl<D: Array, P: Array> Ack<D, P> {
     }
 
     /// Encode an `Ack` to bytes.
-    pub fn encode(&self) -> Result<Bytes, Error> {
-        let ack = wire::Ack {
+    pub fn encode(&self) -> Vec<u8> {
+        wire::Ack {
             chunk: Some(Chunk::to_wire(&self.chunk)),
             epoch: self.epoch,
             partial: self.partial.serialize(),
-        };
-        let mut buf = Vec::new();
-        ack.encode(&mut buf).map_err(Error::Encode)?;
-        Ok(buf.into())
+        }
+        .encode_to_vec()
     }
 }
 
@@ -162,14 +150,10 @@ pub enum Error {
     ParentMissing,
     #[error("Parent on genesis chunk")]
     ParentOnGenesis,
-    #[error("Invalid public key")]
-    InvalidPublicKey,
-    #[error("Invalid digest")]
-    InvalidDigest,
     #[error("Invalid partial")]
     InvalidPartial,
     #[error("Invalid threshold")]
     InvalidThreshold,
-    #[error("Invalid signature")]
-    InvalidSignature,
+    #[error("Cryptographic error: {0}")]
+    Cryptography(#[from] commonware_cryptography::Error),
 }

@@ -465,11 +465,7 @@ impl<
             partial,
         };
         ack_sender
-            .send(
-                Recipients::Some(recipients),
-                ack.encode().map_err(Error::CannotEncode)?,
-                false,
-            )
+            .send(Recipients::Some(recipients), ack.encode().into(), false)
             .await
             .map_err(|_| Error::UnableToSendMessage)?;
 
@@ -696,7 +692,7 @@ impl<
         link_sender
             .send(
                 Recipients::Some(signers.clone()),
-                link.encode().map_err(Error::CannotEncode)?,
+                link.encode().into(),
                 false,
             )
             .await
@@ -735,7 +731,7 @@ impl<
             Some(&self.chunk_namespace),
             &serializer::chunk(&link.chunk),
             sender,
-            &link.signature.clone(),
+            &link.signature,
         ) {
             return Err(Error::InvalidLinkSignature);
         }
@@ -958,14 +954,10 @@ impl<
     /// The journal must already be open and replayed.
     async fn journal_append(&mut self, link: &safe::Link<C, D>) {
         let section = self.get_journal_section(link.chunk.height);
-        let data = link
-            .encode()
-            .map_err(Error::CannotEncode)
-            .expect("unable to encode link");
         self.journals
             .get_mut(&link.chunk.sequencer)
             .expect("journal does not exist")
-            .append(section, data)
+            .append(section, link.encode().into())
             .await
             .expect("unable to append to journal");
     }
@@ -1039,8 +1031,6 @@ enum Error {
     GenesisChunkMustNotHaveParent,
     #[error("Link missing parent")]
     LinkMissingParent,
-    #[error("Cannot encode")]
-    CannotEncode(#[from] safe::Error),
 
     // Epoch Errors
     #[error("Unknown identity at epoch {0}")]
