@@ -63,14 +63,15 @@
 //! )
 //! ```
 
+use thiserror::Error;
+
 mod hasher;
 mod iterator;
 pub mod journaled;
 pub mod mem;
 pub mod verification;
 
-use thiserror::Error;
-
+/// Errors that can occur when interacting with an MMR.
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("an element required for this operation has been pruned")]
