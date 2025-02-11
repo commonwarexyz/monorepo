@@ -657,8 +657,8 @@ mod tests {
             journal.close().await.expect("Failed to close journal");
 
             // Corrupt one of the checksums and make sure it's detected.
-            let checksum_offset = size_of::<u64>() as u64
-                + (ITEMS_PER_BLOB / 2) * (size_of::<u64>() + size_of::<u32>()) as u64;
+            let checksum_offset = Digest::SERIALIZED_LEN as u64
+                + (ITEMS_PER_BLOB / 2) * (Digest::SERIALIZED_LEN + u32::SERIALIZED_LEN) as u64;
             let blob = context
                 .open(&cfg.partition, &40u64.to_be_bytes())
                 .await
