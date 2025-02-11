@@ -1,5 +1,5 @@
-use crate::bn254::{self, Bn254};
-use commonware_cryptography::{Hasher, PublicKey, Scheme, Sha256};
+use crate::bn254::{self, Bn254, PublicKey, Signature};
+use commonware_cryptography::{Hasher, Scheme, Sha256};
 use commonware_p2p::{Receiver, Sender};
 use commonware_utils::hex;
 use prost::Message;
@@ -41,10 +41,14 @@ impl Contributor {
         }
     }
 
-    pub async fn run(mut self, mut sender: impl Sender, mut receiver: impl Receiver) {
+    pub async fn run(
+        mut self,
+        mut sender: impl Sender,
+        mut receiver: impl Receiver<PublicKey = PublicKey>,
+    ) {
         let mut hasher = Sha256::new();
         let mut signed = HashSet::new();
-        let mut signatures: HashMap<u64, HashMap<usize, PublicKey>> = HashMap::new();
+        let mut signatures: HashMap<u64, HashMap<usize, Signature>> = HashMap::new();
         while let Ok((s, message)) = receiver.recv().await {
             // Parse message
             let Ok(message) = wire::Aggregation::decode(message) else {
@@ -67,11 +71,16 @@ impl Contributor {
                     continue;
                 }
 
-                // Extract message
+                // Extract signature
                 let signature = match message.payload {
                     Some(wire::aggregation::Payload::Signature(signature)) => signature.signature,
                     _ => continue,
                 };
+                let Ok(signature) = Signature::try_from(signature) else {
+                    continue;
+                };
+
+                // Verify signature
                 let payload = round.to_be_bytes();
                 hasher.update(&payload);
                 let payload = hasher.finalize();
@@ -89,7 +98,6 @@ impl Contributor {
 
                 // Aggregate signatures
                 let mut participating = Vec::new();
-                let mut pretty_participating = Vec::new();
                 let mut sigs = Vec::new();
                 for i in 0..self.contributors.len() {
                     let Some(signature) = signatures.get(&i) else {
@@ -97,7 +105,6 @@ impl Contributor {
                     };
                     let contributor = &self.contributors[i];
                     participating.push(contributor.clone());
-                    pretty_participating.push(hex(contributor));
                     sigs.push(signature.clone());
                 }
                 let agg_signature = bn254::aggregate_signatures(&sigs).unwrap();
@@ -109,8 +116,8 @@ impl Contributor {
                 info!(
                     round,
                     msg = hex(&payload),
-                    participants = ?pretty_participating,
-                    signature = hex(&agg_signature),
+                    ?participating,
+                    signature = ?agg_signature,
                     "aggregated signatures",
                 );
                 continue;
@@ -143,7 +150,7 @@ impl Contributor {
             let message = wire::Aggregation {
                 round,
                 payload: Some(wire::aggregation::Payload::Signature(wire::Signature {
-                    signature,
+                    signature: signature.to_vec(),
                 })),
             }
             .encode_to_vec()

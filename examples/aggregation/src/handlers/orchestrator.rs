@@ -1,4 +1,5 @@
-use commonware_cryptography::{Hasher, PublicKey, Scheme, Sha256};
+use crate::bn254::{G1PublicKey, PublicKey, Signature};
+use commonware_cryptography::{Hasher, Scheme, Sha256};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Sender};
 use commonware_runtime::Clock;
@@ -22,7 +23,7 @@ pub struct Orchestrator<E: Clock> {
     aggregation_frequency: Duration,
 
     contributors: Vec<PublicKey>,
-    g1_map: HashMap<PublicKey, PublicKey>, // g2 (PublicKey) -> g1 (PublicKey)
+    g1_map: HashMap<PublicKey, G1PublicKey>, // g2 (PublicKey) -> g1 (PublicKey)
     ordered_contributors: HashMap<PublicKey, usize>,
     t: usize,
 }
@@ -32,7 +33,7 @@ impl<E: Clock> Orchestrator<E> {
         runtime: E,
         aggregation_frequency: Duration,
         mut contributors: Vec<PublicKey>,
-        g1_map: HashMap<PublicKey, PublicKey>,
+        g1_map: HashMap<PublicKey, G1PublicKey>,
         t: usize,
     ) -> Self {
         contributors.sort();
@@ -50,7 +51,11 @@ impl<E: Clock> Orchestrator<E> {
         }
     }
 
-    pub async fn run(self, mut sender: impl Sender, mut receiver: impl Receiver) {
+    pub async fn run(
+        self,
+        mut sender: impl Sender,
+        mut receiver: impl Receiver<PublicKey = PublicKey>,
+    ) {
         let mut hasher = Sha256::new();
         let mut signatures = HashMap::new();
         loop {
@@ -59,7 +64,7 @@ impl<E: Clock> Orchestrator<E> {
             let current = current.duration_since(UNIX_EPOCH).unwrap().as_secs();
             hasher.update(&current.to_be_bytes());
             let payload = hasher.finalize();
-            info!(round = current, msg = hex(&payload), "generated message",);
+            info!(round = current, msg = hex(&payload), "generated message");
 
             // Broadcast payload
             let message = wire::Aggregation {
@@ -104,11 +109,16 @@ impl<E: Clock> Orchestrator<E> {
                             continue;
                         }
 
-                        // Verify signature
+                        // Extract signature
                         let signature = match msg.payload {
                             Some(wire::aggregation::Payload::Signature(signature)) => signature.signature,
                             _ => continue,
                         };
+                        let Ok(signature) = Signature::try_from(signature) else {
+                            continue;
+                        };
+
+                        // Verify signature
                         let payload = msg.round.to_be_bytes();
                         hasher.update(&payload);
                         let payload = hasher.finalize();
@@ -127,7 +137,6 @@ impl<E: Clock> Orchestrator<E> {
                         // Aggregate signatures
                         let mut participating = Vec::new();
                         let mut participating_g1 = Vec::new();
-                        let mut pretty_participating = Vec::new();
                         let mut signatures = Vec::new();
                         for i in 0..self.contributors.len() {
                             let Some(signature) = round.get(&i) else {
@@ -136,7 +145,6 @@ impl<E: Clock> Orchestrator<E> {
                             let contributor = &self.contributors[i];
                             participating_g1.push(self.g1_map[contributor].clone());
                             participating.push(contributor.clone());
-                            pretty_participating.push(hex(contributor));
                             signatures.push(signature.clone());
                         }
                         let agg_signature = bn254::aggregate_signatures(&signatures).unwrap();
@@ -154,8 +162,8 @@ impl<E: Clock> Orchestrator<E> {
                         info!(
                             round = msg.round,
                             msg = hex(&payload),
-                            participants = ?pretty_participating,
-                            signature = hex(&agg_signature),
+                            ?participating,
+                            signature = ?agg_signature,
                             apk_x = ?apk.X,
                             apk_y = ?apk.Y,
                             apk_g2_x = ?apk_g2.X,

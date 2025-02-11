@@ -41,7 +41,7 @@ use commonware_runtime::{
     tokio::{self, Executor},
     Runner, Spawner,
 };
-use commonware_utils::{hex, quorum};
+use commonware_utils::quorum;
 use governor::Quota;
 use prometheus_client::registry::Registry;
 use std::{
@@ -114,7 +114,7 @@ fn main() {
     }
     let key = parts[0].parse::<u64>().expect("Key not well-formed");
     let signer = Bn254::from_seed(key);
-    tracing::info!(key = hex(&signer.public_key()), "loaded signer");
+    tracing::info!(key = ?signer.public_key(), "loaded signer");
 
     // Configure my port
     let port = parts[1].parse::<u16>().expect("Port not well-formed");
@@ -131,7 +131,7 @@ fn main() {
     }
     for peer in participants {
         let verifier = Bn254::from_seed(peer).public_key();
-        tracing::info!(key = hex(&verifier), "registered authorized key",);
+        tracing::info!(key = ?verifier, "registered authorized key",);
         recipients.push(verifier);
     }
 
@@ -186,7 +186,7 @@ fn main() {
             let signer = Bn254::from_seed(peer);
             let verifier = signer.public_key();
             let verifier_g1 = signer.public_g1();
-            tracing::info!(key = hex(&verifier), "registered contributor",);
+            tracing::info!(key = ?verifier, "registered contributor",);
             contributors.push(verifier.clone());
             contributors_map.insert(verifier, verifier_g1);
         }
