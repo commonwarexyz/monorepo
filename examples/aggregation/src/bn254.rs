@@ -2,11 +2,16 @@ use ark_bn254::{Fr as Scalar, G1Affine, G1Projective, G2Affine, G2Projective};
 use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup, PrimeGroup};
 use ark_ff::{AdditiveGroup, UniformRand};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use commonware_cryptography::{Hasher, PrivateKey, PublicKey, Scheme, Sha256, Signature};
-use commonware_utils::union_unique;
+use commonware_cryptography::{Array, Error, PrivateKey, PublicKey, Scheme, Sha256, Signature};
+use commonware_utils::{hex, union_unique, SizedSerialize};
 use eigen_crypto_bn254::utils::map_to_curve;
 use rand::{CryptoRng, Rng};
-use std::borrow::Cow;
+use std::{
+    borrow::Cow,
+    fmt::{Debug, Display},
+    hash::{Hash, Hasher},
+    ops::Deref,
+};
 
 const DIGEST_LENGTH: usize = 32;
 const PRIVATE_KEY_LENGTH: usize = 32;
@@ -149,6 +154,97 @@ impl Scheme for Bn254 {
 
     fn len() -> (usize, usize) {
         (PUBLIC_KEY_LENGTH, SIGNATURE_LENGTH)
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct PrivateKey {
+    raw: [u8; PRIVATE_KEY_LENGTH],
+    key: Scalar,
+}
+
+impl Array for PrivateKey {}
+
+impl SizedSerialize for PrivateKey {
+    const SERIALIZED_LEN: usize = PRIVATE_KEY_LENGTH;
+}
+
+impl Hash for PrivateKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.bytes.hash(state);
+    }
+}
+
+impl Ord for PrivateKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.bytes.cmp(&other.bytes)
+    }
+}
+
+impl PartialOrd for PrivateKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl AsRef<[u8]> for PrivateKey {
+    fn as_ref(&self) -> &[u8] {
+        &self.raw
+    }
+}
+
+impl Deref for PrivateKey {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.raw
+    }
+}
+
+impl From<Scalar> for PrivateKey {
+    fn from(key: Scalar) -> Self {
+        let mut bytes = Vec::with_capacity(PRIVATE_KEY_LENGTH);
+        let raw: [u8; PRIVATE_KEY_LENGTH] = key.serialize_compressed(&mut bytes).unwrap();
+        Self { raw, key }
+    }
+}
+
+impl TryFrom<&[u8]> for PrivateKey {
+    type Error = Error;
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        let raw: [u8; PRIVATE_KEY_LENGTH] = value
+            .try_into()
+            .map_err(|_| Error::InvalidPrivateKeyLength)?;
+        let key = Scalar::deserialize_compressed(value).ok_or(Error::InvalidPrivateKey)?;
+        if key == Scalar::ZERO {
+            return Err(Error::InvalidPrivateKey);
+        }
+        Ok(Self { raw, key })
+    }
+}
+
+impl TryFrom<&Vec<u8>> for PrivateKey {
+    type Error = Error;
+    fn try_from(value: &Vec<u8>) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_slice())
+    }
+}
+
+impl TryFrom<Vec<u8>> for PrivateKey {
+    type Error = Error;
+    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_slice())
+    }
+}
+
+impl Debug for PrivateKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", hex(&self.raw))
+    }
+}
+
+impl Display for PrivateKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", hex(&self.raw))
     }
 }
 
