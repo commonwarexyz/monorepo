@@ -11,13 +11,6 @@
 //! `commonware-runtime` is **ALPHA** software and is not yet recommended for production use. Developers should
 //! expect breaking changes and occasional instability.
 
-pub mod deterministic;
-pub mod mocks;
-pub mod tokio;
-
-mod utils;
-pub use utils::{reschedule, Handle, Signal, Signaler};
-
 use std::{
     future::Future,
     net::SocketAddr,
@@ -25,6 +18,18 @@ use std::{
 };
 use thiserror::Error;
 
+pub mod deterministic;
+pub mod mocks;
+cfg_if::cfg_if! {
+    if #[cfg(not(target_arch = "wasm32"))] {
+        pub mod tokio;
+    }
+}
+
+mod utils;
+pub use utils::{reschedule, Handle, Signal, Signaler};
+
+/// Errors that can occur when interacting with the runtime.
 #[derive(Error, Debug, PartialEq)]
 pub enum Error {
     #[error("exited")]

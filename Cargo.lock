@@ -531,9 +531,11 @@ name = "commonware-runtime"
 version = "0.0.16"
 dependencies = [
  "bytes",
+ "cfg-if",
  "commonware-macros",
  "commonware-utils",
  "futures",
+ "getrandom",
  "governor",
  "prometheus-client",
  "rand",
@@ -549,7 +551,6 @@ name = "commonware-storage"
 version = "0.0.11"
 dependencies = [
  "bytes",
- "cfg-if",
  "commonware-cryptography",
  "commonware-macros",
  "commonware-runtime",
