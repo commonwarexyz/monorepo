@@ -81,7 +81,7 @@
 //! - **`wire`**: Contains the protocol buffer-generated message definitions.
 //! - **`mocks`**: Provides mock implementations for testing.
 
-use commonware_cryptography::PublicKey;
+use commonware_cryptography::Array;
 
 mod namespace;
 mod serializer;
@@ -103,8 +103,8 @@ pub type Epoch = u64;
 /// `Context` is used as the `Context` type for the `Application` and `Collector` traits.
 /// Stores a sequencer’s public key and sequential height, defining its unique position in the broadcast chain.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub struct Context {
-    pub sequencer: PublicKey,
+pub struct Context<P: Array> {
+    pub sequencer: P,
     pub height: u64,
 }
 
@@ -116,7 +116,7 @@ mod tests {
         bls12381::dkg::ops,
         bls12381::primitives::{group::Share, poly::Poly},
         sha256::{Digest as Sha256Digest, Sha256},
-        Ed25519, Hasher, PublicKey, Scheme,
+        Ed25519, Hasher, Array, Scheme,
     };
     use commonware_macros::test_traced;
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
@@ -133,7 +133,7 @@ mod tests {
 
     type Registrations = BTreeMap<PublicKey, ((Sender, Receiver), (Sender, Receiver))>;
 
-    async fn register_validators(oracle: &mut Oracle, validators: &[PublicKey]) -> Registrations {
+    async fn register_validators<P: Array>(oracle: &mut Oracle, validators: &[P]) -> Registrations {
         let mut registrations = BTreeMap::new();
         for validator in validators.iter() {
             let (a1, a2) = oracle.register(validator.clone(), 0).await.unwrap();
@@ -150,9 +150,9 @@ mod tests {
         Unlink,
     }
 
-    async fn link_validators(
+    async fn link_validators<P: Array>(
         oracle: &mut Oracle,
-        validators: &[PublicKey],
+        validators: &[P],
         action: Action,
         restrict_to: Option<fn(usize, usize, usize) -> bool>,
     ) {
@@ -179,14 +179,14 @@ mod tests {
         }
     }
 
-    async fn initialize_simulation(
+    async fn initialize_simulation<P: Array>(
         runtime: &Context,
         num_validators: u32,
         shares_vec: &mut [Share],
     ) -> (
         Oracle,
-        Vec<(PublicKey, Ed25519, Share)>,
-        Vec<PublicKey>,
+        Vec<(P, Ed25519, Share)>,
+        Vec<P>,
         Registrations,
     ) {
         let (network, mut oracle) = Network::new(
@@ -223,14 +223,14 @@ mod tests {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn spawn_validator_engines(
+    fn spawn_validator_engines<P: Array>(
         runtime: &Context,
         identity: Poly<commonware_cryptography::bls12381::primitives::group::G1>,
-        pks: &[PublicKey],
-        validators: &[(PublicKey, Ed25519, Share)],
+        pks: &[P],
+        validators: &[(P, Ed25519, Share)],
         registrations: &mut Registrations,
-        mailboxes: &mut BTreeMap<PublicKey, mocks::application::Mailbox<Sha256Digest>>,
-        collectors: &mut BTreeMap<PublicKey, mocks::collector::Mailbox<Sha256Digest>>,
+        mailboxes: &mut BTreeMap<P, mocks::application::Mailbox<Sha256Digest>>,
+        collectors: &mut BTreeMap<P, mocks::collector::Mailbox<Sha256Digest>>,
         refresh_epoch_timeout: Duration,
         rebroadcast_timeout: Duration,
     ) {
@@ -278,9 +278,9 @@ mod tests {
         }
     }
 
-    fn spawn_proposer(
+    fn spawn_proposer<P: Array>(
         runtime: &Context,
-        mailboxes: Arc<Mutex<BTreeMap<PublicKey, mocks::application::Mailbox<Sha256Digest>>>>,
+        mailboxes: Arc<Mutex<BTreeMap<P, mocks::application::Mailbox<Sha256Digest>>>>,
         invalid_when: fn(u64) -> bool,
     ) {
         runtime.clone().spawn("invalid signature proposer", {
@@ -310,9 +310,9 @@ mod tests {
         });
     }
 
-    async fn await_collectors(
+    async fn await_collectors<P: Array>(
         runtime: &Context,
-        collectors: &BTreeMap<PublicKey, mocks::collector::Mailbox<Sha256Digest>>,
+        collectors: &BTreeMap<P, mocks::collector::Mailbox<Sha256Digest>>,
         threshold: u64,
         num_validators: usize,
     ) {

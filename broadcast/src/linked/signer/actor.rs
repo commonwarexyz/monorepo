@@ -10,7 +10,7 @@ use commonware_cryptography::{
         ops,
         poly::{self, PartialSignature},
     },
-    Digest, PublicKey, Scheme,
+    Array, Scheme,
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
@@ -45,10 +45,11 @@ pub struct Actor<
     B: Blob,
     E: Clock + Spawner + Storage<B>,
     C: Scheme,
-    D: Digest,
-    J: Fn(&PublicKey) -> String,
-    A: Application<Context = Context, Digest = D> + Clone,
-    Z: Collector<Context = Context, Digest = D>,
+    D: Array,
+    P: Array,
+    J: Fn(&P) -> String,
+    A: Application<Context = Context<P>, Digest = D> + Clone,
+    Z: Collector<Context = Context<P>, Digest = D>,
     S: ThresholdCoordinator<Index = Epoch, Share = group::Share, Identity = poly::Public>,
 > {
     ////////////////////////////////////////
@@ -132,7 +133,7 @@ pub struct Actor<
     journal_naming_fn: J,
 
     // A map of sequencer public keys to their journals.
-    journals: BTreeMap<PublicKey, Journal<B, E>>,
+    journals: BTreeMap<P, Journal<B, E>>,
 
     ////////////////////////////////////////
     // State
@@ -142,11 +143,11 @@ pub struct Actor<
     // The tip is a `Link` which is comprised of a `Chunk` and,
     // if not the genesis chunk for that sequencer,
     // a threshold signature over the parent chunk.
-    tip_manager: TipManager,
+    tip_manager: TipManager<P>,
 
     // Tracks the acknowledgements for chunks.
     // This is comprised of partial signatures or threshold signatures.
-    ack_manager: AckManager<D>,
+    ack_manager: AckManager<D, P>,
 
     // The current epoch.
     epoch: Epoch,
@@ -156,16 +157,17 @@ impl<
         B: Blob,
         E: Clock + Spawner + Storage<B>,
         C: Scheme,
-        D: Digest,
-        J: Fn(&PublicKey) -> String,
-        A: Application<Context = Context, Digest = D> + Clone,
-        Z: Collector<Context = Context, Digest = D>,
+        D: Array,
+        P: Array,
+        J: Fn(&P) -> String,
+        A: Application<Context = Context<P>, Digest = D> + Clone,
+        Z: Collector<Context = Context<P>, Digest = D>,
         S: ThresholdCoordinator<Index = Epoch, Share = group::Share, Identity = poly::Public>,
-    > Actor<B, E, C, D, J, A, Z, S>
+    > Actor<B, E, C, D, P, J, A, Z, S>
 {
     /// Creates a new actor with the given runtime and configuration.
     /// Returns the actor and a mailbox for sending messages to the actor.
-    pub fn new(runtime: E, cfg: Config<C, D, J, A, Z, S>) -> (Self, Mailbox<D>) {
+    pub fn new(runtime: E, cfg: Config<C, D, P, J, A, Z, S>) -> (Self, Mailbox<D>) {
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::new(mailbox_sender);
 
@@ -176,7 +178,7 @@ impl<
             // If the stream were empty, the `select_next_some()` function would return `None`
             // instantly, front-running all other branches in the `select!` macro.
             let dummy: VerifyFuture<D> =
-                Box::pin(async { future::pending::<(Context, D, Result<bool, Error>)>().await });
+                Box::pin(async { future::pending::<(Context<P>, D, Result<bool, Error>)>().await });
             pending_verifies.push(dummy);
         }
 
@@ -715,7 +717,7 @@ impl<
     fn validate_link(
         &mut self,
         link: &wire::Link,
-        sender: &PublicKey,
+        sender: &P,
     ) -> Result<Option<(wire::Chunk, Epoch, group::Signature)>, Error> {
         // Validate chunk
         let chunk = self.validate_chunk(link.chunk.clone(), self.epoch)?;
@@ -781,7 +783,7 @@ impl<
     fn validate_ack(
         &mut self,
         ack: wire::Ack,
-        sender: &PublicKey,
+        sender: &P,
     ) -> Result<(wire::Chunk, Epoch, PartialSignature), Error> {
         // Validate chunk
         let chunk = self.validate_chunk(ack.chunk, ack.epoch)?;
@@ -895,7 +897,7 @@ impl<
     /// Ensures the journal exists and is initialized for the given sequencer.
     /// If the journal does not exist, it is created and replayed.
     /// Else, no action is taken.
-    async fn journal_prepare(&mut self, sequencer: &PublicKey) {
+    async fn journal_prepare(&mut self, sequencer: &P) {
         // Return early if the journal already exists
         if self.journals.contains_key(sequencer) {
             return;
@@ -975,7 +977,7 @@ impl<
     }
 
     /// Syncs (ensures all data is written to disk) and prunes the journal for the given sequencer and height.
-    async fn journal_sync(&mut self, sequencer: &PublicKey, height: u64) {
+    async fn journal_sync(&mut self, sequencer: &P, height: u64) {
         let section = self.get_journal_section(height);
 
         // Get journal

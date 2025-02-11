@@ -1,5 +1,5 @@
 use crate::{linked::Context, Collector as Z, Proof};
-use commonware_cryptography::{Digest, PublicKey};
+use commonware_cryptography::Array;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
@@ -9,28 +9,28 @@ use std::{
     collections::{BTreeMap, HashMap},
 };
 
-enum Message<D: Digest> {
-    Acknowledged(Context, D, Proof),
-    GetTip(PublicKey, oneshot::Sender<Option<u64>>),
-    GetContiguousTip(PublicKey, oneshot::Sender<Option<u64>>),
-    Get(PublicKey, u64, oneshot::Sender<Option<D>>),
+enum Message<D: Array, P: Array> {
+    Acknowledged(Context<P>, D, Proof),
+    GetTip(P, oneshot::Sender<Option<u64>>),
+    GetContiguousTip(P, oneshot::Sender<Option<u64>>),
+    Get(P, u64, oneshot::Sender<Option<D>>),
 }
 
-pub struct Collector<D: Digest> {
-    mailbox: mpsc::Receiver<Message<D>>,
+pub struct Collector<D: Array, P: Array> {
+    mailbox: mpsc::Receiver<Message<D, P>>,
 
     // All known digests
-    digests: HashMap<PublicKey, BTreeMap<u64, D>>,
+    digests: HashMap<P, BTreeMap<u64, D>>,
 
     // Highest contiguous known height for each sequencer
-    contiguous: HashMap<PublicKey, u64>,
+    contiguous: HashMap<P, u64>,
 
     // Highest known height for each sequencer
-    highest: HashMap<PublicKey, u64>,
+    highest: HashMap<P, u64>,
 }
 
-impl<D: Digest> Collector<D> {
-    pub fn new() -> (Self, Mailbox<D>) {
+impl<D: Array, P: Array> Collector<D, P> {
+    pub fn new() -> (Self, Mailbox<D, P>) {
         let (sender, receiver) = mpsc::channel(1024);
         (
             Collector {
@@ -92,12 +92,12 @@ impl<D: Digest> Collector<D> {
 }
 
 #[derive(Clone)]
-pub struct Mailbox<D: Digest> {
-    sender: mpsc::Sender<Message<D>>,
+pub struct Mailbox<D: Array, P: Array> {
+    sender: mpsc::Sender<Message<D, P>>,
 }
 
-impl<D: Digest> Z for Mailbox<D> {
-    type Context = Context;
+impl<D: Array, P: Array> Z for Mailbox<D, P> {
+    type Context = Context<P>;
     type Digest = D;
     async fn acknowledged(&mut self, context: Self::Context, payload: Self::Digest, proof: Proof) {
         self.sender
@@ -107,8 +107,8 @@ impl<D: Digest> Z for Mailbox<D> {
     }
 }
 
-impl<D: Digest> Mailbox<D> {
-    pub async fn get_tip(&mut self, sequencer: PublicKey) -> Option<u64> {
+impl<D: Array, P: Array> Mailbox<D, P> {
+    pub async fn get_tip(&mut self, sequencer: P) -> Option<u64> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Message::GetTip(sequencer, sender))
@@ -117,7 +117,7 @@ impl<D: Digest> Mailbox<D> {
         receiver.await.unwrap()
     }
 
-    pub async fn get_contiguous_tip(&mut self, sequencer: PublicKey) -> Option<u64> {
+    pub async fn get_contiguous_tip(&mut self, sequencer: P) -> Option<u64> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Message::GetContiguousTip(sequencer, sender))
@@ -126,7 +126,7 @@ impl<D: Digest> Mailbox<D> {
         receiver.await.unwrap()
     }
 
-    pub async fn get(&mut self, sequencer: PublicKey, height: u64) -> Option<D> {
+    pub async fn get(&mut self, sequencer: P, height: u64) -> Option<D> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Message::Get(sequencer, height, sender))

@@ -1,7 +1,7 @@
 //! Replication of messages across a network.
 
 use bytes::Bytes;
-use commonware_cryptography::{Digest, PublicKey};
+use commonware_cryptography::Array;
 use futures::channel::oneshot;
 use std::future::Future;
 
@@ -13,7 +13,7 @@ pub type Proof = Bytes;
 /// Broadcaster is the interface responsible for replication of messages across a network.
 pub trait Broadcaster: Clone + Send + 'static {
     /// Digest is an arbitrary hash digest.
-    type Digest: Digest;
+    type Digest: Array;
 
     /// Attempt to broadcast a digest to the network.
     ///
@@ -31,7 +31,7 @@ pub trait Application: Clone + Send + 'static {
     type Context;
 
     /// Digest is an arbitrary hash digest.
-    type Digest: Digest;
+    type Digest: Array;
 
     /// Verify a proposed payload received from the network.
     ///
@@ -51,7 +51,7 @@ pub trait Collector: Clone + Send + 'static {
     type Context;
 
     /// Digest is an arbitrary hash digest.
-    type Digest: Digest;
+    type Digest: Array;
 
     /// Emit that a payload has been successfully broadcasted.
     /// This is used to acknowledge that the payload has been "received" by the network,
@@ -72,20 +72,23 @@ pub trait Coordinator: Clone + Send + Sync + 'static {
     /// Index is the type used to identify a particular set of sequencers and signers.
     type Index;
 
+    /// PublicKey is the type used to identify a sequencer or signer.
+    type PublicKey: Array;
+
     /// Returns the current index of the coordinator.
     fn index(&self) -> Self::Index;
 
     /// Get the **sorted** sequencers for the given `Index`.
-    fn sequencers(&self, index: Self::Index) -> Option<&Vec<PublicKey>>;
+    fn sequencers(&self, index: Self::Index) -> Option<&Vec<Self::PublicKey>>;
 
     /// Returns the index of the sequencer (in the list of sorted sequencers) if the candidate is a sequencer at the given `Index`.
-    fn is_sequencer(&self, index: Self::Index, candidate: &PublicKey) -> Option<u32>;
+    fn is_sequencer(&self, index: Self::Index, candidate: &Self::PublicKey) -> Option<u32>;
 
     /// Get the **sorted** signers for the given `Index`.
-    fn signers(&self, index: Self::Index) -> Option<&Vec<PublicKey>>;
+    fn signers(&self, index: Self::Index) -> Option<&Vec<Self::PublicKey>>;
 
     /// Returns the index of the signer (in the list of sorted signers) if the candidate is a signer at the given `Index`.
-    fn is_signer(&self, index: Self::Index, candidate: &PublicKey) -> Option<u32>;
+    fn is_signer(&self, index: Self::Index, candidate: &Self::PublicKey) -> Option<u32>;
 }
 
 /// ThresholdCoordinator is the interface responsible for managing which `identity` (typically a group polynomial with

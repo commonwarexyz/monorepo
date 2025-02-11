@@ -6,12 +6,12 @@ use commonware_cryptography::{
         group::{self, Element},
         ops,
     },
-    Digest, Scheme,
+    Array, Scheme,
 };
 use std::marker::PhantomData;
 
 #[derive(Clone)]
-pub struct Prover<C: Scheme, D: Digest> {
+pub struct Prover<C: Scheme, D: Array, P: Array> {
     _crypto: PhantomData<C>,
     _digest: PhantomData<D>,
 
@@ -19,7 +19,7 @@ pub struct Prover<C: Scheme, D: Digest> {
     namespace: Vec<u8>,
 }
 
-impl<C: Scheme, D: Digest> Prover<C, D> {
+impl<C: Scheme, D: Array, P: Array> Prover<C, D, P> {
     /// Create a new prover with the given signing `namespace`.
     pub fn new(public: group::Public, namespace: &[u8]) -> Self {
         Self {
@@ -36,7 +36,6 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
     /// - the signature
     fn get_len() -> (usize, (usize, usize)) {
         let len_digest = size_of::<D>();
-        let (len_public_key, len_signature) = C::len();
 
         let mut len = 0;
         len += len_public_key; // context.sequencer
@@ -49,7 +48,7 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
     }
 
     pub fn serialize_threshold(
-        context: &Context,
+        context: &Context<P>,
         payload: &D,
         epoch: Epoch,
         threshold: &group::Signature,
@@ -69,7 +68,7 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
     pub fn deserialize_threshold(
         &self,
         mut proof: Proof,
-    ) -> Option<(Context, D, group::Signature)> {
+    ) -> Option<(Context<P>, D, group::Signature)> {
         let (len, (public_key_len, signature_len)) = Prover::<C, D>::get_len();
 
         // Ensure proof is the right size

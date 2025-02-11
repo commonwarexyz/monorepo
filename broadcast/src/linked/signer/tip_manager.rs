@@ -1,19 +1,19 @@
 use crate::linked::wire;
-use commonware_cryptography::PublicKey;
+use commonware_cryptography::Array;
 use std::collections::HashMap;
 
 /// Manages the highest-height chunk for each sequencer.
 #[derive(Default)]
-pub struct TipManager {
+pub struct TipManager<P: Array> {
     // The highest-height chunk for each sequencer.
     // The chunk must have the threshold signature of its parent.
     // Existence of the chunk implies:
     // - The existence of the sequencer's entire chunk chain (from height zero)
     // - That the chunk has been acked by this signer.
-    tips: HashMap<PublicKey, wire::Link>,
+    tips: HashMap<P, wire::Link>,
 }
 
-impl TipManager {
+impl<P: Array> TipManager<P> {
     /// Inserts a new tip. Returns true if the tip is new.
     /// Panics if the new tip is lower-height than the existing tip.
     pub fn put(&mut self, link: &wire::Link) -> bool {
@@ -41,17 +41,17 @@ impl TipManager {
     }
 
     /// Returns the tip for the given sequencer.
-    pub fn get(&self, sequencer: &PublicKey) -> Option<wire::Link> {
+    pub fn get(&self, sequencer: &P) -> Option<wire::Link> {
         self.tips.get(sequencer).cloned()
     }
 
     /// Returns just the chunk for the given sequencer.
-    pub fn get_chunk(&self, sequencer: &PublicKey) -> Option<wire::Chunk> {
+    pub fn get_chunk(&self, sequencer: &P) -> Option<wire::Chunk> {
         self.tips.get(sequencer).and_then(|link| link.chunk.clone())
     }
 
     /// Returns the height of the tip for the given sequencer.
-    pub fn get_height(&self, sequencer: &PublicKey) -> Option<u64> {
+    pub fn get_height(&self, sequencer: &P) -> Option<u64> {
         self.tips
             .get(sequencer)
             .map(|link| link.chunk.as_ref().unwrap().height)
@@ -62,10 +62,10 @@ impl TipManager {
 mod tests {
     use super::*;
     use crate::linked::wire;
-    use commonware_cryptography::PublicKey;
+    use commonware_cryptography::Array;
 
     // Helper to create a dummy link.
-    fn create_link(sequencer: PublicKey, height: u64, payload: &[u8]) -> wire::Link {
+    fn create_link<P: Array>(sequencer: P, height: u64, payload: &[u8]) -> wire::Link {
         wire::Link {
             chunk: Some(wire::Chunk {
                 sequencer,
@@ -79,8 +79,8 @@ mod tests {
 
     // Helper to create a dummy PublicKey.
     // (Assuming PublicKey implements From<Vec<u8>>.)
-    fn test_public_key(id: u8) -> PublicKey {
-        PublicKey::from(vec![id])
+    fn test_public_key<P: Array>(id: u8) -> P {
+        P::from(vec![id])
     }
 
     #[test]

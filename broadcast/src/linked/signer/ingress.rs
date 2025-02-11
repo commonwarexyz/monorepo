@@ -1,5 +1,5 @@
 use crate::Broadcaster;
-use commonware_cryptography::Digest;
+use commonware_cryptography::Array;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
@@ -7,7 +7,7 @@ use futures::{
 use std::marker::PhantomData;
 
 // If either of these requests fails, it will not send a reply.
-pub enum Message<D: Digest> {
+pub enum Message<D: Array> {
     Broadcast {
         payload: D,
         result: oneshot::Sender<bool>,
@@ -15,12 +15,12 @@ pub enum Message<D: Digest> {
 }
 
 #[derive(Clone)]
-pub struct Mailbox<D: Digest> {
+pub struct Mailbox<D: Array> {
     sender: mpsc::Sender<Message<D>>,
     _digest: PhantomData<D>,
 }
 
-impl<D: Digest> Mailbox<D> {
+impl<D: Array> Mailbox<D> {
     pub(super) fn new(sender: mpsc::Sender<Message<D>>) -> Self {
         Self {
             sender,
@@ -29,7 +29,7 @@ impl<D: Digest> Mailbox<D> {
     }
 }
 
-impl<D: Digest> Broadcaster for Mailbox<D> {
+impl<D: Array> Broadcaster for Mailbox<D> {
     type Digest = D;
 
     async fn broadcast(&mut self, payload: Self::Digest) -> oneshot::Receiver<bool> {

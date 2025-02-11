@@ -2,15 +2,16 @@ use crate::{
     linked::{Context, Epoch},
     Application, Collector, ThresholdCoordinator,
 };
-use commonware_cryptography::{Digest, PublicKey, Scheme};
+use commonware_cryptography::{Array, Scheme};
 use std::time::Duration;
 
 pub struct Config<
     C: Scheme,
-    D: Digest,
-    J: Fn(&PublicKey) -> String,
-    A: Application<Context = Context, Digest = D>,
-    Z: Collector<Context = Context, Digest = D>,
+    D: Array,
+    P: Array,
+    J: Fn(&P) -> String,
+    A: Application<Context = Context<P>, Digest = D>,
+    Z: Collector<Context = Context<P>, Digest = D>,
     S: ThresholdCoordinator<Index = Epoch>,
 > {
     pub crypto: C,

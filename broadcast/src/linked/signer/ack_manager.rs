@@ -1,13 +1,13 @@
 use crate::linked::Epoch;
 use commonware_cryptography::{
     bls12381::primitives::{group, ops, poly::PartialSignature},
-    Digest, PublicKey,
+    Array,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// A struct representing a set of partial signatures for a payload digest.
 #[derive(Default)]
-struct Partials<D: Digest> {
+struct Partials<D: Array> {
     // The set of share indices that have signed the payload.
     pub shares: HashSet<u32>,
 
@@ -18,12 +18,12 @@ struct Partials<D: Digest> {
 
 /// Evidence for a chunk.
 /// This is either a set of partial signatures or a threshold signature.
-enum Evidence<D: Digest> {
+enum Evidence<D: Array> {
     Partials(Partials<D>),
     Threshold(group::Signature),
 }
 
-impl<D: Digest> Default for Evidence<D> {
+impl<D: Array> Default for Evidence<D> {
     fn default() -> Self {
         Self::Partials(Partials::<D>::default())
     }
@@ -31,7 +31,7 @@ impl<D: Digest> Default for Evidence<D> {
 
 /// Manages acknowledgements for chunks.
 #[derive(Default)]
-pub struct AckManager<D: Digest> {
+pub struct AckManager<D: Array, P: Array> {
     // Acknowledgements for digests.
     //
     // Map from Sequencer => Height => Epoch => Evidence
@@ -41,16 +41,16 @@ pub struct AckManager<D: Digest> {
     // The BTreeMaps are sorted by key, so we can prune old entries. In particular, we can prune
     // entries where the height is less than the height of the highest chunk for the sequencer.
     // We can often prune entries for old epochs as well.
-    acks: HashMap<PublicKey, BTreeMap<u64, BTreeMap<Epoch, Evidence<D>>>>,
+    acks: HashMap<P, BTreeMap<u64, BTreeMap<Epoch, Evidence<D>>>>,
 }
 
-impl<D: Digest> AckManager<D> {
+impl<D: Array, P: Array> AckManager<D, P> {
     /// Adds a partial signature to the evidence.
     ///
     /// If-and-only-if the quorum is newly-reached, the threshold signature is returned.
     pub fn add_partial(
         &mut self,
-        sequencer: &PublicKey,
+        sequencer: &P,
         height: u64,
         epoch: Epoch,
         payload: &D,
@@ -98,7 +98,7 @@ impl<D: Digest> AckManager<D> {
     /// If multiple epochs have thresholds, the highest epoch is returned.
     pub fn get_threshold(
         &self,
-        sequencer: &PublicKey,
+        sequencer: &P,
         height: u64,
     ) -> Option<(Epoch, group::Signature)> {
         self.acks
@@ -117,7 +117,7 @@ impl<D: Digest> AckManager<D> {
     /// Returns `true` if the threshold was newly set, `false` if it already existed.
     pub fn add_threshold(
         &mut self,
-        sequencer: &PublicKey,
+        sequencer: &P,
         height: u64,
         epoch: Epoch,
         threshold: group::Signature,
