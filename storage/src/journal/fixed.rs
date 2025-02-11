@@ -439,6 +439,7 @@ mod tests {
     use futures::{pin_mut, StreamExt};
     use prometheus_client::encoding::text::encode;
 
+    /// Generate a SHA-256 digest for the given value.
     fn test_digest(value: u64) -> Digest {
         hash(&value.to_be_bytes())
     }
