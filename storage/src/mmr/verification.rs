@@ -261,7 +261,7 @@ impl<H: CHasher> Proof<H> {
 
 fn peak_hash_from_range<'a, H: CHasher>(
     hasher: &mut Hasher<H>,
-    node_pos: u64,      // current node position in the tree
+    pos: u64,           // current node position in the tree
     two_h: u64,         // 2^height of the current node
     leftmost_pos: u64,  // leftmost leaf in the tree to be traversed
     rightmost_pos: u64, // rightmost leaf in the tree to be traversed
@@ -272,12 +272,12 @@ fn peak_hash_from_range<'a, H: CHasher>(
     if two_h == 1 {
         // we are at a leaf
         match elements.next() {
-            Some(element) => return Ok(hasher.leaf_hash(node_pos, element)),
+            Some(element) => return Ok(hasher.leaf_hash(pos, element)),
             None => return Err(()),
         }
     }
 
-    let left_pos = node_pos - two_h;
+    let left_pos = pos - two_h;
     let mut left_hash: Option<H::Digest> = None;
     let right_pos = left_pos + two_h - 1;
     let mut right_hash: Option<H::Digest> = None;
@@ -325,12 +325,13 @@ fn peak_hash_from_range<'a, H: CHasher>(
             None => return Err(()),
         }
     }
-    Ok(hasher.node_hash(node_pos, &left_hash.unwrap(), &right_hash.unwrap()))
+    Ok(hasher.node_hash(pos, &left_hash.unwrap(), &right_hash.unwrap()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::Proof;
+    use crate::mmr::iterator::{oldest_provable_pos, oldest_required_proof_pos, PeakIterator};
     use crate::mmr::mem::Mmr;
     use commonware_cryptography::{hash, sha256::Digest, Sha256};
     use commonware_runtime::{deterministic::Executor, Runner};
@@ -600,6 +601,72 @@ mod tests {
     }
 
     #[test]
+    fn test_oldest_provable_pos() {
+        let (executor, _, _) = Executor::default();
+        executor.start(async move {
+            // create a new MMR and add a non-trivial amount (49) of elements
+            let mut mmr: Mmr<Sha256> = Mmr::default();
+            let mut elements = Vec::<Digest>::new();
+            let mut element_positions = Vec::<u64>::new();
+            let mut hasher = Sha256::default();
+            for i in 0..49 {
+                elements.push(test_digest(i));
+                element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));
+            }
+
+            // For every node in the MMR, confirm that the computed oldest_provable_pos is indeed
+            // the correct boundary between being able to generate a proof for a leaf or not.
+            for i in 1..mmr.size() {
+                mmr.forget_to_pos(i);
+                let oldest_provable_pos = oldest_provable_pos(PeakIterator::new(mmr.size()), i);
+                for pos in element_positions.iter() {
+                    let proof = mmr.proof(*pos).await;
+                    if *pos < oldest_provable_pos {
+                        assert!(proof.is_err(), "proof should fail");
+                    } else {
+                        assert!(proof.is_ok(), "proof should succeed");
+                    }
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn test_oldest_required_proof_pos() {
+        let (executor, _, _) = Executor::default();
+        executor.start(async move {
+            // create a new MMR and add a non-trivial amount (49) of elements
+            let mut mmr: Mmr<Sha256> = Mmr::default();
+            let mut elements = Vec::<Digest>::new();
+            let mut element_positions = Vec::<u64>::new();
+            let mut hasher = Sha256::default();
+            for i in 0..49 {
+                elements.push(test_digest(i));
+                element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));
+            }
+
+            // For every leaf, confirm that forgetting to its oldest_required_proof_point allows us
+            // to still prove the leaf, and that forgetting even a single node beyond that renders
+            // the leaf unprovable.
+            for &pos in &element_positions {
+                let oldest_required_proof_pos =
+                    oldest_required_proof_pos(PeakIterator::new(mmr.size()), pos);
+
+                let mut mmr = Mmr::default();
+                for _ in 0..49 {
+                    mmr.add(&mut hasher, elements.last().unwrap());
+                }
+                mmr.forget_to_pos(oldest_required_proof_pos);
+                let proof = mmr.proof(pos).await;
+                assert!(proof.is_ok(), "proof should succeed");
+                mmr.forget_to_pos(oldest_required_proof_pos + 1);
+                let proof = mmr.proof(pos).await;
+                assert!(proof.is_err(), "proof should fail");
+            }
+        });
+    }
+
+    #[test]
     fn test_range_proofs_after_forgetting() {
         let (executor, _, _) = Executor::default();
         executor.start(async move {
@@ -614,8 +681,10 @@ mod tests {
             element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));
         }
 
-        // forget the max # of elements
-        assert_eq!(mmr.forget_max(), 62);
+        // forget up to the first peak
+        mmr.forget_to_pos(62);
+        assert_eq!(mmr.oldest_remembered_pos(), 62);
+        assert_eq!(mmr.oldest_provable_pos(), 62); // peaks are always their own oldest-provable-point
 
         // Prune the elements from our lists that can no longer be proven after forgetting.
         for i in 0..elements.len() {
@@ -652,8 +721,10 @@ mod tests {
             elements.push(test_digest(i));
             element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));
         }
-        assert_eq!(mmr.forget_max(), 126);
-        assert_eq!(mmr.oldest_remembered_node_pos(), 126);
+        mmr.forget_to_pos(126); // the new highest peak
+        assert_eq!(mmr.oldest_remembered_pos(), 126);
+        assert_eq!(mmr.oldest_provable_pos(), 126); // peaks are always their own oldest-provable-point
+
         let updated_root_hash = mmr.root(&mut hasher);
         for i in 0..elements.len() {
             if element_positions[i] > 126 {

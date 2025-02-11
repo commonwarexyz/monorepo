@@ -31,7 +31,7 @@ impl<B: Blob, E: RStorage<B>, H: Hasher> Storage<H> for Mmr<B, E, H> {
     }
 
     async fn get_node(&self, position: u64) -> Result<Option<H::Digest>, Error> {
-        if position >= self.mem_mmr.oldest_remembered_node_pos() {
+        if position >= self.mem_mmr.oldest_remembered_pos() {
             return self.mem_mmr.get_node(position).await;
         }
         match self.journal.read(position).await {
@@ -85,7 +85,7 @@ impl<B: Blob, E: RStorage<B>, H: Hasher> Mmr<B, E, H> {
             let item = journal.read(i).await?;
             vec.push(item);
         }
-        let mem_mmr = MemMmr::init(vec, oldest_peak);
+        let mem_mmr = MemMmr::init(vec, oldest_peak, vec![]);
 
         let mut s = Self {
             mem_mmr,
@@ -122,7 +122,7 @@ impl<B: Blob, E: RStorage<B>, H: Hasher> Mmr<B, E, H> {
             self.journal.append(node).await?;
         }
         self.journal_size = self.mem_mmr.size();
-        self.mem_mmr.forget_max();
+        self.mem_mmr.forget_all();
         self.journal.sync().await?;
         Ok(())
     }
@@ -193,40 +193,42 @@ mod tests {
             assert_eq!(mmr.size().await.unwrap(), 502);
             assert_eq!(mmr.journal_size, 0);
 
+            // Generate & verify proof from element that is not yet flushed to the journal.
+            const TEST_ELEMENT: usize = 133;
+            let test_element_pos = positions[TEST_ELEMENT];
+
+            let proof = mmr.proof(test_element_pos).await.unwrap();
+            let mut hasher = Sha256::new();
+            let root = mmr.root(&mut hasher);
+            assert!(proof.verify_element_inclusion(
+                &mut hasher,
+                &leaves[TEST_ELEMENT],
+                test_element_pos,
+                &root,
+            ));
+
             // Sync the MMR, make sure it flushes the in-mem MMR as expected.
             mmr.sync().await.unwrap();
             assert_eq!(mmr.journal_size, 502);
-            assert_eq!(mmr.mem_mmr.oldest_remembered_node_pos(), 254);
+            assert_eq!(mmr.mem_mmr.oldest_remembered_pos(), 501);
 
-            // Generate & verify proof from element that exists in the journal but not the in-mem
-            // MMR cache.
-            let proof = mmr.proof(1).await.unwrap();
-            let mut hasher = Sha256::new();
-            let root = mmr.root(&mut hasher);
-            assert!(proof.verify_element_inclusion(&mut hasher, &test_digest(1), 1, &root));
+            // Now that the element is flushed from the in-mem MMR, make its proof is still is
+            // generated correctly.
+            let proof2 = mmr.proof(test_element_pos).await.unwrap();
+            assert_eq!(proof, proof2);
 
-            // Generate & verify a proof involving elements that span both cached and uncached
-            // elements.
-            const START_ELEMENT: usize = 126;
-            const END_ELEMENT: usize = 133;
-            let start_pos = positions[START_ELEMENT];
-            let end_pos = positions[END_ELEMENT];
-            assert!(start_pos < mmr.mem_mmr.oldest_remembered_node_pos());
-            assert!(end_pos > mmr.mem_mmr.oldest_remembered_node_pos());
-            let proof = mmr.range_proof(start_pos, end_pos).await.unwrap();
+            // Generate & verify a proof that spans flushed elements and the last element.
+            let last_element = LEAF_COUNT - 1;
+            let last_element_pos = positions[last_element];
+            let proof = mmr
+                .range_proof(test_element_pos, last_element_pos)
+                .await
+                .unwrap();
             assert!(proof.verify_range_inclusion(
                 &mut hasher,
-                &leaves[START_ELEMENT..END_ELEMENT + 1],
-                start_pos,
-                end_pos,
-                &root
-            ));
-            // Verify that the proof fails if we remove an element from the range.
-            assert!(!proof.verify_range_inclusion(
-                &mut hasher,
-                &leaves[START_ELEMENT..END_ELEMENT],
-                start_pos,
-                positions[END_ELEMENT - 1],
+                &leaves[TEST_ELEMENT..last_element + 1],
+                test_element_pos,
+                last_element_pos,
                 &root
             ));
         });
