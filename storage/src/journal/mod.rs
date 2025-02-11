@@ -7,6 +7,9 @@
 
 use thiserror::Error;
 
+pub mod fixed;
+pub mod variable;
+
 /// Errors that can occur when interacting with `Journal`.
 #[derive(Debug, Error)]
 pub enum Error {
@@ -35,6 +38,3 @@ pub enum Error {
     #[error("invalid rewind: {0}")]
     InvalidRewind(u64),
 }
-
-pub mod fixed;
-pub mod variable;
