@@ -11,7 +11,18 @@
 //! `commonware-runtime` is **ALPHA** software and is not yet recommended for production use. Developers should
 //! expect breaking changes and occasional instability.
 
+use std::{
+    future::Future,
+    net::SocketAddr,
+    time::{Duration, SystemTime},
+};
 use thiserror::Error;
+
+pub mod deterministic;
+pub mod mocks;
+
+mod utils;
+pub use utils::{reschedule, Handle, Signal, Signaler};
 
 /// Errors that can occur when interacting with the runtime.
 #[derive(Error, Debug, PartialEq)]
@@ -55,18 +66,6 @@ pub enum Error {
     #[error("offset overflow")]
     OffsetOverflow,
 }
-
-use std::{
-    future::Future,
-    net::SocketAddr,
-    time::{Duration, SystemTime},
-};
-
-pub mod deterministic;
-pub mod mocks;
-
-mod utils;
-pub use utils::{reschedule, Handle, Signal, Signaler};
 
 /// Interface that any task scheduler must implement to start
 /// running tasks.
