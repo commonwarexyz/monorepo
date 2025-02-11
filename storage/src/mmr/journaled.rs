@@ -64,8 +64,8 @@ impl<B: Blob, E: RStorage<B>, H: Hasher> Mmr<B, E, H> {
         let mut orphaned_leaf: Option<H::Digest> = None;
         if last_valid_size != journal_size {
             warn!(
-                "encountered invalid MMR structure, recovering from last valid size of {}",
-                last_valid_size
+                last_valid_size,
+                "encountered invalid MMR structure, recovering from last valid size"
             );
             // Check if there is an intact leaf following the last valid size, from which we can
             // recover its missing parents.
@@ -99,7 +99,7 @@ impl<B: Blob, E: RStorage<B>, H: Hasher> Mmr<B, E, H> {
             let pos = s.add(&mut hasher, &leaf);
             assert!(pos == journal_size);
             s.sync().await?;
-            warn!("recovered orphaned leaf: {:?}", leaf);
+            warn!(leaf_position = pos, "recovered orphaned leaf");
         }
         Ok(s)
     }
