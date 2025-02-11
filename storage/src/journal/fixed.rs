@@ -50,12 +50,14 @@
 
 use super::Error;
 use bytes::BufMut;
+use commonware_cryptography::Array;
 use commonware_runtime::{Blob, Error as RError, Storage};
 use commonware_utils::{hex, SizedSerialize};
 use futures::stream::{self, Stream, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use prometheus_client::registry::Registry;
 use std::collections::BTreeMap;
+use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 use tracing::{debug, trace, warn};
 
@@ -76,7 +78,7 @@ pub struct Config {
 }
 
 /// Implementation of `Journal` storage.
-pub struct Journal<B: Blob, E: Storage<B>, const N: usize> {
+pub struct Journal<B: Blob, E: Storage<B>, A: Array> {
     runtime: E,
     cfg: Config,
 
@@ -87,10 +89,12 @@ pub struct Journal<B: Blob, E: Storage<B>, const N: usize> {
     tracked: Gauge,
     synced: Counter,
     pruned: Counter,
+
+    _array: PhantomData<A>,
 }
 
-impl<B: Blob, E: Storage<B>, const N: usize> Journal<B, E, N> {
-    const CHUNK_SIZE: usize = u32::SERIALIZED_LEN + N;
+impl<B: Blob, E: Storage<B>, A: Array> Journal<B, E, A> {
+    const CHUNK_SIZE: usize = u32::SERIALIZED_LEN + A::SERIALIZED_LEN;
 
     /// Initialize a new `Journal` instance.
     ///
@@ -166,6 +170,8 @@ impl<B: Blob, E: Storage<B>, const N: usize> Journal<B, E, N> {
             tracked,
             synced,
             pruned,
+
+            _array: PhantomData,
         })
     }
 
@@ -189,7 +195,7 @@ impl<B: Blob, E: Storage<B>, const N: usize> Journal<B, E, N> {
 
     /// Append a new item to the journal. Return the item's position in the journal, or error if the
     /// operation fails.
-    pub async fn append(&mut self, item: [u8; N]) -> Result<u64, Error> {
+    pub async fn append(&mut self, item: A) -> Result<u64, Error> {
         let mut newest_blob = self.newest_blob();
 
         let mut blob_len = newest_blob.1.len().await?;
@@ -214,8 +220,8 @@ impl<B: Blob, E: Storage<B>, const N: usize> Journal<B, E, N> {
         }
 
         let mut buf: Vec<u8> = Vec::with_capacity(Self::CHUNK_SIZE);
-        let checksum = crc32fast::hash(&item[..]);
-        buf.put(&item[..]);
+        let checksum = crc32fast::hash(&item);
+        buf.extend_from_slice(&item);
         buf.put_u32(checksum);
 
         let item_position = blob_len / Self::CHUNK_SIZE as u64;
@@ -272,7 +278,7 @@ impl<B: Blob, E: Storage<B>, const N: usize> Journal<B, E, N> {
     }
 
     /// Read the item at the given position in the journal.
-    pub async fn read(&self, item_position: u64) -> Result<[u8; N], Error> {
+    pub async fn read(&self, item_position: u64) -> Result<A, Error> {
         let blob_index = item_position / self.cfg.items_per_blob;
 
         let blob = match self.blobs.get(&blob_index) {
@@ -296,13 +302,13 @@ impl<B: Blob, E: Storage<B>, const N: usize> Journal<B, E, N> {
         Self::verify_integrity(&buf)
     }
 
-    fn verify_integrity(buf: &[u8]) -> Result<[u8; N], Error> {
-        let stored_checksum = u32::from_be_bytes(buf[N..].try_into().unwrap());
-        let checksum = crc32fast::hash(&buf[..N]);
+    fn verify_integrity(buf: &[u8]) -> Result<A, Error> {
+        let stored_checksum = u32::from_be_bytes(buf[A::SERIALIZED_LEN..].try_into().unwrap());
+        let checksum = crc32fast::hash(&buf[..A::SERIALIZED_LEN]);
         if checksum != stored_checksum {
             return Err(Error::ChecksumMismatch(stored_checksum, checksum));
         }
-        Ok(buf[..N].try_into().unwrap())
+        Ok(buf[..A::SERIALIZED_LEN].try_into().unwrap())
     }
 
     /// Returns an unordered stream of all items in the journal.
@@ -319,7 +325,7 @@ impl<B: Blob, E: Storage<B>, const N: usize> Journal<B, E, N> {
     pub async fn replay(
         &mut self,
         concurrency: usize,
-    ) -> Result<impl Stream<Item = Result<(u64, [u8; N]), Error>> + '_, Error> {
+    ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + '_, Error> {
         // Collect all blobs to replay
         let mut blobs = Vec::with_capacity(self.blobs.len());
         for (index, blob) in self.blobs.iter() {
@@ -346,7 +352,7 @@ impl<B: Blob, E: Storage<B>, const N: usize> Journal<B, E, N> {
                             return None;
                         }
                         // Get next item
-                        let mut buf = vec![0u8; N + size_of::<u32>()];
+                        let mut buf = vec![0u8; Self::CHUNK_SIZE];
                         let item = blob.read_at(&mut buf, offset).await.map_err(Error::Runtime);
                         let next_offset = offset + Self::CHUNK_SIZE as u64;
                         match item {
