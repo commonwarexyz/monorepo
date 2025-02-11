@@ -501,7 +501,7 @@ pub struct Blob {
     name: Vec<u8>,
 
     // Files must be seeked prior to any read or write operation and are thus
-    // not safe to concurrently interact with. If we switched to mmaping files
+    // not safe to concurrently interact with. If we switched to mapping files
     // we could remove this lock.
     //
     // We also track the virtual file size because metadata isn't updated until

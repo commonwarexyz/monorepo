@@ -73,6 +73,15 @@ p {
     margin-bottom: 5px;
 }
 
+button {
+    padding: 5px;
+    margin-bottom: 5px;
+    background-color: -webkit-link;
+    color: white;
+    font-family: 'Consolas', monospace;
+    border-width: 0;
+}
+
 img {
     max-width: 100%;
     height: auto;
@@ -139,36 +148,44 @@ summary {
 }
 
 details.benchmark-set {
-    margin-top: 20px;
-    margin-bottom: 20px;
+    margin-top: 10px;
+    margin-bottom: 10px;
     border: 1px solid #eee;
     padding: 8px;
 }
 
 details.benchmark-set summary {
-    font-size: 1.2em;
-    font-weight: bold;
     cursor: pointer;
     outline: none;
     overflow-wrap: anywhere;
     white-space: normal;
     max-width: 100%;
     list-style: none;
+}
+
+details.benchmark-set .benchmark-title {
+    font-weight: 700;
+    font-size: 1.2em;
     color: -webkit-link;
     text-decoration: underline;
 }
 
 details.benchmark-graph-details {
-    margin-left: 15px;
-    margin-top: 15px;
-    margin-bottom: 15px;
-    border: 1px solid #eee;
+    margin-top: 10px;
+    margin-bottom: 10px;
+    border: 1px solid #bbb;
     padding: 8px;
 }
 
-details.benchmark-graph-details summary.benchmark-graph-title {
-    font-size: 1em;
-    font-weight: bold;
+.benchmark-performance {
+    font-size: 0.7em;
+    color: gray;
+    font-style: italic;
+}
+
+.benchmark-graph-title {
+    font-weight: 300;
+    font-size: 0.8em;
     cursor: pointer;
     outline: none;
     overflow-wrap: anywhere;
@@ -181,7 +198,47 @@ details.benchmark-graph-details summary.benchmark-graph-title {
 
 .benchmark-chart {
     display: block;
-    margin: 15px 0;
+    margin: 10px 0;
     width: 100%;
     max-width: 100%;
+}
+
+details.benchmark-module {
+    margin-top: 10px;
+    margin-bottom: 10px;
+    border: 1px solid #ddd;
+    padding: 8px;
+}
+
+details.benchmark-module summary.module-title {
+    font-size: 1em;
+    font-weight: 500;
+    cursor: pointer;
+    outline: none;
+    overflow-wrap: anywhere;
+    white-space: normal;
+    max-width: 100%;
+    list-style: none;
+    color: -webkit-link;
+    text-decoration: underline;
+}
+
+details.benchmark-function {
+    margin-top: 10px;
+    margin-bottom: 10px;
+    border: 1px solid #ccc;
+    padding: 8px;
+}
+
+summary.function-title {
+    font-size: 0.9em;
+    font-weight: 400;
+    cursor: pointer;
+    outline: none;
+    overflow-wrap: anywhere;
+    white-space: normal;
+    max-width: 100%;
+    list-style: none;
+    color: -webkit-link;
+    text-decoration: underline;
 }

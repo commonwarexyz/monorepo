@@ -130,7 +130,6 @@ mod tests {
     use commonware_cryptography::{Ed25519, Scheme};
     use commonware_macros::select;
     use commonware_runtime::{deterministic::Executor, Clock, Runner, Spawner};
-    use commonware_utils::hex;
     use futures::{channel::mpsc, SinkExt, StreamExt};
     use prometheus_client::registry::Registry;
     use rand::Rng;
@@ -211,7 +210,7 @@ mod tests {
                     loop {
                         let index = runtime.gen_range(0..keys.len());
                         let sender = keys[index];
-                        let msg = format!("hello from {}", hex(sender));
+                        let msg = format!("hello from {:?}", sender);
                         let msg = Bytes::from(msg);
                         let mut message_sender = agents.get(sender).unwrap().clone();
                         let sent = message_sender
@@ -320,7 +319,7 @@ mod tests {
             let result = oracle
                 .add_link(
                     pk.clone(),
-                    pk.clone(),
+                    pk,
                     Link {
                         latency: 5.0,
                         jitter: 2.5,
@@ -385,8 +384,8 @@ mod tests {
             // Attempt to link with invalid success rate
             let result = oracle
                 .add_link(
-                    pk1.clone(),
-                    pk2.clone(),
+                    pk1,
+                    pk2,
                     Link {
                         latency: 5.0,
                         jitter: 2.5,
@@ -441,8 +440,8 @@ mod tests {
             // Attempt to link with invalid jitter
             let result = oracle
                 .add_link(
-                    pk1.clone(),
-                    pk2.clone(),
+                    pk1,
+                    pk2,
                     Link {
                         latency: 5.0,
                         jitter: -2.5,
@@ -555,7 +554,7 @@ mod tests {
             // Link agents
             oracle
                 .add_link(
-                    pk1.clone(),
+                    pk1,
                     pk2.clone(),
                     Link {
                         latency: 5.0,
@@ -569,7 +568,7 @@ mod tests {
             // Send message
             let msg = Bytes::from("hello from pk1");
             sender1
-                .send(Recipients::One(pk2.clone()), msg, false)
+                .send(Recipients::One(pk2), msg, false)
                 .await
                 .unwrap();
 
@@ -772,7 +771,7 @@ mod tests {
             }
 
             // Remove non-existent links
-            let result = oracle.remove_link(pk1.clone(), pk2.clone()).await;
+            let result = oracle.remove_link(pk1, pk2).await;
             assert!(matches!(result, Err(Error::LinkMissing)));
         });
     }

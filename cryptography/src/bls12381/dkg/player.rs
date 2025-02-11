@@ -1,14 +1,16 @@
 //! Participants in a DKG/Resharing procedure that receive dealings from dealers
 //! and eventually maintain a share of a shared secret.
 
-use crate::bls12381::{
-    dkg::{ops, Error},
-    primitives::{
-        group::{self, Element, Share},
-        poly::{self, Eval},
+use crate::{
+    bls12381::{
+        dkg::{ops, Error},
+        primitives::{
+            group::{self, Element, Share},
+            poly::{self, Eval},
+        },
     },
+    Array,
 };
-use crate::PublicKey;
 use commonware_utils::quorum;
 use std::collections::{BTreeMap, HashMap};
 
@@ -25,25 +27,25 @@ pub struct Output {
 }
 
 /// Track commitments and dealings distributed by dealers.
-pub struct Player {
+pub struct Player<P: Array> {
     me: u32,
     dealer_threshold: u32,
     player_threshold: u32,
     previous: Option<poly::Public>,
     concurrency: usize,
 
-    dealers: HashMap<PublicKey, u32>,
+    dealers: HashMap<P, u32>,
 
     dealings: HashMap<u32, (poly::Public, Share)>,
 }
 
-impl Player {
+impl<P: Array> Player<P> {
     /// Create a new player for a DKG/Resharing procedure.
     pub fn new(
-        me: PublicKey,
+        me: P,
         previous: Option<poly::Public>,
-        mut dealers: Vec<PublicKey>,
-        mut recipients: Vec<PublicKey>,
+        mut dealers: Vec<P>,
+        mut recipients: Vec<P>,
         concurrency: usize,
     ) -> Self {
         dealers.sort();
@@ -51,7 +53,7 @@ impl Player {
             .iter()
             .enumerate()
             .map(|(i, pk)| (pk.clone(), i as u32))
-            .collect::<HashMap<PublicKey, _>>();
+            .collect::<HashMap<P, _>>();
         recipients.sort();
         let mut me_idx = None;
         for (idx, recipient) in recipients.iter().enumerate() {
@@ -76,7 +78,7 @@ impl Player {
     /// Verify and track a commitment from a dealer.
     pub fn share(
         &mut self,
-        dealer: PublicKey,
+        dealer: P,
         commitment: poly::Public,
         share: Share,
     ) -> Result<(), Error> {

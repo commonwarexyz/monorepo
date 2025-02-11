@@ -1,10 +1,10 @@
 use super::relay::Relay;
 use crate::{threshold_simplex::Context, Automaton as Au, Committer as Co, Proof, Relay as Re};
 use bytes::{Buf, BufMut, Bytes};
-use commonware_cryptography::{Digest, Hasher, PublicKey};
+use commonware_cryptography::{Array, Hasher};
 use commonware_macros::select;
 use commonware_runtime::Clock;
-use commonware_utils::hex;
+use commonware_utils::SizedSerialize;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
@@ -13,52 +13,52 @@ use rand::{Rng, RngCore};
 use rand_distr::{Distribution, Normal};
 use std::{
     collections::{HashMap, HashSet},
-    mem::size_of,
     sync::Arc,
     time::Duration,
 };
 
-pub enum Message {
+pub enum Message<D: Array> {
     Genesis {
-        response: oneshot::Sender<Digest>,
+        response: oneshot::Sender<D>,
     },
     Propose {
-        context: Context,
-        response: oneshot::Sender<Digest>,
+        context: Context<D>,
+        response: oneshot::Sender<D>,
     },
     Verify {
-        context: Context,
-        payload: Digest,
+        context: Context<D>,
+        payload: D,
         response: oneshot::Sender<bool>,
     },
     Broadcast {
-        payload: Digest,
+        payload: D,
     },
     Notarized {
         proof: Proof,
-        payload: Digest,
+        payload: D,
     },
     Finalized {
         proof: Proof,
-        payload: Digest,
+        payload: D,
     },
 }
 
 #[derive(Clone)]
-pub struct Mailbox {
-    sender: mpsc::Sender<Message>,
+pub struct Mailbox<D: Array> {
+    sender: mpsc::Sender<Message<D>>,
 }
 
-impl Mailbox {
-    pub(super) fn new(sender: mpsc::Sender<Message>) -> Self {
+impl<D: Array> Mailbox<D> {
+    pub(super) fn new(sender: mpsc::Sender<Message<D>>) -> Self {
         Self { sender }
     }
 }
 
-impl Au for Mailbox {
-    type Context = Context;
+impl<D: Array> Au for Mailbox<D> {
+    type Digest = D;
+    type Context = Context<D>;
 
-    async fn genesis(&mut self) -> Digest {
+    async fn genesis(&mut self) -> Self::Digest {
         let (response, receiver) = oneshot::channel();
         self.sender
             .send(Message::Genesis { response })
@@ -67,7 +67,7 @@ impl Au for Mailbox {
         receiver.await.expect("Failed to receive genesis")
     }
 
-    async fn propose(&mut self, context: Context) -> oneshot::Receiver<Digest> {
+    async fn propose(&mut self, context: Self::Context) -> oneshot::Receiver<Self::Digest> {
         let (response, receiver) = oneshot::channel();
         self.sender
             .send(Message::Propose { context, response })
@@ -76,7 +76,11 @@ impl Au for Mailbox {
         receiver
     }
 
-    async fn verify(&mut self, context: Context, payload: Digest) -> oneshot::Receiver<bool> {
+    async fn verify(
+        &mut self,
+        context: Self::Context,
+        payload: Self::Digest,
+    ) -> oneshot::Receiver<bool> {
         let (response, receiver) = oneshot::channel();
         self.sender
             .send(Message::Verify {
@@ -90,8 +94,10 @@ impl Au for Mailbox {
     }
 }
 
-impl Re for Mailbox {
-    async fn broadcast(&mut self, payload: Digest) {
+impl<D: Array> Re for Mailbox<D> {
+    type Digest = D;
+
+    async fn broadcast(&mut self, payload: Self::Digest) {
         self.sender
             .send(Message::Broadcast { payload })
             .await
@@ -99,15 +105,17 @@ impl Re for Mailbox {
     }
 }
 
-impl Co for Mailbox {
-    async fn prepared(&mut self, proof: Proof, payload: Digest) {
+impl<D: Array> Co for Mailbox<D> {
+    type Digest = D;
+
+    async fn prepared(&mut self, proof: Proof, payload: Self::Digest) {
         self.sender
             .send(Message::Notarized { proof, payload })
             .await
             .expect("Failed to send notarized");
     }
 
-    async fn finalized(&mut self, proof: Proof, payload: Digest) {
+    async fn finalized(&mut self, proof: Proof, payload: Self::Digest) {
         self.sender
             .send(Message::Finalized { proof, payload })
             .await
@@ -119,51 +127,51 @@ const GENESIS_BYTES: &[u8] = b"genesis";
 
 type Latency = (f64, f64);
 
-pub enum Progress {
-    Notarized(Proof, Digest),
-    Finalized(Proof, Digest),
+pub enum Progress<D: Array> {
+    Notarized(Proof, D),
+    Finalized(Proof, D),
 }
 
-pub struct Config<H: Hasher> {
+pub struct Config<H: Hasher, P: Array> {
     pub hasher: H,
 
-    pub relay: Arc<Relay>,
+    pub relay: Arc<Relay<H::Digest, P>>,
 
     /// The public key of the participant.
     ///
     /// It is common to use multiple instances of an application in a single simulation, this
     /// helps to identify the source of both progress and errors.
-    pub participant: PublicKey,
+    pub participant: P,
 
     pub propose_latency: Latency,
     pub verify_latency: Latency,
 
-    pub tracker: mpsc::UnboundedSender<(PublicKey, Progress)>,
+    pub tracker: mpsc::UnboundedSender<(P, Progress<H::Digest>)>,
 }
 
-pub struct Application<E: Clock + RngCore, H: Hasher> {
+pub struct Application<E: Clock + RngCore, H: Hasher, P: Array> {
     runtime: E,
     hasher: H,
-    participant: PublicKey,
+    participant: P,
 
-    relay: Arc<Relay>,
-    broadcast: mpsc::UnboundedReceiver<(Digest, Bytes)>,
-    tracker: mpsc::UnboundedSender<(PublicKey, Progress)>,
+    relay: Arc<Relay<H::Digest, P>>,
+    broadcast: mpsc::UnboundedReceiver<(H::Digest, Bytes)>,
+    tracker: mpsc::UnboundedSender<(P, Progress<H::Digest>)>,
 
-    mailbox: mpsc::Receiver<Message>,
+    mailbox: mpsc::Receiver<Message<H::Digest>>,
 
     propose_latency: Normal<f64>,
     verify_latency: Normal<f64>,
 
-    pending: HashMap<Digest, Bytes>,
+    pending: HashMap<H::Digest, Bytes>,
 
-    verified: HashSet<Digest>,
-    notarized_views: HashSet<Digest>,
-    finalized_views: HashSet<Digest>,
+    verified: HashSet<H::Digest>,
+    notarized_views: HashSet<H::Digest>,
+    finalized_views: HashSet<H::Digest>,
 }
 
-impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
-    pub fn new(runtime: E, cfg: Config<H>) -> (Self, Mailbox) {
+impl<E: Clock + RngCore, H: Hasher, P: Array> Application<E, H, P> {
+    pub fn new(runtime: E, cfg: Config<H, P>) -> (Self, Mailbox<H::Digest>) {
         // Register self on relay
         let broadcast = cfg.relay.register(cfg.participant.clone());
 
@@ -199,10 +207,10 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
     }
 
     fn panic(&self, msg: &str) -> ! {
-        panic!("[{}] {}", hex(&self.participant), msg);
+        panic!("[{:?}] {}", self.participant, msg);
     }
 
-    fn genesis(&mut self) -> Digest {
+    fn genesis(&mut self) -> H::Digest {
         let payload = Bytes::from(GENESIS_BYTES);
         self.hasher.update(&payload);
         let digest = self.hasher.finalize();
@@ -213,20 +221,15 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
 
     /// When proposing a block, we do not care if the parent is verified (or even in our possession).
     /// Backfilling verification dependencies is considered out-of-scope for consensus.
-    async fn propose(&mut self, context: Context) -> Digest {
+    async fn propose(&mut self, context: Context<H::Digest>) -> H::Digest {
         // Simulate the propose latency
         let duration = self.propose_latency.sample(&mut self.runtime);
         self.runtime
             .sleep(Duration::from_millis(duration as u64))
             .await;
 
-        // Verify parent exists and we are at the correct height
-        if !H::validate(&context.parent.1) {
-            self.panic("invalid parent digest length");
-        }
-
         // Generate the payload
-        let payload_len = size_of::<u64>() + context.parent.1.len() + size_of::<u64>();
+        let payload_len = u64::SERIALIZED_LEN + H::Digest::SERIALIZED_LEN + u64::SERIALIZED_LEN;
         let mut payload = Vec::with_capacity(payload_len);
         payload.put_u64(context.view);
         payload.extend_from_slice(&context.parent.1);
@@ -242,20 +245,17 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
         digest
     }
 
-    async fn verify(&mut self, context: Context, payload: Digest, mut contents: Bytes) -> bool {
+    async fn verify(
+        &mut self,
+        context: Context<H::Digest>,
+        payload: H::Digest,
+        mut contents: Bytes,
+    ) -> bool {
         // Simulate the verify latency
         let duration = self.verify_latency.sample(&mut self.runtime);
         self.runtime
             .sleep(Duration::from_millis(duration as u64))
             .await;
-
-        // Verify parent exists and we are at the correct height
-        if !H::validate(&context.parent.1) {
-            self.panic("invalid parent digest length");
-        }
-        if !H::validate(&payload) {
-            self.panic("invalid digest length");
-        }
 
         // Verify contents
         if contents.len() != 48 {
@@ -268,12 +268,13 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
                 parsed_view, context.view
             ));
         }
-        let parsed_parent: Digest = contents.copy_to_bytes(H::len());
-        if parsed_parent != context.parent.1 {
+        let Ok(parent) = H::Digest::read_from(&mut contents) else {
+            self.panic("invalid parent");
+        };
+        if parent != context.parent.1 {
             self.panic(&format!(
-                "invalid parent (in payload): {} != {}",
-                hex(&parsed_parent),
-                hex(&context.parent.1)
+                "invalid parent (in payload): {:?} != {:?}",
+                parent, context.parent.1
             ));
         }
         // We don't care about the random number
@@ -281,17 +282,14 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
         true
     }
 
-    async fn broadcast(&mut self, payload: Digest) {
+    async fn broadcast(&mut self, payload: H::Digest) {
         let contents = self.pending.remove(&payload).expect("missing payload");
         self.relay
             .broadcast(&self.participant, (payload, contents))
             .await;
     }
 
-    async fn notarized(&mut self, proof: Proof, payload: Digest) {
-        if !H::validate(&payload) {
-            self.panic("invalid digest length");
-        }
+    async fn notarized(&mut self, proof: Proof, payload: H::Digest) {
         if !self.notarized_views.insert(payload.clone()) {
             self.panic("view already notarized");
         }
@@ -304,10 +302,7 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
             .await;
     }
 
-    async fn finalized(&mut self, proof: Proof, payload: Digest) {
-        if !H::validate(&payload) {
-            self.panic("invalid digest length");
-        }
+    async fn finalized(&mut self, proof: Proof, payload: H::Digest) {
         if !self.finalized_views.insert(payload.clone()) {
             self.panic("view already finalized");
         }
@@ -322,8 +317,12 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
 
     pub async fn run(mut self) {
         // Setup digest tracking
-        let mut waiters: HashMap<Digest, Vec<(Context, oneshot::Sender<bool>)>> = HashMap::new();
-        let mut seen: HashMap<Digest, Bytes> = HashMap::new();
+        #[allow(clippy::type_complexity)]
+        let mut waiters: HashMap<
+            H::Digest,
+            Vec<(Context<H::Digest>, oneshot::Sender<bool>)>,
+        > = HashMap::new();
+        let mut seen: HashMap<H::Digest, Bytes> = HashMap::new();
 
         // Handle actions
         loop {

@@ -15,7 +15,6 @@ use commonware_cryptography::{
     Hasher,
 };
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_utils::hex;
 use prost::Message;
 use std::marker::PhantomData;
 use tracing::debug;
@@ -66,14 +65,14 @@ impl<
             let msg = match wire::Voter::decode(msg) {
                 Ok(msg) => msg,
                 Err(err) => {
-                    debug!(?err, sender = hex(&s), "failed to decode message");
+                    debug!(?err, sender = ?s, "failed to decode message");
                     continue;
                 }
             };
             let payload = match msg.payload {
                 Some(payload) => payload,
                 None => {
-                    debug!(sender = hex(&s), "message missing payload");
+                    debug!(sender = ?s, "message missing payload");
                     continue;
                 }
             };
@@ -85,9 +84,13 @@ impl<
                     let proposal = match notarize.proposal {
                         Some(proposal) => proposal,
                         None => {
-                            debug!(sender = hex(&s), "notarize missing proposal");
+                            debug!(sender = ?s, "notarize missing proposal");
                             continue;
                         }
+                    };
+                    let Ok(payload) = H::Digest::try_from(&proposal.payload) else {
+                        debug!(sender = ?s, "invalid payload");
+                        continue;
                     };
                     let view = proposal.view;
 
@@ -96,13 +99,11 @@ impl<
                     let message = nullify_message(view);
                     let view_signature =
                         ops::partial_sign_message(share, Some(&self.nullify_namespace), &message)
-                            .serialize()
-                            .into();
+                            .serialize();
                     let message = seed_message(view);
                     let seed_signature =
                         ops::partial_sign_message(share, Some(&self.seed_namespace), &message)
-                            .serialize()
-                            .into();
+                            .serialize();
                     let n = wire::Nullify {
                         view,
                         view_signature,
@@ -116,11 +117,10 @@ impl<
                     sender.send(Recipients::All, msg, true).await.unwrap();
 
                     // Finalize digest
-                    let message = proposal_message(view, proposal.parent, &proposal.payload);
+                    let message = proposal_message(view, proposal.parent, &payload);
                     let proposal_signature =
                         ops::partial_sign_message(share, Some(&self.finalize_namespace), &message)
-                            .serialize()
-                            .into();
+                            .serialize();
                     let f = wire::Finalize {
                         proposal: Some(proposal.clone()),
                         proposal_signature,

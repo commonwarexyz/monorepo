@@ -2,7 +2,7 @@
 name = "commonware-stream"
 edition = "2021"
 publish = true
-version = "0.0.6"
+version = "0.0.8"
 license = "MIT OR Apache-2.0"
 description = "Exchange messages over arbitrary transport."
 readme = "README.md"

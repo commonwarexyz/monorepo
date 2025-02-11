@@ -83,7 +83,7 @@
 //!
 //! Upon receiving first `(part(v), notarize(c,v))` from `l`:
 //! * Cancel `t_l`
-//! * If the container's parent `c_parent` is notarized at `v_parent` and we have null notarizations for all views
+//! * If the container's parent `c_parent` is notarized at `v_parent` and we have nullifications for all views
 //!   between `v` and `v_parent`, verify `c` and broadcast `(part(v), notarize(c,v))`
 //!
 //! Upon receiving `2f+1` `(part(v), notarize(c,v))`:
@@ -146,41 +146,49 @@
 //! * Introduce message rebroadcast to continue making progress if messages from a given view are dropped (only way
 //!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
 
-use commonware_cryptography::Digest;
+use commonware_cryptography::Array;
 
-mod actors;
-mod config;
-pub use config::Config;
 mod encoder;
-mod engine;
-pub use engine::Engine;
-mod metrics;
 mod prover;
 pub use prover::Prover;
-#[cfg(test)]
-pub mod mocks;
-mod verifier;
 mod wire {
     include!(concat!(env!("OUT_DIR"), "/threshold_simplex.wire.rs"));
 }
 
+cfg_if::cfg_if! {
+    if #[cfg(not(target_arch = "wasm32"))] {
+        mod actors;
+        mod config;
+        pub use config::Config;
+        mod engine;
+        pub use engine::Engine;
+        mod metrics;
+        mod verifier;
+    }
+}
+
+#[cfg(test)]
+pub mod mocks;
+
 /// View is a monotonically increasing counter that represents the current focus of consensus.
 pub type View = u64;
 
+use crate::Activity;
+
 /// Context is a collection of metadata from consensus about a given payload.
 #[derive(Clone)]
-pub struct Context {
+pub struct Context<D: Array> {
     /// Current view of consensus.
     pub view: View,
 
     /// Parent the payload is built on.
     ///
-    /// Payloads from views between the current view and the parent view can never be
-    /// directly finalized (must exist some nullification).
-    pub parent: (View, Digest),
+    /// If there is a gap between the current view and the parent view, the participant
+    /// must possess a nullification for each discarded view to safely vote on the proposed
+    /// payload (any view without a nullification may eventually be finalized and skipping
+    /// it would result in a fork).
+    pub parent: (View, D),
 }
-
-use crate::Activity;
 
 /// Notarize a payload at a given view.
 ///
@@ -204,7 +212,7 @@ mod tests {
     use super::*;
     use commonware_cryptography::{
         bls12381::{dkg::ops, primitives::poly},
-        Ed25519, PublicKey, Scheme, Sha256,
+        Ed25519, Scheme, Sha256,
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};
@@ -212,8 +220,8 @@ mod tests {
         deterministic::{self, Executor},
         Clock, Runner, Spawner,
     };
-    use commonware_storage::journal::{self, Journal};
-    use commonware_utils::{hex, quorum};
+    use commonware_storage::journal::variable::{Config as JConfig, Journal};
+    use commonware_utils::quorum;
     use engine::Engine;
     use futures::{channel::mpsc, StreamExt};
     use governor::Quota;
@@ -228,10 +236,10 @@ mod tests {
     use tracing::debug;
 
     /// Registers all validators using the oracle.
-    async fn register_validators(
-        oracle: &mut Oracle,
-        validators: &[PublicKey],
-    ) -> HashMap<PublicKey, ((Sender, Receiver), (Sender, Receiver))> {
+    async fn register_validators<P: Array>(
+        oracle: &mut Oracle<P>,
+        validators: &[P],
+    ) -> HashMap<P, ((Sender<P>, Receiver<P>), (Sender<P>, Receiver<P>))> {
         let mut registrations = HashMap::new();
         for validator in validators.iter() {
             let (voter_sender, voter_receiver) =
@@ -261,9 +269,9 @@ mod tests {
     /// The `action` parameter determines the action (e.g. link, unlink) to take.
     /// The `restrict_to` function can be used to restrict the linking to certain connections,
     /// otherwise all validators will be linked to all other validators.
-    async fn link_validators(
-        oracle: &mut Oracle,
-        validators: &[PublicKey],
+    async fn link_validators<P: Array>(
+        oracle: &mut Oracle<P>,
+        validators: &[P],
         action: Action,
         restrict_to: Option<fn(usize, usize, usize) -> bool>,
     ) {
@@ -353,7 +361,6 @@ mod tests {
             let prover = Prover::new(pk, &namespace);
 
             // Create engines
-            let hasher = Sha256::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -367,10 +374,10 @@ mod tests {
                     prover: prover.clone(),
                     participants,
                 };
-                let supervisor = mocks::supervisor::Supervisor::<Sha256>::new(supervisor_config);
+                let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
                 supervisors.push(supervisor.clone());
                 let application_cfg = mocks::application::Config {
-                    hasher: hasher.clone(),
+                    hasher: Sha256::default(),
                     relay: relay.clone(),
                     participant: validator.clone(),
                     tracker: done_sender.clone(),
@@ -382,16 +389,15 @@ mod tests {
                 runtime.spawn("application", async move {
                     actor.run().await;
                 });
-                let cfg = journal::Config {
+                let cfg = JConfig {
                     registry: Arc::new(Mutex::new(Registry::default())),
-                    partition: hex(&validator),
+                    partition: validator.to_string(),
                 };
                 let journal = Journal::init(runtime.clone(), cfg)
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
                     crypto: scheme,
-                    hasher: hasher.clone(),
                     automaton: application.clone(),
                     relay: application.clone(),
                     committer: application,
@@ -590,7 +596,6 @@ mod tests {
 
                 // Create engines
                 let prover = Prover::new(pk, &namespace);
-                let hasher = Sha256::default();
                 let relay = Arc::new(mocks::relay::Relay::new());
                 let mut supervisors = HashMap::new();
                 let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -605,10 +610,10 @@ mod tests {
                         participants,
                     };
                     let supervisor =
-                        mocks::supervisor::Supervisor::<Sha256>::new(supervisor_config);
+                        mocks::supervisor::Supervisor::new(supervisor_config);
                     supervisors.insert(validator.clone(), supervisor.clone());
                     let application_cfg = mocks::application::Config {
-                        hasher: hasher.clone(),
+                        hasher: Sha256::default(),
                         relay: relay.clone(),
                         participant: validator.clone(),
                         tracker: done_sender.clone(),
@@ -620,16 +625,15 @@ mod tests {
                     runtime.spawn("application", async move {
                         actor.run().await;
                     });
-                    let cfg = journal::Config {
+                    let cfg = JConfig {
                         registry: Arc::new(Mutex::new(Registry::default())),
-                        partition: hex(&validator),
+                        partition: validator.to_string(),
                     };
                     let journal = Journal::init(runtime.clone(), cfg)
                         .await
                         .expect("unable to create journal");
                     let cfg = config::Config {
                         crypto: scheme,
-                        hasher: hasher.clone(),
                         automaton: application.clone(),
                         relay: application.clone(),
                         committer: application,
@@ -813,7 +817,6 @@ mod tests {
             let prover = Prover::new(pk, &namespace);
 
             // Create engines
-            let hasher = Sha256::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -832,10 +835,10 @@ mod tests {
                     prover: prover.clone(),
                     participants,
                 };
-                let supervisor = mocks::supervisor::Supervisor::<Sha256>::new(supervisor_config);
+                let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
                 supervisors.push(supervisor.clone());
                 let application_cfg = mocks::application::Config {
-                    hasher: hasher.clone(),
+                    hasher: Sha256::default(),
                     relay: relay.clone(),
                     participant: validator.clone(),
                     tracker: done_sender.clone(),
@@ -847,16 +850,15 @@ mod tests {
                 runtime.spawn("application", async move {
                     actor.run().await;
                 });
-                let cfg = journal::Config {
+                let cfg = JConfig {
                     registry: Arc::new(Mutex::new(Registry::default())),
-                    partition: hex(&validator),
+                    partition: validator.to_string(),
                 };
                 let journal = Journal::init(runtime.clone(), cfg)
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
                     crypto: scheme.clone(),
-                    hasher: hasher.clone(),
                     automaton: application.clone(),
                     relay: application.clone(),
                     committer: application,
@@ -924,7 +926,7 @@ mod tests {
             )
             .await;
 
-            // Wait for null notarizations to accrue
+            // Wait for nullifications to accrue
             runtime.sleep(Duration::from_secs(120)).await;
 
             // Unlink second peer from all (except first)
@@ -970,10 +972,10 @@ mod tests {
                 prover: prover.clone(),
                 participants,
             };
-            let supervisor = mocks::supervisor::Supervisor::<Sha256>::new(supervisor_config);
+            let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
             supervisors.push(supervisor.clone());
             let application_cfg = mocks::application::Config {
-                hasher: hasher.clone(),
+                hasher: Sha256::default(),
                 relay: relay.clone(),
                 participant: validator.clone(),
                 tracker: done_sender.clone(),
@@ -985,16 +987,15 @@ mod tests {
             runtime.spawn("application", async move {
                 actor.run().await;
             });
-            let cfg = journal::Config {
+            let cfg = JConfig {
                 registry: Arc::new(Mutex::new(Registry::default())),
-                partition: hex(&validator),
+                partition: validator.to_string(),
             };
             let journal = Journal::init(runtime.clone(), cfg)
                 .await
                 .expect("unable to create journal");
             let cfg = config::Config {
                 crypto: scheme,
-                hasher: hasher.clone(),
                 automaton: application.clone(),
                 relay: application.clone(),
                 committer: application,
@@ -1110,7 +1111,6 @@ mod tests {
             let prover = Prover::new(pk, &namespace);
 
             // Create engines
-            let hasher = Sha256::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -1129,10 +1129,10 @@ mod tests {
                     prover: prover.clone(),
                     participants,
                 };
-                let supervisor = mocks::supervisor::Supervisor::<Sha256>::new(supervisor_config);
+                let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
                 supervisors.push(supervisor.clone());
                 let application_cfg = mocks::application::Config {
-                    hasher: hasher.clone(),
+                    hasher: Sha256::default(),
                     relay: relay.clone(),
                     participant: validator.clone(),
                     tracker: done_sender.clone(),
@@ -1144,16 +1144,15 @@ mod tests {
                 runtime.spawn("application", async move {
                     actor.run().await;
                 });
-                let cfg = journal::Config {
+                let cfg = JConfig {
                     registry: Arc::new(Mutex::new(Registry::default())),
-                    partition: hex(&validator),
+                    partition: validator.to_string(),
                 };
                 let journal = Journal::init(runtime.clone(), cfg)
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
                     crypto: scheme,
-                    hasher: hasher.clone(),
                     automaton: application.clone(),
                     relay: application.clone(),
                     committer: application,
@@ -1297,7 +1296,6 @@ mod tests {
             let prover = Prover::new(pk, &namespace);
 
             // Create engines
-            let hasher = Sha256::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -1311,11 +1309,11 @@ mod tests {
                     prover: prover.clone(),
                     participants,
                 };
-                let supervisor = mocks::supervisor::Supervisor::<Sha256>::new(supervisor_config);
+                let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
                 supervisors.push(supervisor.clone());
                 let application_cfg = if idx_scheme == 0 {
                     mocks::application::Config {
-                        hasher: hasher.clone(),
+                        hasher: Sha256::default(),
                         relay: relay.clone(),
                         participant: validator.clone(),
                         tracker: done_sender.clone(),
@@ -1324,7 +1322,7 @@ mod tests {
                     }
                 } else {
                     mocks::application::Config {
-                        hasher: hasher.clone(),
+                        hasher: Sha256::default(),
                         relay: relay.clone(),
                         participant: validator.clone(),
                         tracker: done_sender.clone(),
@@ -1337,16 +1335,15 @@ mod tests {
                 runtime.spawn("application", async move {
                     actor.run().await;
                 });
-                let cfg = journal::Config {
+                let cfg = JConfig {
                     registry: Arc::new(Mutex::new(Registry::default())),
-                    partition: hex(&validator),
+                    partition: validator.to_string(),
                 };
                 let journal = Journal::init(runtime.clone(), cfg)
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
                     crypto: scheme,
-                    hasher: hasher.clone(),
                     automaton: application.clone(),
                     relay: application.clone(),
                     committer: application,
@@ -1490,7 +1487,6 @@ mod tests {
             let prover = Prover::new(pk, &namespace);
 
             // Create engines
-            let hasher = Sha256::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -1504,10 +1500,10 @@ mod tests {
                     prover: prover.clone(),
                     participants,
                 };
-                let supervisor = mocks::supervisor::Supervisor::<Sha256>::new(supervisor_config);
+                let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
                 supervisors.push(supervisor.clone());
                 let application_cfg = mocks::application::Config {
-                    hasher: hasher.clone(),
+                    hasher: Sha256::default(),
                     relay: relay.clone(),
                     participant: validator.clone(),
                     tracker: done_sender.clone(),
@@ -1519,16 +1515,15 @@ mod tests {
                 runtime.spawn("application", async move {
                     actor.run().await;
                 });
-                let cfg = journal::Config {
+                let cfg = JConfig {
                     registry: Arc::new(Mutex::new(Registry::default())),
-                    partition: hex(&validator),
+                    partition: validator.to_string(),
                 };
                 let journal = Journal::init(runtime.clone(), cfg)
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
                     crypto: scheme.clone(),
-                    hasher: hasher.clone(),
                     automaton: application.clone(),
                     relay: application.clone(),
                     committer: application,
@@ -1665,7 +1660,6 @@ mod tests {
             let prover = Prover::new(pk, &namespace);
 
             // Create engines
-            let hasher = Sha256::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -1679,10 +1673,10 @@ mod tests {
                     prover: prover.clone(),
                     participants,
                 };
-                let supervisor = mocks::supervisor::Supervisor::<Sha256>::new(supervisor_config);
+                let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
                 supervisors.push(supervisor.clone());
                 let application_cfg = mocks::application::Config {
-                    hasher: hasher.clone(),
+                    hasher: Sha256::default(),
                     relay: relay.clone(),
                     participant: validator.clone(),
                     tracker: done_sender.clone(),
@@ -1694,16 +1688,15 @@ mod tests {
                 runtime.spawn("application", async move {
                     actor.run().await;
                 });
-                let cfg = journal::Config {
+                let cfg = JConfig {
                     registry: Arc::new(Mutex::new(Registry::default())),
-                    partition: hex(&validator),
+                    partition: validator.to_string(),
                 };
                 let journal = Journal::init(runtime.clone(), cfg)
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
                     crypto: scheme.clone(),
-                    hasher: hasher.clone(),
                     automaton: application.clone(),
                     relay: application.clone(),
                     committer: application,
@@ -1896,7 +1889,6 @@ mod tests {
             let prover = Prover::new(pk, &namespace);
 
             // Create engines
-            let hasher = Sha256::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -1910,10 +1902,10 @@ mod tests {
                     prover: prover.clone(),
                     participants,
                 };
-                let supervisor = mocks::supervisor::Supervisor::<Sha256>::new(supervisor_config);
+                let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
                 supervisors.push(supervisor.clone());
                 let application_cfg = mocks::application::Config {
-                    hasher: hasher.clone(),
+                    hasher: Sha256::default(),
                     relay: relay.clone(),
                     participant: validator.clone(),
                     tracker: done_sender.clone(),
@@ -1925,16 +1917,15 @@ mod tests {
                 runtime.spawn("application", async move {
                     actor.run().await;
                 });
-                let cfg = journal::Config {
+                let cfg = JConfig {
                     registry: Arc::new(Mutex::new(Registry::default())),
-                    partition: hex(&validator),
+                    partition: validator.to_string(),
                 };
                 let journal = Journal::init(runtime.clone(), cfg)
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
                     crypto: scheme,
-                    hasher: hasher.clone(),
                     automaton: application.clone(),
                     relay: application.clone(),
                     committer: application,
@@ -2077,7 +2068,6 @@ mod tests {
             let prover = Prover::new(pk, &namespace);
 
             // Create engines
-            let hasher = Sha256::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -2090,7 +2080,7 @@ mod tests {
                     prover: prover.clone(),
                     participants,
                 };
-                let supervisor = mocks::supervisor::Supervisor::<Sha256>::new(supervisor_config);
+                let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
                 let (voter, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
@@ -2107,7 +2097,7 @@ mod tests {
                 } else {
                     supervisors.push(supervisor.clone());
                     let application_cfg = mocks::application::Config {
-                        hasher: hasher.clone(),
+                        hasher: Sha256::default(),
                         relay: relay.clone(),
                         participant: validator.clone(),
                         tracker: done_sender.clone(),
@@ -2119,16 +2109,15 @@ mod tests {
                     runtime.spawn("application", async move {
                         actor.run().await;
                     });
-                    let cfg = journal::Config {
+                    let cfg = JConfig {
                         registry: Arc::new(Mutex::new(Registry::default())),
-                        partition: hex(&validator),
+                        partition: validator.to_string(),
                     };
                     let journal = Journal::init(runtime.clone(), cfg)
                         .await
                         .expect("unable to create journal");
                     let cfg = config::Config {
                         crypto: scheme,
-                        hasher: hasher.clone(),
                         automaton: application.clone(),
                         relay: application.clone(),
                         committer: application,
@@ -2264,7 +2253,6 @@ mod tests {
             let prover = Prover::new(pk, &namespace);
 
             // Create engines
-            let hasher = Sha256::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -2277,7 +2265,7 @@ mod tests {
                     prover: prover.clone(),
                     participants,
                 };
-                let supervisor = mocks::supervisor::Supervisor::<Sha256>::new(supervisor_config);
+                let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
                 let (voter, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
@@ -2293,7 +2281,7 @@ mod tests {
                 } else {
                     supervisors.push(supervisor.clone());
                     let application_cfg = mocks::application::Config {
-                        hasher: hasher.clone(),
+                        hasher: Sha256::default(),
                         relay: relay.clone(),
                         participant: validator.clone(),
                         tracker: done_sender.clone(),
@@ -2305,16 +2293,15 @@ mod tests {
                     runtime.spawn("application", async move {
                         actor.run().await;
                     });
-                    let cfg = journal::Config {
+                    let cfg = JConfig {
                         registry: Arc::new(Mutex::new(Registry::default())),
-                        partition: hex(&validator),
+                        partition: validator.to_string(),
                     };
                     let journal = Journal::init(runtime.clone(), cfg)
                         .await
                         .expect("unable to create journal");
                     let cfg = config::Config {
                         crypto: scheme,
-                        hasher: hasher.clone(),
                         automaton: application.clone(),
                         relay: application.clone(),
                         committer: application,

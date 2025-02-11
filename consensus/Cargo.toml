@@ -2,7 +2,7 @@
 name = "commonware-consensus"
 edition = "2021"
 publish = true
-version = "0.0.6"
+version = "0.0.8"
 license = "MIT OR Apache-2.0"
 description = "Order opaque messages in a Byzantine environment."
 readme = "README.md"
@@ -12,21 +12,23 @@ documentation = "https://docs.rs/commonware-consensus"
 
 [dependencies]
 commonware-cryptography = { workspace = true }
+commonware-utils = { workspace = true }
+bytes = { workspace = true }
+prost = { workspace = true }
+cfg-if = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 commonware-macros = { workspace = true }
 commonware-p2p = { workspace = true }
 commonware-runtime = { workspace = true }
 commonware-storage = { workspace = true }
-commonware-utils = { workspace = true }
-bytes = { workspace = true }
-rand = { workspace = true }
-rand_distr = { workspace = true }
+prometheus-client = { workspace = true }
+governor = { workspace = true }
 thiserror = { workspace = true }
 futures = { workspace = true }
+rand = { workspace = true }
+rand_distr = { workspace = true }
 tracing = { workspace = true }
-prost = { workspace = true }
-prometheus-client = { workspace = true }
-sha2 = { workspace = true }
-governor = { workspace = true }
 
 [build-dependencies]
 prost-build = { workspace = true }
@@ -36,3 +38,4 @@ tracing-subscriber = { workspace = true }
 
 [lib]
 bench = false
+crate-type = ["rlib", "cdylib"]

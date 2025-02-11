@@ -2,7 +2,7 @@
 name = "commonware-cryptography"
 edition = "2021"
 publish = true
-version = "0.0.17"
+version = "0.0.19"
 license = "MIT OR Apache-2.0"
 description = "Generate keys, sign arbitrary messages, and deterministically verify signatures."
 readme = "README.md"
@@ -54,3 +54,8 @@ path = "src/ed25519/benches/bench.rs"
 name = "secp256r1"
 harness = false
 path = "src/secp256r1/benches/bench.rs"
+
+[[bench]]
+name = "sha256"
+harness = false
+path = "src/sha256/benches/bench.rs"

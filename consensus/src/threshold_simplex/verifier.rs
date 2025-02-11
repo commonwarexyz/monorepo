@@ -3,14 +3,20 @@ use super::{
     wire, View,
 };
 use crate::ThresholdSupervisor;
-use commonware_cryptography::bls12381::primitives::{
-    self,
-    group::{self, Element},
-    poly,
+use commonware_cryptography::{
+    bls12381::primitives::{
+        self,
+        group::{self, Element},
+        poly,
+    },
+    Array,
 };
 use tracing::debug;
 
-pub fn verify_notarization<S: ThresholdSupervisor<Index = View, Identity = poly::Public>>(
+pub fn verify_notarization<
+    D: Array,
+    S: ThresholdSupervisor<Index = View, Identity = poly::Public>,
+>(
     supervisor: &S,
     notarization_namespace: &[u8],
     seed_namespace: &[u8],
@@ -23,6 +29,12 @@ pub fn verify_notarization<S: ThresholdSupervisor<Index = View, Identity = poly:
             debug!(reason = "missing proposal", "dropping notarization");
             return false;
         }
+    };
+
+    // Ensure payload is well-formed
+    let Ok(payload) = D::try_from(&proposal.payload) else {
+        debug!(reason = "invalid payload", "dropping notarization");
+        return false;
     };
 
     // Get public key
@@ -43,7 +55,7 @@ pub fn verify_notarization<S: ThresholdSupervisor<Index = View, Identity = poly:
     };
 
     // Verify threshold notarization
-    let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
+    let message = proposal_message(proposal.view, proposal.parent, &payload);
     if primitives::ops::verify_message(
         &public_key,
         Some(notarization_namespace),
@@ -123,10 +135,14 @@ pub fn verify_nullification<S: ThresholdSupervisor<Index = View, Identity = poly
         debug!(reason = "invalid seed signature", "dropping nullification");
         return false;
     }
+    debug!(view = nullification.view, "seed verified");
     true
 }
 
-pub fn verify_finalization<S: ThresholdSupervisor<Index = View, Identity = poly::Public>>(
+pub fn verify_finalization<
+    D: Array,
+    S: ThresholdSupervisor<Index = View, Identity = poly::Public>,
+>(
     supervisor: &S,
     finalization_namespace: &[u8],
     seed_namespace: &[u8],
@@ -136,9 +152,15 @@ pub fn verify_finalization<S: ThresholdSupervisor<Index = View, Identity = poly:
     let proposal = match &finalization.proposal {
         Some(proposal) => proposal,
         None => {
-            debug!(reason = "missing proposal", "dropping notarization");
+            debug!(reason = "missing proposal", "dropping finalization");
             return false;
         }
+    };
+
+    // Ensure payload is well-formed
+    let Ok(payload) = D::try_from(&proposal.payload) else {
+        debug!(reason = "invalid payload", "dropping finalization");
+        return false;
     };
 
     // Get public key
@@ -154,12 +176,12 @@ pub fn verify_finalization<S: ThresholdSupervisor<Index = View, Identity = poly:
 
     // Parse signature
     let Some(signature) = group::Signature::deserialize(&finalization.proposal_signature) else {
-        debug!(reason = "invalid signature", "dropping nullification");
+        debug!(reason = "invalid signature", "dropping finalization");
         return false;
     };
 
     // Verify threshold finalization
-    let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
+    let message = proposal_message(proposal.view, proposal.parent, &payload);
     if primitives::ops::verify_message(
         &public_key,
         Some(finalization_namespace),
@@ -185,5 +207,6 @@ pub fn verify_finalization<S: ThresholdSupervisor<Index = View, Identity = poly:
         debug!(reason = "invalid seed signature", "dropping finalization");
         return false;
     }
+    debug!(view = proposal.view, "seed verified");
     true
 }

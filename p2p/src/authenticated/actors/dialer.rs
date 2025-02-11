@@ -7,7 +7,6 @@ use crate::authenticated::{
 use commonware_cryptography::Scheme;
 use commonware_runtime::{Clock, Listener, Network, Sink, Spawner, Stream};
 use commonware_stream::public_key::{Config as StreamConfig, Connection};
-use commonware_utils::hex;
 use governor::{
     clock::Clock as GClock,
     middleware::NoOpMiddleware,
@@ -82,8 +81,8 @@ impl<
 
     async fn dial_peers(
         &self,
-        tracker: &mut tracker::Mailbox<E>,
-        supervisor: &mut spawner::Mailbox<E, Si, St>,
+        tracker: &mut tracker::Mailbox<E, C::PublicKey>,
+        supervisor: &mut spawner::Mailbox<E, Si, St, C::PublicKey>,
     ) {
         for (peer, address, reservation) in tracker.dialable().await {
             // Check if we have hit rate limit for dialing and if so, skip (we don't
@@ -106,15 +105,11 @@ impl<
                     let (sink, stream) = match runtime.dial(address).await {
                         Ok(stream) => stream,
                         Err(e) => {
-                            debug!(peer=hex(&peer), error = ?e, "failed to dial peer");
+                            debug!(?peer, error = ?e, "failed to dial peer");
                             return;
                         }
                     };
-                    debug!(
-                        peer = hex(&peer),
-                        address = address.to_string(),
-                        "dialed peer"
-                    );
+                    debug!(?peer, address = address.to_string(), "dialed peer");
 
                     // Upgrade connection
                     let instance = match Connection::upgrade_dialer(
@@ -128,11 +123,11 @@ impl<
                     {
                         Ok(instance) => instance,
                         Err(e) => {
-                            debug!(peer=hex(&peer), error = ?e, "failed to upgrade connection");
+                            debug!(?peer, error = ?e, "failed to upgrade connection");
                             return;
                         }
                     };
-                    debug!(peer = hex(&peer), "upgraded connection");
+                    debug!(?peer, "upgraded connection");
 
                     // Start peer to handle messages
                     supervisor.spawn(peer, instance, reservation).await;
@@ -143,8 +138,8 @@ impl<
 
     pub async fn run(
         mut self,
-        mut tracker: tracker::Mailbox<E>,
-        mut supervisor: spawner::Mailbox<E, Si, St>,
+        mut tracker: tracker::Mailbox<E, C::PublicKey>,
+        mut supervisor: spawner::Mailbox<E, Si, St, C::PublicKey>,
     ) {
         loop {
             // Attempt to dial peers we know about

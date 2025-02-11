@@ -1,7 +1,6 @@
 //! Leverage common functionality across multiple primitives.
 
 use prost::{encode_length_delimiter, length_delimiter_len};
-use sha2::{Digest, Sha256};
 
 mod time;
 pub use time::SystemTimeExt;
@@ -57,13 +56,6 @@ pub fn quorum(n: u32) -> Option<u32> {
     Some((2 * f) + 1)
 }
 
-/// Hashes the given `Bytes` using SHA-256.
-pub fn hash(bytes: &[u8]) -> Vec<u8> {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    hasher.finalize().to_vec()
-}
-
 /// Computes the union of two byte slices.
 pub fn union(a: &[u8], b: &[u8]) -> Vec<u8> {
     let mut union = Vec::with_capacity(a.len() + b.len());
@@ -95,6 +87,27 @@ pub fn modulo(bytes: &[u8], n: u64) -> u64 {
         result %= n;
     }
     result
+}
+
+/// Types with a constant encoded length.
+pub trait SizedSerialize {
+    const SERIALIZED_LEN: usize;
+}
+
+impl SizedSerialize for u8 {
+    const SERIALIZED_LEN: usize = 1;
+}
+
+impl SizedSerialize for u16 {
+    const SERIALIZED_LEN: usize = 2;
+}
+
+impl SizedSerialize for u32 {
+    const SERIALIZED_LEN: usize = 4;
+}
+
+impl SizedSerialize for u64 {
+    const SERIALIZED_LEN: usize = 8;
 }
 
 #[cfg(test)]
@@ -133,7 +146,7 @@ mod tests {
     }
 
     #[test]
-    fn repltest_from_hex_formatted() {
+    fn test_from_hex_formatted() {
         // Test case 0: empty bytes
         let b = &[];
         let h = hex(b);
@@ -187,30 +200,6 @@ mod tests {
 
         // Test case 3: n = 10 (3*3 + 1)
         assert_eq!(quorum(10), Some(7));
-    }
-
-    #[test]
-    fn test_hash() {
-        // Test case 0: empty bytes
-        let empty = hash(b"");
-        assert_eq!(
-            hex(&empty),
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-        );
-
-        // Test case 1: single byte
-        let single = hash(b"a");
-        assert_eq!(
-            hex(&single),
-            "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb",
-        );
-
-        // Test case 2: multiple bytes
-        let multiple = hash(b"hello world");
-        assert_eq!(
-            hex(&multiple),
-            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
-        );
     }
 
     #[test]

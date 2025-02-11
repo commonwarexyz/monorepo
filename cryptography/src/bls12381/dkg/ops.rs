@@ -96,7 +96,7 @@ pub fn construct_public(
     Ok(public)
 }
 
-/// Recover public polynomial by interpolating coeffcient-wise all
+/// Recover public polynomial by interpolating coefficient-wise all
 /// polynomials.
 ///
 /// It is assumed that the required number of commitments are provided.

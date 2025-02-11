@@ -67,7 +67,7 @@ fn benchmark_dkg_reshare_recovery(c: &mut Criterion) {
                             // Create player
                             let me = contributors[0].clone();
                             let mut player = Player::new(
-                                me.clone(),
+                                me,
                                 Some(outputs[0].public.clone()),
                                 contributors.clone(),
                                 contributors.clone(),

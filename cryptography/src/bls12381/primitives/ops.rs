@@ -3,7 +3,7 @@
 //!
 //! # Domain Separation Tag (DST)
 //!
-//! All signatures use the `POP` (Proof of Possession) scheme during signing. For Proof-of-Posession (POP) signatures,
+//! All signatures use the `POP` (Proof of Possession) scheme during signing. For Proof-of-Possession (POP) signatures,
 //! the domain separation tag is `BLS_POP_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_`. For signatures over other messages, the
 //! domain separation tag is `BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_`. You can read more about DSTs [here](https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-05#section-4.2).
 

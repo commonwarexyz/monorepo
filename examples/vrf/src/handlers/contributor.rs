@@ -7,12 +7,12 @@ use commonware_cryptography::{
         dkg::{player::Output, Dealer, Player},
         primitives::{group, poly},
     },
-    PublicKey, Scheme,
+    Scheme,
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::Clock;
-use commonware_utils::{hex, quorum};
+use commonware_utils::quorum;
 use futures::{channel::mpsc, SinkExt};
 use prost::Message;
 use rand::Rng;
@@ -25,10 +25,10 @@ pub struct Contributor<E: Clock + Rng, C: Scheme> {
     runtime: E,
     crypto: C,
     dkg_phase_timeout: Duration,
-    arbiter: PublicKey,
+    arbiter: C::PublicKey,
     t: u32,
-    contributors: Vec<PublicKey>,
-    contributors_ordered: HashMap<PublicKey, u32>,
+    contributors: Vec<C::PublicKey>,
+    contributors_ordered: HashMap<C::PublicKey, u32>,
 
     corrupt: bool,
     lazy: bool,
@@ -43,14 +43,14 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
         runtime: E,
         crypto: C,
         dkg_phase_timeout: Duration,
-        arbiter: PublicKey,
-        mut contributors: Vec<PublicKey>,
+        arbiter: C::PublicKey,
+        mut contributors: Vec<C::PublicKey>,
         corrupt: bool,
         lazy: bool,
         forger: bool,
     ) -> (Self, mpsc::Receiver<(u64, Output)>) {
         contributors.sort();
-        let contributors_ordered: HashMap<PublicKey, u32> = contributors
+        let contributors_ordered: HashMap<C::PublicKey, u32> = contributors
             .iter()
             .enumerate()
             .map(|(idx, pk)| (pk.clone(), idx as u32))
@@ -79,8 +79,8 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
     async fn run_round(
         &mut self,
         previous: Option<&Output>,
-        sender: &mut impl Sender,
-        receiver: &mut impl Receiver,
+        sender: &mut impl Sender<PublicKey = C::PublicKey>,
+        receiver: &mut impl Receiver<PublicKey = C::PublicKey>,
     ) -> (u64, Option<Output>) {
         // Configure me
         let me = self.crypto.public_key();
@@ -211,14 +211,9 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                 if self.forger {
                     // If we are a forger, don't send any shares and instead create fake signatures.
                     let _ = dealer.ack(player.clone());
-                    let mut signature = vec![0u8; C::len().1];
-                    self.runtime.fill_bytes(&mut signature);
-                    acks.insert(idx as u32, signature.into());
-                    warn!(
-                        round,
-                        player = hex(player),
-                        "not sending share because forger"
-                    );
+                    let signature = self.crypto.sign(None, b"fake");
+                    acks.insert(idx as u32, signature);
+                    warn!(round, ?player, "not sending share because forger");
                     continue;
                 }
                 if self.corrupt {
@@ -228,16 +223,12 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                         private: group::Scalar::rand(&mut self.runtime),
                     }
                     .serialize();
-                    warn!(round, player = hex(player), "modified share");
+                    warn!(round, ?player, "modified share");
                 }
                 if self.lazy && sent == self.t - 1 {
                     // This will still lead to the commitment being used (>= t acks) because
                     // the dealer has already acked.
-                    warn!(
-                        round,
-                        player = hex(player),
-                        "not sending share because lazy"
-                    );
+                    warn!(round, ?player, "not sending share because lazy");
                     continue;
                 }
                 let success = sender
@@ -257,9 +248,9 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                     .await
                     .expect("could not send share");
                 if success.is_empty() {
-                    warn!(round, player = hex(player), "failed to send share");
+                    warn!(round, ?player, "failed to send share");
                 } else {
-                    debug!(round, player = hex(player), "sent share");
+                    debug!(round, ?player, "sent share");
                     sent += 1;
                 }
             }
@@ -314,17 +305,21 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
 
                                         // Verify signature on incoming ack
                                         let payload = payload(round, &me, commitment);
-                                        if !C::verify(Some(ACK_NAMESPACE), &payload, &s, &msg.signature) {
-                                            warn!(round, sender = hex(&s), "received invalid ack signature");
+                                        let Ok(signature) = C::Signature::try_from(&msg.signature) else {
+                                            warn!(round, sender = ?s, "received invalid ack signature");
+                                            continue;
+                                        };
+                                        if !C::verify(Some(ACK_NAMESPACE), &payload, &s, &signature) {
+                                            warn!(round, sender = ?s, "received invalid ack signature");
                                             continue;
                                         }
 
                                         // Store ack
                                         if let Err(e) = dealer.ack(s.clone()) {
-                                            warn!(round, error = ?e, sender = hex(&s), "failed to record ack");
+                                            warn!(round, error = ?e, sender = ?s, "failed to record ack");
                                             continue;
                                         }
-                                        acks.insert(msg.public_key, msg.signature);
+                                        acks.insert(msg.public_key, signature);
 
                                     },
                                     Some(wire::dkg::Payload::Share(msg)) => {
@@ -362,7 +357,7 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                                                     round,
                                                     payload: Some(wire::dkg::Payload::Ack(wire::Ack {
                                                         public_key: me_idx,
-                                                        signature,
+                                                        signature: signature.to_vec(),
                                                     })),
                                                 }
                                                 .encode_to_vec()
@@ -396,7 +391,7 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                     Some(signature) => {
                         ack_vec.push(wire::Ack {
                             public_key: idx,
-                            signature: signature.clone(),
+                            signature: signature.to_vec(),
                         });
                     }
                     None => {
@@ -508,7 +503,11 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
         }
     }
 
-    pub async fn run(mut self, mut sender: impl Sender, mut receiver: impl Receiver) {
+    pub async fn run(
+        mut self,
+        mut sender: impl Sender<PublicKey = C::PublicKey>,
+        mut receiver: impl Receiver<PublicKey = C::PublicKey>,
+    ) {
         if self.corrupt {
             warn!("running as corrupt");
         }

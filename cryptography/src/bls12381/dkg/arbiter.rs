@@ -36,11 +36,13 @@
 //! not provided by the arbiter because this authorization function is highly dependent on
 //! the context in which the dealer is being used.
 
-use crate::bls12381::{
-    dkg::{ops, Error},
-    primitives::{group::Share, poly},
+use crate::{
+    bls12381::{
+        dkg::{ops, Error},
+        primitives::{group::Share, poly},
+    },
+    Array,
 };
-use crate::PublicKey;
 use commonware_utils::{max_faults, quorum};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -58,25 +60,25 @@ pub struct Output {
 }
 
 /// Gather commitments, acknowledgements, and reveals from all dealers.
-pub struct Arbiter {
+pub struct Arbiter<P: Array> {
     previous: Option<poly::Public>,
     dealer_threshold: u32,
     player_threshold: u32,
     concurrency: usize,
 
-    dealers: HashMap<PublicKey, u32>,
-    players: Vec<PublicKey>,
+    dealers: HashMap<P, u32>,
+    players: Vec<P>,
 
     commitments: BTreeMap<u32, (poly::Public, Vec<u32>, Vec<Share>)>,
-    disqualified: HashSet<PublicKey>,
+    disqualified: HashSet<P>,
 }
 
-impl Arbiter {
+impl<P: Array> Arbiter<P> {
     /// Create a new arbiter for a DKG/Resharing procedure.
     pub fn new(
         previous: Option<poly::Public>,
-        mut dealers: Vec<PublicKey>,
-        mut players: Vec<PublicKey>,
+        mut dealers: Vec<P>,
+        mut players: Vec<P>,
         concurrency: usize,
     ) -> Self {
         dealers.sort();
@@ -84,7 +86,7 @@ impl Arbiter {
             .iter()
             .enumerate()
             .map(|(i, pk)| (pk.clone(), i as u32))
-            .collect::<HashMap<PublicKey, _>>();
+            .collect::<HashMap<P, _>>();
         players.sort();
         Self {
             dealer_threshold: quorum(dealers.len() as u32).expect("insufficient dealers"),
@@ -101,14 +103,14 @@ impl Arbiter {
     }
 
     /// Disqualify a participant from the DKG for external reason (i.e. sending invalid messages).
-    pub fn disqualify(&mut self, participant: PublicKey) {
+    pub fn disqualify(&mut self, participant: P) {
         self.disqualified.insert(participant);
     }
 
     /// Verify and track a commitment, acknowledgements, and reveals collected by a dealer.
     pub fn commitment(
         &mut self,
-        dealer: PublicKey,
+        dealer: P,
         commitment: poly::Public,
         acks: Vec<u32>,
         reveals: Vec<Share>,
@@ -214,7 +216,7 @@ impl Arbiter {
     /// Recover the group polynomial and return `2f + 1` commitments and reveals from dealers.
     ///
     /// Return the disqualified dealers.
-    pub fn finalize(mut self) -> (Result<Output, Error>, HashSet<PublicKey>) {
+    pub fn finalize(mut self) -> (Result<Output, Error>, HashSet<P>) {
         // Drop commitments from disqualified dealers
         for disqualified in self.disqualified.iter() {
             let idx = self.dealers.get(disqualified).unwrap();

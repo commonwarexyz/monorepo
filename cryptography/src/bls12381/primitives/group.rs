@@ -11,15 +11,16 @@
 //! is already taken care of for you if you use the provided `deserialize` function.
 
 use blst::{
-    blst_bendian_from_scalar, blst_final_exp, blst_fp12, blst_fr, blst_fr_add, blst_fr_from_scalar,
+    blst_bendian_from_scalar, blst_fp12, blst_fr, blst_fr_add, blst_fr_from_scalar,
     blst_fr_from_uint64, blst_fr_inverse, blst_fr_mul, blst_fr_sub, blst_hash_to_g1,
-    blst_hash_to_g2, blst_keygen, blst_miller_loop, blst_p1, blst_p1_add_or_double, blst_p1_affine,
-    blst_p1_compress, blst_p1_from_affine, blst_p1_in_g1, blst_p1_is_inf, blst_p1_mult,
-    blst_p1_to_affine, blst_p1_uncompress, blst_p2, blst_p2_add_or_double, blst_p2_affine,
-    blst_p2_compress, blst_p2_from_affine, blst_p2_in_g2, blst_p2_is_inf, blst_p2_mult,
-    blst_p2_to_affine, blst_p2_uncompress, blst_scalar, blst_scalar_from_bendian,
-    blst_scalar_from_fr, blst_sk_check, BLS12_381_G1, BLS12_381_G2, BLST_ERROR,
+    blst_hash_to_g2, blst_keygen, blst_p1, blst_p1_add_or_double, blst_p1_affine, blst_p1_compress,
+    blst_p1_from_affine, blst_p1_in_g1, blst_p1_is_inf, blst_p1_mult, blst_p1_to_affine,
+    blst_p1_uncompress, blst_p2, blst_p2_add_or_double, blst_p2_affine, blst_p2_compress,
+    blst_p2_from_affine, blst_p2_in_g2, blst_p2_is_inf, blst_p2_mult, blst_p2_to_affine,
+    blst_p2_uncompress, blst_scalar, blst_scalar_from_bendian, blst_scalar_from_fr, blst_sk_check,
+    Pairing, BLS12_381_G1, BLS12_381_G2, BLS12_381_NEG_G1, BLST_ERROR,
 };
+use commonware_utils::SizedSerialize;
 use rand::RngCore;
 use std::ptr;
 use zeroize::Zeroize;
@@ -194,19 +195,19 @@ impl Share {
 
     /// Canonically serializes the share.
     pub fn serialize(&self) -> Vec<u8> {
-        let mut bytes = [0u8; SCALAR_LENGTH + 4];
-        bytes[..4].copy_from_slice(&self.index.to_be_bytes());
-        bytes[4..].copy_from_slice(&self.private.serialize());
+        let mut bytes = [0u8; u32::SERIALIZED_LEN + SCALAR_LENGTH];
+        bytes[..u32::SERIALIZED_LEN].copy_from_slice(&self.index.to_be_bytes());
+        bytes[u32::SERIALIZED_LEN..].copy_from_slice(&self.private.serialize());
         bytes.to_vec()
     }
 
     /// Deserializes a canonically encoded share.
     pub fn deserialize(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() != SCALAR_LENGTH + 4 {
+        if bytes.len() != u32::SERIALIZED_LEN + SCALAR_LENGTH {
             return None;
         }
         let index = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-        let private = Private::deserialize(&bytes[4..])?;
+        let private = Private::deserialize(&bytes[u32::SERIALIZED_LEN..])?;
         Some(Self { index, private })
     }
 }
@@ -486,25 +487,38 @@ impl Point for G2 {
     }
 }
 
-fn pairing(p: &G1, q: &G2) -> GT {
-    // Reference: https://github.com/MystenLabs/fastcrypto/blob/bd4999bd3e901eab34ae3dd96dbe38b86ac646a7/fastcrypto/src/groups/bls12381.rs#L223-L234
-    let mut pa = blst_p1_affine::default();
-    let mut qa = blst_p2_affine::default();
-    let mut res = blst_fp12::default();
-    unsafe {
-        blst_p1_to_affine(&mut pa, &p.0);
-        blst_p2_to_affine(&mut qa, &q.0);
-        blst_miller_loop(&mut res, &qa, &pa);
-        blst_final_exp(&mut res, &res);
-    }
-    GT(res)
-}
+/// Verifies that `e(pk,hm)` is equal to `e(G1::one(),sig)` using a single product check with
+/// a negated G1 generator (`e(pk,hm) * e(-G1::one(),sig) == 1`).
+pub(super) fn equal(pk: &G1, sig: &G2, hm: &G2) -> bool {
+    // Create a pairing context
+    //
+    // We only handle pre-hashed messages, so we leave the domain separator tag (`DST`) empty.
+    let mut pairing = Pairing::new(false, &[]);
 
-pub(super) fn equal(p: &G1, sig: &G2, hm: &G2) -> bool {
-    // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/b0ef82ff79769d085a5a7d3f4fe690b1c8fe6dc9/crates/threshold-bls/src/sig/bls.rs#L120-L127
-    let left = pairing(&<G1 as Element>::one(), sig);
-    let right = pairing(p, hm);
-    left == right
+    // Convert `sig` into affine and aggregate `e(-G1::one(), sig)`
+    let mut q = blst_p2_affine::default();
+    unsafe {
+        blst_p2_to_affine(&mut q, &sig.0);
+        pairing.raw_aggregate(&q, &BLS12_381_NEG_G1);
+    }
+
+    // Convert `pk` and `hm` into affine
+    let mut p = blst_p1_affine::default();
+    let mut q = blst_p2_affine::default();
+    unsafe {
+        blst_p1_to_affine(&mut p, &pk.0);
+        blst_p2_to_affine(&mut q, &hm.0);
+    }
+
+    // Aggregate `e(pk, hm)`
+    pairing.raw_aggregate(&q, &p);
+
+    // Finalize the pairing accumulation and verify the result
+    //
+    // If `finalverify()` returns `true`, it means `e(pk,hm) * e(-G1::one(),sig) == 1`. This
+    // is equivalent to `e(pk,hm) == e(G1::one(),sig)`.
+    pairing.commit();
+    pairing.finalverify(None)
 }
 
 #[cfg(test)]

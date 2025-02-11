@@ -76,12 +76,83 @@
             <div class="date">Last Updated: <span id="last-update"></span></div>
         </div>
         <div id="main"></div>
+        <button id="toggle-expand" onclick="toggleExpand()">expand all</button>
     </div>
 
     <div id="footer-placeholder"></div>
+    <script src="https://cdn.jsdelivr.net/npm/moment@2.29.2/moment.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@2.9.2/dist/Chart.min.js"></script>
     <script>
         'use strict';
+
+        // Toggle function to switch between expanding/collapsing all <details> elements
+        function updateExpandButton() {
+            const expandBtn = document.getElementById('toggle-expand');
+            const detailsList = document.querySelectorAll('details');
+            const anyOpen = Array.from(detailsList).some(d => d.open);
+            const benchmarkCount = document.querySelectorAll('details.benchmark-graph-details').length;
+            expandBtn.textContent = anyOpen ? `collapse all (${benchmarkCount})` : `expand all (${benchmarkCount})`;
+        }
+
+        // Toggle function to expand all <details> elements
+        function toggleExpand() {
+            const detailsList = document.querySelectorAll('details');
+            const anyOpen = Array.from(detailsList).some(d => d.open);
+            detailsList.forEach(d => d.open = !anyOpen);
+            updateExpandButton();
+        }
+
+        // Compute all-time and 7-day performance changes for a single benchmark
+        function computeSingleBenchSummary(benches) {
+            if (!benches || benches.length < 1) {
+                return { pctAllTime: "N/A", pct7Day: "N/A", latest: "N/A" };
+            }
+            // Sort by date ascending
+            const sorted = [...benches].sort((a, b) => a.date - b.date);
+            const earliestVal = sorted[0].bench.value;      // first
+            const earliestDate = sorted[0].date;
+            const latestVal = sorted[sorted.length - 1].bench.value; // last
+            const latestDate = sorted[sorted.length - 1].date;
+            if (benches.length < 2) {
+                return { pctAllTime: "N/A", pct7Day: "N/A", latest: latestVal };
+            }
+
+            // All-time ratio
+            let pctAllTime = "N/A";
+            if (earliestVal > 0) {
+                const ratioAll = (latestVal - earliestVal) / earliestVal;
+                pctAllTime = (ratioAll * 100).toFixed(1) + "%";
+            }
+
+            // 7-day ratio
+            const sevenDaysInMs = 7 * 24 * 3600 * 1000;
+            const cutoffDate = latestDate - sevenDaysInMs;
+            // find the bench value for the point in time just after or near that date
+            let sevenDayVal = null;
+            let minDelta = Number.MAX_VALUE;
+            for (const point of sorted) {
+                if (point.date >= cutoffDate) {
+                    const delta = point.date - cutoffDate;
+                    if (delta < minDelta) {
+                        minDelta = delta;
+                        sevenDayVal = point.bench.value;
+                    }
+                }
+            }
+            // if we never found anything after the cutoffDate, fallback to earliest
+            if (!sevenDayVal) {
+                sevenDayVal = earliestVal;
+            }
+
+            let pct7Day = "N/A";
+            if (sevenDayVal > 0) {
+                const ratio7 = (latestVal - sevenDayVal) / sevenDayVal;
+                pct7Day = (ratio7 * 100).toFixed(1) + "%";
+            }
+
+            return { pctAllTime, pct7Day, latest: latestVal };
+        }
+
         function setupBenchmark() {
             // Set Chart.js default font family
             Chart.defaults.global.defaultFontFamily = 'Consolas, monospace';
@@ -90,20 +161,41 @@
             // Build cases
             function init() {
                 function collectBenchesPerTestCase(entries) {
-                    const map = new Map();
+                    const moduleMap = new Map();
                     for (const entry of entries) {
                         const { commit, date, tool, benches } = entry;
                         for (const bench of benches) {
-                            const result = { commit, date, tool, bench };
-                            const arr = map.get(bench.name);
-                            if (arr === undefined) {
-                                map.set(bench.name, [result]);
+                            // Get module name
+                            const parts = bench.name.split("::");
+                            if (parts.length < 2) continue;
+                            const moduleName = parts[0];
+
+                            // Get function name and params
+                            const functionPart = parts.slice(1).join("::");
+                            let funcName = functionPart;
+                            let params = "";
+                            if (functionPart.includes("/")) {
+                                [funcName, params] = functionPart.split("/", 2);
+                            }
+
+                            // Populate result
+                            const result = { commit, date, tool, bench, params };
+                            if (!moduleMap.has(moduleName)) {
+                                moduleMap.set(moduleName, new Map());
+                            }
+                            const functionMap = moduleMap.get(moduleName);
+                            if (!functionMap.has(funcName)) {
+                                functionMap.set(funcName, new Map());
+                            }
+                            const paramsMap = functionMap.get(funcName);
+                            if (!paramsMap.has(params)) {
+                                paramsMap.set(params, [result]);
                             } else {
-                                arr.push(result);
+                                paramsMap.get(params).push(result);
                             }
                         }
                     }
-                    return map;
+                    return moduleMap;
                 }
 
                 const data = window.BENCHMARK_DATA;
@@ -112,7 +204,7 @@
                 document.getElementById('last-update').textContent = new Date(data.lastUpdate).toString();
 
                 // Prepare data points for charts
-                return Object.keys(data.entries).map(name => ({
+                return Object.keys(data.entries).sort().map(name => ({
                     name,
                     dataSet: collectBenchesPerTestCase(data.entries[name]),
                 }));
@@ -125,11 +217,21 @@
                     graphDetails.className = 'benchmark-graph-details';
                     parent.appendChild(graphDetails);
 
+                    // Listen for "toggle" events on each details to update button state
+                    graphDetails.addEventListener('toggle', updateExpandButton);
+
                     // <summary> that shows/hides the graph
-                    const summaryElem = document.createElement('summary');
-                    summaryElem.className = 'benchmark-graph-title';
-                    summaryElem.textContent = name;
-                    graphDetails.appendChild(summaryElem);
+                    const summary = document.createElement('summary');
+                    summary.textContent = name;
+                    const { pctAllTime, pct7Day, latest } = computeSingleBenchSummary(dataset);
+                    const value = latest / 1e6;
+                    const units = "ms";
+                    summary.innerHTML = `
+                        <span class="benchmark-graph-title">${name}</span>
+                        <br>
+                        <span class="benchmark-performance">${value} ${units} | All-Time: ${pctAllTime} (Last 7 Days: ${pct7Day})</span>
+                    `;
+                    graphDetails.appendChild(summary);
 
                     // Create the <canvas> inside the <details>
                     const canvas = document.createElement('canvas');
@@ -138,10 +240,11 @@
 
                     // Create chart
                     const data = {
-                        labels: dataset.map(d => d.commit.id.slice(0, 7)),
                         datasets: [{
                             label: name,
-                            data: dataset.map(d => d.bench.value),
+                            data: dataset.map(d => {
+                                return { x: new Date(d.commit.timestamp), y: d.bench.value };
+                            }),
                             borderColor: '#000000',
                             backgroundColor: '#000000' + '60'
                         }]
@@ -149,18 +252,39 @@
                     const options = {
                         scales: {
                             xAxes: [{
-                                scaleLabel: {
-                                    display: true,
-                                    labelString: 'commit',
+                                type: 'time',
+                                time: {
+                                    unit: 'day',
+                                    displayFormats: {
+                                        day: 'M/D'
+                                    },
                                 },
+                                ticks: {
+                                    autoSkip: true,
+                                    maxTicksLimit: 5,
+                                },
+                                scaleLabel: {
+                                    display: false,
+                                },
+                                gridLines: {
+                                    display: true,
+                                }
                             }],
                             yAxes: [{
                                 scaleLabel: {
                                     display: true,
-                                    labelString: dataset.length > 0 ? dataset[0].bench.unit : '',
+                                    labelString: 'ms/iter',
                                 },
                                 ticks: {
                                     beginAtZero: true,
+                                    autoSkip: true,
+                                    maxTicksLimit: 7,
+                                    callback: function (value) {
+                                        return (value / 1e6);
+                                    }
+                                },
+                                gridLines: {
+                                    display: true,
                                 }
                             }]
                         },
@@ -171,15 +295,33 @@
                                     const { index } = items[0];
                                     const data = dataset[index];
                                     return '\n' + data.commit.message
-                                        + '\n\n' + data.commit.timestamp
-                                        + ' committed by @' + data.commit.committer.username + '\n';
+                                        + '\n\nCommitted by ' + data.commit.author.name + ' (@' + data.commit.author.username + ') at ' + data.commit.timestamp + '\n';
                                 },
-                                label: item => {
-                                    let label = item.value;
+                                label: function (item) {
+                                    let rawVal = Number(item.value);
+                                    // Convert from ns -> ms (divide by 1e6)
+                                    let val = rawVal / 1e6;
+
+                                    // Format numeric output
+                                    let label = val.toLocaleString(undefined, {
+                                        minimumFractionDigits: 3,
+                                        maximumFractionDigits: 3
+                                    });
+
                                     const { range, unit } = dataset[item.index].bench;
-                                    label += ' ' + unit;
+                                    label += ' ms/iter';
+
                                     if (range) {
-                                        label += ' (' + range + ')';
+                                        // parse numeric range if it exists, also convert to ms if needed
+                                        let rangeVal = range.replace(/[^\d.]/g, '');
+                                        let rangeNum = Number(rangeVal);
+                                        if (!isNaN(rangeNum)) {
+                                            rangeNum = rangeNum / 1e6;
+                                        }
+                                        label += ' (' + rangeNum.toLocaleString(undefined, {
+                                            minimumFractionDigits: 3,
+                                            maximumFractionDigits: 3
+                                        }) + ' ms)';
                                     }
                                     return label;
                                 },
@@ -207,32 +349,80 @@
                 }
 
                 function renderBenchSet(testName, benchSet, main) {
+                    // Setup the <details> element for the benchmark set
                     const detailsElem = document.createElement('details');
                     detailsElem.className = 'benchmark-set';
                     main.appendChild(detailsElem);
 
+                    // Listen to "toggle" so button updates if a single set is opened/closed
+                    detailsElem.addEventListener('toggle', updateExpandButton);
+
+                    // Create the <summary> element for the benchmark set
                     const summaryElem = document.createElement('summary');
                     summaryElem.className = 'benchmark-title';
                     summaryElem.textContent = testName;
                     detailsElem.appendChild(summaryElem);
 
-                    const graphsElem = document.createElement('div');
-                    graphsElem.className = 'benchmark-graphs';
-                    detailsElem.appendChild(graphsElem);
+                    // Create the container for the modules
+                    const moduleContainer = document.createElement('div');
+                    moduleContainer.className = 'benchmark-modules';
+                    detailsElem.appendChild(moduleContainer);
 
-                    // Render individual graphs within this test set
-                    for (const [benchName, benches] of benchSet.entries()) {
-                        renderGraph(graphsElem, benchName, benches)
-                    }
+                    // Iterate over modules, sorted alphabetically
+                    Array.from(benchSet.keys()).sort().forEach(moduleName => {
+                        const functionMap = benchSet.get(moduleName);
+                        const moduleDetails = document.createElement('details');
+                        moduleDetails.className = 'benchmark-module';
+                        moduleContainer.appendChild(moduleDetails);
+                        moduleDetails.addEventListener('toggle', updateExpandButton);
+
+                        const moduleSummary = document.createElement('summary');
+                        moduleSummary.className = 'module-title';
+                        moduleSummary.textContent = moduleName;
+                        moduleDetails.appendChild(moduleSummary);
+
+                        const functionContainer = document.createElement('div');
+                        functionContainer.className = 'module-functions';
+                        moduleDetails.appendChild(functionContainer);
+
+                        // Iterate over functions within the module, sorted alphabetically
+                        Array.from(functionMap.keys()).sort().forEach(funcName => {
+                            const paramsMap = functionMap.get(funcName);
+                            const functionDetails = document.createElement('details');
+                            functionDetails.className = 'benchmark-function';
+                            functionContainer.appendChild(functionDetails);
+                            functionDetails.addEventListener('toggle', updateExpandButton);
+
+                            const functionSummary = document.createElement('summary');
+                            functionSummary.className = 'function-title';
+                            functionSummary.textContent = funcName;
+                            functionDetails.appendChild(functionSummary);
+
+                            const paramsContainer = document.createElement('div');
+                            paramsContainer.className = 'function-params';
+                            functionDetails.appendChild(paramsContainer);
+
+                            // Iterate over parameter sets within the function
+                            paramsMap.forEach((results, params) => {
+                                const chartTitle = params ? params : "default";
+                                renderGraph(paramsContainer, chartTitle, results);
+                            });
+                        });
+                    });
                 }
 
+                // Render all benchmarks
                 const main = document.getElementById('main');
                 for (const { name, dataSet } of dataSets) {
                     renderBenchSet(name, dataSet, main);
                 }
             }
 
+            // Render all charts
             renderAllCharts(init());
+
+            // Update buttons
+            updateExpandButton();
         };
     </script>
     <script src="https://commonwarexyz.github.io/benchmarks/data.js" onload="setupBenchmark()"></script>

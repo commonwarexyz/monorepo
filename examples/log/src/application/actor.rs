@@ -16,14 +16,17 @@ const GENESIS: &[u8] = b"commonware is neat";
 /// Application actor.
 pub struct Application<R: Rng, C: Scheme, H: Hasher> {
     runtime: R,
-    prover: Prover<C, H>,
+    prover: Prover<C, H::Digest>,
     hasher: H,
-    mailbox: mpsc::Receiver<Message>,
+    mailbox: mpsc::Receiver<Message<H::Digest>>,
 }
 
 impl<R: Rng, C: Scheme, H: Hasher> Application<R, C, H> {
     /// Create a new application actor.
-    pub fn new(runtime: R, config: Config<C, H>) -> (Self, Supervisor, Mailbox) {
+    pub fn new(
+        runtime: R,
+        config: Config<C, H>,
+    ) -> (Self, Supervisor<C::PublicKey>, Mailbox<H::Digest>) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
         (
             Self {
@@ -60,30 +63,31 @@ impl<R: Rng, C: Scheme, H: Hasher> Application<R, C, H> {
                     // Hash the message
                     self.hasher.update(&msg);
                     let digest = self.hasher.finalize();
-                    info!(msg = hex(&msg), payload = hex(&digest), "proposed");
+                    info!(msg = hex(&msg), payload = ?digest, "proposed");
 
                     // Send digest to consensus
                     let _ = response.send(digest);
                 }
-                Message::Verify { payload, response } => {
+                Message::Verify { response } => {
+                    // Digests are already verified by consensus, so we don't need to check they are valid.
+                    //
                     // If we linked payloads to their parent, we would verify
                     // the parent included in the payload matches the provided context.
-                    let valid = H::validate(&payload);
-                    let _ = response.send(valid);
+                    let _ = response.send(true);
                 }
                 Message::Prepared { proof, payload } => {
                     let (view, _, _, _) = self
                         .prover
                         .deserialize_notarization(proof, u32::MAX, false)
                         .unwrap();
-                    info!(view, payload = hex(&payload), "prepared")
+                    info!(view, ?payload, "prepared")
                 }
                 Message::Finalized { proof, payload } => {
                     let (view, _, _, _) = self
                         .prover
                         .deserialize_finalization(proof, u32::MAX, false)
                         .unwrap();
-                    info!(view, payload = hex(&payload), "finalized")
+                    info!(view, ?payload, "finalized")
                 }
             }
         }

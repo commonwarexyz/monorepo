@@ -10,7 +10,7 @@ use commonware_cryptography::{
         group::{self, Element},
         poly,
     },
-    Digest, Hasher, PublicKey,
+    Array,
 };
 use commonware_utils::modulo;
 use std::{
@@ -18,33 +18,33 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-type ViewInfo = (
+type ViewInfo<P> = (
     poly::Poly<group::Public>,
-    HashMap<PublicKey, u32>,
-    Vec<PublicKey>,
+    HashMap<P, u32>,
+    Vec<P>,
     group::Share,
 );
 
-pub struct Config<H: Hasher> {
-    pub prover: Prover<H>,
-    pub participants: BTreeMap<View, (poly::Poly<group::Public>, Vec<PublicKey>, group::Share)>,
+pub struct Config<P: Array, D: Array> {
+    pub prover: Prover<D>,
+    pub participants: BTreeMap<View, (poly::Poly<group::Public>, Vec<P>, group::Share)>,
 }
 
-type Participation = HashMap<View, HashMap<Digest, HashSet<PublicKey>>>;
-type Faults = HashMap<PublicKey, HashMap<View, HashSet<Activity>>>;
+type Participation<D, P> = HashMap<View, HashMap<D, HashSet<P>>>;
+type Faults<P> = HashMap<P, HashMap<View, HashSet<Activity>>>;
 
 #[derive(Clone)]
-pub struct Supervisor<H: Hasher> {
-    prover: Prover<H>,
-    participants: BTreeMap<View, ViewInfo>,
+pub struct Supervisor<P: Array, D: Array> {
+    prover: Prover<D>,
+    participants: BTreeMap<View, ViewInfo<P>>,
 
-    pub notarizes: Arc<Mutex<Participation>>,
-    pub finalizes: Arc<Mutex<Participation>>,
-    pub faults: Arc<Mutex<Faults>>,
+    pub notarizes: Arc<Mutex<Participation<D, P>>>,
+    pub finalizes: Arc<Mutex<Participation<D, P>>>,
+    pub faults: Arc<Mutex<Faults<P>>>,
 }
 
-impl<H: Hasher> Supervisor<H> {
-    pub fn new(cfg: Config<H>) -> Self {
+impl<P: Array, D: Array> Supervisor<P, D> {
+    pub fn new(cfg: Config<P, D>) -> Self {
         let mut parsed_participants = BTreeMap::new();
         for (view, (identity, mut validators, share)) in cfg.participants.into_iter() {
             let mut map = HashMap::new();
@@ -64,14 +64,15 @@ impl<H: Hasher> Supervisor<H> {
     }
 }
 
-impl<H: Hasher> Su for Supervisor<H> {
+impl<P: Array, D: Array> Su for Supervisor<P, D> {
     type Index = View;
+    type PublicKey = P;
 
-    fn leader(&self, _: Self::Index) -> Option<PublicKey> {
+    fn leader(&self, _: Self::Index) -> Option<Self::PublicKey> {
         unimplemented!("only defined in supertrait")
     }
 
-    fn participants(&self, index: Self::Index) -> Option<&Vec<PublicKey>> {
+    fn participants(&self, index: Self::Index) -> Option<&Vec<Self::PublicKey>> {
         let closest = match self.participants.range(..=index).next_back() {
             Some((_, (_, _, p, _))) => p,
             None => {
@@ -81,7 +82,7 @@ impl<H: Hasher> Su for Supervisor<H> {
         Some(closest)
     }
 
-    fn is_participant(&self, index: Self::Index, candidate: &PublicKey) -> Option<u32> {
+    fn is_participant(&self, index: Self::Index, candidate: &Self::PublicKey) -> Option<u32> {
         let closest = match self.participants.range(..=index).next_back() {
             Some((_, (_, p, _, _))) => p,
             None => {
@@ -198,12 +199,12 @@ impl<H: Hasher> Su for Supervisor<H> {
     }
 }
 
-impl<H: Hasher> TSu for Supervisor<H> {
+impl<P: Array, D: Array> TSu for Supervisor<P, D> {
     type Seed = group::Signature;
     type Identity = poly::Public;
     type Share = group::Share;
 
-    fn leader(&self, index: Self::Index, seed: Self::Seed) -> Option<PublicKey> {
+    fn leader(&self, index: Self::Index, seed: Self::Seed) -> Option<Self::PublicKey> {
         let closest = match self.participants.range(..=index).next_back() {
             Some((_, (_, _, p, _))) => p,
             None => {

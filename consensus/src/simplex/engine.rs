@@ -4,11 +4,11 @@ use super::{
     Context, View,
 };
 use crate::{Automaton, Committer, Relay, Supervisor};
-use commonware_cryptography::{Hasher, Scheme};
+use commonware_cryptography::{Array, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Sender};
 use commonware_runtime::{Blob, Clock, Spawner, Storage};
-use commonware_storage::journal::Journal;
+use commonware_storage::journal::variable::Journal;
 use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
 use tracing::debug;
@@ -18,17 +18,17 @@ pub struct Engine<
     B: Blob,
     E: Clock + GClock + Rng + CryptoRng + Spawner + Storage<B>,
     C: Scheme,
-    H: Hasher,
-    A: Automaton<Context = Context>,
-    R: Relay,
-    F: Committer,
-    S: Supervisor<Index = View>,
+    D: Array,
+    A: Automaton<Context = Context<D>, Digest = D>,
+    R: Relay<Digest = D>,
+    F: Committer<Digest = D>,
+    S: Supervisor<Index = View, PublicKey = C::PublicKey>,
 > {
     runtime: E,
 
-    voter: voter::Actor<B, E, C, H, A, R, F, S>,
-    voter_mailbox: voter::Mailbox,
-    resolver: resolver::Actor<E, C, H, S>,
+    voter: voter::Actor<B, E, C, D, A, R, F, S>,
+    voter_mailbox: voter::Mailbox<D>,
+    resolver: resolver::Actor<E, C, D, S>,
     resolver_mailbox: resolver::Mailbox,
 }
 
@@ -36,15 +36,15 @@ impl<
         B: Blob,
         E: Clock + GClock + Rng + CryptoRng + Spawner + Storage<B>,
         C: Scheme,
-        H: Hasher,
-        A: Automaton<Context = Context>,
-        R: Relay,
-        F: Committer,
-        S: Supervisor<Index = View>,
-    > Engine<B, E, C, H, A, R, F, S>
+        D: Array,
+        A: Automaton<Context = Context<D>, Digest = D>,
+        R: Relay<Digest = D>,
+        F: Committer<Digest = D>,
+        S: Supervisor<Index = View, PublicKey = C::PublicKey>,
+    > Engine<B, E, C, D, A, R, F, S>
 {
     /// Create a new `simplex` consensus engine.
-    pub fn new(runtime: E, journal: Journal<B, E>, cfg: Config<C, H, A, R, F, S>) -> Self {
+    pub fn new(runtime: E, journal: Journal<B, E>, cfg: Config<C, D, A, R, F, S>) -> Self {
         // Ensure configuration is valid
         cfg.assert();
 
@@ -54,7 +54,6 @@ impl<
             journal,
             voter::Config {
                 crypto: cfg.crypto.clone(),
-                hasher: cfg.hasher,
                 automaton: cfg.automaton,
                 relay: cfg.relay,
                 committer: cfg.committer,
@@ -104,8 +103,14 @@ impl<
     /// This will also rebuild the state of the engine from provided `Journal`.
     pub async fn run(
         self,
-        voter_network: (impl Sender, impl Receiver),
-        resolver_network: (impl Sender, impl Receiver),
+        voter_network: (
+            impl Sender<PublicKey = C::PublicKey>,
+            impl Receiver<PublicKey = C::PublicKey>,
+        ),
+        resolver_network: (
+            impl Sender<PublicKey = C::PublicKey>,
+            impl Receiver<PublicKey = C::PublicKey>,
+        ),
     ) {
         // Start the voter
         let (voter_sender, voter_receiver) = voter_network;

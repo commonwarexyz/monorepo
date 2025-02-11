@@ -1231,7 +1231,7 @@ mod tests {
         dealer.ack(player.clone()).unwrap();
 
         // Ack player (again)
-        let result = dealer.ack(player.clone());
+        let result = dealer.ack(player);
         assert!(matches!(result, Err(Error::DuplicateAck)));
     }
 
@@ -1254,7 +1254,7 @@ mod tests {
 
         // Ack invalid player
         let player = Ed25519::from_seed(n as u64).public_key();
-        let result = dealer.ack(player.clone());
+        let result = dealer.ack(player);
         assert!(matches!(result, Err(Error::PlayerInvalid)));
     }
 

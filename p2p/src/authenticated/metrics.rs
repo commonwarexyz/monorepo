@@ -1,6 +1,5 @@
 use crate::Channel;
-use commonware_cryptography::PublicKey;
-use commonware_utils::hex;
+use commonware_cryptography::Array;
 use prometheus_client::encoding::EncodeLabelSet;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
@@ -9,8 +8,10 @@ pub struct Peer {
 }
 
 impl Peer {
-    pub fn new(peer: &PublicKey) -> Self {
-        Self { peer: hex(peer) }
+    pub fn new(peer: &impl Array) -> Self {
+        Self {
+            peer: peer.to_string(),
+        }
     }
 }
 
@@ -25,27 +26,27 @@ impl Message {
     const PEERS_TYPE: i32 = -2;
     const UNKNOWN_TYPE: i32 = i32::MIN;
 
-    pub fn new_bit_vec(peer: &PublicKey) -> Self {
+    pub fn new_bit_vec(peer: &impl Array) -> Self {
         Self {
-            peer: hex(peer),
+            peer: peer.to_string(),
             message: Self::BIT_VEC_TYPE,
         }
     }
-    pub fn new_peers(peer: &PublicKey) -> Self {
+    pub fn new_peers(peer: &impl Array) -> Self {
         Self {
-            peer: hex(peer),
+            peer: peer.to_string(),
             message: Self::PEERS_TYPE,
         }
     }
-    pub fn new_data(peer: &PublicKey, channel: Channel) -> Self {
+    pub fn new_data(peer: &impl Array, channel: Channel) -> Self {
         Self {
-            peer: hex(peer),
+            peer: peer.to_string(),
             message: channel as i32,
         }
     }
-    pub fn new_unknown(peer: &PublicKey) -> Self {
+    pub fn new_unknown(peer: &impl Array) -> Self {
         Self {
-            peer: hex(peer),
+            peer: peer.to_string(),
             message: Self::UNKNOWN_TYPE,
         }
     }

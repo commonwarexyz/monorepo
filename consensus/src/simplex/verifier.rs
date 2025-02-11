@@ -3,18 +3,22 @@ use crate::{
     simplex::encoder::{nullify_message, proposal_message},
     Supervisor,
 };
-use commonware_cryptography::{PublicKey, Scheme};
-use commonware_utils::{hex, quorum};
+use commonware_cryptography::{Array, Scheme};
+use commonware_utils::quorum;
 use std::collections::HashSet;
 use tracing::debug;
 
-pub fn threshold(validators: &[PublicKey]) -> Option<(u32, u32)> {
+pub fn threshold<P: Array>(validators: &[P]) -> Option<(u32, u32)> {
     let len = validators.len() as u32;
     let threshold = quorum(len).expect("not enough validators for a quorum");
     Some((threshold, len))
 }
 
-pub fn verify_notarization<S: Supervisor<Index = View>, C: Scheme>(
+pub fn verify_notarization<
+    S: Supervisor<Index = View, PublicKey = C::PublicKey>,
+    C: Scheme,
+    D: Array,
+>(
     supervisor: &S,
     namespace: &[u8],
     notarization: &wire::Notarization,
@@ -28,6 +32,12 @@ pub fn verify_notarization<S: Supervisor<Index = View>, C: Scheme>(
         }
     };
 
+    // Ensure payload is well-formed
+    let Ok(payload) = D::try_from(&proposal.payload) else {
+        debug!(reason = "invalid payload", "dropping notarization");
+        return false;
+    };
+
     // Ensure finalization has valid number of signatures
     let validators = match supervisor.participants(proposal.view) {
         Some(validators) => validators,
@@ -35,7 +45,7 @@ pub fn verify_notarization<S: Supervisor<Index = View>, C: Scheme>(
             debug!(
                 view = proposal.view,
                 reason = "unable to compute participants for view",
-                "dropping finalization"
+                "dropping notarization"
             );
             return false;
         }
@@ -46,7 +56,7 @@ pub fn verify_notarization<S: Supervisor<Index = View>, C: Scheme>(
             debug!(
                 view = proposal.view,
                 reason = "unable to compute participants for view",
-                "dropping finalization"
+                "dropping notarization"
             );
             return false;
         }
@@ -71,7 +81,7 @@ pub fn verify_notarization<S: Supervisor<Index = View>, C: Scheme>(
     }
 
     // Verify threshold notarization
-    let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
+    let message = proposal_message(proposal.view, proposal.parent, &payload);
     let mut seen = HashSet::new();
     for signature in notarization.signatures.iter() {
         // Get public key
@@ -82,7 +92,7 @@ pub fn verify_notarization<S: Supervisor<Index = View>, C: Scheme>(
                     view = proposal.view,
                     signer = signature.public_key,
                     reason = "invalid validator",
-                    "dropping finalization"
+                    "dropping notarization"
                 );
                 return false;
             }
@@ -91,7 +101,7 @@ pub fn verify_notarization<S: Supervisor<Index = View>, C: Scheme>(
         // Ensure we haven't seen this signature before
         if seen.contains(&signature.public_key) {
             debug!(
-                signer = hex(public_key),
+                signer = ?public_key,
                 reason = "duplicate signature",
                 "dropping notarization"
             );
@@ -100,7 +110,10 @@ pub fn verify_notarization<S: Supervisor<Index = View>, C: Scheme>(
         seen.insert(signature.public_key);
 
         // Verify signature
-        if !C::verify(Some(namespace), &message, public_key, &signature.signature) {
+        let Ok(signature) = C::Signature::try_from(&signature.signature) else {
+            return false;
+        };
+        if !C::verify(Some(namespace), &message, public_key, &signature) {
             debug!(reason = "invalid signature", "dropping notarization");
             return false;
         }
@@ -109,7 +122,7 @@ pub fn verify_notarization<S: Supervisor<Index = View>, C: Scheme>(
     true
 }
 
-pub fn verify_nullification<S: Supervisor<Index = View>, C: Scheme>(
+pub fn verify_nullification<S: Supervisor<Index = View, PublicKey = C::PublicKey>, C: Scheme>(
     supervisor: &S,
     namespace: &[u8],
     nullification: &wire::Nullification,
@@ -121,7 +134,7 @@ pub fn verify_nullification<S: Supervisor<Index = View>, C: Scheme>(
             debug!(
                 view = nullification.view,
                 reason = "unable to compute participants for view",
-                "dropping finalization"
+                "dropping nullification"
             );
             return false;
         }
@@ -132,7 +145,7 @@ pub fn verify_nullification<S: Supervisor<Index = View>, C: Scheme>(
             debug!(
                 view = nullification.view,
                 reason = "unable to compute participants for view",
-                "dropping finalization"
+                "dropping nullification"
             );
             return false;
         }
@@ -168,7 +181,7 @@ pub fn verify_nullification<S: Supervisor<Index = View>, C: Scheme>(
                     view = nullification.view,
                     signer = signature.public_key,
                     reason = "invalid validator",
-                    "dropping finalization"
+                    "dropping nullification"
                 );
                 return false;
             }
@@ -177,17 +190,20 @@ pub fn verify_nullification<S: Supervisor<Index = View>, C: Scheme>(
         // Ensure we haven't seen this signature before
         if seen.contains(&signature.public_key) {
             debug!(
-                signer = hex(public_key),
+                signer = ?public_key,
                 reason = "duplicate signature",
-                "dropping notarization"
+                "dropping nullification"
             );
             return false;
         }
         seen.insert(signature.public_key);
 
         // Verify signature
-        if !C::verify(Some(namespace), &message, public_key, &signature.signature) {
-            debug!(reason = "invalid signature", "dropping notarization");
+        let Ok(signature) = C::Signature::try_from(&signature.signature) else {
+            return false;
+        };
+        if !C::verify(Some(namespace), &message, public_key, &signature) {
+            debug!(reason = "invalid signature", "dropping nullification");
             return false;
         }
     }
@@ -195,7 +211,11 @@ pub fn verify_nullification<S: Supervisor<Index = View>, C: Scheme>(
     true
 }
 
-pub fn verify_finalization<S: Supervisor<Index = View>, C: Scheme>(
+pub fn verify_finalization<
+    S: Supervisor<Index = View, PublicKey = C::PublicKey>,
+    C: Scheme,
+    D: Array,
+>(
     supervisor: &S,
     namespace: &[u8],
     finalization: &wire::Finalization,
@@ -204,9 +224,15 @@ pub fn verify_finalization<S: Supervisor<Index = View>, C: Scheme>(
     let proposal = match &finalization.proposal {
         Some(proposal) => proposal,
         None => {
-            debug!(reason = "missing proposal", "dropping notarization");
+            debug!(reason = "missing proposal", "dropping finalization");
             return false;
         }
+    };
+
+    // Ensure payload is well-formed
+    let Ok(payload) = D::try_from(&proposal.payload) else {
+        debug!(reason = "invalid payload", "dropping finalization");
+        return false;
     };
 
     // Ensure finalization has valid number of signatures
@@ -252,7 +278,7 @@ pub fn verify_finalization<S: Supervisor<Index = View>, C: Scheme>(
     }
 
     // Verify threshold finalization
-    let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
+    let message = proposal_message(proposal.view, proposal.parent, &payload);
     let mut seen = HashSet::new();
     for signature in finalization.signatures.iter() {
         // Get public key
@@ -272,7 +298,7 @@ pub fn verify_finalization<S: Supervisor<Index = View>, C: Scheme>(
         // Ensure we haven't seen this signature before
         if seen.contains(&signature.public_key) {
             debug!(
-                signer = hex(public_key),
+                signer = ?public_key,
                 reason = "duplicate signature",
                 "dropping finalization"
             );
@@ -281,7 +307,10 @@ pub fn verify_finalization<S: Supervisor<Index = View>, C: Scheme>(
         seen.insert(signature.public_key);
 
         // Verify signature
-        if !C::verify(Some(namespace), &message, public_key, &signature.signature) {
+        let Ok(signature) = C::Signature::try_from(&signature.signature) else {
+            return false;
+        };
+        if !C::verify(Some(namespace), &message, public_key, &signature) {
             debug!(reason = "invalid signature", "dropping finalization");
             return false;
         }

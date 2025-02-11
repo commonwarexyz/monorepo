@@ -15,9 +15,9 @@ use commonware_runtime::{
     tokio::{self, Executor},
     Network, Runner, Spawner,
 };
-use commonware_storage::journal::{self, Journal};
+use commonware_storage::journal::variable::{Config, Journal};
 use commonware_stream::public_key::{self, Connection};
-use commonware_utils::{from_hex, hex, quorum, union};
+use commonware_utils::{from_hex, quorum, union};
 use governor::Quota;
 use prometheus_client::registry::Registry;
 use std::sync::{Arc, Mutex};
@@ -73,7 +73,7 @@ fn main() {
     }
     let key = parts[0].parse::<u64>().expect("Key not well-formed");
     let signer = Ed25519::from_seed(key);
-    tracing::info!(key = hex(&signer.public_key()), "loaded signer");
+    tracing::info!(key = ?signer.public_key(), "loaded signer");
 
     // Configure my port
     let port = parts[1].parse::<u16>().expect("Port not well-formed");
@@ -90,7 +90,7 @@ fn main() {
     }
     for peer in participants {
         let verifier = Ed25519::from_seed(peer).public_key();
-        tracing::info!(key = hex(&verifier), "registered authorized key",);
+        tracing::info!(key = ?verifier, "registered authorized key");
         validators.push(verifier);
     }
 
@@ -217,7 +217,7 @@ fn main() {
         // Initialize storage
         let journal = Journal::init(
             runtime.clone(),
-            journal::Config {
+            Config {
                 registry: Arc::new(Mutex::new(Registry::default())),
                 partition: String::from("log"),
             },
@@ -227,9 +227,8 @@ fn main() {
 
         // Initialize application
         let consensus_namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
-        let hasher = Sha256::default();
-        let prover: Prover<Sha256> = Prover::new(public, &consensus_namespace);
-        let other_prover: Prover<Sha256> = Prover::new(other_identity, &consensus_namespace);
+        let prover = Prover::new(public, &consensus_namespace);
+        let other_prover = Prover::new(other_identity, &consensus_namespace);
         let (application, supervisor, mailbox) = application::Application::new(
             runtime.clone(),
             application::Config {
@@ -237,7 +236,7 @@ fn main() {
                 prover,
                 other_prover,
                 other_network: other_identity,
-                hasher: hasher.clone(),
+                hasher: Sha256::default(),
                 mailbox_size: 1024,
                 identity,
                 participants: validators.clone(),
@@ -251,7 +250,6 @@ fn main() {
             journal,
             threshold_simplex::Config {
                 crypto: signer.clone(),
-                hasher,
                 automaton: mailbox.clone(),
                 relay: mailbox.clone(),
                 committer: mailbox,

@@ -47,11 +47,11 @@ pub struct Network<
     runtime: E,
     cfg: Config<C>,
 
-    channels: Channels,
+    channels: Channels<C::PublicKey>,
     tracker: tracker::Actor<E, C>,
-    tracker_mailbox: tracker::Mailbox<E>,
-    router: router::Actor,
-    router_mailbox: router::Mailbox,
+    tracker_mailbox: tracker::Mailbox<E, C::PublicKey>,
+    router: router::Actor<C::PublicKey>,
+    router_mailbox: router::Mailbox<C::PublicKey>,
 
     _phantom_si: PhantomData<Si>,
     _phantom_st: PhantomData<St>,
@@ -76,7 +76,7 @@ impl<
     ///
     /// * A tuple containing the network instance and the oracle that
     ///   can be used by a developer to configure which peers are authorized.
-    pub fn new(runtime: E, cfg: Config<C>) -> (Self, tracker::Oracle<E>) {
+    pub fn new(runtime: E, cfg: Config<C>) -> (Self, tracker::Oracle<E, C::PublicKey>) {
         let (tracker, tracker_mailbox, oracle) = tracker::Actor::new(
             runtime.clone(),
             tracker::Config {
@@ -138,7 +138,10 @@ impl<
         rate: Quota,
         backlog: usize,
         compression: Option<i32>,
-    ) -> (channels::Sender, channels::Receiver) {
+    ) -> (
+        channels::Sender<C::PublicKey>,
+        channels::Receiver<C::PublicKey>,
+    ) {
         self.channels.register(channel, rate, backlog, compression)
     }
 

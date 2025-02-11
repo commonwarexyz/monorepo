@@ -9,13 +9,12 @@ use crate::{
         verifier::{verify_notarization, verify_nullification},
         wire, View,
     },
-    ThresholdSupervisor,
+    Parsed, ThresholdSupervisor,
 };
-use commonware_cryptography::{bls12381::primitives::poly, Hasher, Scheme};
+use commonware_cryptography::{bls12381::primitives::poly, Array, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{utils::requester, Receiver, Recipients, Sender};
 use commonware_runtime::Clock;
-use commonware_utils::hex;
 use futures::{channel::mpsc, future::Either, StreamExt};
 use governor::clock::Clock as GClock;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
@@ -99,12 +98,12 @@ impl Inflight {
 pub struct Actor<
     E: Clock + GClock + Rng,
     C: Scheme,
-    H: Hasher,
-    S: ThresholdSupervisor<Index = View, Identity = poly::Public>,
+    D: Array,
+    S: ThresholdSupervisor<Index = View, Identity = poly::Public, PublicKey = C::PublicKey>,
 > {
     runtime: E,
     supervisor: S,
-    _hasher: PhantomData<H>,
+    _digest: PhantomData<D>,
 
     seed_namespace: Vec<u8>,
     notarize_namespace: Vec<u8>,
@@ -134,9 +133,9 @@ pub struct Actor<
 impl<
         E: Clock + GClock + Rng,
         C: Scheme,
-        H: Hasher,
-        S: ThresholdSupervisor<Index = View, Identity = poly::Public>,
-    > Actor<E, C, H, S>
+        D: Array,
+        S: ThresholdSupervisor<Index = View, Identity = poly::Public, PublicKey = C::PublicKey>,
+    > Actor<E, C, D, S>
 {
     pub fn new(runtime: E, cfg: Config<C, S>) -> (Self, Mailbox) {
         // Initialize requester
@@ -173,7 +172,7 @@ impl<
             Self {
                 runtime,
                 supervisor: cfg.supervisor,
-                _hasher: PhantomData,
+                _digest: PhantomData,
 
                 seed_namespace: seed_namespace(&cfg.namespace),
                 notarize_namespace: notarize_namespace(&cfg.namespace),
@@ -204,7 +203,7 @@ impl<
     }
 
     /// Concurrent indicates whether we should send a new request (only if we see a request for the first time)
-    async fn send(&mut self, shuffle: bool, sender: &mut impl Sender) {
+    async fn send(&mut self, shuffle: bool, sender: &mut impl Sender<PublicKey = C::PublicKey>) {
         // Clear retry
         self.retry = None;
 
@@ -286,14 +285,14 @@ impl<
                     // Try again (treating past request as timeout)
                     let request = self.requester.cancel(request).unwrap();
                     self.requester.timeout(request);
-                    debug!(peer = hex(&recipient), "failed to send request");
+                    debug!(peer = ?recipient, "failed to send request");
                     continue;
                 }
 
                 // Exit if sent
                 self.inflight.add(request, inflight);
                 debug!(
-                    peer = hex(&recipient),
+                    peer = ?recipient,
                     ?notarizations,
                     ?nullifications,
                     "sent request"
@@ -305,9 +304,9 @@ impl<
 
     pub async fn run(
         mut self,
-        mut voter: voter::Mailbox,
-        mut sender: impl Sender,
-        mut receiver: impl Receiver,
+        mut voter: voter::Mailbox<D>,
+        mut sender: impl Sender<PublicKey = C::PublicKey>,
+        mut receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) {
         // Wait for an event
         let mut current_view = 0;
@@ -435,14 +434,14 @@ impl<
                     let msg = match wire::Backfiller::decode(msg) {
                         Ok(msg) => msg,
                         Err(err) => {
-                            warn!(?err, sender = hex(&s), "failed to decode message");
+                            warn!(?err, sender = ?s, "failed to decode message");
                             continue;
                         },
                     };
                     let payload = match msg.payload {
                         Some(payload) => payload,
                         None => {
-                            warn!(sender = hex(&s), "missing payload");
+                            warn!(sender = ?s, "missing payload");
                             continue;
                         },
                     };
@@ -458,8 +457,8 @@ impl<
 
                             // Ensure too many notarizations/nullifications aren't requested
                             if request.notarizations.len() + request.nullifications.len() > self.max_fetch_count {
-                                warn!(sender = hex(&s), "request too large");
-                                self.requester.block(s.clone());
+                                warn!(sender = ?s, "request too large");
+                                self.requester.block(s);
                                 continue;
                             }
 
@@ -496,7 +495,7 @@ impl<
                             }
 
                             // Send response
-                            debug!(sender = hex(&s), ?notarizations, ?missing_notarizations, ?nullifications, ?missing_nullifications, "sending response");
+                            debug!(sender = ?s, ?notarizations, ?missing_notarizations, ?nullifications, ?missing_nullifications, "sending response");
                             let response = wire::Backfiller {
                                 id: msg.id,
                                 payload: Some(wire::backfiller::Payload::Response(wire::Response {
@@ -507,14 +506,14 @@ impl<
                             .encode_to_vec()
                             .into();
                             sender
-                                .send(Recipients::One(s.clone()), response, false)
+                                .send(Recipients::One(s), response, false)
                                 .await
                                 .unwrap();
                         },
                         wire::backfiller::Payload::Response(response) => {
                             // Ensure we were waiting for this response
                             let Some(request) = self.requester.handle(&s, msg.id) else {
-                                debug!(sender = hex(&s), "unexpected message");
+                                debug!(sender = ?s, "unexpected message");
                                 continue;
                             };
                             self.inflight.clear(request.id);
@@ -522,7 +521,7 @@ impl<
                             // Ensure response isn't too big
                             if response.notarizations.len() + response.nullifications.len() > self.max_fetch_count {
                                 // Block responder
-                                warn!(sender = hex(&s), "response too large");
+                                warn!(sender = ?s, "response too large");
                                 self.requester.block(s);
 
                                 // Pick new recipient
@@ -534,27 +533,36 @@ impl<
                             let mut notarizations_found = BTreeSet::new();
                             let mut nullifications_found = BTreeSet::new();
                             for notarization in response.notarizations {
-                                let view = match notarization.proposal.as_ref() {
-                                    Some(proposal) => proposal.view,
+                                let proposal = match notarization.proposal.as_ref() {
+                                    Some(proposal) => proposal,
                                     None => {
-                                        warn!(sender = hex(&s), "missing proposal");
+                                        warn!(sender = ?s, "missing proposal");
                                         self.requester.block(s.clone());
                                         continue;
                                     },
                                 };
+                                let view = proposal.view;
+                                let Ok(payload) = D::try_from(&proposal.payload) else {
+                                    warn!(view, sender = ?s, "invalid proposal");
+                                    self.requester.block(s.clone());
+                                    continue;
+                                };
                                 let entry = Entry { task: Task::Notarization, view };
                                 if !self.required.contains(&entry) {
-                                    debug!(view, sender = hex(&s), "unnecessary notarization");
+                                    debug!(view, sender = ?s, "unnecessary notarization");
                                     continue;
                                 }
-                                if !verify_notarization::<S>(&self.supervisor, &self.notarize_namespace, &self.seed_namespace, &notarization) {
-                                    warn!(view, sender = hex(&s), "invalid notarization");
+                                if !verify_notarization::<D, S>(&self.supervisor, &self.notarize_namespace, &self.seed_namespace, &notarization) {
+                                    warn!(view, sender = ?s, "invalid notarization");
                                     self.requester.block(s.clone());
                                     continue;
                                 }
                                 self.required.remove(&entry);
                                 self.notarizations.insert(view, notarization.clone());
-                                voter.notarization(notarization).await;
+                                voter.notarization(Parsed{
+                                    message: notarization,
+                                    digest: payload,
+                                }).await;
                                 notarizations_found.insert(view);
                             }
 
@@ -563,11 +571,11 @@ impl<
                                 let view = nullification.view;
                                 let entry = Entry { task: Task::Nullification, view };
                                 if !self.required.contains(&entry) {
-                                    debug!(view, sender = hex(&s), "unnecessary nullification");
+                                    debug!(view, sender = ?s, "unnecessary nullification");
                                     continue;
                                 }
                                 if !verify_nullification::<S>(&self.supervisor, &self.nullify_namespace, &self.seed_namespace, &nullification) {
-                                    warn!(view, sender = hex(&s), "invalid nullification");
+                                    warn!(view, sender = ?s, "invalid nullification");
                                     self.requester.block(s.clone());
                                     continue;
                                 }
@@ -582,7 +590,7 @@ impl<
                             if !notarizations_found.is_empty() || !nullifications_found.is_empty() {
                                 self.requester.resolve(request);
                                 debug!(
-                                    sender = hex(&s),
+                                    sender = ?s,
                                     notarizations = ?notarizations_found,
                                     nullifications = ?nullifications_found,
                                     "response useful",
@@ -590,7 +598,7 @@ impl<
                             } else {
                                 // We don't reward a peer for sending us a response that doesn't help us
                                 shuffle = true;
-                                debug!(sender = hex(&s), "response not useful");
+                                debug!(sender = ?s, "response not useful");
                             }
 
                             // If still work to do, send another request

@@ -1,6 +1,6 @@
 use super::{Context, View};
 use crate::{Automaton, Committer, Relay, Supervisor};
-use commonware_cryptography::{Hasher, Scheme};
+use commonware_cryptography::{Array, Scheme};
 use governor::Quota;
 use prometheus_client::registry::Registry;
 use std::{
@@ -11,17 +11,14 @@ use std::{
 /// Configuration for the consensus engine.
 pub struct Config<
     C: Scheme,
-    H: Hasher,
-    A: Automaton<Context = Context>,
-    R: Relay,
-    F: Committer,
+    D: Array,
+    A: Automaton<Context = Context<D>, Digest = D>,
+    R: Relay<Digest = D>,
+    F: Committer<Digest = D>,
     S: Supervisor<Index = View>,
 > {
     /// Cryptographic primitives.
     pub crypto: C,
-
-    /// Hashing algorithm.
-    pub hasher: H,
 
     /// Automaton for the consensus engine.
     pub automaton: A,
@@ -84,12 +81,12 @@ pub struct Config<
 
 impl<
         C: Scheme,
-        H: Hasher,
-        A: Automaton<Context = Context>,
-        R: Relay,
-        F: Committer,
+        D: Array,
+        A: Automaton<Context = Context<D>, Digest = D>,
+        R: Relay<Digest = D>,
+        F: Committer<Digest = D>,
         S: Supervisor<Index = View>,
-    > Config<C, H, A, R, F, S>
+    > Config<C, D, A, R, F, S>
 {
     /// Assert enforces that all configuration values are valid.
     pub fn assert(&self) {
