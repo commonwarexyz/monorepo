@@ -36,9 +36,5 @@ pub enum Error {
     InvalidRewind(u64),
 }
 
-cfg_if::cfg_if! {
-    if #[cfg(not(target_arch = "wasm32"))] {
-        pub mod fixed;
-        pub mod variable;
-    }
-}
+pub mod fixed;
+pub mod variable;

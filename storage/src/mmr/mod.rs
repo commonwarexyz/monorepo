@@ -67,19 +67,15 @@ use thiserror::Error;
 
 mod hasher;
 mod iterator;
+pub mod journaled;
 pub mod mem;
 pub mod verification;
 
+/// Errors that can occur when interacting with an MMR.
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("an element required for this operation has been pruned")]
     ElementPruned,
     #[error("journal error: {0}")]
     JournalError(#[from] crate::journal::Error),
-}
-
-cfg_if::cfg_if! {
-    if #[cfg(not(target_arch = "wasm32"))] {
-        pub mod journaled;
-    }
 }
