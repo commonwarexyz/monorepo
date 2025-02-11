@@ -20,6 +20,11 @@ use thiserror::Error;
 
 pub mod deterministic;
 pub mod mocks;
+cfg_if::cfg_if! {
+    if #[cfg(not(target_arch = "wasm32"))] {
+        pub mod tokio;
+    }
+}
 
 mod utils;
 pub use utils::{reschedule, Handle, Signal, Signaler};
@@ -232,12 +237,6 @@ pub trait Blob: Clone + Send + Sync + 'static {
 
     /// Close the blob.
     fn close(self) -> impl Future<Output = Result<(), Error>> + Send;
-}
-
-cfg_if::cfg_if! {
-    if #[cfg(not(target_arch = "wasm32"))] {
-        pub mod tokio;
-    }
 }
 
 #[cfg(test)]
