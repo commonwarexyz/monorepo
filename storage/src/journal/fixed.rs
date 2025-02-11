@@ -50,12 +50,14 @@
 
 use super::Error;
 use bytes::BufMut;
+use commonware_cryptography::Array;
 use commonware_runtime::{Blob, Error as RError, Storage};
 use commonware_utils::{hex, SizedSerialize};
 use futures::stream::{self, Stream, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use prometheus_client::registry::Registry;
 use std::collections::BTreeMap;
+use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 use tracing::{debug, trace, warn};
 
@@ -76,7 +78,7 @@ pub struct Config {
 }
 
 /// Implementation of `Journal` storage.
-pub struct Journal<B: Blob, E: Storage<B>, const N: usize> {
+pub struct Journal<B: Blob, E: Storage<B>, A: Array> {
     runtime: E,
     cfg: Config,
 
@@ -87,10 +89,12 @@ pub struct Journal<B: Blob, E: Storage<B>, const N: usize> {
     tracked: Gauge,
     synced: Counter,
     pruned: Counter,
+
+    _array: PhantomData<A>,
 }
 
-impl<B: Blob, E: Storage<B>, const N: usize> Journal<B, E, N> {
-    const CHUNK_SIZE: usize = u32::SERIALIZED_LEN + N;
+impl<B: Blob, E: Storage<B>, A: Array> Journal<B, E, A> {
+    const CHUNK_SIZE: usize = u32::SERIALIZED_LEN + A::SERIALIZED_LEN;
 
     /// Initialize a new `Journal` instance.
     ///
@@ -166,6 +170,8 @@ impl<B: Blob, E: Storage<B>, const N: usize> Journal<B, E, N> {
             tracked,
             synced,
             pruned,
+
+            _array: PhantomData,
         })
     }
 
@@ -189,7 +195,7 @@ impl<B: Blob, E: Storage<B>, const N: usize> Journal<B, E, N> {
 
     /// Append a new item to the journal. Return the item's position in the journal, or error if the
     /// operation fails.
-    pub async fn append(&mut self, item: [u8; N]) -> Result<u64, Error> {
+    pub async fn append(&mut self, item: A) -> Result<u64, Error> {
         let mut newest_blob = self.newest_blob();
 
         let mut blob_len = newest_blob.1.len().await?;
@@ -214,8 +220,8 @@ impl<B: Blob, E: Storage<B>, const N: usize> Journal<B, E, N> {
         }
 
         let mut buf: Vec<u8> = Vec::with_capacity(Self::CHUNK_SIZE);
-        let checksum = crc32fast::hash(&item[..]);
-        buf.put(&item[..]);
+        let checksum = crc32fast::hash(&item);
+        buf.extend_from_slice(&item);
         buf.put_u32(checksum);
 
         let item_position = blob_len / Self::CHUNK_SIZE as u64;
@@ -272,7 +278,7 @@ impl<B: Blob, E: Storage<B>, const N: usize> Journal<B, E, N> {
     }
 
     /// Read the item at the given position in the journal.
-    pub async fn read(&self, item_position: u64) -> Result<[u8; N], Error> {
+    pub async fn read(&self, item_position: u64) -> Result<A, Error> {
         let blob_index = item_position / self.cfg.items_per_blob;
 
         let blob = match self.blobs.get(&blob_index) {
@@ -296,13 +302,13 @@ impl<B: Blob, E: Storage<B>, const N: usize> Journal<B, E, N> {
         Self::verify_integrity(&buf)
     }
 
-    fn verify_integrity(buf: &[u8]) -> Result<[u8; N], Error> {
-        let stored_checksum = u32::from_be_bytes(buf[N..].try_into().unwrap());
-        let checksum = crc32fast::hash(&buf[..N]);
+    fn verify_integrity(buf: &[u8]) -> Result<A, Error> {
+        let stored_checksum = u32::from_be_bytes(buf[A::SERIALIZED_LEN..].try_into().unwrap());
+        let checksum = crc32fast::hash(&buf[..A::SERIALIZED_LEN]);
         if checksum != stored_checksum {
             return Err(Error::ChecksumMismatch(stored_checksum, checksum));
         }
-        Ok(buf[..N].try_into().unwrap())
+        Ok(buf[..A::SERIALIZED_LEN].try_into().unwrap())
     }
 
     /// Returns an unordered stream of all items in the journal.
@@ -319,7 +325,7 @@ impl<B: Blob, E: Storage<B>, const N: usize> Journal<B, E, N> {
     pub async fn replay(
         &mut self,
         concurrency: usize,
-    ) -> Result<impl Stream<Item = Result<(u64, [u8; N]), Error>> + '_, Error> {
+    ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + '_, Error> {
         // Collect all blobs to replay
         let mut blobs = Vec::with_capacity(self.blobs.len());
         for (index, blob) in self.blobs.iter() {
@@ -346,7 +352,7 @@ impl<B: Blob, E: Storage<B>, const N: usize> Journal<B, E, N> {
                             return None;
                         }
                         // Get next item
-                        let mut buf = vec![0u8; N + size_of::<u32>()];
+                        let mut buf = vec![0u8; Self::CHUNK_SIZE];
                         let item = blob.read_at(&mut buf, offset).await.map_err(Error::Runtime);
                         let next_offset = offset + Self::CHUNK_SIZE as u64;
                         match item {
@@ -427,10 +433,16 @@ impl<B: Blob, E: Storage<B>, const N: usize> Journal<B, E, N> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_cryptography::{hash, sha256::Digest};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic::Executor, Blob, Runner, Storage};
     use futures::{pin_mut, StreamExt};
     use prometheus_client::encoding::text::encode;
+
+    /// Generate a SHA-256 digest for the given value.
+    fn test_digest(value: u64) -> Digest {
+        hash(&value.to_be_bytes())
+    }
 
     #[test_traced]
     fn test_fixed_journal_append_and_prune() {
@@ -455,7 +467,7 @@ mod tests {
 
             // Append an item to the journal
             let mut position = journal
-                .append(0u64.to_be_bytes())
+                .append(test_digest(0))
                 .await
                 .expect("failed to append data 0");
             assert_eq!(position, 0);
@@ -475,12 +487,12 @@ mod tests {
 
             // Append two more items to the journal to trigger a new blob creation
             position = journal
-                .append(1u64.to_be_bytes())
+                .append(test_digest(1))
                 .await
                 .expect("failed to append data 1");
             assert_eq!(position, 1);
             position = journal
-                .append(2u64.to_be_bytes())
+                .append(test_digest(2))
                 .await
                 .expect("failed to append data 2");
             assert_eq!(position, 2);
@@ -490,11 +502,11 @@ mod tests {
 
             // Read the items back
             let item0 = journal.read(0).await.expect("failed to read data 0");
-            assert_eq!(item0, 0u64.to_be_bytes());
+            assert_eq!(item0, test_digest(0));
             let item1 = journal.read(1).await.expect("failed to read data 1");
-            assert_eq!(item1, 1u64.to_be_bytes());
+            assert_eq!(item1, test_digest(1));
             let item2 = journal.read(2).await.expect("failed to read data 2");
-            assert_eq!(item2, 2u64.to_be_bytes());
+            assert_eq!(item2, test_digest(2));
             let err = journal.read(3).await.expect_err("expected read to fail");
             assert!(matches!(err, Error::Runtime(_)));
             let err = journal.read(400).await.expect_err("expected read to fail");
@@ -527,12 +539,12 @@ mod tests {
 
             // Third item should still be readable
             let result2 = journal.read(2).await.unwrap();
-            assert_eq!(result2, 2u64.to_be_bytes());
+            assert_eq!(result2, test_digest(2));
 
             // Should be able to continue to append items
-            for i in 3u64..10 {
+            for i in 3..10 {
                 let position = journal
-                    .append(i.to_be_bytes())
+                    .append(test_digest(i))
                     .await
                     .expect("failed to append data");
                 assert_eq!(position, i);
@@ -577,7 +589,7 @@ mod tests {
             while let Some(result) = stream.next().await {
                 match result {
                     Ok((position, item)) => {
-                        assert_eq!(position, u64::from_be_bytes(item));
+                        assert_eq!(test_digest(position), item);
                         items.push(position);
                     }
                     Err(err) => panic!("Failed to read item: {}", err),
@@ -608,7 +620,7 @@ mod tests {
             // Append many items, filling 100 blobs and part of the 101st
             for i in 0u64..(ITEMS_PER_BLOB * 100 + ITEMS_PER_BLOB / 2) {
                 let position = journal
-                    .append(i.to_be_bytes())
+                    .append(test_digest(i))
                     .await
                     .expect("failed to append data");
                 assert_eq!(position, i);
@@ -626,7 +638,7 @@ mod tests {
                 while let Some(result) = stream.next().await {
                     match result {
                         Ok((position, item)) => {
-                            assert_eq!(position, u64::from_be_bytes(item));
+                            assert_eq!(test_digest(position), item);
                             items.push(position);
                         }
                         Err(err) => panic!("Failed to read item: {}", err),
@@ -646,8 +658,8 @@ mod tests {
             journal.close().await.expect("Failed to close journal");
 
             // Corrupt one of the checksums and make sure it's detected.
-            let checksum_offset = size_of::<u64>() as u64
-                + (ITEMS_PER_BLOB / 2) * (size_of::<u64>() + size_of::<u32>()) as u64;
+            let checksum_offset = Digest::SERIALIZED_LEN as u64
+                + (ITEMS_PER_BLOB / 2) * (Digest::SERIALIZED_LEN + u32::SERIALIZED_LEN) as u64;
             let blob = context
                 .open(&cfg.partition, &40u64.to_be_bytes())
                 .await
@@ -676,7 +688,7 @@ mod tests {
                 while let Some(result) = stream.next().await {
                     match result {
                         Ok((position, item)) => {
-                            assert_eq!(position, u64::from_be_bytes(item));
+                            assert_eq!(test_digest(position), item);
                             items.push(position);
                         }
                         Err(err) => {
@@ -722,7 +734,7 @@ mod tests {
                 while let Some(result) = stream.next().await {
                     match result {
                         Ok((position, item)) => {
-                            assert_eq!(position, u64::from_be_bytes(item));
+                            assert_eq!(test_digest(position), item);
                             items.push(position);
                         }
                         Err(err) => {
@@ -745,7 +757,7 @@ mod tests {
                 .await
                 .expect("Failed to open blob");
             // Re-initialize the journal to simulate a restart
-            let result = Journal::<_, _, 8>::init(context.clone(), cfg.clone()).await;
+            let result = Journal::<_, _, Digest>::init(context.clone(), cfg.clone()).await;
             assert!(matches!(result.err().unwrap(), Error::MissingBlob(n) if n == 40));
         });
     }
@@ -766,9 +778,9 @@ mod tests {
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
-            for i in 0u32..4 {
+            for i in 0..4 {
                 journal
-                    .append(i.to_be_bytes())
+                    .append(test_digest(i))
                     .await
                     .expect("failed to append data");
             }
@@ -791,7 +803,7 @@ mod tests {
             blob.close().await.expect("Failed to close blob");
 
             // Re-initialize the journal to simulate a restart
-            let journal = Journal::<_, _, 4>::init(context.clone(), cfg.clone())
+            let journal = Journal::<_, _, Digest>::init(context.clone(), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
             // the last corrupted item should get discarded
@@ -824,7 +836,7 @@ mod tests {
 
             // Append an item to the journal
             journal
-                .append(0u64.to_be_bytes())
+                .append(test_digest(0))
                 .await
                 .expect("failed to append data 0");
             assert_eq!(journal.size().await.unwrap(), 1);
@@ -833,9 +845,9 @@ mod tests {
             assert_eq!(journal.size().await.unwrap(), 0);
 
             // append 7 items
-            for i in 0u64..7 {
+            for i in 0..7 {
                 let pos = journal
-                    .append(i.to_be_bytes())
+                    .append(test_digest(i))
                     .await
                     .expect("failed to append data");
                 assert_eq!(pos, i);
@@ -858,9 +870,9 @@ mod tests {
 
             // stress test: add 100 items, rewind 49, repeat x10.
             for _ in 0..10 {
-                for i in 0u64..100 {
+                for i in 0..100 {
                     journal
-                        .append(i.to_be_bytes())
+                        .append(test_digest(i))
                         .await
                         .expect("failed to append data");
                 }
@@ -884,9 +896,9 @@ mod tests {
                 .await
                 .expect("failed to initialize journal");
             for _ in 0..10 {
-                for i in 0u64..100 {
+                for i in 0..100 {
                     journal
-                        .append(i.to_be_bytes())
+                        .append(test_digest(i))
                         .await
                         .expect("failed to append data");
                 }
@@ -900,7 +912,7 @@ mod tests {
             journal.close().await.expect("Failed to close journal");
 
             // Make sure re-opened journal is as expected
-            let mut journal: Journal<_, _, 4> = Journal::init(context.clone(), cfg.clone())
+            let mut journal: Journal<_, _, Digest> = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to re-initialize journal");
             assert_eq!(journal.size().await.unwrap(), 10 * (100 - 49));

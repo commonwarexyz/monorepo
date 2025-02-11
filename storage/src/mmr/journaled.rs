@@ -12,18 +12,20 @@ use crate::mmr::{
 };
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Blob, Storage as RStorage};
+use commonware_utils::SizedSerialize;
 use tracing::warn;
 
 /// A MMR backed by a fixed-item-length journal.
-pub struct Mmr<B: Blob, E: RStorage<B>, H: Hasher, const DIGEST_LENGTH: usize> {
+pub struct Mmr<B: Blob, E: RStorage<B>, H: Hasher>
+where
+    H::Digest: SizedSerialize,
+{
     mem_mmr: MemMmr<H>,
-    journal: Journal<B, E, DIGEST_LENGTH>,
+    journal: Journal<B, E, H::Digest>,
     journal_size: u64,
 }
 
-impl<B: Blob, E: RStorage<B>, H: Hasher, const DIGEST_LENGTH: usize> Storage<H>
-    for Mmr<B, E, H, DIGEST_LENGTH>
-{
+impl<B: Blob, E: RStorage<B>, H: Hasher> Storage<H> for Mmr<B, E, H> {
     async fn size(&self) -> Result<u64, Error> {
         Ok(self.mem_mmr.size())
     }
@@ -40,10 +42,10 @@ impl<B: Blob, E: RStorage<B>, H: Hasher, const DIGEST_LENGTH: usize> Storage<H>
     }
 }
 
-impl<B: Blob, E: RStorage<B>, H: Hasher, const DIGEST_LENGTH: usize> Mmr<B, E, H, DIGEST_LENGTH> {
+impl<B: Blob, E: RStorage<B>, H: Hasher> Mmr<B, E, H> {
     /// Initialize a new `Mmr` instance.
     pub async fn init(context: E, journal_cfg: JConfig) -> Result<Self, Error> {
-        let mut journal = Journal::<B, E, DIGEST_LENGTH>::init(context, journal_cfg).await?;
+        let mut journal = Journal::<B, E, H::Digest>::init(context, journal_cfg).await?;
         let mut journal_size = journal.size().await?;
         if journal_size == 0 {
             return Ok(Self {
@@ -53,7 +55,7 @@ impl<B: Blob, E: RStorage<B>, H: Hasher, const DIGEST_LENGTH: usize> Mmr<B, E, H
             });
         }
 
-        let zero_digest = H::Digest::try_from([0u8; DIGEST_LENGTH].as_ref()).unwrap();
+        let zero_digest = H::Digest::try_from(vec![0u8; H::Digest::SERIALIZED_LEN]).unwrap();
         let mut last_valid_size = journal_size;
         while !PeakIterator::check_validity(last_valid_size) {
             // Even this naive sequential backup must terminate in log2(n) iterations.
@@ -145,12 +147,7 @@ impl<B: Blob, E: RStorage<B>, H: Hasher, const DIGEST_LENGTH: usize> Mmr<B, E, H
         start_element_pos: u64,
         end_element_pos: u64,
     ) -> Result<Proof<H>, Error> {
-        Proof::<H>::range_proof::<Mmr<B, E, H, DIGEST_LENGTH>>(
-            self,
-            start_element_pos,
-            end_element_pos,
-        )
-        .await
+        Proof::<H>::range_proof::<Mmr<B, E, H>>(self, start_element_pos, end_element_pos).await
     }
 }
 
@@ -178,8 +175,7 @@ mod tests {
                 partition: "test_partition".into(),
                 items_per_blob: 7,
             };
-            const N: usize = size_of::<Digest>();
-            let mut mmr = Mmr::<_, _, Sha256, N>::init(context.clone(), cfg.clone())
+            let mut mmr = Mmr::<_, _, Sha256>::init(context.clone(), cfg.clone())
                 .await
                 .unwrap();
             assert_eq!(mmr.size().await.unwrap(), 0);
@@ -248,8 +244,7 @@ mod tests {
                 partition: "test_partition".into(),
                 items_per_blob: 7,
             };
-            const N: usize = size_of::<Digest>();
-            let mut mmr = Mmr::<_, _, Sha256, N>::init(context.clone(), cfg.clone())
+            let mut mmr = Mmr::<_, _, Sha256>::init(context.clone(), cfg.clone())
                 .await
                 .unwrap();
             assert_eq!(mmr.size().await.unwrap(), 0);
@@ -284,7 +279,7 @@ mod tests {
                 .expect("Failed to corrupt blob");
             blob.close().await.expect("Failed to close blob");
 
-            let mmr = Mmr::<_, _, Sha256, N>::init(context.clone(), cfg.clone())
+            let mmr = Mmr::<_, _, Sha256>::init(context.clone(), cfg.clone())
                 .await
                 .unwrap();
             // Since we didn't corrupt the leaf, the MMR is able to replay the leaf and recover to
@@ -293,7 +288,7 @@ mod tests {
 
             // Make sure closing it and re-opening it persists the recovered state.
             mmr.close().await.unwrap();
-            let mmr = Mmr::<_, _, Sha256, N>::init(context.clone(), cfg.clone())
+            let mmr = Mmr::<_, _, Sha256>::init(context.clone(), cfg.clone())
                 .await
                 .unwrap();
             assert_eq!(mmr.size().await.unwrap(), 498);
@@ -319,7 +314,7 @@ mod tests {
                 .expect("Failed to corrupt blob");
             blob.close().await.expect("Failed to close blob");
 
-            let mmr = Mmr::<_, _, Sha256, N>::init(context.clone(), cfg.clone())
+            let mmr = Mmr::<_, _, Sha256>::init(context.clone(), cfg.clone())
                 .await
                 .unwrap();
             // Since the leaf was corrupted, it should not have been recovered, and the journal's
