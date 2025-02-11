@@ -171,13 +171,13 @@ impl SizedSerialize for PrivateKey {
 
 impl Hash for PrivateKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.bytes.hash(state);
+        self.raw.hash(state);
     }
 }
 
 impl Ord for PrivateKey {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.bytes.cmp(&other.bytes)
+        self.raw.cmp(&other.raw)
     }
 }
 
@@ -202,8 +202,8 @@ impl Deref for PrivateKey {
 
 impl From<Scalar> for PrivateKey {
     fn from(key: Scalar) -> Self {
-        let mut bytes = Vec::with_capacity(PRIVATE_KEY_LENGTH);
-        let raw: [u8; PRIVATE_KEY_LENGTH] = key.serialize_compressed(&mut bytes).unwrap();
+        let mut raw = [0u8; PRIVATE_KEY_LENGTH];
+        key.serialize_compressed(&mut raw[..]).unwrap();
         Self { raw, key }
     }
 }
@@ -214,7 +214,7 @@ impl TryFrom<&[u8]> for PrivateKey {
         let raw: [u8; PRIVATE_KEY_LENGTH] = value
             .try_into()
             .map_err(|_| Error::InvalidPrivateKeyLength)?;
-        let key = Scalar::deserialize_compressed(value).ok_or(Error::InvalidPrivateKey)?;
+        let key = Scalar::deserialize_compressed(value).map_err(|_| Error::InvalidPrivateKey)?;
         if key == Scalar::ZERO {
             return Err(Error::InvalidPrivateKey);
         }
@@ -248,11 +248,193 @@ impl Display for PrivateKey {
     }
 }
 
+#[derive(Clone, Eq, PartialEq)]
+pub struct PublicKey {
+    raw: [u8; PUBLIC_KEY_LENGTH],
+    key: G2Affine,
+}
+
+impl Array for PublicKey {}
+
+impl SizedSerialize for PublicKey {
+    const SERIALIZED_LEN: usize = PUBLIC_KEY_LENGTH;
+}
+
+impl Hash for PublicKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.raw.hash(state);
+    }
+}
+
+impl Ord for PublicKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.raw.cmp(&other.raw)
+    }
+}
+
+impl PartialOrd for PublicKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl AsRef<[u8]> for PublicKey {
+    fn as_ref(&self) -> &[u8] {
+        &self.raw
+    }
+}
+
+impl Deref for PublicKey {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.raw
+    }
+}
+
+impl From<G2Affine> for PublicKey {
+    fn from(key: G2Affine) -> Self {
+        let mut raw = [0u8; PUBLIC_KEY_LENGTH];
+        key.serialize_compressed(&mut raw[..]).unwrap();
+        Self { raw, key }
+    }
+}
+
+impl TryFrom<&[u8]> for PublicKey {
+    type Error = Error;
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        let raw: [u8; PUBLIC_KEY_LENGTH] = value
+            .try_into()
+            .map_err(|_| Error::InvalidPublicKeyLength)?;
+        let key = G2Affine::deserialize_compressed(value).map_err(|_| Error::InvalidPublicKey)?;
+        if !key.is_in_correct_subgroup_assuming_on_curve() || !key.is_on_curve() || key.is_zero() {
+            return Err(Error::InvalidPublicKey);
+        }
+        Ok(Self { raw, key })
+    }
+}
+
+impl TryFrom<&Vec<u8>> for PublicKey {
+    type Error = Error;
+    fn try_from(value: &Vec<u8>) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_slice())
+    }
+}
+
+impl TryFrom<Vec<u8>> for PublicKey {
+    type Error = Error;
+    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_slice())
+    }
+}
+
+impl Debug for PublicKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", hex(&self.raw))
+    }
+}
+
+impl Display for PublicKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", hex(&self.raw))
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct Signature {
+    raw: [u8; SIGNATURE_LENGTH],
+    sig: G1Affine,
+}
+
+impl Array for Signature {}
+
+impl SizedSerialize for Signature {
+    const SERIALIZED_LEN: usize = SIGNATURE_LENGTH;
+}
+
+impl Hash for Signature {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.raw.hash(state);
+    }
+}
+
+impl Ord for Signature {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.raw.cmp(&other.raw)
+    }
+}
+
+impl PartialOrd for Signature {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl AsRef<[u8]> for Signature {
+    fn as_ref(&self) -> &[u8] {
+        &self.raw
+    }
+}
+
+impl Deref for Signature {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.raw
+    }
+}
+
+impl From<G1Affine> for Signature {
+    fn from(sig: G1Affine) -> Self {
+        let mut raw = [0u8; SIGNATURE_LENGTH];
+        sig.serialize_compressed(&mut raw[..]).unwrap();
+        Self { raw, sig }
+    }
+}
+
+impl TryFrom<&[u8]> for Signature {
+    type Error = Error;
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        let raw: [u8; SIGNATURE_LENGTH] = value
+            .try_into()
+            .map_err(|_| Error::InvalidSignatureLength)?;
+        let sig = G1Affine::deserialize_compressed(value).map_err(|_| Error::InvalidSignature)?;
+        if !sig.is_in_correct_subgroup_assuming_on_curve() || !sig.is_on_curve() || sig.is_zero() {
+            return Err(Error::InvalidSignature);
+        }
+        Ok(Self { raw, sig })
+    }
+}
+
+impl TryFrom<&Vec<u8>> for Signature {
+    type Error = Error;
+    fn try_from(value: &Vec<u8>) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_slice())
+    }
+}
+
+impl TryFrom<Vec<u8>> for Signature {
+    type Error = Error;
+    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_slice())
+    }
+}
+
+impl Debug for Signature {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", hex(&self.raw))
+    }
+}
+
+impl Display for Signature {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", hex(&self.raw))
+    }
+}
+
 impl Bn254 {
     pub fn public_g1(&self) -> PublicKey {
         let pk = G1Projective::generator() * self.private;
-        let mut bytes = Vec::with_capacity(G1_LENGTH);
-        pk.into_affine().serialize_compressed(&mut bytes).unwrap();
+        let mut raw = [0u8; G1_LENGTH];
+        pk.into_affine().serialize_compressed(&mut raw[..]).unwrap();
         bytes.into()
     }
 }
