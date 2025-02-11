@@ -35,7 +35,7 @@ impl<B: Blob, E: RStorage<B>, H: Hasher> Storage<H> for Mmr<B, E, H> {
             return self.mem_mmr.get_node(position).await;
         }
         match self.journal.read(position).await {
-            Ok(item) => Ok(Some(H::Digest::try_from(item.as_ref()).unwrap())),
+            Ok(item) => Ok(Some(item)),
             Err(JError::ItemPruned(_)) => Ok(None),
             Err(e) => Err(Error::JournalError(e)),
         }
@@ -55,14 +55,13 @@ impl<B: Blob, E: RStorage<B>, H: Hasher> Mmr<B, E, H> {
             });
         }
 
-        let zero_digest = H::Digest::try_from(vec![0u8; H::Digest::SERIALIZED_LEN]).unwrap();
         let mut last_valid_size = journal_size;
         while !PeakIterator::check_validity(last_valid_size) {
             // Even this naive sequential backup must terminate in log2(n) iterations.
             // A size-0 MMR is always valid so this loop must terminate before underflow.
             last_valid_size -= 1;
         }
-        let mut orphaned_leaf = zero_digest.clone();
+        let mut orphaned_leaf: Option<H::Digest> = None;
         if last_valid_size != journal_size {
             warn!(
                 "encountered invalid MMR structure, recovering from last valid size of {}",
@@ -72,7 +71,7 @@ impl<B: Blob, E: RStorage<B>, H: Hasher> Mmr<B, E, H> {
             // recover its missing parents.
             let recovered_item = journal.read(last_valid_size).await;
             if let Ok(item) = recovered_item {
-                orphaned_leaf = H::Digest::try_from(item.as_ref()).unwrap();
+                orphaned_leaf = Some(item);
             }
             journal.rewind(last_valid_size).await?;
             journal_size = last_valid_size
@@ -84,7 +83,7 @@ impl<B: Blob, E: RStorage<B>, H: Hasher> Mmr<B, E, H> {
         let oldest_peak = PeakIterator::new(journal_size).next().unwrap().0;
         for i in oldest_peak..journal_size {
             let item = journal.read(i).await?;
-            vec.push(H::Digest::try_from(item.as_ref()).unwrap());
+            vec.push(item);
         }
         let mem_mmr = MemMmr::init(vec, oldest_peak);
 
@@ -94,13 +93,13 @@ impl<B: Blob, E: RStorage<B>, H: Hasher> Mmr<B, E, H> {
             journal_size,
         };
 
-        if orphaned_leaf != zero_digest {
+        if let Some(leaf) = orphaned_leaf {
             // Recover the orphaned leaf and any missing parents.
             let mut hasher = H::new();
-            let pos = s.add(&mut hasher, &orphaned_leaf);
+            let pos = s.add(&mut hasher, &leaf);
             assert!(pos == journal_size);
-            warn!("recovered orphaned leaf: {:?}", orphaned_leaf);
             s.sync().await?;
+            warn!("recovered orphaned leaf: {:?}", leaf);
         }
         Ok(s)
     }
@@ -119,9 +118,7 @@ impl<B: Blob, E: RStorage<B>, H: Hasher> Mmr<B, E, H> {
     pub async fn sync(&mut self) -> Result<(), Error> {
         for i in self.journal_size..self.mem_mmr.size() {
             let node = self.mem_mmr.get_node(i).await?.unwrap();
-            self.journal
-                .append(node.as_ref().try_into().unwrap())
-                .await?;
+            self.journal.append(node).await?;
         }
         self.journal_size = self.mem_mmr.size();
         self.mem_mmr.forget_max();
