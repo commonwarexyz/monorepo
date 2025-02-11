@@ -27,7 +27,7 @@ use futures::{
 use prometheus_client::registry::Registry;
 use prost::Message as _;
 use std::{
-    collections::HashMap,
+    collections::BTreeMap,
     future::Future,
     marker::PhantomData,
     pin::Pin,
@@ -132,7 +132,7 @@ pub struct Actor<
     journal_naming_fn: J,
 
     // A map of sequencer public keys to their journals.
-    journals: HashMap<PublicKey, Journal<B, E>>,
+    journals: BTreeMap<PublicKey, Journal<B, E>>,
 
     ////////////////////////////////////////
     // State
@@ -201,7 +201,7 @@ impl<
             journal_heights_per_section: cfg.journal_heights_per_section,
             journal_replay_concurrency: cfg.journal_replay_concurrency,
             journal_naming_fn: cfg.journal_naming_fn,
-            journals: HashMap::new(),
+            journals: BTreeMap::new(),
             tip_manager: TipManager::default(),
             ack_manager: AckManager::default(),
             epoch: 0,
@@ -259,7 +259,7 @@ impl<
                 // Handle shutdown signal
                 _ = &mut shutdown => {
                     debug!("Shutdown");
-                    for (_, journal) in self.journals.drain() {
+                    while let Some((_, journal)) = self.journals.pop_first() {
                         journal.close().await.expect("unable to close journal");
                     }
                     return;
