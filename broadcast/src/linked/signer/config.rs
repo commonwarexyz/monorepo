@@ -5,6 +5,7 @@ use crate::{
 use commonware_cryptography::{Array, Scheme};
 use std::time::Duration;
 
+/// Configuration when creating an `Actor`.
 pub struct Config<
     C: Scheme,
     D: Array,

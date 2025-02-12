@@ -38,7 +38,7 @@ use tracing::{debug, error, info, warn};
 type VerifyFuture<D, P> =
     Pin<Box<dyn Future<Output = (Context<P>, D, Result<bool, Error>)> + Send>>;
 
-/// The actor that implements the Broadcaster trait.
+/// The actor that implements the `Broadcaster` trait.
 pub struct Actor<
     B: Blob,
     E: Clock + Spawner + Storage<B>,

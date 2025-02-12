@@ -6,7 +6,7 @@ use futures::{
 };
 use std::marker::PhantomData;
 
-// If either of these requests fails, it will not send a reply.
+/// Message types that can be sent to the `Mailbox`
 pub enum Message<D: Array> {
     Broadcast {
         payload: D,
@@ -14,6 +14,7 @@ pub enum Message<D: Array> {
     },
 }
 
+/// Ingress mailbox for the `Actor`.
 #[derive(Clone)]
 pub struct Mailbox<D: Array> {
     sender: mpsc::Sender<Message<D>>,
