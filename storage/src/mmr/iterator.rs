@@ -110,12 +110,12 @@ pub(crate) fn nodes_needing_parents(peak_iterator: PeakIterator) -> Vec<u64> {
 }
 
 /// Returns the position of the oldest provable node in the represented MMR.
-pub(crate) fn oldest_provable_pos(
-    peak_iterator: PeakIterator,
-    oldest_remembered_node_pos: u64,
-) -> u64 {
+pub(crate) fn oldest_provable_pos(peak_iterator: PeakIterator, oldest_remembered_pos: u64) -> u64 {
+    if peak_iterator.size == 0 {
+        return 0;
+    }
     for (peak_pos, height) in peak_iterator {
-        if peak_pos < oldest_remembered_node_pos {
+        if peak_pos < oldest_remembered_pos {
             continue;
         }
         // We have found the tree containing the oldest remembered node. Now we look for the
@@ -127,16 +127,18 @@ pub(crate) fn oldest_provable_pos(
         while two_h > 1 {
             let left_pos = cur_node - two_h;
             let right_pos = left_pos + two_h - 1;
-            if left_pos < oldest_remembered_node_pos {
+            if left_pos < oldest_remembered_pos {
                 // found pruned left sibling
                 return right_pos + 1;
             }
             two_h >>= 1;
             cur_node = left_pos;
         }
-        return oldest_remembered_node_pos;
+        return oldest_remembered_pos;
     }
-    0 // mmr is empty
+    // The oldest remembered node should always be at or equal to the last peak (aka the last node
+    // in the MMR), so if we get here, the MMR corresponding to the inputs is invalid.
+    panic!("mmr invalid")
 }
 
 /// Returns the position of the oldest node whose digest will be required to prove inclusion of
@@ -144,6 +146,9 @@ pub(crate) fn oldest_provable_pos(
 ///
 /// Forgetting this position will render the node with position `provable_pos` unprovable.
 pub(crate) fn oldest_required_proof_pos(peak_iterator: PeakIterator, provable_pos: u64) -> u64 {
+    if peak_iterator.size == 0 {
+        return 0;
+    }
     for (peak_pos, height) in peak_iterator {
         if peak_pos < provable_pos {
             continue;
@@ -155,7 +160,6 @@ pub(crate) fn oldest_required_proof_pos(peak_iterator: PeakIterator, provable_po
             if parent_pos == provable_pos {
                 // If we hit the node we are trying to prove while walking the path, then no
                 // older nodes are required to prove it.
-                println!("HELLO!!!!");
                 return provable_pos;
             }
             // If we hit a node whose sibling precedes the position we wish to prove, then that
@@ -166,7 +170,9 @@ pub(crate) fn oldest_required_proof_pos(peak_iterator: PeakIterator, provable_po
         }
         return provable_pos;
     }
-    0 // mmr is empty
+    // The oldest remembered node should always be at or equal to the last peak (aka the last node
+    // in the MMR), so if we get here, the MMR corresponding to the inputs is invalid.
+    panic!("mmr invalid")
 }
 
 /// A PathIterator returns a (parent_pos, sibling_pos) tuple for the sibling of each node along the
