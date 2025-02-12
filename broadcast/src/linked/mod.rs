@@ -125,11 +125,12 @@ mod tests {
         sha256::{Digest as Sha256Digest, Sha256},
         Ed25519, Hasher, Scheme,
     };
-    use commonware_macros::test_traced;
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::deterministic::{self, Context, Executor};
     use commonware_runtime::{Clock, Runner, Spawner};
     use commonware_utils::hex;
+    use futures::channel::oneshot;
+    use futures::future::join_all;
     use prometheus_client::registry::Registry;
     use std::sync::{Arc, Mutex};
     use std::{
@@ -337,37 +338,37 @@ mod tests {
         runtime: &Context,
         collectors: &BTreeMap<PublicKey, mocks::collector::Mailbox<Ed25519, Sha256Digest>>,
         threshold: u64,
-        num_validators: usize,
     ) {
-        let completed = Arc::new(Mutex::new(HashSet::new()));
-        for (validator, mailbox) in collectors.iter() {
-            let validator_cloned = validator.clone();
-            let mut mailbox_cloned = mailbox.clone();
-            let runtime_cloned = runtime.clone();
-            let runtime_for_sleep = runtime_cloned.clone();
-            let completed_clone = completed.clone();
-            runtime_cloned.spawn("collector_watcher", async move {
-                loop {
-                    let tip = mailbox_cloned
-                        .get_tip(validator_cloned.clone())
-                        .await
-                        .unwrap_or(0);
-                    debug!("Collector tip: {}", tip);
-                    if tip >= threshold {
-                        completed_clone
-                            .lock()
-                            .unwrap()
-                            .insert(validator_cloned.clone());
-                        break;
+        let mut receivers = Vec::new();
+        for (sequencer, mailbox) in collectors.iter() {
+            // Create a oneshot channel to signal when the collector has reached the threshold.
+            let (tx, rx) = oneshot::channel();
+            receivers.push(rx);
+
+            // Spawn a watcher for the collector.
+            runtime.spawn("collector_watcher", {
+                let sequencer = sequencer.clone();
+                let mut mailbox = mailbox.clone();
+                let runtime = runtime.clone();
+                async move {
+                    loop {
+                        let tip = mailbox.get_tip(sequencer.clone()).await.unwrap_or(0);
+                        debug!(tip, ?sequencer, "Collector");
+                        if tip >= threshold {
+                            let _ = tx.send(sequencer.clone());
+                            break;
+                        }
+                        runtime.sleep(Duration::from_millis(100)).await;
                     }
-                    runtime_for_sleep.sleep(Duration::from_millis(100)).await;
                 }
             });
         }
-        while completed.lock().unwrap().len() != num_validators {
-            runtime.sleep(Duration::from_secs(1)).await;
-        }
+
+        // Wait for all oneshot receivers to complete.
+        let results = join_all(receivers).await;
+        assert_eq!(results.len(), collectors.len());
     }
+
     #[test]
     fn test_all_online() {
         let num_validators: u32 = 4;
@@ -400,7 +401,7 @@ mod tests {
                     Duration::from_secs(5),
                 );
                 spawn_proposer(&context, mailboxes.clone(), |_| false);
-                await_collectors(&context, &collectors, 100, num_validators as usize).await;
+                await_collectors(&context, &collectors, 100).await;
             }
         });
     }
@@ -549,7 +550,7 @@ mod tests {
                     success_rate: 1.0,
                 };
                 link_validators(&mut oracle, &pks, Action::Link(link), None).await;
-                await_collectors(&context, &collectors, 100, num_validators as usize).await;
+                await_collectors(&context, &collectors, 100).await;
             }
         });
     }
@@ -599,7 +600,7 @@ mod tests {
                 );
 
                 spawn_proposer(&context, mailboxes.clone(), |_| false);
-                await_collectors(&context, &collectors, 40, num_validators as usize).await;
+                await_collectors(&context, &collectors, 40).await;
             }
         });
         auditor.state()
@@ -610,7 +611,7 @@ mod tests {
         slow_and_lossy_links(0);
     }
 
-    #[test_traced]
+    #[test]
     fn test_determinism() {
         // We use slow and lossy links as the deterministic test
         // because it is the most complex test.
@@ -654,7 +655,7 @@ mod tests {
                 );
 
                 spawn_proposer(&context, mailboxes.clone(), |i| i % 10 == 0);
-                await_collectors(&context, &collectors, 100, num_validators as usize).await;
+                await_collectors(&context, &collectors, 100).await;
             }
         });
     }
