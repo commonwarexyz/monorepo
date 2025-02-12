@@ -53,6 +53,8 @@ pub struct Actor<
         Identity = poly::Public,
         PublicKey = C::PublicKey,
     >,
+    NetS: Sender<PublicKey = C::PublicKey>,
+    NetR: Receiver<PublicKey = C::PublicKey>,
 > {
     ////////////////////////////////////////
     // Interfaces
@@ -62,7 +64,8 @@ pub struct Actor<
     coordinator: S,
     application: A,
     collector: Z,
-    _digest: PhantomData<D>,
+    _sender: PhantomData<NetS>,
+    _receiver: PhantomData<NetR>,
 
     ////////////////////////////////////////
     // Namespace Constants
@@ -169,7 +172,9 @@ impl<
             Identity = poly::Public,
             PublicKey = C::PublicKey,
         >,
-    > Actor<B, E, C, D, J, A, Z, S>
+        NetS: Sender<PublicKey = C::PublicKey>,
+        NetR: Receiver<PublicKey = C::PublicKey>,
+    > Actor<B, E, C, D, J, A, Z, S, NetS, NetR>
 {
     /// Creates a new actor with the given runtime and configuration.
     /// Returns the actor and a mailbox for sending messages to the actor.
@@ -192,7 +197,8 @@ impl<
         let result = Self {
             runtime,
             crypto: cfg.crypto,
-            _digest: PhantomData,
+            _sender: PhantomData,
+            _receiver: PhantomData,
             coordinator: cfg.coordinator,
             application: cfg.application,
             collector: cfg.collector,
@@ -231,17 +237,7 @@ impl<
     /// - Messages from the network:
     ///   - Links
     ///   - Acks
-    pub async fn run(
-        mut self,
-        chunk_network: (
-            impl Sender<PublicKey = C::PublicKey>,
-            impl Receiver<PublicKey = C::PublicKey>,
-        ),
-        ack_network: (
-            impl Sender<PublicKey = C::PublicKey>,
-            impl Receiver<PublicKey = C::PublicKey>,
-        ),
-    ) {
+    pub async fn run(mut self, chunk_network: (NetS, NetR), ack_network: (NetS, NetR)) {
         let (mut link_sender, mut link_receiver) = chunk_network;
         let (mut ack_sender, mut ack_receiver) = ack_network;
         let mut shutdown = self.runtime.stopped();
@@ -307,7 +303,7 @@ impl<
                             break;
                         }
                     };
-                    let link = match safe::Link::<C, D>::decode(&msg) {
+                    let link = match safe::Link::decode(&msg) {
                         Ok(link) => link,
                         Err(err) => {
                             warn!(?err, ?sender, "link decode failed");
@@ -416,7 +412,7 @@ impl<
         &mut self,
         context: &Context<C::PublicKey>,
         payload: &D,
-        ack_sender: &mut impl Sender<PublicKey = C::PublicKey>,
+        ack_sender: &mut NetS,
     ) -> Result<(), Error> {
         // Get the tip
         let Some(tip) = self.tip_manager.get(&context.sequencer) else {
@@ -465,7 +461,7 @@ impl<
         };
 
         // Send the ack to the network
-        let ack = safe::Ack::<D, C::PublicKey> {
+        let ack = safe::Ack {
             chunk: tip.chunk,
             epoch: self.epoch,
             partial,
@@ -586,7 +582,7 @@ impl<
         &mut self,
         payload: D,
         result: oneshot::Sender<bool>,
-        link_sender: &mut impl Sender<PublicKey = C::PublicKey>,
+        link_sender: &mut NetS,
     ) -> Result<(), Error> {
         let me = self.crypto.public_key();
 
@@ -603,7 +599,7 @@ impl<
 
             // Update height and parent
             height = tip.chunk.height + 1;
-            parent = Some(safe::Parent::<D> {
+            parent = Some(safe::Parent {
                 payload: tip.chunk.payload,
                 threshold,
                 epoch,
@@ -611,7 +607,7 @@ impl<
         }
 
         // Construct new link
-        let chunk = safe::Chunk::<D, C::PublicKey> {
+        let chunk = safe::Chunk {
             sequencer: me.clone(),
             height,
             payload,
@@ -619,7 +615,7 @@ impl<
         let signature = self
             .crypto
             .sign(Some(&self.chunk_namespace), &serializer::chunk(&chunk));
-        let link = safe::Link::<C, D> {
+        let link = safe::Link {
             chunk,
             signature,
             parent,
@@ -649,10 +645,7 @@ impl<
     /// - this instance is the sequencer for the current epoch.
     /// - this instance has a chunk to rebroadcast.
     /// - this instance has not yet collected the threshold signature for the chunk.
-    async fn rebroadcast(
-        &mut self,
-        link_sender: &mut impl Sender<PublicKey = C::PublicKey>,
-    ) -> Result<(), Error> {
+    async fn rebroadcast(&mut self, link_sender: &mut NetS) -> Result<(), Error> {
         // Unset the rebroadcast deadline
         self.rebroadcast_deadline = None;
 
@@ -686,7 +679,7 @@ impl<
     async fn broadcast(
         &mut self,
         link: &safe::Link<C, D>,
-        link_sender: &mut impl Sender<PublicKey = C::PublicKey>,
+        link_sender: &mut NetS,
         epoch: Epoch,
     ) -> Result<(), Error> {
         // Send the link to all signers
@@ -721,16 +714,23 @@ impl<
         link: &safe::Link<C, D>,
         sender: &C::PublicKey,
     ) -> Result<(), Error> {
-        // Validate chunk
-        self.validate_chunk(&link.chunk, self.epoch)?;
-
         // Verify the sender
         if link.chunk.sequencer != *sender {
             return Err(Error::PeerMismatch);
         }
 
+        // Optimization: If the link is exactly equal to the tip,
+        // don't perform any further validation.
+        if let Some(tip) = self.tip_manager.get(sender) {
+            if tip == *link {
+                return Ok(());
+            }
+        }
+
+        // Validate chunk
+        self.validate_chunk(&link.chunk, self.epoch)?;
+
         // Verify the signature
-        // TODO (Optimization): If the link is equal to the tip, don't verify
         if !C::verify(
             Some(&self.chunk_namespace),
             &serializer::chunk(&link.chunk),
@@ -752,14 +752,13 @@ impl<
         let Some(parent) = &link.parent else {
             return Err(Error::LinkMissingParent);
         };
-        let parent_chunk = safe::Chunk::<D, C::PublicKey> {
+        let parent_chunk = safe::Chunk {
             sequencer: sender.clone(),
             height: link.chunk.height.checked_sub(1).unwrap(),
             payload: parent.payload.clone(),
         };
 
         // Verify parent threshold signature
-        // TODO (Optimization): If the link is exactly equal to the tip, don't verify
         let Some(identity) = self.coordinator.identity(parent.epoch) else {
             return Err(Error::UnknownIdentity(parent.epoch));
         };
@@ -823,7 +822,7 @@ impl<
         }
 
         // Validate partial signature
-        // TODO (Optimization): If the ack already exists, don't verify
+        // Optimization: If the ack already exists, don't verify
         let Some(identity) = self.coordinator.identity(ack.epoch) else {
             return Err(Error::UnknownIdentity(ack.epoch));
         };

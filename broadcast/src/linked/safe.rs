@@ -66,11 +66,19 @@ impl<D: Array> Parent<D> {
 }
 
 /// Safe version of a `Link`.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq)]
 pub struct Link<C: Scheme, D: Array> {
     pub chunk: Chunk<D, C::PublicKey>,
     pub signature: C::Signature,
     pub parent: Option<Parent<D>>,
+}
+
+impl<C: Scheme, D: Array> PartialEq for Link<C, D> {
+    fn eq(&self, other: &Self) -> bool {
+        self.chunk == other.chunk
+            && self.signature == other.signature
+            && self.parent == other.parent
+    }
 }
 
 impl<C: Scheme, D: Array> std::fmt::Debug for Link<C, D> {

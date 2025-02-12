@@ -64,14 +64,14 @@ impl<C: Scheme, D: Array> Collector<C, D> {
                     match prover.deserialize_threshold(proof) {
                         Some((ctx, _digest, _epoch, _threshold)) => {
                             if ctx != context {
-                                error!("Invalid context");
+                                error!("invalid context");
                                 continue;
                             }
                             // The prover checked the validity of the threshold signature in deserialize_threshold.
                             // Ignore the digest and epoch.
                         }
                         None => {
-                            error!("Invalid proof");
+                            error!("invalid proof");
                             continue;
                         }
                     }

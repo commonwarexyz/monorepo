@@ -353,7 +353,7 @@ mod tests {
                 async move {
                     loop {
                         let tip = mailbox.get_tip(sequencer.clone()).await.unwrap_or(0);
-                        debug!(tip, ?sequencer, "Collector");
+                        debug!(tip, ?sequencer, "collector");
                         if tip >= threshold {
                             let _ = tx.send(sequencer.clone());
                             break;
