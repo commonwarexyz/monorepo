@@ -1,6 +1,4 @@
-//! Secure, ordered broadcast protocol with linked messages for consistent network
-//! dissemination using cryptographic proofs, sequential linking, and robust state
-//! management.
+//! Ordered, reliable broadcast across multiple, dynamic participants.
 //!
 //! # Core Concepts
 //!
