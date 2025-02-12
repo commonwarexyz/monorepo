@@ -34,6 +34,7 @@ message Parent {
 // - The signature of the sequencer over the Chunk
 // - A threshold signature over the parent of the Chunk
 message Link {
+    // Chunk that is being broadcasted
     Chunk chunk = 1;
 
     // Signature of the sequencer over the chunk
@@ -47,6 +48,7 @@ message Link {
 
 // Ack is a message sent by a signer to acknowledge the receipt of a Chunk.
 message Ack {
+    // Chunk that is being acknowledged
     Chunk chunk = 1;
 
     // Epoch of the validator set

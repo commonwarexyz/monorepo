@@ -27,7 +27,7 @@ pub enum Error {
     Crypto(#[from] commonware_cryptography::Error),
 }
 
-/// Safe version of a `Chunk`.
+/// Parsed version of a `Chunk`.
 #[derive(Clone, Debug, Eq, PartialOrd, Ord, PartialEq)]
 pub struct Chunk<D: Array, P: Array> {
     pub sequencer: P,
@@ -55,7 +55,7 @@ impl<D: Array, P: Array> Chunk<D, P> {
     }
 }
 
-/// Safe version of a `Parent`.
+/// Parsed version of a `Parent`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Parent<D: Array> {
     pub payload: D,
@@ -84,7 +84,7 @@ impl<D: Array> Parent<D> {
     }
 }
 
-/// Safe version of a `Link`.
+/// Parsed version of a `Link`.
 #[derive(Clone, Eq)]
 pub struct Link<C: Scheme, D: Array> {
     pub chunk: Chunk<D, C::PublicKey>,
@@ -141,7 +141,7 @@ impl<C: Scheme, D: Array> PartialEq for Link<C, D> {
     }
 }
 
-/// Safe version of an `Ack`.
+/// Parsed version of an `Ack`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Ack<D: Array, P: Array> {
     pub chunk: Chunk<D, P>,

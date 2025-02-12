@@ -1,6 +1,6 @@
 use super::{AckManager, Config, Mailbox, Message, TipManager};
 use crate::{
-    linked::{canon, namespace, prover::Prover, serializer, Context, Epoch},
+    linked::{namespace, parsed, prover::Prover, serializer, Context, Epoch},
     Application, Collector, ThresholdCoordinator,
 };
 use commonware_cryptography::{
@@ -303,7 +303,7 @@ impl<
                             break;
                         }
                     };
-                    let link = match canon::Link::<C, D>::decode(&msg) {
+                    let link = match parsed::Link::<C, D>::decode(&msg) {
                         Ok(link) => link,
                         Err(err) => {
                             warn!(?err, ?sender, "link decode failed");
@@ -338,7 +338,7 @@ impl<
                             break;
                         }
                     };
-                    let ack = match canon::Ack::decode(&msg) {
+                    let ack = match parsed::Ack::decode(&msg) {
                         Ok(ack) => ack,
                         Err(err) => {
                             warn!(?err, ?sender, "ack decode failed");
@@ -461,7 +461,7 @@ impl<
         };
 
         // Send the ack to the network
-        let ack = canon::Ack {
+        let ack = parsed::Ack {
             chunk: tip.chunk,
             epoch: self.epoch,
             partial,
@@ -484,7 +484,7 @@ impl<
     /// If the threshold is already known, it is ignored.
     async fn handle_threshold(
         &mut self,
-        chunk: &canon::Chunk<D, C::PublicKey>,
+        chunk: &parsed::Chunk<D, C::PublicKey>,
         epoch: Epoch,
         threshold: group::Signature,
     ) {
@@ -512,7 +512,7 @@ impl<
     ///
     /// Returns an error if the ack is invalid, or can be ignored
     /// (e.g. already exists, threshold already exists, is outside the epoch bounds, etc.).
-    async fn handle_ack(&mut self, ack: &canon::Ack<D, C::PublicKey>) -> Result<(), Error> {
+    async fn handle_ack(&mut self, ack: &parsed::Ack<D, C::PublicKey>) -> Result<(), Error> {
         // Get the quorum
         let Some(identity) = self.coordinator.identity(ack.epoch) else {
             return Err(Error::UnknownIdentity(ack.epoch));
@@ -532,7 +532,7 @@ impl<
     /// Handles a valid link message, storing it as the tip.
     /// Alerts the application of the new link.
     /// Also appends the link to the journal if it's new.
-    async fn handle_link(&mut self, link: &canon::Link<C, D>) {
+    async fn handle_link(&mut self, link: &parsed::Link<C, D>) {
         // Store the tip
         let is_new = self.tip_manager.put(link);
 
@@ -599,7 +599,7 @@ impl<
 
             // Update height and parent
             height = tip.chunk.height + 1;
-            parent = Some(canon::Parent {
+            parent = Some(parsed::Parent {
                 payload: tip.chunk.payload,
                 threshold,
                 epoch,
@@ -607,7 +607,7 @@ impl<
         }
 
         // Construct new link
-        let chunk = canon::Chunk {
+        let chunk = parsed::Chunk {
             sequencer: me.clone(),
             height,
             payload,
@@ -615,7 +615,7 @@ impl<
         let signature = self
             .crypto
             .sign(Some(&self.chunk_namespace), &serializer::chunk(&chunk));
-        let link = canon::Link::<C, D> {
+        let link = parsed::Link::<C, D> {
             chunk,
             signature,
             parent,
@@ -678,7 +678,7 @@ impl<
     /// Send a link message to all signers in the given epoch.
     async fn broadcast(
         &mut self,
-        link: &canon::Link<C, D>,
+        link: &parsed::Link<C, D>,
         link_sender: &mut NetS,
         epoch: Epoch,
     ) -> Result<(), Error> {
@@ -711,7 +711,7 @@ impl<
     /// Else returns an error if the link is invalid.
     fn validate_link(
         &mut self,
-        link: &canon::Link<C, D>,
+        link: &parsed::Link<C, D>,
         sender: &C::PublicKey,
     ) -> Result<(), Error> {
         // Verify the sender
@@ -752,7 +752,7 @@ impl<
         let Some(parent) = &link.parent else {
             return Err(Error::LinkMissingParent);
         };
-        let parent_chunk = canon::Chunk {
+        let parent_chunk = parsed::Chunk {
             sequencer: sender.clone(),
             height: link.chunk.height.checked_sub(1).unwrap(),
             payload: parent.payload.clone(),
@@ -780,7 +780,7 @@ impl<
     /// Returns an error if the ack is invalid.
     fn validate_ack(
         &self,
-        ack: &canon::Ack<D, C::PublicKey>,
+        ack: &parsed::Ack<D, C::PublicKey>,
         sender: &C::PublicKey,
     ) -> Result<(), Error> {
         // Validate chunk
@@ -843,7 +843,7 @@ impl<
     /// Returns an error if the chunk is invalid.
     fn validate_chunk(
         &self,
-        chunk: &canon::Chunk<D, C::PublicKey>,
+        chunk: &parsed::Chunk<D, C::PublicKey>,
         epoch: Epoch,
     ) -> Result<(), Error> {
         // Verify sequencer
@@ -918,12 +918,12 @@ impl<
 
             // Read from the stream, which may be in arbitrary order.
             // Remember the highest link height
-            let mut tip: Option<canon::Link<C, D>> = None;
+            let mut tip: Option<parsed::Link<C, D>> = None;
             let mut num_items = 0;
             while let Some(msg) = stream.next().await {
                 num_items += 1;
                 let (_, _, _, msg) = msg.expect("unable to decode journal message");
-                let link = canon::Link::<C, D>::decode(&msg)
+                let link = parsed::Link::<C, D>::decode(&msg)
                     .expect("journal message is unexpected format");
                 let height = link.chunk.height;
                 match tip {
@@ -955,7 +955,7 @@ impl<
     /// Write a link to the appropriate journal.
     ///
     /// The journal must already be open and replayed.
-    async fn journal_append(&mut self, link: &canon::Link<C, D>) {
+    async fn journal_append(&mut self, link: &parsed::Link<C, D>) {
         let section = self.get_journal_section(link.chunk.height);
         self.journals
             .get_mut(&link.chunk.sequencer)

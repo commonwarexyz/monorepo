@@ -74,16 +74,16 @@
 //!
 //! # Internal Modules
 //!
-//! - **`namespace`**: Generates namespace IDs for different signature types.
+//! - **`namespace`**: Generates namespaces for different signature types.
 //! - **`serializer`**: Serializes and deserializes messages.
-//! - **`wire`**: Contains the protocol buffer-generated message definitions.
-//! - **`safe`**: Provides parsed wrappers around wire types.
-//! - **`mocks`**: Provides mock implementations for testing.
+//! - **`wire`**: Protobuf-generated message definitions.
+//! - **`parsed`**: Parsed wrappers around wire types.
+//! - **`mocks`**: Mock implementations for testing.
 
 use commonware_cryptography::Array;
 
-mod canon;
 mod namespace;
+mod parsed;
 mod serializer;
 
 #[cfg(test)]
