@@ -70,7 +70,7 @@
 //!
 //! - **`signer`**: Contains the actor that validates messages, links them, and handles threshold
 //!   signatures.
-//! - **`prover`**: Generates and verifies "proofs" (i.e. threshold signatures over messages).
+//! - **`prover`**: Generates and verifies proofs of broadcast.
 //!
 //! # Internal Modules
 //!
