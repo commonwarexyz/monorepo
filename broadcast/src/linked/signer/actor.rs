@@ -250,9 +250,9 @@ impl<
         // and attempt to rebroadcast if necessary.
         self.refresh_epoch();
         self.journal_prepare(&self.crypto.public_key()).await;
-        if let Err(e) = self.rebroadcast(&mut link_sender).await {
+        if let Err(err) = self.rebroadcast(&mut link_sender).await {
             // Rebroadcasting my return a non-critical error, so log the error and continue.
-            info!(err=?e, "Failed initial rebroadcast");
+            info!(?err, "initial rebroadcast failed");
         }
 
         loop {
@@ -273,7 +273,7 @@ impl<
             select! {
                 // Handle shutdown signal
                 _ = &mut shutdown => {
-                    debug!("Shutdown");
+                    debug!("shutdown");
                     while let Some((_, journal)) = self.journals.pop_first() {
                         journal.close().await.expect("unable to close journal");
                     }
@@ -282,34 +282,40 @@ impl<
 
                 // Handle refresh epoch deadline
                 _ = refresh_epoch => {
-                    debug!("Timeout: Refresh Epoch");
+                    debug!("refresh epoch");
                     // Simply continue; the epoch will be refreshed on the next iteration.
                     continue;
                 },
 
                 // Handle rebroadcast deadline
                 _ = rebroadcast => {
-                    debug!("Timeout: Rebroadcast");
-                    if let Err(e) = self.rebroadcast(&mut link_sender).await {
-                        error!(err=?e, "Failed to rebroadcast");
+                    debug!("rebroadcast");
+                    if let Err(err) = self.rebroadcast(&mut link_sender).await {
+                        info!(?err, "rebroadcast failed");
                         continue;
                     }
                 },
 
                 // Handle incoming links
                 msg = link_receiver.recv() => {
-                    debug!("Network: Link");
+                    debug!("link network");
                     // Error handling
-                    let Ok((sender, msg)) = msg else {
-                        error!("link_receiver failed");
-                        break;
+                    let (sender, msg) = match msg {
+                        Ok(r) => r,
+                        Err(err) => {
+                            error!(?err, "link receiver failed");
+                            break;
+                        }
                     };
-                    let Ok(link) = safe::Link::<C, D>::decode(&msg) else {
-                        error!("Failed to decode link");
-                        continue;
+                    let link = match safe::Link::<C, D>::decode(&msg) {
+                        Ok(link) => link,
+                        Err(err) => {
+                            warn!(?err, ?sender, "link decode failed");
+                            continue;
+                        }
                     };
-                    if let Err(e) = self.validate_link(&link, &sender) {
-                        error!(err=?e, "Failed to validate link");
+                    if let Err(err) = self.validate_link(&link, &sender) {
+                        warn!(?err, ?link, ?sender, "link validate failed");
                         continue;
                     };
 
@@ -327,25 +333,28 @@ impl<
 
                 // Handle incoming acks
                 msg = ack_receiver.recv() => {
-                    debug!("Network: Ack");
+                    debug!("ack network");
                     // Error handling
-                    let Ok((sender, msg)) = msg else {
-                        error!("ack_receiver failed");
-                        break;
+                    let (sender, msg) = match msg {
+                        Ok(r) => r,
+                        Err(err) => {
+                            warn!(?err, "ack receiver failed");
+                            break;
+                        }
                     };
                     let ack = match safe::Ack::decode(&msg) {
                         Ok(ack) => ack,
-                        Err(e) => {
-                            error!(err=?e, "Failed to decode ack");
+                        Err(err) => {
+                            warn!(?err, ?sender, "ack decode failed");
                             continue;
                         }
                     };
-                    if let Err(e) = self.validate_ack(&ack, &sender) {
-                        error!(err=?e, "Failed to validate ack");
+                    if let Err(err) = self.validate_ack(&ack, &sender) {
+                        warn!(?err, ?ack, ?sender, "ack validate failed");
                         continue;
                     };
-                    if let Err(e) = self.handle_ack(ack).await {
-                        error!(err=?e, "Failed to handle ack");
+                    if let Err(err) = self.handle_ack(ack).await {
+                        warn!(?err, ?ack, "ack handle failed");
                         continue;
                     }
                 },
@@ -355,40 +364,37 @@ impl<
                     let (context, digest, verify_result) = maybe_verified;
                     match verify_result {
                         Ok(true) => {
-                            debug!("Verification successful for context: {:?}, digest: {:?}", context, digest);
-                            if let Err(e) = self.handle_app_verified(&context, &digest, &mut ack_sender).await {
-                                error!(err=?e, "Failed to handle app verified");
+                            debug!(?context, ?digest, "verified");
+                            if let Err(err) = self.handle_app_verified(&context, &digest, &mut ack_sender).await {
+                                warn!(?err, ?context, ?digest, "verified handle failed");
                             }
                         },
                         Ok(false) => {
-                            warn!("Application returned false for verify request");
+                            warn!(?context, ?digest, "verified was false");
                         },
-                        Err(e) => {
-                            warn!(err=?e, "Verification error or timeout");
+                        Err(err) => {
+                            warn!(?err, ?context, ?digest, "verified returned error");
                         },
                     }
                 },
 
                 // Handle mailbox messages
                 mail = self.mailbox_receiver.next() => {
-                    let msg = match mail {
-                        Some(msg) => msg,
-                        None => {
-                            error!("Mailbox receiver failed");
-                            break;
-                        }
+                    let Some(msg) = mail else {
+                        error!("mailbox receiver failed");
+                        break;
                     };
                     match msg {
                         Message::Broadcast{ payload, result } => {
-                            debug!("Mailbox: Broadcast");
+                            debug!("broadcast");
                             if self.coordinator.is_sequencer(self.epoch, &self.crypto.public_key()).is_none() {
-                                error!("Not a sequencer in the current epoch");
+                                warn!(epoch=?self.epoch, ?payload, "not a sequencer");
                                 continue;
                             }
 
                             // Broadcast the message
-                            if let Err(e) = self.broadcast_new(payload, result, &mut link_sender).await {
-                                error!(err=?e, "Failed to broadcast new");
+                            if let Err(err) = self.broadcast_new(payload, result, &mut link_sender).await {
+                                warn!(?err, ?payload, "broadcast new failed");
                                 continue;
                             }
                         }
@@ -547,7 +553,7 @@ impl<
         // if the number of pending requests is too high.
         // We use > instead of >= because the stream always has one dummy future.
         if self.pending_verifies.len() > self.pending_verify_size {
-            warn!("Too many concurrent requests to application");
+            warn!(n=?self.pending_verifies.len(), "too many pending verifies");
             return;
         }
 
@@ -627,14 +633,12 @@ impl<
         self.journal_sync(&me, height).await;
 
         // Broadcast to network
-        if let Err(e) = self.broadcast(&link, link_sender, self.epoch).await {
-            error!(err=?e, "Failed to broadcast link");
+        if let Err(err) = self.broadcast(&link, link_sender, self.epoch).await {
             let _ = result.send(false);
-            return Err(e);
+            return Err(err);
         };
 
         // Return success
-        debug!("Broadcast successful");
         let _ = result.send(true);
         Ok(())
     }
@@ -904,7 +908,7 @@ impl<
 
         // Replay journal
         {
-            debug!(?sequencer, "Replaying journal");
+            debug!(?sequencer, "journal replay begin");
 
             // Prepare the stream
             let stream = journal
@@ -942,7 +946,7 @@ impl<
                 assert!(is_new);
             }
 
-            debug!(?sequencer, ?num_items, "Journal replay complete");
+            debug!(?sequencer, ?num_items, "journal replay end");
         }
 
         // Store journal
