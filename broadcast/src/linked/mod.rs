@@ -125,6 +125,7 @@ mod tests {
         sha256::{Digest as Sha256Digest, Sha256},
         Ed25519, Hasher, Scheme,
     };
+    use commonware_macros::test_traced;
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::deterministic::{self, Context, Executor};
     use commonware_runtime::{Clock, Runner, Spawner};
@@ -369,7 +370,7 @@ mod tests {
         assert_eq!(results.len(), collectors.len());
     }
 
-    #[test]
+    #[test_traced]
     fn test_all_online() {
         let num_validators: u32 = 4;
         let quorum: u32 = 3;
@@ -406,7 +407,7 @@ mod tests {
         });
     }
 
-    #[test]
+    #[test_traced]
     fn test_unclean_shutdown() {
         let num_validators: u32 = 4;
         let quorum: u32 = 3;
@@ -508,7 +509,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[test_traced]
     fn test_network_partition() {
         let num_validators: u32 = 4;
         let quorum: u32 = 3;
@@ -606,12 +607,12 @@ mod tests {
         auditor.state()
     }
 
-    #[test]
+    #[test_traced]
     fn test_slow_and_lossy_links() {
         slow_and_lossy_links(0);
     }
 
-    #[test]
+    #[test_traced]
     fn test_determinism() {
         // We use slow and lossy links as the deterministic test
         // because it is the most complex test.
@@ -622,7 +623,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[test_traced]
     fn test_invalid_signature_injection() {
         let num_validators: u32 = 4;
         let quorum: u32 = 3;
