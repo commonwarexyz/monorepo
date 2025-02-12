@@ -332,13 +332,11 @@ fn peak_hash_from_range<'a, H: CHasher>(
 mod tests {
     use super::Proof;
     use crate::mmr::mem::Mmr;
-    use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
+    use commonware_cryptography::{hash, sha256::Digest, Sha256};
     use commonware_runtime::{deterministic::Executor, Runner};
 
     fn test_digest(v: u8) -> Digest {
-        let mut hasher = Sha256::new();
-        hasher.update(&[v]);
-        hasher.finalize()
+        hash(&[v])
     }
 
     #[test]
