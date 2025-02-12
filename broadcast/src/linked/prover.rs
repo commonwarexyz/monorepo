@@ -11,6 +11,10 @@ use commonware_cryptography::{
 use commonware_utils::SizedSerialize;
 use std::marker::PhantomData;
 
+/// Encode and decode proofs of broadcast.
+///
+/// We don't use protobuf for proof encoding because we expect external parties
+/// to decode proofs in constrained environments where protobuf may not be implemented.
 #[derive(Clone)]
 pub struct Prover<C: Scheme, D: Array> {
     _crypto: PhantomData<C>,
@@ -18,6 +22,15 @@ pub struct Prover<C: Scheme, D: Array> {
 
     public: group::Public,
     namespace: Vec<u8>,
+}
+
+impl<C: Scheme, D: Array> SizedSerialize for Prover<C, D> {
+    /// The length of a serialized proof.
+    const SERIALIZED_LEN: usize = C::PublicKey::SERIALIZED_LEN
+        + u64::SERIALIZED_LEN
+        + D::SERIALIZED_LEN
+        + u64::SERIALIZED_LEN
+        + C::Signature::SERIALIZED_LEN;
 }
 
 impl<C: Scheme, D: Array> Prover<C, D> {
@@ -31,24 +44,14 @@ impl<C: Scheme, D: Array> Prover<C, D> {
         }
     }
 
-    /// Returns the length of a proof
-    fn proof_len() -> usize {
-        let mut len = 0;
-        len += C::PublicKey::SERIALIZED_LEN; // context.sequencer
-        len += u64::SERIALIZED_LEN; // context.height
-        len += D::SERIALIZED_LEN; // payload
-        len += u64::SERIALIZED_LEN; // epoch
-        len += C::Signature::SERIALIZED_LEN; // threshold
-        len
-    }
-
+    /// Generate a proof for the given `context`, `payload`, `epoch`, and `threshold`.
     pub fn serialize_threshold(
         context: &Context<C::PublicKey>,
         payload: &D,
         epoch: Epoch,
         threshold: &group::Signature,
     ) -> Proof {
-        let mut proof = Vec::with_capacity(Self::proof_len());
+        let mut proof = Vec::with_capacity(Self::SERIALIZED_LEN);
 
         // Encode proof
         proof.extend_from_slice(&context.sequencer);
@@ -59,13 +62,15 @@ impl<C: Scheme, D: Array> Prover<C, D> {
         proof.into()
     }
 
+    /// Deserialize a proof into a `context`, `payload`, `epoch`, and `threshold`.
+    /// Returns `None` if the proof is invalid.
     pub fn deserialize_threshold(
         &self,
         mut proof: Proof,
-    ) -> Option<(Context<C::PublicKey>, D, group::Signature)> {
+    ) -> Option<(Context<C::PublicKey>, D, Epoch, group::Signature)> {
         // Ensure proof is the right size
 
-        if proof.len() != Self::proof_len() {
+        if proof.len() != Self::SERIALIZED_LEN {
             return None;
         }
 
@@ -90,6 +95,6 @@ impl<C: Scheme, D: Array> Prover<C, D> {
             return None;
         }
 
-        Some((Context { sequencer, height }, payload, threshold))
+        Some((Context { sequencer, height }, payload, epoch, threshold))
     }
 }
