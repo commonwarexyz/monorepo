@@ -2,12 +2,15 @@
 
 use crate::mmr::{
     hasher::Hasher,
-    iterator::{nodes_needing_parents, PeakIterator},
+    iterator::{
+        nodes_needing_parents, oldest_provable_pos, oldest_required_proof_pos, PeakIterator,
+    },
     verification::{Proof, Storage},
     Error,
     Error::ElementPruned,
 };
 use commonware_cryptography::Hasher as CHasher;
+use std::collections::HashMap;
 
 /// Implementation of `Mmr`.
 ///
@@ -19,10 +22,14 @@ pub struct Mmr<H: CHasher> {
     // The nodes of the MMR, laid out according to a post-order traversal of the MMR trees, starting
     // from the from tallest tree to shortest.
     nodes: Vec<H::Digest>,
+
     // The position of the oldest element still maintained by the MMR. Will be 0 unless forgetting
-    // has been invoked. If non-zero, then proofs can only be generated for elements with positions
-    // strictly after this point.
+    // has been invoked.
     oldest_remembered_pos: u64,
+
+    // The hashes of the MMR's peaks that are older than oldest_remembered_pos, keyed by their
+    // position.
+    old_peaks: HashMap<u64, H::Digest>,
 }
 
 impl<H: CHasher> Default for Mmr<H> {
@@ -37,9 +44,16 @@ impl<H: CHasher> Storage<H> for Mmr<H> {
     }
 
     async fn get_node(&self, position: u64) -> Result<Option<H::Digest>, Error> {
-        match self.nodes.get(self.pos_to_index(position)) {
-            Some(node) => Ok(Some(node.clone())),
-            None => Ok(None),
+        if position < self.oldest_remembered_pos {
+            match self.old_peaks.get(&position) {
+                Some(node) => Ok(Some(node.clone())),
+                None => Ok(None),
+            }
+        } else {
+            match self.nodes.get(self.pos_to_index(position)) {
+                Some(node) => Ok(Some(node.clone())),
+                None => Ok(None),
+            }
         }
     }
 }
@@ -50,16 +64,31 @@ impl<H: CHasher> Mmr<H> {
         Self {
             nodes: Vec::new(),
             oldest_remembered_pos: 0,
+            old_peaks: HashMap::new(),
         }
     }
 
-    /// Return an `Mmr` initialized with the given nodes and oldest remembered position.
-    pub fn init(nodes: Vec<H::Digest>, oldest_remembered_pos: u64) -> Self {
-        let s = Self {
+    /// Return an `Mmr` initialized with the given nodes and oldest remembered position, and
+    /// hashes of any peaks that are older than the oldest remembered position.
+    pub fn init(
+        nodes: Vec<H::Digest>,
+        oldest_remembered_pos: u64,
+        old_peaks: Vec<H::Digest>,
+    ) -> Self {
+        let mut s = Self {
             nodes,
             oldest_remembered_pos,
+            old_peaks: HashMap::new(),
         };
         assert!(PeakIterator::check_validity(s.size()));
+        let mut given_peak_iter = old_peaks.iter();
+        for (peak, _) in s.peak_iterator() {
+            if peak < s.oldest_remembered_pos {
+                let given_peak = given_peak_iter.next().unwrap();
+                assert!(s.old_peaks.insert(peak, given_peak.clone()).is_none());
+            }
+        }
+        assert!(given_peak_iter.next().is_none());
         s
     }
 
@@ -68,8 +97,9 @@ impl<H: CHasher> Mmr<H> {
         self.nodes.len() as u64 + self.oldest_remembered_pos
     }
 
-    /// Return the position of the oldest remembered node in the MMR.
-    pub fn oldest_remembered_node_pos(&self) -> u64 {
+    /// Return the position of the oldest remembered node in the MMR, not including the peaks which
+    /// are always remembered.
+    pub fn oldest_remembered_pos(&self) -> u64 {
         self.oldest_remembered_pos
     }
 
@@ -83,7 +113,19 @@ impl<H: CHasher> Mmr<H> {
         index as u64 + self.oldest_remembered_pos
     }
 
+    /// Returns the requested node, assuming it is either a peak or known to exist within the
+    /// currently remembered node set.
+    fn get_node_unchecked(&self, pos: u64) -> &H::Digest {
+        if pos >= self.oldest_remembered_pos {
+            &self.nodes[self.pos_to_index(pos)]
+        } else {
+            self.old_peaks.get(&pos).unwrap()
+        }
+    }
+
     /// Return the index of the element in the current nodes vector given its position in the MMR.
+    ///
+    /// Will underflow if `pos` precedes the oldest remembered position.
     fn pos_to_index(&self, pos: u64) -> usize {
         (pos - self.oldest_remembered_pos) as usize
     }
@@ -101,7 +143,7 @@ impl<H: CHasher> Mmr<H> {
         // Compute the new parent nodes if any, and insert them into the MMR.
         for sibling_pos in peaks.into_iter().rev() {
             let parent_pos = self.index_to_pos(self.nodes.len());
-            let sibling_hash = &self.nodes[self.pos_to_index(sibling_pos)];
+            let sibling_hash = self.get_node_unchecked(sibling_pos);
             hash = h.node_hash(parent_pos, sibling_hash, &hash);
             self.nodes.push(hash.clone());
         }
@@ -112,7 +154,7 @@ impl<H: CHasher> Mmr<H> {
     pub fn root(&self, hasher: &mut H) -> H::Digest {
         let peaks = self
             .peak_iterator()
-            .map(|(peak_pos, _)| &self.nodes[(peak_pos - self.oldest_remembered_pos) as usize]);
+            .map(|(peak_pos, _)| self.get_node_unchecked(peak_pos));
         let size = self.size();
         Hasher::new(hasher).root_hash(size, peaks)
     }
@@ -142,30 +184,46 @@ impl<H: CHasher> Mmr<H> {
         Proof::<H>::range_proof::<Mmr<H>>(self, start_element_pos, end_element_pos).await
     }
 
-    /// Returns the position of the oldest element that must be retained by this MMR in order to
-    /// preserve its ability to generate proofs for new elements. This is the position of the
-    /// tallest peak.
-    fn oldest_required_element(&self) -> u64 {
-        match self.peak_iterator().next() {
-            None => {
-                // Degenerate case, only happens when MMR is empty.
-                0
-            }
-            Some((pos, _)) => pos,
+    /// Forget all but the very last node (and any peak).
+    pub fn forget_all(&mut self) {
+        if !self.nodes.is_empty() {
+            self.forget_to_pos(self.index_to_pos(self.nodes.len() - 1));
         }
     }
 
-    /// Forget as many nodes as possible without breaking proof generation going forward, returning
-    /// the position of the oldest remembered node after forgetting, or 0 if nothing was forgotten.
-    pub fn forget_max(&mut self) -> u64 {
-        self.forget_to_pos(self.oldest_required_element());
-        self.oldest_required_element()
+    /// Forget the maximum amount of nodes possible while still allowing nodes with position `pos`
+    /// or newer to be provable, returning the position of the oldest remaining node.
+    pub fn forget(&mut self, pos: u64) -> u64 {
+        let oldest_pos = oldest_required_proof_pos(self.peak_iterator(), pos);
+        self.forget_to_pos(oldest_pos);
+        oldest_pos
     }
 
-    fn forget_to_pos(&mut self, pos: u64) {
-        let nodes_to_remove = self.pos_to_index(pos);
+    /// Forget all nodes up to but not including the given position (except for any peaks in that
+    /// range).
+    ///
+    /// Forgotten nodes will no longer be provable, nor will some nodes that follow them in some
+    /// cases.  Use forget(pos) to guarantee a desired node (and all that follow it) will remain
+    /// provable after forgetting.
+    pub(crate) fn forget_to_pos(&mut self, pos: u64) {
+        for peak in self.peak_iterator() {
+            if peak.0 < pos && peak.0 >= self.oldest_remembered_pos {
+                assert!(self
+                    .old_peaks
+                    .insert(peak.0, self.nodes[self.pos_to_index(peak.0)].clone())
+                    .is_none());
+            }
+        }
+        let nodes_to_keep = self.pos_to_index(pos);
+        self.nodes = self.nodes[nodes_to_keep..self.nodes.len()].to_vec();
         self.oldest_remembered_pos = pos;
-        self.nodes = self.nodes[nodes_to_remove..self.nodes.len()].to_vec();
+    }
+
+    /// Return the oldest node position provable by this MMR.
+    ///
+    /// Will return 0 unless forgetting has been invoked.
+    pub fn oldest_provable_pos(&self) -> u64 {
+        oldest_provable_pos(self.peak_iterator(), self.oldest_remembered_pos)
     }
 }
 
@@ -176,11 +234,9 @@ mod tests {
     use commonware_runtime::{deterministic::Executor, Runner};
     use commonware_utils::hex;
 
-    /// Test MMR building by consecutively adding 11 equal elements to a new MMR, producing the
-    /// structure in the example documented at the top of the mmr crate's mod.rs file with 19 nodes
-    /// and 3 peaks.
+    /// Test empty MMR behavior.
     #[test]
-    fn test_add_eleven_values() {
+    fn test_empty() {
         let (executor, _, _) = Executor::default();
         executor.start(async move {
             let mut mmr: Mmr<Sha256> = Mmr::<Sha256>::new();
@@ -189,16 +245,21 @@ mod tests {
                 None,
                 "empty iterator should have no peaks"
             );
-            assert_eq!(
-                mmr.forget_max(),
-                0,
-                "forget_max on empty MMR should do nothing"
-            );
-            assert_eq!(
-                mmr.oldest_required_element(),
-                0,
-                "oldest_required_element should return 0 on empty MMR"
-            );
+            mmr.forget_all();
+            assert_eq!(mmr.size(), 0, "forget_all on empty MMR should do nothing");
+            assert_eq!(mmr.oldest_provable_pos(), 0);
+            assert_eq!(mmr.forget(0), 0);
+        });
+    }
+
+    /// Test MMR building by consecutively adding 11 equal elements to a new MMR, producing the
+    /// structure in the example documented at the top of the mmr crate's mod.rs file with 19 nodes
+    /// and 3 peaks.
+    #[test]
+    fn test_add_eleven_values() {
+        let (executor, _, _) = Executor::default();
+        executor.start(async move {
+            let mut mmr: Mmr<Sha256> = Mmr::<Sha256>::new();
             let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
             let mut leaves: Vec<u64> = Vec::new();
             let mut hasher = Sha256::default();
@@ -210,7 +271,7 @@ mod tests {
                 let nodes_needing_parents = nodes_needing_parents(mmr.peak_iterator());
                 assert!(nodes_needing_parents.len() <= peaks.len());
             }
-            assert_eq!(mmr.oldest_remembered_node_pos(), 0);
+            assert_eq!(mmr.oldest_remembered_pos(), 0);
             assert_eq!(mmr.size(), 19, "mmr not of expected size");
             assert_eq!(
                 leaves,
@@ -273,16 +334,14 @@ mod tests {
             assert_eq!(root_hash, expected_root_hash, "incorrect root hash");
 
             // forgetting tests
-            assert_eq!(
-                mmr.forget_max(),
-                14,
-                "forget_max should forget to tallest peak"
-            );
-            assert_eq!(mmr.oldest_remembered_node_pos(), 14);
+            mmr.forget_to_pos(14); // forget to tallest peak
+            assert_eq!(mmr.oldest_remembered_pos(), 14);
 
-            // After forgetting we shouldn't be able to prove elements at or before the oldest remaining.
+            // After forgetting up to a peak, we shouldn't be able to prove any elements before it.
             assert!(matches!(mmr.proof(0).await, Err(ElementPruned)));
             assert!(matches!(mmr.proof(11).await, Err(ElementPruned)));
+            // We should still be able to prove any leaf following this peak, the first of which is
+            // at position 15.
             assert!(mmr.proof(15).await.is_ok());
 
             let root_hash_after_forget = mmr.root(&mut hasher);
@@ -304,23 +363,30 @@ mod tests {
             );
 
             // Test that we can initialize a new MMR from another's elements.
-            let mmr_copy = Mmr::<Sha256>::init(mmr.nodes.clone(), mmr.oldest_remembered_node_pos());
+            let mut old_peaks = Vec::new();
+            mmr.peak_iterator().for_each(|peak| {
+                if peak.0 < mmr.oldest_remembered_pos() {
+                    old_peaks.push(mmr.get_node_unchecked(peak.0).clone());
+                }
+            });
+            let mmr_copy =
+                Mmr::<Sha256>::init(mmr.nodes.clone(), mmr.oldest_remembered_pos(), old_peaks);
             assert_eq!(mmr_copy.size(), 19);
             assert_eq!(
-                mmr_copy.oldest_remembered_node_pos(),
-                mmr.oldest_remembered_node_pos()
+                mmr_copy.oldest_remembered_pos(),
+                mmr.oldest_remembered_pos()
             );
         });
     }
 
-    /// Test that max-forgetting never breaks adding new nodes.
+    /// Test that forgetting all nodes never breaks adding new nodes.
     #[test]
-    fn test_forget_max() {
+    fn test_forget_all() {
         let mut mmr: Mmr<Sha256> = Mmr::<Sha256>::new();
         let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
         let mut hasher = Sha256::default();
         for _ in 0..1000 {
-            mmr.forget_max();
+            mmr.forget_all();
             mmr.add(&mut hasher, &element);
         }
     }
@@ -576,7 +642,7 @@ mod tests {
             assert_eq!(hex(&root), expected_root);
 
             // confirm forgetting doesn't affect the root computation
-            mmr.forget_max();
+            mmr.forget_all();
             let root2 = mmr.root(&mut hasher);
             assert_eq!(root, root2);
         }

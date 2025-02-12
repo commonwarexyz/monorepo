@@ -109,6 +109,72 @@ pub(crate) fn nodes_needing_parents(peak_iterator: PeakIterator) -> Vec<u64> {
     peaks
 }
 
+/// Returns the position of the oldest provable node in the represented MMR.
+pub(crate) fn oldest_provable_pos(peak_iterator: PeakIterator, oldest_remembered_pos: u64) -> u64 {
+    if peak_iterator.size == 0 {
+        return 0;
+    }
+    for (peak_pos, height) in peak_iterator {
+        if peak_pos < oldest_remembered_pos {
+            continue;
+        }
+        // We have found the tree containing the oldest remembered node. Now we look for the
+        // highest node in this tree whose left-sibling is pruned (if any). The provable nodes
+        // are those that strictly follow this node. If no such node exists, then all existing
+        // nodes are provable
+        let mut two_h = 1 << height;
+        let mut cur_node = peak_pos;
+        while two_h > 1 {
+            let left_pos = cur_node - two_h;
+            let right_pos = left_pos + two_h - 1;
+            if left_pos < oldest_remembered_pos {
+                // found pruned left sibling
+                return right_pos + 1;
+            }
+            two_h >>= 1;
+            cur_node = left_pos;
+        }
+        return oldest_remembered_pos;
+    }
+    // The oldest remembered node should always be at or equal to the last peak (aka the last node
+    // in the MMR), so if we get here, the MMR corresponding to the inputs is invalid.
+    panic!("mmr invalid")
+}
+
+/// Returns the position of the oldest node whose digest will be required to prove inclusion of
+/// `provable_pos`.
+///
+/// Forgetting this position will render the node with position `provable_pos` unprovable.
+pub(crate) fn oldest_required_proof_pos(peak_iterator: PeakIterator, provable_pos: u64) -> u64 {
+    if peak_iterator.size == 0 {
+        return 0;
+    }
+    for (peak_pos, height) in peak_iterator {
+        if peak_pos < provable_pos {
+            continue;
+        }
+        // We have found the tree containing the node we want to guarantee is provable. We
+        // now walk down the path from its root to this node.
+        let iter = PathIterator::new(provable_pos, peak_pos, height);
+        for (parent_pos, sibling_pos) in iter {
+            if parent_pos == provable_pos {
+                // If we hit the node we are trying to prove while walking the path, then no
+                // older nodes are required to prove it.
+                return provable_pos;
+            }
+            // If we hit a node whose sibling precedes the position we wish to prove, then that
+            // sibling is required to prove it, and it's the oldest such node.
+            if sibling_pos < provable_pos {
+                return sibling_pos;
+            }
+        }
+        return provable_pos;
+    }
+    // The oldest remembered node should always be at or equal to the last peak (aka the last node
+    // in the MMR), so if we get here, the MMR corresponding to the inputs is invalid.
+    panic!("mmr invalid")
+}
+
 /// A PathIterator returns a (parent_pos, sibling_pos) tuple for the sibling of each node along the
 /// path from a given perfect binary tree peak to a designated leaf, not including the peak itself.
 ///
@@ -166,5 +232,27 @@ impl Iterator for PathIterator {
         let r = Some((self.node_pos, right_pos));
         self.node_pos = left_pos;
         r
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Very basic testing for the proving boundary computations. Testing of the validity of these
+    // boundaries appears in the verification crate.
+    #[test]
+    fn test_proof_boundaries() {
+        for oldest_remembered in 0u64..19u64 {
+            let iter = PeakIterator::new(19);
+            let oldest_provable = oldest_provable_pos(iter, oldest_remembered);
+            assert!(oldest_provable >= oldest_remembered);
+        }
+
+        for provable_pos in 0u64..19u64 {
+            let iter = PeakIterator::new(19);
+            let oldest_required = oldest_required_proof_pos(iter, provable_pos);
+            assert!(oldest_required <= provable_pos);
+        }
     }
 }
