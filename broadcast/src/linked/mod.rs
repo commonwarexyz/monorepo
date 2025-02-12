@@ -103,10 +103,12 @@ pub mod signer;
 pub type Epoch = u64;
 
 /// `Context` is used as the `Context` type for the `Application` and `Collector` traits.
-/// Stores a sequencer’s public key and sequential height, defining its unique position in the broadcast chain.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct Context<P: Array> {
+    /// Sequencer's public key.
     pub sequencer: P,
+
+    /// Sequencer-specific sequential height. Zero-indexed.
     pub height: u64,
 }
 
@@ -117,7 +119,7 @@ mod tests {
     use commonware_cryptography::{
         bls12381::{
             dkg::ops,
-            primitives::{group::Share, poly::Poly},
+            primitives::{group::Share, poly},
         },
         ed25519::PublicKey,
         sha256::{Digest as Sha256Digest, Sha256},
@@ -233,15 +235,16 @@ mod tests {
     #[allow(clippy::too_many_arguments)]
     fn spawn_validator_engines(
         runtime: &Context,
-        identity: Poly<commonware_cryptography::bls12381::primitives::group::G1>,
+        identity: poly::Public,
         pks: &[PublicKey],
         validators: &[(PublicKey, Ed25519, Share)],
         registrations: &mut Registrations<PublicKey>,
         mailboxes: &mut BTreeMap<PublicKey, mocks::application::Mailbox<Sha256Digest, PublicKey>>,
-        collectors: &mut BTreeMap<PublicKey, mocks::collector::Mailbox<Sha256Digest, PublicKey>>,
+        collectors: &mut BTreeMap<PublicKey, mocks::collector::Mailbox<Ed25519, Sha256Digest>>,
         refresh_epoch_timeout: Duration,
         rebroadcast_timeout: Duration,
     ) {
+        let namespace = b"my testing namespace";
         for (validator, scheme, share) in validators.iter() {
             let mut coordinator = mocks::coordinator::Coordinator::<PublicKey>::new(
                 identity.clone(),
@@ -255,7 +258,10 @@ mod tests {
             mailboxes.insert(validator.clone(), app_mailbox.clone());
 
             let (collector, collector_mailbox) =
-                mocks::collector::Collector::<Sha256Digest, PublicKey>::new();
+                mocks::collector::Collector::<Ed25519, Sha256Digest>::new(
+                    namespace,
+                    poly::public(&identity),
+                );
             runtime.clone().spawn("collector", collector.run());
             collectors.insert(validator.clone(), collector_mailbox);
 
@@ -269,7 +275,7 @@ mod tests {
                     coordinator,
                     mailbox_size: 1024,
                     pending_verify_size: 1024,
-                    namespace: "my testing namespace".into(),
+                    namespace: namespace.to_vec(),
                     epoch_bounds: (1, 1),
                     height_bound: 2,
                     refresh_epoch_timeout,
@@ -329,7 +335,7 @@ mod tests {
 
     async fn await_collectors(
         runtime: &Context,
-        collectors: &BTreeMap<PublicKey, mocks::collector::Mailbox<Sha256Digest, PublicKey>>,
+        collectors: &BTreeMap<PublicKey, mocks::collector::Mailbox<Ed25519, Sha256Digest>>,
         threshold: u64,
         num_validators: usize,
     ) {
@@ -381,8 +387,7 @@ mod tests {
                     mocks::application::Mailbox<Sha256Digest, PublicKey>,
                 >::new()));
                 let mut collectors =
-                    BTreeMap::<PublicKey, mocks::collector::Mailbox<Sha256Digest, PublicKey>>::new(
-                    );
+                    BTreeMap::<PublicKey, mocks::collector::Mailbox<Ed25519, Sha256Digest>>::new();
                 spawn_validator_engines(
                     &context,
                     identity.clone(),
@@ -456,7 +461,7 @@ mod tests {
                     >::new()));
                     let mut collectors = BTreeMap::<
                         PublicKey,
-                        mocks::collector::Mailbox<Sha256Digest, PublicKey>,
+                        mocks::collector::Mailbox<Ed25519, Sha256Digest>,
                     >::new();
                     spawn_validator_engines(
                         &context,
@@ -473,7 +478,7 @@ mod tests {
 
                     let collector_pairs: Vec<(
                         PublicKey,
-                        mocks::collector::Mailbox<Sha256Digest, PublicKey>,
+                        mocks::collector::Mailbox<Ed25519, Sha256Digest>,
                     )> = collectors
                         .iter()
                         .map(|(v, m)| (v.clone(), m.clone()))
@@ -521,8 +526,7 @@ mod tests {
                     mocks::application::Mailbox<Sha256Digest, PublicKey>,
                 >::new()));
                 let mut collectors =
-                    BTreeMap::<PublicKey, mocks::collector::Mailbox<Sha256Digest, PublicKey>>::new(
-                    );
+                    BTreeMap::<PublicKey, mocks::collector::Mailbox<Ed25519, Sha256Digest>>::new();
                 spawn_validator_engines(
                     &context,
                     identity.clone(),
@@ -581,8 +585,7 @@ mod tests {
                     mocks::application::Mailbox<Sha256Digest, PublicKey>,
                 >::new()));
                 let mut collectors =
-                    BTreeMap::<PublicKey, mocks::collector::Mailbox<Sha256Digest, PublicKey>>::new(
-                    );
+                    BTreeMap::<PublicKey, mocks::collector::Mailbox<Ed25519, Sha256Digest>>::new();
                 spawn_validator_engines(
                     &context,
                     identity.clone(),
@@ -637,8 +640,7 @@ mod tests {
                     mocks::application::Mailbox<Sha256Digest, PublicKey>,
                 >::new()));
                 let mut collectors =
-                    BTreeMap::<PublicKey, mocks::collector::Mailbox<Sha256Digest, PublicKey>>::new(
-                    );
+                    BTreeMap::<PublicKey, mocks::collector::Mailbox<Ed25519, Sha256Digest>>::new();
                 spawn_validator_engines(
                     &context,
                     identity.clone(),

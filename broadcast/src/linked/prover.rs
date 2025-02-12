@@ -19,9 +19,8 @@ use std::marker::PhantomData;
 pub struct Prover<C: Scheme, D: Array> {
     _crypto: PhantomData<C>,
     _digest: PhantomData<D>,
-
-    public: group::Public,
     namespace: Vec<u8>,
+    public: group::Public,
 }
 
 impl<C: Scheme, D: Array> SizedSerialize for Prover<C, D> {
@@ -30,17 +29,17 @@ impl<C: Scheme, D: Array> SizedSerialize for Prover<C, D> {
         + u64::SERIALIZED_LEN
         + D::SERIALIZED_LEN
         + u64::SERIALIZED_LEN
-        + C::Signature::SERIALIZED_LEN;
+        + group::SIGNATURE_LENGTH;
 }
 
 impl<C: Scheme, D: Array> Prover<C, D> {
     /// Create a new prover with the given signing `namespace`.
-    pub fn new(public: group::Public, namespace: &[u8]) -> Self {
+    pub fn new(namespace: &[u8], public: group::Public) -> Self {
         Self {
             _crypto: PhantomData,
             _digest: PhantomData,
-            public,
             namespace: namespace::ack(namespace),
+            public,
         }
     }
 
@@ -59,7 +58,11 @@ impl<C: Scheme, D: Array> Prover<C, D> {
         proof.extend_from_slice(payload);
         proof.put_u64(epoch);
         proof.extend_from_slice(&threshold.serialize());
-        proof.into()
+        let result: Proof = proof.into();
+
+        // Ensure proof is the right size
+        assert!(result.len() == Self::SERIALIZED_LEN);
+        result
     }
 
     /// Deserialize a proof into a `context`, `payload`, `epoch`, and `threshold`.
@@ -81,7 +84,7 @@ impl<C: Scheme, D: Array> Prover<C, D> {
             return None;
         };
         let epoch = proof.get_u64();
-        let threshold = proof.copy_to_bytes(C::Signature::SERIALIZED_LEN);
+        let threshold = proof.copy_to_bytes(group::SIGNATURE_LENGTH);
         let threshold = group::Signature::deserialize(&threshold)?;
 
         // Verify signature
