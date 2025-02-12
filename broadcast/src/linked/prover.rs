@@ -72,7 +72,6 @@ impl<C: Scheme, D: Array> Prover<C, D> {
         mut proof: Proof,
     ) -> Option<(Context<C::PublicKey>, D, Epoch, group::Signature)> {
         // Ensure proof is the right size
-
         if proof.len() != Self::SERIALIZED_LEN {
             return None;
         }

@@ -98,6 +98,9 @@ pub mod signer;
 
 /// `Epoch` is used as the `Index` type for the `Coordinator` trait.
 /// Defines the current set of sequencers and signers.
+///
+/// This is not a single "View" in the sense of a consensus protocol, but rather a continuous
+/// sequence of views in-which the set of sequencers and signers is constant.
 pub type Epoch = u64;
 
 /// `Context` is used as the `Context` type for the `Application` and `Collector` traits.
