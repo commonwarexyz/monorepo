@@ -66,11 +66,21 @@ impl<D: Array> Parent<D> {
 }
 
 /// Safe version of a `Link`.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct Link<C: Scheme, D: Array> {
     pub chunk: Chunk<D, C::PublicKey>,
     pub signature: C::Signature,
     pub parent: Option<Parent<D>>,
+}
+
+impl<C: Scheme, D: Array> std::fmt::Debug for Link<C, D> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Link")
+            .field("chunk", &self.chunk)
+            .field("signature", &self.signature)
+            .field("parent", &self.parent)
+            .finish()
+    }
 }
 
 impl<C: Scheme, D: Array> Link<C, D> {

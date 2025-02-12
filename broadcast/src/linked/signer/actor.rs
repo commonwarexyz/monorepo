@@ -353,7 +353,7 @@ impl<
                         warn!(?err, ?ack, ?sender, "ack validate failed");
                         continue;
                     };
-                    if let Err(err) = self.handle_ack(ack).await {
+                    if let Err(err) = self.handle_ack(&ack).await {
                         warn!(?err, ?ack, "ack handle failed");
                         continue;
                     }
@@ -394,7 +394,7 @@ impl<
 
                             // Broadcast the message
                             if let Err(err) = self.broadcast_new(payload, result, &mut link_sender).await {
-                                warn!(?err, ?payload, "broadcast new failed");
+                                warn!(?err, "broadcast new failed");
                                 continue;
                             }
                         }
@@ -476,7 +476,7 @@ impl<
             .map_err(|_| Error::UnableToSendMessage)?;
 
         // Handle the ack internally
-        self.handle_ack(ack).await?;
+        self.handle_ack(&ack).await?;
 
         Ok(())
     }
@@ -516,7 +516,7 @@ impl<
     ///
     /// Returns an error if the ack is invalid, or can be ignored
     /// (e.g. already exists, threshold already exists, is outside the epoch bounds, etc.).
-    async fn handle_ack(&mut self, ack: safe::Ack<D, C::PublicKey>) -> Result<(), Error> {
+    async fn handle_ack(&mut self, ack: &safe::Ack<D, C::PublicKey>) -> Result<(), Error> {
         // Get the quorum
         let Some(identity) = self.coordinator.identity(ack.epoch) else {
             return Err(Error::UnknownIdentity(ack.epoch));
@@ -524,7 +524,7 @@ impl<
         let quorum = identity.required();
 
         // Add the partial signature. If a new threshold is formed, handle it.
-        if let Some(threshold) = self.ack_manager.add_ack(&ack, quorum) {
+        if let Some(threshold) = self.ack_manager.add_ack(ack, quorum) {
             // Handle the threshold signature
             self.handle_threshold(&ack.chunk, ack.epoch, threshold)
                 .await;
