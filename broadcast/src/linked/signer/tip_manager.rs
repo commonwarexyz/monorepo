@@ -59,7 +59,7 @@ mod tests {
     use crate::linked::safe;
     use bytes::Bytes;
     use commonware_cryptography::{
-        ed25519::{self, Ed25519},
+        ed25519::{self, Ed25519, PublicKey, Signature},
         sha256::{self, Digest},
         Array,
     };
@@ -71,16 +71,16 @@ mod tests {
         use super::*;
 
         /// Creates a dummy link for testing.
-        pub fn create_dummy_link<C: Scheme>(
-            sequencer: C::PublicKey,
+        pub fn create_dummy_link(
+            sequencer: PublicKey,
             height: u64,
             payload: &str,
-        ) -> safe::Link<C, Digest> {
+        ) -> safe::Link<Ed25519, Digest> {
             let signature = {
-                let mut data = Bytes::from(vec![3u8; C::Signature::SERIALIZED_LEN]);
-                C::Signature::read_from(&mut data).unwrap()
+                let mut data = Bytes::from(vec![3u8; Signature::SERIALIZED_LEN]);
+                Signature::read_from(&mut data).unwrap()
             };
-            safe::Link {
+            safe::Link::<Ed25519, Digest> {
                 chunk: safe::Chunk {
                     sequencer,
                     height,

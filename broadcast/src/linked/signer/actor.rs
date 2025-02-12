@@ -303,7 +303,7 @@ impl<
                             break;
                         }
                     };
-                    let link = match safe::Link::decode(&msg) {
+                    let link = match safe::Link::<C, D>::decode(&msg) {
                         Ok(link) => link,
                         Err(err) => {
                             warn!(?err, ?sender, "link decode failed");
@@ -615,7 +615,7 @@ impl<
         let signature = self
             .crypto
             .sign(Some(&self.chunk_namespace), &serializer::chunk(&chunk));
-        let link = safe::Link {
+        let link = safe::Link::<C, D> {
             chunk,
             signature,
             parent,
