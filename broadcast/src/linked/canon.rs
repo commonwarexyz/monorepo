@@ -9,6 +9,24 @@ use commonware_cryptography::{
 };
 use prost::Message;
 
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("Decode error: {0}")]
+    Decode(#[from] prost::DecodeError),
+    #[error("Missing chunk")]
+    MissingChunk,
+    #[error("Missing parent")]
+    ParentMissing,
+    #[error("Parent on genesis chunk")]
+    ParentOnGenesis,
+    #[error("Invalid partial")]
+    InvalidPartial,
+    #[error("Invalid threshold")]
+    InvalidThreshold,
+    #[error("Cryptographic error: {0}")]
+    Crypto(#[from] commonware_cryptography::Error),
+}
+
 /// Safe version of a `Chunk`.
 #[derive(Clone, Debug, Eq, PartialOrd, Ord, PartialEq)]
 pub struct Chunk<D: Array, P: Array> {
@@ -21,9 +39,9 @@ impl<D: Array, P: Array> Chunk<D, P> {
     /// Returns a `Chunk` from a `wire::Chunk`.
     pub fn from_wire(chunk: wire::Chunk) -> Result<Self, Error> {
         Ok(Self {
-            sequencer: P::try_from(chunk.sequencer).map_err(Error::Cryptography)?,
+            sequencer: P::try_from(chunk.sequencer).map_err(Error::Crypto)?,
             height: chunk.height,
-            payload: D::try_from(chunk.payload).map_err(Error::Cryptography)?,
+            payload: D::try_from(chunk.payload).map_err(Error::Crypto)?,
         })
     }
 
@@ -49,7 +67,7 @@ impl<D: Array> Parent<D> {
     /// Returns a `Parent` from a `wire::Parent`.
     pub fn from_wire(parent: wire::Parent) -> Result<Self, Error> {
         Ok(Self {
-            payload: D::try_from(parent.payload).map_err(Error::Cryptography)?,
+            payload: D::try_from(parent.payload).map_err(Error::Crypto)?,
             epoch: parent.epoch,
             threshold: ThresholdSignature::deserialize(&parent.threshold)
                 .ok_or(Error::InvalidThreshold)?,
@@ -86,7 +104,7 @@ impl<C: Scheme, D: Array> Link<C, D> {
         } else if chunk.height > 0 && parent.is_none() {
             return Err(Error::ParentMissing);
         }
-        let signature = C::Signature::try_from(link.signature).map_err(Error::Cryptography)?;
+        let signature = C::Signature::try_from(link.signature).map_err(Error::Crypto)?;
         Ok(Self {
             chunk,
             signature,
@@ -154,24 +172,4 @@ impl<D: Array, P: Array> Ack<D, P> {
         }
         .encode_to_vec()
     }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("Decode error: {0}")]
-    Decode(#[from] prost::DecodeError),
-    #[error("Encode error: {0}")]
-    Encode(#[from] prost::EncodeError),
-    #[error("Missing chunk")]
-    MissingChunk,
-    #[error("Missing parent")]
-    ParentMissing,
-    #[error("Parent on genesis chunk")]
-    ParentOnGenesis,
-    #[error("Invalid partial")]
-    InvalidPartial,
-    #[error("Invalid threshold")]
-    InvalidThreshold,
-    #[error("Cryptographic error: {0}")]
-    Cryptography(#[from] commonware_cryptography::Error),
 }
