@@ -88,7 +88,7 @@ impl<C: Scheme, D: Array> Prover<C, D> {
         let threshold = group::Signature::deserialize(&threshold)?;
 
         // Verify signature
-        let chunk = safe::Chunk::<D, C::PublicKey> {
+        let chunk = safe::Chunk {
             sequencer: sequencer.clone(),
             height,
             payload: payload.clone(),
