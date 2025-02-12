@@ -642,7 +642,7 @@ mod tests {
             assert_eq!(hex(&root), expected_root);
 
             // confirm forgetting doesn't affect the root computation
-            mmr.forget_max();
+            mmr.forget_all();
             let root2 = mmr.root(&mut hasher);
             assert_eq!(root, root2);
         }
