@@ -191,13 +191,21 @@ impl<H: CHasher> Mmr<H> {
         }
     }
 
+    /// Forget the maximum amount of nodes possible while still allowing nodes with position `pos`
+    /// or newer to be provable, returning the position of the oldest remaining node.
+    pub fn forget(&mut self, pos: u64) -> u64 {
+        let oldest_pos = oldest_required_proof_pos(self.peak_iterator(), pos);
+        self.forget_to_pos(oldest_pos);
+        oldest_pos
+    }
+
     /// Forget all nodes up to but not including the given position (except for any peaks in that
     /// range).
     ///
     /// Forgotten nodes will no longer be provable, nor will some nodes that follow them in some
-    /// cases.  Use forget_max() to guarantee a desired node (and all that follow it) will remain
+    /// cases.  Use forget(pos) to guarantee a desired node (and all that follow it) will remain
     /// provable after forgetting.
-    pub fn forget_to_pos(&mut self, pos: u64) {
+    pub(crate) fn forget_to_pos(&mut self, pos: u64) {
         for peak in self.peak_iterator() {
             if peak.0 < pos && peak.0 >= self.oldest_remembered_pos {
                 assert!(self
@@ -209,14 +217,6 @@ impl<H: CHasher> Mmr<H> {
         let nodes_to_keep = self.pos_to_index(pos);
         self.nodes = self.nodes[nodes_to_keep..self.nodes.len()].to_vec();
         self.oldest_remembered_pos = pos;
-    }
-
-    /// Forget the maximum amount of nodes possible while still allowing nodes with position `pos`
-    /// or newer to be provable, returning the position of the oldest remaining node.
-    pub fn forget_max(&mut self, pos: u64) -> u64 {
-        let oldest_pos = oldest_required_proof_pos(self.peak_iterator(), pos);
-        self.forget_to_pos(oldest_pos);
-        oldest_pos
     }
 
     /// Return the oldest node position provable by this MMR.
@@ -248,7 +248,7 @@ mod tests {
             mmr.forget_all();
             assert_eq!(mmr.size(), 0, "forget_all on empty MMR should do nothing");
             assert_eq!(mmr.oldest_provable_pos(), 0);
-            assert_eq!(mmr.forget_max(0), 0);
+            assert_eq!(mmr.forget(0), 0);
         });
     }
 
