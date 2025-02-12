@@ -18,6 +18,8 @@ pub trait Broadcaster: Clone + Send + 'static {
     /// Attempt to broadcast a digest to the network.
     ///
     /// Returns a future that resolves to a boolean indicating success.
+    /// The broadcast may fail for a variety of reasons such-as networking errors, the node not
+    /// being a valid sequencer, or the Broadcaster not being ready to broadcast a new payload.
     fn broadcast(
         &mut self,
         payload: Self::Digest,
@@ -36,7 +38,8 @@ pub trait Application: Clone + Send + 'static {
     /// Verify a proposed payload received from the network.
     ///
     /// Returns a future that resolves to a boolean indicating success.
-    /// Part of verification is ensuring that the data is made available, for example by storing it in a database.
+    /// Part of verification requires ensuring that the data is made available.
+    /// For example, by storing it in a database.
     fn verify(
         &mut self,
         context: Self::Context,
