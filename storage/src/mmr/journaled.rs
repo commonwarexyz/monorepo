@@ -13,6 +13,7 @@ use crate::mmr::{
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Blob, Storage as RStorage};
 use commonware_utils::SizedSerialize;
+use futures::future::try_join_all;
 use tracing::warn;
 
 /// A MMR backed by a fixed-item-length journal.
@@ -77,15 +78,18 @@ impl<B: Blob, E: RStorage<B>, H: Hasher> Mmr<B, E, H> {
             journal_size = last_valid_size
         }
 
-        // TODO(https://github.com/commonwarexyz/monorepo/issues/478): extend Journal::replay() to
-        // accept a starting pos so this can be made much more efficient.
-        let mut vec = Vec::new();
-        let oldest_peak = PeakIterator::new(journal_size).next().unwrap().0;
-        for i in oldest_peak..journal_size {
-            let item = journal.read(i).await?;
-            vec.push(item);
-        }
-        let mem_mmr = MemMmr::init(vec, oldest_peak, vec![]);
+        // We bootstrap the in-mem MMR cache in the "forget_all" state where it only remembers the
+        // most recent node.
+        let bootstrap_peaks_futures: Vec<_> = PeakIterator::new(journal_size)
+            .map(|(peak, _)| journal.read(peak))
+            .collect();
+        let mut bootstrap_peaks = try_join_all(bootstrap_peaks_futures).await?;
+        let oldest_remembered_digest = bootstrap_peaks.pop().unwrap();
+        let mem_mmr = MemMmr::init(
+            vec![oldest_remembered_digest],
+            journal_size - 1,
+            bootstrap_peaks,
+        );
 
         let mut s = Self {
             mem_mmr,
