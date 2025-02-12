@@ -1,4 +1,4 @@
-use super::{namespace, safe, serializer, Context, Epoch};
+use super::{canon, namespace, serializer, Context, Epoch};
 use crate::Proof;
 use bytes::{Buf, BufMut};
 use commonware_cryptography::{
@@ -87,7 +87,7 @@ impl<C: Scheme, D: Array> Prover<C, D> {
         let threshold = group::Signature::deserialize(&threshold)?;
 
         // Verify signature
-        let chunk = safe::Chunk {
+        let chunk = canon::Chunk {
             sequencer: sequencer.clone(),
             height,
             payload: payload.clone(),

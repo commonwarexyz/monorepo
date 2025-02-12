@@ -1,4 +1,4 @@
-use crate::linked::safe;
+use crate::linked::canon;
 use commonware_cryptography::{Array, Scheme};
 use std::collections::{hash_map::Entry, HashMap};
 
@@ -10,7 +10,7 @@ pub struct TipManager<C: Scheme, D: Array> {
     // Existence of the chunk implies:
     // - The existence of the sequencer's entire chunk chain (from height zero)
     // - That the chunk has been acked by this signer.
-    tips: HashMap<C::PublicKey, safe::Link<C, D>>,
+    tips: HashMap<C::PublicKey, canon::Link<C, D>>,
 }
 
 impl<C: Scheme, D: Array> TipManager<C, D> {
@@ -23,7 +23,7 @@ impl<C: Scheme, D: Array> TipManager<C, D> {
 
     /// Inserts a new tip. Returns true if the tip is new.
     /// Panics if the new tip is lower-height than the existing tip.
-    pub fn put(&mut self, link: &safe::Link<C, D>) -> bool {
+    pub fn put(&mut self, link: &canon::Link<C, D>) -> bool {
         match self.tips.entry(link.chunk.sequencer.clone()) {
             Entry::Vacant(e) => {
                 e.insert(link.clone());
@@ -48,7 +48,7 @@ impl<C: Scheme, D: Array> TipManager<C, D> {
     }
 
     /// Returns the tip for the given sequencer.
-    pub fn get(&self, sequencer: &C::PublicKey) -> Option<safe::Link<C, D>> {
+    pub fn get(&self, sequencer: &C::PublicKey) -> Option<canon::Link<C, D>> {
         self.tips.get(sequencer).cloned()
     }
 }
@@ -56,7 +56,7 @@ impl<C: Scheme, D: Array> TipManager<C, D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::linked::safe;
+    use crate::linked::canon;
     use bytes::Bytes;
     use commonware_cryptography::{
         ed25519::{self, Ed25519, PublicKey, Signature},
@@ -75,13 +75,13 @@ mod tests {
             sequencer: PublicKey,
             height: u64,
             payload: &str,
-        ) -> safe::Link<Ed25519, Digest> {
+        ) -> canon::Link<Ed25519, Digest> {
             let signature = {
                 let mut data = Bytes::from(vec![3u8; Signature::SERIALIZED_LEN]);
                 Signature::read_from(&mut data).unwrap()
             };
-            safe::Link::<Ed25519, Digest> {
-                chunk: safe::Chunk {
+            canon::Link::<Ed25519, Digest> {
+                chunk: canon::Chunk {
                     sequencer,
                     height,
                     payload: sha256::hash(payload.as_bytes()),
@@ -103,7 +103,7 @@ mod tests {
             key: ed25519::PublicKey,
             height: u64,
             payload: &str,
-        ) -> safe::Link<Ed25519, Digest> {
+        ) -> canon::Link<Ed25519, Digest> {
             let link = create_dummy_link(key.clone(), height, payload);
             manager.put(&link);
             link

@@ -1,9 +1,12 @@
 use crate::linked::{wire, Epoch};
-use commonware_cryptography::bls12381::primitives::{
-    group::{Element, Signature as ThresholdSignature},
-    poly::PartialSignature,
-};
 use commonware_cryptography::Array;
+use commonware_cryptography::{
+    bls12381::primitives::{
+        group::{Element, Signature as ThresholdSignature},
+        poly::PartialSignature,
+    },
+    Scheme,
+};
 use prost::Message;
 
 /// Safe version of a `Chunk`.
@@ -64,14 +67,14 @@ impl<D: Array> Parent<D> {
 }
 
 /// Safe version of a `Link`.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Link<P: Array, S: Array, D: Array> {
-    pub chunk: Chunk<D, P>,
-    pub signature: S,
+#[derive(Clone, Eq)]
+pub struct Link<C: Scheme, D: Array> {
+    pub chunk: Chunk<D, C::PublicKey>,
+    pub signature: C::Signature,
     pub parent: Option<Parent<D>>,
 }
 
-impl<P: Array, S: Array, D: Array> Link<P, S, D> {
+impl<C: Scheme, D: Array> Link<C, D> {
     /// Decode a `Link` from bytes.
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
         let link = wire::Link::decode(bytes)?;
@@ -83,7 +86,7 @@ impl<P: Array, S: Array, D: Array> Link<P, S, D> {
         } else if chunk.height > 0 && parent.is_none() {
             return Err(Error::ParentMissing);
         }
-        let signature = S::try_from(link.signature).map_err(Error::Cryptography)?;
+        let signature = C::Signature::try_from(link.signature).map_err(Error::Cryptography)?;
         Ok(Self {
             chunk,
             signature,
@@ -99,6 +102,24 @@ impl<P: Array, S: Array, D: Array> Link<P, S, D> {
             parent: self.parent.as_ref().map(|parent| parent.to_wire()),
         }
         .encode_to_vec()
+    }
+}
+
+impl<C: Scheme, D: Array> std::fmt::Debug for Link<C, D> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Link")
+            .field("chunk", &self.chunk)
+            .field("signature", &self.signature)
+            .field("parent", &self.parent)
+            .finish()
+    }
+}
+
+impl<C: Scheme, D: Array> PartialEq for Link<C, D> {
+    fn eq(&self, other: &Self) -> bool {
+        self.chunk == other.chunk
+            && self.signature == other.signature
+            && self.parent == other.parent
     }
 }
 

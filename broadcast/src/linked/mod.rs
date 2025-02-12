@@ -82,8 +82,8 @@
 
 use commonware_cryptography::Array;
 
+mod canon;
 mod namespace;
-mod safe;
 mod serializer;
 
 #[cfg(test)]

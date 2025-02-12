@@ -1,4 +1,4 @@
-use crate::linked::{safe, Epoch};
+use crate::linked::{canon, Epoch};
 use commonware_cryptography::{
     bls12381::primitives::{group, ops, poly::PartialSignature},
     Array,
@@ -58,7 +58,7 @@ impl<D: Array, P: Array> AckManager<D, P> {
     /// Adds a partial signature to the evidence.
     ///
     /// If-and-only-if the quorum is newly-reached, the threshold signature is returned.
-    pub fn add_ack(&mut self, ack: &safe::Ack<D, P>, quorum: u32) -> Option<group::Signature> {
+    pub fn add_ack(&mut self, ack: &canon::Ack<D, P>, quorum: u32) -> Option<group::Signature> {
         let evidence = self
             .acks
             .entry(ack.chunk.sequencer.clone())
@@ -145,7 +145,7 @@ impl<D: Array, P: Array> AckManager<D, P> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::linked::{namespace, safe, serializer};
+    use crate::linked::{canon, namespace, serializer};
     use commonware_cryptography::{bls12381::dkg::ops::generate_shares, ed25519, sha256};
     use commonware_runtime::deterministic::Executor;
     use commonware_utils::SizedSerialize;
@@ -172,8 +172,8 @@ mod tests {
             sequencer: &ed25519::PublicKey,
             height: u64,
             payload: sha256::Digest,
-        ) -> safe::Chunk<sha256::Digest, ed25519::PublicKey> {
-            safe::Chunk {
+        ) -> canon::Chunk<sha256::Digest, ed25519::PublicKey> {
+            canon::Chunk {
                 sequencer: sequencer.clone(),
                 height,
                 payload,
@@ -183,7 +183,7 @@ mod tests {
         /// Sign a partial for the given chunk and epoch using the provided share.
         pub fn sign_partial(
             share: &Share,
-            chunk: &safe::Chunk<sha256::Digest, ed25519::PublicKey>,
+            chunk: &canon::Chunk<sha256::Digest, ed25519::PublicKey>,
             epoch: Epoch,
         ) -> commonware_cryptography::bls12381::primitives::poly::PartialSignature {
             ops::partial_sign_message(
@@ -196,11 +196,11 @@ mod tests {
         /// Create an Ack by signing a partial with the provided share.
         pub fn create_ack(
             share: &Share,
-            chunk: &safe::Chunk<sha256::Digest, ed25519::PublicKey>,
+            chunk: &canon::Chunk<sha256::Digest, ed25519::PublicKey>,
             epoch: Epoch,
-        ) -> safe::Ack<sha256::Digest, ed25519::PublicKey> {
+        ) -> canon::Ack<sha256::Digest, ed25519::PublicKey> {
             let partial = sign_partial(share, chunk, epoch);
-            safe::Ack {
+            canon::Ack {
                 chunk: chunk.clone(),
                 epoch,
                 partial,
@@ -218,7 +218,7 @@ mod tests {
         /// Generate a threshold signature directly from the shares specified by `indices`.
         pub fn generate_threshold_from_indices(
             shares: &[Share],
-            chunk: &safe::Chunk<sha256::Digest, ed25519::PublicKey>,
+            chunk: &canon::Chunk<sha256::Digest, ed25519::PublicKey>,
             epoch: Epoch,
             quorum: u32,
             indices: &[usize],
@@ -233,10 +233,10 @@ mod tests {
         /// Create a vector of acks for the given share indices.
         pub fn create_acks_for_indices(
             shares: &[Share],
-            chunk: &safe::Chunk<sha256::Digest, ed25519::PublicKey>,
+            chunk: &canon::Chunk<sha256::Digest, ed25519::PublicKey>,
             epoch: Epoch,
             indices: &[usize],
-        ) -> Vec<safe::Ack<sha256::Digest, ed25519::PublicKey>> {
+        ) -> Vec<canon::Ack<sha256::Digest, ed25519::PublicKey>> {
             indices
                 .iter()
                 .map(|&i| create_ack(&shares[i], chunk, epoch))
@@ -248,7 +248,7 @@ mod tests {
         pub fn add_acks_for_indices(
             manager: &mut AckManager<sha256::Digest, ed25519::PublicKey>,
             shares: &[Share],
-            chunk: &safe::Chunk<sha256::Digest, ed25519::PublicKey>,
+            chunk: &canon::Chunk<sha256::Digest, ed25519::PublicKey>,
             epoch: Epoch,
             quorum: u32,
             indices: &[usize],
