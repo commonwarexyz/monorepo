@@ -32,7 +32,7 @@ pub type PartialSignature = Eval<group::Signature>;
 pub const PARTIAL_SIGNATURE_LENGTH: usize = u32::SERIALIZED_LEN + group::SIGNATURE_LENGTH;
 
 /// A polynomial evaluation at a specific index.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Eval<C: Element> {
     pub index: u32,
     pub value: C,
