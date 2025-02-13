@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta content="text/html; charset=utf-8" http-equiv="Content-Type">
+    <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1" />
+    <link rel="icon" href="../favicon.ico" type="image/x-icon">
+
+    <title>commonware > Merkle Mountain Ranges for Performant Data Authentication</title>
+    <meta name="description" content="Decentralized systems require the ability to prove authenticity of data received from potentially untrustworthy sources. The most well known data structure for this task is the Merkle tree, which allows one to efficiently prove inclusion of an element within a list without having to obtain the entire list from a trusted source.">
+    <meta name="author" content="Roberto Bayardo">
+    <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
+
+    <meta property="og:url" content="https://commonware.xyz/blogs/mmr.html" />
+    <meta property="og:type" content="article" />
+    <meta property="og:site_name" content="commonware" />
+    <meta property="og:image" content="https://commonware.xyz/imgs/mmr.png" />
+    <meta property="og:title" content="Merkle Mountain Ranges for Performant Data Authentication" />
+    <meta property="og:description" content="Decentralized systems require the ability to prove authenticity of data received from potentially untrustworthy sources. The most well known data structure for this task is the Merkle tree, which allows one to efficiently prove inclusion of an element within a list without having to obtain the entire list from a trusted source." />
+    <meta property="article:author" content="https://x.com/roberto_bayardo" />
+    <meta property="article:published_time" content="2025-02-13T00:00:00Z" />
+    <meta property="article:modified_time" content="2025-02-13T00:00:00Z" />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta property="twitter:domain" content="commonware.xyz" />
+    <meta property="twitter:url" content="https://commonware.xyz/blogs/mmr.html" />
+    <meta property="twitter:title" content="Merkle Mountain Ranges for Performant Data Authentication" />
+    <meta property="twitter:description" content="Decentralized systems require the ability to prove authenticity of data received from potentially untrustworthy sources. The most well known data structure for this task is the Merkle tree, which allows one to efficiently prove inclusion of an element within a list without having to obtain the entire list from a trusted source." />
+    <meta property="twitter:image" content="https://commonware.xyz/imgs/mmr.png" />
+    <meta property="twitter:site" content="@commonwarexyz" />
+    <meta property="twitter:creator" content="@roberto_bayardo" />
+
+    <link rel="stylesheet" type="text/css" href="../style.css">
+</head>
+
+<body>
+    <div id="logo-placeholder">
+        <div class="logo-line">
+            <span class="edge-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="edge-logo-symbol">*</span>
+        </div>
+        <div class="logo-line">
+            <span class="vertical-logo-symbol">|</span>
+            <span class="logo-text"> commonware </span>
+            <span class="vertical-logo-symbol"> </span>
+        </div>
+        <div class="logo-line">
+            <span class="edge-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="edge-logo-symbol">+</span>
+        </div>
+    </div>
+    <div class="content">
+        <h1>Merkle Mountain Ranges for Performant Data Authentication</h1>
+        <div class="meta">
+            <div class="author">By <a href="https://x.com/roberto_bayardo">Roberto Bayardo</a></div>
+            <div class="date">February 13, 2025</div>
+        </div>
+        <p>Decentralized systems require the ability to prove authenticity of data received from potentially untrustworthy sources. The most well known data structure for this task is the <a href="https://en.wikipedia.org/wiki/Merkle_tree">Merkle tree</a>, which allows one to efficiently prove inclusion of an element within a list without having to obtain the entire list from a trusted source.</p>
+        <p>A Merkle tree is a <a href="https://docs.rs/commonware-storage/latest/commonware_storage/bmt/index.html">binary tree</a> whose leaves represent the list elements by storing the hash of the element, and whose internal nodes store the hash of their children. The only trusted piece of data required to validate a Merkle proof is a single hash value (~32 bytes) corresponding to the root of the Merkle tree. And the Merkle proof is itself quite small, consisting of a single value from each node along the path from root to the leaf element (logarithmic in the size of the list <i>N</i>) as illustrated in Figure 1.</p>
+        <div class="image-container">
+            <img src="../imgs/merkle-tree.png" alt="Example Merkle tree over a list of 7 elements">
+            <div class="image-caption">Figure 1: Example Merkle tree over a list of 7 elements</div>
+        </div>
+        <p>Because of these powerful properties, it's no surprise that the Merkle tree and its variants (such as <a href="https://ethereum.org/en/developers/docs/data-structures-and-encoding/patricia-merkle-trie/">Ethereum's Merkle Patricia Trie</a>) are fundamental components of most blockchains. And making these data structures performant is among today’s primary challenges to scaling blockchains further.</p>
+        <p>One particularly interesting variant of the Merkle tree, <a href="https://docs.rs/commonware-storage/latest/commonware_storage/mmr/index.html">now available in the Commonware Library</a>, is the <a href="https://github.com/opentimestamps/opentimestamps-server/blob/master/doc/merkle-mountain-range.md">Merkle Mountain Range</a> (MMR). A MMR differs from a Merkle tree in that it is append-only. While Merkle trees support element updates and insertions at arbitrary list positions, MMRs only allow new elements to be added to the end of the list.</p>
+        <p>The append-only restriction may appear burdensome, but it turns out updates can still be simulated through re-appending data (as in <a href="https://arxiv.org/pdf/2501.05262">QMDB</a>). What this restriction yields, however, is extreme performance. When adding an element to the MMR, (1) very little data needs to be read in from storage (typically cached), and (2) new data generated by the addition can be persisted to storage with one contiguous write. Contrast this to a standard Merkle tree, where adding or updating an element can require reading and updating a logarithmically sized amount of data scattered randomly across storage.</p>
+        <p>A <a href="https://www.geeksforgeeks.org/perfect-binary-tree/">perfect binary tree</a> is a binary tree that is both balanced and has a full set of leaves. A MMR is a list of perfect binary trees, called <i>mountains</i>, each of strictly decreasing height. The leaves of the MMR store the (positioned) hash of each element in the order of their insertion. We won't cover all the details here, but note that this structure is easy to maintain: if you add a new element to the end of the list, you need only generate at most a <i>log2(N)</i> number of new internal nodes to re-impose the required properties without modifying any existing nodes, as depicted in Figure 2 below.</p>
+        <div class="image-container">
+            <img src="../imgs/mmr.png" alt="Appending new elements to an MMR">
+            <div class="image-caption">Figure 2: Appending new elements to an MMR</div>
+        </div>
+        <p>The root nodes of each mountain are called the <i>peaks</i> of the MMR. The <i>root hash</i> of the MMR is computed by hashing the total number of nodes in the MMR together with the set of all peak hashes, a process called <i>bagging the peaks</i>. The amount of trusted data for MMR data authentication thus remains a single hash. A MMR inclusion proof consists of hashes derived from the path connecting its leaf element to the peak of its mountain, along with the hashes of the peaks of all other mountains. Both sets of hashes are bounded by <i>log2(N)</i> in number.</p>
+        <p>Because elements are all written sequentially, there is no need for intensive free space recovery techniques such as garbage collection or compaction. As soon as we no longer require proving the inclusion of any element older than a certain point in time, we can drop nearly all of those elements (and most of their ancestor nodes) from the MMR without losing the ability to generate new roots.</p>
+        <div class="image-container">
+            <img src="../imgs/mmr-certificate.png" alt="Wrapping the MMR root with a consensus certificate">
+            <div class="image-caption">Figure 3: Wrapping the MMR root with a consensus certificate</div>
+        </div>
+        <p>MMRs and <a href="https://commonware.xyz/blogs/threshold-simplex.html">threshold consensus signatures</a> make for a powerful combination. Consider, for example, using an MMR to store successfully executed blockchain transactions in the order of their execution. If the MMR root is included in the block digest, then a user (or external blockchain) running a lite client can prove successful execution of any historical transaction from a consensus certificate and the latest MMR root. Have a proof from an old MMR root? The latest MMR root (effectively) includes references to all previous roots and can be combined with some recent intermediate hashes to verify it.</p>
+        <p>Generating a lot of data but need a proof of inclusion (and order)? Reach for the MMR.</p>
+    </div>
+
+    <div id="footer-placeholder"></div>
+    <script src="../shared.js"></script>
+    <script defer src='https://static.cloudflareinsights.com/beacon.min.js' data-cf-beacon='{"token": "07159b86f75b4af18e54dd0cda2fb4a7"}'></script>
+</body>
+
+</html>
