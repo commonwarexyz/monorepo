@@ -1,3 +1,5 @@
+//! Parsed wrappers around wire types.
+
 use crate::linked::{wire, Epoch};
 use commonware_cryptography::Array;
 use commonware_cryptography::{

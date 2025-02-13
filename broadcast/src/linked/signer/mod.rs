@@ -1,10 +1,11 @@
 //! Signer actor for the broadcast module.
 //!
-//! Responsible for:
-//! - Broadcasting chunks (if a sequencer
-//! - Acknowledging chunks (if a validator)
-//! - Managing the chain tip of each sequencer
-//! - Managing acknowledgements for each sequencer and combining them into threshold signatures
+//! It is responsible for:
+//! - Broadcasting nodes (if a sequencer)
+//! - Signing chunks (if a validator)
+//! - Tracking the latest chunk in each sequencer’s chain
+//! - Recovering threshold signatures from partial signatures for each chunk
+//! - Notifying other actors of new chunks and threshold signatures
 
 mod ack_manager;
 mod actor;

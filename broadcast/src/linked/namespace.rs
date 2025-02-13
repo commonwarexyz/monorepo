@@ -1,3 +1,5 @@
+//! Generates namespaces for different signature types.
+
 use commonware_utils::union;
 
 const CHUNK_SUFFIX: &[u8] = b"_CHUNK";

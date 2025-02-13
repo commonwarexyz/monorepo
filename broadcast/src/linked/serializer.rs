@@ -1,3 +1,5 @@
+//! Serializes and deserializes messages.
+
 use super::{parsed, Epoch};
 use bytes::BufMut;
 use commonware_cryptography::Array;

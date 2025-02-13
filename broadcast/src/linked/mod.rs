@@ -1,84 +1,38 @@
 //! Ordered, reliable broadcast across multiple, dynamic participants.
 //!
-//! # Core Concepts
+//! # Concepts
 //!
-//! - **Sequential Linking**: Every broadcast message contains a cryptographic reference
-//!   to the previous message, forming an immutable chain.
+//! The system has two types of network participants: `sequencers` and `validators`. Their sets may
+//! overlap and are defined by the current `epoch`, a monotonically increasing integer. This module
+//! can handle reconfiguration of these sets across different epochs.
 //!
-//! - **Threshold Signatures**: Validators produce partial signatures that combine into a
-//!   threshold signature, ensuring a quorum verifies each message.
+//! Sequencers broadcast data. The smallest unit of data is a `chunk`. Sequencers broadcast `node`s
+//! that contain a chunk and a threshold signature over the previous chunk, forming a linked chain
+//! of nodes from each sequencer.
 //!
-//! - **Epochs**: The protocol is divided into epochs. Each epoch defines the active set of
-//!   signers and sequencers for orderly transitions and consensus.
+//! Validators verify and sign chunks using partial signatures. These can be combined to recover a
+//! threshold signature, ensuring a quorum verifies each chunk. The threshold signature allows
+//! external parties to confirm that the chunk was reliably broadcast.
 //!
-//! - **Storage**: Nodes persist state changes (links, acknowledgements) to a journal.
-//!   This enables reliable recovery and prevents conflicts like duplicate messages.
+//! Network participants persist any new nodes to a journal. This enables recovery from crashes and
+//! ensures that sequencers do not broadcast conflicting chunks and that validators do not sign
+//! them. "Conflicting" chunks are chunks from the same sequencer at the same height with different
+//! payloads.
 //!
 //! # Design
 //!
-//! The system has two sets of nodes: Sequencers and Validators. The sets may overlap.
-//! Sequencers link messages, while Validators verify and sign them. Each message includes a
-//! threshold signature over its predecessor for an unbroken, verifiable chain.
+//! The core of the module is the `signer` actor. It is responsible for:
+//! - Broadcasting nodes (if a sequencer)
+//! - Signing chunks (if a validator)
+//! - Tracking the latest chunk in each sequencer’s chain
+//! - Recovering threshold signatures from partial signatures for each chunk
+//! - Notifying other actors of new chunks and threshold signatures
 //!
-//! # Actor Overview and Design
+//! # Acknowledgements
 //!
-//! The core of the protocol is the `Signer` actor. It manages the lifecycle of a secure,
-//! ordered broadcast by:
-//!
-//! 1. **Initializing** storage, networking, and cryptographic settings.
-//! 2. **Processing** incoming messages by validating data and signatures.
-//! 3. **Broadcasting** signed messages to all nodes.
-//! 4. **Verifying** message integrity and order.
-//! 5. **Updating Epochs** based on consensus.
-//!
-//! ## Key Design Principles
-//!
-//! - **Actor-Based Model**:  
-//!   The `Signer` (see `actor.rs`) encapsulates all functions, handling network I/O,
-//!   verification, timeouts, and state updates concurrently.
-//!
-//! - **Event Sourcing & Journaling**:  
-//!   Each new message is logged to a persistent journal. This maintains chain integrity and
-//!   enables reliable recovery after crashes.
-//!
-//! - **Asynchronous Processing**:  
-//!   Using Rust’s async/await, the actor processes tasks simultaneously, including epoch
-//!   refreshes, message rebroadcasts, and verification requests.
-//!
-//! ## Operational Flow
-//!
-//! 1. **Message Chaining**:  
-//!    Each new message includes a threshold signature over the previous message, forming an
-//!    immutable, verifiable chain.
-//!
-//! 2. **Signature Aggregation**:  
-//!    Validators produce partial signatures that combine into a threshold signature,
-//!    ensuring quorum endorsement.
-//!
-//! 3. **Epoch Management**:  
-//!    Epochs define the active set of signers and sequencers. The actor refreshes its epoch and
-//!    enforces strict bounds on accepted messages.
-//!
-//! 4. **Reliable Recovery**:  
-//!    Storage logs all sequencer messages, allowing nodes to replay messages after shutdown.
-//!
-//! 5. **Concurrent Operations**:  
-//!    The actor listens for network events, dispatches verification tasks, and manages timeouts
-//!    for efficient operation.
-//!
-//! # Public Modules
-//!
-//! - **`signer`**: Contains the actor that validates messages, links them, and handles threshold
-//!   signatures.
-//! - **`prover`**: Generates and verifies proofs of broadcast.
-//!
-//! # Internal Modules
-//!
-//! - **`namespace`**: Generates namespaces for different signature types.
-//! - **`serializer`**: Serializes and deserializes messages.
-//! - **`wire`**: Protobuf-generated message definitions.
-//! - **`parsed`**: Parsed wrappers around wire types.
-//! - **`mocks`**: Mock implementations for testing.
+//! The following whitepapers and blog posts were used as a reference for this module:
+//! - [Autobahn](https://arxiv.org/abs/2401.10369)
+//! - [Vryx](https://hackmd.io/@patrickogrady/rys8mdl5p)
 
 use commonware_cryptography::Array;
 
