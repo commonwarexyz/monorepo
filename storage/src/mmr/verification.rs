@@ -1,3 +1,6 @@
+//! Defines the inclusion `Proof` structure, functions for generating them from any MMR implementing
+//! the `Storage` trait, and functions for verifying them against a root hash.
+
 use crate::mmr::{
     hasher::Hasher,
     iterator::{PathIterator, PeakIterator},
@@ -25,7 +28,7 @@ pub struct Proof<H: CHasher> {
     pub hashes: Vec<H::Digest>,
 }
 
-// A trait that allows generic generation of an MMR inclusion proof.
+/// A trait that allows generic generation of an MMR inclusion proof.
 pub trait Storage<H: CHasher> {
     /// Return the number of elements in the MMR.
     fn size(&self) -> impl Future<Output = Result<u64, Error>>;
