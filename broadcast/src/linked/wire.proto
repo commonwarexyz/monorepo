@@ -28,12 +28,9 @@ message Parent {
     bytes threshold = 3;
 }
 
-// Link is a message that contains a Chunk and a proof of validity.
-//
-// The proof of validity consists of:
-// - The signature of the sequencer over the Chunk
-// - A threshold signature over the parent of the Chunk
-message Link {
+// Node is a message from a sequencer that contains a Chunk and a proof that the parent was correctly broadcasted.
+// It represents a newly-proposed tip of the chain for the given sequencer.
+message Node {
     // Chunk that is being broadcasted
     Chunk chunk = 1;
 

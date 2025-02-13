@@ -84,27 +84,27 @@ impl<D: Array> Parent<D> {
     }
 }
 
-/// Parsed version of a `Link`.
+/// Parsed version of a `Node`.
 #[derive(Clone, Eq)]
-pub struct Link<C: Scheme, D: Array> {
+pub struct Node<C: Scheme, D: Array> {
     pub chunk: Chunk<D, C::PublicKey>,
     pub signature: C::Signature,
     pub parent: Option<Parent<D>>,
 }
 
-impl<C: Scheme, D: Array> Link<C, D> {
-    /// Decode a `Link` from bytes.
+impl<C: Scheme, D: Array> Node<C, D> {
+    /// Decode a `Node` from bytes.
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
-        let link = wire::Link::decode(bytes)?;
-        let chunk = link.chunk.ok_or(Error::MissingChunk)?;
+        let node = wire::Node::decode(bytes)?;
+        let chunk = node.chunk.ok_or(Error::MissingChunk)?;
         let chunk = Chunk::from_wire(chunk)?;
-        let parent = link.parent.map(Parent::from_wire).transpose()?;
+        let parent = node.parent.map(Parent::from_wire).transpose()?;
         if chunk.height == 0 && parent.is_some() {
             return Err(Error::ParentOnGenesis);
         } else if chunk.height > 0 && parent.is_none() {
             return Err(Error::ParentMissing);
         }
-        let signature = C::Signature::try_from(link.signature).map_err(Error::Crypto)?;
+        let signature = C::Signature::try_from(node.signature).map_err(Error::Crypto)?;
         Ok(Self {
             chunk,
             signature,
@@ -112,9 +112,9 @@ impl<C: Scheme, D: Array> Link<C, D> {
         })
     }
 
-    /// Encode a `Link` to bytes.
+    /// Encode a `Node` to bytes.
     pub fn encode(&self) -> Vec<u8> {
-        wire::Link {
+        wire::Node {
             chunk: Some(self.chunk.to_wire()),
             signature: self.signature.to_vec(),
             parent: self.parent.as_ref().map(|parent| parent.to_wire()),
@@ -123,9 +123,9 @@ impl<C: Scheme, D: Array> Link<C, D> {
     }
 }
 
-impl<C: Scheme, D: Array> std::fmt::Debug for Link<C, D> {
+impl<C: Scheme, D: Array> std::fmt::Debug for Node<C, D> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Link")
+        f.debug_struct("Node")
             .field("chunk", &self.chunk)
             .field("signature", &self.signature)
             .field("parent", &self.parent)
@@ -133,7 +133,7 @@ impl<C: Scheme, D: Array> std::fmt::Debug for Link<C, D> {
     }
 }
 
-impl<C: Scheme, D: Array> PartialEq for Link<C, D> {
+impl<C: Scheme, D: Array> PartialEq for Node<C, D> {
     fn eq(&self, other: &Self) -> bool {
         self.chunk == other.chunk
             && self.signature == other.signature

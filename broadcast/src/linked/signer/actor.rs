@@ -145,7 +145,7 @@ pub struct Actor<
     ////////////////////////////////////////
 
     // Tracks the current tip for each sequencer.
-    // The tip is a `Link` which is comprised of a `Chunk` and,
+    // The tip is a `Node` which is comprised of a `Chunk` and,
     // if not the genesis chunk for that sequencer,
     // a threshold signature over the parent chunk.
     tip_manager: TipManager<C, D>,
@@ -229,15 +229,15 @@ impl<
     /// The actor will handle:
     /// - Timeouts
     ///   - Refreshing the Epoch
-    ///   - Rebroadcasting Links
+    ///   - Rebroadcasting Nodes
     /// - Mailbox messages from the application:
     ///   - Broadcast requests
     ///   - Ack requests
     /// - Messages from the network:
-    ///   - Links
+    ///   - Nodes
     ///   - Acks
     pub async fn run(mut self, chunk_network: (NetS, NetR), ack_network: (NetS, NetR)) {
-        let (mut link_sender, mut link_receiver) = chunk_network;
+        let (mut node_sender, mut node_receiver) = chunk_network;
         let (mut ack_sender, mut ack_receiver) = ack_network;
         let mut shutdown = self.runtime.stopped();
 
@@ -245,7 +245,7 @@ impl<
         // and attempt to rebroadcast if necessary.
         self.refresh_epoch();
         self.journal_prepare(&self.crypto.public_key()).await;
-        if let Err(err) = self.rebroadcast(&mut link_sender).await {
+        if let Err(err) = self.rebroadcast(&mut node_sender).await {
             // Rebroadcasting my return a non-critical error, so log the error and continue.
             info!(?err, "initial rebroadcast failed");
         }
@@ -285,32 +285,32 @@ impl<
                 // Handle rebroadcast deadline
                 _ = rebroadcast => {
                     debug!("rebroadcast");
-                    if let Err(err) = self.rebroadcast(&mut link_sender).await {
+                    if let Err(err) = self.rebroadcast(&mut node_sender).await {
                         info!(?err, "rebroadcast failed");
                         continue;
                     }
                 },
 
-                // Handle incoming links
-                msg = link_receiver.recv() => {
-                    debug!("link network");
+                // Handle incoming nodes
+                msg = node_receiver.recv() => {
+                    debug!("node network");
                     // Error handling
                     let (sender, msg) = match msg {
                         Ok(r) => r,
                         Err(err) => {
-                            error!(?err, "link receiver failed");
+                            error!(?err, "node receiver failed");
                             break;
                         }
                     };
-                    let link = match parsed::Link::<C, D>::decode(&msg) {
-                        Ok(link) => link,
+                    let node = match parsed::Node::<C, D>::decode(&msg) {
+                        Ok(node) => node,
                         Err(err) => {
-                            warn!(?err, ?sender, "link decode failed");
+                            warn!(?err, ?sender, "node decode failed");
                             continue;
                         }
                     };
-                    if let Err(err) = self.validate_link(&link, &sender) {
-                        warn!(?err, ?link, ?sender, "link validate failed");
+                    if let Err(err) = self.validate_node(&node, &sender) {
+                        warn!(?err, ?node, ?sender, "node validate failed");
                         continue;
                     };
 
@@ -318,12 +318,12 @@ impl<
                     self.journal_prepare(&sender).await;
 
                     // Handle the parent threshold signature
-                    if let Some(parent) = link.parent.as_ref() {
-                        self.handle_threshold(&link.chunk, parent.epoch, parent.threshold).await;
+                    if let Some(parent) = node.parent.as_ref() {
+                        self.handle_threshold(&node.chunk, parent.epoch, parent.threshold).await;
                     }
 
-                    // Process the new link
-                    self.handle_link(&link).await;
+                    // Process the new node
+                    self.handle_node(&node).await;
                 },
 
                 // Handle incoming acks
@@ -388,7 +388,7 @@ impl<
                             }
 
                             // Broadcast the message
-                            if let Err(err) = self.broadcast_new(payload, result, &mut link_sender).await {
+                            if let Err(err) = self.broadcast_new(payload, result, &mut node_sender).await {
                                 warn!(?err, "broadcast new failed");
                                 continue;
                             }
@@ -476,7 +476,7 @@ impl<
         Ok(())
     }
 
-    /// Handles a threshold, either received from a link from the network or generated locally.
+    /// Handles a threshold, either received from a `Node` from the network or generated locally.
     ///
     /// The threshold must already be verified.
     /// If the threshold is new, it is stored and the proof is emitted to the collector.
@@ -528,19 +528,19 @@ impl<
         Ok(())
     }
 
-    /// Handles a valid link message, storing it as the tip.
-    /// Alerts the application of the new link.
-    /// Also appends the link to the journal if it's new.
-    async fn handle_link(&mut self, link: &parsed::Link<C, D>) {
+    /// Handles a valid `Node` message, storing it as the tip.
+    /// Alerts the application of the new node.
+    /// Also appends the `Node` to the journal if it's new.
+    async fn handle_node(&mut self, node: &parsed::Node<C, D>) {
         // Store the tip
-        let is_new = self.tip_manager.put(link);
+        let is_new = self.tip_manager.put(node);
 
-        // Append to journal if the link is new, making sure to sync the journal
+        // Append to journal if the `Node` is new, making sure to sync the journal
         // to prevent sending two conflicting chunks to the application, even if
         // the node crashes and restarts.
         if is_new {
-            self.journal_append(link).await;
-            self.journal_sync(&link.chunk.sequencer, link.chunk.height)
+            self.journal_append(node).await;
+            self.journal_sync(&node.chunk.sequencer, node.chunk.height)
                 .await;
         }
 
@@ -554,10 +554,10 @@ impl<
 
         // Verify the chunk with the application
         let context = Context {
-            sequencer: link.chunk.sequencer.clone(),
-            height: link.chunk.height,
+            sequencer: node.chunk.sequencer.clone(),
+            height: node.chunk.height,
         };
-        let payload = link.chunk.payload.clone();
+        let payload = node.chunk.payload.clone();
         let mut app_clone = self.application.clone();
         let verify_future = Box::pin(async move {
             let receiver = app_clone.verify(context.clone(), payload.clone()).await;
@@ -581,7 +581,7 @@ impl<
         &mut self,
         payload: D,
         result: oneshot::Sender<bool>,
-        link_sender: &mut NetS,
+        node_sender: &mut NetS,
     ) -> Result<(), Error> {
         let me = self.crypto.public_key();
 
@@ -605,7 +605,7 @@ impl<
             });
         }
 
-        // Construct new link
+        // Construct new node
         let chunk = parsed::Chunk {
             sequencer: me.clone(),
             height,
@@ -614,21 +614,21 @@ impl<
         let signature = self
             .crypto
             .sign(Some(&self.chunk_namespace), &serializer::chunk(&chunk));
-        let link = parsed::Link::<C, D> {
+        let node = parsed::Node::<C, D> {
             chunk,
             signature,
             parent,
         };
 
         // Deal with the chunk as if it were received over the network
-        self.handle_link(&link).await;
+        self.handle_node(&node).await;
 
         // Sync the journal to prevent ever broadcasting two conflicting chunks
         // at the same height, even if the node crashes and restarts
         self.journal_sync(&me, height).await;
 
         // Broadcast to network
-        if let Err(err) = self.broadcast(&link, link_sender, self.epoch).await {
+        if let Err(err) = self.broadcast(&node, node_sender, self.epoch).await {
             let _ = result.send(false);
             return Err(err);
         };
@@ -644,7 +644,7 @@ impl<
     /// - this instance is the sequencer for the current epoch.
     /// - this instance has a chunk to rebroadcast.
     /// - this instance has not yet collected the threshold signature for the chunk.
-    async fn rebroadcast(&mut self, link_sender: &mut NetS) -> Result<(), Error> {
+    async fn rebroadcast(&mut self, node_sender: &mut NetS) -> Result<(), Error> {
         // Unset the rebroadcast deadline
         self.rebroadcast_deadline = None;
 
@@ -655,40 +655,40 @@ impl<
         }
 
         // Return if no chunk to rebroadcast
-        let Some(link_tip) = self.tip_manager.get(&me) else {
+        let Some(tip) = self.tip_manager.get(&me) else {
             return Err(Error::NothingToRebroadcast);
         };
 
         // Return if threshold already collected
         if self
             .ack_manager
-            .get_threshold(&me, link_tip.chunk.height)
+            .get_threshold(&me, tip.chunk.height)
             .is_some()
         {
             return Err(Error::AlreadyBroadcast);
         }
 
         // Broadcast the message, which resets the rebroadcast deadline
-        self.broadcast(&link_tip, link_sender, self.epoch).await?;
+        self.broadcast(&tip, node_sender, self.epoch).await?;
 
         Ok(())
     }
 
-    /// Send a link message to all signers in the given epoch.
+    /// Send a  `Node` message to all signers in the given epoch.
     async fn broadcast(
         &mut self,
-        link: &parsed::Link<C, D>,
-        link_sender: &mut NetS,
+        node: &parsed::Node<C, D>,
+        node_sender: &mut NetS,
         epoch: Epoch,
     ) -> Result<(), Error> {
-        // Send the link to all signers
+        // Send the node to all signers
         let Some(signers) = self.coordinator.signers(epoch) else {
             return Err(Error::UnknownSigners(epoch));
         };
-        link_sender
+        node_sender
             .send(
                 Recipients::Some(signers.clone()),
-                link.encode().into(),
+                node.encode().into(),
                 false,
             )
             .await
@@ -704,56 +704,56 @@ impl<
     // Validation
     ////////////////////////////////////////
 
-    /// Takes a raw link (from sender) from the p2p network and validates it.
+    /// Takes a raw `Node` (from sender) from the p2p network and validates it.
     ///
     /// If valid, returns the implied parent chunk and its threshold signature.
-    /// Else returns an error if the link is invalid.
-    fn validate_link(
+    /// Else returns an error if the `Node` is invalid.
+    fn validate_node(
         &mut self,
-        link: &parsed::Link<C, D>,
+        node: &parsed::Node<C, D>,
         sender: &C::PublicKey,
     ) -> Result<(), Error> {
         // Verify the sender
-        if link.chunk.sequencer != *sender {
+        if node.chunk.sequencer != *sender {
             return Err(Error::PeerMismatch);
         }
 
-        // Optimization: If the link is exactly equal to the tip,
+        // Optimization: If the node is exactly equal to the tip,
         // don't perform any further validation.
         if let Some(tip) = self.tip_manager.get(sender) {
-            if tip == *link {
+            if tip == *node {
                 return Ok(());
             }
         }
 
         // Validate chunk
-        self.validate_chunk(&link.chunk, self.epoch)?;
+        self.validate_chunk(&node.chunk, self.epoch)?;
 
         // Verify the signature
         if !C::verify(
             Some(&self.chunk_namespace),
-            &serializer::chunk(&link.chunk),
+            &serializer::chunk(&node.chunk),
             sender,
-            &link.signature,
+            &node.signature,
         ) {
-            return Err(Error::InvalidLinkSignature);
+            return Err(Error::InvalidNodeSignature);
         }
 
         // Verify no parent
-        if link.chunk.height == 0 {
-            if link.parent.is_some() {
+        if node.chunk.height == 0 {
+            if node.parent.is_some() {
                 return Err(Error::GenesisChunkMustNotHaveParent);
             }
             return Ok(());
         }
 
         // Verify parent
-        let Some(parent) = &link.parent else {
-            return Err(Error::LinkMissingParent);
+        let Some(parent) = &node.parent else {
+            return Err(Error::NodeMissingParent);
         };
         let parent_chunk = parsed::Chunk {
             sequencer: sender.clone(),
-            height: link.chunk.height.checked_sub(1).unwrap(),
+            height: node.chunk.height.checked_sub(1).unwrap(),
             payload: parent.payload.clone(),
         };
 
@@ -916,22 +916,22 @@ impl<
             pin_mut!(stream);
 
             // Read from the stream, which may be in arbitrary order.
-            // Remember the highest link height
-            let mut tip: Option<parsed::Link<C, D>> = None;
+            // Remember the highest node height
+            let mut tip: Option<parsed::Node<C, D>> = None;
             let mut num_items = 0;
             while let Some(msg) = stream.next().await {
                 num_items += 1;
                 let (_, _, _, msg) = msg.expect("unable to decode journal message");
-                let link = parsed::Link::<C, D>::decode(&msg)
+                let node = parsed::Node::<C, D>::decode(&msg)
                     .expect("journal message is unexpected format");
-                let height = link.chunk.height;
+                let height = node.chunk.height;
                 match tip {
                     None => {
-                        tip = Some(link);
+                        tip = Some(node);
                     }
                     Some(ref t) => {
                         if height > t.chunk.height {
-                            tip = Some(link);
+                            tip = Some(node);
                         }
                     }
                 }
@@ -939,8 +939,8 @@ impl<
 
             // Set the tip only once. The items from the journal may be in arbitrary order,
             // and the tip manager will panic if inserting tips out-of-order.
-            if let Some(link) = tip.take() {
-                let is_new = self.tip_manager.put(&link);
+            if let Some(node) = tip.take() {
+                let is_new = self.tip_manager.put(&node);
                 assert!(is_new);
             }
 
@@ -951,15 +951,16 @@ impl<
         self.journals.insert(sequencer.clone(), journal);
     }
 
-    /// Write a link to the appropriate journal.
+    /// Write a `Node` to the appropriate journal, which contains the tip `Chunk` for the sequencer.
     ///
-    /// The journal must already be open and replayed.
-    async fn journal_append(&mut self, link: &parsed::Link<C, D>) {
-        let section = self.get_journal_section(link.chunk.height);
+    /// To prevent ever writing two conflicting `Chunk`s at the same height,
+    /// the journal must already be open and replayed.
+    async fn journal_append(&mut self, node: &parsed::Node<C, D>) {
+        let section = self.get_journal_section(node.chunk.height);
         self.journals
-            .get_mut(&link.chunk.sequencer)
+            .get_mut(&node.chunk.sequencer)
             .expect("journal does not exist")
-            .append(section, link.encode().into())
+            .append(section, node.encode().into())
             .await
             .expect("unable to append to journal");
     }
@@ -1031,8 +1032,8 @@ enum Error {
     // Proto Malformed Errors
     #[error("Genesis chunk must not have a parent")]
     GenesisChunkMustNotHaveParent,
-    #[error("Link missing parent")]
-    LinkMissingParent,
+    #[error("Node missing parent")]
+    NodeMissingParent,
 
     // Epoch Errors
     #[error("Unknown identity at epoch {0}")]
@@ -1055,8 +1056,8 @@ enum Error {
     InvalidThresholdSignature,
     #[error("Invalid partial signature")]
     InvalidPartialSignature,
-    #[error("Invalid link signature")]
-    InvalidLinkSignature,
+    #[error("Invalid node signature")]
+    InvalidNodeSignature,
 
     // Ignorable Message Errors
     #[error("Invalid ack epoch {0} outside bounds {1} - {2}")]
