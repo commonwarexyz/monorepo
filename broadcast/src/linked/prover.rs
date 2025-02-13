@@ -27,16 +27,14 @@ pub struct Prover<C: Scheme, D: Array> {
     public: group::Public,
 }
 
-impl<C: Scheme, D: Array> SizedSerialize for Prover<C, D> {
+impl<C: Scheme, D: Array> Prover<C, D> {
     /// The length of a serialized proof.
-    const SERIALIZED_LEN: usize = C::PublicKey::SERIALIZED_LEN
+    const PROOF_LEN: usize = C::PublicKey::SERIALIZED_LEN
         + u64::SERIALIZED_LEN
         + D::SERIALIZED_LEN
         + u64::SERIALIZED_LEN
         + group::SIGNATURE_LENGTH;
-}
 
-impl<C: Scheme, D: Array> Prover<C, D> {
     /// Create a new prover with the given signing `namespace`.
     pub fn new(namespace: &[u8], public: group::Public) -> Self {
         Self {
@@ -54,7 +52,7 @@ impl<C: Scheme, D: Array> Prover<C, D> {
         epoch: Epoch,
         threshold: &group::Signature,
     ) -> Proof {
-        let mut proof = Vec::with_capacity(Self::SERIALIZED_LEN);
+        let mut proof = Vec::with_capacity(Self::PROOF_LEN);
 
         // Encode proof
         proof.extend_from_slice(&context.sequencer);
@@ -65,7 +63,7 @@ impl<C: Scheme, D: Array> Prover<C, D> {
         let result: Proof = proof.into();
 
         // Ensure proof is the right size
-        assert!(result.len() == Self::SERIALIZED_LEN);
+        assert!(result.len() == Self::PROOF_LEN);
         result
     }
 
@@ -76,7 +74,7 @@ impl<C: Scheme, D: Array> Prover<C, D> {
         mut proof: Proof,
     ) -> Option<(Context<C::PublicKey>, D, Epoch, group::Signature)> {
         // Ensure proof is the right size
-        if proof.len() != Self::SERIALIZED_LEN {
+        if proof.len() != Self::PROOF_LEN {
             return None;
         }
 

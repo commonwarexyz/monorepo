@@ -130,7 +130,6 @@ mod tests {
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::deterministic::{self, Context, Executor};
     use commonware_runtime::{Clock, Runner, Spawner};
-    use commonware_utils::hex;
     use futures::channel::oneshot;
     use futures::future::join_all;
     use prometheus_client::registry::Registry;
@@ -268,7 +267,6 @@ mod tests {
             runtime.clone().spawn("collector", collector.run());
             collectors.insert(validator.clone(), collector_mailbox);
 
-            let hex_validator = hex(validator);
             let (signer, signer_mailbox) = signer::Actor::new(
                 runtime.clone(),
                 signer::Config {
@@ -285,7 +283,7 @@ mod tests {
                     rebroadcast_timeout,
                     journal_heights_per_section: 10,
                     journal_replay_concurrency: 1,
-                    journal_naming_fn: move |v| format!("seq/{}/{}", hex_validator, hex(v)),
+                    journal_name_prefix: format!("broadcast-linked-seq/{}/", validator),
                 },
             );
 

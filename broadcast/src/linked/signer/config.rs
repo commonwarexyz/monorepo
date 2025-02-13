@@ -9,7 +9,6 @@ use std::time::Duration;
 pub struct Config<
     C: Scheme,
     D: Array,
-    J: Fn(&C::PublicKey) -> String,
     A: Application<Context = Context<C::PublicKey>, Digest = D>,
     Z: Collector<Context = Context<C::PublicKey>, Digest = D>,
     S: ThresholdCoordinator<Index = Epoch>,
@@ -25,7 +24,7 @@ pub struct Config<
     pub rebroadcast_timeout: Duration,
     pub epoch_bounds: (u64, u64),
     pub height_bound: u64,
-    pub journal_naming_fn: J,
+    pub journal_name_prefix: String,
     pub journal_heights_per_section: u64,
     pub journal_replay_concurrency: usize,
 }

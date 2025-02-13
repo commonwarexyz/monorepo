@@ -12,6 +12,8 @@ pub fn ack<D: Array, P: Array>(chunk: &parsed::Chunk<D, P>, epoch: Epoch) -> Vec
     buf.put_u64(chunk.height);
     buf.put_slice(&chunk.payload);
     buf.put_u64(epoch);
+
+    assert!(buf.len() == len);
     buf
 }
 
@@ -23,5 +25,7 @@ pub fn chunk<D: Array, P: Array>(chunk: &parsed::Chunk<D, P>) -> Vec<u8> {
     buf.put_slice(&chunk.sequencer);
     buf.put_u64(chunk.height);
     buf.put_slice(&chunk.payload);
+
+    assert!(buf.len() == len);
     buf
 }

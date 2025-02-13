@@ -44,7 +44,6 @@ pub struct Actor<
     E: Clock + Spawner + Storage<B>,
     C: Scheme,
     D: Array,
-    J: Fn(&C::PublicKey) -> String,
     A: Application<Context = Context<C::PublicKey>, Digest = D> + Clone,
     Z: Collector<Context = Context<C::PublicKey>, Digest = D>,
     S: ThresholdCoordinator<
@@ -134,8 +133,9 @@ pub struct Actor<
     // The number of concurrent operations when replaying journals.
     journal_replay_concurrency: usize,
 
-    // A function that returns the partition name for a sequencer.
-    journal_naming_fn: J,
+    // A prefix for the journal names.
+    // The rest of the name is the hex-encoded public keys of the relevant sequencer.
+    journal_name_prefix: String,
 
     // A map of sequencer public keys to their journals.
     journals: BTreeMap<C::PublicKey, Journal<B, E>>,
@@ -163,7 +163,6 @@ impl<
         E: Clock + Spawner + Storage<B>,
         C: Scheme,
         D: Array,
-        J: Fn(&C::PublicKey) -> String,
         A: Application<Context = Context<C::PublicKey>, Digest = D> + Clone,
         Z: Collector<Context = Context<C::PublicKey>, Digest = D>,
         S: ThresholdCoordinator<
@@ -174,11 +173,11 @@ impl<
         >,
         NetS: Sender<PublicKey = C::PublicKey>,
         NetR: Receiver<PublicKey = C::PublicKey>,
-    > Actor<B, E, C, D, J, A, Z, S, NetS, NetR>
+    > Actor<B, E, C, D, A, Z, S, NetS, NetR>
 {
     /// Creates a new actor with the given runtime and configuration.
     /// Returns the actor and a mailbox for sending messages to the actor.
-    pub fn new(runtime: E, cfg: Config<C, D, J, A, Z, S>) -> (Self, Mailbox<D>) {
+    pub fn new(runtime: E, cfg: Config<C, D, A, Z, S>) -> (Self, Mailbox<D>) {
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::new(mailbox_sender);
 
@@ -215,7 +214,7 @@ impl<
             mailbox_receiver,
             journal_heights_per_section: cfg.journal_heights_per_section,
             journal_replay_concurrency: cfg.journal_replay_concurrency,
-            journal_naming_fn: cfg.journal_naming_fn,
+            journal_name_prefix: cfg.journal_name_prefix,
             journals: BTreeMap::new(),
             tip_manager: TipManager::<C, D>::new(),
             ack_manager: AckManager::<D, C::PublicKey>::new(),
@@ -899,7 +898,7 @@ impl<
         // Initialize journal
         let cfg = journal::variable::Config {
             registry: Arc::new(Mutex::new(Registry::default())),
-            partition: (self.journal_naming_fn)(sequencer),
+            partition: format!("{}{}", &self.journal_name_prefix, sequencer),
         };
         let mut journal = Journal::init(self.runtime.clone(), cfg)
             .await
