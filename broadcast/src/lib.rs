@@ -1,4 +1,4 @@
-//! Replication of messages across a network.
+//! Disseminate data over a wide-area network.
 
 use bytes::Bytes;
 use commonware_cryptography::Array;
