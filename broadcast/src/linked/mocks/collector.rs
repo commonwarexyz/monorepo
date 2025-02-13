@@ -1,7 +1,4 @@
-use crate::{
-    linked::{prover::Prover, Context},
-    Collector as Z, Proof,
-};
+use crate::{linked::prover::Prover, Collector as Z, Proof};
 use commonware_cryptography::{bls12381::primitives::group, Array, Scheme};
 use futures::{
     channel::{mpsc, oneshot},
@@ -14,7 +11,7 @@ use std::{
 use tracing::error;
 
 enum Message<C: Scheme, D: Array> {
-    Acknowledged(Context<C::PublicKey>, D, Proof),
+    Acknowledged(Proof, D),
     GetTip(C::PublicKey, oneshot::Sender<Option<u64>>),
     GetContiguousTip(C::PublicKey, oneshot::Sender<Option<u64>>),
     Get(C::PublicKey, u64, oneshot::Sender<Option<D>>),
@@ -58,23 +55,17 @@ impl<C: Scheme, D: Array> Collector<C, D> {
     pub async fn run(mut self) {
         while let Some(msg) = self.mailbox.next().await {
             match msg {
-                Message::Acknowledged(context, payload, proof) => {
+                Message::Acknowledged(proof, payload) => {
                     // Check proof.
+                    // The prover checks the validity of the threshold signature when deserializing
                     let prover = Prover::<C, D>::new(&self.namespace, self.public);
-                    match prover.deserialize_threshold(proof) {
-                        Some((ctx, _digest, _epoch, _threshold)) => {
-                            if ctx != context {
-                                error!("invalid context");
-                                continue;
-                            }
-                            // The prover checked the validity of the threshold signature in deserialize_threshold.
-                            // Ignore the digest and epoch.
-                        }
+                    let context = match prover.deserialize_threshold(proof) {
+                        Some((context, _payload, _epoch, _threshold)) => context,
                         None => {
                             error!("invalid proof");
                             continue;
                         }
-                    }
+                    };
 
                     // Update the collector
                     let digests = self.digests.entry(context.sequencer.clone()).or_default();
@@ -124,11 +115,10 @@ pub struct Mailbox<C: Scheme, D: Array> {
 }
 
 impl<C: Scheme, D: Array> Z for Mailbox<C, D> {
-    type Context = Context<C::PublicKey>;
     type Digest = D;
-    async fn acknowledged(&mut self, context: Self::Context, payload: Self::Digest, proof: Proof) {
+    async fn acknowledged(&mut self, proof: Proof, payload: Self::Digest) {
         self.sender
-            .send(Message::Acknowledged(context, payload, proof))
+            .send(Message::Acknowledged(proof, payload))
             .await
             .expect("Failed to send acknowledged");
     }

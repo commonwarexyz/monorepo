@@ -45,7 +45,7 @@ pub struct Actor<
     C: Scheme,
     D: Array,
     A: Application<Context = Context<C::PublicKey>, Digest = D> + Clone,
-    Z: Collector<Context = Context<C::PublicKey>, Digest = D>,
+    Z: Collector<Digest = D>,
     S: ThresholdCoordinator<
         Index = Epoch,
         Share = group::Share,
@@ -164,7 +164,7 @@ impl<
         C: Scheme,
         D: Array,
         A: Application<Context = Context<C::PublicKey>, Digest = D> + Clone,
-        Z: Collector<Context = Context<C::PublicKey>, Digest = D>,
+        Z: Collector<Digest = D>,
         S: ThresholdCoordinator<
             Index = Epoch,
             Share = group::Share,
@@ -503,7 +503,7 @@ impl<
         let proof =
             Prover::<C, D>::serialize_threshold(&context, &chunk.payload, epoch, &threshold);
         self.collector
-            .acknowledged(context, chunk.payload.clone(), proof)
+            .acknowledged(proof, chunk.payload.clone())
             .await;
     }
 

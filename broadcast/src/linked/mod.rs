@@ -1,4 +1,4 @@
-//! Ordered, reliable broadcast across multiple, dynamic participants.
+//! Ordered, reliable broadcast across reconfigurable participants.
 //!
 //! # Concepts
 //!
@@ -30,9 +30,8 @@
 //!
 //! # Acknowledgements
 //!
-//! The following whitepapers and blog posts were used as a reference for this module:
-//! - [Autobahn](https://arxiv.org/abs/2401.10369)
-//! - [Vryx](https://hackmd.io/@patrickogrady/rys8mdl5p)
+//! [Autobahn](https://arxiv.org/abs/2401.10369) provided the insight that a succinct
+//! proof-of-availability could be produced by linking sequencer broadcasts.
 
 use commonware_cryptography::Array;
 

@@ -49,10 +49,6 @@ pub trait Application: Clone + Send + 'static {
 
 /// Collector is the interface responsible for handling notifications of broadcasted payloads.
 pub trait Collector: Clone + Send + 'static {
-    /// Context is metadata provided by the broadcast engine to associated with a given payload.
-    /// This could include things like the public key of the sequencer.
-    type Context;
-
     /// Digest is an arbitrary hash digest.
     type Digest: Array;
 
@@ -61,9 +57,8 @@ pub trait Collector: Clone + Send + 'static {
     /// for example that it has been successfully gossiped to a threshold of validators.
     fn acknowledged(
         &mut self,
-        context: Self::Context,
-        payload: Self::Digest,
         proof: Proof,
+        payload: Self::Digest,
     ) -> impl Future<Output = ()> + Send;
 }
 

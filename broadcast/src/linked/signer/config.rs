@@ -10,7 +10,7 @@ pub struct Config<
     C: Scheme,
     D: Array,
     A: Application<Context = Context<C::PublicKey>, Digest = D>,
-    Z: Collector<Context = Context<C::PublicKey>, Digest = D>,
+    Z: Collector<Digest = D>,
     S: ThresholdCoordinator<Index = Epoch>,
 > {
     pub crypto: C,
