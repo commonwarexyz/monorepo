@@ -2,7 +2,7 @@
 name = "commonware-consensus"
 edition = "2021"
 publish = true
-version = "0.0.8"
+version = "0.0.9"
 license = "MIT OR Apache-2.0"
 description = "Order opaque messages in a Byzantine environment."
 readme = "README.md"
