@@ -5,7 +5,8 @@ mod tests {
     use crate::bls12381::scheme::Bls12381;
     use crate::scheme::Scheme;
 
-    // Source: https://github.com/google/wycheproof/blob/master/testvectors/bls_sig_test.json
+    // Test vectors inspired by Wycheproof test methodology
+    // See: https://github.com/C2SP/wycheproof/tree/master/testvectors
     // Test vectors for BLS signatures with invalid lengths
     #[test]
     fn test_invalid_signature_length() {
@@ -24,7 +25,8 @@ mod tests {
         }
     }
 
-    // Source: https://github.com/google/wycheproof/blob/master/testvectors/bls_sig_test.json#L123
+    // Test vectors inspired by Wycheproof test methodology
+    // See: https://github.com/C2SP/wycheproof/tree/master/testvectors
     // Test vectors for invalid curve points
     #[test]
     fn test_invalid_curve_points() {
@@ -42,7 +44,8 @@ mod tests {
         assert!(Bls12381::verify(None, msg, &private_key, &sig).is_err());
     }
 
-    // Source: https://github.com/google/wycheproof/blob/master/testvectors/bls_sig_test.json#L245
+    // Test vectors inspired by Wycheproof test methodology
+    // See: https://github.com/C2SP/wycheproof/tree/master/testvectors
     // Test vectors for message substitution attacks
     #[test]
     fn test_message_substitution_attack() {
@@ -60,7 +63,8 @@ mod tests {
         assert!(Bls12381::verify(None, msg2, &public_key, &sig).is_err());
     }
 
-    // Source: https://github.com/google/wycheproof/blob/master/testvectors/bls_sig_test.json#L367
+    // Test vectors inspired by Wycheproof test methodology
+    // See: https://github.com/C2SP/wycheproof/tree/master/testvectors
     // Test vectors for signature reuse attacks
     #[test]
     fn test_signature_reuse_attack() {
@@ -79,7 +83,8 @@ mod tests {
         assert!(Bls12381::verify(namespace2, msg, &public_key, &sig).is_err());
     }
 
-    // Source: https://github.com/google/wycheproof/blob/master/testvectors/bls_sig_test.json#L489
+    // Test vectors inspired by Wycheproof test methodology
+    // See: https://github.com/C2SP/wycheproof/tree/master/testvectors
     // Test vectors for small subgroup attacks
     #[test]
     fn test_small_subgroup_attack() {
