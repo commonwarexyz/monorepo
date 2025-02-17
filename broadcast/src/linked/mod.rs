@@ -230,7 +230,7 @@ mod tests {
                     collector: collectors.get(validator).unwrap().clone(),
                     coordinator,
                     mailbox_size: 1024,
-                    pending_verify_size: 1024,
+                    verify_concurrent: 1024,
                     namespace: namespace.to_vec(),
                     epoch_bounds: (1, 1),
                     height_bound: 2,

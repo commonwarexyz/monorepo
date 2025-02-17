@@ -19,7 +19,7 @@ pub struct Config<
     pub application: A,
     pub collector: Z,
     pub mailbox_size: usize,
-    pub pending_verify_size: usize,
+    pub verify_concurrent: usize,
     pub namespace: Vec<u8>,
     pub refresh_epoch_timeout: Duration,
     pub rebroadcast_timeout: Duration,

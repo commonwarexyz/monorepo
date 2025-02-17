@@ -111,7 +111,7 @@ pub struct Actor<
     pending_verifies: FuturesPool<(Context<C::PublicKey>, D, Result<bool, Error>)>,
 
     // The maximum number of items in `pending_verifies`.
-    pending_verify_size: usize,
+    verify_concurrent: usize,
 
     // The mailbox for receiving messages (primarily from the application).
     mailbox_receiver: mpsc::Receiver<Message<D>>,
@@ -191,7 +191,7 @@ impl<
             epoch_bounds: cfg.epoch_bounds,
             height_bound: cfg.height_bound,
             pending_verifies: FuturesPool::default(),
-            pending_verify_size: cfg.pending_verify_size,
+            verify_concurrent: cfg.verify_concurrent,
             mailbox_receiver,
             journal_heights_per_section: cfg.journal_heights_per_section,
             journal_replay_concurrency: cfg.journal_replay_concurrency,
@@ -532,7 +532,7 @@ impl<
 
         // Drop the node if there are too many pending verifies
         let n = self.pending_verifies.len();
-        if n >= self.pending_verify_size {
+        if n >= self.verify_concurrent {
             warn!(?n, "too many pending verifies");
             return;
         }
