@@ -163,7 +163,10 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic::Executor, Runner};
     use prometheus_client::registry::Registry;
-    use std::sync::{Arc, Mutex};
+    use std::{
+        num::NonZeroUsize,
+        sync::{Arc, Mutex},
+    };
 
     fn test_digest(v: u8) -> Digest {
         hash(&v.to_be_bytes())
@@ -177,6 +180,7 @@ mod tests {
                 registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
                 items_per_blob: 7,
+                cache_capacity: NonZeroUsize::new(2).unwrap(),
             };
             let mut mmr = Mmr::<_, _, Sha256>::init(context.clone(), cfg.clone())
                 .await
@@ -248,6 +252,7 @@ mod tests {
                 registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
                 items_per_blob: 7,
+                cache_capacity: NonZeroUsize::new(2).unwrap(),
             };
             let mut mmr = Mmr::<_, _, Sha256>::init(context.clone(), cfg.clone())
                 .await
