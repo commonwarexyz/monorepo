@@ -15,27 +15,20 @@ use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Blob, Clock, Handle, Metrics, Spawner, Storage};
 use commonware_storage::journal::{self, variable::Journal};
+use commonware_utils::futures::Pool as FuturesPool;
 use commonware_utils::Array;
 use futures::{
     channel::{mpsc, oneshot},
     future::{self, Either},
-    pin_mut,
-    stream::FuturesUnordered,
-    StreamExt,
+    pin_mut, StreamExt,
 };
 use std::{
     collections::BTreeMap,
-    future::Future,
     marker::PhantomData,
-    pin::Pin,
     time::{Duration, SystemTime},
 };
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
-
-/// A future representing a request to the application to verify a payload.
-type VerifyFuture<D, P> =
-    Pin<Box<dyn Future<Output = (Context<P>, D, Result<bool, Error>)> + Send>>;
 
 /// The actor that implements the `Broadcaster` trait.
 pub struct Actor<
@@ -114,7 +107,8 @@ pub struct Actor<
     // A stream of futures.
     // Each future represents a verification request to the application
     // that will either timeout or resolve with a boolean.
-    pending_verifies: FuturesUnordered<VerifyFuture<D, C::PublicKey>>,
+    #[allow(clippy::type_complexity)]
+    pending_verifies: FuturesPool<(Context<C::PublicKey>, D, Result<bool, Error>)>,
 
     // The maximum number of items in `pending_verifies`.
     pending_verify_size: usize,
@@ -180,18 +174,6 @@ impl<
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::new(mailbox_sender);
 
-        // Initialize the pending verification futures.
-        let pending_verifies = FuturesUnordered::new();
-        {
-            // Inserts a dummy future (that never resolves) to prevent the stream from being empty.
-            // If the stream were empty, the `select_next_some()` function would return `None`
-            // instantly, front-running all other branches in the `select!` macro.
-            let dummy: VerifyFuture<D, C::PublicKey> = Box::pin(async {
-                future::pending::<(Context<C::PublicKey>, D, Result<bool, Error>)>().await
-            });
-            pending_verifies.push(dummy);
-        }
-
         let result = Self {
             context,
             crypto: cfg.crypto,
@@ -208,7 +190,7 @@ impl<
             rebroadcast_deadline: None,
             epoch_bounds: cfg.epoch_bounds,
             height_bound: cfg.height_bound,
-            pending_verifies,
+            pending_verifies: FuturesPool::default(),
             pending_verify_size: cfg.pending_verify_size,
             mailbox_receiver,
             journal_heights_per_section: cfg.journal_heights_per_section,
@@ -359,7 +341,7 @@ impl<
                 },
 
                 // Handle completed verification futures.
-                maybe_verified = self.pending_verifies.select_next_some() => {
+                maybe_verified = self.pending_verifies.next_completed() => {
                     let (context, digest, verify_result) = maybe_verified;
                     match verify_result {
                         Ok(true) => {
@@ -548,11 +530,10 @@ impl<
                 .await;
         }
 
-        // Ignore sending the verification request to the application
-        // if the number of pending requests is too high.
-        // We use > instead of >= because the stream always has one dummy future.
-        if self.pending_verifies.len() > self.pending_verify_size {
-            warn!(n=?self.pending_verifies.len(), "too many pending verifies");
+        // Drop the node if there are too many pending verifies
+        let n = self.pending_verifies.len();
+        if n >= self.pending_verify_size {
+            warn!(?n, "too many pending verifies");
             return;
         }
 
@@ -562,15 +543,12 @@ impl<
             height: node.chunk.height,
         };
         let payload = node.chunk.payload.clone();
-        let mut app_clone = self.application.clone();
-        let verify_future = Box::pin(async move {
-            let receiver = app_clone.verify(context.clone(), payload.clone()).await;
+        let mut application = self.application.clone();
+        self.pending_verifies.push(async move {
+            let receiver = application.verify(context.clone(), payload.clone()).await;
             let result = receiver.await.map_err(Error::AppVerifyCanceled);
             (context, payload, result)
         });
-
-        // Save the verification future
-        self.pending_verifies.push(verify_future);
     }
 
     ////////////////////////////////////////
