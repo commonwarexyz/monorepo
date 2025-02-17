@@ -37,4 +37,6 @@ pub enum Error {
     InvalidItem(u64),
     #[error("invalid rewind: {0}")]
     InvalidRewind(u64),
+    #[error("invalid index: {0}")]
+    InvalidIndex(u64),
 }

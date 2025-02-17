@@ -24,6 +24,8 @@ futures-util = { workspace = true }
 tracing = { workspace = true }
 zstd = { workspace = true }
 rangemap = "1.5.1"
+lru = "0.13.0"
+tokio = { workspace = true}
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
