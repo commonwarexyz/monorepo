@@ -306,7 +306,7 @@ impl<B: Blob, E: Storage<B>, A: Array> Journal<B, E, A> {
         if blob_index < self.min_blob_index {
             return Err(Error::ItemPruned(item_position));
         }
-        let items_per_blob = self.cfg.items_per_blob.clone();
+        let items_per_blob = self.cfg.items_per_blob;
         let blob = self.get_blob(blob_index).await?;
         let item_index = item_position % items_per_blob;
         let offset = item_index * Self::CHUNK_SIZE as u64;
@@ -340,8 +340,8 @@ impl<B: Blob, E: Storage<B>, A: Array> Journal<B, E, A> {
         &mut self,
         concurrency: usize,
     ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + '_, Error> {
-        let closure = |index: u64, blob: B, offset: u64, blob_len: u64| {
-            let items_per_blob = Arc::new(tokio::sync::Mutex::new(self.cfg.items_per_blob.clone()));
+        let read_item = |index: u64, blob: B, offset: u64, blob_len: u64| {
+            let items_per_blob = self.cfg.items_per_blob;
             async move {
                 // Check if we are at the end of the blob
                 if offset == blob_len {
@@ -354,8 +354,7 @@ impl<B: Blob, E: Storage<B>, A: Array> Journal<B, E, A> {
                     Ok(_) => match Self::verify_integrity(&buf) {
                         Ok(item) => Some((
                             Ok((
-                                *items_per_blob.lock().await * index
-                                    + offset / Self::CHUNK_SIZE as u64,
+                                items_per_blob * index + offset / Self::CHUNK_SIZE as u64,
                                 item,
                             )),
                             (index, Some(blob), next_offset, Some(blob_len)),
@@ -369,54 +368,39 @@ impl<B: Blob, E: Storage<B>, A: Array> Journal<B, E, A> {
             }
         };
 
-        // sync the newest blob to be able to read from another blob in the stream.
-        self.newest_index_blob.1.sync().await?;
-
-        let lru_cache = Arc::clone(&self.lru_cache);
         let runtime = &self.runtime;
         let partition = &self.cfg.partition;
         let newest_index = self.newest_index_blob.0;
+        let newest_blob = self.newest_index_blob.1.clone();
         Ok(
-            stream::iter((self.min_blob_index..self.newest_index_blob.0 + 1).into_iter())
+            stream::iter(self.min_blob_index..self.newest_index_blob.0 + 1)
                 .map(move |index| {
-                    let lru_cache = Arc::clone(&lru_cache);
+                    let mut blob = None;
+                    if index == newest_index {
+                        blob = Some(newest_blob.clone());
+                    }
 
                     async move {
+                        let blob_len = match &blob {
+                            Some(blob) => Some(blob.len().await.unwrap()),
+                            None => None,
+                        };
                         stream::unfold(
-                            (index, None::<B>, 0u64, None),
-                            move |state: (u64, Option<B>, u64, Option<u64>)| {
-                                let lru_cache = Arc::clone(&lru_cache);
-
-                                async move {
-                                    match state {
-                                        (index, Some(blob), offset, Some(blob_len)) => {
-                                            let next_step =
-                                                closure(index, blob.clone(), offset, blob_len)
-                                                    .await;
-                                            if next_step.is_none() && index != newest_index {
-                                                lru_cache.lock().await.put(index, blob);
-                                            }
-                                            next_step
-                                        }
-                                        (index, None, 0u64, None) => {
-                                            let blob = match lru_cache.lock().await.pop(&index) {
-                                                None => runtime
-                                                    .open(partition, &index.to_be_bytes())
-                                                    .await
-                                                    .unwrap(),
-                                                Some(blob) => blob,
-                                            };
-                                            let blob_len = blob.len().await.unwrap();
-                                            let next_step =
-                                                closure(index, blob.clone(), 0u64, blob_len).await;
-                                            if index != newest_index {
-                                                lru_cache.lock().await.put(index, blob);
-                                            }
-
-                                            next_step
-                                        }
-                                        _ => None,
+                            (index, blob, 0u64, blob_len),
+                            move |state: (u64, Option<B>, u64, Option<u64>)| async move {
+                                match state {
+                                    (index, Some(blob), offset, Some(blob_len)) => {
+                                        read_item(index, blob, offset, blob_len).await
                                     }
+                                    (index, None, 0u64, None) => {
+                                        let blob = runtime
+                                            .open(partition, &index.to_be_bytes())
+                                            .await
+                                            .unwrap();
+                                        let blob_len = blob.len().await.unwrap();
+                                        read_item(index, blob, 0u64, blob_len).await
+                                    }
+                                    _ => None,
                                 }
                             },
                         )
@@ -438,7 +422,7 @@ impl<B: Blob, E: Storage<B>, A: Array> Journal<B, E, A> {
 
     /// Return the blob containing the oldest unpruned items and its index.
     async fn oldest_blob(&mut self) -> (u64, B) {
-        let index = self.min_blob_index.clone();
+        let index = self.min_blob_index;
         if let Ok(blob) = self.get_blob(index).await {
             return (index, blob);
         }
@@ -466,11 +450,10 @@ impl<B: Blob, E: Storage<B>, A: Array> Journal<B, E, A> {
                 Ok::<B, Error>(res)
             })
         });
-        let res = match elem {
+        match elem {
             Ok(x) => Ok(x.clone()),
             Err(err) => Err(err),
-        };
-        res
+        }
     }
 
     /// Allow the journal to prune items older than `min_item_position`. The journal may still
