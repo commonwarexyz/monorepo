@@ -11,6 +11,7 @@ repository = "https://github.com/commonwarexyz/monorepo/tree/main/utils"
 documentation = "https://docs.rs/commonware-utils"
 
 [dependencies]
+futures = { workspace = true }
 prost = { workspace = true }
 
 [dev-dependencies]

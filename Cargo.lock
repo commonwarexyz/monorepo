@@ -548,6 +548,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-resolver"
+version = "0.0.2"
+dependencies = [
+ "bytes",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-p2p",
+ "commonware-runtime",
+ "commonware-utils",
+ "futures",
+ "governor",
+ "prometheus-client",
+ "prost",
+ "prost-build",
+ "rand",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "commonware-runtime"
 version = "0.0.18"
 dependencies = [
@@ -612,6 +632,7 @@ dependencies = [
 name = "commonware-utils"
 version = "0.0.13"
 dependencies = [
+ "futures",
  "num-bigint",
  "prost",
  "rand",
