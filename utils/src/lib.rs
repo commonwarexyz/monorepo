@@ -8,6 +8,8 @@ mod time;
 pub use time::SystemTimeExt;
 mod priority_set;
 pub use priority_set::PrioritySet;
+pub mod futures;
+pub use futures::Pool;
 
 /// Converts bytes to a hexadecimal string.
 pub fn hex(bytes: &[u8]) -> String {
@@ -89,6 +91,12 @@ pub fn modulo(bytes: &[u8], n: u64) -> u64 {
         result %= n;
     }
     result
+}
+
+/// Type that can be serialized and deserialized.``
+pub trait Serialize: Sized {
+    fn serialize(&self) -> Vec<u8>;
+    fn deserialize(bytes: &[u8]) -> Option<Self>;
 }
 
 /// Types with a constant encoded length.
