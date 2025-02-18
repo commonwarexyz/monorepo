@@ -255,6 +255,7 @@ impl<
                 // Handle shutdown signal
                 _ = &mut shutdown => {
                     debug!("shutdown");
+                    self.pending_verifies.cancel_all();
                     while let Some((_, journal)) = self.journals.pop_first() {
                         journal.close().await.expect("unable to close journal");
                     }
