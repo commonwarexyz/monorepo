@@ -52,4 +52,9 @@ impl<T: Send> Pool<T> {
     pub fn stream(&mut self) -> SelectNextSome<FuturesUnordered<PooledFuture<T>>> {
         self.pool.select_next_some()
     }
+
+    /// Cancels all futures in the pool.
+    pub fn cancel_all(&mut self) {
+        self.pool.clear();
+    }
 }

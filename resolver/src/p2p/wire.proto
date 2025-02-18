@@ -6,6 +6,7 @@ message PeerMsg {
     // Responses should have the same id as the request.
     uint64 id = 1;
 
+    // Payload is the data being sent.
     oneof payload {
         // Request is a request for a response.
         bytes request = 2;
@@ -13,7 +14,7 @@ message PeerMsg {
         // Response is a response to a request.
         bytes response = 3;
 
-        // Response that indicates that the request was not processed.
-        uint64 error_code = 4;
+        // If both `request` and `response` are missing, the message indicates an empty response.
+        // This indicates an unspecified error.
     }
 }

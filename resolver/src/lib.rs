@@ -9,12 +9,12 @@ use std::fmt::Debug;
 
 pub mod p2p;
 
-/// Used as the key to identify unique data.
+/// Used as the key to uniquely identify data.
 pub trait Key: Serialize + Clone + Debug + PartialEq + Eq + Ord + Send + Sync + 'static {}
 
 /// Client is the interface responsible for fetching data from the network.
 pub trait Client: Clone + Send + 'static {
-    /// The key type used to identify data.
+    /// Type used to uniquely identify data.
     type Key: Key;
 
     /// Fetch data from the network.
@@ -23,7 +23,7 @@ pub trait Client: Clone + Send + 'static {
 
 /// Server is the interface responsible for serving data requested by the network.
 pub trait Server: Clone + Send + 'static {
-    /// The key type used to identify data.
+    /// Type used to uniquely identify data.
     type Key: Key;
 
     /// Serve a request received from the network.
@@ -32,6 +32,7 @@ pub trait Server: Clone + Send + 'static {
 
 /// Director is the interface responsible for managing the list of peers that can be used to fetch data.
 pub trait Director: Clone + Send + 'static {
+    /// Type used to uniquely identify peers.
     type PublicKey;
 
     /// Returns the current list of peers that can be used to fetch data.
