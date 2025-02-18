@@ -2,7 +2,7 @@
 
 use commonware_cryptography::Hasher as CHasher;
 
-/// Hasher decorator the MMR uses for computing leaf, node and root hashes.
+/// Hasher decorator that the MMR uses for computing leaf, node and root hashes.
 pub(crate) struct Hasher<'a, H: CHasher> {
     hasher: &'a mut H,
 }
