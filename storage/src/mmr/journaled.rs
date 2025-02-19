@@ -32,7 +32,7 @@ impl<B: Blob, E: RStorage<B>, H: Hasher> Storage<H> for Mmr<B, E, H> {
     }
 
     async fn get_node(&self, position: u64) -> Result<Option<H::Digest>, Error> {
-        if position >= self.mem_mmr.oldest_remembered_pos() {
+        if position >= self.mem_mmr.oldest_retained_pos() {
             return self.mem_mmr.get_node(position).await;
         }
         match self.journal.read(position).await {
@@ -78,7 +78,7 @@ impl<B: Blob, E: RStorage<B>, H: Hasher> Mmr<B, E, H> {
             journal_size = last_valid_size
         }
 
-        // We bootstrap the in-mem MMR cache in the "forget_all" state where it only remembers the
+        // We bootstrap the in-mem MMR cache in the "prune_all" state where it only remembers the
         // most recent node.
         let bootstrap_peaks_futures: Vec<_> = PeakIterator::new(journal_size)
             .map(|(peak, _)| journal.read(peak))
@@ -126,7 +126,7 @@ impl<B: Blob, E: RStorage<B>, H: Hasher> Mmr<B, E, H> {
             self.journal.append(node).await?;
         }
         self.journal_size = self.mem_mmr.size();
-        self.mem_mmr.forget_all();
+        self.mem_mmr.prune_all();
         self.journal.sync().await?;
         Ok(())
     }
@@ -214,7 +214,7 @@ mod tests {
             // Sync the MMR, make sure it flushes the in-mem MMR as expected.
             mmr.sync().await.unwrap();
             assert_eq!(mmr.journal_size, 502);
-            assert_eq!(mmr.mem_mmr.oldest_remembered_pos(), 501);
+            assert_eq!(mmr.mem_mmr.oldest_retained_pos(), 501);
 
             // Now that the element is flushed from the in-mem MMR, make its proof is still is
             // generated correctly.
