@@ -347,11 +347,19 @@ impl<B: Blob, E: Storage<B>, A: Array> Journal<B, E, A> {
     pub async fn replay(
         &mut self,
         concurrency: usize,
+        index: Option<u64>,
     ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + '_, Error> {
+        let start_index = {
+            if index.is_some() {
+                index.unwrap()
+            } else {
+                0
+            }
+        };
         // Collect all blobs to replay
-        let mut blobs = Vec::with_capacity(self.blobs.len());
+        let mut blobs = Vec::with_capacity(self.blobs.len() - start_index as usize);
         let newest_blob_index = self.newest_blob().0;
-        for (index, blob) in self.blobs.iter() {
+        for (index, blob) in self.blobs.range(start_index..) {
             let blob_len = {
                 if *index == newest_blob_index {
                     blob.len().await?
@@ -613,7 +621,10 @@ mod tests {
             // will be empty, and there will be no retained items.
             assert_eq!(journal.oldest_retained_pos().await.unwrap(), None);
 
-            let stream = journal.replay(1).await.expect("failed to replay journal");
+            let stream = journal
+                .replay(1, None)
+                .await
+                .expect("failed to replay journal");
             pin_mut!(stream);
             let mut items = Vec::new();
             while let Some(result) = stream.next().await {
@@ -662,7 +673,10 @@ mod tests {
 
             // Replay should return all items
             {
-                let stream = journal.replay(10).await.expect("failed to replay journal");
+                let stream = journal
+                    .replay(10, None)
+                    .await
+                    .expect("failed to replay journal");
                 let mut items = Vec::new();
                 pin_mut!(stream);
                 while let Some(result) = stream.next().await {
@@ -674,7 +688,6 @@ mod tests {
                         Err(err) => panic!("Failed to read item: {}", err),
                     }
                 }
-
                 // Make sure all items were replayed
                 assert_eq!(
                     items.len(),
@@ -711,7 +724,10 @@ mod tests {
 
             // Replay all items, making sure the checksum mismatch error is handled correctly
             {
-                let stream = journal.replay(10).await.expect("failed to replay journal");
+                let stream = journal
+                    .replay(10, None)
+                    .await
+                    .expect("failed to replay journal");
                 let mut items = Vec::new();
                 pin_mut!(stream);
                 let mut error_count = 0;
@@ -757,7 +773,10 @@ mod tests {
 
             // Replay all items, making sure the partial read error is handled correctly
             {
-                let stream = journal.replay(10).await.expect("failed to replay journal");
+                let stream = journal
+                    .replay(10, None)
+                    .await
+                    .expect("failed to replay journal");
                 let mut items = Vec::new();
                 pin_mut!(stream);
                 let mut error_count = 0;
@@ -1026,5 +1045,67 @@ mod tests {
             assert_eq!(journal.size().await.unwrap(), 300);
             assert_eq!(journal.oldest_retained_pos().await.unwrap(), None);
         });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_partial_replay() {
+        const ITEMS_PER_BLOB: u64 = 7;
+        // Initialize the deterministic runtime
+        let (executor, context, _) = Executor::default();
+
+        // Start the test within the executor
+        executor.start(async move {
+            // Initialize the journal, allowing a max of 7 items per blob.
+            let cfg = Config {
+                registry: Arc::new(Mutex::new(Registry::default())),
+                partition: "test_partition".into(),
+                items_per_blob: ITEMS_PER_BLOB,
+            };
+            let mut journal = Journal::init(context.clone(), cfg.clone())
+                .await
+                .expect("failed to initialize journal");
+
+            // Append many items, filling 100 blobs and part of the 101st
+            for i in 0u64..(ITEMS_PER_BLOB * 100 + ITEMS_PER_BLOB / 2) {
+                let pos = journal
+                    .append(test_digest(i))
+                    .await
+                    .expect("failed to append data");
+                assert_eq!(pos, i);
+            }
+
+            let mut buffer = String::new();
+            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            assert!(buffer.contains("tracked 101"));
+
+            // Replay should return all items
+            {
+                let stream = journal
+                    .replay(10, Some(2))
+                    .await
+                    .expect("failed to replay journal");
+                let mut items = Vec::new();
+                pin_mut!(stream);
+                while let Some(result) = stream.next().await {
+                    match result {
+                        Ok((pos, item)) => {
+                            assert_eq!(test_digest(pos), item);
+                            items.push(pos);
+                        }
+                        Err(err) => panic!("Failed to read item: {}", err),
+                    }
+                }
+                assert_eq!(
+                    items.len(),
+                    ITEMS_PER_BLOB as usize * 98 + ITEMS_PER_BLOB as usize / 2
+                );
+                items.sort();
+                for (i, pos) in items.iter().enumerate() {
+                    let i=i+14;
+                    assert_eq!(i as u64, *pos);
+                }
+            }
+            journal.close().await.expect("Failed to close journal");
+        })
     }
 }
