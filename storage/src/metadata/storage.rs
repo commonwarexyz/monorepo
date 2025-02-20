@@ -2,7 +2,10 @@ use super::{Config, Error};
 use bytes::{BufMut, Bytes};
 use commonware_runtime::{Blob, Clock, Storage};
 use commonware_utils::SystemTimeExt as _;
-use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
+use prometheus_client::{
+    metrics::{counter::Counter, gauge::Gauge},
+    registry::Registry,
+};
 use std::{
     collections::BTreeMap,
     marker::PhantomData,
@@ -30,7 +33,7 @@ pub struct Metadata<B: Blob, E: Clock + Storage<B>> {
 
 impl<B: Blob, E: Clock + Storage<B>> Metadata<B, E> {
     /// Initialize a new `Metadata` instance.
-    pub async fn init(runtime: E, cfg: Config) -> Result<Self, Error> {
+    pub async fn init(runtime: E, registry: &mut Registry, cfg: Config) -> Result<Self, Error> {
         // Open dedicated blobs
         let left = runtime.open(&cfg.partition, BLOB_NAMES[0]).await?;
         let right = runtime.open(&cfg.partition, BLOB_NAMES[1]).await?;
@@ -65,7 +68,6 @@ impl<B: Blob, E: Clock + Storage<B>> Metadata<B, E> {
         let syncs = Counter::default();
         let keys = Gauge::default();
         {
-            let mut registry = cfg.registry.lock().unwrap();
             registry.register("syncs", "number of syncs of data to disk", syncs.clone());
             registry.register("keys", "number of tracked keys", keys.clone());
         }

@@ -192,10 +192,11 @@ fn main() {
         );
 
         // Initialize storage
+        let mut storage_registry = Registry::default();
         let journal = Journal::init(
             runtime.clone(),
+            storage_registry.sub_registry_with_prefix("journal"),
             Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: String::from("log"),
             },
         )

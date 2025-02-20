@@ -82,13 +82,12 @@
 //! use commonware_runtime::{Spawner, Runner, deterministic::Executor};
 //! use commonware_storage::journal::variable::{Journal, Config};
 //! use prometheus_client::registry::Registry;
-//! use std::sync::{Arc, Mutex};
 //!
 //! let (executor, context, _) = Executor::default();
 //! executor.start(async move {
 //!     // Create a journal
-//!     let mut journal = Journal::init(context, Config{
-//!         registry: Arc::new(Mutex::new(Registry::default())),
+//!     let mut registry = Registry::default();
+//!     let mut journal = Journal::init(context, &mut registry, Config{
 //!         partition: "partition".to_string()
 //!     }).await.unwrap();
 //!
@@ -108,15 +107,11 @@ use futures::stream::{self, Stream, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use prometheus_client::registry::Registry;
 use std::collections::{btree_map::Entry, BTreeMap};
-use std::sync::{Arc, Mutex};
 use tracing::{debug, trace, warn};
 
 /// Configuration for `Journal` storage.
 #[derive(Clone)]
 pub struct Config {
-    /// Registry for metrics.
-    pub registry: Arc<Mutex<Registry>>,
-
     /// The `commonware-runtime::Storage` partition to use
     /// for storing journal blobs.
     pub partition: String,
@@ -156,7 +151,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     /// All backing blobs are opened but not read during
     /// initialization. The `replay` method can be used
     /// to iterate over all items in the `Journal`.
-    pub async fn init(runtime: E, cfg: Config) -> Result<Self, Error> {
+    pub async fn init(runtime: E, registry: &mut Registry, cfg: Config) -> Result<Self, Error> {
         // Iterate over blobs in partition
         let mut blobs = BTreeMap::new();
         let stored_blobs = match runtime.scan(&cfg.partition).await {
@@ -180,7 +175,6 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
         let synced = Counter::default();
         let pruned = Counter::default();
         {
-            let mut registry = cfg.registry.lock().unwrap();
             registry.register("tracked", "Number of blobs", tracked.clone());
             registry.register("synced", "Number of syncs", synced.clone());
             registry.register("pruned", "Number of blobs pruned", pruned.clone());
@@ -597,14 +591,15 @@ mod tests {
 
         // Start the test within the executor
         executor.start(async move {
+            let mut registry = Registry::default();
+
             // Initialize the journal
             let cfg = Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
             };
             let index = 1u64;
             let data = Bytes::from("Test data");
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.clone(), &mut registry, cfg.clone())
                 .await
                 .expect("Failed to initialize journal");
 
@@ -616,7 +611,7 @@ mod tests {
 
             // Check metrics
             let mut buffer = String::new();
-            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            encode(&mut buffer, &registry).unwrap();
             assert!(buffer.contains("tracked 1"));
 
             // Close the journal
@@ -624,10 +619,9 @@ mod tests {
 
             // Re-initialize the journal to simulate a restart
             let cfg = Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
             };
-            let mut journal = Journal::init(context, cfg.clone())
+            let mut journal = Journal::init(context, &mut registry, cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
 
@@ -655,7 +649,7 @@ mod tests {
 
             // Check metrics
             let mut buffer = String::new();
-            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            encode(&mut buffer, &registry).unwrap();
             assert!(buffer.contains("tracked 1"));
         });
     }
@@ -668,13 +662,13 @@ mod tests {
         // Start the test within the executor
         executor.start(async move {
             // Create a journal configuration
+            let mut registry = Registry::default();
             let cfg = Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
             };
 
             // Initialize the journal
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.clone(), &mut registry, cfg.clone())
                 .await
                 .expect("Failed to initialize journal");
 
@@ -695,7 +689,7 @@ mod tests {
 
             // Check metrics
             let mut buffer = String::new();
-            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            encode(&mut buffer, &registry).unwrap();
             assert!(buffer.contains("tracked 3"));
             assert!(buffer.contains("synced_total 4"));
 
@@ -703,7 +697,7 @@ mod tests {
             journal.close().await.expect("Failed to close journal");
 
             // Re-initialize the journal to simulate a restart
-            let mut journal = Journal::init(context, cfg)
+            let mut journal = Journal::init(context, &mut registry, cfg)
                 .await
                 .expect("Failed to re-initialize journal");
 
@@ -762,14 +756,15 @@ mod tests {
 
         // Start the test within the executor
         executor.start(async move {
+            let mut registry = Registry::default();
+
             // Create a journal configuration
             let cfg = Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
             };
 
             // Initialize the journal
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.clone(), &mut registry, cfg.clone())
                 .await
                 .expect("Failed to initialize journal");
 
@@ -804,14 +799,14 @@ mod tests {
 
             // Check metrics
             let mut buffer = String::new();
-            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            encode(&mut buffer, &registry).unwrap();
             assert!(buffer.contains("pruned_total 2"));
 
             // Close the journal
             journal.close().await.expect("Failed to close journal");
 
             // Re-initialize the journal to simulate a restart
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.clone(), &mut registry, cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
 
@@ -865,7 +860,6 @@ mod tests {
         executor.start(async move {
             // Create a journal configuration
             let cfg = Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
             };
 
@@ -878,7 +872,7 @@ mod tests {
             blob.close().await.expect("Failed to close blob");
 
             // Attempt to initialize the journal
-            let result = Journal::init(context, cfg).await;
+            let result = Journal::init(context, &mut Registry::default(), cfg).await;
 
             // Expect an error
             assert!(matches!(result, Err(Error::InvalidBlobName(_))));
@@ -893,7 +887,6 @@ mod tests {
         executor.start(async move {
             // Create a journal configuration
             let cfg = Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
             };
 
@@ -913,7 +906,7 @@ mod tests {
             blob.close().await.expect("Failed to close blob");
 
             // Initialize the journal
-            let mut journal = Journal::init(context, cfg)
+            let mut journal = Journal::init(context, &mut Registry::default(), cfg)
                 .await
                 .expect("Failed to initialize journal");
 
@@ -952,7 +945,6 @@ mod tests {
         executor.start(async move {
             // Create a journal configuration
             let cfg = Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
             };
 
@@ -976,7 +968,7 @@ mod tests {
             blob.close().await.expect("Failed to close blob");
 
             // Initialize the journal
-            let mut journal = Journal::init(context, cfg)
+            let mut journal = Journal::init(context, &mut Registry::default(), cfg)
                 .await
                 .expect("Failed to initialize journal");
 
@@ -1017,7 +1009,6 @@ mod tests {
         executor.start(async move {
             // Create a journal configuration
             let cfg = Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
             };
 
@@ -1049,7 +1040,7 @@ mod tests {
             blob.close().await.expect("Failed to close blob");
 
             // Initialize the journal
-            let mut journal = Journal::init(context, cfg)
+            let mut journal = Journal::init(context, &mut Registry::default(), cfg)
                 .await
                 .expect("Failed to initialize journal");
 
@@ -1081,7 +1072,6 @@ mod tests {
         executor.start(async move {
             // Create a journal configuration
             let cfg = Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
             };
 
@@ -1119,7 +1109,7 @@ mod tests {
             blob.close().await.expect("Failed to close blob");
 
             // Initialize the journal
-            let mut journal = Journal::init(context, cfg)
+            let mut journal = Journal::init(context, &mut Registry::default(), cfg)
                 .await
                 .expect("Failed to initialize journal");
 
@@ -1155,12 +1145,11 @@ mod tests {
         executor.start(async move {
             // Create a journal configuration
             let cfg = Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
             };
 
             // Initialize the journal
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.clone(), &mut Registry::default(), cfg.clone())
                 .await
                 .expect("Failed to initialize journal");
 
@@ -1199,7 +1188,7 @@ mod tests {
             blob.close().await.expect("Failed to close blob");
 
             // Re-initialize the journal to simulate a restart
-            let mut journal = Journal::init(context, cfg)
+            let mut journal = Journal::init(context, &mut Registry::default(), cfg)
                 .await
                 .expect("Failed to re-initialize journal");
 
@@ -1292,13 +1281,14 @@ mod tests {
         executor.start(async move {
             // Create journal
             let cfg = Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "partition".to_string(),
             };
             let runtime = MockStorage {
                 len: u32::MAX as u64 * INDEX_ALIGNMENT, // can store up to u32::Max at the last offset
             };
-            let mut journal = Journal::init(runtime, cfg).await.unwrap();
+            let mut journal = Journal::init(runtime, &mut Registry::default(), cfg)
+                .await
+                .unwrap();
 
             // Append data
             let data = Bytes::from("Test data");
@@ -1317,13 +1307,14 @@ mod tests {
         executor.start(async move {
             // Create journal
             let cfg = Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "partition".to_string(),
             };
             let runtime = MockStorage {
                 len: u32::MAX as u64 * INDEX_ALIGNMENT + 1,
             };
-            let mut journal = Journal::init(runtime, cfg).await.unwrap();
+            let mut journal = Journal::init(runtime, &mut Registry::default(), cfg)
+                .await
+                .unwrap();
 
             // Append data
             let data = Bytes::from("Test data");
