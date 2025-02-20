@@ -103,6 +103,7 @@
         <p>Sequencer tips are stored robustly in a write-ahead log, ensuring consistency even in the face of unexpected node shutdown. This prevents honest sequencers from broadcasting conflicting messages and also prevents honest validators from signing conflicting messages from dishonest sequencers. Conflicting messages are messages with the same sequencer and height that contain different data.</p>
         <p>As with other primitives, this dialect is tested for resilience using Commonware's <a href="https://commonware.xyz/commonware-runtime.html">deterministic simulator</a>. It reproducibly simulates complex scenarios such as packet loss, complete node failure, and temporary network partitions.</p>
         <p>For developers building decentralized applications, <i>broadcast::linked</i> unlocks high-throughput replication using multiple sequencers and a simple, easily verifiable structure over message dissemination. Its use of threshold signatures proves the integrity of an entire history of messages, allowing for fast, succinct validation by external nodes ingesting network activity and can serve as early confirmation for users (and a slashable commitment for the sequencer).</p>
+        <p>Scalability is no longer a differentiator-it's a requirement. <i>broadcast::linked</i> is your shortcut.</p>
     </div>
 
     <div id="footer-placeholder"></div>
