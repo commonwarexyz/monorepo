@@ -620,7 +620,7 @@ mod tests {
             // For every node in the MMR, confirm that the computed oldest_provable_pos is indeed
             // the correct boundary between being able to generate a proof for a leaf or not.
             for i in 1..mmr.size() {
-                mmr.forget_to_pos(i);
+                mmr.prune_to_pos(i);
                 let oldest_provable_pos = oldest_provable_pos(PeakIterator::new(mmr.size()), i);
                 for pos in element_positions.iter() {
                     let proof = mmr.proof(*pos).await;
@@ -648,9 +648,9 @@ mod tests {
                 element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));
             }
 
-            // For every leaf, confirm that forgetting to its oldest_required_proof_point allows us
-            // to still prove the leaf, and that forgetting even a single node beyond that renders
-            // the leaf unprovable.
+            // For every leaf, confirm that pruning to its oldest_required_proof_point allows us to
+            // still prove the leaf, and that pruning even a single node beyond that renders the
+            // leaf unprovable.
             for &pos in &element_positions {
                 let oldest_required_proof_pos =
                     oldest_required_proof_pos(PeakIterator::new(mmr.size()), pos);
@@ -659,10 +659,10 @@ mod tests {
                 for _ in 0..49 {
                     mmr.add(&mut hasher, elements.last().unwrap());
                 }
-                mmr.forget_to_pos(oldest_required_proof_pos);
+                mmr.prune_to_pos(oldest_required_proof_pos);
                 let proof = mmr.proof(pos).await;
                 assert!(proof.is_ok(), "proof should succeed");
-                mmr.forget_to_pos(oldest_required_proof_pos + 1);
+                mmr.prune_to_pos(oldest_required_proof_pos + 1);
                 let proof = mmr.proof(pos).await;
                 assert!(proof.is_err(), "proof should fail");
             }
@@ -670,7 +670,7 @@ mod tests {
     }
 
     #[test]
-    fn test_range_proofs_after_forgetting() {
+    fn test_range_proofs_after_pruning() {
         let (executor, _, _) = Executor::default();
         executor.start(async move {
 
@@ -684,12 +684,12 @@ mod tests {
             element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));
         }
 
-        // forget up to the first peak
-        mmr.forget_to_pos(62);
-        assert_eq!(mmr.oldest_remembered_pos(), 62);
+        // prune up to the first peak
+        mmr.prune_to_pos(62);
+        assert_eq!(mmr.oldest_retained_pos(), 62);
         assert_eq!(mmr.oldest_provable_pos(), 62); // peaks are always their own oldest-provable-point
 
-        // Prune the elements from our lists that can no longer be proven after forgetting.
+        // Prune the elements from our lists that can no longer be proven after pruning.
         for i in 0..elements.len() {
             if element_positions[i] > 62 {
                 elements = elements[i..elements.len()].to_vec();
@@ -719,13 +719,13 @@ mod tests {
             }
         }
 
-        // add a few more nodes, forget again, and test again to make sure repeated forgetting works
+        // add a few more nodes, prune again, and test again to make sure repeated pruning works
         for i in 0..37 {
             elements.push(test_digest(i));
             element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));
         }
-        mmr.forget_to_pos(126); // the new highest peak
-        assert_eq!(mmr.oldest_remembered_pos(), 126);
+        mmr.prune_to_pos(126); // the new highest peak
+        assert_eq!(mmr.oldest_retained_pos(), 126);
         assert_eq!(mmr.oldest_provable_pos(), 126); // peaks are always their own oldest-provable-point
 
         let updated_root_hash = mmr.root(&mut hasher);
@@ -747,7 +747,7 @@ mod tests {
                 end_pos,
                 &updated_root_hash,
             ),
-            "valid range proof over remaining elements after 2 forgetting rounds should verify successfully",
+            "valid range proof over remaining elements after 2 pruning rounds should verify successfully",
         );
     });
     }
