@@ -353,10 +353,9 @@ mod tests {
                     actor.run().await;
                 });
                 let cfg = JConfig {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     partition: validator.to_string(),
                 };
-                let journal = Journal::init(runtime.clone(), cfg)
+                let journal = Journal::init(runtime.clone(), &mut Registry::default(), cfg)
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
@@ -580,10 +579,9 @@ mod tests {
                         actor.run().await;
                     });
                     let cfg = JConfig {
-                        registry: Arc::new(Mutex::new(Registry::default())),
                         partition: validator.to_string(),
                     };
-                    let journal = Journal::init(runtime.clone(), cfg)
+                    let journal = Journal::init(runtime.clone(), &mut Registry::default(), cfg)
                         .await
                         .expect("unable to create journal");
                     let cfg = config::Config {
@@ -794,10 +792,9 @@ mod tests {
                     actor.run().await;
                 });
                 let cfg = JConfig {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     partition: validator.to_string(),
                 };
-                let journal = Journal::init(runtime.clone(), cfg)
+                let journal = Journal::init(runtime.clone(), &mut Registry::default(), cfg)
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
@@ -929,10 +926,9 @@ mod tests {
                 actor.run().await;
             });
             let cfg = JConfig {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: validator.to_string(),
             };
-            let journal = Journal::init(runtime.clone(), cfg)
+            let journal = Journal::init(runtime.clone(), &mut Registry::default(), cfg)
                 .await
                 .expect("unable to create journal");
             let cfg = config::Config {
@@ -1080,10 +1076,9 @@ mod tests {
                     actor.run().await;
                 });
                 let cfg = JConfig {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     partition: validator.to_string(),
                 };
-                let journal = Journal::init(runtime.clone(), cfg)
+                let journal = Journal::init(runtime.clone(), &mut Registry::default(), cfg)
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
@@ -1265,10 +1260,9 @@ mod tests {
                     actor.run().await;
                 });
                 let cfg = JConfig {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     partition: validator.to_string(),
                 };
-                let journal = Journal::init(runtime.clone(), cfg)
+                let journal = Journal::init(runtime.clone(), &mut Registry::default(), cfg)
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
@@ -1439,10 +1433,9 @@ mod tests {
                     actor.run().await;
                 });
                 let cfg = JConfig {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     partition: validator.to_string(),
                 };
-                let journal = Journal::init(runtime.clone(), cfg)
+                let journal = Journal::init(runtime.clone(), &mut Registry::default(), cfg)
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
@@ -1606,10 +1599,9 @@ mod tests {
                     actor.run().await;
                 });
                 let cfg = JConfig {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     partition: validator.to_string(),
                 };
-                let journal = Journal::init(runtime.clone(), cfg)
+                let journal = Journal::init(runtime.clone(), &mut Registry::default(), cfg)
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
@@ -1830,10 +1822,9 @@ mod tests {
                     actor.run().await;
                 });
                 let cfg = JConfig {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     partition: validator.to_string(),
                 };
-                let journal = Journal::init(runtime.clone(), cfg)
+                let journal = Journal::init(runtime.clone(), &mut Registry::default(), cfg)
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
@@ -2017,10 +2008,9 @@ mod tests {
                         actor.run().await;
                     });
                     let cfg = JConfig {
-                        registry: Arc::new(Mutex::new(Registry::default())),
                         partition: validator.to_string(),
                     };
-                    let journal = Journal::init(runtime.clone(), cfg)
+                    let journal = Journal::init(runtime.clone(), &mut Registry::default(), cfg)
                         .await
                         .expect("unable to create journal");
                     let cfg = config::Config {
@@ -2202,10 +2192,9 @@ mod tests {
                         actor.run().await;
                     });
                     let cfg = JConfig {
-                        registry: Arc::new(Mutex::new(Registry::default())),
                         partition: validator.to_string(),
                     };
-                    let journal = Journal::init(runtime.clone(), cfg)
+                    let journal = Journal::init(runtime.clone(), &mut Registry::default(), cfg)
                         .await
                         .expect("unable to create journal");
                     let cfg = config::Config {

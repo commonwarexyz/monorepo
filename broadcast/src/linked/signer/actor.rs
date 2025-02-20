@@ -28,7 +28,6 @@ use std::{
     future::Future,
     marker::PhantomData,
     pin::Pin,
-    sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
 use thiserror::Error;
@@ -140,6 +139,9 @@ pub struct Actor<
     // A map of sequencer public keys to their journals.
     journals: BTreeMap<C::PublicKey, Journal<B, E>>,
 
+    // Registry used by journals
+    journal_registry: Registry,
+
     ////////////////////////////////////////
     // State
     ////////////////////////////////////////
@@ -216,6 +218,7 @@ impl<
             journal_replay_concurrency: cfg.journal_replay_concurrency,
             journal_name_prefix: cfg.journal_name_prefix,
             journals: BTreeMap::new(),
+            journal_registry: Registry::default(),
             tip_manager: TipManager::<C, D>::new(),
             ack_manager: AckManager::<D, C::PublicKey>::new(),
             epoch: 0,
@@ -897,12 +900,16 @@ impl<
 
         // Initialize journal
         let cfg = journal::variable::Config {
-            registry: Arc::new(Mutex::new(Registry::default())),
             partition: format!("{}{}", &self.journal_name_prefix, sequencer),
         };
-        let mut journal = Journal::init(self.runtime.clone(), cfg)
-            .await
-            .expect("unable to init journal");
+        let mut journal = Journal::init(
+            self.runtime.clone(),
+            self.journal_registry
+                .sub_registry_with_label(("sequencer".into(), sequencer.to_string().into())),
+            cfg,
+        )
+        .await
+        .expect("unable to init journal");
 
         // Replay journal
         {

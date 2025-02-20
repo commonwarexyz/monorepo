@@ -3,7 +3,10 @@ use crate::journal::variable::Journal;
 use bytes::{Buf, BufMut, Bytes};
 use commonware_runtime::{Blob, Storage};
 use futures::{pin_mut, StreamExt};
-use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
+use prometheus_client::{
+    metrics::{counter::Counter, gauge::Gauge},
+    registry::Registry,
+};
 use rangemap::RangeInclusiveSet;
 use std::collections::{hash_map::Entry, BTreeMap, HashMap};
 use tracing::{debug, trace};
@@ -63,7 +66,11 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
     ///
     /// The in-memory index for `Archive` is populated during this call
     /// by replaying the journal.
-    pub async fn init(mut journal: Journal<B, E>, cfg: Config<T>) -> Result<Self, Error> {
+    pub async fn init(
+        mut journal: Journal<B, E>,
+        registry: &mut Registry,
+        cfg: Config<T>,
+    ) -> Result<Self, Error> {
         // Initialize keys and run corruption check
         let mut indices = BTreeMap::new();
         let mut keys = HashMap::new();
@@ -116,7 +123,6 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         let has = Counter::default();
         let syncs = Counter::default();
         {
-            let mut registry = cfg.registry.lock().unwrap();
             registry.register(
                 "items_tracked",
                 "Number of items tracked",

@@ -58,15 +58,11 @@ use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use prometheus_client::registry::Registry;
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
-use std::sync::{Arc, Mutex};
 use tracing::{debug, trace, warn};
 
 /// Configuration for `Journal` storage.
 #[derive(Clone)]
 pub struct Config {
-    /// Registry for metrics.
-    pub registry: Arc<Mutex<Registry>>,
-
     /// The `commonware-runtime::Storage` partition to use for storing journal blobs.
     pub partition: String,
 
@@ -104,7 +100,7 @@ impl<B: Blob, E: Storage<B>, A: Array> Journal<B, E, A> {
     ///
     /// All backing blobs are opened but not read during initialization. The `replay` method can be
     /// used to iterate over all items in the `Journal`.
-    pub async fn init(runtime: E, cfg: Config) -> Result<Self, Error> {
+    pub async fn init(runtime: E, registry: &mut Registry, cfg: Config) -> Result<Self, Error> {
         // Iterate over blobs in partition
         let mut blobs = BTreeMap::new();
         let stored_blobs = match runtime.scan(&cfg.partition).await {
@@ -145,7 +141,6 @@ impl<B: Blob, E: Storage<B>, A: Array> Journal<B, E, A> {
         let synced = Counter::default();
         let pruned = Counter::default();
         {
-            let mut registry = cfg.registry.lock().unwrap();
             registry.register("tracked", "Number of blobs", tracked.clone());
             registry.register("synced", "Number of syncs", synced.clone());
             registry.register("pruned", "Number of blobs pruned", pruned.clone());
@@ -479,17 +474,17 @@ mod tests {
         // Start the test within the executor
         executor.start(async move {
             // Initialize the journal, allowing a max of 2 items per blob.
+            let mut registry = Registry::default();
             let cfg = Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
                 items_per_blob: 2,
             };
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.clone(), &mut registry, cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
             let mut buffer = String::new();
-            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            encode(&mut buffer, &registry).unwrap();
             assert!(buffer.contains("tracked 1"));
 
             // Append an item to the journal
@@ -503,12 +498,12 @@ mod tests {
             journal.close().await.expect("Failed to close journal");
 
             // Re-initialize the journal to simulate a restart
+            let mut registry = Registry::default();
             let cfg = Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
                 items_per_blob: 2,
             };
-            let mut journal = Journal::init(context, cfg.clone())
+            let mut journal = Journal::init(context, &mut registry, cfg.clone())
                 .await
                 .expect("failed to re-initialize journal");
 
@@ -524,7 +519,7 @@ mod tests {
                 .expect("failed to append data 2");
             assert_eq!(pos, 2);
             let mut buffer = String::new();
-            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            encode(&mut buffer, &registry).unwrap();
             assert!(buffer.contains("tracked 2"));
 
             // Read the items back
@@ -542,20 +537,20 @@ mod tests {
             // Sync the journal
             journal.sync().await.expect("failed to sync journal");
             let mut buffer = String::new();
-            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            encode(&mut buffer, &registry).unwrap();
             assert!(buffer.contains("synced_total 1"));
 
             // Pruning to 1 should be a no-op because there's no blob with only older items.
             journal.prune(1).await.expect("failed to prune journal 1");
             let mut buffer = String::new();
-            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            encode(&mut buffer, &registry).unwrap();
             assert!(buffer.contains("tracked 2"));
 
             // Pruning to 2 should allow the first blob to be pruned.
             journal.prune(2).await.expect("failed to prune journal 2");
             assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(2));
             let mut buffer = String::new();
-            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            encode(&mut buffer, &registry).unwrap();
             assert!(buffer.contains("tracked 1"));
             assert!(buffer.contains("pruned_total 1"));
 
@@ -591,7 +586,7 @@ mod tests {
                 .expect("failed to prune journal 2");
             assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(6));
             let mut buffer = String::new();
-            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            encode(&mut buffer, &registry).unwrap();
             assert_eq!(journal.oldest_blob().0, 3);
             assert_eq!(journal.newest_blob().0, 5);
             assert!(buffer.contains("tracked 3"));
@@ -602,7 +597,7 @@ mod tests {
                 .prune(10000)
                 .await
                 .expect("failed to max-prune journal");
-            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            encode(&mut buffer, &registry).unwrap();
             let size = journal.size().await.unwrap();
             assert_eq!(size, 10);
             assert_eq!(journal.oldest_blob().0, 5);
@@ -638,12 +633,12 @@ mod tests {
         // Start the test within the executor
         executor.start(async move {
             // Initialize the journal, allowing a max of 7 items per blob.
+            let mut registry = Registry::default();
             let cfg = Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
                 items_per_blob: ITEMS_PER_BLOB,
             };
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.clone(), &mut registry, cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
@@ -657,7 +652,7 @@ mod tests {
             }
 
             let mut buffer = String::new();
-            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            encode(&mut buffer, &registry).unwrap();
             assert!(buffer.contains("tracked 101"));
 
             // Replay should return all items
@@ -703,7 +698,7 @@ mod tests {
             blob.close().await.expect("Failed to close blob");
 
             // Re-initialize the journal to simulate a restart
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.clone(), &mut registry, cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
             let err = journal.read(corrupted_item_pos).await.unwrap_err();
@@ -749,7 +744,7 @@ mod tests {
             blob.close().await.expect("Failed to close blob");
 
             // Re-initialize the journal to simulate a restart
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.clone(), &mut registry, cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
             let err = journal.read(corrupted_item_pos).await.unwrap_err();
@@ -787,7 +782,8 @@ mod tests {
                 .await
                 .expect("Failed to remove blob");
             // Re-initialize the journal to simulate a restart
-            let result = Journal::<_, _, Digest>::init(context.clone(), cfg.clone()).await;
+            let result =
+                Journal::<_, _, Digest>::init(context.clone(), &mut registry, cfg.clone()).await;
             assert!(matches!(result.err().unwrap(), Error::MissingBlob(n) if n == 40));
         });
     }
@@ -800,12 +796,12 @@ mod tests {
         // Start the test within the executor
         executor.start(async move {
             // Initialize the journal, allowing a max of 2 items per blob.
+            let mut registry = Registry::default();
             let cfg = Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
-                partition: "test_partition".into(),
                 items_per_blob: 3,
+                partition: "test_partition".into(),
             };
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.clone(), &mut registry, cfg.clone())
                 .await
                 .expect("failed to initialize journal");
             for i in 0..5 {
@@ -816,7 +812,7 @@ mod tests {
             }
             assert_eq!(journal.size().await.unwrap(), 5);
             let mut buffer = String::new();
-            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            encode(&mut buffer, &registry).unwrap();
             assert!(buffer.contains("tracked 2"));
             journal.close().await.expect("Failed to close journal");
 
@@ -833,13 +829,14 @@ mod tests {
             blob.close().await.expect("Failed to close blob");
 
             // Re-initialize the journal to simulate a restart
-            let journal = Journal::<_, _, Digest>::init(context.clone(), cfg.clone())
-                .await
-                .expect("Failed to re-initialize journal");
+            let journal =
+                Journal::<_, _, Digest>::init(context.clone(), &mut registry, cfg.clone())
+                    .await
+                    .expect("Failed to re-initialize journal");
             // the last corrupted item should get discarded
             assert_eq!(journal.size().await.unwrap(), 4);
             let mut buffer = String::new();
-            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            encode(&mut buffer, &registry).unwrap();
             assert!(buffer.contains("tracked 2"));
             journal.close().await.expect("Failed to close journal");
 
@@ -849,11 +846,12 @@ mod tests {
                 .remove(&cfg.partition, Some(&1u64.to_be_bytes()))
                 .await
                 .expect("Failed to remove blob");
-            let journal = Journal::<_, _, Digest>::init(context.clone(), cfg.clone())
-                .await
-                .expect("Failed to re-initialize journal");
+            let journal =
+                Journal::<_, _, Digest>::init(context.clone(), &mut registry, cfg.clone())
+                    .await
+                    .expect("Failed to re-initialize journal");
             assert_eq!(journal.size().await.unwrap(), 3);
-            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            encode(&mut buffer, &registry).unwrap();
             assert!(buffer.contains("tracked 2"));
         });
     }
@@ -864,11 +862,10 @@ mod tests {
         executor.start(async move {
             // Initialize the journal, allowing a max of 10 items per blob.
             let cfg = Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
                 items_per_blob: 10,
             };
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.clone(), &mut Registry::default(), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
             // Add only a single item
@@ -892,9 +889,13 @@ mod tests {
             blob.close().await.expect("Failed to close blob");
 
             // Re-initialize the journal to simulate a restart
-            let mut journal = Journal::<_, _, Digest>::init(context.clone(), cfg.clone())
-                .await
-                .expect("Failed to re-initialize journal");
+            let mut journal = Journal::<_, _, Digest>::init(
+                context.clone(),
+                &mut Registry::default(),
+                cfg.clone(),
+            )
+            .await
+            .expect("Failed to re-initialize journal");
 
             // Since there was only a single item appended which we then corrupted, recovery should
             // leave us in the state of an empty journal.
@@ -914,12 +915,12 @@ mod tests {
         let (executor, context, _) = Executor::default();
         executor.start(async move {
             // Initialize the journal, allowing a max of 2 items per blob.
+            let mut registry = Registry::default();
             let cfg = Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
                 items_per_blob: 2,
             };
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.clone(), &mut registry, cfg.clone())
                 .await
                 .expect("failed to initialize journal");
             assert!(matches!(journal.rewind(0).await, Ok(())));
@@ -947,19 +948,19 @@ mod tests {
                     .expect("failed to append data");
                 assert_eq!(pos, i);
             }
-            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            encode(&mut buffer, &registry).unwrap();
             assert!(buffer.contains("tracked 4"));
             assert_eq!(journal.size().await.unwrap(), 7);
 
             // rewind back to item #4, which should prune 2 blobs
             assert!(matches!(journal.rewind(4).await, Ok(())));
             assert_eq!(journal.size().await.unwrap(), 4);
-            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            encode(&mut buffer, &registry).unwrap();
             assert!(buffer.contains("tracked 3"));
 
             // rewind back to empty and ensure all blobs are rewound over
             assert!(matches!(journal.rewind(0).await, Ok(())));
-            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            encode(&mut buffer, &registry).unwrap();
             assert!(buffer.contains("tracked 1"));
             assert_eq!(journal.size().await.unwrap(), 0);
 
@@ -983,11 +984,10 @@ mod tests {
 
             // Repeat with a different blob size (3 items per blob)
             let cfg = Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition_2".into(),
                 items_per_blob: 3,
             };
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.clone(), &mut registry, cfg.clone())
                 .await
                 .expect("failed to initialize journal");
             for _ in 0..10 {
@@ -1007,9 +1007,10 @@ mod tests {
             journal.close().await.expect("Failed to close journal");
 
             // Make sure re-opened journal is as expected
-            let mut journal: Journal<_, _, Digest> = Journal::init(context.clone(), cfg.clone())
-                .await
-                .expect("failed to re-initialize journal");
+            let mut journal: Journal<_, _, Digest> =
+                Journal::init(context.clone(), &mut registry, cfg.clone())
+                    .await
+                    .expect("failed to re-initialize journal");
             assert_eq!(journal.size().await.unwrap(), 10 * (100 - 49));
 
             // Make sure rewinding works after pruning
