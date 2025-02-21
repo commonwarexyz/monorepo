@@ -13,6 +13,8 @@ use tokio::process::Command;
 use tokio::time::{sleep, Duration};
 use uuid::Uuid;
 
+const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 const PROMETHEUS_VERSION: &str = "2.30.3";
 const DATASOURCES_YML: &str = r#"
 apiVersion: 1
@@ -62,15 +64,15 @@ struct InstanceConfig {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let matches = App::new("deployer")
-        .version("1.0")
+        .version(PKG_VERSION)
         .about("Deploys individually specified EC2 instances with monitoring")
         .subcommand(
-            SubCommand::with_name("setup")
+            SubCommand::with_name("create")
                 .about("Sets up EC2 instances and deploys files with monitoring")
                 .arg(Arg::with_name("config").long("config").takes_value(true).required(true).help("Path to YAML config file"))
         )
         .subcommand(
-            SubCommand::with_name("teardown")
+            SubCommand::with_name("destroy")
                 .about("Deletes all deployed resources")
                 .arg(Arg::with_name("tag").long("tag").takes_value(true).required(true).help("Deployment tag"))
         )
