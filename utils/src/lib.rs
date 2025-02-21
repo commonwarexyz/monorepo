@@ -93,12 +93,6 @@ pub fn modulo(bytes: &[u8], n: u64) -> u64 {
     result
 }
 
-/// Type that can be serialized and deserialized.``
-pub trait Serialize: Sized {
-    fn serialize(&self) -> Vec<u8>;
-    fn deserialize(bytes: &[u8]) -> Option<Self>;
-}
-
 /// Types with a constant encoded length.
 pub trait SizedSerialize {
     const SERIALIZED_LEN: usize;
