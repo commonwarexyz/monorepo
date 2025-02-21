@@ -8,7 +8,7 @@ use aws_sdk_ec2::{Client as Ec2Client, Error as Ec2Error};
 use clap::{App, Arg, SubCommand};
 use futures::future::join_all;
 use reqwest::blocking;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fs::File;
@@ -85,6 +85,18 @@ struct RegionResources {
     subnet_id: String,
     regular_sg_id: Option<String>,
     monitoring_sg_id: Option<String>,
+}
+
+#[derive(Serialize)]
+struct Peer {
+    name: String,
+    region: String,
+    ip: String,
+}
+
+#[derive(Serialize)]
+struct Peers {
+    peers: Vec<Peer>,
 }
 
 #[tokio::main]
@@ -236,14 +248,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .await
                 .into_iter()
                 .collect::<Result<Vec<_>, _>>()?;
-            let all_ips: Vec<String> = deployments.iter().map(|d| d.ip.clone()).collect();
 
             // Create peers.yaml with all IPs
-            let peers_yaml = serde_yaml::to_string(&all_ips)?;
+            let peers = Peers {
+                peers: deployments
+                    .iter()
+                    .map(|d| Peer {
+                        name: d.instance.name.clone(),
+                        region: d.instance.region.clone(),
+                        ip: d.ip.clone(),
+                    })
+                    .collect(),
+            };
+            let peers_yaml = serde_yaml::to_string(&peers)?;
             let peers_path = temp_dir.path().join("peers.yaml");
             std::fs::write(&peers_path, peers_yaml)?;
 
             // Configure monitoring instance
+            let all_ips: Vec<String> = deployments.iter().map(|d| d.ip.clone()).collect();
             let prom_config = generate_prometheus_config(&all_ips);
             let prom_path = temp_dir.path().join("prometheus.yml");
             std::fs::write(&prom_path, prom_config)?;
