@@ -13,6 +13,7 @@ fn main() {
         .about("generate configuration files")
         .arg(
             Arg::new("peers")
+                .long("peers")
                 .required(true)
                 .value_parser(value_parser!(usize)),
         )
@@ -24,23 +25,26 @@ fn main() {
         )
         .arg(
             Arg::new("regions")
+                .long("regions")
                 .required(true)
                 .value_delimiter(',')
                 .value_parser(value_parser!(String)),
         )
         .arg(
             Arg::new("instance_type")
+                .long("instance-type")
                 .required(true)
                 .value_parser(value_parser!(String)),
         )
         .arg(
             Arg::new("dashboard")
+                .long("dashboard")
                 .required(true)
                 .value_parser(value_parser!(String)),
         )
         .arg(
             Arg::new("output")
-                .long("directory to output configuration files")
+                .long("output")
                 .required(true)
                 .value_parser(value_parser!(String)),
         )
@@ -68,7 +72,11 @@ fn main() {
         .collect::<Vec<_>>();
 
     // Generate instance configurations
-    let regions = matches.get_many::<String>("regions").unwrap();
+    let regions = matches
+        .get_many::<String>("regions")
+        .unwrap()
+        .cloned()
+        .collect::<Vec<_>>();
     let instance_type = matches.get_one::<String>("instance_type").unwrap();
     let mut instance_configs = Vec::new();
     let mut peer_configs = Vec::new();
@@ -86,7 +94,8 @@ fn main() {
         peer_configs.push((peer_config_file.clone(), peer_config));
 
         // Create instance config
-        let region = regions.clone().choose(&mut OsRng).unwrap().clone();
+        let region_index = (0..regions.len()).choose(&mut OsRng).unwrap();
+        let region = regions[region_index].clone();
         let instance = InstanceConfig {
             name: name.clone(),
             region,
@@ -98,12 +107,11 @@ fn main() {
     }
 
     // Generate root config file
-    let dashboard = matches.get_one::<String>("dashboard").unwrap().clone();
     let config = commonware_deployer::Config {
         instances: instance_configs,
         monitoring: commonware_deployer::MonitoringConfig {
             instance_type: instance_type.clone(),
-            dashboard,
+            dashboard: "dashboard.json".to_string(),
         },
         ports: vec![commonware_deployer::PortConfig {
             protocol: "tcp".to_string(),
@@ -113,10 +121,24 @@ fn main() {
     };
 
     // Write configuration files
+    let raw_current_dir = std::env::current_dir().unwrap();
+    let current_dir = raw_current_dir.to_str().unwrap();
     let output = matches.get_one::<String>("output").unwrap();
-    std::fs::create_dir_all(output).unwrap();
+    let output = format!("{}/{}", current_dir, output);
+    assert!(
+        !std::path::Path::new(&output).exists(),
+        "Output directory already exists"
+    );
+    std::fs::create_dir_all(output.clone()).unwrap();
+    let dashboard = matches.get_one::<String>("dashboard").unwrap().clone();
+    println!("{}/{}", current_dir, dashboard);
+    std::fs::copy(
+        format!("{}/{}", current_dir, dashboard),
+        format!("{}/dashboard.json", output),
+    )
+    .unwrap();
     for (peer_config_file, peer_config) in peer_configs {
-        let path = format!("{}/{}.yaml", output, peer_config_file);
+        let path = format!("{}/{}", output, peer_config_file);
         let file = std::fs::File::create(path).unwrap();
         serde_yaml::to_writer(file, &peer_config).unwrap();
     }
