@@ -1,18 +1,20 @@
 use axum::{routing::get, serve, Extension, Router};
 use clap::{Arg, Command};
 use commonware_cryptography::{
-    ed25519::{self, PrivateKey, PublicKey},
+    ed25519::{PrivateKey, PublicKey},
     Ed25519, Scheme,
 };
 use commonware_deployer::Peers;
-use commonware_p2p::authenticated;
+use commonware_p2p::{authenticated, Receiver, Recipients, Sender};
 use commonware_runtime::{
     tokio::{self, Executor},
     Network, Runner, Spawner,
 };
-use commonware_utils::{from_hex, from_hex_formatted, union};
+use commonware_utils::{from_hex_formatted, union};
+use futures::future::try_join_all;
 use governor::Quota;
 use prometheus_client::{encoding::text::encode, registry::Registry};
+use rand::{rngs::StdRng, RngCore, SeedableRng};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -20,9 +22,8 @@ use std::{
     num::NonZeroU32,
     str::FromStr,
     sync::{Arc, Mutex},
-    u32,
 };
-use tracing::{info, Level};
+use tracing::{error, info, Level};
 
 const FLOOD_NAMESPACE: &[u8] = b"_COMMONWARE_FLOOD";
 const METRICS_PORT: u16 = 9090;
@@ -137,7 +138,7 @@ fn main() {
         oracle.register(0, peer_keys).await;
 
         // Register flood channel
-        let (flood_sender, flood_receiver) = network.register(
+        let (mut flood_sender, mut flood_receiver) = network.register(
             0,
             Quota::per_second(NonZeroU32::new(u32::MAX).unwrap()),
             256,
@@ -165,19 +166,34 @@ fn main() {
             }
         });
 
-        // Create p2p
-        let p2p = runtime.spawn("p2p", network.run());
+        // Create network
+        let p2p = runtime.spawn("network", network.run());
 
         // Create flood
-        let flood = runtime.spawn("flood", async move {
-            let mut count = 0;
+        let flood_sender = runtime.spawn("flood_sender", async move {
+            let mut rng = StdRng::seed_from_u64(0);
             loop {
-                flood_sender
-                    .send(count.to_string().into())
-                    .await
-                    .expect("Could not send flood message");
-                count += 1;
+                // Create message
+                let mut msg = Vec::with_capacity(config.message_size);
+                rng.fill_bytes(&mut msg);
+
+                // Send to all peers
+                if let Err(e) = flood_sender.send(Recipients::All, msg.into(), false).await {
+                    error!(?e, "could not send flood message");
+                }
             }
         });
+        let flood_receiver = runtime.spawn("flood_receiver", async move {
+            loop {
+                if let Err(e) = flood_receiver.recv().await {
+                    error!(?e, "could not receive flood message");
+                }
+            }
+        });
+
+        // Wait for any task to error
+        if let Err(e) = try_join_all(vec![metrics, p2p, flood_sender, flood_receiver]).await {
+            error!(?e, "task failed");
+        }
     });
 }

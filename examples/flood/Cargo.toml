@@ -24,6 +24,8 @@ serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
 governor = { workspace = true }
 axum = "0.8.1"
+rand = { workspace = true }
+futures = { workspace = true }
 
 [[bin]]
 name = "commonware-flood"
