@@ -2,14 +2,14 @@ use aws_config::{BehaviorVersion, Region};
 use aws_sdk_ec2::error::BuildError;
 use aws_sdk_ec2::types::{
     Filter, InstanceStateName, InstanceType, IpPermission, IpRange, ResourceType, Tag,
-    TagSpecification,
+    TagSpecification, UserIdGroupPair,
 };
 use aws_sdk_ec2::{Client as Ec2Client, Error as Ec2Error};
 use clap::{App, Arg, SubCommand};
 use futures::future::join_all;
 use reqwest::blocking;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::error::Error;
 use std::fs::File;
 use tempdir::TempDir;
@@ -82,6 +82,8 @@ struct Config {
 
 struct RegionResources {
     vpc_id: String,
+    vpc_cidr: String,
+    route_table_id: String,
     subnet_id: String,
     regular_sg_id: Option<String>,
     monitoring_sg_id: Option<String>,
@@ -132,22 +134,35 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let tag = Uuid::new_v4().to_string();
 
             // Determine unique regions
-            let mut regions: HashSet<String> =
+            let mut regions: BTreeSet<String> =
                 config.instances.iter().map(|i| i.region.clone()).collect();
             regions.insert(MONITORING_REGION.to_string());
 
-            // Create resources per region
+            // Create CIDR block for each region
+            let mut vpc_cidrs = HashMap::new();
+            let mut subnet_cidrs = HashMap::new();
+            let mut ec2_clients = HashMap::new();
             let mut region_resources = HashMap::new();
-            for region in &regions {
-                let ec2_client = create_ec2_client(Region::new(region.clone())).await;
-                let vpc_id = create_vpc(&ec2_client, &tag).await?;
-                let igw_id = create_and_attach_igw(&ec2_client, &vpc_id, &tag).await?;
-                let route_table_id =
-                    create_route_table(&ec2_client, &vpc_id, &igw_id, &tag).await?;
-                let subnet_id = create_subnet(&ec2_client, &vpc_id, &route_table_id, &tag).await?;
+            for (idx, region) in regions.iter().enumerate() {
+                let vpc_cidr = format!("10.{}.0.0/16", idx);
+                vpc_cidrs.insert(region.clone(), vpc_cidr);
+                let subnet_cidr = format!("10.{}.1.0/24", idx);
+                subnet_cidrs.insert(region.clone(), subnet_cidr);
+                ec2_clients.insert(
+                    region.clone(),
+                    create_ec2_client(Region::new(region.clone())).await,
+                );
+                let ec2_client = ec2_clients.get(region).unwrap();
+                let vpc_cidr = vpc_cidrs.get(region).unwrap();
+                let vpc_id = create_vpc(ec2_client, vpc_cidr, &tag).await?;
+                let igw_id = create_and_attach_igw(ec2_client, &vpc_id, &tag).await?;
+                let route_table_id = create_route_table(ec2_client, &vpc_id, &igw_id, &tag).await?;
+                let subnet_cidr = subnet_cidrs.get(region).unwrap();
+                let subnet_id =
+                    create_subnet(ec2_client, &vpc_id, &route_table_id, subnet_cidr, &tag).await?;
                 let monitoring_sg_id = if *region == MONITORING_REGION {
                     Some(
-                        create_security_group_monitoring(&ec2_client, &vpc_id, &deployer_ip, &tag)
+                        create_security_group_monitoring(ec2_client, &vpc_id, &deployer_ip, &tag)
                             .await?,
                     )
                 } else {
@@ -157,6 +172,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     region.clone(),
                     RegionResources {
                         vpc_id,
+                        vpc_cidr: vpc_cidr.clone(),
+                        route_table_id,
                         subnet_id,
                         regular_sg_id: None,
                         monitoring_sg_id,
@@ -164,17 +181,54 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 );
             }
 
+            // Setup VPC peering connections
+            let monitoring_region = MONITORING_REGION.to_string();
+            let monitoring_resources = region_resources.get(&monitoring_region).unwrap();
+            let monitoring_vpc_id = &monitoring_resources.vpc_id;
+            let monitoring_cidr = &monitoring_resources.vpc_cidr;
+            let regular_regions: HashSet<String> =
+                config.instances.iter().map(|i| i.region.clone()).collect();
+            for region in &regions {
+                if region != &monitoring_region && regular_regions.contains(region) {
+                    let regular_resources = region_resources.get(region).unwrap();
+                    let regular_vpc_id = &regular_resources.vpc_id;
+                    let regular_cidr = &regular_resources.vpc_cidr;
+                    let peer_id = create_vpc_peering_connection(
+                        &ec2_clients[&monitoring_region],
+                        monitoring_vpc_id,
+                        regular_vpc_id,
+                        region,
+                        &tag,
+                    )
+                    .await?;
+                    accept_vpc_peering_connection(&ec2_clients[region], &peer_id).await?;
+                    add_route(
+                        &ec2_clients[&monitoring_region],
+                        &monitoring_resources.route_table_id,
+                        regular_cidr,
+                        &peer_id,
+                    )
+                    .await?;
+                    add_route(
+                        &ec2_clients[region],
+                        &regular_resources.route_table_id,
+                        monitoring_cidr,
+                        &peer_id,
+                    )
+                    .await?;
+                }
+            }
+
             // Launch monitoring instance
             let monitoring_region = MONITORING_REGION.to_string();
-            let monitoring_resources = region_resources.get_mut(&monitoring_region).unwrap();
-            let monitoring_ec2_client =
-                create_ec2_client(Region::new(monitoring_region.clone())).await;
-            let ami_id = find_latest_ami(&monitoring_ec2_client).await?;
+            let monitoring_resources = region_resources.get(&monitoring_region).unwrap();
+            let monitoring_ec2_client = &ec2_clients[&monitoring_region];
+            let ami_id = find_latest_ami(monitoring_ec2_client).await?;
             let monitoring_instance_type =
                 InstanceType::try_parse(&config.monitoring.instance_type)
                     .expect("Invalid instance type");
             let monitoring_instance_id = launch_instances(
-                &monitoring_ec2_client,
+                monitoring_ec2_client,
                 &ami_id,
                 monitoring_instance_type,
                 &config.key.name,
@@ -186,17 +240,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .await?[0]
                 .clone();
             let monitoring_ip = wait_for_instances_running(
-                &monitoring_ec2_client,
+                monitoring_ec2_client,
                 &[monitoring_instance_id.clone()],
             )
             .await?[0]
                 .clone();
+            let monitoring_private_ip =
+                get_private_ip(monitoring_ec2_client, &monitoring_instance_id).await?;
 
             // Create regular security groups for each region
             for (region, resources) in region_resources.iter_mut() {
-                let ec2_client = create_ec2_client(Region::new(region.clone())).await;
+                let ec2_client = &ec2_clients[region];
                 let regular_sg_id = create_security_group_regular(
-                    &ec2_client,
+                    ec2_client,
                     &resources.vpc_id,
                     &deployer_ip,
                     &monitoring_ip,
@@ -213,15 +269,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 let key_name = config.key.name.clone();
                 let region = instance.region.clone();
                 let resources = region_resources.get(&region).unwrap();
-                let ec2_client = create_ec2_client(Region::new(region.clone())).await;
-                let ami_id = find_latest_ami(&ec2_client).await?;
+                let ec2_client = ec2_clients.get(&region).unwrap();
+                let ami_id = find_latest_ami(ec2_client).await?;
                 let instance_type = InstanceType::try_parse(&instance.instance_type)
                     .expect("Invalid instance type");
                 let regular_sg_id = resources.regular_sg_id.as_ref().unwrap();
                 let tag = tag.clone();
                 let future = async move {
                     let instance_id = launch_instances(
-                        &ec2_client,
+                        ec2_client,
                         &ami_id,
                         instance_type,
                         &key_name,
@@ -232,9 +288,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     )
                     .await?[0]
                         .clone();
-                    let ip = wait_for_instances_running(&ec2_client, &[instance_id.clone()])
-                        .await?[0]
-                        .clone();
+                    let ip = wait_for_instances_running(ec2_client, &[instance_id.clone()]).await?
+                        [0]
+                    .clone();
                     Ok::<Deployment, Box<dyn Error>>(Deployment {
                         instance: instance.clone(),
                         ip,
@@ -364,7 +420,7 @@ sudo systemctl enable grafana-server
                 let instance = deployment.instance.clone();
                 let ip = deployment.ip.clone();
                 let config = config.clone();
-                let monitoring_ip = monitoring_ip.clone();
+                let monitoring_private_ip = monitoring_private_ip.clone();
                 let peers_path = peers_path.clone();
                 let future = async move {
                     // Upload binary, config, and peers
@@ -416,7 +472,7 @@ scrape_configs:
           instance: {}
           __path__: /var/log/binary.log
 "#,
-                        monitoring_ip, instance.name
+                        monitoring_private_ip, instance.name
                     );
                     let promtail_config_path =
                         temp_dir_path.join(format!("promtail_{}.yml", instance.name));
@@ -450,6 +506,51 @@ nohup /opt/promtail/promtail -config.file=/etc/promtail/promtail.yml &
                 .await
                 .into_iter()
                 .collect::<Result<Vec<_>, _>>()?;
+
+            // Update Monitoring Security Group to Restrict Port 3100
+            let monitoring_resources = region_resources.get(&monitoring_region).unwrap();
+            let monitoring_sg_id = monitoring_resources.monitoring_sg_id.as_ref().unwrap();
+            let monitoring_ec2_client = &ec2_clients[&monitoring_region];
+
+            if regular_regions.contains(&monitoring_region) {
+                let regular_sg_id = region_resources[&monitoring_region]
+                    .regular_sg_id
+                    .clone()
+                    .unwrap();
+                monitoring_ec2_client
+                    .authorize_security_group_ingress()
+                    .group_id(monitoring_sg_id)
+                    .ip_permissions(
+                        IpPermission::builder()
+                            .ip_protocol("tcp")
+                            .from_port(3100)
+                            .to_port(3100)
+                            .user_id_group_pairs(
+                                UserIdGroupPair::builder().group_id(regular_sg_id).build(),
+                            )
+                            .build(),
+                    )
+                    .send()
+                    .await?;
+            }
+            for region in &regions {
+                if region != &monitoring_region && regular_regions.contains(region) {
+                    let regular_cidr = &region_resources[region].vpc_cidr;
+                    monitoring_ec2_client
+                        .authorize_security_group_ingress()
+                        .group_id(monitoring_sg_id)
+                        .ip_permissions(
+                            IpPermission::builder()
+                                .ip_protocol("tcp")
+                                .from_port(3100)
+                                .to_port(3100)
+                                .ip_ranges(IpRange::builder().cidr_ip(regular_cidr).build())
+                                .build(),
+                        )
+                        .send()
+                        .await?;
+                }
+            }
 
             println!("Monitoring instance IP: {}", monitoring_ip);
             println!("Deployed to: {:?}", all_regular_ips);
@@ -490,6 +591,10 @@ nohup /opt/promtail/promtail -config.file=/etc/promtail/promtail.yml &
                 let subnet_ids = find_subnets_by_tag(&ec2_client, &tag).await?;
                 for subnet_id in subnet_ids {
                     delete_subnet(&ec2_client, &subnet_id).await?;
+                }
+                let peering_ids = find_vpc_peering_by_tag(&ec2_client, &tag).await?;
+                for peering_id in peering_ids {
+                    delete_vpc_peering(&ec2_client, &peering_id).await?;
                 }
                 let vpc_ids = find_vpcs_by_tag(&ec2_client, &tag).await?;
                 for vpc_id in vpc_ids {
@@ -542,10 +647,10 @@ async fn find_latest_ami(client: &Ec2Client) -> Result<String, Ec2Error> {
     Ok(latest_ami.to_string())
 }
 
-async fn create_vpc(client: &Ec2Client, tag: &str) -> Result<String, Ec2Error> {
+async fn create_vpc(client: &Ec2Client, cidr_block: &str, tag: &str) -> Result<String, Ec2Error> {
     let resp = client
         .create_vpc()
-        .cidr_block("10.0.0.0/16")
+        .cidr_block(cidr_block)
         .tag_specifications(
             TagSpecification::builder()
                 .resource_type(ResourceType::Vpc)
@@ -618,12 +723,13 @@ async fn create_subnet(
     client: &Ec2Client,
     vpc_id: &str,
     route_table_id: &str,
+    subnet_cidr: &str,
     tag: &str,
 ) -> Result<String, Ec2Error> {
     let subnet_resp = client
         .create_subnet()
         .vpc_id(vpc_id)
-        .cidr_block("10.0.1.0/24")
+        .cidr_block(subnet_cidr)
         .tag_specifications(
             TagSpecification::builder()
                 .resource_type(ResourceType::Subnet)
@@ -675,14 +781,6 @@ async fn create_security_group_monitoring(
                         .cidr_ip(format!("{}/32", deployer_ip))
                         .build(),
                 )
-                .build(),
-        )
-        .ip_permissions(
-            IpPermission::builder()
-                .ip_protocol("tcp")
-                .from_port(3100)
-                .to_port(3100)
-                .ip_ranges(IpRange::builder().cidr_ip("0.0.0.0/0").build())
                 .build(),
         )
         .send()
@@ -813,6 +911,92 @@ async fn wait_for_instances_running(
         }
         sleep(Duration::from_secs(5)).await;
     }
+}
+
+async fn get_private_ip(client: &Ec2Client, instance_id: &str) -> Result<String, Ec2Error> {
+    let resp = client
+        .describe_instances()
+        .instance_ids(instance_id)
+        .send()
+        .await?;
+    let reservations = resp.reservations.unwrap();
+    let instance = &reservations[0].instances.as_ref().unwrap()[0];
+    Ok(instance.private_ip_address.as_ref().unwrap().clone())
+}
+
+async fn create_vpc_peering_connection(
+    client: &Ec2Client,
+    requester_vpc_id: &str,
+    peer_vpc_id: &str,
+    peer_region: &str,
+    tag: &str,
+) -> Result<String, Ec2Error> {
+    let resp = client
+        .create_vpc_peering_connection()
+        .vpc_id(requester_vpc_id)
+        .peer_vpc_id(peer_vpc_id)
+        .peer_region(peer_region)
+        .tag_specifications(
+            TagSpecification::builder()
+                .resource_type(ResourceType::VpcPeeringConnection)
+                .tags(Tag::builder().key("deployer").value(tag).build())
+                .build(),
+        )
+        .send()
+        .await?;
+    Ok(resp
+        .vpc_peering_connection
+        .unwrap()
+        .vpc_peering_connection_id
+        .unwrap())
+}
+
+async fn accept_vpc_peering_connection(client: &Ec2Client, peer_id: &str) -> Result<(), Ec2Error> {
+    client
+        .accept_vpc_peering_connection()
+        .vpc_peering_connection_id(peer_id)
+        .send()
+        .await?;
+    Ok(())
+}
+
+async fn add_route(
+    client: &Ec2Client,
+    route_table_id: &str,
+    destination_cidr: &str,
+    peer_id: &str,
+) -> Result<(), Ec2Error> {
+    client
+        .create_route()
+        .route_table_id(route_table_id)
+        .destination_cidr_block(destination_cidr)
+        .vpc_peering_connection_id(peer_id)
+        .send()
+        .await?;
+    Ok(())
+}
+
+async fn find_vpc_peering_by_tag(client: &Ec2Client, tag: &str) -> Result<Vec<String>, Ec2Error> {
+    let resp = client
+        .describe_vpc_peering_connections()
+        .filters(Filter::builder().name("tag:deployer").values(tag).build())
+        .send()
+        .await?;
+    Ok(resp
+        .vpc_peering_connections
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| p.vpc_peering_connection_id.unwrap())
+        .collect())
+}
+
+async fn delete_vpc_peering(client: &Ec2Client, peering_id: &str) -> Result<(), Ec2Error> {
+    client
+        .delete_vpc_peering_connection()
+        .vpc_peering_connection_id(peering_id)
+        .send()
+        .await?;
+    Ok(())
 }
 
 fn generate_prometheus_config(ips: &[String]) -> String {
