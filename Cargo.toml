@@ -19,6 +19,7 @@ resolver = "2"
 commonware-broadcast = { version = "0.0.3", path = "broadcast" }
 commonware-consensus = { version = "0.0.10", path = "consensus" }
 commonware-cryptography = { version = "0.0.21", path = "cryptography" }
+commonware-deployer = { version = "0.0.2", path = "deployer" }
 commonware-macros = { version = "0.0.12", path = "macros" }
 commonware-p2p = { version = "0.0.32", path = "p2p" }
 commonware-runtime = { version = "0.0.18", path = "runtime" }

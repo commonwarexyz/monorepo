@@ -1,0 +1,23 @@
+[package]
+name = "commonware-deployer"
+edition = "2021"
+publish = true
+version = "0.0.2"
+license = "MIT OR Apache-2.0"
+description = "TBD"
+readme = "README.md"
+homepage = "https://commonware.xyz"
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/deployer"
+documentation = "https://docs.rs/commonware-deployer"
+
+[dependencies]
+aws-config = "0.56"
+aws-sdk-ec2 = "0.56"
+clap = "2.34"
+futures = "0.3"
+reqwest = { version = "0.11", features = ["blocking"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
+tempdir = "0.3"
+tokio = { version = "1.0", features = ["full"] }
+uuid = { version = "1.0", features = ["v4"] }
