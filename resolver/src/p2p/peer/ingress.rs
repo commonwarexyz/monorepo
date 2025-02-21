@@ -1,18 +1,14 @@
-use bytes::Bytes;
-use futures::{
-    channel::{mpsc, oneshot},
-    SinkExt,
-};
+use crate::Resolver;
+use commonware_cryptography::Array;
+use futures::{channel::mpsc, SinkExt};
 
-use crate::{Client, Key};
-
+/// Messages that can be sent to the peer actor.
 pub enum Message<K> {
-    Fetch {
-        key: K,
-        response: oneshot::Sender<Bytes>,
-    },
+    Fetch { key: K },
+    Cancel { key: K },
 }
 
+/// A way to send messages to the peer actor.
 #[derive(Clone)]
 pub struct Mailbox<K> {
     sender: mpsc::Sender<Message<K>>,
@@ -24,18 +20,20 @@ impl<K> Mailbox<K> {
     }
 }
 
-impl<K: Key> Client for Mailbox<K> {
+impl<K: Array> Resolver for Mailbox<K> {
     type Key = K;
 
-    async fn fetch(&mut self, key: Self::Key) -> oneshot::Receiver<Bytes> {
-        let (sender, receiver) = oneshot::channel();
+    async fn fetch(&mut self, key: Self::Key) {
         self.sender
-            .send(Message::Fetch {
-                key,
-                response: sender,
-            })
+            .send(Message::Fetch { key })
             .await
-            .expect("Failed to send notarization");
-        receiver
+            .expect("Failed to send fetch");
+    }
+
+    async fn cancel(&mut self, key: Self::Key) {
+        self.sender
+            .send(Message::Cancel { key })
+            .await
+            .expect("Failed to send cancel_fetch");
     }
 }
