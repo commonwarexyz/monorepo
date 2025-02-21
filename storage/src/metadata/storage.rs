@@ -166,6 +166,13 @@ impl<B: Blob, E: Clock + Storage<B>> Metadata<B, E> {
         self.data.get(&key)
     }
 
+    /// Clear all values from `Metadata`. The new state will not be persisted until `sync` is
+    /// called.
+    pub fn clear(&mut self) {
+        self.data.clear();
+        self.keys.set(0);
+    }
+
     /// Put a value into `Metadata`.
     ///
     /// If the key already exists, the value will be overwritten. The

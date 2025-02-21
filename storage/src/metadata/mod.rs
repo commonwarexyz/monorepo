@@ -107,7 +107,7 @@ mod tests {
     use std::time::UNIX_EPOCH;
 
     #[test_traced]
-    fn test_put_get() {
+    fn test_put_get_clear() {
         // Initialize the deterministic runtime
         let (executor, context, _) = Executor::default();
         executor.start(async move {
@@ -163,7 +163,7 @@ mod tests {
                 registry: registry.clone(),
                 partition: "test".to_string(),
             };
-            let metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
 
             // Check last update (increment by 1 over the previous)
             let last_update = metadata.last_update().unwrap();
@@ -181,6 +181,17 @@ mod tests {
             // Get the key
             let value = metadata.get(key).unwrap();
             assert_eq!(value, &hello);
+
+            // Test clearing the metadata store
+            metadata.clear();
+            let value = metadata.get(key);
+            assert!(value.is_none());
+
+            // Check metrics
+            let mut buffer = String::new();
+            encode(&mut buffer, &registry.lock().unwrap()).unwrap();
+            assert!(buffer.contains("syncs_total 0"));
+            assert!(buffer.contains("keys 0"));
         });
     }
 
