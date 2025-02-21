@@ -10,6 +10,7 @@ use futures::future::join_all;
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::error::Error;
+use std::i32;
 use tempdir::TempDir;
 use tokio::process::Command;
 use tokio::time::{sleep, Duration};
@@ -245,6 +246,7 @@ sudo systemctl enable grafana-server
             let mut launch_futures = Vec::new();
             for instance in &config.instances {
                 let deployer_ip = deployer_ip.clone();
+                let monitoring_ip = monitoring_ip.clone();
                 let instance = instance.clone();
                 let config = config.clone();
                 let tag = tag.clone();
@@ -258,9 +260,14 @@ sudo systemctl enable grafana-server
                         create_route_table(&ec2_client, &vpc_id, &igw_id, &tag).await?;
                     let subnet_id =
                         create_subnet(&ec2_client, &vpc_id, &route_table_id, &tag).await?;
-                    let sg_regular =
-                        create_security_group_regular(&ec2_client, &vpc_id, &deployer_ip, &tag)
-                            .await?;
+                    let sg_regular = create_security_group_regular(
+                        &ec2_client,
+                        &vpc_id,
+                        &deployer_ip,
+                        &monitoring_ip,
+                        &tag,
+                    )
+                    .await?;
                     let instance_type = InstanceType::try_parse(&instance.instance_type)
                         .expect("Invalid instance type");
                     let instance_id = launch_instances(
@@ -611,29 +618,13 @@ async fn create_security_group_monitoring(
         .ip_permissions(
             IpPermission::builder()
                 .ip_protocol("tcp")
-                .from_port(22)
-                .to_port(22)
+                .from_port(0)
+                .to_port(65535)
                 .ip_ranges(
                     IpRange::builder()
                         .cidr_ip(format!("{}/32", deployer_ip))
                         .build(),
                 )
-                .build(),
-        )
-        .ip_permissions(
-            IpPermission::builder()
-                .ip_protocol("tcp")
-                .from_port(9090)
-                .to_port(9090)
-                .ip_ranges(IpRange::builder().cidr_ip("0.0.0.0/0").build())
-                .build(),
-        )
-        .ip_permissions(
-            IpPermission::builder()
-                .ip_protocol("tcp")
-                .from_port(3000)
-                .to_port(3000)
-                .ip_ranges(IpRange::builder().cidr_ip("0.0.0.0/0").build())
                 .build(),
         )
         .ip_permissions(
@@ -653,6 +644,7 @@ async fn create_security_group_regular(
     client: &Ec2Client,
     vpc_id: &str,
     deployer_ip: &str,
+    monitoring_ip: &str,
     tag: &str,
 ) -> Result<String, Ec2Error> {
     let sg_resp = client
@@ -675,8 +667,8 @@ async fn create_security_group_regular(
         .ip_permissions(
             IpPermission::builder()
                 .ip_protocol("tcp")
-                .from_port(22)
-                .to_port(22)
+                .from_port(0)
+                .to_port(65535)
                 .ip_ranges(
                     IpRange::builder()
                         .cidr_ip(format!("{}/32", deployer_ip))
@@ -689,7 +681,23 @@ async fn create_security_group_regular(
                 .ip_protocol("tcp")
                 .from_port(9080)
                 .to_port(9080)
-                .ip_ranges(IpRange::builder().cidr_ip("0.0.0.0/0").build())
+                .ip_ranges(
+                    IpRange::builder()
+                        .cidr_ip(format!("{}/32", monitoring_ip))
+                        .build(),
+                )
+                .build(),
+        )
+        .ip_permissions(
+            IpPermission::builder()
+                .ip_protocol("tcp")
+                .from_port(9100)
+                .to_port(9100)
+                .ip_ranges(
+                    IpRange::builder()
+                        .cidr_ip(format!("{}/32", monitoring_ip))
+                        .build(),
+                )
                 .build(),
         )
         .send()
