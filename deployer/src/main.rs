@@ -2,16 +2,14 @@ use aws_config::Region;
 use aws_sdk_ec2::error::BuildError;
 use aws_sdk_ec2::types::{
     Filter, InstanceStateName, InstanceType, IpPermission, IpRange, ResourceType, Tag,
-    TagSpecification, UserIdGroupPair,
+    TagSpecification,
 };
 use aws_sdk_ec2::{Client as Ec2Client, Error as Ec2Error};
 use clap::{App, Arg, SubCommand};
 use futures::future::join_all;
-use reqwest;
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::error::Error;
-use std::path::Path;
 use tempdir::TempDir;
 use tokio::process::Command;
 use tokio::time::{sleep, Duration};
@@ -53,6 +51,13 @@ struct InstanceConfig {
     instance_type: String,
     binary: String,
     config: String,
+}
+
+#[derive(Clone)]
+struct Deployment {
+    instance: InstanceConfig,
+    instance_id: String,
+    ip: String,
 }
 
 #[derive(Deserialize, Clone)]
@@ -236,19 +241,16 @@ sudo systemctl enable grafana-server
             );
             ssh_execute(&config.key.file, &monitoring_ip, &install_monitoring_cmd).await?;
 
-            // Deploy regular instances
+            // Deploy instances
             let tempdir_path = temp_dir.path();
-            let mut deploy_futures = Vec::new();
+            let mut launch_futures = Vec::new();
             for instance in &config.instances {
                 let deployer_ip = deployer_ip.clone();
                 let instance = instance.clone();
                 let config = config.clone();
                 let tag = tag.clone();
-                let monitoring_ip = monitoring_ip.clone();
-                let instance_type = InstanceType::try_parse(&instance.instance_type)
-                    .expect("Invalid instance type");
-                let region = Region::new(instance.region);
                 let future = async move {
+                    let region = Region::new(instance.region.clone());
                     let ec2_client = create_ec2_client(region).await;
                     let ami_id = find_latest_ami(&ec2_client).await?;
                     let vpc_id = create_vpc(&ec2_client, &tag).await?;
@@ -260,6 +262,8 @@ sudo systemctl enable grafana-server
                     let sg_regular =
                         create_security_group_regular(&ec2_client, &vpc_id, &deployer_ip, &tag)
                             .await?;
+                    let instance_type = InstanceType::try_parse(&instance.instance_type)
+                        .expect("Invalid instance type");
                     let instance_id = launch_instances(
                         &ec2_client,
                         &ami_id,
@@ -276,7 +280,37 @@ sudo systemctl enable grafana-server
                         .await?[0]
                         .clone();
 
-                    // Upload binary and config
+                    Ok::<Deployment, Box<dyn Error>>(Deployment {
+                        instance,
+                        instance_id,
+                        ip,
+                    })
+                };
+                launch_futures.push(future);
+            }
+
+            // Collect IPs
+            let deployments: Vec<Deployment> = join_all(launch_futures)
+                .await
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()?;
+            let all_ips: Vec<String> = deployments.iter().map(|d| d.ip.clone()).collect();
+
+            // Create peers.yaml with all IPs
+            let peers_yaml = serde_yaml::to_string(&all_ips)?;
+            let peers_path = tempdir_path.join("peers.yaml");
+            std::fs::write(&peers_path, peers_yaml)?;
+
+            // Deploy regular instances: Phase 2 - Configure instances
+            let mut start_futures = Vec::new();
+            for deployment in &deployments {
+                let instance = deployment.instance.clone();
+                let ip = deployment.ip.clone();
+                let config = config.clone();
+                let monitoring_ip = monitoring_ip.clone();
+                let peers_path = peers_path.clone();
+                let future = async move {
+                    // Upload binary, config, and peers
                     scp_file(
                         &config.key.file,
                         &instance.binary,
@@ -291,11 +325,18 @@ sudo systemctl enable grafana-server
                         "/home/ubuntu/config.conf",
                     )
                     .await?;
+                    scp_file(
+                        &config.key.file,
+                        peers_path.to_str().unwrap(),
+                        &ip,
+                        "/home/ubuntu/peers.yaml",
+                    )
+                    .await?;
 
                     // Create log file and start binary with logging
                     let create_log_cmd = "sudo touch /var/log/binary.log && sudo chown ubuntu:ubuntu /var/log/binary.log";
                     ssh_execute(&config.key.file, &ip, create_log_cmd).await?;
-                    let run_cmd = "chmod +x /home/ubuntu/binary && nohup /home/ubuntu/binary --config /home/ubuntu/config.conf > /var/log/binary.log 2>&1 &";
+                    let run_cmd = "chmod +x /home/ubuntu/binary && nohup /home/ubuntu/binary --peers /home/ubuntu/peers.yaml --config /home/ubuntu/config.conf > /var/log/binary.log 2>&1 &";
                     ssh_execute(&config.key.file, &ip, run_cmd).await?;
 
                     // Install and configure Promtail
@@ -346,9 +387,9 @@ nohup /opt/promtail/promtail -config.file=/etc/promtail/promtail.yml &
 
                     Ok::<String, Box<dyn Error>>(ip)
                 };
-                deploy_futures.push(future);
+                start_futures.push(future);
             }
-            let all_regular_ips = join_all(deploy_futures)
+            let all_regular_ips = join_all(start_futures)
                 .await
                 .into_iter()
                 .collect::<Result<Vec<_>, _>>()?;
@@ -442,7 +483,7 @@ async fn find_latest_ami(client: &Ec2Client) -> Result<String, Ec2Error> {
         )));
     }
     images.sort_by(|a, b| b.creation_date().cmp(&a.creation_date()));
-    let latest_ami = images[0].image_id().unwrap().clone();
+    let latest_ami = images[0].image_id().unwrap();
     Ok(latest_ami.to_string())
 }
 
