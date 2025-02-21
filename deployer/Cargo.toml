@@ -11,8 +11,8 @@ repository = "https://github.com/commonwarexyz/monorepo/tree/main/deployer"
 documentation = "https://docs.rs/commonware-deployer"
 
 [dependencies]
-aws-config = "0.56"
-aws-sdk-ec2 = "0.56"
+aws-config = "1.5.16"
+aws-sdk-ec2 = "1.110.0"
 clap = "2.34"
 futures = "0.3"
 reqwest = { version = "0.11", features = ["blocking"] }

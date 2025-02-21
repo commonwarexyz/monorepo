@@ -3,6 +3,7 @@ members = [
     "broadcast",
     "consensus",
     "cryptography",
+    "deployer",
     "macros",
     "p2p",
     "runtime",
