@@ -5,6 +5,7 @@ use commonware_cryptography::{
     Ed25519, Scheme,
 };
 use commonware_deployer::Peers;
+use commonware_flood::Config;
 use commonware_p2p::{authenticated, Receiver, Recipients, Sender};
 use commonware_runtime::{
     tokio::{self, Executor},
@@ -15,7 +16,6 @@ use futures::future::try_join_all;
 use governor::Quota;
 use prometheus_client::{encoding::text::encode, registry::Registry};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
-use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -27,15 +27,6 @@ use tracing::{error, info, Level};
 
 const FLOOD_NAMESPACE: &[u8] = b"_COMMONWARE_FLOOD";
 const METRICS_PORT: u16 = 9090;
-
-#[derive(Deserialize, Serialize)]
-pub struct Config {
-    pub private_key: String,
-    pub port: u16,
-    pub allowed_peers: Vec<String>,
-    pub bootstrappers: Vec<String>,
-    pub message_size: usize,
-}
 
 async fn metrics_handler(registries: Extension<Vec<Arc<Mutex<Registry>>>>) -> String {
     let mut buffer = String::new();
