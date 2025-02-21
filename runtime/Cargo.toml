@@ -22,6 +22,7 @@ bytes = { workspace = true }
 sha2 = { workspace = true }
 governor = { workspace = true }
 prometheus-client = { workspace = true }
+axum = "0.8.1"
 
 # Enable "js" feature when WASM is target
 [target.'cfg(target_arch = "wasm32")'.dependencies.getrandom]

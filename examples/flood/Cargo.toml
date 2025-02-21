@@ -22,6 +22,8 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["fmt", "json"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
+governor = { workspace = true }
+axum = "0.8.1"
 
 [[bin]]
 name = "commonware-flood"
