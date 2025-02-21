@@ -7,9 +7,11 @@ use aws_sdk_ec2::types::{
 use aws_sdk_ec2::{Client as Ec2Client, Error as Ec2Error};
 use clap::{App, Arg, SubCommand};
 use futures::future::join_all;
+use reqwest::blocking;
 use serde::Deserialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
+use std::fs::File;
 use tempdir::TempDir;
 use tokio::process::Command;
 use tokio::time::{sleep, Duration};
@@ -78,6 +80,13 @@ struct Config {
     monitoring: MonitoringConfig,
 }
 
+struct RegionResources {
+    vpc_id: String,
+    subnet_id: String,
+    regular_sg_id: Option<String>,
+    monitoring_sg_id: Option<String>,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let matches = App::new("deployer")
@@ -97,7 +106,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .get_matches();
 
     // Determine deployer IP
-    let deployer_ip = reqwest::blocking::get("http://icanhazip.com")?
+    let deployer_ip = blocking::get("http://icanhazip.com")?
         .text()?
         .trim()
         .to_string();
@@ -105,26 +114,50 @@ async fn main() -> Result<(), Box<dyn Error>> {
     match matches.subcommand() {
         ("setup", Some(sub_m)) => {
             let config_path = sub_m.value_of("config").unwrap();
-            let config_file = std::fs::File::open(config_path)?;
+            let config_file = File::open(config_path)?;
             let config: Config = serde_yaml::from_reader(config_file)?;
 
             let tag = Uuid::new_v4().to_string();
-            let monitoring_region = Region::new(MONITORING_REGION);
-            let monitoring_ec2_client = create_ec2_client(monitoring_region).await;
+
+            // Determine unique regions
+            let mut regions: HashSet<String> =
+                config.instances.iter().map(|i| i.region.clone()).collect();
+            regions.insert(MONITORING_REGION.to_string());
+
+            // Create resources per region
+            let mut region_resources = HashMap::new();
+            for region in &regions {
+                let ec2_client = create_ec2_client(Region::new(region.clone())).await;
+                let vpc_id = create_vpc(&ec2_client, &tag).await?;
+                let igw_id = create_and_attach_igw(&ec2_client, &vpc_id, &tag).await?;
+                let route_table_id =
+                    create_route_table(&ec2_client, &vpc_id, &igw_id, &tag).await?;
+                let subnet_id = create_subnet(&ec2_client, &vpc_id, &route_table_id, &tag).await?;
+                let monitoring_sg_id = if *region == MONITORING_REGION {
+                    Some(
+                        create_security_group_monitoring(&ec2_client, &vpc_id, &deployer_ip, &tag)
+                            .await?,
+                    )
+                } else {
+                    None
+                };
+                region_resources.insert(
+                    region.clone(),
+                    RegionResources {
+                        vpc_id,
+                        subnet_id,
+                        regular_sg_id: None,
+                        monitoring_sg_id,
+                    },
+                );
+            }
+
+            // Launch monitoring instance
+            let monitoring_region = MONITORING_REGION.to_string();
+            let monitoring_resources = region_resources.get_mut(&monitoring_region).unwrap();
+            let monitoring_ec2_client =
+                create_ec2_client(Region::new(monitoring_region.clone())).await;
             let ami_id = find_latest_ami(&monitoring_ec2_client).await?;
-            let vpc_id = create_vpc(&monitoring_ec2_client, &tag).await?;
-            let igw_id = create_and_attach_igw(&monitoring_ec2_client, &vpc_id, &tag).await?;
-            let route_table_id =
-                create_route_table(&monitoring_ec2_client, &vpc_id, &igw_id, &tag).await?;
-            let subnet_id =
-                create_subnet(&monitoring_ec2_client, &vpc_id, &route_table_id, &tag).await?;
-            let sg_monitoring = create_security_group_monitoring(
-                &monitoring_ec2_client,
-                &vpc_id,
-                &deployer_ip,
-                &tag,
-            )
-            .await?;
             let monitoring_instance_type =
                 InstanceType::try_parse(&config.monitoring.instance_type)
                     .expect("Invalid instance type");
@@ -133,8 +166,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 &ami_id,
                 monitoring_instance_type,
                 &config.key.name,
-                &subnet_id,
-                &sg_monitoring,
+                &monitoring_resources.subnet_id,
+                monitoring_resources.monitoring_sg_id.as_ref().unwrap(),
                 1,
                 &tag,
             )
@@ -147,9 +180,71 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .await?[0]
                 .clone();
 
-            // Configure monitoring instance with Prometheus, Grafana, and Loki
-            let prom_config = generate_prometheus_config(&[]); // Will update with IPs later if needed
+            // Create regular security groups for each region
+            for (region, resources) in region_resources.iter_mut() {
+                let ec2_client = create_ec2_client(Region::new(region.clone())).await;
+                let regular_sg_id = create_security_group_regular(
+                    &ec2_client,
+                    &resources.vpc_id,
+                    &deployer_ip,
+                    &monitoring_ip,
+                    &tag,
+                )
+                .await?;
+                resources.regular_sg_id = Some(regular_sg_id);
+            }
+
+            // Launch regular instances
             let temp_dir = TempDir::new("deployer")?;
+            let mut launch_futures = Vec::new();
+            for instance in &config.instances {
+                let key_name = config.key.name.clone();
+                let region = instance.region.clone();
+                let resources = region_resources.get(&region).unwrap();
+                let ec2_client = create_ec2_client(Region::new(region.clone())).await;
+                let ami_id = find_latest_ami(&ec2_client).await?;
+                let instance_type = InstanceType::try_parse(&instance.instance_type)
+                    .expect("Invalid instance type");
+                let regular_sg_id = resources.regular_sg_id.as_ref().unwrap();
+                let tag = tag.clone();
+                let future = async move {
+                    let instance_id = launch_instances(
+                        &ec2_client,
+                        &ami_id,
+                        instance_type,
+                        &key_name,
+                        &resources.subnet_id,
+                        regular_sg_id,
+                        1,
+                        &tag,
+                    )
+                    .await?[0]
+                        .clone();
+                    let ip = wait_for_instances_running(&ec2_client, &[instance_id.clone()])
+                        .await?[0]
+                        .clone();
+                    Ok::<Deployment, Box<dyn Error>>(Deployment {
+                        instance: instance.clone(),
+                        ip,
+                    })
+                };
+                launch_futures.push(future);
+            }
+
+            // Collect deployments
+            let deployments: Vec<Deployment> = join_all(launch_futures)
+                .await
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()?;
+            let all_ips: Vec<String> = deployments.iter().map(|d| d.ip.clone()).collect();
+
+            // Create peers.yaml with all IPs
+            let peers_yaml = serde_yaml::to_string(&all_ips)?;
+            let peers_path = temp_dir.path().join("peers.yaml");
+            std::fs::write(&peers_path, peers_yaml)?;
+
+            // Configure monitoring instance
+            let prom_config = generate_prometheus_config(&all_ips);
             let prom_path = temp_dir.path().join("prometheus.yml");
             std::fs::write(&prom_path, prom_config)?;
             let datasources_path = temp_dir.path().join("datasources.yml");
@@ -240,69 +335,8 @@ sudo systemctl enable grafana-server
             );
             ssh_execute(&config.key.file, &monitoring_ip, &install_monitoring_cmd).await?;
 
-            // Deploy instances
-            let tempdir_path = temp_dir.path();
-            let mut launch_futures = Vec::new();
-            for instance in &config.instances {
-                let deployer_ip = deployer_ip.clone();
-                let monitoring_ip = monitoring_ip.clone();
-                let instance = instance.clone();
-                let config = config.clone();
-                let tag = tag.clone();
-                let future = async move {
-                    let region = Region::new(instance.region.clone());
-                    let ec2_client = create_ec2_client(region).await;
-                    let ami_id = find_latest_ami(&ec2_client).await?;
-                    let vpc_id = create_vpc(&ec2_client, &tag).await?;
-                    let igw_id = create_and_attach_igw(&ec2_client, &vpc_id, &tag).await?;
-                    let route_table_id =
-                        create_route_table(&ec2_client, &vpc_id, &igw_id, &tag).await?;
-                    let subnet_id =
-                        create_subnet(&ec2_client, &vpc_id, &route_table_id, &tag).await?;
-                    let sg_regular = create_security_group_regular(
-                        &ec2_client,
-                        &vpc_id,
-                        &deployer_ip,
-                        &monitoring_ip,
-                        &tag,
-                    )
-                    .await?;
-                    let instance_type = InstanceType::try_parse(&instance.instance_type)
-                        .expect("Invalid instance type");
-                    let instance_id = launch_instances(
-                        &ec2_client,
-                        &ami_id,
-                        instance_type,
-                        &config.key.name,
-                        &subnet_id,
-                        &sg_regular,
-                        1,
-                        &tag,
-                    )
-                    .await?[0]
-                        .clone();
-                    let ip = wait_for_instances_running(&ec2_client, &[instance_id.clone()])
-                        .await?[0]
-                        .clone();
-
-                    Ok::<Deployment, Box<dyn Error>>(Deployment { instance, ip })
-                };
-                launch_futures.push(future);
-            }
-
-            // Collect IPs
-            let deployments: Vec<Deployment> = join_all(launch_futures)
-                .await
-                .into_iter()
-                .collect::<Result<Vec<_>, _>>()?;
-            let all_ips: Vec<String> = deployments.iter().map(|d| d.ip.clone()).collect();
-
-            // Create peers.yaml with all IPs
-            let peers_yaml = serde_yaml::to_string(&all_ips)?;
-            let peers_path = tempdir_path.join("peers.yaml");
-            std::fs::write(&peers_path, peers_yaml)?;
-
-            // Deploy regular instances: Phase 2 - Configure instances
+            // Configure regular instances
+            let temp_dir_path = temp_dir.path();
             let mut start_futures = Vec::new();
             for deployment in &deployments {
                 let instance = deployment.instance.clone();
@@ -363,7 +397,7 @@ scrape_configs:
                         monitoring_ip, instance.name
                     );
                     let promtail_config_path =
-                        tempdir_path.join(format!("promtail_{}.yml", instance.name));
+                        temp_dir_path.join(format!("promtail_{}.yml", instance.name));
                     std::fs::write(&promtail_config_path, promtail_config)?;
                     scp_file(
                         &config.key.file,
@@ -401,18 +435,14 @@ nohup /opt/promtail/promtail -config.file=/etc/promtail/promtail.yml &
         }
         ("teardown", Some(sub_m)) => {
             let tag = sub_m.value_of("tag").unwrap().to_string();
-
-            // Read config file
             let config_path = sub_m.value_of("config").unwrap();
-            let config_file = std::fs::File::open(config_path)?;
+            let config_file = File::open(config_path)?;
             let config: Config = serde_yaml::from_reader(config_file)?;
             let mut all_regions = HashSet::new();
             all_regions.insert(MONITORING_REGION.to_string());
             for instance in &config.instances {
                 all_regions.insert(instance.region.clone());
             }
-
-            // Iterate over all regions
             for region in all_regions {
                 let region = Region::new(region);
                 let ec2_client = create_ec2_client(region).await;
@@ -452,8 +482,7 @@ nohup /opt/promtail/promtail -config.file=/etc/promtail/promtail.yml &
     Ok(())
 }
 
-// ### Helper Functions
-
+// Helper functions remain the same as in the original code
 async fn create_ec2_client(region: Region) -> Ec2Client {
     let config = aws_config::defaults(BehaviorVersion::latest())
         .region(region)
