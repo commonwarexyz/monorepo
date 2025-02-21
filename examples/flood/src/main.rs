@@ -5,7 +5,6 @@ use commonware_cryptography::{
 };
 use commonware_deployer::Peers;
 use commonware_utils::{from_hex, from_hex_formatted};
-use reqwest::blocking;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
@@ -34,14 +33,6 @@ fn main() {
         .arg(Arg::new("config").required(true))
         .get_matches();
 
-    // Get public IP
-    let ip = blocking::get("http://icanhazip.com")
-        .expect("Could not get public IP")
-        .text()
-        .expect("Could not parse public IP")
-        .trim()
-        .to_string();
-
     // Load peers
     let peer_file = matches.get_one::<String>("peers").unwrap();
     let peers_file = std::fs::read_to_string(peer_file).expect("Could not read peers file");
@@ -55,6 +46,13 @@ fn main() {
     let key = from_hex_formatted(&config.private_key).expect("Could not parse private key");
     let key = PrivateKey::try_from(key).expect("Private key is invalid");
     let signer = <Ed25519 as Scheme>::from(key).expect("Could not create signer");
+    let public_key = signer.public_key().to_string();
+    let ip = peers
+        .peers
+        .iter()
+        .find(|peer| peer.name == public_key)
+        .map(|peer| peer.ip.clone())
+        .expect("Could not find self in IPs");
     info!(
         key = ?signer.public_key(),
         ip,

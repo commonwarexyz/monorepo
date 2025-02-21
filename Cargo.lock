@@ -902,7 +902,6 @@ dependencies = [
  "commonware-runtime",
  "commonware-utils",
  "prometheus-client",
- "reqwest",
  "serde",
  "serde_yaml",
  "tracing",
