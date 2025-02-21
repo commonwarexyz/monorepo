@@ -47,6 +47,13 @@ providers:
 "#;
 
 #[derive(Deserialize, Clone)]
+struct PortConfig {
+    protocol: String,
+    port: u16,
+    cidr: String,
+}
+
+#[derive(Deserialize, Clone)]
 struct InstanceConfig {
     name: String,
     region: String,
@@ -78,6 +85,7 @@ struct Config {
     instances: Vec<InstanceConfig>,
     key: KeyConfig,
     monitoring: MonitoringConfig,
+    ports: Vec<PortConfig>,
 }
 
 struct RegionResources {
@@ -89,14 +97,14 @@ struct RegionResources {
     monitoring_sg_id: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 struct Peer {
     name: String,
     region: String,
     ip: String,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 struct Peers {
     peers: Vec<Peer>,
 }
@@ -257,6 +265,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     &deployer_ip,
                     &monitoring_ip,
                     &tag,
+                    &config.ports,
                 )
                 .await?;
                 resources.regular_sg_id = Some(regular_sg_id);
@@ -794,6 +803,7 @@ async fn create_security_group_regular(
     deployer_ip: &str,
     monitoring_ip: &str,
     tag: &str,
+    ports: &[PortConfig],
 ) -> Result<String, Ec2Error> {
     let sg_resp = client
         .create_security_group()
@@ -809,7 +819,7 @@ async fn create_security_group_regular(
         .send()
         .await?;
     let sg_id = sg_resp.group_id.unwrap();
-    client
+    let mut builder = client
         .authorize_security_group_ingress()
         .group_id(&sg_id)
         .ip_permissions(
@@ -847,9 +857,19 @@ async fn create_security_group_regular(
                         .build(),
                 )
                 .build(),
-        )
-        .send()
-        .await?;
+        );
+    for port in ports {
+        builder = builder.ip_permissions(
+            IpPermission::builder()
+                .ip_protocol(&port.protocol)
+                .from_port(port.port as i32)
+                .to_port(port.port as i32)
+                .ip_ranges(IpRange::builder().cidr_ip(&port.cidr).build())
+                .build(),
+        );
+    }
+
+    builder.send().await?;
     Ok(sg_id)
 }
 
