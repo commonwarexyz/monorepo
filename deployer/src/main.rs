@@ -1,4 +1,4 @@
-use aws_config::Region;
+use aws_config::{BehaviorVersion, Region};
 use aws_sdk_ec2::error::BuildError;
 use aws_sdk_ec2::types::{
     Filter, InstanceStateName, InstanceType, IpPermission, IpRange, ResourceType, Tag,
@@ -56,7 +56,6 @@ struct InstanceConfig {
 #[derive(Clone)]
 struct Deployment {
     instance: InstanceConfig,
-    instance_id: String,
     ip: String,
 }
 
@@ -280,11 +279,7 @@ sudo systemctl enable grafana-server
                         .await?[0]
                         .clone();
 
-                    Ok::<Deployment, Box<dyn Error>>(Deployment {
-                        instance,
-                        instance_id,
-                        ip,
-                    })
+                    Ok::<Deployment, Box<dyn Error>>(Deployment { instance, ip })
                 };
                 launch_futures.push(future);
             }
@@ -454,7 +449,10 @@ nohup /opt/promtail/promtail -config.file=/etc/promtail/promtail.yml &
 // ### Helper Functions
 
 async fn create_ec2_client(region: Region) -> Ec2Client {
-    let config = aws_config::from_env().region(region).load().await;
+    let config = aws_config::defaults(BehaviorVersion::latest())
+        .region(region)
+        .load()
+        .await;
     Ec2Client::new(&config)
 }
 
@@ -699,6 +697,7 @@ async fn create_security_group_regular(
     Ok(sg_id)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn launch_instances(
     client: &Ec2Client,
     ami_id: &str,
