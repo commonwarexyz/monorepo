@@ -21,3 +21,10 @@ serde_yaml = "0.9"
 tempdir = "0.3"
 tokio = { version = "1.0", features = ["full"] }
 uuid = { version = "1.0", features = ["v4"] }
+
+[[bin]]
+name = "commonware-deployer"
+bench = false
+
+[lib]
+bench = false

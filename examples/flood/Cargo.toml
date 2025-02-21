@@ -1,0 +1,28 @@
+[package]
+name = "commonware-flood"
+edition = "2021"
+publish = true
+version = "0.0.10"
+license = "MIT OR Apache-2.0"
+description = "TBD"
+readme = "README.md"
+homepage = "https://commonware.xyz"
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/flood"
+documentation = "https://docs.rs/commonware-flood"
+
+[dependencies]
+commonware-cryptography = { workspace = true }
+commonware-runtime = { workspace = true }
+commonware-p2p = { workspace = true }
+commonware-deployer = { workspace = true }
+commonware-utils = { workspace = true }
+clap = { workspace = true }
+prometheus-client = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["fmt", "json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
+
+[[bin]]
+name = "commonware-flood"
+bench = false

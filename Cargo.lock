@@ -892,6 +892,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-flood"
+version = "0.0.10"
+dependencies = [
+ "clap 4.5.18",
+ "commonware-cryptography",
+ "commonware-deployer",
+ "commonware-p2p",
+ "commonware-runtime",
+ "commonware-utils",
+ "prometheus-client",
+ "serde",
+ "serde_yaml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "commonware-log"
 version = "0.0.10"
 dependencies = [

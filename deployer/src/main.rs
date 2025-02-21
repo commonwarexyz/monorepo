@@ -6,9 +6,9 @@ use aws_sdk_ec2::types::{
 };
 use aws_sdk_ec2::{Client as Ec2Client, Error as Ec2Error};
 use clap::{App, Arg, SubCommand};
+use commonware_deployer::{Config, InstanceConfig, Peer, Peers, PortConfig};
 use futures::future::join_all;
 use reqwest::blocking;
-use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::error::Error;
 use std::fs::File;
@@ -46,46 +46,10 @@ providers:
       path: /var/lib/grafana/dashboards
 "#;
 
-#[derive(Deserialize, Clone)]
-struct PortConfig {
-    protocol: String,
-    port: u16,
-    cidr: String,
-}
-
-#[derive(Deserialize, Clone)]
-struct InstanceConfig {
-    name: String,
-    region: String,
-    instance_type: String,
-    binary: String,
-    config: String,
-}
-
 #[derive(Clone)]
 struct Deployment {
     instance: InstanceConfig,
     ip: String,
-}
-
-#[derive(Deserialize, Clone)]
-struct MonitoringConfig {
-    instance_type: String,
-    dashboard: String,
-}
-
-#[derive(Deserialize, Clone)]
-struct KeyConfig {
-    name: String,
-    file: String,
-}
-
-#[derive(Deserialize, Clone)]
-struct Config {
-    instances: Vec<InstanceConfig>,
-    key: KeyConfig,
-    monitoring: MonitoringConfig,
-    ports: Vec<PortConfig>,
 }
 
 struct RegionResources {
@@ -97,18 +61,7 @@ struct RegionResources {
     monitoring_sg_id: Option<String>,
 }
 
-#[derive(Deserialize, Serialize)]
-struct Peer {
-    name: String,
-    region: String,
-    ip: String,
-}
-
-#[derive(Deserialize, Serialize)]
-struct Peers {
-    peers: Vec<Peer>,
-}
-
+// TODO: change name to ec2
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let matches = App::new("deployer")

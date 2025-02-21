@@ -11,6 +11,7 @@ members = [
     "utils",
     "examples/bridge",
     "examples/chat",
+    "examples/flood",
     "examples/log",
     "examples/vrf",
 ]
