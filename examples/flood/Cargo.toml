@@ -28,5 +28,11 @@ rand = { workspace = true }
 futures = { workspace = true }
 
 [[bin]]
-name = "commonware-flood"
+name = "runner"
+path = "src/bin/runner.rs"
+bench = false
+
+[[bin]]
+name = "setup"
+path = "src/bin/setup.rs"
 bench = false

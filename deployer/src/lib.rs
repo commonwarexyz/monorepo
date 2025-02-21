@@ -35,15 +35,8 @@ pub struct MonitoringConfig {
 }
 
 #[derive(Deserialize, Clone)]
-pub struct KeyConfig {
-    pub name: String,
-    pub file: String,
-}
-
-#[derive(Deserialize, Clone)]
 pub struct Config {
     pub instances: Vec<InstanceConfig>,
-    pub key: KeyConfig,
     pub monitoring: MonitoringConfig,
     pub ports: Vec<PortConfig>,
 }

@@ -1,5 +1,6 @@
 use aws_config::{BehaviorVersion, Region};
 use aws_sdk_ec2::error::BuildError;
+use aws_sdk_ec2::primitives::Blob;
 use aws_sdk_ec2::types::{
     Filter, InstanceStateName, InstanceType, IpPermission, IpRange, ResourceType, Tag,
     TagSpecification, UserIdGroupPair,
@@ -93,6 +94,30 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let config: Config = serde_yaml::from_reader(config_file)?;
 
             let tag = Uuid::new_v4().to_string();
+            let key_name = format!("deployer-{}", tag);
+            let temp_dir = TempDir::new("deployer")?;
+            let private_key_path = temp_dir.path().join(format!("id_rsa_{}", tag));
+            let public_key_path = temp_dir.path().join(format!("id_rsa_{}.pub", tag));
+
+            // Generate SSH key pair
+            let output = Command::new("ssh-keygen")
+                .arg("-t")
+                .arg("rsa")
+                .arg("-b")
+                .arg("4096")
+                .arg("-f")
+                .arg(private_key_path.to_str().unwrap())
+                .arg("-N")
+                .arg("")
+                .output()
+                .await?;
+            if !output.status.success() {
+                return Err(format!("Failed to generate SSH key: {:?}", output).into());
+            }
+
+            // Read public key
+            let public_key = std::fs::read_to_string(&public_key_path)?;
+            let private_key = private_key_path.to_str().unwrap();
 
             // Determine unique regions
             let mut regions: BTreeSet<String> =
@@ -140,6 +165,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         monitoring_sg_id,
                     },
                 );
+
+                // Import key pair to the region
+                import_key_pair(ec2_client, &key_name, &public_key).await?;
             }
 
             // Setup VPC peering connections
@@ -192,7 +220,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 monitoring_ec2_client,
                 &ami_id,
                 monitoring_instance_type,
-                &config.key.name,
+                &key_name,
                 &monitoring_resources.subnet_id,
                 monitoring_resources.monitoring_sg_id.as_ref().unwrap(),
                 1,
@@ -228,7 +256,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let temp_dir = TempDir::new("deployer")?;
             let mut launch_futures = Vec::new();
             for instance in &config.instances {
-                let key_name = config.key.name.clone();
+                let key_name = key_name.clone();
                 let region = instance.region.clone();
                 let resources = region_resources.get(&region).unwrap();
                 let ec2_client = ec2_clients.get(&region).unwrap();
@@ -304,35 +332,35 @@ table_manager:
             let loki_config_path = temp_dir.path().join("loki.yml");
             std::fs::write(&loki_config_path, loki_config)?;
             scp_file(
-                &config.key.file,
+                private_key,
                 prom_path.to_str().unwrap(),
                 &monitoring_ip,
                 "/home/ubuntu/prometheus.yml",
             )
             .await?;
             scp_file(
-                &config.key.file,
+                private_key,
                 datasources_path.to_str().unwrap(),
                 &monitoring_ip,
                 "/home/ubuntu/datasources.yml",
             )
             .await?;
             scp_file(
-                &config.key.file,
+                private_key,
                 all_yaml_path.to_str().unwrap(),
                 &monitoring_ip,
                 "/home/ubuntu/all.yml",
             )
             .await?;
             scp_file(
-                &config.key.file,
+                private_key,
                 &config.monitoring.dashboard,
                 &monitoring_ip,
                 "/home/ubuntu/dashboard.json",
             )
             .await?;
             scp_file(
-                &config.key.file,
+                private_key,
                 loki_config_path.to_str().unwrap(),
                 &monitoring_ip,
                 "/home/ubuntu/loki.yml",
@@ -373,7 +401,7 @@ sudo systemctl enable grafana-server
                 PROMETHEUS_VERSION,
                 LOKI_VERSION
             );
-            ssh_execute(&config.key.file, &monitoring_ip, &install_monitoring_cmd).await?;
+            ssh_execute(private_key, &monitoring_ip, &install_monitoring_cmd).await?;
 
             // Configure regular instances
             let temp_dir_path = temp_dir.path();
@@ -381,27 +409,20 @@ sudo systemctl enable grafana-server
             for deployment in &deployments {
                 let instance = deployment.instance.clone();
                 let ip = deployment.ip.clone();
-                let config = config.clone();
                 let monitoring_private_ip = monitoring_private_ip.clone();
                 let peers_path = peers_path.clone();
                 let future = async move {
                     // Upload binary, config, and peers
+                    scp_file(private_key, &instance.binary, &ip, "/home/ubuntu/binary").await?;
                     scp_file(
-                        &config.key.file,
-                        &instance.binary,
-                        &ip,
-                        "/home/ubuntu/binary",
-                    )
-                    .await?;
-                    scp_file(
-                        &config.key.file,
+                        private_key,
                         &instance.config,
                         &ip,
                         "/home/ubuntu/config.conf",
                     )
                     .await?;
                     scp_file(
-                        &config.key.file,
+                        private_key,
                         peers_path.to_str().unwrap(),
                         &ip,
                         "/home/ubuntu/peers.yaml",
@@ -410,9 +431,9 @@ sudo systemctl enable grafana-server
 
                     // Create log file and start binary with logging
                     let create_log_cmd = "sudo touch /var/log/binary.log && sudo chown ubuntu:ubuntu /var/log/binary.log";
-                    ssh_execute(&config.key.file, &ip, create_log_cmd).await?;
+                    ssh_execute(private_key, &ip, create_log_cmd).await?;
                     let run_cmd = "chmod +x /home/ubuntu/binary && nohup /home/ubuntu/binary --peers /home/ubuntu/peers.yaml --config /home/ubuntu/config.conf > /var/log/binary.log 2>&1 &";
-                    ssh_execute(&config.key.file, &ip, run_cmd).await?;
+                    ssh_execute(private_key, &ip, run_cmd).await?;
 
                     // Install and configure Promtail
                     let promtail_config = format!(
@@ -440,7 +461,7 @@ scrape_configs:
                         temp_dir_path.join(format!("promtail_{}.yml", instance.name));
                     std::fs::write(&promtail_config_path, promtail_config)?;
                     scp_file(
-                        &config.key.file,
+                        private_key,
                         promtail_config_path.to_str().unwrap(),
                         &ip,
                         "/home/ubuntu/promtail.yml",
@@ -458,7 +479,7 @@ nohup /opt/promtail/promtail -config.file=/etc/promtail/promtail.yml &
 "#,
                         PROMTAIL_VERSION
                     );
-                    ssh_execute(&config.key.file, &ip, &install_promtail_cmd).await?;
+                    ssh_execute(private_key, &ip, &install_promtail_cmd).await?;
 
                     Ok::<String, Box<dyn Error>>(ip)
                 };
@@ -562,6 +583,8 @@ nohup /opt/promtail/promtail -config.file=/etc/promtail/promtail.yml &
                 for vpc_id in vpc_ids {
                     delete_vpc(&ec2_client, &vpc_id).await?;
                 }
+                let key_name = format!("deployer-{}", tag);
+                delete_key_pair(&ec2_client, &key_name).await?;
             }
             println!("Teardown complete for tag: {}", tag);
         }
@@ -578,6 +601,26 @@ async fn create_ec2_client(region: Region) -> Ec2Client {
         .load()
         .await;
     Ec2Client::new(&config)
+}
+
+async fn import_key_pair(
+    client: &Ec2Client,
+    key_name: &str,
+    public_key: &str,
+) -> Result<(), Ec2Error> {
+    let blob = Blob::new(public_key.as_bytes());
+    client
+        .import_key_pair()
+        .key_name(key_name)
+        .public_key_material(blob)
+        .send()
+        .await?;
+    Ok(())
+}
+
+async fn delete_key_pair(client: &Ec2Client, key_name: &str) -> Result<(), Ec2Error> {
+    client.delete_key_pair().key_name(key_name).send().await?;
+    Ok(())
 }
 
 async fn find_latest_ami(client: &Ec2Client) -> Result<String, Ec2Error> {

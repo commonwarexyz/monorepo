@@ -47,6 +47,13 @@ async fn metrics_handler(registries: Extension<Vec<Arc<Mutex<Registry>>>>) -> St
 }
 
 fn main() {
+    // Parse arguments
+    let matches = Command::new("runner")
+        .about("flood the network with messages")
+        .arg(Arg::new("peers").required(true))
+        .arg(Arg::new("config").required(true))
+        .get_matches();
+
     // Create logger
     tracing_subscriber::fmt()
         .json()
@@ -54,13 +61,6 @@ fn main() {
         .with_line_number(true)
         .with_file(true)
         .init();
-
-    // Parse arguments
-    let matches = Command::new("commonware-flood")
-        .about("flood the network with messages")
-        .arg(Arg::new("peers").required(true))
-        .arg(Arg::new("config").required(true))
-        .get_matches();
 
     // Load peers
     let peer_file = matches.get_one::<String>("peers").unwrap();
