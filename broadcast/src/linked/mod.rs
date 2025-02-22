@@ -85,7 +85,6 @@ mod tests {
     use commonware_runtime::{Clock, Runner, Spawner};
     use futures::channel::oneshot;
     use futures::future::join_all;
-    use prometheus_client::registry::Registry;
     use std::sync::{Arc, Mutex};
     use std::{
         collections::{BTreeMap, HashSet},
@@ -157,7 +156,6 @@ mod tests {
         let (network, mut oracle) = Network::new(
             runtime.clone(),
             commonware_p2p::simulated::Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 max_size: 1024 * 1024,
             },
         );
@@ -381,7 +379,6 @@ mod tests {
                     let (network, mut oracle) = Network::new(
                         context.clone(),
                         commonware_p2p::simulated::Config {
-                            registry: Arc::new(Mutex::new(Registry::default())),
                             max_size: 1024 * 1024,
                         },
                     );

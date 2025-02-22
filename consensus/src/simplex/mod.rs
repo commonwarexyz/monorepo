@@ -293,7 +293,6 @@ mod tests {
             let (network, mut oracle) = Network::new(
                 runtime.clone(),
                 Config {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     max_size: 1024 * 1024,
                 },
             );
@@ -520,7 +519,6 @@ mod tests {
                 let (network, mut oracle) = Network::new(
                     runtime.clone(),
                     Config {
-                        registry: Arc::new(Mutex::new(Registry::default())),
                         max_size: 1024 * 1024,
                     },
                 );
@@ -723,7 +721,6 @@ mod tests {
             let (network, mut oracle) = Network::new(
                 runtime.clone(),
                 Config {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     max_size: 1024 * 1024,
                 },
             );
@@ -1009,7 +1006,6 @@ mod tests {
             let (network, mut oracle) = Network::new(
                 runtime.clone(),
                 Config {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     max_size: 1024 * 1024,
                 },
             );
@@ -1194,7 +1190,6 @@ mod tests {
             let (network, mut oracle) = Network::new(
                 runtime.clone(),
                 Config {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     max_size: 1024 * 1024,
                 },
             );
@@ -1379,7 +1374,6 @@ mod tests {
             let (network, mut oracle) = Network::new(
                 runtime.clone(),
                 Config {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     max_size: 1024 * 1024,
                 },
             );
@@ -1546,7 +1540,6 @@ mod tests {
             let (network, mut oracle) = Network::new(
                 runtime.clone(),
                 Config {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     max_size: 1024 * 1024,
                 },
             );
@@ -1770,7 +1763,6 @@ mod tests {
             let (network, mut oracle) = Network::new(
                 runtime.clone(),
                 Config {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     max_size: 1024 * 1024,
                 },
             );
@@ -1943,7 +1935,6 @@ mod tests {
             let (network, mut oracle) = Network::new(
                 runtime.clone(),
                 Config {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     max_size: 1024 * 1024,
                 },
             );
@@ -2128,7 +2119,6 @@ mod tests {
             let (network, mut oracle) = Network::new(
                 runtime.clone(),
                 Config {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     max_size: 1024 * 1024,
                 },
             );
