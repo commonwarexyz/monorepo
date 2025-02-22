@@ -81,14 +81,11 @@
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, deterministic::Executor};
 //! use commonware_storage::journal::variable::{Journal, Config};
-//! use prometheus_client::registry::Registry;
-//! use std::sync::{Arc, Mutex};
 //!
 //! let (executor, context, _) = Executor::default();
 //! executor.start(async move {
 //!     // Create a journal
 //!     let mut journal = Journal::init(context, Config{
-//!         registry: Arc::new(Mutex::new(Registry::default())),
 //!         partition: "partition".to_string()
 //!     }).await.unwrap();
 //!

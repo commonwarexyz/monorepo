@@ -113,21 +113,17 @@
 //! use commonware_runtime::{Spawner, Runner, deterministic::Executor};
 //! use commonware_storage::archive::{Archive, Config, translator::FourCap};
 //! use commonware_storage::journal::{Error, variable::{Config as JConfig, Journal}};
-//! use prometheus_client::registry::Registry;
-//! use std::sync::{Arc, Mutex};
 //!
 //! let (executor, context, _) = Executor::default();
 //! executor.start(async move {
 //!     // Create a journal
 //!     let cfg = JConfig {
-//!         registry: Arc::new(Mutex::new(Registry::default())),
 //!         partition: "partition".to_string()
 //!     };
-//!     let journal = Journal::init(context, cfg).await.unwrap();
+//!     let journal = Journal::init(context.clone(), cfg).await.unwrap();
 //!
 //!     // Create an archive
 //!     let cfg = Config {
-//!         registry: Arc::new(Mutex::new(Registry::default())),
 //!         key_len: 8,
 //!         translator: FourCap,
 //!         section_mask: 0xffff_ffff_ffff_0000u64,
@@ -135,7 +131,7 @@
 //!         replay_concurrency: 4,
 //!         compression: Some(3),
 //!     };
-//!     let mut archive = Archive::init(journal, cfg).await.unwrap();
+//!     let mut archive = Archive::init(context, journal, cfg).await.unwrap();
 //!
 //!     // Put a key
 //!     archive.put(1, b"test-key", "data".into()).await.unwrap();
