@@ -1,36 +1,36 @@
-//! Contains an Actor struct which implements the Resolver trait.
-
 use super::{
     config::Config,
+    fetcher::Fetcher,
     ingress::{Mailbox, Message},
 };
 use crate::{
     p2p::{
         wire::{self, peer_msg::Payload},
-        Value,
+        Director, Producer, Value,
     },
-    Consumer, Director, Producer,
+    Consumer,
 };
-use bimap::BiHashMap;
-use bytes::Bytes;
 use commonware_cryptography::{Array, Scheme};
 use commonware_macros::select;
-use commonware_p2p::utils::requester::{self, Requester};
+use commonware_p2p::utils::requester::Requester;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Spawner};
 use commonware_utils::futures::Pool as FuturesPool;
 use futures::{
     channel::{mpsc, oneshot},
-    future::Either,
+    future::{self, Either},
     StreamExt,
 };
-use governor::clock::Clock as GClock;
+use governor::{
+    clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore,
+    RateLimiter,
+};
 use prost::Message as _;
 use rand::Rng;
 use std::marker::PhantomData;
 use tracing::{debug, error, warn};
 
-/// TODO
+/// An actor that makes and responds to requests using the P2P network.
 pub struct Actor<
     E: Clock + GClock + Spawner + Rng,
     C: Scheme,
@@ -41,23 +41,36 @@ pub struct Actor<
     NetS: Sender<PublicKey = C::PublicKey>,
     NetR: Receiver<PublicKey = C::PublicKey>,
 > {
+    ////////////////////////////////////////
+    // Interfaces
+    ////////////////////////////////////////
     runtime: E,
-    mailbox: mpsc::Receiver<Message<Key>>,
-
     consumer: Con,
     producer: Pro,
     director: D,
 
-    // Outgoing requests
-    requester: Requester<E, C>,
-    fetches: BiHashMap<requester::ID, Key>,
-    fetch_concurrent: usize,
+    ////////////////////////////////////////
+    // Outgoing Requests
+    ////////////////////////////////////////
+    /// Mailbox that makes and cancels fetch requests
+    mailbox: mpsc::Receiver<Message<Key>>,
 
-    // Incoming requests
+    fetcher: Fetcher<E, C, Key, NetS>,
+
+    ////////////////////////////////////////
+    // Incoming Requests
+    ////////////////////////////////////////
     serves: FuturesPool<(C::PublicKey, u64, Result<Value, oneshot::Canceled>)>,
     serve_concurrent: usize,
 
-    // Network
+    // Rate limit for incoming requests per peer
+    #[allow(clippy::type_complexity)]
+    rate_limiter:
+        RateLimiter<C::PublicKey, HashMapStateStore<C::PublicKey>, E, NoOpMiddleware<E::Instant>>,
+
+    ////////////////////////////////////////
+    // Phantom Data
+    ////////////////////////////////////////
     _s: PhantomData<NetS>,
     _r: PhantomData<NetR>,
 }
@@ -76,6 +89,13 @@ impl<
     pub async fn new(runtime: E, cfg: Config<C, D, Key, Con, Pro>) -> (Self, Mailbox<Key>) {
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
         let requester = Requester::new(runtime.clone(), cfg.requester_config);
+        let rate_limiter = RateLimiter::hashmap_with_clock(cfg.rate_limit, &runtime);
+        let fetcher = Fetcher::new(
+            runtime.clone(),
+            requester,
+            cfg.fetch_max_outstanding,
+            cfg.fetch_retry_timeout,
+        );
         (
             Self {
                 runtime,
@@ -83,11 +103,11 @@ impl<
                 producer: cfg.producer,
                 director: cfg.director,
                 mailbox: receiver,
-                requester,
-                fetch_concurrent: cfg.fetch_concurrent,
-                serve_concurrent: cfg.serve_concurrent,
-                fetches: BiHashMap::new(),
+                fetcher,
                 serves: FuturesPool::new(),
+                serve_concurrent: cfg.serve_concurrent,
+                rate_limiter,
+
                 _s: PhantomData,
                 _r: PhantomData,
             },
@@ -101,14 +121,18 @@ impl<
 
         loop {
             // Update peer list
-            self.requester.reconcile(&self.director.peers());
+            self.fetcher.reconcile(&self.director.peers());
+
+            // Get retry timeout (if any)
+            let held_deadline = match self.fetcher.get_held_deadline() {
+                Some(deadline) => Either::Left(self.runtime.sleep_until(deadline)),
+                None => Either::Right(future::pending()),
+            };
 
             // Get requester timeout (if any)
-            let (id_timeout, timeout) = if let Some((id_timeout, timeout)) = self.requester.next() {
-                (id_timeout, Either::Left(self.runtime.sleep_until(timeout)))
-            } else {
-                // 0 is a valid value, but the future will never resolve
-                (0, Either::Right(futures::future::pending()))
+            let open_deadline = match self.fetcher.get_open_deadline() {
+                Some(deadline) => Either::Left(self.runtime.sleep_until(deadline)),
+                None => Either::Right(future::pending()),
             };
 
             // Handle shutdown signal
@@ -121,31 +145,34 @@ impl<
 
                 // Handle mailbox messages
                 msg = self.mailbox.next() => {
-                    debug!("mailbox message");
                     let Some(msg) = msg else {
                         error!("mailbox closed");
                         return;
                     };
                     match msg {
                         Message::Fetch { key } => {
-                            self.handle_fetch(&mut sender, key.clone()).await;
+                            debug!(?key, "mailbox: fetch");
+                            if let Err(err) = self.fetcher.fetch(&mut sender, key.clone(), false).await {
+                                warn!(?err, ?key, "failed to fetch");
+                                self.consumer.failed(key, ()).await;
+                            }
                         }
                         Message::Cancel { key } => {
-                            self.handle_cancel(key);
+                            debug!(?key, "mailbox: cancel");
+                            self.fetcher.cancel(&key);
+                            self.consumer.failed(key, ()).await;
                         }
                     }
                 },
 
                 // Handle completed server requests
                 msg = self.serves.stream() => {
-                    debug!("pending request completed");
                     let (peer, id, result) = msg;
                     Self::handle_serve(&mut sender, peer, id, result).await;
                 },
 
                 // Handle network messages
                 msg = receiver.recv() => {
-                    debug!("network message");
                     let (peer, msg) = match msg {
                         Ok(msg) => msg,
                         Err(err) => {
@@ -153,111 +180,67 @@ impl<
                             return;
                         }
                     };
-                    let msg = match wire::PeerMsg::decode(msg){
+                    let msg = match wire::PeerMsg::decode(msg) {
+                        Ok(msg) => msg,
                         Err(err) => {
                             warn!(?err, ?peer, "decode failed");
                             continue;
-                        },
-                        Ok(msg) => msg,
+                        }
                     };
                     let id = msg.id;
                     match msg.payload {
+                        // Peer is requesting data
                         Some(Payload::Request(request)) => {
+                            // Parse request
                             let Ok(key) = Key::try_from(request) else {
-                                warn!(?peer, ?id, "invalid request");
+                                warn!(?peer, ?id, "peer invalid request");
                                 continue;
                             };
                             self.handle_request(peer, id, key);
                         },
-                        Some(Payload::Response(response)) => self.handle_response(&mut sender, peer, id, Some(response)).await,
-                        None => self.handle_response(&mut sender, peer, id, None).await,
+                        // Peer is responding to a request with a full response
+                        Some(Payload::Response(response)) => {
+                            debug!(?peer, ?id, "peer response: data");
+
+                            // Get the key associate with the response, if any
+                            let Some(key) = self.fetcher.got_response(&peer, id, true) else {
+                                continue;
+                            };
+
+                            // The peer had the data, so we can deliver it to the consumer
+                            self.consumer.deliver(key, response).await;
+                        },
+                        // Peer is responding to a request with an error
+                        None => {
+                            warn!(?peer, ?id, "peer response: error");
+
+                            // Get the key associate with the response, if any
+                            let Some(key) = self.fetcher.got_response(&peer, id, false) else {
+                                continue;
+                            };
+
+                            // The peer did not have the data, so we need to try again
+                            self.fetcher.fetch(&mut sender, key, true).await.unwrap(); // Unwrap must be safe
+                        },
                     }
                 },
 
-                // Handle requester timeout
-                _ = timeout => {
-                    debug!("requester timeout");
-                    self.handle_timeout_fetch(&mut sender, id_timeout).await;
+                // Handle held deadline
+                _ = held_deadline => {
+                    let key = self.fetcher.pop_held();
+                    debug!(?key, "retrying");
+                    self.fetcher.fetch(&mut sender, key, true).await.unwrap(); // Unwrap must be safe
+                },
+
+                // Handle open deadline
+                _ = open_deadline => {
+                    if let Some(key) = self.fetcher.pop_open() {
+                        debug!(?key, "requester timeout");
+                        self.fetcher.fetch(&mut sender, key, true).await.unwrap(); // Unwrap must be safe
+                    }
                 },
             }
         }
-    }
-
-    /// Handles the case where a request times out.
-    async fn handle_timeout_fetch(&mut self, sender: &mut NetS, id: requester::ID) {
-        // The request must exist
-        let request = self.requester.cancel(id).unwrap();
-        self.requester.timeout(request);
-
-        // Remove the existing request information, if any.
-        // It is possible that the request was canceled before it timed out.
-        let Some((_id, key)) = self.fetches.remove_by_left(&id) else {
-            // If the request was previously canceled, do nothing
-            return;
-        };
-
-        // Retry the request
-        self.handle_fetch(sender, key).await;
-    }
-
-    /// Handles the case where the application wants to fetch a key from an external peer.
-    async fn handle_fetch(&mut self, sender: &mut NetS, key: Key) {
-        // If we are already fetching the key, do nothing
-        if self.fetches.contains_right(&key) {
-            debug!(?key, "already fetching");
-            return;
-        }
-
-        // If there are too many pending requests, drop the request
-        let n = self.fetches.len();
-        if n >= self.fetch_concurrent {
-            warn!(?n, ?key, "too many pending fetches");
-            return self.consumer.failed(key, ()).await;
-        }
-
-        // Get peer to send request to
-        let Some((peer, id)) = self.requester.request(false) else {
-            warn!(?key, "requester failed");
-            return self.consumer.failed(key, ()).await;
-        };
-        let recipient = Recipients::One(peer.clone());
-
-        // Encode message
-        let msg: Bytes = wire::PeerMsg {
-            id,
-            payload: Some(Payload::Request(key.to_vec())),
-        }
-        .encode_to_vec()
-        .into();
-
-        // Send message to peer
-        let success = match sender.send(recipient, msg, false).await {
-            // Return early on failure
-            Err(err) => {
-                error!(?err, ?peer, ?key, "failed to send request");
-                return self.consumer.failed(key, ()).await;
-            }
-            Ok(sent_to) => !sent_to.is_empty(),
-        };
-
-        // If the message was not sent successfully, treat it instantly as a peer timeout
-        // TODO: consider letting this timeout naturally or deal with it in a different way. Ideally we can kind of retry the request instantly again but we don't want to get stuck in an infinite loop.
-        if !success {
-            warn!(?peer, ?key, "failed to send request");
-            // We can unwrap the value since we know it exists
-            let req = self.requester.handle(&peer, id).unwrap();
-            self.requester.timeout(req);
-            return self.consumer.failed(key, ()).await;
-        }
-
-        // If the message was sent to someone, add the request to the map
-        self.fetches.insert(id, key);
-    }
-
-    /// Handles the case where the application wants to cancel a fetch request.
-    fn handle_cancel(&mut self, key: Key) {
-        // Don't need to check the return value
-        self.fetches.remove_by_right(&key);
     }
 
     /// Handles the case where the application responds to a request from an external peer.
@@ -268,87 +251,53 @@ impl<
         response: Result<Value, oneshot::Canceled>,
     ) {
         // Encode message
-        let msg: Bytes = wire::PeerMsg {
+        let msg = wire::PeerMsg {
             id,
-            payload: match response {
-                Ok(response) => Some(Payload::Response(response)),
-                Err(_) => None,
-            },
+            payload: response.ok().map(Payload::Response),
         }
         .encode_to_vec()
         .into();
 
         // Send message to peer
-        let recipients = Recipients::One(peer.clone());
-        match sender.send(recipients, msg, false).await {
-            Ok(sent_to) => {
-                if sent_to.is_empty() {
-                    warn!(?peer, ?id, "failed to send response");
-                }
-            }
-            Err(err) => {
-                error!(?err, ?peer, ?id, "failed to send response");
-            }
-        }
+        let result = sender.send(Recipients::One(peer.clone()), msg, false).await;
+
+        // Log result, but do not handle errors
+        match result {
+            Err(err) => error!(?err, ?peer, ?id, "serve send failed"),
+            Ok(to) if to.is_empty() => warn!(?peer, ?id, "serve send failed"),
+            Ok(_) => debug!(?peer, ?id, "serve sent"),
+        };
     }
 
     /// Handles the case where a peer sends a request to this peer.
     fn handle_request(&mut self, peer: C::PublicKey, id: u64, request: Key) {
-        debug!(?peer, ?id, "peer request");
+        // If the peer is not allowed to request, drop the request
+        if !self.director.is_peer(&peer) {
+            warn!(?peer, ?id, "dropping request: peer not allowed");
+            return;
+        }
+
+        // If there are too many requests from this peer, drop the request
+        if self.rate_limiter.check_key(&peer).is_err() {
+            warn!(?peer, ?id, "dropping request: rate limit exceeded");
+            return;
+        }
 
         // If there are too many pending requests, drop the request
-        // TODO: consider sending a failure response
+        // TODO: consider sending a failure response (?)
         let n = self.serves.len();
         if n >= self.serve_concurrent {
-            warn!(?peer, ?id, ?n, "too many pending requests");
+            warn!(?peer, ?id, ?n, "dropping request: too many pending");
             return;
         }
 
         // Serve the request
+        debug!(?peer, ?id, "peer request");
         let mut producer = self.producer.clone();
         self.serves.push(async move {
             let receiver = producer.produce(request).await;
             let result = receiver.await;
             (peer, id, result)
         });
-    }
-
-    /// Handles the case where a peer returns a response to a request.
-    /// The response may be a success or a failure.
-    ///
-    /// The id of the response may not be valid.
-    async fn handle_response(
-        &mut self,
-        sender: &mut NetS,
-        peer: C::PublicKey,
-        id: u64,
-        response: Option<Value>,
-    ) {
-        // Logging
-        match response {
-            Some(_) => debug!(?peer, ?id, "peer response"),
-            None => warn!(?peer, ?id, "peer error response"),
-        }
-
-        // Update the requester
-        let Some(request) = self.requester.handle(&peer, id) else {
-            // Malicious peer used a request id not assigned to it
-            warn!(?peer, ?id, "peer gave invalid id");
-            return;
-        };
-        self.requester.resolve(request);
-
-        let Some((_id, key)) = self.fetches.remove_by_left(&id) else {
-            // If the request was canceled, do nothing
-            debug!(?peer, ?id, "peer responded to canceled request");
-            return;
-        };
-
-        // Either keep trying to fetch the key or deliver the response
-        if let Some(data) = response {
-            self.consumer.deliver(key, data).await;
-        } else {
-            self.handle_fetch(sender, key).await;
-        }
     }
 }

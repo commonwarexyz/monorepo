@@ -563,6 +563,7 @@ dependencies = [
  "commonware-macros",
  "commonware-p2p",
  "commonware-runtime",
+ "commonware-stream",
  "commonware-utils",
  "futures",
  "governor",
@@ -570,6 +571,7 @@ dependencies = [
  "prost",
  "prost-build",
  "rand",
+ "thiserror",
  "tracing",
  "tracing-subscriber",
 ]
