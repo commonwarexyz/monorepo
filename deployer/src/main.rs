@@ -586,6 +586,7 @@ nohup /opt/promtail/promtail -config.file=/etc/promtail/promtail.yml &
 
             // Teardown resources
             for region in all_regions {
+                // Create EC2 client for region
                 let region = Region::new(region);
                 let ec2_client = create_ec2_client(region).await;
 
@@ -604,11 +605,25 @@ nohup /opt/promtail/promtail -config.file=/etc/promtail/promtail.yml &
                     delete_security_group(&ec2_client, &sg_id).await?;
                 }
 
+                // Delete subnets
+                let subnet_ids = find_subnets_by_tag(&ec2_client, &tag).await?;
+                for subnet_id in subnet_ids {
+                    println!("Deleting subnet: {}", subnet_id);
+                    delete_subnet(&ec2_client, &subnet_id).await?;
+                }
+
                 // Delete route tables
                 let route_table_ids = find_route_tables_by_tag(&ec2_client, &tag).await?;
                 for rt_id in route_table_ids {
                     println!("Deleting route table: {}", rt_id);
                     delete_route_table(&ec2_client, &rt_id).await?;
+                }
+
+                // Delete VPC peering connections
+                let peering_ids = find_vpc_peering_by_tag(&ec2_client, &tag).await?;
+                for peering_id in peering_ids {
+                    println!("Deleting VPC peering connection: {}", peering_id);
+                    delete_vpc_peering(&ec2_client, &peering_id).await?;
                 }
 
                 // Delete internet gateways
@@ -618,20 +633,6 @@ nohup /opt/promtail/promtail -config.file=/etc/promtail/promtail.yml &
                     let vpc_id = find_vpc_by_igw(&ec2_client, &igw_id).await?;
                     detach_igw(&ec2_client, &igw_id, &vpc_id).await?;
                     delete_igw(&ec2_client, &igw_id).await?;
-                }
-
-                // Delete subnets
-                let subnet_ids = find_subnets_by_tag(&ec2_client, &tag).await?;
-                for subnet_id in subnet_ids {
-                    println!("Deleting subnet: {}", subnet_id);
-                    delete_subnet(&ec2_client, &subnet_id).await?;
-                }
-
-                // Delete VPC peering connections
-                let peering_ids = find_vpc_peering_by_tag(&ec2_client, &tag).await?;
-                for peering_id in peering_ids {
-                    println!("Deleting VPC peering connection: {}", peering_id);
-                    delete_vpc_peering(&ec2_client, &peering_id).await?;
                 }
 
                 // Delete VPCs
