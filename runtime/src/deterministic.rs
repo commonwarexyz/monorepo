@@ -22,7 +22,7 @@
 //! println!("Auditor state: {}", auditor.state());
 //! ```
 
-use crate::{mocks, utils::Signaler, Clock, Error, Handle, Signal};
+use crate::{mocks, utils::Signaler, Clock, Error, Handle, Metrics as TMetrics, Signal};
 use commonware_utils::{hex, SystemTimeExt};
 use futures::{
     channel::mpsc,
@@ -31,9 +31,9 @@ use futures::{
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
-    encoding::EncodeLabelSet,
+    encoding::{text::encode, EncodeLabelSet},
     metrics::{counter::Counter, family::Family, gauge::Gauge},
-    registry::Registry,
+    registry::{Metric, Registry},
 };
 use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
 use sha2::{Digest, Sha256};
@@ -456,6 +456,7 @@ pub struct Executor {
     signal: Signal,
     finished: Mutex<bool>,
     recovered: Mutex<bool>,
+    registry: Mutex<Registry>,
 }
 
 impl Executor {
@@ -492,6 +493,7 @@ impl Executor {
             signal,
             finished: Mutex::new(false),
             recovered: Mutex::new(false),
+            registry: Mutex::new(Registry::default()),
         });
         (
             Runner {
@@ -768,6 +770,7 @@ impl Context {
             signal,
             finished: Mutex::new(false),
             recovered: Mutex::new(false),
+            registry: Mutex::new(Registry::default()),
         });
         (
             Runner {
@@ -1296,6 +1299,30 @@ impl crate::Blob for Blob {
 impl Drop for Blob {
     fn drop(&mut self) {
         self.executor.metrics.open_blobs.dec();
+    }
+}
+
+impl TMetrics for Context {
+    fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
+        let prefixed_name = {
+            let prefix = self.executor.prefix.lock().unwrap();
+            if prefix.is_empty() {
+                name.into()
+            } else {
+                format!("{}_{}", *prefix, name.into())
+            }
+        };
+        self.executor
+            .registry
+            .lock()
+            .unwrap()
+            .register(prefixed_name, help, metric)
+    }
+
+    fn encode(&self) -> String {
+        let mut buffer = String::new();
+        encode(&mut buffer, &self.executor.registry.lock().unwrap()).expect("encoding failed");
+        buffer
     }
 }
 

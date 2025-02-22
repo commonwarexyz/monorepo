@@ -11,6 +11,7 @@
 //! `commonware-runtime` is **ALPHA** software and is not yet recommended for production use. Developers should
 //! expect breaking changes and occasional instability.
 
+use prometheus_client::registry::Metric;
 use std::{
     future::Future,
     net::SocketAddr,
@@ -237,6 +238,11 @@ pub trait Blob: Clone + Send + Sync + 'static {
 
     /// Close the blob.
     fn close(self) -> impl Future<Output = Result<(), Error>> + Send;
+}
+
+pub trait Metrics: Clone + Send + Sync + 'static {
+    fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric);
+    fn encode(&self) -> String;
 }
 
 #[cfg(test)]
