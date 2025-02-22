@@ -240,8 +240,14 @@ pub trait Blob: Clone + Send + Sync + 'static {
     fn close(self) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
+/// Interface to register and encode metrics.
 pub trait Metrics: Clone + Send + Sync + 'static {
+    /// Register a metric with the runtime.
+    ///
+    /// Any metric registered will automatically include the prefix of the current task.
     fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric);
+
+    /// Encode all metrics into a buffer.
     fn encode(&self) -> String;
 }
 
@@ -832,16 +838,12 @@ mod tests {
     #[test]
     fn test_deterministic_blob_clone_and_concurrent_read() {
         // Run test
-        let cfg = deterministic::Config {
-            registry: Arc::new(Mutex::new(Registry::default())),
-            ..Default::default()
-        };
+        let cfg = deterministic::Config::default();
         let (executor, runtime, _) = deterministic::Executor::init(cfg.clone());
-        test_blob_clone_and_concurrent_read(executor, runtime);
+        test_blob_clone_and_concurrent_read(executor, runtime.clone());
 
         // Ensure no blobs still open
-        let mut buffer = String::new();
-        encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+        let buffer = runtime.encode();
         assert!(buffer.contains("open_blobs 0"));
     }
 

@@ -22,7 +22,7 @@
 //! println!("Auditor state: {}", auditor.state());
 //! ```
 
-use crate::{mocks, utils::Signaler, Clock, Error, Handle, Metrics as TMetrics, Signal};
+use crate::{mocks, utils::Signaler, Clock, Error, Handle, Signal};
 use commonware_utils::{hex, SystemTimeExt};
 use futures::{
     channel::mpsc,
@@ -56,6 +56,9 @@ const EPHEMERAL_PORT_RANGE: Range<u16> = 32768..61000;
 /// Label for root task created during `Runner::start`.
 const ROOT_TASK: &str = "root";
 
+/// Prefix for runtime metrics.
+const RUNTIME_METRICS_PREFIX: &str = "runtime";
+
 /// Map of names to blob contents.
 pub type Partition = HashMap<Vec<u8>, Vec<u8>>;
 
@@ -80,7 +83,7 @@ struct Metrics {
 }
 
 impl Metrics {
-    pub fn init(registry: Arc<Mutex<Registry>>) -> Self {
+    pub fn init(registry: &mut Registry) -> Self {
         let metrics = Self {
             task_polls: Family::default(),
             tasks_running: Family::default(),
@@ -92,54 +95,51 @@ impl Metrics {
             storage_writes: Counter::default(),
             storage_write_bandwidth: Counter::default(),
         };
-        {
-            let mut registry = registry.lock().unwrap();
-            registry.register(
-                "tasks_spawned",
-                "Total number of tasks spawned",
-                metrics.tasks_spawned.clone(),
-            );
-            registry.register(
-                "tasks_running",
-                "Number of tasks currently running",
-                metrics.tasks_running.clone(),
-            );
-            registry.register(
-                "task_polls",
-                "Total number of task polls",
-                metrics.task_polls.clone(),
-            );
-            registry.register(
-                "bandwidth",
-                "Total amount of data sent over network",
-                metrics.network_bandwidth.clone(),
-            );
-            registry.register(
-                "open_blobs",
-                "Number of open blobs",
-                metrics.open_blobs.clone(),
-            );
-            registry.register(
-                "storage_reads",
-                "Total number of disk reads",
-                metrics.storage_reads.clone(),
-            );
-            registry.register(
-                "storage_read_bandwidth",
-                "Total amount of data read from disk",
-                metrics.storage_read_bandwidth.clone(),
-            );
-            registry.register(
-                "storage_writes",
-                "Total number of disk writes",
-                metrics.storage_writes.clone(),
-            );
-            registry.register(
-                "storage_write_bandwidth",
-                "Total amount of data written to disk",
-                metrics.storage_write_bandwidth.clone(),
-            );
-        }
+        registry.register(
+            "tasks_spawned",
+            "Total number of tasks spawned",
+            metrics.tasks_spawned.clone(),
+        );
+        registry.register(
+            "tasks_running",
+            "Number of tasks currently running",
+            metrics.tasks_running.clone(),
+        );
+        registry.register(
+            "task_polls",
+            "Total number of task polls",
+            metrics.task_polls.clone(),
+        );
+        registry.register(
+            "bandwidth",
+            "Total amount of data sent over network",
+            metrics.network_bandwidth.clone(),
+        );
+        registry.register(
+            "open_blobs",
+            "Number of open blobs",
+            metrics.open_blobs.clone(),
+        );
+        registry.register(
+            "storage_reads",
+            "Total number of disk reads",
+            metrics.storage_reads.clone(),
+        );
+        registry.register(
+            "storage_read_bandwidth",
+            "Total amount of data read from disk",
+            metrics.storage_read_bandwidth.clone(),
+        );
+        registry.register(
+            "storage_writes",
+            "Total number of disk writes",
+            metrics.storage_writes.clone(),
+        );
+        registry.register(
+            "storage_write_bandwidth",
+            "Total amount of data written to disk",
+            metrics.storage_write_bandwidth.clone(),
+        );
         metrics
     }
 }
@@ -339,6 +339,24 @@ impl Auditor {
         *hash = hasher.finalize().to_vec();
     }
 
+    fn register(&self, name: &str, help: &str) {
+        let mut hash = self.hash.lock().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(&*hash);
+        hasher.update(b"register");
+        hasher.update(name.as_bytes());
+        hasher.update(help.as_bytes());
+        *hash = hasher.finalize().to_vec();
+    }
+
+    fn encode(&self) {
+        let mut hash = self.hash.lock().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(&*hash);
+        hasher.update(b"encode");
+        *hash = hasher.finalize().to_vec();
+    }
+
     /// Generate a representation of the current state of the runtime.
     ///
     /// This can be used to ensure that logic running on top
@@ -415,9 +433,6 @@ impl Tasks {
 /// Configuration for the `deterministic` runtime.
 #[derive(Clone)]
 pub struct Config {
-    /// Registry for metrics.
-    pub registry: Arc<Mutex<Registry>>,
-
     /// Seed for the random number generator.
     pub seed: u64,
 
@@ -432,7 +447,6 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            registry: Arc::new(Mutex::new(Registry::default())),
             seed: 42,
             cycle: Duration::from_millis(1),
             timeout: None,
@@ -442,6 +456,7 @@ impl Default for Config {
 
 /// Deterministic runtime that randomly selects tasks to run based on a seed.
 pub struct Executor {
+    registry: Mutex<Registry>,
     cycle: Duration,
     deadline: Option<SystemTime>,
     metrics: Arc<Metrics>,
@@ -456,7 +471,6 @@ pub struct Executor {
     signal: Signal,
     finished: Mutex<bool>,
     recovered: Mutex<bool>,
-    registry: Mutex<Registry>,
 }
 
 impl Executor {
@@ -467,8 +481,12 @@ impl Executor {
             panic!("cycle duration must be non-zero when timeout is set");
         }
 
+        // Create a new registry
+        let mut registry = Registry::default();
+        let runtime_registry = registry.sub_registry_with_prefix(RUNTIME_METRICS_PREFIX);
+
         // Initialize runtime
-        let metrics = Arc::new(Metrics::init(cfg.registry));
+        let metrics = Arc::new(Metrics::init(runtime_registry));
         let auditor = Arc::new(Auditor::new());
         let start_time = UNIX_EPOCH;
         let deadline = cfg
@@ -476,6 +494,7 @@ impl Executor {
             .map(|timeout| start_time.checked_add(timeout).expect("timeout overflowed"));
         let (signaler, signal) = Signaler::new();
         let executor = Arc::new(Self {
+            registry: Mutex::new(registry),
             cycle: cfg.cycle,
             deadline,
             metrics: metrics.clone(),
@@ -493,7 +512,6 @@ impl Executor {
             signal,
             finished: Mutex::new(false),
             recovered: Mutex::new(false),
-            registry: Mutex::new(Registry::default()),
         });
         (
             Runner {
@@ -741,10 +759,10 @@ impl Context {
             *recovered = true;
         }
 
-        // Prepare metrics
-        let metrics = self.executor.metrics.clone();
-        metrics.open_blobs.set(0);
-        metrics.tasks_running.clear();
+        // Rebuild metrics
+        let mut registry = Registry::default();
+        let runtime_registry = registry.sub_registry_with_prefix(RUNTIME_METRICS_PREFIX);
+        let metrics = Arc::new(Metrics::init(runtime_registry));
 
         // Copy state
         let auditor = self.executor.auditor.clone();
@@ -753,13 +771,14 @@ impl Context {
             // Copied from the current runtime
             cycle: self.executor.cycle,
             deadline: self.executor.deadline,
-            metrics: metrics.clone(),
             auditor: auditor.clone(),
             rng: Mutex::new(self.executor.rng.lock().unwrap().clone()),
             time: Mutex::new(*self.executor.time.lock().unwrap()),
             partitions: Mutex::new(self.executor.partitions.lock().unwrap().clone()),
 
             // New state for the new runtime
+            registry: Mutex::new(registry),
+            metrics: metrics.clone(),
             prefix: Mutex::new(String::new()),
             tasks: Arc::new(Tasks {
                 queue: Mutex::new(Vec::new()),
@@ -770,7 +789,6 @@ impl Context {
             signal,
             finished: Mutex::new(false),
             recovered: Mutex::new(false),
-            registry: Mutex::new(Registry::default()),
         });
         (
             Runner {
@@ -1302,14 +1320,20 @@ impl Drop for Blob {
     }
 }
 
-impl TMetrics for Context {
+impl crate::Metrics for Context {
     fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
+        // Prepare args
+        let name = name.into();
+        let help = help.into();
+
+        // Register metric
+        self.executor.auditor.register(&name, &help);
         let prefixed_name = {
             let prefix = self.executor.prefix.lock().unwrap();
             if prefix.is_empty() {
-                name.into()
+                name
             } else {
-                format!("{}_{}", *prefix, name.into())
+                format!("{}_{}", *prefix, name)
             }
         };
         self.executor
@@ -1320,6 +1344,7 @@ impl TMetrics for Context {
     }
 
     fn encode(&self) -> String {
+        self.executor.auditor.encode();
         let mut buffer = String::new();
         encode(&mut buffer, &self.executor.registry.lock().unwrap()).expect("encoding failed");
         buffer
