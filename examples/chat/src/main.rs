@@ -58,10 +58,7 @@ mod logger;
 use clap::{value_parser, Arg, Command};
 use commonware_cryptography::{Ed25519, Scheme};
 use commonware_p2p::authenticated::{self, Network};
-use commonware_runtime::{
-    tokio::{self, Executor},
-    Runner, Spawner,
-};
+use commonware_runtime::{tokio::Executor, Runner, Spawner};
 use governor::Quota;
 use prometheus_client::registry::Registry;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -76,12 +73,7 @@ const APPLICATION_NAMESPACE: &[u8] = b"commonware-chat";
 #[doc(hidden)]
 fn main() {
     // Initialize runtime
-    let runtime_registry = Arc::new(Mutex::new(Registry::with_prefix("runtime")));
-    let runtime_cfg = tokio::Config {
-        registry: runtime_registry.clone(),
-        ..Default::default()
-    };
-    let (executor, runtime) = Executor::init(runtime_cfg.clone());
+    let (executor, runtime) = Executor::default();
 
     // Parse arguments
     let matches = Command::new("commonware-chat")
@@ -196,7 +188,6 @@ fn main() {
         handler::run(
             runtime.clone(),
             signer.public_key().to_string(),
-            runtime_registry,
             p2p_registry,
             logs,
             chat_sender,
