@@ -27,9 +27,9 @@ use crate::{utils::Signaler, Clock, Error, Handle, Signal};
 use commonware_utils::{from_hex, hex};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
-    encoding::EncodeLabelSet,
+    encoding::{text::encode, EncodeLabelSet},
     metrics::{counter::Counter, family::Family, gauge::Gauge},
-    registry::Registry,
+    registry::{Metric, Registry},
 };
 use rand::{rngs::OsRng, CryptoRng, RngCore};
 use std::{
@@ -51,6 +51,9 @@ use tokio::{
     time::timeout,
 };
 use tracing::warn;
+
+/// Prefix for runtime metrics.
+const RUNTIME_METRICS_PREFIX: &str = "runtime_tokio";
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct Work {
@@ -77,7 +80,7 @@ struct Metrics {
 }
 
 impl Metrics {
-    pub fn init(registry: Arc<Mutex<Registry>>) -> Self {
+    pub fn init(registry: &mut Registry) -> Self {
         let metrics = Self {
             tasks_spawned: Family::default(),
             tasks_running: Family::default(),
@@ -91,64 +94,61 @@ impl Metrics {
             storage_writes: Counter::default(),
             storage_write_bytes: Counter::default(),
         };
-        {
-            let mut registry = registry.lock().unwrap();
-            registry.register(
-                "tasks_spawned",
-                "Total number of tasks spawned",
-                metrics.tasks_spawned.clone(),
-            );
-            registry.register(
-                "tasks_running",
-                "Number of tasks currently running",
-                metrics.tasks_running.clone(),
-            );
-            registry.register(
-                "inbound_connections",
-                "Number of connections created by dialing us",
-                metrics.inbound_connections.clone(),
-            );
-            registry.register(
-                "outbound_connections",
-                "Number of connections created by dialing others",
-                metrics.outbound_connections.clone(),
-            );
-            registry.register(
-                "inbound_bandwidth",
-                "Bandwidth used by receiving data from others",
-                metrics.inbound_bandwidth.clone(),
-            );
-            registry.register(
-                "outbound_bandwidth",
-                "Bandwidth used by sending data to others",
-                metrics.outbound_bandwidth.clone(),
-            );
-            registry.register(
-                "open_blobs",
-                "Number of open blobs",
-                metrics.open_blobs.clone(),
-            );
-            registry.register(
-                "storage_reads",
-                "Total number of disk reads",
-                metrics.storage_reads.clone(),
-            );
-            registry.register(
-                "storage_read_bytes",
-                "Total amount of data read from disk",
-                metrics.storage_read_bytes.clone(),
-            );
-            registry.register(
-                "storage_writes",
-                "Total number of disk writes",
-                metrics.storage_writes.clone(),
-            );
-            registry.register(
-                "storage_write_bytes",
-                "Total amount of data written to disk",
-                metrics.storage_write_bytes.clone(),
-            );
-        }
+        registry.register(
+            "tasks_spawned",
+            "Total number of tasks spawned",
+            metrics.tasks_spawned.clone(),
+        );
+        registry.register(
+            "tasks_running",
+            "Number of tasks currently running",
+            metrics.tasks_running.clone(),
+        );
+        registry.register(
+            "inbound_connections",
+            "Number of connections created by dialing us",
+            metrics.inbound_connections.clone(),
+        );
+        registry.register(
+            "outbound_connections",
+            "Number of connections created by dialing others",
+            metrics.outbound_connections.clone(),
+        );
+        registry.register(
+            "inbound_bandwidth",
+            "Bandwidth used by receiving data from others",
+            metrics.inbound_bandwidth.clone(),
+        );
+        registry.register(
+            "outbound_bandwidth",
+            "Bandwidth used by sending data to others",
+            metrics.outbound_bandwidth.clone(),
+        );
+        registry.register(
+            "open_blobs",
+            "Number of open blobs",
+            metrics.open_blobs.clone(),
+        );
+        registry.register(
+            "storage_reads",
+            "Total number of disk reads",
+            metrics.storage_reads.clone(),
+        );
+        registry.register(
+            "storage_read_bytes",
+            "Total amount of data read from disk",
+            metrics.storage_read_bytes.clone(),
+        );
+        registry.register(
+            "storage_writes",
+            "Total number of disk writes",
+            metrics.storage_writes.clone(),
+        );
+        registry.register(
+            "storage_write_bytes",
+            "Total amount of data written to disk",
+            metrics.storage_write_bytes.clone(),
+        );
         metrics
     }
 }
@@ -156,9 +156,6 @@ impl Metrics {
 /// Configuration for the `tokio` runtime.
 #[derive(Clone)]
 pub struct Config {
-    /// Registry for metrics.
-    pub registry: Arc<Mutex<Registry>>,
-
     /// Number of threads to use for the runtime.
     pub threads: usize,
 
@@ -200,7 +197,6 @@ impl Default for Config {
 
         // Return the configuration
         Self {
-            registry: Arc::new(Mutex::new(Registry::default())),
             threads: 2,
             catch_panics: true,
             read_timeout: Duration::from_secs(60),
@@ -215,6 +211,7 @@ impl Default for Config {
 /// Runtime based on [Tokio](https://tokio.rs).
 pub struct Executor {
     cfg: Config,
+    registry: Mutex<Registry>,
     metrics: Arc<Metrics>,
     runtime: Runtime,
     fs: AsyncMutex<()>,
@@ -225,7 +222,12 @@ pub struct Executor {
 impl Executor {
     /// Initialize a new `tokio` runtime with the given number of threads.
     pub fn init(cfg: Config) -> (Runner, Context) {
-        let metrics = Arc::new(Metrics::init(cfg.registry.clone()));
+        // Create a new registry
+        let mut registry = Registry::default();
+        let runtime_registry = registry.sub_registry_with_prefix(RUNTIME_METRICS_PREFIX);
+
+        // Initialize runtime
+        let metrics = Arc::new(Metrics::init(runtime_registry));
         let runtime = Builder::new_multi_thread()
             .worker_threads(cfg.threads)
             .enable_all()
@@ -234,6 +236,7 @@ impl Executor {
         let (signaler, signal) = Signaler::new();
         let executor = Arc::new(Self {
             cfg,
+            registry: Mutex::new(registry),
             metrics,
             runtime,
             fs: AsyncMutex::new(()),
@@ -717,5 +720,25 @@ impl crate::Blob for Blob {
 impl Drop for Blob {
     fn drop(&mut self) {
         self.metrics.open_blobs.dec();
+    }
+}
+
+impl crate::Metrics for Context {
+    fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
+        let name = name.into();
+        let prefixed_name = PREFIX
+            .try_with(|prefix| format!("{}_{}", prefix, name))
+            .unwrap_or(name);
+        self.executor
+            .registry
+            .lock()
+            .unwrap()
+            .register(prefixed_name, help, metric)
+    }
+
+    fn encode(&self) -> String {
+        let mut buffer = String::new();
+        encode(&mut buffer, &self.executor.registry.lock().unwrap()).expect("encoding failed");
+        buffer
     }
 }

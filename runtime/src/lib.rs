@@ -256,10 +256,8 @@ mod tests {
     use super::*;
     use commonware_macros::select;
     use futures::{channel::mpsc, future::ready, join, SinkExt, StreamExt};
-    use prometheus_client::encoding::text::encode;
-    use prometheus_client::registry::Registry;
     use std::panic::{catch_unwind, AssertUnwindSafe};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
     use utils::reschedule;
 
     fn test_error_future(runner: impl Runner) {
@@ -838,8 +836,7 @@ mod tests {
     #[test]
     fn test_deterministic_blob_clone_and_concurrent_read() {
         // Run test
-        let cfg = deterministic::Config::default();
-        let (executor, runtime, _) = deterministic::Executor::init(cfg.clone());
+        let (executor, runtime, _) = deterministic::Executor::default();
         test_blob_clone_and_concurrent_read(executor, runtime.clone());
 
         // Ensure no blobs still open
@@ -934,16 +931,11 @@ mod tests {
     #[test]
     fn test_tokio_blob_clone_and_concurrent_read() {
         // Run test
-        let cfg = tokio::Config {
-            registry: Arc::new(Mutex::new(Registry::default())),
-            ..Default::default()
-        };
-        let (executor, runtime) = tokio::Executor::init(cfg.clone());
-        test_blob_clone_and_concurrent_read(executor, runtime);
+        let (executor, runtime) = tokio::Executor::default();
+        test_blob_clone_and_concurrent_read(executor, runtime.clone());
 
         // Ensure no blobs still open
-        let mut buffer = String::new();
-        encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+        let buffer = runtime.encode();
         assert!(buffer.contains("open_blobs 0"));
     }
 

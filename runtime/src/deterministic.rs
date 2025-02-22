@@ -57,7 +57,7 @@ const EPHEMERAL_PORT_RANGE: Range<u16> = 32768..61000;
 const ROOT_TASK: &str = "root";
 
 /// Prefix for runtime metrics.
-const RUNTIME_METRICS_PREFIX: &str = "runtime";
+const RUNTIME_METRICS_PREFIX: &str = "runtime_deterministic";
 
 /// Map of names to blob contents.
 pub type Partition = HashMap<Vec<u8>, Vec<u8>>;
