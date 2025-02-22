@@ -16,6 +16,7 @@ commonware-cryptography = { workspace = true }
 commonware-macros = { workspace = true }
 commonware-p2p = { workspace = true }
 commonware-runtime = { workspace = true }
+commonware-stream = { workspace = true }
 commonware-utils = { workspace = true }
 bytes = { workspace = true }
 rand = { workspace = true }
@@ -24,6 +25,7 @@ tracing = { workspace = true }
 prost = { workspace = true }
 governor = { workspace = true }
 prometheus-client = { workspace = true }
+thiserror = { workspace = true }
 
 [build-dependencies]
 prost-build = { workspace = true }
