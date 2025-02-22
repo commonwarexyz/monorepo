@@ -10,7 +10,7 @@ use commonware_cryptography::Array;
 use commonware_macros::select;
 use commonware_runtime::{
     deterministic::{Listener, Sink, Stream},
-    Clock, Listener as _, Network as RNetwork, Spawner,
+    Clock, Listener as _, Metrics, Network as RNetwork, Spawner,
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_utils::SizedSerialize;
@@ -18,16 +18,12 @@ use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
 };
-use prometheus_client::{
-    metrics::{counter::Counter, family::Family},
-    registry::Registry,
-};
+use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
 use std::{
     collections::{BTreeMap, HashMap},
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::{Arc, Mutex},
     time::Duration,
 };
 use tracing::{error, trace};
@@ -37,15 +33,13 @@ type Task<P> = (Channel, P, Recipients<P>, Bytes, oneshot::Sender<Vec<P>>);
 
 /// Configuration for the simulated network.
 pub struct Config {
-    /// Registry for prometheus metrics.
-    pub registry: Arc<Mutex<Registry>>,
-
     /// Maximum size of a message that can be sent over the network.
     pub max_size: usize,
 }
 
 /// Implementation of a simulated network.
-pub struct Network<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock, P: Array> {
+pub struct Network<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock + Metrics, P: Array>
+{
     runtime: E,
 
     // Maximum size of a message that can be sent over the network
@@ -75,7 +69,9 @@ pub struct Network<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock, 
     sent_messages: Family<metrics::Message, Counter>,
 }
 
-impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock, P: Array> Network<E, P> {
+impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock + Metrics, P: Array>
+    Network<E, P>
+{
     /// Create a new simulated network with a given runtime and configuration.
     ///
     /// Returns a tuple containing the network instance and the oracle that can
@@ -85,15 +81,12 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock, P: Array> Netw
         let (oracle_sender, oracle_receiver) = mpsc::unbounded();
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();
-        {
-            let mut registry = cfg.registry.lock().unwrap();
-            registry.register("messages_sent", "messages sent", sent_messages.clone());
-            registry.register(
-                "messages_received",
-                "messages received",
-                received_messages.clone(),
-            );
-        }
+        runtime.register("messages_sent", "messages sent", sent_messages.clone());
+        runtime.register(
+            "messages_received",
+            "messages received",
+            received_messages.clone(),
+        );
 
         // Start with a pseudo-random IP address to assign sockets to for new peers
         let next_addr = SocketAddr::new(
@@ -710,7 +703,6 @@ mod tests {
         let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             let cfg = Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 max_size: MAX_MESSAGE_SIZE,
             };
             let (network, mut oracle) = Network::new(runtime.clone(), cfg);
@@ -754,7 +746,6 @@ mod tests {
     #[test]
     fn test_get_next_socket() {
         let cfg = Config {
-            registry: Arc::new(Mutex::new(Registry::default())),
             max_size: MAX_MESSAGE_SIZE,
         };
         let (_, runtime, _) = Executor::default();

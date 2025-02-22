@@ -131,9 +131,7 @@ mod tests {
     use commonware_macros::select;
     use commonware_runtime::{deterministic::Executor, Clock, Runner, Spawner};
     use futures::{channel::mpsc, SinkExt, StreamExt};
-    use prometheus_client::registry::Registry;
     use rand::Rng;
-    use std::sync::{Arc, Mutex};
     use std::{
         collections::{BTreeMap, HashMap},
         time::Duration,
@@ -146,7 +144,6 @@ mod tests {
             let (network, mut oracle) = Network::new(
                 runtime.clone(),
                 Config {
-                    registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
                     max_size: 1024 * 1024,
                 },
             );
@@ -262,7 +259,6 @@ mod tests {
             let (network, mut oracle) = Network::new(
                 runtime.clone(),
                 Config {
-                    registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
                     max_size: 1024 * 1024,
                 },
             );
@@ -303,7 +299,6 @@ mod tests {
             let (network, mut oracle) = Network::new(
                 runtime.clone(),
                 Config {
-                    registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
                     max_size: 1024 * 1024,
                 },
             );
@@ -341,7 +336,6 @@ mod tests {
             let (network, mut oracle) = Network::new(
                 runtime.clone(),
                 Config {
-                    registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
                     max_size: 1024 * 1024,
                 },
             );
@@ -367,7 +361,6 @@ mod tests {
             let (network, mut oracle) = Network::new(
                 runtime.clone(),
                 Config {
-                    registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
                     max_size: 1024 * 1024,
                 },
             );
@@ -407,7 +400,6 @@ mod tests {
             let (network, mut oracle) = Network::new(
                 runtime.clone(),
                 Config {
-                    registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
                     max_size: 1024 * 1024,
                 },
             );
@@ -463,7 +455,6 @@ mod tests {
             let (network, mut oracle) = Network::new(
                 runtime.clone(),
                 Config {
-                    registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
                     max_size: 1024 * 1024,
                 },
             );
@@ -537,7 +528,6 @@ mod tests {
             let (network, mut oracle) = Network::new(
                 runtime.clone(),
                 Config {
-                    registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
                     max_size: 1024 * 1024,
                 },
             );
@@ -590,7 +580,6 @@ mod tests {
             let (network, mut oracle) = Network::new(
                 runtime.clone(),
                 Config {
-                    registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
                     max_size: 1024 * 1024,
                 },
             );
@@ -660,7 +649,6 @@ mod tests {
             let (network, mut oracle) = Network::new(
                 runtime.clone(),
                 Config {
-                    registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
                     max_size: 1024 * 1024,
                 },
             );
