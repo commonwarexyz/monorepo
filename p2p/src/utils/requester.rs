@@ -226,7 +226,7 @@ impl<E: Clock + GClock + Rng, C: Scheme> Requester<E, C> {
 
     /// Get the next outstanding ID and deadline.
     pub fn next(&self) -> Option<(ID, SystemTime)> {
-        let (id, deadline) = self.deadlines.iter().next()?;
+        let (id, deadline) = self.deadlines.peek()?;
         Some((*id, *deadline))
     }
 

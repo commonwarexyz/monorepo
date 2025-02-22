@@ -1,0 +1,20 @@
+syntax = "proto3";
+package wire;
+
+message PeerMsg {
+    // Unique identifier for the message.
+    // Responses should have the same id as the request.
+    uint64 id = 1;
+
+    // Payload is the data being sent.
+    oneof payload {
+        // Request is a request for a response.
+        bytes request = 2;
+
+        // Response is a response to a request.
+        bytes response = 3;
+
+        // If both `request` and `response` are missing, the message indicates an empty response.
+        // This indicates an unspecified error.
+    }
+}
