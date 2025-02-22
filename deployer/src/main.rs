@@ -81,12 +81,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .get_matches();
 
     // Determine deployer IP
-    let deployer_ip = reqwest::get("http://icanhazip.com")
+    let deployer_ip = reqwest::get("http://ipv4.icanhazip.com")
         .await?
         .text()
         .await?
         .trim()
         .to_string();
+    println!("Deployer IP: {}", deployer_ip);
 
     match matches.subcommand() {
         ("setup", Some(sub_m)) => {
@@ -588,7 +589,7 @@ nohup /opt/promtail/promtail -config.file=/etc/promtail/promtail.yml &
             for region in all_regions {
                 // Create EC2 client for region
                 let region = Region::new(region);
-                let ec2_client = create_ec2_client(region).await;
+                let ec2_client = create_ec2_client(region.clone()).await;
 
                 // Delete instances
                 let instance_ids = find_instances_by_tag(&ec2_client, &tag).await?;
@@ -644,7 +645,7 @@ nohup /opt/promtail/promtail -config.file=/etc/promtail/promtail.yml &
 
                 // Delete key pair
                 let key_name = format!("deployer-{}", tag);
-                println!("Deleting key pair: {}", key_name);
+                println!("Deleting key pair {} for region {}", key_name, region);
                 delete_key_pair(&ec2_client, &key_name).await?;
             }
             println!("Teardown complete for tag: {}", tag);
