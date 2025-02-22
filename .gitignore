@@ -2,3 +2,4 @@
 *.DS_Store
 /target
 *.vscode
+examples/flood/assets
