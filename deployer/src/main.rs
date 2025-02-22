@@ -607,7 +607,7 @@ nohup /opt/promtail/promtail -config.file=/etc/promtail/promtail.yml &
             println!("Regions: {:?}", all_regions);
 
             // Teardown resources
-            for region in all_regions {
+            for region in all_regions.clone() {
                 // Create EC2 client for region
                 let region = Region::new(region);
                 let ec2_client = create_ec2_client(region.clone()).await;
@@ -615,59 +615,70 @@ nohup /opt/promtail/promtail -config.file=/etc/promtail/promtail.yml &
                 // Delete instances
                 let instance_ids = find_instances_by_tag(&ec2_client, &tag).await?;
                 if !instance_ids.is_empty() {
-                    println!("Terminating instances: {:?}", instance_ids);
                     terminate_instances(&ec2_client, &instance_ids).await?;
                     wait_for_instances_terminated(&ec2_client, &instance_ids).await?;
+                    println!("Terminated instances({}): {:?}", region, instance_ids);
                 }
 
                 // Delete security groups
                 let sg_ids = find_security_groups_by_tag(&ec2_client, &tag).await?;
                 for sg_id in sg_ids {
-                    println!("Deleting security group: {}", sg_id);
                     delete_security_group(&ec2_client, &sg_id).await?;
+                    println!("Deleted security group({}): {}", region, sg_id);
                 }
 
                 // Delete subnets
                 let subnet_ids = find_subnets_by_tag(&ec2_client, &tag).await?;
                 for subnet_id in subnet_ids {
-                    println!("Deleting subnet: {}", subnet_id);
                     delete_subnet(&ec2_client, &subnet_id).await?;
+                    println!("Deleted subnet({}): {}", region, subnet_id);
                 }
 
                 // Delete route tables
                 let route_table_ids = find_route_tables_by_tag(&ec2_client, &tag).await?;
                 for rt_id in route_table_ids {
-                    println!("Deleting route table: {}", rt_id);
                     delete_route_table(&ec2_client, &rt_id).await?;
+                    println!("Deleted route table({}): {}", region, rt_id);
                 }
 
                 // Delete VPC peering connections
                 let peering_ids = find_vpc_peering_by_tag(&ec2_client, &tag).await?;
                 for peering_id in peering_ids {
-                    println!("Deleting VPC peering connection: {}", peering_id);
                     delete_vpc_peering(&ec2_client, &peering_id).await?;
+                    wait_for_vpc_peering_deletion(&ec2_client, &peering_id).await?;
+                    println!("Deleted VPC peering connection({}): {}", region, peering_id);
                 }
 
                 // Delete internet gateways
                 let igw_ids = find_igws_by_tag(&ec2_client, &tag).await?;
                 for igw_id in igw_ids {
-                    println!("Detaching and deleting internet gateway: {}", igw_id);
                     let vpc_id = find_vpc_by_igw(&ec2_client, &igw_id).await?;
                     detach_igw(&ec2_client, &igw_id, &vpc_id).await?;
                     delete_igw(&ec2_client, &igw_id).await?;
-                }
-
-                // Delete VPCs
-                let vpc_ids = find_vpcs_by_tag(&ec2_client, &tag).await?;
-                for vpc_id in vpc_ids {
-                    println!("Deleting VPC: {}", vpc_id);
-                    delete_vpc(&ec2_client, &vpc_id).await?;
+                    println!(
+                        "Detached and deleted internet gateway({}): {}",
+                        region, igw_id
+                    );
                 }
 
                 // Delete key pair
                 let key_name = format!("deployer-{}", tag);
-                println!("Deleting key pair {} for region {}", key_name, region);
                 delete_key_pair(&ec2_client, &key_name).await?;
+                println!("Deleted key pair({}): {}", region, key_name);
+            }
+
+            // Delete VPCs after all peering connections are deleted
+            for region in all_regions {
+                // Create EC2 client for region
+                let region = Region::new(region);
+                let ec2_client = create_ec2_client(region.clone()).await;
+
+                // Delete VPCs
+                let vpc_ids = find_vpcs_by_tag(&ec2_client, &tag).await?;
+                for vpc_id in vpc_ids {
+                    delete_vpc(&ec2_client, &vpc_id).await?;
+                    println!("Deleted VPC({}): {}", region, vpc_id);
+                }
             }
             println!("Teardown complete for tag: {}", tag);
         }
@@ -1144,6 +1155,33 @@ async fn delete_vpc_peering(client: &Ec2Client, peering_id: &str) -> Result<(), 
         .send()
         .await?;
     Ok(())
+}
+
+async fn wait_for_vpc_peering_deletion(
+    ec2_client: &Ec2Client,
+    peer_id: &str,
+) -> Result<(), Ec2Error> {
+    loop {
+        let resp = ec2_client
+            .describe_vpc_peering_connections()
+            .vpc_peering_connection_ids(peer_id)
+            .send()
+            .await?;
+        if let Some(connections) = resp.vpc_peering_connections {
+            if let Some(connection) = connections.first() {
+                if connection.status.as_ref().unwrap().code
+                    == Some(VpcPeeringConnectionStateReasonCode::Deleted)
+                {
+                    return Ok(());
+                }
+            } else {
+                return Ok(());
+            }
+        } else {
+            return Ok(());
+        }
+        sleep(Duration::from_secs(5)).await;
+    }
 }
 
 fn generate_prometheus_config(ips: &[String]) -> String {
