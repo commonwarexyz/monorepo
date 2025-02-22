@@ -9,7 +9,6 @@ use aws_sdk_ec2::{Client as Ec2Client, Error as Ec2Error};
 use clap::{App, Arg, SubCommand};
 use commonware_deployer::{Config, InstanceConfig, Peer, Peers, PortConfig};
 use futures::future::join_all;
-use reqwest::blocking;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::error::Error;
 use std::fs::File;
@@ -82,8 +81,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .get_matches();
 
     // Determine deployer IP
-    let deployer_ip = blocking::get("http://icanhazip.com")?
-        .text()?
+    let deployer_ip = reqwest::get("http://icanhazip.com")
+        .await?
+        .text()
+        .await?
         .trim()
         .to_string();
 
