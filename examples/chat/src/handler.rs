@@ -8,7 +8,6 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use futures::{channel::mpsc, SinkExt, StreamExt};
-use prometheus_client::{encoding::text::encode, registry::Registry};
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
@@ -44,7 +43,6 @@ enum Focus {
 pub async fn run(
     runtime: impl Spawner + Metrics,
     me: String,
-    p2p_registry: Arc<Mutex<Registry>>,
     logs: Arc<Mutex<Vec<String>>>,
     mut sender: impl Sender,
     mut receiver: impl Receiver,
@@ -135,12 +133,7 @@ pub async fn run(
                 f.render_widget(messages_block, messages_chunks[0]);
 
                 // Display metrics
-                let mut buffer = runtime.encode();
-                {
-                    // TODO: No longer needed when runtime includes
-                    let registry = p2p_registry.lock().unwrap();
-                    encode(&mut buffer, &registry).unwrap();
-                }
+                let buffer = runtime.encode();
                 let metrics_text = Text::from(buffer);
                 let metrics_block = Paragraph::new(metrics_text)
                     .block(

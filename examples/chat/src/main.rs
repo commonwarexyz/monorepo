@@ -60,7 +60,6 @@ use commonware_cryptography::{Ed25519, Scheme};
 use commonware_p2p::authenticated::{self, Network};
 use commonware_runtime::{tokio::Executor, Runner, Spawner};
 use governor::Quota;
-use prometheus_client::registry::Registry;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::num::NonZeroU32;
 use std::str::FromStr;
@@ -150,11 +149,9 @@ fn main() {
 
     // Configure network
     const MAX_MESSAGE_SIZE: usize = 1024; // 1 KB
-    let p2p_registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
     let p2p_cfg = authenticated::Config::aggressive(
         signer.clone(),
         APPLICATION_NAMESPACE,
-        p2p_registry.clone(),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
         MAX_MESSAGE_SIZE,
@@ -188,7 +185,6 @@ fn main() {
         handler::run(
             runtime.clone(),
             signer.public_key().to_string(),
-            p2p_registry,
             logs,
             chat_sender,
             chat_receiver,

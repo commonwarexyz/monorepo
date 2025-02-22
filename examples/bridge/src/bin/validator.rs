@@ -170,7 +170,6 @@ fn main() {
     let p2p_cfg = authenticated::Config::aggressive(
         signer.clone(),
         &union(APPLICATION_NAMESPACE, P2P_SUFFIX),
-        Arc::new(Mutex::new(Registry::default())),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
         1024 * 1024, // 1MB
