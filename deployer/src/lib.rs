@@ -24,6 +24,8 @@ pub struct InstanceConfig {
     pub name: String,
     pub region: String,
     pub instance_type: String,
+    pub storage_size: i32,
+    pub storage_class: String,
     pub binary: String,
     pub config: String,
 }
@@ -31,6 +33,8 @@ pub struct InstanceConfig {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct MonitoringConfig {
     pub instance_type: String,
+    pub storage_size: i32,
+    pub storage_class: String,
     pub dashboard: String,
 }
 

@@ -2,8 +2,8 @@ use aws_config::{BehaviorVersion, Region};
 use aws_sdk_ec2::error::BuildError;
 use aws_sdk_ec2::primitives::Blob;
 use aws_sdk_ec2::types::{
-    Filter, InstanceStateName, InstanceType, IpPermission, IpRange, ResourceType, Tag,
-    TagSpecification, UserIdGroupPair,
+    BlockDeviceMapping, EbsBlockDevice, Filter, InstanceStateName, InstanceType, IpPermission,
+    IpRange, ResourceType, Tag, TagSpecification, UserIdGroupPair, VolumeType,
 };
 use aws_sdk_ec2::{Client as Ec2Client, Error as Ec2Error};
 use clap::{App, Arg, SubCommand};
@@ -216,10 +216,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let monitoring_instance_type =
                 InstanceType::try_parse(&config.monitoring.instance_type)
                     .expect("Invalid instance type");
+            let monitoring_storage_class = VolumeType::try_parse(&config.monitoring.storage_class)
+                .expect("Invalid storage class");
             let monitoring_instance_id = launch_instances(
                 monitoring_ec2_client,
                 &ami_id,
                 monitoring_instance_type,
+                config.monitoring.storage_size,
+                monitoring_storage_class,
                 &key_name,
                 &monitoring_resources.subnet_id,
                 monitoring_resources.monitoring_sg_id.as_ref().unwrap(),
@@ -263,6 +267,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 let ami_id = find_latest_ami(ec2_client).await?;
                 let instance_type = InstanceType::try_parse(&instance.instance_type)
                     .expect("Invalid instance type");
+                let storage_class =
+                    VolumeType::try_parse(&instance.storage_class).expect("Invalid storage class");
                 let regular_sg_id = resources.regular_sg_id.as_ref().unwrap();
                 let tag = tag.clone();
                 let future = async move {
@@ -270,6 +276,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         ec2_client,
                         &ami_id,
                         instance_type,
+                        instance.storage_size,
+                        storage_class,
                         &key_name,
                         &resources.subnet_id,
                         regular_sg_id,
@@ -371,12 +379,12 @@ table_manager:
                 r#"
 sudo apt-get update -y
 sudo apt-get install -y wget curl unzip
-wget https://github.com/prometheus/prometheus/releases/download/v{}/prometheus-{}.linux-amd64.tar.gz
-tar xvfz prometheus-{}.linux-amd64.tar.gz
-sudo mv prometheus-{}.linux-amd64 /opt/prometheus
-wget https://github.com/grafana/loki/releases/download/v{}/loki-linux-amd64.zip
-unzip loki-linux-amd64.zip
-sudo mv loki-linux-amd64 /opt/loki/loki
+wget https://github.com/prometheus/prometheus/releases/download/v{}/prometheus-{}.linux-arm64.tar.gz
+tar xvfz prometheus-{}.linux-arm64.tar.gz
+sudo mv prometheus-{}.linux-arm64 /opt/prometheus
+wget https://github.com/grafana/loki/releases/download/v{}/loki-linux-arm64.zip
+unzip loki-linux-arm64.zip
+sudo mv loki-linux-arm64 /opt/loki/loki
 sudo mkdir -p /etc/loki
 sudo mv /home/ubuntu/loki.yml /etc/loki/loki.yml
 sudo chown root:root /etc/loki/loki.yml
@@ -469,9 +477,9 @@ scrape_configs:
                     .await?;
                     let install_promtail_cmd = format!(
                         r#"
-wget https://github.com/grafana/loki/releases/download/v{}/promtail-linux-amd64.zip
-unzip promtail-linux-amd64.zip
-sudo mv promtail-linux-amd64 /opt/promtail/promtail
+wget https://github.com/grafana/loki/releases/download/v{}/promtail-linux-arm64.zip
+unzip promtail-linux-arm64.zip
+sudo mv promtail-linux-arm64 /opt/promtail/promtail
 sudo mkdir -p /etc/promtail
 sudo mv /home/ubuntu/promtail.yml /etc/promtail/promtail.yml
 sudo chown root:root /etc/promtail/promtail.yml
@@ -596,7 +604,7 @@ nohup /opt/promtail/promtail -config.file=/etc/promtail/promtail.yml &
 
 // Helper functions remain the same as in the original code
 async fn create_ec2_client(region: Region) -> Ec2Client {
-    let config = aws_config::defaults(BehaviorVersion::latest())
+    let config = aws_config::defaults(BehaviorVersion::v2024_03_28())
         .region(region)
         .load()
         .await;
@@ -629,7 +637,7 @@ async fn find_latest_ami(client: &Ec2Client) -> Result<String, Ec2Error> {
         .filters(
             Filter::builder()
                 .name("name")
-                .values("ubuntu/images/hvm-ssd/ubuntu-focal-20.04-amd64-server-*")
+                .values("ubuntu/images/hvm-ssd/ubuntu-focal-20.04-arm64-server-*")
                 .build(),
         )
         .filters(
@@ -874,6 +882,8 @@ async fn launch_instances(
     client: &Ec2Client,
     ami_id: &str,
     instance_type: InstanceType,
+    storage_size: i32,
+    storage_class: VolumeType,
     key_name: &str,
     subnet_id: &str,
     sg_id: &str,
@@ -893,6 +903,18 @@ async fn launch_instances(
             TagSpecification::builder()
                 .resource_type(ResourceType::Instance)
                 .tags(Tag::builder().key("deployer").value(tag).build())
+                .build(),
+        )
+        .block_device_mappings(
+            BlockDeviceMapping::builder()
+                .device_name("/dev/sda1")
+                .ebs(
+                    EbsBlockDevice::builder()
+                        .volume_size(storage_size)
+                        .volume_type(storage_class)
+                        .delete_on_termination(true)
+                        .build(),
+                )
                 .build(),
         )
         .send()
