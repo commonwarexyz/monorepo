@@ -15,8 +15,6 @@
 //! use commonware_p2p::simulated::{Config, Link, Network};
 //! use commonware_cryptography::{Ed25519, Scheme};
 //! use commonware_runtime::{deterministic::Executor, Spawner, Runner};
-//! use prometheus_client::registry::Registry;
-//! use std::sync::{Arc, Mutex};
 //!
 //! // Generate peers
 //! let peers = vec![
@@ -28,7 +26,6 @@
 //!
 //! // Configure network
 //! let p2p_cfg = Config {
-//!     registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
 //!     max_size: 1024 * 1024, // 1MB
 //! };
 //!

@@ -88,17 +88,12 @@
 //! use commonware_cryptography::{Ed25519, Scheme};
 //! use commonware_runtime::{tokio::{self, Executor}, Spawner, Runner};
 //! use governor::Quota;
-//! use prometheus_client::registry::Registry;
 //! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 //! use std::num::NonZeroU32;
-//! use std::sync::{Arc, Mutex};
 //!
 //! // Configure runtime
 //! let runtime_cfg = tokio::Config::default();
 //! let (executor, runtime) = Executor::init(runtime_cfg.clone());
-//!
-//! // Configure prometheus registry
-//! let registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
 //!
 //! // Generate identity
 //! //
@@ -130,7 +125,6 @@
 //! let p2p_cfg = authenticated::Config::aggressive(
 //!     signer.clone(),
 //!     application_namespace,
-//!     registry,
 //!     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3000),
 //!     bootstrappers,
 //!     MAX_MESSAGE_SIZE,
