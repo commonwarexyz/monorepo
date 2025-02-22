@@ -1,14 +1,11 @@
 use commonware_consensus::{
     threshold_simplex::View, Activity, Proof, Supervisor as Su, ThresholdSupervisor as TSu,
 };
-use commonware_cryptography::{
-    bls12381::primitives::{
-        group::{self, Element},
-        poly::{self, Poly},
-    },
-    Array,
+use commonware_cryptography::bls12381::primitives::{
+    group::{self, Element},
+    poly::{self, Poly},
 };
-use commonware_utils::modulo;
+use commonware_utils::{modulo, Array};
 use std::collections::HashMap;
 
 /// Implementation of `commonware-consensus::Supervisor`.

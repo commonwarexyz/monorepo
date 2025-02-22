@@ -1,5 +1,5 @@
 use crate::{simplex::wire, Parsed};
-use commonware_cryptography::Array;
+use commonware_utils::Array;
 use futures::{channel::mpsc, SinkExt};
 
 // If either of these requests fails, it will not send a reply.

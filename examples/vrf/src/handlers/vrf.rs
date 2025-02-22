@@ -1,19 +1,16 @@
 use crate::handlers::wire;
-use commonware_cryptography::{
-    bls12381::{
-        dkg::player::Output,
-        primitives::{
-            group::{self, Element},
-            ops,
-            poly::PartialSignature,
-        },
+use commonware_cryptography::bls12381::{
+    dkg::player::Output,
+    primitives::{
+        group::{self, Element},
+        ops,
+        poly::PartialSignature,
     },
-    Array,
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::Clock;
-use commonware_utils::hex;
+use commonware_utils::{hex, Array};
 use futures::{channel::mpsc, StreamExt};
 use prost::Message;
 use std::collections::{HashMap, HashSet};

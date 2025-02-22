@@ -1,8 +1,8 @@
 //! Make concurrent requests to peers limited by rate and prioritized by performance.
 
-use commonware_cryptography::{Array, Scheme};
+use commonware_cryptography::Scheme;
 use commonware_runtime::Clock;
-use commonware_utils::PrioritySet;
+use commonware_utils::{Array, PrioritySet};
 use either::Either;
 use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
