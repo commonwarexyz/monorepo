@@ -4,6 +4,7 @@ use aws_sdk_ec2::primitives::Blob;
 use aws_sdk_ec2::types::{
     BlockDeviceMapping, EbsBlockDevice, Filter, InstanceStateName, InstanceType, IpPermission,
     IpRange, ResourceType, Tag, TagSpecification, UserIdGroupPair, VolumeType,
+    VpcPeeringConnectionStateReasonCode,
 };
 use aws_sdk_ec2::{Client as Ec2Client, Error as Ec2Error};
 use clap::{App, Arg, SubCommand};
@@ -153,23 +154,25 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 let vpc_cidr = format!("10.{}.0.0/16", idx);
                 vpc_cidrs.insert(region.clone(), vpc_cidr.clone());
                 let vpc_id = create_vpc(ec2_client, &vpc_cidr, &tag).await?;
+                println!("Created VPC {} in region {}", vpc_id, region);
                 let igw_id = create_and_attach_igw(ec2_client, &vpc_id, &tag).await?;
+                println!("Created and attached IGW {} to VPC {}", igw_id, vpc_id);
                 let route_table_id = create_route_table(ec2_client, &vpc_id, &igw_id, &tag).await?;
-                println!("Created VPC, IGW, and Route Table for region: {}", region);
+                println!("Created Route Table {} in VPC {}", route_table_id, vpc_id);
 
                 // Create Subnet
                 let subnet_cidr = format!("10.{}.1.0/24", idx);
                 subnet_cidrs.insert(region.clone(), subnet_cidr.clone());
                 let subnet_id =
                     create_subnet(ec2_client, &vpc_id, &route_table_id, &subnet_cidr, &tag).await?;
-                println!("Created Subnet for region: {}", region);
+                println!("Created Subnet {} in VPC {}", subnet_id, vpc_id);
 
                 // Create monitoring security group in monitoring region
                 let monitoring_sg_id = if *region == MONITORING_REGION {
                     let sg_id =
                         create_security_group_monitoring(ec2_client, &vpc_id, &deployer_ip, &tag)
                             .await?;
-                    println!("Created Monitoring Security Group for region: {}", region);
+                    println!("Created monitoring security group: {}", sg_id);
                     Some(sg_id)
                 } else {
                     None
@@ -201,18 +204,33 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 config.instances.iter().map(|i| i.region.clone()).collect();
             for region in &regions {
                 if region != &monitoring_region && regular_regions.contains(region) {
+                    // Create VPC peering connection from monitoring to regular region
+                    let ec2_client = ec2_clients.get(region).unwrap();
                     let regular_resources = region_resources.get(region).unwrap();
                     let regular_vpc_id = &regular_resources.vpc_id;
                     let regular_cidr = &regular_resources.vpc_cidr;
                     let peer_id = create_vpc_peering_connection(
-                        &ec2_clients[&monitoring_region],
+                        ec2_client,
                         monitoring_vpc_id,
                         regular_vpc_id,
                         region,
                         &tag,
                     )
                     .await?;
-                    accept_vpc_peering_connection(&ec2_clients[region], &peer_id).await?;
+                    println!(
+                        "Created VPC peering connection {} from {} to {}",
+                        peer_id, monitoring_vpc_id, regular_vpc_id
+                    );
+
+                    // Wait for VPC peering connection to be active
+                    wait_for_vpc_peering_connection(ec2_client, &peer_id).await?;
+                    println!("VPC peering connection {} is active", peer_id);
+
+                    // Accept VPC peering connection in regular region
+                    accept_vpc_peering_connection(ec2_client, &peer_id).await?;
+                    println!("Accepted VPC peering connection {} in {}", peer_id, region);
+
+                    // Add routes in both regions
                     add_route(
                         &ec2_clients[&monitoring_region],
                         &monitoring_resources.route_table_id,
@@ -221,12 +239,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     )
                     .await?;
                     add_route(
-                        &ec2_clients[region],
+                        ec2_client,
                         &regular_resources.route_table_id,
                         monitoring_cidr,
                         &peer_id,
                     )
                     .await?;
+                    println!(
+                        "Added routes for VPC peering connection {} between {} and {}",
+                        peer_id, monitoring_vpc_id, regular_vpc_id
+                    );
                 }
             }
 
@@ -1041,6 +1063,37 @@ async fn create_vpc_peering_connection(
         .unwrap()
         .vpc_peering_connection_id
         .unwrap())
+}
+
+/// Waits for the VPC peering connection to become available in the accepter region.
+/// Returns Ok(()) when the peering connection is in "pending-acceptance" state.
+async fn wait_for_vpc_peering_connection(
+    client: &Ec2Client,
+    peer_id: &str,
+) -> Result<(), Ec2Error> {
+    loop {
+        // Describe the VPC peering connection to check its status
+        let resp = client
+            .describe_vpc_peering_connections()
+            .vpc_peering_connection_ids(peer_id)
+            .send()
+            .await?;
+
+        // Check if the peering connection exists and is in the correct state
+        if let Some(connections) = resp.vpc_peering_connections {
+            if let Some(connection) = connections.first() {
+                if connection.status.as_ref().unwrap().code
+                    == Some(VpcPeeringConnectionStateReasonCode::PendingAcceptance)
+                {
+                    return Ok(());
+                }
+            }
+        }
+
+        // If the peering connection is not yet available, wait and retry
+        println!("Waiting for peering connection to be available...");
+        sleep(Duration::from_secs(5)).await;
+    }
 }
 
 async fn accept_vpc_peering_connection(client: &Ec2Client, peer_id: &str) -> Result<(), Ec2Error> {
