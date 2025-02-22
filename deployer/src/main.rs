@@ -712,7 +712,7 @@ async fn find_latest_ami(client: &Ec2Client) -> Result<String, Ec2Error> {
         .filters(
             Filter::builder()
                 .name("name")
-                .values("ubuntu/images/hvm-ssd/ubuntu-noble-24.04-arm64-server-*")
+                .values("ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-arm64-server-*")
                 .build(),
         )
         .filters(
