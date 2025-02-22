@@ -11,9 +11,11 @@ use thiserror::Error;
 
 /// Errors that can occur when interacting with cryptographic primitives.
 #[derive(Error, Debug, PartialEq)]
-pub enum Error {
+pub enum Error<E: StdError + Send + Sync + 'static> {
     #[error("invalid bytes")]
     InsufficientBytes,
+    #[error("other: {0}")]
+    Other(E),
 }
 
 /// Types that can be fallibly read from a fixed-size byte sequence.
@@ -46,22 +48,21 @@ pub trait Array:
     type Error: StdError + Send + Sync + 'static;
 
     /// Attempts to read an array from the provided buffer.
-    fn read_from<B: Buf>(buf: &mut B) -> Result<Self, Box<dyn StdError + Send + Sync>> {
+    fn read_from<B: Buf>(buf: &mut B) -> Result<Self, Error<<Self as Array>::Error>> {
         let len = Self::SERIALIZED_LEN;
         if buf.remaining() < len {
-            return Err(Box::new(Error::InsufficientBytes));
+            return Err(Error::InsufficientBytes);
         }
 
         let chunk = buf.chunk();
         if chunk.len() >= len {
-            let array = Self::try_from(&chunk[..len])?;
+            let array = Self::try_from(&chunk[..len]).map_err(Error::Other)?;
             buf.advance(len);
             return Ok(array);
         }
 
         let mut temp = vec![0u8; len];
         buf.copy_to_slice(&mut temp);
-        let result = Self::try_from(temp)?;
-        Ok(result)
+        Self::try_from(temp).map_err(Error::Other)
     }
 }
