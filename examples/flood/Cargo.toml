@@ -27,10 +27,6 @@ axum = { workspace = true }
 rand = { workspace = true }
 futures = { workspace = true }
 
-[dependencies.openssl]
-version = "0.10"
-features = ["vendored"]
-
 [[bin]]
 name = "flood"
 path = "src/bin/flood.rs"

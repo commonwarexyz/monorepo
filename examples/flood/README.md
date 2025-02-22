@@ -8,13 +8,17 @@ cargo run --bin setup -- --peers 5 --bootstrappers 2 --regions us-west-2,us-east
 
 ## Build Binary
 
+_TODO: Docker pre-requisite._
+
 ```bash
-cargo install cross
+docker build -t flood-builder .
 ```
 
 ```bash
-cross build --release --bin flood --target x86_64-unknown-linux-gnu
+docker run -it -v ${PWD}/../..:/monorepo flood-builder
 ```
+
+Emitted binary is called `flood` and it is located in the same directory.
 
 ## Run
 
