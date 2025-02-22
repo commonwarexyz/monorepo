@@ -8,6 +8,7 @@ members = [
     "runtime",
     "storage",
     "utils",
+    "examples/aggregation",
     "examples/bridge",
     "examples/chat",
     "examples/log",
