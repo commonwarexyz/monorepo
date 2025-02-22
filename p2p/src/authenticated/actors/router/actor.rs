@@ -8,6 +8,7 @@ use crate::{
 };
 use bytes::Bytes;
 use commonware_cryptography::Array;
+use commonware_runtime::Metrics;
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::collections::BTreeMap;
@@ -21,20 +22,19 @@ pub struct Actor<P: Array> {
 }
 
 impl<P: Array> Actor<P> {
-    pub fn new(cfg: Config) -> (Self, Mailbox<P>, Messenger<P>) {
+    pub fn new(runtime: &impl Metrics, cfg: Config) -> (Self, Mailbox<P>, Messenger<P>) {
+        // Create mailbox
         let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
 
         // Create metrics
         let messages_dropped = Family::<metrics::Message, Counter>::default();
-        {
-            let mut registry = cfg.registry.lock().unwrap();
-            registry.register(
-                "messages_dropped",
-                "messages dropped",
-                messages_dropped.clone(),
-            );
-        }
+        runtime.register(
+            "messages_dropped",
+            "messages dropped",
+            messages_dropped.clone(),
+        );
 
+        // Create actor
         (
             Self {
                 control: control_receiver,

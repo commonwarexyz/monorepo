@@ -2,7 +2,7 @@
 
 use crate::authenticated::actors::{spawner, tracker};
 use commonware_cryptography::Scheme;
-use commonware_runtime::{Clock, Listener, Network, Sink, Spawner, Stream};
+use commonware_runtime::{Clock, Listener, Metrics, Network, Sink, Spawner, Stream};
 use commonware_stream::public_key::{Config as StreamConfig, Connection, IncomingConnection};
 use governor::{
     clock::ReasonablyRealtime,
@@ -10,18 +10,13 @@ use governor::{
     state::{InMemoryState, NotKeyed},
     Quota, RateLimiter,
 };
-use prometheus_client::{metrics::counter::Counter, registry::Registry};
+use prometheus_client::metrics::counter::Counter;
 use rand::{CryptoRng, Rng};
-use std::{
-    marker::PhantomData,
-    net::SocketAddr,
-    sync::{Arc, Mutex},
-};
+use std::{marker::PhantomData, net::SocketAddr};
 use tracing::debug;
 
 /// Configuration for the listener actor.
 pub struct Config<C: Scheme> {
-    pub registry: Arc<Mutex<Registry>>,
     pub address: SocketAddr,
     pub stream_cfg: StreamConfig<C>,
     pub allowed_incoming_connectioned_rate: Quota,
@@ -31,7 +26,7 @@ pub struct Actor<
     Si: Sink,
     St: Stream,
     L: Listener<Si, St>,
-    E: Spawner + Clock + ReasonablyRealtime + Network<L, Si, St> + Rng + CryptoRng,
+    E: Spawner + Clock + ReasonablyRealtime + Network<L, Si, St> + Rng + CryptoRng + Metrics,
     C: Scheme,
 > {
     runtime: E,
@@ -51,21 +46,18 @@ impl<
         Si: Sink,
         St: Stream,
         L: Listener<Si, St>,
-        E: Spawner + Clock + ReasonablyRealtime + Network<L, Si, St> + Rng + CryptoRng,
+        E: Spawner + Clock + ReasonablyRealtime + Network<L, Si, St> + Rng + CryptoRng + Metrics,
         C: Scheme,
     > Actor<Si, St, L, E, C>
 {
     pub fn new(runtime: E, cfg: Config<C>) -> Self {
         // Create metrics
         let handshakes_rate_limited = Counter::default();
-        {
-            let mut registry = cfg.registry.lock().unwrap();
-            registry.register(
-                "handshake_rate_limited",
-                "number of handshakes rate limited",
-                handshakes_rate_limited.clone(),
-            );
-        }
+        runtime.register(
+            "handshake_rate_limited",
+            "number of handshakes rate limited",
+            handshakes_rate_limited.clone(),
+        );
 
         Self {
             runtime: runtime.clone(),

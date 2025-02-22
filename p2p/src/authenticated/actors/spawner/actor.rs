@@ -7,7 +7,7 @@ use crate::authenticated::{
     metrics,
 };
 use commonware_cryptography::Array;
-use commonware_runtime::{Clock, Sink, Spawner, Stream};
+use commonware_runtime::{Clock, Metrics, Sink, Spawner, Stream};
 use futures::{channel::mpsc, StreamExt};
 use governor::{clock::ReasonablyRealtime, Quota};
 use prometheus_client::metrics::{counter::Counter, family::Family};
@@ -15,7 +15,12 @@ use rand::{CryptoRng, Rng};
 use std::time::Duration;
 use tracing::{debug, info};
 
-pub struct Actor<E: Spawner + Clock, Si: Sink, St: Stream, P: Array> {
+pub struct Actor<
+    E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics,
+    Si: Sink,
+    St: Stream,
+    P: Array,
+> {
     runtime: E,
 
     mailbox_size: usize,
@@ -30,27 +35,28 @@ pub struct Actor<E: Spawner + Clock, Si: Sink, St: Stream, P: Array> {
     rate_limited: Family<metrics::Message, Counter>,
 }
 
-impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng, Si: Sink, St: Stream, P: Array>
-    Actor<E, Si, St, P>
+impl<
+        E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics,
+        Si: Sink,
+        St: Stream,
+        P: Array,
+    > Actor<E, Si, St, P>
 {
     pub fn new(runtime: E, cfg: Config) -> (Self, Mailbox<E, Si, St, P>) {
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();
         let rate_limited = Family::<metrics::Message, Counter>::default();
-        {
-            let mut registry = cfg.registry.lock().unwrap();
-            registry.register("messages_sent", "messages sent", sent_messages.clone());
-            registry.register(
-                "messages_received",
-                "messages received",
-                received_messages.clone(),
-            );
-            registry.register(
-                "messages_rate_limited",
-                "messages rate limited",
-                rate_limited.clone(),
-            );
-        }
+        runtime.register("messages_sent", "messages sent", sent_messages.clone());
+        runtime.register(
+            "messages_received",
+            "messages received",
+            received_messages.clone(),
+        );
+        runtime.register(
+            "messages_rate_limited",
+            "messages rate limited",
+            rate_limited.clone(),
+        );
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
 
         (

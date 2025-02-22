@@ -204,16 +204,15 @@ mod tests {
     use commonware_cryptography::{Ed25519, Scheme};
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        deterministic, tokio, Clock, Listener, Network as RNetwork, Runner, Sink, Spawner, Stream,
+        deterministic, tokio, Clock, Listener, Metrics, Network as RNetwork, Runner, Sink, Spawner,
+        Stream,
     };
     use governor::{clock::ReasonablyRealtime, Quota};
-    use prometheus_client::registry::Registry;
     use rand::{CryptoRng, Rng};
     use std::collections::HashSet;
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
         num::NonZeroU32,
-        sync::{Arc, Mutex},
         time::Duration,
     };
 
@@ -231,7 +230,13 @@ mod tests {
     /// We set a unique `base_port` for each test to avoid "address already in use"
     /// errors when tests are run immediately after each other.
     async fn run_network<Si: Sink, St: Stream, L: Listener<Si, St>>(
-        runtime: impl Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork<L, Si, St>,
+        runtime: impl Spawner
+            + Clock
+            + ReasonablyRealtime
+            + Rng
+            + CryptoRng
+            + RNetwork<L, Si, St>
+            + Metrics,
         max_message_size: usize,
         base_port: u16,
         n: usize,
@@ -261,10 +266,8 @@ mod tests {
 
             // Create network
             let signer = peer.clone();
-            let registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
             let config = Config::test(
                 signer.clone(),
-                registry,
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
                 bootstrappers,
                 max_message_size,
@@ -486,10 +489,8 @@ mod tests {
 
                 // Create network
                 let signer = peer.clone();
-                let registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
                 let config = Config::test(
                     signer.clone(),
-                    registry,
                     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
                     bootstrappers,
                     1_024 * 1_024, // 1MB
@@ -573,10 +574,8 @@ mod tests {
 
             // Create network
             let signer = peers[0].clone();
-            let registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
             let config = Config::test(
                 signer.clone(),
-                registry,
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port),
                 Vec::new(),
                 1_024 * 1_024, // 1MB

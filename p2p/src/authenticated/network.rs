@@ -8,7 +8,7 @@ use super::{
 use crate::Channel;
 use commonware_cryptography::Scheme;
 use commonware_macros::select;
-use commonware_runtime::{Clock, Listener, Network as RNetwork, Sink, Spawner, Stream};
+use commonware_runtime::{Clock, Listener, Metrics, Network as RNetwork, Sink, Spawner, Stream};
 use commonware_stream::public_key;
 use commonware_utils::union;
 use governor::{clock::ReasonablyRealtime, Quota};
@@ -41,7 +41,7 @@ pub struct Network<
     Si: Sink,
     St: Stream,
     L: Listener<Si, St>,
-    E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork<L, Si, St>,
+    E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork<L, Si, St> + Metrics,
     C: Scheme,
 > {
     runtime: E,
@@ -62,7 +62,7 @@ impl<
         Si: Sink,
         St: Stream,
         L: Listener<Si, St>,
-        E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork<L, Si, St>,
+        E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork<L, Si, St> + Metrics,
         C: Scheme,
     > Network<Si, St, L, E, C>
 {
@@ -82,7 +82,6 @@ impl<
             tracker::Config {
                 crypto: cfg.crypto.clone(),
                 namespace: union(&cfg.namespace, TRACKER_SUFFIX),
-                registry: cfg.registry.clone(),
                 address: cfg.dialable,
                 bootstrappers: cfg.bootstrappers.clone(),
                 allow_private_ips: cfg.allow_private_ips,
@@ -93,10 +92,12 @@ impl<
                 peer_gossip_max_count: cfg.peer_gossip_max_count,
             },
         );
-        let (router, router_mailbox, messenger) = router::Actor::new(router::Config {
-            registry: cfg.registry.clone(),
-            mailbox_size: cfg.mailbox_size,
-        });
+        let (router, router_mailbox, messenger) = router::Actor::new(
+            &runtime,
+            router::Config {
+                mailbox_size: cfg.mailbox_size,
+            },
+        );
         let channels = Channels::new(messenger, cfg.max_message_size);
 
         (
@@ -159,7 +160,6 @@ impl<
         let (spawner, spawner_mailbox) = spawner::Actor::new(
             self.runtime.clone(),
             spawner::Config {
-                registry: self.cfg.registry.clone(),
                 mailbox_size: self.cfg.mailbox_size,
                 gossip_bit_vec_frequency: self.cfg.gossip_bit_vec_frequency,
                 allowed_bit_vec_rate: self.cfg.allowed_bit_vec_rate,
@@ -183,7 +183,6 @@ impl<
         let listener = listener::Actor::new(
             self.runtime.clone(),
             listener::Config {
-                registry: self.cfg.registry.clone(),
                 address: self.cfg.listen,
                 stream_cfg: stream_cfg.clone(),
                 allowed_incoming_connectioned_rate: self.cfg.allowed_incoming_connection_rate,
@@ -198,7 +197,6 @@ impl<
         let dialer = dialer::Actor::new(
             self.runtime.clone(),
             dialer::Config {
-                registry: self.cfg.registry,
                 stream_cfg,
                 dial_frequency: self.cfg.dial_frequency,
                 dial_rate: self.cfg.dial_rate,
