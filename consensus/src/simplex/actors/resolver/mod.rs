@@ -16,7 +16,6 @@ pub struct Config<C: Scheme, S: Supervisor> {
     pub crypto: C,
     pub supervisor: S,
 
-    pub registry: Arc<Mutex<Registry>>,
     pub namespace: Vec<u8>,
     pub mailbox_size: usize,
     pub activity_timeout: u64,

@@ -32,9 +32,6 @@ pub struct Config<
     /// Supervisor for the consensus engine.
     pub supervisor: S,
 
-    /// Prometheus metrics registry.
-    pub registry: Arc<Mutex<Registry>>,
-
     /// Maximum number of messages to buffer on channels inside the consensus
     /// engine before blocking.
     pub mailbox_size: usize,
