@@ -16,7 +16,7 @@ pub struct Config<
     D: Array,
     A: Automaton<Context = Context<D>, Digest = D>,
     R: Relay<Digest = D>,
-    F: Committer<Digest = D>,
+    F: Committer<Digest = D, Index = View>,
     S: Supervisor<Index = View>,
 > {
     pub crypto: C,

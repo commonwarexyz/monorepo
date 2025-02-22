@@ -89,6 +89,13 @@ impl<R: Rng, C: Scheme, H: Hasher> Application<R, C, H> {
                         .unwrap();
                     info!(view, ?payload, "finalized")
                 }
+                Message::Nullified { proof, view } => {
+                    let (_, _) = self
+                        .prover
+                        .deserialize_nullification(proof, u32::MAX, false)
+                        .unwrap();
+                    info!(view, "nullified")
+                }
             }
         }
     }

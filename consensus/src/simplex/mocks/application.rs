@@ -1,5 +1,8 @@
 use super::relay::Relay;
-use crate::{simplex::Context, Automaton as Au, Committer as Co, Proof, Relay as Re};
+use crate::{
+    simplex::{Context, View},
+    Automaton as Au, Committer as Co, Proof, Relay as Re,
+};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_cryptography::{Array, Hasher};
 use commonware_macros::select;
@@ -40,6 +43,10 @@ pub enum Message<D: Array> {
     Finalized {
         proof: Proof,
         payload: D,
+    },
+    Skipped {
+        proof: Proof,
+        view: View,
     },
 }
 
@@ -107,6 +114,7 @@ impl<D: Array> Re for Mailbox<D> {
 
 impl<D: Array> Co for Mailbox<D> {
     type Digest = D;
+    type Index = View;
 
     async fn prepared(&mut self, proof: Proof, payload: Self::Digest) {
         self.sender
@@ -121,6 +129,13 @@ impl<D: Array> Co for Mailbox<D> {
             .await
             .expect("Failed to send finalized");
     }
+
+    async fn skipped(&mut self, proof: Proof, index: Self::Index) {
+        self.sender
+            .send(Message::Skipped { proof, view: index })
+            .await
+            .expect("Failed to send skipped");
+    }
 }
 
 const GENESIS_BYTES: &[u8] = b"genesis";
@@ -130,6 +145,7 @@ type Latency = (f64, f64);
 pub enum Progress<D: Array> {
     Notarized(Proof, D),
     Finalized(Proof, D),
+    Skipped(Proof, View),
 }
 
 pub struct Config<H: Hasher, P: Array> {
@@ -168,6 +184,7 @@ pub struct Application<E: Clock + RngCore, H: Hasher, P: Array> {
     verified: HashSet<H::Digest>,
     notarized_views: HashSet<H::Digest>,
     finalized_views: HashSet<H::Digest>,
+    skipped_views: HashSet<View>,
 }
 
 impl<E: Clock + RngCore, H: Hasher, P: Array> Application<E, H, P> {
@@ -201,6 +218,7 @@ impl<E: Clock + RngCore, H: Hasher, P: Array> Application<E, H, P> {
                 verified: HashSet::new(),
                 notarized_views: HashSet::new(),
                 finalized_views: HashSet::new(),
+                skipped_views: HashSet::new(),
             },
             Mailbox::new(sender),
         )
@@ -315,6 +333,16 @@ impl<E: Clock + RngCore, H: Hasher, P: Array> Application<E, H, P> {
             .await;
     }
 
+    async fn skipped(&mut self, proof: Proof, view: View) {
+        if !self.skipped_views.insert(view) {
+            self.panic("view already skipped")
+        }
+        let _ = self
+            .tracker
+            .send((self.participant.clone(), Progress::Skipped(proof, view)))
+            .await;
+    }
+
     pub async fn run(mut self) {
         // Setup digest tracking
         #[allow(clippy::type_complexity)]
@@ -361,6 +389,9 @@ impl<E: Clock + RngCore, H: Hasher, P: Array> Application<E, H, P> {
                         }
                         Message::Finalized { proof, payload } => {
                             self.finalized(proof, payload).await;
+                        }
+                        Message::Skipped {proof, view } => {
+                            self.skipped(proof, view).await;
                         }
                     }
                 },

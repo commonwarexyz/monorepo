@@ -175,9 +175,13 @@ pub const CONFLICTING_NOTARIZE: Activity = 2;
 pub const CONFLICTING_FINALIZE: Activity = 3;
 /// Nullify and finalize in the same view.
 pub const NULLIFY_AND_FINALIZE: Activity = 4;
+/// Nullify a view.
+pub const NULLIFY: Activity = 5;
 
 #[cfg(test)]
 mod tests {
+    use crate::simplex::mocks::application::Progress;
+
     use super::*;
     use commonware_cryptography::{sha256::Digest as Sha256Digest, Ed25519, Scheme, Sha256};
     use commonware_macros::{select, test_traced};
@@ -484,6 +488,23 @@ mod tests {
                         }
                     }
                 }
+                {
+                    let nullifies = supervisor.nullifies.lock().unwrap();
+                    for (view, nullifiers) in nullifies.iter() {
+                        // Only check at views below timeout
+                        if *view > latest_complete {
+                            continue;
+                        }
+                        if nullifiers.len() < threshold as usize {
+                            // We can't verify that everyone participated at every view because some nodes may
+                            // have started later.
+                            panic!("view: {}", view);
+                        }
+                        if nullifiers.len() != n as usize {
+                            exceptions += 1;
+                        }
+                    }
+                }
 
                 // Ensure exceptions within allowed
                 assert!(exceptions <= max_exceptions);
@@ -678,6 +699,7 @@ mod tests {
                                 }
                                 completed.lock().unwrap().insert(validator);
                             }
+                            mocks::application::Progress::Skipped(_, _) => {}
                         }
                     }
                 });
@@ -1177,6 +1199,14 @@ mod tests {
                         }
                     }
                 }
+                {
+                    let nullifies = supervisor.nullifies.lock().unwrap();
+                    for (view, nullifiers) in nullifies.iter() {
+                        if nullifiers.contains(offline) {
+                            panic!("view: {}", view);
+                        }
+                    }
+                }
             }
         });
     }
@@ -1362,6 +1392,14 @@ mod tests {
                         }
                     }
                 }
+                //{
+                //    let nullifies = supervisor.nullifies.lock().unwrap();
+                //    for (view, nullifiers) in nullifies.iter() {
+                //        if nullifiers.contains(slow) {
+                //            panic!("view: {}", view);
+                //        }
+                //    }
+                //}
             }
         });
     }
@@ -1477,8 +1515,12 @@ mod tests {
             // Wait for a few virtual minutes (shouldn't finalize anything)
             select! {
                 _timeout = runtime.sleep(Duration::from_secs(60)) => {},
-                _done = done_receiver.next() => {
-                    panic!("engine should not notarize or finalize anything");
+                done_progress = done_receiver.next() => {
+                    match done_progress {
+                        Some((_, Progress::Skipped(_, _))) => {},
+                        Some(_) => panic!("engine should not notarize or finalize anything"),
+                        None => {},
+                    }
                 }
             }
 

@@ -92,6 +92,8 @@ cfg_if::cfg_if! {
         pub trait Committer: Clone + Send + 'static {
             /// Hash of an arbitrary payload.
             type Digest: Array;
+            /// Index is the type used to indicate the in-progress consensus decision.
+            type Index;
 
             /// Event that a payload has made some progress towards finalization but is not yet finalized.
             ///
@@ -100,6 +102,9 @@ cfg_if::cfg_if! {
 
             /// Event indicating the container has been finalized.
             fn finalized(&mut self, proof: Proof, payload: Self::Digest) -> impl Future<Output = ()> + Send;
+
+            /// Event indicating the container has been skipped.
+            fn skipped(&mut self, proof: Proof, index: Self::Index) -> impl Future<Output = ()> + Send;
         }
 
         /// Supervisor is the interface responsible for managing which participants are active at a given time.

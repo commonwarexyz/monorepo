@@ -1,7 +1,7 @@
 use crate::{
     simplex::{
         prover::Prover, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE, NOTARIZE,
-        NULLIFY_AND_FINALIZE,
+        NULLIFY, NULLIFY_AND_FINALIZE,
     },
     Activity, Proof, Supervisor as Su,
 };
@@ -16,6 +16,7 @@ pub struct Config<C: Scheme, D: Array> {
     pub participants: BTreeMap<View, Vec<C::PublicKey>>,
 }
 
+type Nullifies<P> = HashMap<View, HashSet<P>>;
 type Participation<D, P> = HashMap<View, HashMap<D, HashSet<P>>>;
 type Faults<P> = HashMap<P, HashMap<View, HashSet<Activity>>>;
 type Participants<P> = BTreeMap<View, (HashMap<P, u32>, Vec<P>)>;
@@ -28,6 +29,7 @@ pub struct Supervisor<C: Scheme, D: Array> {
 
     pub notarizes: Arc<Mutex<Participation<D, C::PublicKey>>>,
     pub finalizes: Arc<Mutex<Participation<D, C::PublicKey>>>,
+    pub nullifies: Arc<Mutex<Nullifies<C::PublicKey>>>,
     pub faults: Arc<Mutex<Faults<C::PublicKey>>>,
 }
 
@@ -47,6 +49,7 @@ impl<C: Scheme, D: Array> Supervisor<C, D> {
             prover: cfg.prover,
             notarizes: Arc::new(Mutex::new(HashMap::new())),
             finalizes: Arc::new(Mutex::new(HashMap::new())),
+            nullifies: Arc::new(Mutex::new(HashMap::new())),
             faults: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -156,6 +159,15 @@ impl<C: Scheme, D: Array> Su for Supervisor<C, D> {
                     .entry(view)
                     .or_default()
                     .insert(NULLIFY_AND_FINALIZE);
+            }
+            NULLIFY => {
+                let (view, public_key) = self.prover.deserialize_nullify(proof, true).unwrap();
+                self.nullifies
+                    .lock()
+                    .unwrap()
+                    .entry(view)
+                    .or_default()
+                    .insert(public_key);
             }
             unexpected => {
                 panic!("unexpected activity: {}", unexpected);

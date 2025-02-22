@@ -206,6 +206,8 @@ pub const CONFLICTING_NOTARIZE: Activity = 2;
 pub const CONFLICTING_FINALIZE: Activity = 3;
 /// Nullify and finalize in the same view.
 pub const NULLIFY_AND_FINALIZE: Activity = 4;
+/// Nullify a view.
+pub const NULLIFY: Activity = 5;
 
 #[cfg(test)]
 mod tests {
@@ -521,6 +523,23 @@ mod tests {
                         }
                     }
                 }
+                {
+                    let nullifies = supervisor.nullifies.lock().unwrap();
+                    for (view, nullifiers) in nullifies.iter() {
+                        // Only check at views below timeout
+                        if *view > latest_complete {
+                            continue;
+                        }
+                        if nullifiers.len() < threshold as usize {
+                            // We can't verify that everyone participated at every view because some nodes may
+                            // have started later.
+                            panic!("view: {}", view);
+                        }
+                        if nullifiers.len() != n as usize {
+                            exceptions += 1;
+                        }
+                    }
+                }
 
                 // Ensure exceptions within allowed
                 assert!(exceptions <= max_exceptions);
@@ -730,6 +749,7 @@ mod tests {
                                 }
                                 completed.lock().unwrap().insert(validator);
                             }
+                            mocks::application::Progress::Skipped(_, _) => {}
                         }
                     }
                 });
@@ -1240,6 +1260,14 @@ mod tests {
                             if finalizers.contains(offline) {
                                 panic!("view: {}", view);
                             }
+                        }
+                    }
+                }
+                {
+                    let nullifies = supervisor.nullifies.lock().unwrap();
+                    for (view, nullifiers) in nullifies.iter() {
+                        if nullifiers.contains(offline) {
+                            panic!("view: {}", view);
                         }
                     }
                 }

@@ -174,6 +174,130 @@ impl<C: Scheme, D: Array> Prover<C, D> {
         Some((view, parent, payload, seen.into_iter().collect()))
     }
 
+    /// Serialize a nullify proof.
+    pub fn serialize_nullify(
+        view: u64,
+        public_key: &C::PublicKey,
+        signature: &C::Signature,
+    ) -> Proof {
+        // Compute proof len
+        let len = size_of::<u64>() + C::PublicKey::SERIALIZED_LEN + C::Signature::SERIALIZED_LEN;
+
+        // Encode proof
+        let mut proof = Vec::with_capacity(len);
+        proof.put_u64(view);
+        proof.extend_from_slice(public_key);
+        proof.extend_from_slice(signature);
+        proof.into()
+    }
+
+    /// Serialize a nullification proof.
+    pub fn serialize_nullification(
+        view: u64,
+        signatures: Vec<(&C::PublicKey, C::Signature)>,
+    ) -> Proof {
+        // Compute proof len
+        let len = size_of::<u64>()
+            + size_of::<u32>()
+            + signatures.len() * (C::PublicKey::SERIALIZED_LEN + C::Signature::SERIALIZED_LEN);
+
+        // Encode proof
+        let mut proof = Vec::with_capacity(len);
+        proof.put_u64(view);
+        proof.put_u32(signatures.len() as u32);
+        for (public_key, signature) in signatures {
+            proof.extend_from_slice(public_key);
+            proof.extend_from_slice(&signature);
+        }
+        proof.into()
+    }
+
+    // Deserialize a nullify proof.
+    pub fn deserialize_nullify(
+        &self,
+        mut proof: Proof,
+        check_sig: bool,
+    ) -> Option<(View, C::PublicKey)> {
+        // Ensure proof is big enough
+        let len = size_of::<u64>() + C::PublicKey::SERIALIZED_LEN + C::Signature::SERIALIZED_LEN;
+        if proof.len() != len {
+            return None;
+        }
+
+        // Decode proof prefix
+        let view = proof.get_u64();
+        let public_key = C::PublicKey::read_from(&mut proof).ok()?;
+        let signature = C::Signature::read_from(&mut proof).ok()?;
+
+        if check_sig {
+            let message = nullify_message(view);
+            if !C::verify(
+                Some(&self.nullify_namespace),
+                &message,
+                &public_key,
+                &signature,
+            ) {
+                return None;
+            }
+        }
+        Some((view, public_key))
+    }
+
+    // Deserialize a nullification proof.
+    pub fn deserialize_nullification(
+        &self,
+        mut proof: Proof,
+        max_sigs: u32,
+        check_sigs: bool,
+    ) -> Option<(View, Vec<C::PublicKey>)> {
+        // Ensure proof prefix is big enough
+        let len = size_of::<u64>() + size_of::<u32>();
+        if proof.len() < len {
+            return None;
+        }
+
+        // Decode proof prefix
+        let view = proof.get_u64();
+        let count = proof.get_u32();
+        if count > max_sigs {
+            return None;
+        }
+
+        // Check for integer overflow in size calculation
+        let count = count as usize;
+        let item_size = C::PublicKey::SERIALIZED_LEN.checked_add(C::Signature::SERIALIZED_LEN)?;
+        let total_size = count.checked_mul(item_size)?;
+        if proof.remaining() != total_size {
+            return None;
+        }
+
+        // Decode signatures + retrieve public keys
+        let message = nullify_message(view);
+        let mut seen = HashSet::with_capacity(count);
+        for _ in 0..count {
+            // Check if already saw public key
+            let public_key = C::PublicKey::read_from(&mut proof).ok()?;
+            if seen.contains(&public_key) {
+                return None;
+            }
+            seen.insert(public_key.clone());
+
+            // Verify signature
+            if check_sigs {
+                let signature = C::Signature::read_from(&mut proof).ok()?;
+                if !C::verify(
+                    Some(&self.nullify_namespace),
+                    &message,
+                    &public_key,
+                    &signature,
+                ) {
+                    return None;
+                }
+            }
+        }
+        Some((view, seen.into_iter().collect()))
+    }
+
     /// Deserialize a notarize proof.
     pub fn deserialize_notarize(
         &self,
@@ -440,13 +564,83 @@ impl<C: Scheme, D: Array> Prover<C, D> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::BytesMut;
     use commonware_cryptography::{sha256::Digest as Sha256Digest, Ed25519, Hasher, Sha256};
+    use rand::rngs::OsRng;
     use rand::SeedableRng;
 
     fn test_digest(value: u8) -> Sha256Digest {
         let mut hasher = Sha256::new();
         hasher.update(&[value]);
         hasher.finalize()
+    }
+
+    #[test]
+    fn test_deserialize_nullify() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
+        let mut scheme = <Ed25519 as Scheme>::new(&mut rng);
+        let view: View = 1;
+        let prover = Prover::<Ed25519, Sha256Digest>::new(b"test");
+
+        let message = &nullify_message(view);
+        let signature = scheme.sign(Some(&prover.nullify_namespace), message);
+
+        let proof = Prover::<Ed25519, Sha256Digest>::serialize_nullify(
+            view,
+            &scheme.public_key(),
+            &signature,
+        );
+        let res = prover.deserialize_nullify(proof, true);
+        assert!(res.is_some());
+        let res = res.unwrap();
+        assert_eq!(view, res.0);
+        assert_eq!(scheme.public_key(), res.1);
+    }
+
+    #[test]
+    fn test_deserialize_nullify_invalid_proof_length() {
+        let mut scheme = <Ed25519 as Scheme>::new(&mut OsRng);
+        let view: View = 1;
+        let prover = Prover::<Ed25519, Sha256Digest>::new(b"test");
+
+        let message = &nullify_message(view);
+        let signature = scheme.sign(Some(&prover.nullify_namespace), message);
+
+        let proof = Prover::<Ed25519, Sha256Digest>::serialize_nullify(
+            view,
+            &scheme.public_key(),
+            &signature,
+        );
+
+        // Using proof overflow.
+        let mut mut_proof = BytesMut::from(proof.clone());
+        mut_proof.put_u8(1);
+        let res = prover.deserialize_nullify(mut_proof.freeze(), false);
+        assert!(res.is_none());
+        // Using proof underflow.
+        let mut mut_proof = BytesMut::from(proof.clone());
+        mut_proof.truncate(mut_proof.len() - 1);
+        let res = prover.deserialize_nullify(mut_proof.freeze(), false);
+        assert!(res.is_none());
+    }
+
+    #[test]
+    fn test_deserialize_nullify_invalid_signature() {
+        let mut scheme = <Ed25519 as Scheme>::new(&mut OsRng);
+        let view: View = 1;
+        let prover = Prover::<Ed25519, Sha256Digest>::new(b"test");
+
+        let message = &nullify_message(view + 1);
+        let signature = scheme.sign(Some(&prover.nullify_namespace), message);
+
+        let proof = Prover::<Ed25519, Sha256Digest>::serialize_nullify(
+            view,
+            &scheme.public_key(),
+            &signature,
+        );
+
+        let res = prover.deserialize_nullify(proof, true);
+        assert!(res.is_none());
     }
 
     #[test]

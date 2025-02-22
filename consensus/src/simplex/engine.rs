@@ -21,7 +21,7 @@ pub struct Engine<
     D: Array,
     A: Automaton<Context = Context<D>, Digest = D>,
     R: Relay<Digest = D>,
-    F: Committer<Digest = D>,
+    F: Committer<Digest = D, Index = View>,
     S: Supervisor<Index = View, PublicKey = C::PublicKey>,
 > {
     runtime: E,
@@ -39,7 +39,7 @@ impl<
         D: Array,
         A: Automaton<Context = Context<D>, Digest = D>,
         R: Relay<Digest = D>,
-        F: Committer<Digest = D>,
+        F: Committer<Digest = D, Index = View>,
         S: Supervisor<Index = View, PublicKey = C::PublicKey>,
     > Engine<B, E, C, D, A, R, F, S>
 {
