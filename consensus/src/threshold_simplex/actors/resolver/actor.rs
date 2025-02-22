@@ -14,7 +14,7 @@ use crate::{
 use commonware_cryptography::{bls12381::primitives::poly, Array, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{utils::requester, Receiver, Recipients, Sender};
-use commonware_runtime::Clock;
+use commonware_runtime::{Clock, Metrics};
 use futures::{channel::mpsc, future::Either, StreamExt};
 use governor::clock::Clock as GClock;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
@@ -96,7 +96,7 @@ impl Inflight {
 
 /// Requests are made concurrently to multiple peers.
 pub struct Actor<
-    E: Clock + GClock + Rng,
+    E: Clock + GClock + Rng + Metrics,
     C: Scheme,
     D: Array,
     S: ThresholdSupervisor<Index = View, Identity = poly::Public, PublicKey = C::PublicKey>,
@@ -131,7 +131,7 @@ pub struct Actor<
 }
 
 impl<
-        E: Clock + GClock + Rng,
+        E: Clock + GClock + Rng + Metrics,
         C: Scheme,
         D: Array,
         S: ThresholdSupervisor<Index = View, Identity = poly::Public, PublicKey = C::PublicKey>,
@@ -151,20 +151,17 @@ impl<
         let unfulfilled = Gauge::default();
         let outstanding = Gauge::default();
         let served = Counter::default();
-        {
-            let mut registry = cfg.registry.lock().unwrap();
-            registry.register(
-                "unfulfilled",
-                "unfulfilled notarizations/nullifications",
-                unfulfilled.clone(),
-            );
-            registry.register("outstanding", "outstanding requests", outstanding.clone());
-            registry.register(
-                "served",
-                "served notarizations/nullifications",
-                served.clone(),
-            );
-        }
+        runtime.register(
+            "unfulfilled",
+            "unfulfilled notarizations/nullifications",
+            unfulfilled.clone(),
+        );
+        runtime.register("outstanding", "outstanding requests", outstanding.clone());
+        runtime.register(
+            "served",
+            "served notarizations/nullifications",
+            served.clone(),
+        );
 
         // Initialize mailbox
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);

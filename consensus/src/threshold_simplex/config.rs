@@ -2,11 +2,7 @@ use super::{Context, View};
 use crate::{Automaton, Committer, Relay, ThresholdSupervisor};
 use commonware_cryptography::{bls12381::primitives::group, Array, Scheme};
 use governor::Quota;
-use prometheus_client::registry::Registry;
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::time::Duration;
 
 /// Configuration for the consensus engine.
 pub struct Config<
