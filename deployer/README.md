@@ -8,3 +8,13 @@ TBD
 ## Status
 
 `commonware-deployer` is **ALPHA** software and is not yet recommended for production use. Developers should expect breaking changes and occasional instability.
+
+## Build
+
+```bash
+cargo build --release
+
+mv ../target/release/commonware-deployer ~/.cargo/bin/
+
+commonware-deployer --help
+```

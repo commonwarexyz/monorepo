@@ -90,13 +90,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     match matches.subcommand() {
         ("setup", Some(sub_m)) => {
+            // Load config
             let config_path = sub_m.value_of("config").unwrap();
             let config_file = File::open(config_path)?;
             let config: Config = serde_yaml::from_reader(config_file)?;
 
+            // Generate unique tag
             let tag = Uuid::new_v4().to_string();
-            let key_name = format!("deployer-{}", tag);
+            println!("Deployment tag: {}", tag);
+
+            // Create temp directory
             let temp_dir = TempDir::new("deployer")?;
+            println!("Temp directory: {:?}", temp_dir.path());
+
+            // Generate SSH key pair
+            let key_name = format!("deployer-{}", tag);
             let private_key_path = temp_dir.path().join(format!("id_rsa_{}", tag));
             let public_key_path = temp_dir.path().join(format!("id_rsa_{}.pub", tag));
 
@@ -124,6 +132,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let mut regions: BTreeSet<String> =
                 config.instances.iter().map(|i| i.region.clone()).collect();
             regions.insert(MONITORING_REGION.to_string());
+            println!("Regions: {:?}", regions);
 
             // Create CIDR block for each region
             let mut vpc_cidrs = HashMap::new();
@@ -131,30 +140,44 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let mut ec2_clients = HashMap::new();
             let mut region_resources = HashMap::new();
             for (idx, region) in regions.iter().enumerate() {
-                let vpc_cidr = format!("10.{}.0.0/16", idx);
-                vpc_cidrs.insert(region.clone(), vpc_cidr);
-                let subnet_cidr = format!("10.{}.1.0/24", idx);
-                subnet_cidrs.insert(region.clone(), subnet_cidr);
+                // Create EC2 client for region
                 ec2_clients.insert(
                     region.clone(),
                     create_ec2_client(Region::new(region.clone())).await,
                 );
+                println!("Created EC2 client for region: {}", region);
                 let ec2_client = ec2_clients.get(region).unwrap();
-                let vpc_cidr = vpc_cidrs.get(region).unwrap();
-                let vpc_id = create_vpc(ec2_client, vpc_cidr, &tag).await?;
+
+                // Create VPC, IGW, and Route Table
+                let vpc_cidr = format!("10.{}.0.0/16", idx);
+                vpc_cidrs.insert(region.clone(), vpc_cidr.clone());
+                let vpc_id = create_vpc(ec2_client, &vpc_cidr, &tag).await?;
                 let igw_id = create_and_attach_igw(ec2_client, &vpc_id, &tag).await?;
                 let route_table_id = create_route_table(ec2_client, &vpc_id, &igw_id, &tag).await?;
-                let subnet_cidr = subnet_cidrs.get(region).unwrap();
+                println!("Created VPC, IGW, and Route Table for region: {}", region);
+
+                // Create Subnet
+                let subnet_cidr = format!("10.{}.1.0/24", idx);
+                subnet_cidrs.insert(region.clone(), subnet_cidr.clone());
                 let subnet_id =
-                    create_subnet(ec2_client, &vpc_id, &route_table_id, subnet_cidr, &tag).await?;
+                    create_subnet(ec2_client, &vpc_id, &route_table_id, &subnet_cidr, &tag).await?;
+                println!("Created Subnet for region: {}", region);
+
+                // Create monitoring security group in monitoring region
                 let monitoring_sg_id = if *region == MONITORING_REGION {
-                    Some(
+                    let sg_id =
                         create_security_group_monitoring(ec2_client, &vpc_id, &deployer_ip, &tag)
-                            .await?,
-                    )
+                            .await?;
+                    println!("Created Monitoring Security Group for region: {}", region);
+                    Some(sg_id)
                 } else {
                     None
                 };
+
+                // Import key pair to the region
+                import_key_pair(ec2_client, &key_name, &public_key).await?;
+
+                // Store region resources
                 region_resources.insert(
                     region.clone(),
                     RegionResources {
@@ -166,9 +189,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         monitoring_sg_id,
                     },
                 );
-
-                // Import key pair to the region
-                import_key_pair(ec2_client, &key_name, &public_key).await?;
             }
 
             // Setup VPC peering connections
@@ -549,50 +569,81 @@ nohup /opt/promtail/promtail -config.file=/etc/promtail/promtail.yml &
             println!("Deployment tag: {}", tag);
         }
         ("teardown", Some(sub_m)) => {
+            // Load tag config
             let tag = sub_m.value_of("tag").unwrap().to_string();
             let config_path = sub_m.value_of("config").unwrap();
             let config_file = File::open(config_path)?;
             let config: Config = serde_yaml::from_reader(config_file)?;
+            println!("Deployment tag: {}", tag);
+
+            // Populate all regions
             let mut all_regions = HashSet::new();
             all_regions.insert(MONITORING_REGION.to_string());
             for instance in &config.instances {
                 all_regions.insert(instance.region.clone());
             }
+            println!("Regions: {:?}", all_regions);
+
+            // Teardown resources
             for region in all_regions {
                 let region = Region::new(region);
                 let ec2_client = create_ec2_client(region).await;
+
+                // Delete instances
                 let instance_ids = find_instances_by_tag(&ec2_client, &tag).await?;
                 if !instance_ids.is_empty() {
+                    println!("Terminating instances: {:?}", instance_ids);
                     terminate_instances(&ec2_client, &instance_ids).await?;
                     wait_for_instances_terminated(&ec2_client, &instance_ids).await?;
                 }
+
+                // Delete security groups
                 let sg_ids = find_security_groups_by_tag(&ec2_client, &tag).await?;
                 for sg_id in sg_ids {
+                    println!("Deleting security group: {}", sg_id);
                     delete_security_group(&ec2_client, &sg_id).await?;
                 }
+
+                // Delete route tables
                 let route_table_ids = find_route_tables_by_tag(&ec2_client, &tag).await?;
                 for rt_id in route_table_ids {
+                    println!("Deleting route table: {}", rt_id);
                     delete_route_table(&ec2_client, &rt_id).await?;
                 }
+
+                // Delete internet gateways
                 let igw_ids = find_igws_by_tag(&ec2_client, &tag).await?;
                 for igw_id in igw_ids {
+                    println!("Detaching and deleting internet gateway: {}", igw_id);
                     let vpc_id = find_vpc_by_igw(&ec2_client, &igw_id).await?;
                     detach_igw(&ec2_client, &igw_id, &vpc_id).await?;
                     delete_igw(&ec2_client, &igw_id).await?;
                 }
+
+                // Delete subnets
                 let subnet_ids = find_subnets_by_tag(&ec2_client, &tag).await?;
                 for subnet_id in subnet_ids {
+                    println!("Deleting subnet: {}", subnet_id);
                     delete_subnet(&ec2_client, &subnet_id).await?;
                 }
+
+                // Delete VPC peering connections
                 let peering_ids = find_vpc_peering_by_tag(&ec2_client, &tag).await?;
                 for peering_id in peering_ids {
+                    println!("Deleting VPC peering connection: {}", peering_id);
                     delete_vpc_peering(&ec2_client, &peering_id).await?;
                 }
+
+                // Delete VPCs
                 let vpc_ids = find_vpcs_by_tag(&ec2_client, &tag).await?;
                 for vpc_id in vpc_ids {
+                    println!("Deleting VPC: {}", vpc_id);
                     delete_vpc(&ec2_client, &vpc_id).await?;
                 }
+
+                // Delete key pair
                 let key_name = format!("deployer-{}", tag);
+                println!("Deleting key pair: {}", key_name);
                 delete_key_pair(&ec2_client, &key_name).await?;
             }
             println!("Teardown complete for tag: {}", tag);
