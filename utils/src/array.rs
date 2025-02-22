@@ -44,7 +44,7 @@ pub trait Array:
     + TryFrom<Vec<u8>, Error = <Self as Array>::Error>
     + SizedSerialize
 {
-    /// Associated error type for conversions
+    /// Errors returned when parsing an invalid byte sequence.
     type Error: StdError + Send + Sync + 'static;
 
     /// Attempts to read an array from the provided buffer.
