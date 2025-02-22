@@ -5,7 +5,7 @@
 //! `commonware-cryptography` is **ALPHA** software and is not yet recommended for production use. Developers should
 //! expect breaking changes and occasional instability.
 
-use commonware_utils::{array, Array};
+use commonware_utils::Array;
 use rand::{CryptoRng, Rng, RngCore, SeedableRng};
 use std::fmt::Debug;
 use thiserror::Error;
@@ -36,8 +36,6 @@ pub enum Error {
     InvalidSignature,
     #[error("invalid signature length")]
     InvalidSignatureLength,
-    #[error("array error: {0}")]
-    ArrayError(#[from] array::Error),
 }
 
 /// Interface that commonware crates rely on for most cryptographic operations.

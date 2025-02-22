@@ -2,6 +2,7 @@ use crate::SizedSerialize;
 use bytes::Buf;
 use std::{
     cmp::{Ord, PartialOrd},
+    error::Error as StdError,
     fmt::{Debug, Display},
     hash::Hash,
     ops::Deref,
@@ -42,13 +43,13 @@ pub trait Array:
     + SizedSerialize
 {
     /// Associated error type for conversions
-    type Error: std::error::Error + Send + Sync + 'static + From<Error>;
+    type Error: StdError + Send + Sync + 'static;
 
     /// Attempts to read an array from the provided buffer.
-    fn read_from<B: Buf>(buf: &mut B) -> Result<Self, <Self as Array>::Error> {
+    fn read_from<B: Buf>(buf: &mut B) -> Result<Self, Box<dyn StdError + Send + Sync>> {
         let len = Self::SERIALIZED_LEN;
         if buf.remaining() < len {
-            return Err(<Self as Array>::Error::from(Error::InsufficientBytes));
+            return Err(Box::new(Error::InsufficientBytes));
         }
 
         let chunk = buf.chunk();
@@ -60,6 +61,7 @@ pub trait Array:
 
         let mut temp = vec![0u8; len];
         buf.copy_to_slice(&mut temp);
-        Self::try_from(temp)
+        let result = Self::try_from(temp)?;
+        Ok(result)
     }
 }
