@@ -205,12 +205,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             for region in &regions {
                 if region != &monitoring_region && regular_regions.contains(region) {
                     // Create VPC peering connection from monitoring to regular region
-                    let ec2_client = ec2_clients.get(region).unwrap();
                     let regular_resources = region_resources.get(region).unwrap();
                     let regular_vpc_id = &regular_resources.vpc_id;
                     let regular_cidr = &regular_resources.vpc_cidr;
                     let peer_id = create_vpc_peering_connection(
-                        ec2_client,
+                        &ec2_clients[&monitoring_region],
                         monitoring_vpc_id,
                         regular_vpc_id,
                         region,
@@ -223,11 +222,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     );
 
                     // Wait for VPC peering connection to be active
-                    wait_for_vpc_peering_connection(ec2_client, &peer_id).await?;
+                    wait_for_vpc_peering_connection(&ec2_clients[region], &peer_id).await?;
                     println!("VPC peering connection {} is active", peer_id);
 
                     // Accept VPC peering connection in regular region
-                    accept_vpc_peering_connection(ec2_client, &peer_id).await?;
+                    accept_vpc_peering_connection(&ec2_clients[region], &peer_id).await?;
                     println!("Accepted VPC peering connection {} in {}", peer_id, region);
 
                     // Add routes in both regions
@@ -239,7 +238,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     )
                     .await?;
                     add_route(
-                        ec2_client,
+                        &ec2_clients[region],
                         &regular_resources.route_table_id,
                         monitoring_cidr,
                         &peer_id,
@@ -1073,11 +1072,15 @@ async fn wait_for_vpc_peering_connection(
 ) -> Result<(), Ec2Error> {
     loop {
         // Describe the VPC peering connection to check its status
-        let resp = client
+        let Ok(resp) = client
             .describe_vpc_peering_connections()
             .vpc_peering_connection_ids(peer_id)
             .send()
-            .await?;
+            .await
+        else {
+            sleep(Duration::from_secs(2)).await;
+            continue;
+        };
 
         // Check if the peering connection exists and is in the correct state
         if let Some(connections) = resp.vpc_peering_connections {
@@ -1091,8 +1094,7 @@ async fn wait_for_vpc_peering_connection(
         }
 
         // If the peering connection is not yet available, wait and retry
-        println!("Waiting for peering connection to be available...");
-        sleep(Duration::from_secs(5)).await;
+        sleep(Duration::from_secs(2)).await;
     }
 }
 
