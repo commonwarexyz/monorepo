@@ -112,7 +112,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, P: Arr
 
         // Send/Receive messages from the peer
         let (mut conn_sender, mut conn_receiver) = connection.split();
-        let mut send_handler: Handle<Result<(), Error>> = self.runtime.clone().with_label("sender").spawn( {
+        let mut send_handler: Handle<Result<(), Error>> = self.runtime.with_label("sender").spawn( {
             let peer = peer.clone();
             let mut tracker = tracker.clone();
             let mailbox = self.mailbox.clone();

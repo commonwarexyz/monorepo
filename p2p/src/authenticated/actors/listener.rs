@@ -168,7 +168,7 @@ impl<
             debug!(ip = ?address.ip(), port = ?address.port(), "accepted incoming connection");
 
             // Spawn a new handshaker to upgrade connection
-            self.runtime.clone().with_label("handshaker").spawn({
+            self.runtime.with_label("handshaker").spawn({
                 let stream_cfg = self.stream_cfg.clone();
                 let tracker = tracker.clone();
                 let supervisor = supervisor.clone();

@@ -50,7 +50,7 @@ impl<
 
         // Create voter
         let (voter, voter_mailbox) = voter::Actor::new(
-            runtime.clone().with_label("voter"),
+            runtime.with_label("voter"),
             journal,
             voter::Config {
                 crypto: cfg.crypto.clone(),
@@ -70,7 +70,7 @@ impl<
 
         // Create resolver
         let (resolver, resolver_mailbox) = resolver::Actor::new(
-            runtime.clone().with_label("resolver"),
+            runtime.with_label("resolver"),
             resolver::Config {
                 crypto: cfg.crypto,
                 supervisor: cfg.supervisor,

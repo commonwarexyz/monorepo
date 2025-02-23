@@ -139,7 +139,7 @@ mod tests {
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.clone().with_label("network"),
+                runtime.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                 },
@@ -256,7 +256,7 @@ mod tests {
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.clone().with_label("network"),
+                runtime.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                 },
@@ -452,7 +452,7 @@ mod tests {
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.clone().with_label("network"),
+                runtime.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                 },
@@ -525,7 +525,7 @@ mod tests {
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.clone().with_label("network"),
+                runtime.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                 },
@@ -646,7 +646,7 @@ mod tests {
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.clone().with_label("network"),
+                runtime.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                 },

@@ -80,7 +80,7 @@ impl<
     ///   can be used by a developer to configure which peers are authorized.
     pub fn new(runtime: E, cfg: Config<C>) -> (Self, tracker::Oracle<E, C::PublicKey>) {
         let (tracker, tracker_mailbox, oracle) = tracker::Actor::new(
-            runtime.clone().with_label("tracker"),
+            runtime.with_label("tracker"),
             tracker::Config {
                 crypto: cfg.crypto.clone(),
                 namespace: union(&cfg.namespace, TRACKER_SUFFIX),
@@ -95,7 +95,7 @@ impl<
             },
         );
         let (router, router_mailbox, messenger) = router::Actor::new(
-            runtime.clone().with_label("router"),
+            runtime.with_label("router"),
             router::Config {
                 mailbox_size: cfg.mailbox_size,
             },
@@ -164,7 +164,7 @@ impl<
 
         // Start spawner
         let (spawner, spawner_mailbox) = spawner::Actor::new(
-            self.runtime.clone().with_label("spawner"),
+            self.runtime.with_label("spawner"),
             spawner::Config {
                 mailbox_size: self.cfg.mailbox_size,
                 gossip_bit_vec_frequency: self.cfg.gossip_bit_vec_frequency,
@@ -185,7 +185,7 @@ impl<
             handshake_timeout: self.cfg.handshake_timeout,
         };
         let listener = listener::Actor::new(
-            self.runtime.clone().with_label("listener"),
+            self.runtime.with_label("listener"),
             listener::Config {
                 address: self.cfg.listen,
                 stream_cfg: stream_cfg.clone(),
@@ -197,7 +197,7 @@ impl<
 
         // Start dialer
         let dialer = dialer::Actor::new(
-            self.runtime.clone().with_label("dialer"),
+            self.runtime.with_label("dialer"),
             dialer::Config {
                 stream_cfg,
                 dial_frequency: self.cfg.dial_frequency,

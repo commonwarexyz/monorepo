@@ -282,7 +282,7 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock + Metrics, P: A
             trace!(?origin, ?recipient, ?delay, "sending message",);
 
             // Send message
-            self.runtime.clone().with_label("messenger").spawn({
+            self.runtime.with_label("messenger").spawn({
                 let message = message.clone();
                 let recipient = recipient.clone();
                 let origin = origin.clone();
@@ -507,7 +507,7 @@ impl<P: Array> Peer<P> {
         let (inbox_sender, mut inbox_receiver) = mpsc::unbounded();
 
         // Spawn router
-        runtime.clone().with_label("router").spawn(|_| async move {
+        runtime.with_label("router").spawn(|_| async move {
             // Map of channels to mailboxes (senders to particular channels)
             let mut mailboxes = HashMap::new();
 
@@ -564,7 +564,7 @@ impl<P: Array> Peer<P> {
         });
 
         // Spawn a task that accepts new connections and spawns a task for each connection
-        runtime.clone().with_label("listener").spawn({
+        runtime.with_label("listener").spawn({
             let inbox_sender = inbox_sender.clone();
             move |runtime| async move {
                 // Initialize listener
@@ -573,7 +573,7 @@ impl<P: Array> Peer<P> {
                 // Continually accept new connections
                 while let Ok((_, _, mut stream)) = listener.accept().await {
                     // New connection accepted. Spawn a task for this connection
-                    runtime.clone().with_label("receiver").spawn({
+                    runtime.with_label("receiver").spawn({
                         let mut inbox_sender = inbox_sender.clone();
                         move |_| async move {
                             // Receive dialer's public key as a handshake

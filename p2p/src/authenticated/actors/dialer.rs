@@ -90,7 +90,7 @@ impl<
                 .inc();
 
             // Spawn dialer to connect to peer
-            self.runtime.clone().with_label("dialer").spawn({
+            self.runtime.with_label("dialer").spawn({
                 let config = self.stream_cfg.clone();
                 let mut supervisor = supervisor.clone();
                 move |runtime| async move {

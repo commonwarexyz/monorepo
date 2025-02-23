@@ -323,7 +323,7 @@ mod tests {
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.clone().with_label("network"),
+                runtime.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                 },
@@ -388,14 +388,14 @@ mod tests {
                     verify_latency: (10.0, 5.0),
                 };
                 let (actor, application) = mocks::application::Application::new(
-                    runtime.clone().with_label("application"),
+                    runtime.with_label("application"),
                     application_cfg,
                 );
                 actor.start();
                 let cfg = JConfig {
                     partition: validator.to_string(),
                 };
-                let journal = Journal::init(runtime.clone().with_label("journal"), cfg)
+                let journal = Journal::init(runtime.with_label("journal"), cfg)
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
@@ -562,7 +562,7 @@ mod tests {
                 async move {
                 // Create simulated network
                 let (network, mut oracle) = Network::new(
-                    runtime.clone().with_label("network"),
+                    runtime.with_label("network"),
                     Config {
                         max_size: 1024 * 1024,
                     },
@@ -624,12 +624,12 @@ mod tests {
                         verify_latency: (10.0, 5.0),
                     };
                     let (actor, application) =
-                        mocks::application::Application::new(runtime.clone().with_label("application"), application_cfg);
+                        mocks::application::Application::new(runtime.with_label("application"), application_cfg);
                     actor.start();
                     let cfg = JConfig {
                         partition: validator.to_string(),
                     };
-                    let journal = Journal::init(runtime.clone().with_label("journal"), cfg)
+                    let journal = Journal::init(runtime.with_label("journal"), cfg)
                         .await
                         .expect("unable to create journal");
                     let cfg = config::Config {
@@ -651,7 +651,7 @@ mod tests {
                         fetch_concurrent: 1,
                         replay_concurrency: 1,
                     };
-                    let engine = Engine::new(runtime.clone().with_label("engine"), journal, cfg);
+                    let engine = Engine::new(runtime.with_label("engine"), journal, cfg);
 
                     // Start engine
                     let (voter, resolver) = registrations
@@ -661,7 +661,7 @@ mod tests {
                 }
 
                 // Wait for all engines to finish
-                runtime.clone().with_label("confirmed").spawn(move |_| async move {
+                runtime.with_label("confirmed").spawn(move |_| async move {
                     loop {
                         // Parse events
                         let (validator, event) = done_receiver.next().await.unwrap();
@@ -766,7 +766,7 @@ mod tests {
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.clone().with_label("network"),
+                runtime.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                 },
@@ -842,14 +842,14 @@ mod tests {
                     verify_latency: (10.0, 5.0),
                 };
                 let (actor, application) = mocks::application::Application::new(
-                    runtime.clone().with_label("application"),
+                    runtime.with_label("application"),
                     application_cfg,
                 );
                 actor.start();
                 let cfg = JConfig {
                     partition: validator.to_string(),
                 };
-                let journal = Journal::init(runtime.clone().with_label("journal"), cfg)
+                let journal = Journal::init(runtime.with_label("journal"), cfg)
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
@@ -980,14 +980,14 @@ mod tests {
                     verify_latency: (10.0, 5.0),
                 };
                 let (actor, application) = mocks::application::Application::new(
-                    runtime.clone().with_label("application"),
+                    runtime.with_label("application"),
                     application_cfg,
                 );
                 actor.start();
                 let cfg = JConfig {
                     partition: validator.to_string(),
                 };
-                let journal = Journal::init(runtime.clone().with_label("journal"), cfg)
+                let journal = Journal::init(runtime.with_label("journal"), cfg)
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
@@ -1062,7 +1062,7 @@ mod tests {
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.clone().with_label("network"),
+                runtime.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                 },
@@ -1138,14 +1138,14 @@ mod tests {
                     verify_latency: (10.0, 5.0),
                 };
                 let (actor, application) = mocks::application::Application::new(
-                    runtime.clone().with_label("application"),
+                    runtime.with_label("application"),
                     application_cfg,
                 );
                 actor.start();
                 let cfg = JConfig {
                     partition: validator.to_string(),
                 };
-                let journal = Journal::init(runtime.clone().with_label("journal"), cfg)
+                let journal = Journal::init(runtime.with_label("journal"), cfg)
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
@@ -1253,7 +1253,7 @@ mod tests {
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.clone().with_label("network"),
+                runtime.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                 },
@@ -1329,14 +1329,14 @@ mod tests {
                     }
                 };
                 let (actor, application) = mocks::application::Application::new(
-                    runtime.clone().with_label("application"),
+                    runtime.with_label("application"),
                     application_cfg,
                 );
                 actor.start();
                 let cfg = JConfig {
                     partition: validator.to_string(),
                 };
-                let journal = Journal::init(runtime.clone().with_label("journal"), cfg)
+                let journal = Journal::init(runtime.with_label("journal"), cfg)
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
@@ -1444,7 +1444,7 @@ mod tests {
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.clone().with_label("network"),
+                runtime.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                 },
@@ -1509,14 +1509,14 @@ mod tests {
                     verify_latency: (10.0, 5.0),
                 };
                 let (actor, application) = mocks::application::Application::new(
-                    runtime.clone().with_label("application"),
+                    runtime.with_label("application"),
                     application_cfg,
                 );
                 actor.start();
                 let cfg = JConfig {
                     partition: validator.to_string(),
                 };
-                let journal = Journal::init(runtime.clone().with_label("journal"), cfg)
+                let journal = Journal::init(runtime.with_label("journal"), cfg)
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
@@ -1617,7 +1617,7 @@ mod tests {
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.clone().with_label("network"),
+                runtime.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                 },
@@ -1682,14 +1682,14 @@ mod tests {
                     verify_latency: (10.0, 5.0),
                 };
                 let (actor, application) = mocks::application::Application::new(
-                    runtime.clone().with_label("application"),
+                    runtime.with_label("application"),
                     application_cfg,
                 );
                 actor.start();
                 let cfg = JConfig {
                     partition: validator.to_string(),
                 };
-                let journal = Journal::init(runtime.clone().with_label("journal"), cfg)
+                let journal = Journal::init(runtime.with_label("journal"), cfg)
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
@@ -1846,7 +1846,7 @@ mod tests {
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.clone().with_label("network"),
+                runtime.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                 },
@@ -1911,14 +1911,14 @@ mod tests {
                     verify_latency: (10.0, 5.0),
                 };
                 let (actor, application) = mocks::application::Application::new(
-                    runtime.clone().with_label("application"),
+                    runtime.with_label("application"),
                     application_cfg,
                 );
                 actor.start();
                 let cfg = JConfig {
                     partition: validator.to_string(),
                 };
-                let journal = Journal::init(runtime.clone().with_label("journal"), cfg)
+                let journal = Journal::init(runtime.with_label("journal"), cfg)
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
@@ -2025,7 +2025,7 @@ mod tests {
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.clone().with_label("network"),
+                runtime.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                 },
@@ -2089,7 +2089,7 @@ mod tests {
                     };
                     let engine: mocks::conflicter::Conflicter<_, Sha256, _> =
                         mocks::conflicter::Conflicter::new(
-                            runtime.clone().with_label("byzantine_engine"),
+                            runtime.with_label("byzantine_engine"),
                             cfg,
                         );
                     engine.start(voter);
@@ -2104,14 +2104,14 @@ mod tests {
                         verify_latency: (10.0, 5.0),
                     };
                     let (actor, application) = mocks::application::Application::new(
-                        runtime.clone().with_label("application"),
+                        runtime.with_label("application"),
                         application_cfg,
                     );
                     actor.start();
                     let cfg = JConfig {
                         partition: validator.to_string(),
                     };
-                    let journal = Journal::init(runtime.clone().with_label("journal"), cfg)
+                    let journal = Journal::init(runtime.with_label("journal"), cfg)
                         .await
                         .expect("unable to create journal");
                     let cfg = config::Config {
@@ -2211,7 +2211,7 @@ mod tests {
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.clone().with_label("network"),
+                runtime.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                 },
@@ -2273,10 +2273,8 @@ mod tests {
                         supervisor,
                         namespace: namespace.clone(),
                     };
-                    let engine: mocks::nuller::Nuller<_, Sha256, _> = mocks::nuller::Nuller::new(
-                        runtime.clone().with_label("byzantine_engine"),
-                        cfg,
-                    );
+                    let engine: mocks::nuller::Nuller<_, Sha256, _> =
+                        mocks::nuller::Nuller::new(runtime.with_label("byzantine_engine"), cfg);
                     engine.start(voter);
                 } else {
                     supervisors.push(supervisor.clone());
@@ -2289,14 +2287,14 @@ mod tests {
                         verify_latency: (10.0, 5.0),
                     };
                     let (actor, application) = mocks::application::Application::new(
-                        runtime.clone().with_label("application"),
+                        runtime.with_label("application"),
                         application_cfg,
                     );
                     actor.start();
                     let cfg = JConfig {
                         partition: validator.to_string(),
                     };
-                    let journal = Journal::init(runtime.clone().with_label("journal"), cfg)
+                    let journal = Journal::init(runtime.with_label("journal"), cfg)
                         .await
                         .expect("unable to create journal");
                     let cfg = config::Config {

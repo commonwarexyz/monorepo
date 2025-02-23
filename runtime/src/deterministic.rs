@@ -1308,9 +1308,9 @@ impl Drop for Blob {
 }
 
 impl crate::Metrics for Context {
-    fn with_label(self, label: &str) -> Self {
+    fn with_label(&self, label: &str) -> Self {
         let label = {
-            let prefix = self.label;
+            let prefix = self.label.clone();
             if prefix.is_empty() || prefix == ROOT_TASK {
                 label.to_string()
             } else {
@@ -1322,8 +1322,8 @@ impl crate::Metrics for Context {
         }
         Self {
             label,
-            executor: self.executor,
-            networking: self.networking,
+            executor: self.executor.clone(),
+            networking: self.networking.clone(),
         }
     }
 

@@ -410,7 +410,7 @@ mod tests {
             let (mut stream_sender, stream) = mocks::Channel::init();
 
             // Accept connections but do nothing
-            runtime.clone().with_label("stream_sender").spawn({
+            runtime.with_label("stream_sender").spawn({
                 let recipient = recipient.clone();
                 move |runtime| async move {
                     runtime.sleep(Duration::from_secs(10)).await;

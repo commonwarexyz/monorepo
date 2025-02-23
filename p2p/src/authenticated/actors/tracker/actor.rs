@@ -679,7 +679,7 @@ mod tests {
         let cfg = test_config(Ed25519::from_seed(0), Vec::new());
         executor.start(async move {
             // Run actor in background
-            let actor_runtime = runtime.clone().with_label("actor");
+            let actor_runtime = runtime.with_label("actor");
             let (actor, mut mailbox, mut oracle) = Actor::new(actor_runtime.clone(), cfg);
             actor_runtime.spawn(|_| actor.run());
 

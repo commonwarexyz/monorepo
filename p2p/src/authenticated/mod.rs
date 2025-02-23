@@ -247,7 +247,7 @@ mod tests {
         let mut waiters = Vec::new();
         for (i, peer) in peers.iter().enumerate() {
             // Create peer runtime
-            let runtime = runtime.clone().with_label(&format!("peer-{}", i));
+            let runtime = runtime.with_label(&format!("peer-{}", i));
 
             // Derive port
             let port = base_port + i as u16;
@@ -269,8 +269,7 @@ mod tests {
                 bootstrappers,
                 max_message_size,
             );
-            let (mut network, mut oracle) =
-                Network::new(runtime.clone().with_label("network"), config);
+            let (mut network, mut oracle) = Network::new(runtime.with_label("network"), config);
 
             // Register peers
             oracle.register(0, addresses.clone()).await;
@@ -476,7 +475,7 @@ mod tests {
             let mut waiters = Vec::new();
             for (i, peer) in peers.iter().enumerate() {
                 // Create peer runtime
-                let runtime = runtime.clone().with_label(&format!("peer-{}", i));
+                let runtime = runtime.with_label(&format!("peer-{}", i));
 
                 // Derive port
                 let port = base_port + i as u16;
@@ -498,8 +497,7 @@ mod tests {
                     bootstrappers,
                     1_024 * 1_024, // 1MB
                 );
-                let (mut network, mut oracle) =
-                    Network::new(runtime.clone().with_label("network"), config);
+                let (mut network, mut oracle) = Network::new(runtime.with_label("network"), config);
 
                 // Register peers at separate indices
                 oracle.register(0, vec![addresses[0].clone()]).await;
@@ -583,8 +581,7 @@ mod tests {
                 Vec::new(),
                 1_024 * 1_024, // 1MB
             );
-            let (mut network, mut oracle) =
-                Network::new(runtime.clone().with_label("network"), config);
+            let (mut network, mut oracle) = Network::new(runtime.with_label("network"), config);
 
             // Register peers
             oracle.register(0, addresses.clone()).await;
