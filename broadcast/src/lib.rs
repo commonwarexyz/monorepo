@@ -1,7 +1,7 @@
 //! Disseminate data over a wide-area network.
 
 use bytes::Bytes;
-use commonware_cryptography::Array;
+use commonware_utils::Array;
 use futures::channel::oneshot;
 use std::future::Future;
 

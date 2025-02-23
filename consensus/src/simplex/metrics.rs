@@ -1,4 +1,4 @@
-use commonware_cryptography::Array;
+use commonware_utils::Array;
 use prometheus_client::encoding::EncodeLabelSet;
 
 const NOTARIZE_TYPE: i32 = 1;

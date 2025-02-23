@@ -6,7 +6,7 @@
 //! expect breaking changes and occasional instability.
 
 use bytes::Bytes;
-use commonware_cryptography::Array;
+use commonware_utils::Array;
 
 pub mod simplex;
 pub mod threshold_simplex;

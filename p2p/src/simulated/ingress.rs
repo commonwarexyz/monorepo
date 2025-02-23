@@ -1,6 +1,6 @@
 use super::{Error, Receiver, Sender};
 use crate::Channel;
-use commonware_cryptography::Array;
+use commonware_utils::Array;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,

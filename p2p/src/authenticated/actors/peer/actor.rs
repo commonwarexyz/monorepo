@@ -2,13 +2,13 @@ use super::{Config, Error, Mailbox, Message, Relay};
 use crate::authenticated::{
     actors::tracker, channels::Channels, metrics, wire, wire::message::Payload,
 };
-use commonware_cryptography::Array;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Sink, Spawner, Stream};
 use commonware_stream::{
     public_key::{Connection, Sender},
     Receiver as _, Sender as _,
 };
+use commonware_utils::Array;
 use futures::{channel::mpsc, SinkExt, StreamExt};
 use governor::{clock::ReasonablyRealtime, Quota, RateLimiter};
 use prometheus_client::metrics::{counter::Counter, family::Family};

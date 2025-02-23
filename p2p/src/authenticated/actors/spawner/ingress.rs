@@ -1,7 +1,7 @@
 use crate::authenticated::actors::tracker;
-use commonware_cryptography::Array;
 use commonware_runtime::{Clock, Sink, Spawner, Stream};
 use commonware_stream::public_key::Connection;
+use commonware_utils::Array;
 use futures::{channel::mpsc, SinkExt};
 
 pub enum Message<E: Spawner + Clock, Si: Sink, St: Stream, P: Array> {

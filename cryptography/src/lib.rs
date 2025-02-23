@@ -5,11 +5,9 @@
 //! `commonware-cryptography` is **ALPHA** software and is not yet recommended for production use. Developers should
 //! expect breaking changes and occasional instability.
 
-use bytes::Buf;
-use commonware_utils::SizedSerialize;
+use commonware_utils::Array;
 use rand::{CryptoRng, Rng, RngCore, SeedableRng};
-use std::fmt::Display;
-use std::{fmt::Debug, hash::Hash, ops::Deref};
+use std::fmt::Debug;
 use thiserror::Error;
 
 pub mod bls12381;
@@ -38,57 +36,6 @@ pub enum Error {
     InvalidSignature,
     #[error("invalid signature length")]
     InvalidSignatureLength,
-    #[error("invalid bytes")]
-    InsufficientBytes,
-}
-
-/// Types that can be fallibly read from a fixed-size byte sequence.
-///
-/// `Array` is typically used to parse things like `PublicKeys` and `Signatures`
-/// from an untrusted network connection. Once parsed, these types are assumed
-/// to be well-formed (which prevents duplicate validation).
-///
-/// If a byte sequencer is not properly formatted, `TryFrom` must return an error.
-pub trait Array:
-    Clone
-    + Send
-    + Sync
-    + 'static
-    + Eq
-    + PartialEq
-    + Ord
-    + PartialOrd
-    + Debug
-    + Hash
-    + Display
-    + AsRef<[u8]>
-    + Deref<Target = [u8]>
-    + for<'a> TryFrom<&'a [u8], Error = Error>
-    + for<'a> TryFrom<&'a Vec<u8>, Error = Error>
-    + TryFrom<Vec<u8>, Error = Error>
-    + SizedSerialize
-{
-    /// Attempts to read an array from the provided buffer.
-    fn read_from<B: Buf>(buf: &mut B) -> Result<Self, Error> {
-        // Check if there are enough bytes in the buffer to read a digest.
-        let len = Self::SERIALIZED_LEN;
-        if buf.remaining() < len {
-            return Err(Error::InsufficientBytes);
-        }
-
-        // If there are enough contiguous bytes in the buffer, use them directly.
-        let chunk = buf.chunk();
-        if chunk.len() >= len {
-            let array = Self::try_from(&chunk[..len])?;
-            buf.advance(len);
-            return Ok(array);
-        }
-
-        // Otherwise, copy the bytes into a temporary buffer.
-        let mut temp = vec![0u8; len];
-        buf.copy_to_slice(&mut temp);
-        Self::try_from(temp)
-    }
 }
 
 /// Interface that commonware crates rely on for most cryptographic operations.
@@ -238,6 +185,7 @@ pub trait Hasher: Clone + Send + Sync + 'static {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_utils::SizedSerialize;
     use rand::rngs::OsRng;
 
     fn test_validate<C: Scheme>() {
@@ -254,7 +202,10 @@ mod tests {
         assert_eq!(public_key, signer.public_key());
     }
 
-    fn test_validate_invalid_public_key<C: Scheme>() {
+    fn test_validate_invalid_public_key<C: Scheme>()
+    where
+        C::PublicKey: TryFrom<Vec<u8>, Error = Error>,
+    {
         let result = C::PublicKey::try_from(vec![0; 1024]);
         assert_eq!(result, Err(Error::InvalidPublicKeyLength));
     }

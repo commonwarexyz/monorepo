@@ -1,6 +1,6 @@
 use crate::authenticated::{actors::peer, wire};
-use commonware_cryptography::Array;
 use commonware_runtime::Spawner;
+use commonware_utils::Array;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,

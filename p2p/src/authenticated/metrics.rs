@@ -1,5 +1,5 @@
 use crate::Channel;
-use commonware_cryptography::Array;
+use commonware_utils::Array;
 use prometheus_client::encoding::EncodeLabelSet;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]

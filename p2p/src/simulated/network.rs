@@ -6,14 +6,13 @@ use super::{
 };
 use crate::{Channel, Message, Recipients};
 use bytes::Bytes;
-use commonware_cryptography::Array;
 use commonware_macros::select;
 use commonware_runtime::{
     deterministic::{Listener, Sink, Stream},
     Clock, Listener as _, Network as RNetwork, Spawner,
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
-use commonware_utils::SizedSerialize;
+use commonware_utils::{Array, SizedSerialize};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,

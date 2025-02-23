@@ -87,7 +87,9 @@ pub struct PrivateKey {
     key: SigningKey,
 }
 
-impl Array for PrivateKey {}
+impl Array for PrivateKey {
+    type Error = Error;
+}
 
 impl SizedSerialize for PrivateKey {
     const SERIALIZED_LEN: usize = PRIVATE_KEY_LENGTH;
@@ -175,7 +177,9 @@ pub struct PublicKey {
     key: VerifyingKey,
 }
 
-impl Array for PublicKey {}
+impl Array for PublicKey {
+    type Error = Error;
+}
 
 impl SizedSerialize for PublicKey {
     const SERIALIZED_LEN: usize = PUBLIC_KEY_LENGTH;
@@ -252,7 +256,9 @@ pub struct Signature {
     signature: p256::ecdsa::Signature,
 }
 
-impl Array for Signature {}
+impl Array for Signature {
+    type Error = Error;
+}
 
 impl SizedSerialize for Signature {
     const SERIALIZED_LEN: usize = SIGNATURE_LENGTH;

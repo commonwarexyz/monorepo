@@ -7,8 +7,8 @@ use super::{
 };
 use crate::Proof;
 use bytes::{Buf, BufMut};
-use commonware_cryptography::{Array, Scheme};
-use commonware_utils::SizedSerialize;
+use commonware_cryptography::Scheme;
+use commonware_utils::{Array, SizedSerialize};
 use std::{collections::HashSet, marker::PhantomData};
 
 /// Encode and decode proofs of activity.

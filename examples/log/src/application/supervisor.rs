@@ -1,5 +1,5 @@
 use commonware_consensus::{simplex::View, Activity, Proof, Supervisor as Su};
-use commonware_cryptography::Array;
+use commonware_utils::Array;
 use std::collections::HashMap;
 
 /// Implementation of `commonware-consensus::Supervisor`.

@@ -5,8 +5,9 @@
 use commonware_consensus::threshold_simplex::Prover;
 use commonware_cryptography::{
     bls12381::primitives::{group, poly},
-    Array, Hasher,
+    Hasher,
 };
+use commonware_utils::Array;
 
 mod actor;
 pub use actor::Application;

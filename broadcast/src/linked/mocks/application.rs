@@ -2,7 +2,7 @@ use crate::{
     linked::{signer, Context},
     Application as A, Broadcaster,
 };
-use commonware_cryptography::Array;
+use commonware_utils::Array;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,

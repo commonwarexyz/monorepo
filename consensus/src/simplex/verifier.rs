@@ -3,8 +3,8 @@ use crate::{
     simplex::encoder::{nullify_message, proposal_message},
     Supervisor,
 };
-use commonware_cryptography::{Array, Scheme};
-use commonware_utils::quorum;
+use commonware_cryptography::Scheme;
+use commonware_utils::{quorum, Array};
 use std::collections::HashSet;
 use tracing::debug;
 

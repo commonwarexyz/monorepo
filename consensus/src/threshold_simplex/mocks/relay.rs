@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use commonware_cryptography::Array;
+use commonware_utils::Array;
 use futures::{channel::mpsc, SinkExt};
 use std::{collections::BTreeMap, sync::Mutex};
 
