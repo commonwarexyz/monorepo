@@ -2,6 +2,7 @@ use crate::SizedSerialize;
 use bytes::Buf;
 use std::{
     cmp::{Ord, PartialOrd},
+    error::Error as StdError,
     fmt::{Debug, Display},
     hash::Hash,
     ops::Deref,
@@ -10,9 +11,11 @@ use thiserror::Error;
 
 /// Errors that can occur when interacting with cryptographic primitives.
 #[derive(Error, Debug, PartialEq)]
-pub enum Error {
+pub enum Error<E: StdError + Send + Sync + 'static> {
     #[error("invalid bytes")]
     InsufficientBytes,
+    #[error("other: {0}")]
+    Other(E),
 }
 
 /// Types that can be fallibly read from a fixed-size byte sequence.
@@ -41,25 +44,25 @@ pub trait Array:
     + TryFrom<Vec<u8>, Error = <Self as Array>::Error>
     + SizedSerialize
 {
-    /// Associated error type for conversions
-    type Error: std::error::Error + Send + Sync + 'static + From<Error>;
+    /// Errors returned when parsing an invalid byte sequence.
+    type Error: StdError + Send + Sync + 'static;
 
     /// Attempts to read an array from the provided buffer.
-    fn read_from<B: Buf>(buf: &mut B) -> Result<Self, <Self as Array>::Error> {
+    fn read_from<B: Buf>(buf: &mut B) -> Result<Self, Error<<Self as Array>::Error>> {
         let len = Self::SERIALIZED_LEN;
         if buf.remaining() < len {
-            return Err(<Self as Array>::Error::from(Error::InsufficientBytes));
+            return Err(Error::InsufficientBytes);
         }
 
         let chunk = buf.chunk();
         if chunk.len() >= len {
-            let array = Self::try_from(&chunk[..len])?;
+            let array = Self::try_from(&chunk[..len]).map_err(Error::Other)?;
             buf.advance(len);
             return Ok(array);
         }
 
         let mut temp = vec![0u8; len];
         buf.copy_to_slice(&mut temp);
-        Self::try_from(temp)
+        Self::try_from(temp).map_err(Error::Other)
     }
 }
