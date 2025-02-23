@@ -2,11 +2,11 @@
 
 use prost::{encode_length_delimiter, length_delimiter_len};
 
+pub mod array;
+pub use array::Array;
 mod time;
 pub use time::SystemTimeExt;
-pub mod array;
 mod priority_set;
-pub use array::Array;
 pub use priority_set::PrioritySet;
 
 /// Converts bytes to a hexadecimal string.

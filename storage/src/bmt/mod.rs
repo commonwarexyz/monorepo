@@ -58,8 +58,8 @@ pub enum Error {
     UnalignedProof,
     #[error("too many siblings: {0}")]
     TooManySiblings(usize),
-    #[error("invalid digest: {0}")]
-    InvalidDigest(String),
+    #[error("invalid digest")]
+    InvalidDigest,
 }
 
 /// Constructor for a Binary Merkle Tree (BMT).
@@ -284,8 +284,7 @@ impl<H: Hasher> Proof<H> {
         // Deserialize the siblings
         let mut siblings = Vec::with_capacity(num_siblings);
         for _ in 0..num_siblings {
-            let hash =
-                H::Digest::read_from(&mut buf).map_err(|e| Error::InvalidDigest(e.to_string()))?;
+            let hash = H::Digest::read_from(&mut buf).map_err(|_| Error::InvalidDigest)?;
             siblings.push(hash);
         }
         Ok(Self { siblings })
