@@ -282,14 +282,13 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock + Metrics, P: A
             trace!(?origin, ?recipient, ?delay, "sending message",);
 
             // Send message
-            self.runtime.spawn("messenger", {
-                let runtime = self.runtime.clone();
+            self.runtime.clone().with_label("messenger").spawn({
                 let message = message.clone();
                 let recipient = recipient.clone();
                 let origin = origin.clone();
                 let mut acquired_sender = acquired_sender.clone();
                 let received_messages = self.received_messages.clone();
-                async move {
+                move |runtime| async move {
                     // Mark as sent as soon as soon as execution starts
                     acquired_sender.send(()).await.unwrap();
 
@@ -326,18 +325,21 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock + Metrics, P: A
         }
 
         // Notify sender of successful sends
-        self.runtime.spawn("notifier", async move {
-            // Wait for semaphore to be acquired on all sends
-            for _ in 0..sent.len() {
-                acquired_receiver.next().await.unwrap();
-            }
+        self.runtime
+            .clone()
+            .with_label("notifier")
+            .spawn(|_| async move {
+                // Wait for semaphore to be acquired on all sends
+                for _ in 0..sent.len() {
+                    acquired_receiver.next().await.unwrap();
+                }
 
-            // Notify sender of successful sends
-            if let Err(err) = reply.send(sent) {
-                // This can only happen if the sender exited.
-                error!(?err, "failed to send ack");
-            }
-        });
+                // Notify sender of successful sends
+                if let Err(err) = reply.send(sent) {
+                    // This can only happen if the sender exited.
+                    error!(?err, "failed to send ack");
+                }
+            });
     }
 
     /// Run the simulated network.
@@ -380,7 +382,7 @@ pub struct Sender<P: Array> {
 
 impl<P: Array> Sender<P> {
     fn new(
-        runtime: impl Spawner,
+        runtime: impl Spawner + Metrics,
         me: P,
         channel: Channel,
         max_size: usize,
@@ -389,7 +391,7 @@ impl<P: Array> Sender<P> {
         // Listen for messages
         let (high, mut high_receiver) = mpsc::unbounded();
         let (low, mut low_receiver) = mpsc::unbounded();
-        runtime.spawn("sender", async move {
+        runtime.with_label("sender").spawn(move |_| async move {
             loop {
                 // Wait for task
                 let task;
@@ -486,7 +488,7 @@ impl<P: Array> Peer<P> {
     ///
     /// The peer will listen for incoming connections on the given `socket` address.
     /// `max_size` is the maximum size of a message that can be sent to the peer.
-    fn new<E: Spawner + RNetwork<Listener, Sink, Stream>>(
+    fn new<E: Spawner + RNetwork<Listener, Sink, Stream> + Metrics>(
         runtime: &mut E,
         public_key: P,
         socket: SocketAddr,
@@ -501,7 +503,7 @@ impl<P: Array> Peer<P> {
         let (inbox_sender, mut inbox_receiver) = mpsc::unbounded();
 
         // Spawn router
-        runtime.spawn("router", async move {
+        runtime.clone().with_label("router").spawn(|_| async move {
             // Map of channels to mailboxes (senders to particular channels)
             let mut mailboxes = HashMap::new();
 
@@ -558,19 +560,18 @@ impl<P: Array> Peer<P> {
         });
 
         // Spawn a task that accepts new connections and spawns a task for each connection
-        runtime.spawn("listener", {
-            let runtime = runtime.clone();
+        runtime.clone().with_label("listener").spawn({
             let inbox_sender = inbox_sender.clone();
-            async move {
+            move |runtime| async move {
                 // Initialize listener
                 let mut listener = runtime.bind(socket).await.unwrap();
 
                 // Continually accept new connections
                 while let Ok((_, _, mut stream)) = listener.accept().await {
                     // New connection accepted. Spawn a task for this connection
-                    runtime.spawn("receiver", {
+                    runtime.clone().with_label("receiver").spawn({
                         let mut inbox_sender = inbox_sender.clone();
-                        async move {
+                        move |_| async move {
                             // Receive dialer's public key as a handshake
                             let dialer = match recv_frame(&mut stream, max_size).await {
                                 Ok(data) => data,
@@ -635,7 +636,7 @@ struct Link {
 }
 
 impl Link {
-    fn new<E: Spawner + RNetwork<Listener, Sink, Stream>, P: Array>(
+    fn new<E: Spawner + RNetwork<Listener, Sink, Stream> + Metrics, P: Array>(
         runtime: &mut E,
         dialer: P,
         socket: SocketAddr,
@@ -652,9 +653,10 @@ impl Link {
 
         // Spawn a task that will wait for messages to be sent to the link and then send them
         // over the network.
-        runtime.spawn("link", {
-            let runtime = runtime.clone();
-            async move {
+        runtime
+            .clone()
+            .with_label("link")
+            .spawn(move |runtime| async move {
                 // Dial the peer and handshake by sending it the dialer's public key
                 let (mut sink, _) = runtime.dial(socket).await.unwrap();
                 if let Err(err) = send_frame(&mut sink, &dialer, max_size).await {
@@ -671,8 +673,7 @@ impl Link {
                     let data = data.freeze();
                     send_frame(&mut sink, &data, max_size).await.unwrap();
                 }
-            }
-        });
+            });
 
         result
     }
@@ -705,8 +706,9 @@ mod tests {
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
             };
-            let (network, mut oracle) = Network::new(runtime.clone(), cfg);
-            runtime.spawn("network", network.run());
+            let network_runtime = runtime.with_label("network");
+            let (network, mut oracle) = Network::new(network_runtime.clone(), cfg);
+            network_runtime.spawn(|_| network.run());
 
             // Create two public keys
             let pk1 = Ed25519::from_seed(1).public_key();
