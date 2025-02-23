@@ -95,9 +95,10 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     ///
     /// Unlike a future, a spawned task will start executing immediately (even if the caller
     /// does not await the handle).
-    fn spawn<F, T>(&self, label: &str, f: F) -> Handle<T>
+    fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
     where
-        F: Future<Output = T> + Send + 'static,
+        F: FnOnce(Self) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static;
 
     /// Signals the runtime to stop execution and that all outstanding tasks
@@ -242,6 +243,9 @@ pub trait Blob: Clone + Send + Sync + 'static {
 
 /// Interface to register and encode metrics.
 pub trait Metrics: Clone + Send + Sync + 'static {
+    /// Apply a suffix.
+    fn with_suffix(self, name: &str) -> Self;
+
     /// Register a metric with the runtime.
     ///
     /// Any metric registered will automatically include the prefix of the current task.
@@ -295,7 +299,7 @@ mod tests {
 
     fn test_root_finishes(runner: impl Runner, context: impl Spawner) {
         runner.start(async move {
-            context.spawn("test", async move {
+            context.spawn(|_| async move {
                 loop {
                     reschedule().await;
                 }
@@ -305,7 +309,7 @@ mod tests {
 
     fn test_spawn_abort(runner: impl Runner, context: impl Spawner) {
         runner.start(async move {
-            let handle = context.spawn("test", async move {
+            let handle = context.spawn(|_| async move {
                 loop {
                     reschedule().await;
                 }
@@ -326,7 +330,7 @@ mod tests {
 
     fn test_panic_aborts_spawn(runner: impl Runner, context: impl Spawner) {
         let result = runner.start(async move {
-            let result = context.spawn("test", async move {
+            let result = context.spawn(|_| async move {
                 panic!("blah");
             });
             assert_eq!(result.await, Err(Error::Exited));
@@ -665,9 +669,9 @@ mod tests {
             blob.sync().await.expect("Failed to sync blob");
 
             // Read data from the blob in clone
-            let check1 = context.spawn("test", {
+            let check1 = context.clone().spawn({
                 let blob = blob.clone();
-                async move {
+                move |_| async move {
                     let mut buffer = vec![0u8; data.len()];
                     blob.read_at(&mut buffer, 0)
                         .await
@@ -675,9 +679,9 @@ mod tests {
                     assert_eq!(&buffer, data);
                 }
             });
-            let check2 = context.spawn("test", {
+            let check2 = context.spawn({
                 let blob = blob.clone();
-                async move {
+                move |_| async move {
                     let mut buffer = vec![0u8; data.len()];
                     blob.read_at(&mut buffer, 0)
                         .await
@@ -707,22 +711,23 @@ mod tests {
         });
     }
 
-    fn test_shutdown(runner: impl Runner, context: impl Spawner + Clock) {
+    fn test_shutdown(runner: impl Runner, context: impl Spawner + Clock + Metrics) {
         let kill = 9;
         runner.start(async move {
             // Spawn a task that waits for signal
-            let before = context.spawn("before", {
-                let context = context.clone();
-                async move {
+            let before = context
+                .clone()
+                .with_suffix("before")
+                .spawn(move |context| async move {
                     let sig = context.stopped().await;
                     assert_eq!(sig.unwrap(), kill);
-                }
-            });
+                });
 
             // Spawn a task after stop is called
-            let after = context.spawn("after", {
-                let context = context.clone();
-                async move {
+            let after = context
+                .clone()
+                .with_suffix("after")
+                .spawn(move |context| async move {
                     // Wait for stop signal
                     let mut signal = context.stopped();
                     loop {
@@ -737,8 +742,7 @@ mod tests {
                             },
                         }
                     }
-                }
-            });
+                });
 
             // Sleep for a bit before stopping
             context.sleep(Duration::from_millis(50)).await;

@@ -804,7 +804,7 @@ impl Context {
 }
 
 impl crate::Spawner for Context {
-    fn spawn<F, T>(&self, label: &str, f: F) -> Handle<T>
+    fn spawn<F, T>(&self, f: F) -> Handle<T>
     where
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
