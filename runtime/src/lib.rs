@@ -121,6 +121,20 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     fn stopped(&self) -> Signal;
 }
 
+/// Interface to register and encode metrics.
+pub trait Metrics: Clone + Send + Sync + 'static {
+    /// Apply a suffix.
+    fn with_suffix(self, label: &str) -> Self;
+
+    /// Register a metric with the runtime.
+    ///
+    /// Any metric registered will automatically include the prefix of the current task.
+    fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric);
+
+    /// Encode all metrics into a buffer.
+    fn encode(&self) -> String;
+}
+
 /// Interface that any task scheduler must implement to provide
 /// time-based operations.
 ///
@@ -244,20 +258,6 @@ pub trait Blob: Clone + Send + Sync + 'static {
 
     /// Close the blob.
     fn close(self) -> impl Future<Output = Result<(), Error>> + Send;
-}
-
-/// Interface to register and encode metrics.
-pub trait Metrics: Clone + Send + Sync + 'static {
-    /// Apply a suffix.
-    fn with_suffix(self, name: &str) -> Self;
-
-    /// Register a metric with the runtime.
-    ///
-    /// Any metric registered will automatically include the prefix of the current task.
-    fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric);
-
-    /// Encode all metrics into a buffer.
-    fn encode(&self) -> String;
 }
 
 #[cfg(test)]

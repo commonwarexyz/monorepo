@@ -462,7 +462,6 @@ pub struct Executor {
     metrics: Arc<Metrics>,
     auditor: Arc<Auditor>,
     rng: Mutex<StdRng>,
-    prefix: Mutex<String>,
     time: Mutex<SystemTime>,
     tasks: Arc<Tasks>,
     sleeping: Mutex<BinaryHeap<Alarm>>,
@@ -500,7 +499,6 @@ impl Executor {
             metrics: metrics.clone(),
             auditor: auditor.clone(),
             rng: Mutex::new(StdRng::seed_from_u64(cfg.seed)),
-            prefix: Mutex::new(String::new()),
             time: Mutex::new(start_time),
             tasks: Arc::new(Tasks {
                 queue: Mutex::new(Vec::new()),
@@ -518,6 +516,7 @@ impl Executor {
                 executor: executor.clone(),
             },
             Context {
+                label: String::new(),
                 executor,
                 networking: Arc::new(Networking::new(metrics, auditor.clone())),
             },
@@ -607,12 +606,6 @@ impl crate::Runner for Runner {
             // processing a different task required for other tasks to make progress).
             trace!(iter, tasks = tasks.len(), "starting loop");
             for task in tasks {
-                // Set current task prefix
-                {
-                    let mut prefix = self.executor.prefix.lock().unwrap();
-                    prefix.clone_from(&task.label);
-                }
-
                 // Record task for auditing
                 self.executor.auditor.process_task(task.id, &task.label);
 
@@ -728,6 +721,7 @@ impl crate::Runner for Runner {
 /// runtime.
 #[derive(Clone)]
 pub struct Context {
+    label: String,
     executor: Arc<Executor>,
     networking: Arc<Networking>,
 }
@@ -779,7 +773,6 @@ impl Context {
             // New state for the new runtime
             registry: Mutex::new(registry),
             metrics: metrics.clone(),
-            prefix: Mutex::new(String::new()),
             tasks: Arc::new(Tasks {
                 queue: Mutex::new(Vec::new()),
                 counter: Mutex::new(0),
@@ -795,6 +788,7 @@ impl Context {
                 executor: executor.clone(),
             },
             Self {
+                label: String::new(),
                 executor,
                 networking: Arc::new(Networking::new(metrics, auditor.clone())),
             },
@@ -804,24 +798,41 @@ impl Context {
 }
 
 impl crate::Spawner for Context {
-    fn spawn<F, T>(&self, f: F) -> Handle<T>
+    fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
+    where
+        F: FnOnce(Self) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let executor = self.executor.clone();
+        let label = self.label.clone();
+        let work = Work {
+            label: self.label.clone(),
+        };
+        self.executor
+            .metrics
+            .tasks_spawned
+            .get_or_create(&work)
+            .inc();
+        let gauge = self
+            .executor
+            .metrics
+            .tasks_running
+            .get_or_create(&work)
+            .clone();
+        let future = f(self);
+        let (f, handle) = Handle::init(future, gauge, false);
+        Tasks::register(&executor.tasks, &label, false, Box::pin(f));
+        handle
+    }
+
+    fn spawn_ref<F, T>(&self, f: F) -> Handle<T>
     where
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        let label = {
-            let prefix = self.executor.prefix.lock().unwrap();
-            if prefix.is_empty() || *prefix == ROOT_TASK {
-                label.to_string()
-            } else {
-                format!("{}_{}", *prefix, label)
-            }
-        };
-        if label == ROOT_TASK {
-            panic!("root task cannot be spawned");
-        }
         let work = Work {
-            label: label.clone(),
+            label: self.label.clone(),
         };
         self.executor
             .metrics
@@ -835,7 +846,7 @@ impl crate::Spawner for Context {
             .get_or_create(&work)
             .clone();
         let (f, handle) = Handle::init(f, gauge, false);
-        Tasks::register(&self.executor.tasks, &label, false, Box::pin(f));
+        Tasks::register(&self.executor.tasks, &self.label, false, Box::pin(f));
         handle
     }
 
@@ -1321,6 +1332,25 @@ impl Drop for Blob {
 }
 
 impl crate::Metrics for Context {
+    fn with_suffix(self, label: &str) -> Self {
+        let label = {
+            let prefix = self.label;
+            if prefix.is_empty() || prefix == ROOT_TASK {
+                label.to_string()
+            } else {
+                format!("{}_{}", prefix, label)
+            }
+        };
+        if label == ROOT_TASK {
+            panic!("root task cannot be spawned");
+        }
+        Self {
+            label,
+            executor: self.executor,
+            networking: self.networking,
+        }
+    }
+
     fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
         // Prepare args
         let name = name.into();
@@ -1329,7 +1359,7 @@ impl crate::Metrics for Context {
         // Register metric
         self.executor.auditor.register(&name, &help);
         let prefixed_name = {
-            let prefix = self.executor.prefix.lock().unwrap();
+            let prefix = &self.label;
             if prefix.is_empty() {
                 name
             } else {
@@ -1354,7 +1384,7 @@ impl crate::Metrics for Context {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{utils::run_tasks, Blob, Runner, Spawner, Storage};
+    use crate::{utils::run_tasks, Blob, Metrics, Runner, Spawner, Storage};
     use commonware_macros::test_traced;
     use futures::task::noop_waker;
 
@@ -1455,16 +1485,9 @@ mod tests {
     #[test]
     #[should_panic(expected = "root task cannot be spawned")]
     fn test_spawn_root_task() {
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
-            let _ = context
-                .spawn(ROOT_TASK, async move {
-                    // This task should never run
-                    panic!("root task should not run");
-                })
-                .await;
-            panic!("root task should not be spawned");
-        });
+        let (_, context, _) = Executor::default();
+        context.with_suffix(ROOT_TASK);
+        panic!("using root_task should not be possible");
     }
 
     #[test]
