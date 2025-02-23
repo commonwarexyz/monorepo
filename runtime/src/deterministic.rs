@@ -1308,7 +1308,7 @@ impl Drop for Blob {
 }
 
 impl crate::Metrics for Context {
-    fn with_suffix(self, label: &str) -> Self {
+    fn with_label(self, label: &str) -> Self {
         let label = {
             let prefix = self.label;
             if prefix.is_empty() || prefix == ROOT_TASK {
@@ -1462,7 +1462,7 @@ mod tests {
     #[should_panic(expected = "root task cannot be spawned")]
     fn test_spawn_root_task() {
         let (_, context, _) = Executor::default();
-        context.with_suffix(ROOT_TASK);
+        context.with_label(ROOT_TASK);
         panic!("using root_task should not be possible");
     }
 

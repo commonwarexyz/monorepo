@@ -81,7 +81,10 @@ mod tests {
     };
     use commonware_macros::test_traced;
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
-    use commonware_runtime::deterministic::{self, Context, Executor};
+    use commonware_runtime::{
+        deterministic::{self, Context, Executor},
+        Metrics,
+    };
     use commonware_runtime::{Clock, Runner, Spawner};
     use futures::channel::oneshot;
     use futures::future::join_all;
@@ -159,7 +162,7 @@ mod tests {
                 max_size: 1024 * 1024,
             },
         );
-        runtime.clone().spawn("network", network.run());
+        runtime.clone().with_label("network").spawn(network.run());
 
         let mut schemes = (0..num_validators)
             .map(|i| Ed25519::from_seed(i as u64))
@@ -215,7 +218,10 @@ mod tests {
                     namespace,
                     poly::public(&identity),
                 );
-            runtime.clone().spawn("collector", collector.run());
+            runtime
+                .clone()
+                .with_label("collector")
+                .spawn(collector.run());
             collectors.insert(validator.clone(), collector_mailbox);
 
             let (signer, signer_mailbox) = signer::Actor::new(
@@ -240,12 +246,12 @@ mod tests {
 
             runtime
                 .clone()
-                .spawn("app", async move { app.run(signer_mailbox).await });
+                .with_label("app")
+                .spawn(async move { app.run(signer_mailbox).await });
             let ((a1, a2), (b1, b2)) = registrations.remove(validator).unwrap();
-            runtime.clone().spawn(
-                "signer",
-                async move { signer.run((a1, a2), (b1, b2)).await },
-            );
+            runtime
+                .with_label("signer")
+                .spawn(async move { signer.run((a1, a2), (b1, b2)).await });
         }
     }
 
@@ -256,9 +262,10 @@ mod tests {
         >,
         invalid_when: fn(u64) -> bool,
     ) {
-        runtime.clone().spawn("invalid signature proposer", {
-            let runtime = runtime.clone();
-            async move {
+        runtime
+            .clone()
+            .with_label("invalid signature proposer")
+            .spawn(|runtime| async move {
                 let mut iter = 0;
                 loop {
                     iter += 1;
@@ -281,8 +288,7 @@ mod tests {
                     }
                     runtime.sleep(Duration::from_millis(250)).await;
                 }
-            }
-        });
+            });
     }
 
     async fn await_collectors(
@@ -297,11 +303,10 @@ mod tests {
             receivers.push(rx);
 
             // Spawn a watcher for the collector.
-            runtime.spawn("collector_watcher", {
+            runtime.clone().with_label("collector_watcher").spawn({
                 let sequencer = sequencer.clone();
                 let mut mailbox = mailbox.clone();
-                let runtime = runtime.clone();
-                async move {
+                move |runtime| async move {
                     loop {
                         let tip = mailbox.get_tip(sequencer.clone()).await.unwrap_or(0);
                         debug!(tip, ?sequencer, "collector");
@@ -382,7 +387,7 @@ mod tests {
                             max_size: 1024 * 1024,
                         },
                     );
-                    context.clone().spawn("network", network.run());
+                    context.clone().with_label("network").spawn(network.run());
 
                     let mut schemes = (0..num_validators)
                         .map(|i| Ed25519::from_seed(i as u64))
@@ -435,18 +440,19 @@ mod tests {
                         .map(|(v, m)| (v.clone(), m.clone()))
                         .collect();
                     for (validator, mut mailbox) in collector_pairs {
-                        let context_cloned = context.clone();
                         let completed_clone = completed.clone();
-                        context.clone().spawn("collector_unclean", async move {
-                            loop {
-                                let tip = mailbox.get_tip(validator.clone()).await.unwrap_or(0);
-                                if tip >= 100 {
-                                    completed_clone.lock().unwrap().insert(validator.clone());
-                                    break;
+                        context.clone().with_label("collector_unclean").spawn(
+                            |context| async move {
+                                loop {
+                                    let tip = mailbox.get_tip(validator.clone()).await.unwrap_or(0);
+                                    if tip >= 100 {
+                                        completed_clone.lock().unwrap().insert(validator.clone());
+                                        break;
+                                    }
+                                    context.sleep(Duration::from_millis(100)).await;
                                 }
-                                context_cloned.sleep(Duration::from_millis(100)).await;
-                            }
-                        });
+                            },
+                        );
                     }
                     context.sleep(Duration::from_millis(1000)).await;
                     *shutdowns.lock().unwrap() += 1;

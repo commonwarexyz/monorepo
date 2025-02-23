@@ -113,8 +113,8 @@ pub trait Spawner: Clone + Send + Sync + 'static {
 
 /// Interface to register and encode metrics.
 pub trait Metrics: Clone + Send + Sync + 'static {
-    /// Apply a suffix to the tracked label on some context.
-    fn with_suffix(self, label: &str) -> Self;
+    /// Append a suffix to the tracked label on some context.
+    fn with_label(self, label: &str) -> Self;
 
     /// Register a metric with the runtime.
     ///
@@ -664,7 +664,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync blob");
 
             // Read data from the blob in clone
-            let check1 = context.clone().with_suffix("check1").spawn({
+            let check1 = context.clone().with_label("check1").spawn({
                 let blob = blob.clone();
                 move |_| async move {
                     let mut buffer = vec![0u8; data.len()];
@@ -674,7 +674,7 @@ mod tests {
                     assert_eq!(&buffer, data);
                 }
             });
-            let check2 = context.with_suffix("check2").spawn({
+            let check2 = context.with_label("check2").spawn({
                 let blob = blob.clone();
                 move |_| async move {
                     let mut buffer = vec![0u8; data.len()];
@@ -712,7 +712,7 @@ mod tests {
             // Spawn a task that waits for signal
             let before = context
                 .clone()
-                .with_suffix("before")
+                .with_label("before")
                 .spawn(move |context| async move {
                     let sig = context.stopped().await;
                     assert_eq!(sig.unwrap(), kill);
@@ -721,7 +721,7 @@ mod tests {
             // Spawn a task after stop is called
             let after = context
                 .clone()
-                .with_suffix("after")
+                .with_label("after")
                 .spawn(move |context| async move {
                     // Wait for stop signal
                     let mut signal = context.stopped();

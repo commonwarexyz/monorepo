@@ -725,7 +725,7 @@ impl Drop for Blob {
 }
 
 impl crate::Metrics for Context {
-    fn with_suffix(self, label: &str) -> Self {
+    fn with_label(self, label: &str) -> Self {
         let label = {
             let prefix = self.label;
             if prefix.is_empty() {
