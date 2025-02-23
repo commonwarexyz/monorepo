@@ -17,7 +17,7 @@ use crate::{
 use commonware_cryptography::{sha256::hash, sha256::Digest as Sha256Digest, Array, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Blob, Clock, Metrics, Spawner, Storage};
+use commonware_runtime::{Blob, Clock, Handle, Metrics, Spawner, Storage};
 use commonware_storage::journal::variable::Journal;
 use commonware_utils::quorum;
 use futures::{
@@ -2022,7 +2022,18 @@ impl<
         };
     }
 
-    pub async fn run(
+    pub fn start(
+        self,
+        backfiller: resolver::Mailbox,
+        sender: impl Sender,
+        receiver: impl Receiver,
+    ) -> Handle<()> {
+        self.runtime
+            .clone()
+            .spawn(|_| self.run(backfiller, sender, receiver))
+    }
+
+    async fn run(
         mut self,
         mut backfiller: resolver::Mailbox,
         mut sender: impl Sender,

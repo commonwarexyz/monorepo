@@ -7,7 +7,7 @@ use crate::{Automaton, Committer, Relay, Supervisor};
 use commonware_cryptography::{Array, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Sender};
-use commonware_runtime::{Blob, Clock, Metrics, Spawner, Storage};
+use commonware_runtime::{Blob, Clock, Handle, Metrics, Spawner, Storage};
 use commonware_storage::journal::variable::Journal;
 use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
@@ -50,7 +50,7 @@ impl<
 
         // Create voter
         let (voter, voter_mailbox) = voter::Actor::new(
-            runtime.clone(),
+            runtime.clone().with_label("voter"),
             journal,
             voter::Config {
                 crypto: cfg.crypto.clone(),
@@ -70,7 +70,7 @@ impl<
 
         // Create resolver
         let (resolver, resolver_mailbox) = resolver::Actor::new(
-            runtime.clone(),
+            runtime.clone().with_label("resolver"),
             resolver::Config {
                 crypto: cfg.crypto,
                 supervisor: cfg.supervisor,
@@ -99,7 +99,23 @@ impl<
     /// Start the `simplex` consensus engine.
     ///
     /// This will also rebuild the state of the engine from provided `Journal`.
-    pub async fn run(
+    pub fn start(
+        self,
+        voter_network: (
+            impl Sender<PublicKey = C::PublicKey>,
+            impl Receiver<PublicKey = C::PublicKey>,
+        ),
+        resolver_network: (
+            impl Sender<PublicKey = C::PublicKey>,
+            impl Receiver<PublicKey = C::PublicKey>,
+        ),
+    ) -> Handle<()> {
+        self.runtime
+            .clone()
+            .spawn(|_| self.run(voter_network, resolver_network))
+    }
+
+    async fn run(
         self,
         voter_network: (
             impl Sender<PublicKey = C::PublicKey>,
@@ -112,29 +128,25 @@ impl<
     ) {
         // Start the voter
         let (voter_sender, voter_receiver) = voter_network;
-        let mut voter = self.runtime.spawn("voter", async move {
-            self.voter
-                .run(self.resolver_mailbox, voter_sender, voter_receiver)
-                .await;
-        });
+        let mut voter_task = self
+            .voter
+            .start(self.resolver_mailbox, voter_sender, voter_receiver);
 
         // Start the resolver
         let (resolver_sender, resolver_receiver) = resolver_network;
-        let mut resolver = self.runtime.spawn("resolver", async move {
+        let mut resolver_task =
             self.resolver
-                .run(self.voter_mailbox, resolver_sender, resolver_receiver)
-                .await;
-        });
+                .start(self.voter_mailbox, resolver_sender, resolver_receiver);
 
         // Wait for the resolver or voter to finish
         select! {
-            _ = &mut voter => {
+            _ = &mut voter_task => {
                 debug!("voter finished");
-                resolver.abort();
+                resolver_task.abort();
             },
-            _ = &mut resolver => {
+            _ = &mut resolver_task => {
                 debug!("resolver finished");
-                voter.abort();
+                voter_task.abort();
             },
         }
     }

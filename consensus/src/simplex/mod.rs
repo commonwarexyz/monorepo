@@ -189,7 +189,7 @@ mod tests {
     use commonware_storage::journal::variable::{Config as JConfig, Journal};
     use commonware_utils::quorum;
     use engine::Engine;
-    use futures::{channel::mpsc, StreamExt};
+    use futures::{channel::mpsc, io::ReadUntil, StreamExt};
     use governor::Quota;
     use mocks::application;
     use prover::Prover;
@@ -290,16 +290,15 @@ mod tests {
         let (executor, runtime, _) = Executor::timed(Duration::from_secs(30));
         executor.start(async move {
             // Create simulated network
-            let network_runtime = runtime.clone().with_label("network");
             let (network, mut oracle) = Network::new(
-                network_runtime.clone(),
+                runtime.clone().with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                 },
             );
 
             // Start network
-            network_runtime.spawn(|_| network.run());
+            network.start();
 
             // Register participants
             let mut schemes = Vec::new();
@@ -352,17 +351,15 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                 };
-                let application_runtime = runtime.clone().with_label("application");
                 let (actor, application) = mocks::application::Application::new(
-                    application_runtime.clone(),
+                    runtime.clone().with_label("application"),
                     application_cfg,
                 );
-                application_runtime.spawn(|_| actor.run());
+                actor.start();
                 let cfg = JConfig {
                     partition: validator.to_string(),
                 };
-                let consensus_runtime = runtime.clone().with_label("consensus");
-                let journal = Journal::init(consensus_runtime.clone().with_label("journal"), cfg)
+                let journal = Journal::init(runtime.clone().with_label("journal"), cfg)
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
@@ -384,13 +381,11 @@ mod tests {
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
                 };
-                let engine_runtime = consensus_runtime.clone().with_label("engine");
-                let engine = Engine::new(engine_runtime.clone(), journal, cfg);
-
+                let engine = Engine::new(runtime.with_label("engine"), journal, cfg);
                 let (voter, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                engine_handlers.push(engine_runtime.spawn(|_| engine.run(voter, resolver)));
+                engine_handlers.push(engine.start(voter, resolver));
             }
 
             // Wait for all engines to finish
