@@ -5,7 +5,7 @@ use crate::authenticated::{
     metrics,
 };
 use commonware_cryptography::Scheme;
-use commonware_runtime::{Clock, Listener, Network, Sink, Spawner, Stream};
+use commonware_runtime::{Clock, Listener, Metrics, Network, Sink, Spawner, Stream};
 use commonware_stream::public_key::{Config as StreamConfig, Connection};
 use governor::{
     clock::Clock as GClock,
@@ -15,14 +15,11 @@ use governor::{
 };
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
-use prometheus_client::registry::Registry;
 use rand::{CryptoRng, Rng};
-use std::sync::{Arc, Mutex};
 use std::{marker::PhantomData, time::Duration};
 use tracing::debug;
 
 pub struct Config<C: Scheme> {
-    pub registry: Arc<Mutex<Registry>>,
     pub stream_cfg: StreamConfig<C>,
     pub dial_frequency: Duration,
     pub dial_rate: Quota,
@@ -32,7 +29,7 @@ pub struct Actor<
     Si: Sink,
     St: Stream,
     L: Listener<Si, St>,
-    E: Spawner + Clock + GClock + Network<L, Si, St>,
+    E: Spawner + Clock + GClock + Network<L, Si, St> + Metrics,
     C: Scheme,
 > {
     runtime: E,
@@ -53,20 +50,17 @@ impl<
         Si: Sink,
         St: Stream,
         L: Listener<Si, St>,
-        E: Spawner + Clock + GClock + Network<L, Si, St> + Rng + CryptoRng,
+        E: Spawner + Clock + GClock + Network<L, Si, St> + Rng + CryptoRng + Metrics,
         C: Scheme,
     > Actor<Si, St, L, E, C>
 {
     pub fn new(runtime: E, cfg: Config<C>) -> Self {
         let dial_attempts = Family::<metrics::Peer, Counter>::default();
-        {
-            let mut registry = cfg.registry.lock().unwrap();
-            registry.register(
-                "dial_attempts",
-                "number of dial attempts",
-                dial_attempts.clone(),
-            );
-        }
+        runtime.register(
+            "dial_attempts",
+            "number of dial attempts",
+            dial_attempts.clone(),
+        );
         Self {
             runtime: runtime.clone(),
             stream_cfg: cfg.stream_cfg,

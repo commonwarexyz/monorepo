@@ -1,12 +1,6 @@
 use commonware_cryptography::Scheme;
 use governor::Quota;
-use prometheus_client::registry::Registry;
-use std::{
-    net::SocketAddr,
-    num::NonZeroU32,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{net::SocketAddr, num::NonZeroU32, time::Duration};
 
 /// Known peer and its accompanying address that will be dialed on startup.
 pub type Bootstrapper<P> = (P, SocketAddr);
@@ -25,9 +19,6 @@ pub struct Config<C: Scheme> {
 
     /// Prefix for all signed messages to avoid replay attacks.
     pub namespace: Vec<u8>,
-
-    /// Registry for prometheus metrics.
-    pub registry: Arc<Mutex<Registry>>,
 
     /// Address to listen on.
     pub listen: SocketAddr,
@@ -111,7 +102,6 @@ impl<C: Scheme> Config<C> {
     pub fn recommended(
         crypto: C,
         namespace: &[u8],
-        registry: Arc<Mutex<Registry>>,
         listen: SocketAddr,
         bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
         max_message_size: usize,
@@ -119,7 +109,6 @@ impl<C: Scheme> Config<C> {
         Self {
             crypto,
             namespace: namespace.to_vec(),
-            registry,
             listen,
             dialable: listen,
             bootstrappers,
@@ -150,7 +139,6 @@ impl<C: Scheme> Config<C> {
     pub fn aggressive(
         crypto: C,
         namespace: &[u8],
-        registry: Arc<Mutex<Registry>>,
         listen: SocketAddr,
         bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
         max_message_size: usize,
@@ -158,7 +146,6 @@ impl<C: Scheme> Config<C> {
         Self {
             crypto,
             namespace: namespace.to_vec(),
-            registry,
             listen,
             dialable: listen,
             bootstrappers,
@@ -184,7 +171,6 @@ impl<C: Scheme> Config<C> {
     #[cfg(test)]
     pub fn test(
         crypto: C,
-        registry: Arc<Mutex<Registry>>,
         listen: SocketAddr,
         bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
         max_message_size: usize,
@@ -192,7 +178,6 @@ impl<C: Scheme> Config<C> {
         Self {
             crypto,
             namespace: b"test_namespace".to_vec(),
-            registry,
             listen,
             dialable: listen,
             bootstrappers,

@@ -17,7 +17,7 @@ use crate::{
 use commonware_cryptography::{sha256::hash, sha256::Digest as Sha256Digest, Array, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Blob, Clock, Spawner, Storage};
+use commonware_runtime::{Blob, Clock, Metrics, Spawner, Storage};
 use commonware_storage::journal::variable::Journal;
 use commonware_utils::quorum;
 use futures::{
@@ -455,7 +455,7 @@ impl<C: Scheme, D: Array, S: Supervisor<Index = View, PublicKey = C::PublicKey>>
 
 pub struct Actor<
     B: Blob,
-    E: Clock + Rng + Spawner + Storage<B>,
+    E: Clock + Rng + Spawner + Storage<B> + Metrics,
     C: Scheme,
     D: Array,
     A: Automaton<Context = Context<D>, Digest = D>,
@@ -498,7 +498,7 @@ pub struct Actor<
 
 impl<
         B: Blob,
-        E: Clock + Rng + Spawner + Storage<B>,
+        E: Clock + Rng + Spawner + Storage<B> + Metrics,
         C: Scheme,
         D: Array,
         A: Automaton<Context = Context<D>, Digest = D>,
@@ -522,21 +522,18 @@ impl<
         let tracked_views = Gauge::<i64, AtomicI64>::default();
         let received_messages = Family::<metrics::PeerMessage, Counter>::default();
         let broadcast_messages = Family::<metrics::Message, Counter>::default();
-        {
-            let mut registry = cfg.registry.lock().unwrap();
-            registry.register("current_view", "current view", current_view.clone());
-            registry.register("tracked_views", "tracked views", tracked_views.clone());
-            registry.register(
-                "received_messages",
-                "received messages",
-                received_messages.clone(),
-            );
-            registry.register(
-                "broadcast_messages",
-                "broadcast messages",
-                broadcast_messages.clone(),
-            );
-        }
+        runtime.register("current_view", "current view", current_view.clone());
+        runtime.register("tracked_views", "tracked views", tracked_views.clone());
+        runtime.register(
+            "received_messages",
+            "received messages",
+            received_messages.clone(),
+        );
+        runtime.register(
+            "broadcast_messages",
+            "broadcast messages",
+            broadcast_messages.clone(),
+        );
 
         // Initialize store
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);

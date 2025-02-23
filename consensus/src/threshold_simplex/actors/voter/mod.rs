@@ -9,8 +9,6 @@ pub use actor::Actor;
 use commonware_cryptography::Scheme;
 use commonware_cryptography::{bls12381::primitives::group, Array};
 pub use ingress::{Mailbox, Message};
-use prometheus_client::registry::Registry;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub struct Config<
@@ -27,7 +25,6 @@ pub struct Config<
     pub committer: F,
     pub supervisor: S,
 
-    pub registry: Arc<Mutex<Registry>>,
     pub namespace: Vec<u8>,
     pub mailbox_size: usize,
     pub leader_timeout: Duration,

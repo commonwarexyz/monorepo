@@ -6,7 +6,7 @@ pub use super::{
 use crate::authenticated::{ip, metrics, wire};
 use bitvec::prelude::*;
 use commonware_cryptography::{Array, Scheme};
-use commonware_runtime::{Clock, Spawner};
+use commonware_runtime::{Clock, Metrics, Spawner};
 use commonware_utils::{union, SystemTimeExt};
 use futures::{channel::mpsc, StreamExt};
 use governor::{
@@ -132,7 +132,7 @@ impl AddressCount {
     }
 }
 
-pub struct Actor<E: Spawner + Rng + GClock, C: Scheme> {
+pub struct Actor<E: Spawner + Rng + GClock + Metrics, C: Scheme> {
     runtime: E,
 
     crypto: C,
@@ -159,7 +159,7 @@ pub struct Actor<E: Spawner + Rng + GClock, C: Scheme> {
     ip_signature: wire::Peer,
 }
 
-impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
+impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
     #[allow(clippy::type_complexity)]
     pub fn new(
         runtime: E,
@@ -207,25 +207,22 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
         let reserved_connections = Gauge::default();
         let rate_limited_connections = Family::<metrics::Peer, Counter>::default();
         let updated_peers = Family::<metrics::Peer, Counter>::default();
-        {
-            let mut registry = cfg.registry.lock().unwrap();
-            registry.register("tracked_peers", "tracked peers", tracked_peers.clone());
-            registry.register(
-                "connections",
-                "number of connections",
-                reserved_connections.clone(),
-            );
-            registry.register(
-                "rate_limited_connections",
-                "number of rate limited connections",
-                rate_limited_connections.clone(),
-            );
-            registry.register(
-                "updated_peers",
-                "number of peer records updated",
-                updated_peers.clone(),
-            );
-        }
+        runtime.register("tracked_peers", "tracked peers", tracked_peers.clone());
+        runtime.register(
+            "connections",
+            "number of connections",
+            reserved_connections.clone(),
+        );
+        runtime.register(
+            "rate_limited_connections",
+            "number of rate limited connections",
+            rate_limited_connections.clone(),
+        );
+        runtime.register(
+            "updated_peers",
+            "number of peer records updated",
+            updated_peers.clone(),
+        );
 
         (
             Self {
@@ -651,7 +648,6 @@ mod tests {
     use governor::Quota;
     use std::net::{IpAddr, Ipv4Addr};
     use std::num::NonZeroU32;
-    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     fn test_config<C: Scheme>(
@@ -661,7 +657,6 @@ mod tests {
         Config {
             crypto,
             namespace: b"test_namespace".to_vec(),
-            registry: Arc::new(Mutex::new(prometheus_client::registry::Registry::default())),
             address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
             bootstrappers,
             allow_private_ips: true,

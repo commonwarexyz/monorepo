@@ -225,7 +225,6 @@ mod tests {
     use engine::Engine;
     use futures::{channel::mpsc, StreamExt};
     use governor::Quota;
-    use prometheus_client::registry::Registry;
     use rand::{rngs::StdRng, Rng, SeedableRng};
     use std::{
         collections::{BTreeMap, HashMap, HashSet},
@@ -326,7 +325,6 @@ mod tests {
             let (network, mut oracle) = Network::new(
                 runtime.clone(),
                 Config {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     max_size: 1024 * 1024,
                 },
             );
@@ -390,7 +388,6 @@ mod tests {
                     actor.run().await;
                 });
                 let cfg = JConfig {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     partition: validator.to_string(),
                 };
                 let journal = Journal::init(runtime.clone(), cfg)
@@ -402,7 +399,6 @@ mod tests {
                     relay: application.clone(),
                     committer: application,
                     supervisor,
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     mailbox_size: 1024,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
@@ -565,7 +561,6 @@ mod tests {
                 let (network, mut oracle) = Network::new(
                     runtime.clone(),
                     Config {
-                        registry: Arc::new(Mutex::new(Registry::default())),
                         max_size: 1024 * 1024,
                     },
                 );
@@ -626,7 +621,6 @@ mod tests {
                         actor.run().await;
                     });
                     let cfg = JConfig {
-                        registry: Arc::new(Mutex::new(Registry::default())),
                         partition: validator.to_string(),
                     };
                     let journal = Journal::init(runtime.clone(), cfg)
@@ -638,7 +632,6 @@ mod tests {
                         relay: application.clone(),
                         committer: application,
                         supervisor,
-                        registry: Arc::new(Mutex::new(Registry::default())),
                         mailbox_size: 1024,
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
@@ -776,7 +769,6 @@ mod tests {
             let (network, mut oracle) = Network::new(
                 runtime.clone(),
                 Config {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     max_size: 1024 * 1024,
                 },
             );
@@ -851,7 +843,6 @@ mod tests {
                     actor.run().await;
                 });
                 let cfg = JConfig {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     partition: validator.to_string(),
                 };
                 let journal = Journal::init(runtime.clone(), cfg)
@@ -863,7 +854,6 @@ mod tests {
                     relay: application.clone(),
                     committer: application,
                     supervisor,
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     mailbox_size: 1024,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
@@ -988,7 +978,6 @@ mod tests {
                 actor.run().await;
             });
             let cfg = JConfig {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: validator.to_string(),
             };
             let journal = Journal::init(runtime.clone(), cfg)
@@ -1000,7 +989,6 @@ mod tests {
                 relay: application.clone(),
                 committer: application,
                 supervisor,
-                registry: Arc::new(Mutex::new(Registry::default())),
                 mailbox_size: 1024,
                 namespace: namespace.clone(),
                 leader_timeout: Duration::from_secs(1),
@@ -1070,7 +1058,6 @@ mod tests {
             let (network, mut oracle) = Network::new(
                 runtime.clone(),
                 Config {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     max_size: 1024 * 1024,
                 },
             );
@@ -1145,7 +1132,6 @@ mod tests {
                     actor.run().await;
                 });
                 let cfg = JConfig {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     partition: validator.to_string(),
                 };
                 let journal = Journal::init(runtime.clone(), cfg)
@@ -1157,7 +1143,6 @@ mod tests {
                     relay: application.clone(),
                     committer: application,
                     supervisor,
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     mailbox_size: 1024,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
@@ -1261,7 +1246,6 @@ mod tests {
             let (network, mut oracle) = Network::new(
                 runtime.clone(),
                 Config {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     max_size: 1024 * 1024,
                 },
             );
@@ -1336,7 +1320,6 @@ mod tests {
                     actor.run().await;
                 });
                 let cfg = JConfig {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     partition: validator.to_string(),
                 };
                 let journal = Journal::init(runtime.clone(), cfg)
@@ -1348,7 +1331,6 @@ mod tests {
                     relay: application.clone(),
                     committer: application,
                     supervisor,
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     mailbox_size: 1024,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
@@ -1452,7 +1434,6 @@ mod tests {
             let (network, mut oracle) = Network::new(
                 runtime.clone(),
                 Config {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     max_size: 1024 * 1024,
                 },
             );
@@ -1516,7 +1497,6 @@ mod tests {
                     actor.run().await;
                 });
                 let cfg = JConfig {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     partition: validator.to_string(),
                 };
                 let journal = Journal::init(runtime.clone(), cfg)
@@ -1528,7 +1508,6 @@ mod tests {
                     relay: application.clone(),
                     committer: application,
                     supervisor,
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     mailbox_size: 1024,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
@@ -1625,7 +1604,6 @@ mod tests {
             let (network, mut oracle) = Network::new(
                 runtime.clone(),
                 Config {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     max_size: 1024 * 1024,
                 },
             );
@@ -1689,7 +1667,6 @@ mod tests {
                     actor.run().await;
                 });
                 let cfg = JConfig {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     partition: validator.to_string(),
                 };
                 let journal = Journal::init(runtime.clone(), cfg)
@@ -1701,7 +1678,6 @@ mod tests {
                     relay: application.clone(),
                     committer: application,
                     supervisor,
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     mailbox_size: 1024,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
@@ -1854,7 +1830,6 @@ mod tests {
             let (network, mut oracle) = Network::new(
                 runtime.clone(),
                 Config {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     max_size: 1024 * 1024,
                 },
             );
@@ -1918,7 +1893,6 @@ mod tests {
                     actor.run().await;
                 });
                 let cfg = JConfig {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     partition: validator.to_string(),
                 };
                 let journal = Journal::init(runtime.clone(), cfg)
@@ -1930,7 +1904,6 @@ mod tests {
                     relay: application.clone(),
                     committer: application,
                     supervisor,
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     mailbox_size: 1024,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
@@ -2033,7 +2006,6 @@ mod tests {
             let (network, mut oracle) = Network::new(
                 runtime.clone(),
                 Config {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     max_size: 1024 * 1024,
                 },
             );
@@ -2110,7 +2082,6 @@ mod tests {
                         actor.run().await;
                     });
                     let cfg = JConfig {
-                        registry: Arc::new(Mutex::new(Registry::default())),
                         partition: validator.to_string(),
                     };
                     let journal = Journal::init(runtime.clone(), cfg)
@@ -2122,7 +2093,6 @@ mod tests {
                         relay: application.clone(),
                         committer: application,
                         supervisor,
-                        registry: Arc::new(Mutex::new(Registry::default())),
                         mailbox_size: 1024,
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
@@ -2218,7 +2188,6 @@ mod tests {
             let (network, mut oracle) = Network::new(
                 runtime.clone(),
                 Config {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     max_size: 1024 * 1024,
                 },
             );
@@ -2294,7 +2263,6 @@ mod tests {
                         actor.run().await;
                     });
                     let cfg = JConfig {
-                        registry: Arc::new(Mutex::new(Registry::default())),
                         partition: validator.to_string(),
                     };
                     let journal = Journal::init(runtime.clone(), cfg)
@@ -2306,7 +2274,6 @@ mod tests {
                         relay: application.clone(),
                         committer: application,
                         supervisor,
-                        registry: Arc::new(Mutex::new(Registry::default())),
                         mailbox_size: 1024,
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),

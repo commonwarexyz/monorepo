@@ -13,7 +13,7 @@ use commonware_cryptography::{
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Blob, Clock, Spawner, Storage};
+use commonware_runtime::{Blob, Clock, Metrics, Spawner, Storage};
 use commonware_storage::journal::{self, variable::Journal};
 use futures::{
     channel::{mpsc, oneshot},
@@ -22,13 +22,11 @@ use futures::{
     stream::FuturesUnordered,
     StreamExt,
 };
-use prometheus_client::registry::Registry;
 use std::{
     collections::BTreeMap,
     future::Future,
     marker::PhantomData,
     pin::Pin,
-    sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
 use thiserror::Error;
@@ -41,7 +39,7 @@ type VerifyFuture<D, P> =
 /// The actor that implements the `Broadcaster` trait.
 pub struct Actor<
     B: Blob,
-    E: Clock + Spawner + Storage<B>,
+    E: Clock + Spawner + Storage<B> + Metrics,
     C: Scheme,
     D: Array,
     A: Application<Context = Context<C::PublicKey>, Digest = D> + Clone,
@@ -160,7 +158,7 @@ pub struct Actor<
 
 impl<
         B: Blob,
-        E: Clock + Spawner + Storage<B>,
+        E: Clock + Spawner + Storage<B> + Metrics,
         C: Scheme,
         D: Array,
         A: Application<Context = Context<C::PublicKey>, Digest = D> + Clone,
@@ -897,7 +895,6 @@ impl<
 
         // Initialize journal
         let cfg = journal::variable::Config {
-            registry: Arc::new(Mutex::new(Registry::default())),
             partition: format!("{}{}", &self.journal_name_prefix, sequencer),
         };
         let mut journal = Journal::init(self.runtime.clone(), cfg)

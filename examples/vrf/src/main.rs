@@ -87,8 +87,6 @@ use commonware_runtime::{
 };
 use commonware_utils::quorum;
 use governor::Quota;
-use prometheus_client::registry::Registry;
-use std::sync::{Arc, Mutex};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::NonZeroU32,
@@ -215,7 +213,6 @@ fn main() {
     let p2p_cfg = authenticated::Config::aggressive(
         signer.clone(),
         APPLICATION_NAMESPACE,
-        Arc::new(Mutex::new(Registry::default())),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
         MAX_MESSAGE_SIZE,

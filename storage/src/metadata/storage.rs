@@ -1,6 +1,6 @@
 use super::{Config, Error};
 use bytes::{BufMut, Bytes};
-use commonware_runtime::{Blob, Clock, Storage};
+use commonware_runtime::{Blob, Clock, Metrics, Storage};
 use commonware_utils::SystemTimeExt as _;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::{
@@ -14,7 +14,7 @@ const BLOB_NAMES: [&[u8]; 2] = [b"left", b"right"];
 const SECONDS_IN_NANOSECONDS: u128 = 1_000_000_000;
 
 /// Implementation of `Metadata` storage.
-pub struct Metadata<B: Blob, E: Clock + Storage<B>> {
+pub struct Metadata<B: Blob, E: Clock + Storage<B> + Metrics> {
     runtime: E,
 
     // Data is stored in a BTreeMap to enable deterministic serialization.
@@ -28,7 +28,7 @@ pub struct Metadata<B: Blob, E: Clock + Storage<B>> {
     _phantom_e: PhantomData<E>,
 }
 
-impl<B: Blob, E: Clock + Storage<B>> Metadata<B, E> {
+impl<B: Blob, E: Clock + Storage<B> + Metrics> Metadata<B, E> {
     /// Initialize a new `Metadata` instance.
     pub async fn init(runtime: E, cfg: Config) -> Result<Self, Error> {
         // Open dedicated blobs
@@ -64,11 +64,8 @@ impl<B: Blob, E: Clock + Storage<B>> Metadata<B, E> {
         // Create metrics
         let syncs = Counter::default();
         let keys = Gauge::default();
-        {
-            let mut registry = cfg.registry.lock().unwrap();
-            registry.register("syncs", "number of syncs of data to disk", syncs.clone());
-            registry.register("keys", "number of tracked keys", keys.clone());
-        }
+        runtime.register("syncs", "number of syncs of data to disk", syncs.clone());
+        runtime.register("keys", "number of tracked keys", keys.clone());
 
         // Return metadata
         keys.set(data.len() as i64);

@@ -19,8 +19,6 @@ use commonware_storage::journal::variable::{Config, Journal};
 use commonware_stream::public_key::{self, Connection};
 use commonware_utils::{from_hex, quorum, union};
 use governor::Quota;
-use prometheus_client::registry::Registry;
-use std::sync::{Arc, Mutex};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::NonZeroU32,
@@ -170,7 +168,6 @@ fn main() {
     let p2p_cfg = authenticated::Config::aggressive(
         signer.clone(),
         &union(APPLICATION_NAMESPACE, P2P_SUFFIX),
-        Arc::new(Mutex::new(Registry::default())),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
         1024 * 1024, // 1MB
@@ -218,7 +215,6 @@ fn main() {
         let journal = Journal::init(
             runtime.clone(),
             Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: String::from("log"),
             },
         )
@@ -254,7 +250,6 @@ fn main() {
                 relay: mailbox.clone(),
                 committer: mailbox,
                 supervisor,
-                registry: Arc::new(Mutex::new(Registry::default())),
                 namespace: consensus_namespace,
                 mailbox_size: 1024,
                 replay_concurrency: 1,

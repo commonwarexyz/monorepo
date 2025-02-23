@@ -10,7 +10,7 @@ use commonware_cryptography::{
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Sender};
-use commonware_runtime::{Blob, Clock, Spawner, Storage};
+use commonware_runtime::{Blob, Clock, Metrics, Spawner, Storage};
 use commonware_storage::journal::variable::Journal;
 use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
@@ -19,7 +19,7 @@ use tracing::debug;
 /// Instance of `threshold-simplex` consensus engine.
 pub struct Engine<
     B: Blob,
-    E: Clock + GClock + Rng + CryptoRng + Spawner + Storage<B>,
+    E: Clock + GClock + Rng + CryptoRng + Spawner + Storage<B> + Metrics,
     C: Scheme,
     D: Array,
     A: Automaton<Context = Context<D>, Digest = D>,
@@ -43,7 +43,7 @@ pub struct Engine<
 
 impl<
         B: Blob,
-        E: Clock + GClock + Rng + CryptoRng + Spawner + Storage<B>,
+        E: Clock + GClock + Rng + CryptoRng + Spawner + Storage<B> + Metrics,
         C: Scheme,
         D: Array,
         A: Automaton<Context = Context<D>, Digest = D>,
@@ -73,7 +73,6 @@ impl<
                 relay: cfg.relay,
                 committer: cfg.committer,
                 supervisor: cfg.supervisor.clone(),
-                registry: cfg.registry.clone(),
                 mailbox_size: cfg.mailbox_size,
                 namespace: cfg.namespace.clone(),
                 leader_timeout: cfg.leader_timeout,
@@ -90,7 +89,6 @@ impl<
             resolver::Config {
                 crypto: cfg.crypto,
                 supervisor: cfg.supervisor,
-                registry: cfg.registry,
                 mailbox_size: cfg.mailbox_size,
                 namespace: cfg.namespace,
                 activity_timeout: cfg.activity_timeout,
