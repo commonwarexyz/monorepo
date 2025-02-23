@@ -7,7 +7,7 @@ use crate::authenticated::{
     metrics,
 };
 use commonware_cryptography::Array;
-use commonware_runtime::{Clock, Metrics, Sink, Spawner, Stream};
+use commonware_runtime::{Clock, Handle, Metrics, Sink, Spawner, Stream};
 use futures::{channel::mpsc, StreamExt};
 use governor::{clock::ReasonablyRealtime, Quota};
 use prometheus_client::metrics::{counter::Counter, family::Family};
@@ -75,7 +75,15 @@ impl<
         )
     }
 
-    pub async fn run(mut self, tracker: tracker::Mailbox<E, P>, router: router::Mailbox<P>) {
+    pub async fn start(
+        self,
+        tracker: tracker::Mailbox<E, P>,
+        router: router::Mailbox<P>,
+    ) -> Handle<()> {
+        self.runtime.clone().spawn(|_| self.run(tracker, router))
+    }
+
+    async fn run(mut self, tracker: tracker::Mailbox<E, P>, router: router::Mailbox<P>) {
         while let Some(msg) = self.receiver.next().await {
             match msg {
                 Message::Spawn {

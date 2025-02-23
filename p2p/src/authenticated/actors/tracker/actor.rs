@@ -6,7 +6,7 @@ pub use super::{
 use crate::authenticated::{ip, metrics, wire};
 use bitvec::prelude::*;
 use commonware_cryptography::{Array, Scheme};
-use commonware_runtime::{Clock, Metrics, Spawner};
+use commonware_runtime::{Clock, Handle, Metrics, Spawner};
 use commonware_utils::{union, SystemTimeExt};
 use futures::{channel::mpsc, StreamExt};
 use governor::{
@@ -552,7 +552,11 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
         ))
     }
 
-    pub async fn run(mut self) {
+    pub async fn start(self) -> Handle<()> {
+        self.runtime.clone().spawn(|_| self.run())
+    }
+
+    async fn run(mut self) {
         while let Some(msg) = self.receiver.next().await {
             match msg {
                 Message::Construct {

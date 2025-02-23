@@ -5,7 +5,7 @@ use crate::authenticated::{
     metrics,
 };
 use commonware_cryptography::Scheme;
-use commonware_runtime::{Clock, Listener, Metrics, Network, Sink, Spawner, Stream};
+use commonware_runtime::{Clock, Handle, Listener, Metrics, Network, Sink, Spawner, Stream};
 use commonware_stream::public_key::{Config as StreamConfig, Connection};
 use governor::{
     clock::Clock as GClock,
@@ -129,7 +129,17 @@ impl<
         }
     }
 
-    pub async fn run(
+    pub async fn start(
+        self,
+        tracker: tracker::Mailbox<E, C::PublicKey>,
+        supervisor: spawner::Mailbox<E, Si, St, C::PublicKey>,
+    ) -> Handle<()> {
+        self.runtime
+            .clone()
+            .spawn(|_| self.run(tracker, supervisor))
+    }
+
+    async fn run(
         mut self,
         mut tracker: tracker::Mailbox<E, C::PublicKey>,
         mut supervisor: spawner::Mailbox<E, Si, St, C::PublicKey>,

@@ -284,7 +284,7 @@ mod tests {
             );
 
             // Wait to connect to all peers, and then send messages to everyone
-            network_runtime.spawn(|_| network.run());
+            network.start();
 
             // Send/Receive messages
             let handler = runtime.with_label("agent").spawn({
@@ -498,8 +498,8 @@ mod tests {
                     bootstrappers,
                     1_024 * 1_024, // 1MB
                 );
-                let network_runtime = runtime.clone().with_label("network");
-                let (mut network, mut oracle) = Network::new(network_runtime.clone(), config);
+                let (mut network, mut oracle) =
+                    Network::new(runtime.clone().with_label("network"), config);
 
                 // Register peers at separate indices
                 oracle.register(0, vec![addresses[0].clone()]).await;
@@ -519,7 +519,7 @@ mod tests {
                 );
 
                 // Wait to connect to all peers, and then send messages to everyone
-                network_runtime.spawn(|_| network.run());
+                network.start();
 
                 // Send/Receive messages
                 let handler = runtime
@@ -583,8 +583,8 @@ mod tests {
                 Vec::new(),
                 1_024 * 1_024, // 1MB
             );
-            let network_runtime = runtime.clone().with_label("network");
-            let (mut network, mut oracle) = Network::new(network_runtime.clone(), config);
+            let (mut network, mut oracle) =
+                Network::new(runtime.clone().with_label("network"), config);
 
             // Register peers
             oracle.register(0, addresses.clone()).await;
@@ -598,7 +598,7 @@ mod tests {
             );
 
             // Wait to connect to all peers, and then send messages to everyone
-            network_runtime.spawn(|_| network.run());
+            network.start();
 
             // Crate random message
             let mut msg = vec![0u8; 10 * 1024 * 1024]; // 10MB (greater than frame capacity)

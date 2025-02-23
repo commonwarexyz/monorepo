@@ -1011,15 +1011,16 @@ mod tests {
         let (executor, runtime, _) = Executor::timed(Duration::from_secs(30));
         executor.start(async move {
             // Create simulated network
+            let network_runtime = runtime.clone().with_label("network");
             let (network, mut oracle) = Network::new(
-                runtime.clone(),
+                network_runtime.clone(),
                 Config {
                     max_size: 1024 * 1024,
                 },
             );
 
             // Start network
-            runtime.spawn("network", network.run());
+            network_runtime.spawn(|_| network.run());
 
             // Register participants
             let mut schemes = Vec::new();
