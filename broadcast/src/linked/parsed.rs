@@ -25,12 +25,12 @@ pub enum Error {
     InvalidPartial,
     #[error("Invalid threshold")]
     InvalidThreshold,
-    #[error("Sequencer parse error: {0}")]
-    Sequencer(String),
-    #[error("Payload parse error: {0}")]
-    Payload(String),
-    #[error("Signature parse error: {0}")]
-    Signature(String),
+    #[error("Invalid sequencer")]
+    InvalidSequencer,
+    #[error("Invalid payload")]
+    InvalidPayload,
+    #[error("Invalid signature")]
+    InvalidSignature,
 }
 
 /// Parsed version of a `Chunk`.
@@ -45,9 +45,9 @@ impl<D: Array, P: Array> Chunk<D, P> {
     /// Returns a `Chunk` from a `wire::Chunk`.
     pub fn from_wire(chunk: wire::Chunk) -> Result<Self, Error> {
         Ok(Self {
-            sequencer: P::try_from(chunk.sequencer).map_err(|e| Error::Sequencer(e.to_string()))?,
+            sequencer: P::try_from(chunk.sequencer).map_err(|_| Error::InvalidSequencer)?,
             height: chunk.height,
-            payload: D::try_from(chunk.payload).map_err(|e| Error::Payload(e.to_string()))?,
+            payload: D::try_from(chunk.payload).map_err(|_| Error::InvalidPayload)?,
         })
     }
 
@@ -73,7 +73,7 @@ impl<D: Array> Parent<D> {
     /// Returns a `Parent` from a `wire::Parent`.
     pub fn from_wire(parent: wire::Parent) -> Result<Self, Error> {
         Ok(Self {
-            payload: D::try_from(parent.payload).map_err(|e| Error::Payload(e.to_string()))?,
+            payload: D::try_from(parent.payload).map_err(|_| Error::InvalidPayload)?,
             epoch: parent.epoch,
             threshold: ThresholdSignature::deserialize(&parent.threshold)
                 .ok_or(Error::InvalidThreshold)?,
@@ -111,7 +111,7 @@ impl<C: Scheme, D: Array> Node<C, D> {
             return Err(Error::ParentMissing);
         }
         let signature =
-            C::Signature::try_from(node.signature).map_err(|e| Error::Signature(e.to_string()))?;
+            C::Signature::try_from(node.signature).map_err(|_| Error::InvalidSignature)?;
         Ok(Self {
             chunk,
             signature,

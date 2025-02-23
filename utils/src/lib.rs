@@ -4,7 +4,7 @@ use prost::{encode_length_delimiter, length_delimiter_len};
 
 mod time;
 pub use time::SystemTimeExt;
-mod array;
+pub mod array;
 mod priority_set;
 pub use array::Array;
 pub use priority_set::PrioritySet;
