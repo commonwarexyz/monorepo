@@ -1,8 +1,6 @@
 use crate::linked::{parsed, Epoch};
-use commonware_cryptography::{
-    bls12381::primitives::{group, ops, poly::PartialSignature},
-    Array,
-};
+use commonware_cryptography::bls12381::primitives::{group, ops, poly::PartialSignature};
+use commonware_utils::Array;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// A struct representing a set of partial signatures for a payload digest.

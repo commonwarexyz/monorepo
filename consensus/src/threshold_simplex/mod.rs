@@ -146,7 +146,7 @@
 //! * Introduce message rebroadcast to continue making progress if messages from a given view are dropped (only way
 //!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
 
-use commonware_cryptography::Array;
+use commonware_utils::Array;
 
 mod encoder;
 mod prover;

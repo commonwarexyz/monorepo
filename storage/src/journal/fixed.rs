@@ -50,9 +50,8 @@
 
 use super::Error;
 use bytes::BufMut;
-use commonware_cryptography::Array;
 use commonware_runtime::{Blob, Error as RError, Storage};
-use commonware_utils::{hex, SizedSerialize};
+use commonware_utils::{hex, Array, SizedSerialize};
 use futures::stream::{self, Stream, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use prometheus_client::registry::Registry;

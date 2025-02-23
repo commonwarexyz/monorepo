@@ -2,7 +2,8 @@ use crate::{
     linked::{Context, Epoch},
     Application, Collector, ThresholdCoordinator,
 };
-use commonware_cryptography::{Array, Scheme};
+use commonware_cryptography::Scheme;
+use commonware_utils::Array;
 use std::time::Duration;
 
 /// Configuration when creating an `Actor`.

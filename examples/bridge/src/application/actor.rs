@@ -9,11 +9,11 @@ use bytes::BufMut;
 use commonware_consensus::threshold_simplex::Prover;
 use commonware_cryptography::{
     bls12381::primitives::{group::Element, poly},
-    Array, Hasher,
+    Hasher,
 };
 use commonware_runtime::{Sink, Stream};
 use commonware_stream::{public_key::Connection, Receiver, Sender};
-use commonware_utils::{hex, SizedSerialize};
+use commonware_utils::{hex, Array, SizedSerialize};
 use futures::{channel::mpsc, StreamExt};
 use prost::Message as _;
 use rand::Rng;

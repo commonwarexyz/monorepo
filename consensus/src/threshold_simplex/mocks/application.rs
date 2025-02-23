@@ -1,10 +1,10 @@
 use super::relay::Relay;
 use crate::{threshold_simplex::Context, Automaton as Au, Committer as Co, Proof, Relay as Re};
 use bytes::{Buf, BufMut, Bytes};
-use commonware_cryptography::{Array, Hasher};
+use commonware_cryptography::Hasher;
 use commonware_macros::select;
 use commonware_runtime::Clock;
-use commonware_utils::SizedSerialize;
+use commonware_utils::{Array, SizedSerialize};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,

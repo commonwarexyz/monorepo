@@ -2,6 +2,8 @@
 
 use prost::{encode_length_delimiter, length_delimiter_len};
 
+pub mod array;
+pub use array::Array;
 mod time;
 pub use time::SystemTimeExt;
 mod priority_set;
