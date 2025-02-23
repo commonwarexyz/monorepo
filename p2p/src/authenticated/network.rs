@@ -148,13 +148,13 @@ impl<
         self.channels.register(channel, rate, backlog, compression)
     }
 
+    /// Starts the network.
+    ///
+    /// After the network is started, it is not possible to add more channels.
     pub fn start(self) -> Handle<()> {
         self.runtime.clone().spawn(|_| self.run())
     }
 
-    /// Starts the network.
-    ///
-    /// After the network is started, it is not possible to add more channels.
     async fn run(self) {
         // Start tracker
         let mut tracker_task = self.tracker.start();

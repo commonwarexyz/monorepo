@@ -156,14 +156,13 @@ mod tests {
         Vec<PublicKey>,
         Registrations<PublicKey>,
     ) {
-        let network_runtime = runtime.clone().with_label("network");
         let (network, mut oracle) = Network::new(
-            network_runtime.clone(),
+            runtime.clone().with_label("network"),
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
             },
         );
-        network_runtime.spawn(|_| network.run());
+        network.start();
 
         let mut schemes = (0..num_validators)
             .map(|i| Ed25519::from_seed(i as u64))
@@ -251,9 +250,7 @@ mod tests {
                 .with_label("app")
                 .spawn(|_| app.run(signer_mailbox));
             let ((a1, a2), (b1, b2)) = registrations.remove(validator).unwrap();
-            runtime
-                .with_label("signer")
-                .spawn(|_| signer.run((a1, a2), (b1, b2)));
+            signer.start((a1, a2), (b1, b2));
         }
     }
 
@@ -388,14 +385,13 @@ mod tests {
                 let shutdowns = shutdowns.clone();
                 let identity = identity.clone();
                 async move {
-                    let network_context = context.clone().with_label("network");
                     let (network, mut oracle) = Network::new(
-                        network_context.clone(),
+                        context.clone().with_label("network"),
                         commonware_p2p::simulated::Config {
                             max_size: 1024 * 1024,
                         },
                     );
-                    network_context.spawn(|_| network.run());
+                    network.start();
 
                     let mut schemes = (0..num_validators)
                         .map(|i| Ed25519::from_seed(i as u64))

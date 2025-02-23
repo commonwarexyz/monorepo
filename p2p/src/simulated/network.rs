@@ -342,14 +342,14 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock + Metrics, P: A
             });
     }
 
-    pub fn start(self) -> Handle<()> {
-        self.runtime.clone().spawn(|_| self.run())
-    }
-
     /// Run the simulated network.
     ///
     /// It is not necessary to invoke this method before modifying the network topology, however,
     /// no messages will be sent until this method is called.
+    pub fn start(self) -> Handle<()> {
+        self.runtime.clone().spawn(|_| self.run())
+    }
+
     async fn run(mut self) {
         loop {
             select! {
