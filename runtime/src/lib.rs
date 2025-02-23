@@ -101,6 +101,11 @@ pub trait Spawner: Clone + Send + Sync + 'static {
         Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static;
 
+    fn spawn_ref<F, T>(&self, f: F) -> Handle<T>
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static;
+
     /// Signals the runtime to stop execution and that all outstanding tasks
     /// should perform any required cleanup and exit. This method is idempotent and
     /// can be called multiple times.
@@ -299,7 +304,7 @@ mod tests {
 
     fn test_root_finishes(runner: impl Runner, context: impl Spawner) {
         runner.start(async move {
-            context.spawn(|_| async move {
+            context.spawn_ref(async move {
                 loop {
                     reschedule().await;
                 }
@@ -309,7 +314,7 @@ mod tests {
 
     fn test_spawn_abort(runner: impl Runner, context: impl Spawner) {
         runner.start(async move {
-            let handle = context.spawn(|_| async move {
+            let handle = context.spawn_ref(async move {
                 loop {
                     reschedule().await;
                 }
@@ -330,7 +335,7 @@ mod tests {
 
     fn test_panic_aborts_spawn(runner: impl Runner, context: impl Spawner) {
         let result = runner.start(async move {
-            let result = context.spawn(|_| async move {
+            let result = context.spawn_ref(async move {
                 panic!("blah");
             });
             assert_eq!(result.await, Err(Error::Exited));
@@ -669,9 +674,9 @@ mod tests {
             blob.sync().await.expect("Failed to sync blob");
 
             // Read data from the blob in clone
-            let check1 = context.clone().spawn({
+            let check1 = context.spawn_ref({
                 let blob = blob.clone();
-                move |_| async move {
+                async move {
                     let mut buffer = vec![0u8; data.len()];
                     blob.read_at(&mut buffer, 0)
                         .await
@@ -679,9 +684,9 @@ mod tests {
                     assert_eq!(&buffer, data);
                 }
             });
-            let check2 = context.spawn({
+            let check2 = context.spawn_ref({
                 let blob = blob.clone();
-                move |_| async move {
+                async move {
                     let mut buffer = vec![0u8; data.len()];
                     blob.read_at(&mut buffer, 0)
                         .await
