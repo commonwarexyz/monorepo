@@ -1,6 +1,6 @@
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Metrics, Spawner};
+use commonware_runtime::{Handle, Metrics, Spawner};
 use commonware_utils::hex;
 use crossterm::{
     event::{self, Event as CEvent, KeyCode},
@@ -40,7 +40,17 @@ enum Focus {
     Messages,
 }
 
-pub async fn run(
+pub fn start(
+    runtime: impl Spawner + Metrics,
+    me: String,
+    logs: Arc<Mutex<Vec<String>>>,
+    sender: impl Sender,
+    receiver: impl Receiver,
+) -> Handle<()> {
+    runtime.spawn(|runtime| run(runtime, me, logs, sender, receiver))
+}
+
+async fn run(
     runtime: impl Spawner + Metrics,
     me: String,
     logs: Arc<Mutex<Vec<String>>>,
@@ -56,7 +66,7 @@ pub async fn run(
 
     // Listen for input
     let (mut tx, mut rx) = mpsc::channel(100);
-    runtime.spawn("keyboard", async move {
+    runtime.with_label("keyboard").spawn(|_| async move {
         loop {
             match event::poll(Duration::from_millis(500)) {
                 Ok(true) => {}

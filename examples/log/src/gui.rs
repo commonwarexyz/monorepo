@@ -3,7 +3,7 @@
 //! This code has nothing to do with the application or consensus and was
 //! implemented to make consensus logging easier to follow.
 
-use commonware_runtime::Spawner;
+use commonware_runtime::{Handle, Metrics, Spawner};
 use crossterm::{
     event::{self, Event as CEvent, KeyCode},
     execute,
@@ -138,13 +138,14 @@ impl<'a> MakeWriter<'a> for Writer {
     }
 }
 
-pub struct Gui {
+pub struct Gui<E: Spawner + Metrics> {
+    runtime: E,
     progress: Arc<Mutex<Vec<String>>>,
     logs: Arc<Mutex<Vec<String>>>,
 }
 
-impl Gui {
-    pub fn new() -> Self {
+impl<E: Spawner + Metrics> Gui<E> {
+    pub fn new(runtime: E) -> Self {
         // Create writer
         let progress = Arc::new(Mutex::new(Vec::new()));
         let logs = Arc::new(Mutex::new(Vec::new()));
@@ -156,10 +157,18 @@ impl Gui {
             .with_max_level(tracing::Level::DEBUG)
             .with_writer(writer)
             .init();
-        Self { progress, logs }
+        Self {
+            runtime,
+            progress,
+            logs,
+        }
     }
 
-    pub async fn run<R: Spawner>(self, runtime: R) {
+    pub fn start(self) -> Handle<()> {
+        self.runtime.clone().spawn(|_| self.run())
+    }
+
+    async fn run(self) {
         // Setup terminal
         enable_raw_mode().unwrap();
         let mut stdout = stdout();
@@ -169,7 +178,7 @@ impl Gui {
 
         // Listen for input
         let (mut tx, mut rx) = mpsc::channel(100);
-        runtime.spawn("keyboard", async move {
+        self.runtime.with_label("keyboard").spawn(|_| async move {
             loop {
                 match event::poll(Duration::from_millis(500)) {
                     Ok(true) => {}

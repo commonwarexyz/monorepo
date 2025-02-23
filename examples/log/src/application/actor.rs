@@ -5,6 +5,7 @@ use super::{
 };
 use commonware_consensus::simplex::Prover;
 use commonware_cryptography::{Hasher, Scheme};
+use commonware_runtime::{Handle, Spawner};
 use commonware_utils::hex;
 use futures::{channel::mpsc, StreamExt};
 use rand::Rng;
@@ -14,14 +15,14 @@ use tracing::info;
 const GENESIS: &[u8] = b"commonware is neat";
 
 /// Application actor.
-pub struct Application<R: Rng, C: Scheme, H: Hasher> {
+pub struct Application<R: Rng + Spawner, C: Scheme, H: Hasher> {
     runtime: R,
     prover: Prover<C, H::Digest>,
     hasher: H,
     mailbox: mpsc::Receiver<Message<H::Digest>>,
 }
 
-impl<R: Rng, C: Scheme, H: Hasher> Application<R, C, H> {
+impl<R: Rng + Spawner, C: Scheme, H: Hasher> Application<R, C, H> {
     /// Create a new application actor.
     pub fn new(
         runtime: R,
@@ -41,7 +42,11 @@ impl<R: Rng, C: Scheme, H: Hasher> Application<R, C, H> {
     }
 
     /// Run the application actor.
-    pub async fn run(mut self) {
+    pub fn start(self) -> Handle<()> {
+        self.runtime.clone().spawn(|_| self.run())
+    }
+
+    async fn run(mut self) {
         while let Some(message) = self.mailbox.next().await {
             match message {
                 Message::Genesis { response } => {

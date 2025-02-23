@@ -12,7 +12,7 @@ use commonware_cryptography::{
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::Clock;
+use commonware_runtime::{Clock, Handle, Spawner};
 use commonware_utils::hex;
 use futures::{channel::mpsc, StreamExt};
 use prost::Message;
@@ -24,7 +24,7 @@ const VRF_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_VRF_";
 
 /// Generate bias-resistant, verifiable randomness using BLS12-381
 /// Threshold Signatures.
-pub struct Vrf<E: Clock, P: Array> {
+pub struct Vrf<E: Clock + Spawner, P: Array> {
     runtime: E,
     timeout: Duration,
     threshold: u32,
@@ -33,7 +33,7 @@ pub struct Vrf<E: Clock, P: Array> {
     requests: mpsc::Receiver<(u64, Output)>,
 }
 
-impl<E: Clock, P: Array> Vrf<E, P> {
+impl<E: Clock + Spawner, P: Array> Vrf<E, P> {
     pub fn new(
         runtime: E,
         timeout: Duration,
@@ -160,7 +160,15 @@ impl<E: Clock, P: Array> Vrf<E, P> {
         }
     }
 
-    pub async fn run(
+    pub fn start(
+        self,
+        sender: impl Sender<PublicKey = P>,
+        receiver: impl Receiver<PublicKey = P>,
+    ) -> Handle<()> {
+        self.runtime.clone().spawn(|_| self.run(sender, receiver))
+    }
+
+    async fn run(
         mut self,
         mut sender: impl Sender<PublicKey = P>,
         mut receiver: impl Receiver<PublicKey = P>,

@@ -13,7 +13,7 @@ use commonware_cryptography::{
 use commonware_p2p::authenticated;
 use commonware_runtime::{
     tokio::{self, Executor},
-    Network, Runner, Spawner,
+    Metrics, Network, Runner,
 };
 use commonware_storage::journal::variable::{Config, Journal};
 use commonware_stream::public_key::{self, Connection};
@@ -186,7 +186,8 @@ fn main() {
                 .expect("Failed to upgrade connection with indexer");
 
         // Setup p2p
-        let (mut network, mut oracle) = authenticated::Network::new(runtime.clone(), p2p_cfg);
+        let (mut network, mut oracle) =
+            authenticated::Network::new(runtime.with_label("network"), p2p_cfg);
 
         // Provide authorized peers
         //
@@ -226,7 +227,7 @@ fn main() {
         let prover = Prover::new(public, &consensus_namespace);
         let other_prover = Prover::new(other_identity, &consensus_namespace);
         let (application, supervisor, mailbox) = application::Application::new(
-            runtime.clone(),
+            runtime.with_label("application"),
             application::Config {
                 indexer,
                 prover,
@@ -242,7 +243,7 @@ fn main() {
 
         // Initialize consensus
         let engine = Engine::new(
-            runtime.clone(),
+            runtime.with_label("engine"),
             journal,
             threshold_simplex::Config {
                 crypto: signer.clone(),
@@ -266,16 +267,13 @@ fn main() {
         );
 
         // Start consensus
-        runtime.spawn("network", network.run());
-        runtime.spawn(
-            "engine",
-            engine.run(
-                (voter_sender, voter_receiver),
-                (resolver_sender, resolver_receiver),
-            ),
+        network.start();
+        engine.start(
+            (voter_sender, voter_receiver),
+            (resolver_sender, resolver_receiver),
         );
 
         // Block on application
-        application.run().await;
+        application.start().await.expect("Application failed");
     });
 }

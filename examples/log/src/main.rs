@@ -53,7 +53,7 @@ use commonware_cryptography::{sha256::Digest as Sha256Digest, Ed25519, Scheme, S
 use commonware_p2p::authenticated::{self, Network};
 use commonware_runtime::{
     tokio::{self, Executor},
-    Runner, Spawner,
+    Metrics, Runner,
 };
 use commonware_storage::journal::variable::{Config, Journal};
 use commonware_utils::union;
@@ -89,9 +89,6 @@ fn main() {
         )
         .arg(Arg::new("storage-dir").long("storage-dir").required(true))
         .get_matches();
-
-    // Create GUI
-    let gui = gui::Gui::new();
 
     // Configure my identity
     let me = matches
@@ -163,7 +160,8 @@ fn main() {
 
     // Start runtime
     executor.start(async move {
-        let (mut network, mut oracle) = Network::new(runtime.clone(), p2p_cfg);
+        // Initialize network
+        let (mut network, mut oracle) = Network::new(runtime.with_label("network"), p2p_cfg);
 
         // Provide authorized peers
         //
@@ -190,7 +188,7 @@ fn main() {
 
         // Initialize storage
         let journal = Journal::init(
-            runtime.clone(),
+            runtime.with_label("journal"),
             Config {
                 partition: String::from("log"),
             },
@@ -202,7 +200,7 @@ fn main() {
         let namespace = union(APPLICATION_NAMESPACE, b"_CONSENSUS");
         let prover: Prover<Ed25519, Sha256Digest> = Prover::new(&namespace);
         let (application, supervisor, mailbox) = application::Application::new(
-            runtime.clone(),
+            runtime.with_label("application"),
             application::Config {
                 prover,
                 hasher: Sha256::default(),
@@ -213,7 +211,7 @@ fn main() {
 
         // Initialize consensus
         let engine = Engine::new(
-            runtime.clone(),
+            runtime.with_label("engine"),
             journal,
             simplex::Config {
                 crypto: signer.clone(),
@@ -237,17 +235,15 @@ fn main() {
         );
 
         // Start consensus
-        runtime.spawn("application", application.run());
-        runtime.spawn("network", network.run());
-        runtime.spawn(
-            "engine",
-            engine.run(
-                (voter_sender, voter_receiver),
-                (resolver_sender, resolver_receiver),
-            ),
+        application.start();
+        network.start();
+        engine.start(
+            (voter_sender, voter_receiver),
+            (resolver_sender, resolver_receiver),
         );
 
         // Block on GUI
-        gui.run(runtime).await;
+        let gui = gui::Gui::new(runtime.with_label("gui"));
+        gui.start().await.expect("GUI failed");
     });
 }

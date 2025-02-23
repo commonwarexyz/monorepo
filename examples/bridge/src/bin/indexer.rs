@@ -7,7 +7,7 @@ use commonware_cryptography::{
     sha256::Digest as Sha256Digest,
     Ed25519, Hasher, Scheme, Sha256,
 };
-use commonware_runtime::{tokio::Executor, Listener, Network, Runner, Spawner};
+use commonware_runtime::{tokio::Executor, Listener, Metrics, Network, Runner, Spawner};
 use commonware_stream::{
     public_key::{Config, Connection, IncomingConnection},
     Receiver, Sender,
@@ -132,7 +132,7 @@ fn main() {
 
         // Start handler
         let mut hasher = Sha256::new();
-        runtime.spawn("handler", async move {
+        runtime.with_label("handler").spawn(|_| async move {
             while let Some(msg) = receiver.next().await {
                 match msg {
                     Message::PutBlock { incoming, response } => {
@@ -252,9 +252,9 @@ fn main() {
             info!(?peer, "upgraded connection");
 
             // Spawn message handler
-            runtime.spawn("connection", {
+            runtime.with_label("connection").spawn({
                 let mut handler = handler.clone();
-                async move {
+                move |_| async move {
                     // Split stream
                     let (mut sender, mut receiver) = stream.split();
 

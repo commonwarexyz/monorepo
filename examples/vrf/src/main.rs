@@ -83,7 +83,7 @@ use commonware_cryptography::{Ed25519, Scheme};
 use commonware_p2p::authenticated::{self, Network};
 use commonware_runtime::{
     tokio::{self, Executor},
-    Runner, Spawner,
+    Metrics, Runner,
 };
 use commonware_utils::quorum;
 use governor::Quota;
@@ -220,7 +220,7 @@ fn main() {
 
     // Start runtime
     executor.start(async move {
-        let (mut network, mut oracle) = Network::new(runtime.clone(), p2p_cfg);
+        let (mut network, mut oracle) = Network::new(runtime.with_label("network"), p2p_cfg);
 
         // Provide authorized peers
         //
@@ -265,7 +265,7 @@ fn main() {
             );
             let arbiter = Ed25519::from_seed(*arbiter).public_key();
             let (contributor, requests) = handlers::Contributor::new(
-                runtime.clone(),
+                runtime.with_label("contributor"),
                 signer,
                 DKG_PHASE_TIMEOUT,
                 arbiter,
@@ -274,10 +274,7 @@ fn main() {
                 lazy,
                 forger,
             );
-            runtime.spawn(
-                "contributor",
-                contributor.run(contributor_sender, contributor_receiver),
-            );
+            contributor.start(contributor_sender, contributor_receiver);
 
             // Create vrf
             let (vrf_sender, vrf_receiver) = network.register(
@@ -287,13 +284,13 @@ fn main() {
                 None,
             );
             let signer = handlers::Vrf::new(
-                runtime.clone(),
+                runtime.with_label("signer"),
                 Duration::from_secs(5),
                 threshold,
                 contributors,
                 requests,
             );
-            runtime.spawn("signer", signer.run(vrf_sender, vrf_receiver));
+            signer.start(vrf_sender, vrf_receiver);
         } else {
             let (arbiter_sender, arbiter_receiver) = network.register(
                 handlers::DKG_CHANNEL,
@@ -302,14 +299,14 @@ fn main() {
                 COMPRESSION_LEVEL,
             );
             let arbiter: handlers::Arbiter<_, Ed25519> = handlers::Arbiter::new(
-                runtime.clone(),
+                runtime.with_label("arbiter"),
                 DKG_FREQUENCY,
                 DKG_PHASE_TIMEOUT,
                 contributors,
                 threshold,
             );
-            runtime.spawn("arbiter", arbiter.run(arbiter_sender, arbiter_receiver));
+            arbiter.start(arbiter_sender, arbiter_receiver);
         }
-        network.run().await;
+        network.start().await.expect("Network failed");
     });
 }

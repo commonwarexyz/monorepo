@@ -11,7 +11,7 @@ use commonware_cryptography::{
     bls12381::primitives::{group::Element, poly},
     Array, Hasher,
 };
-use commonware_runtime::{Sink, Stream};
+use commonware_runtime::{Handle, Sink, Spawner, Stream};
 use commonware_stream::{public_key::Connection, Receiver, Sender};
 use commonware_utils::{hex, SizedSerialize};
 use futures::{channel::mpsc, StreamExt};
@@ -23,7 +23,7 @@ use tracing::{debug, info};
 const GENESIS: &[u8] = b"commonware is neat";
 
 /// Application actor.
-pub struct Application<R: Rng, H: Hasher, Si: Sink, St: Stream> {
+pub struct Application<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> {
     runtime: R,
     indexer: Connection<Si, St>,
     prover: Prover<H::Digest>,
@@ -34,7 +34,7 @@ pub struct Application<R: Rng, H: Hasher, Si: Sink, St: Stream> {
     mailbox: mpsc::Receiver<Message<H::Digest>>,
 }
 
-impl<R: Rng, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St> {
+impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St> {
     /// Create a new application actor.
     pub fn new<P: Array>(
         runtime: R,
@@ -58,7 +58,11 @@ impl<R: Rng, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St> {
     }
 
     /// Run the application actor.
-    pub async fn run(mut self) {
+    pub fn start(self) -> Handle<()> {
+        self.runtime.clone().spawn(|_| self.run())
+    }
+
+    async fn run(mut self) {
         let (mut indexer_sender, mut indexer_receiver) = self.indexer.split();
         while let Some(message) = self.mailbox.next().await {
             match message {
