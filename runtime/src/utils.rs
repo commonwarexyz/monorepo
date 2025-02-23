@@ -214,7 +214,7 @@ pub type Signal = Shared<oneshot::Receiver<i32>>;
 ///                      sig = &mut signal => {
 ///                          println!("Received signal: {}", sig.unwrap());
 ///                          break;
-///                      },   
+///                      },
 ///                      _ = context.sleep(Duration::from_secs(1)) => {},
 ///                 };
 ///             }
@@ -263,10 +263,9 @@ pub fn run_tasks(tasks: usize, runner: impl Runner, context: impl Spawner) -> Ve
     runner.start(async move {
         // Randomly schedule tasks
         let mut handles = FuturesUnordered::new();
-        for i in 0..tasks - 1 {
-            handles.push(context.spawn("test", task(i)));
+        for i in 0..=tasks - 1 {
+            handles.push(context.clone().spawn(move |_| task(i)));
         }
-        handles.push(context.spawn("test", task(tasks - 1)));
 
         // Collect output order
         let mut outputs = Vec::new();

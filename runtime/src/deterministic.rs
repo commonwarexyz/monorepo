@@ -826,30 +826,6 @@ impl crate::Spawner for Context {
         handle
     }
 
-    fn spawn_ref<F, T>(&self, f: F) -> Handle<T>
-    where
-        F: Future<Output = T> + Send + 'static,
-        T: Send + 'static,
-    {
-        let work = Work {
-            label: self.label.clone(),
-        };
-        self.executor
-            .metrics
-            .tasks_spawned
-            .get_or_create(&work)
-            .inc();
-        let gauge = self
-            .executor
-            .metrics
-            .tasks_running
-            .get_or_create(&work)
-            .clone();
-        let (f, handle) = Handle::init(f, gauge, false);
-        Tasks::register(&self.executor.tasks, &self.label, false, Box::pin(f));
-        handle
-    }
-
     fn stop(&self, value: i32) {
         self.executor.auditor.stop(value);
         self.executor.signaler.lock().unwrap().signal(value);
@@ -1384,7 +1360,7 @@ impl crate::Metrics for Context {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{utils::run_tasks, Blob, Metrics, Runner, Spawner, Storage};
+    use crate::{utils::run_tasks, Blob, Metrics, Runner, Storage};
     use commonware_macros::test_traced;
     use futures::task::noop_waker;
 

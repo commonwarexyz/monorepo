@@ -88,22 +88,12 @@ pub trait Runner {
 pub trait Spawner: Clone + Send + Sync + 'static {
     /// Enqueues a task to be executed.
     ///
-    /// Label can be used to track how many instances of a specific type of
-    /// task have been spawned or are running concurrently (and is appended to all
-    /// metrics). Label is automatically appended to the parent task labels (i.e. spawning
-    /// "fun" from "have" will be labeled "have_fun").
-    ///
     /// Unlike a future, a spawned task will start executing immediately (even if the caller
     /// does not await the handle).
     fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
         Fut: Future<Output = T> + Send + 'static,
-        T: Send + 'static;
-
-    fn spawn_ref<F, T>(&self, f: F) -> Handle<T>
-    where
-        F: Future<Output = T> + Send + 'static,
         T: Send + 'static;
 
     /// Signals the runtime to stop execution and that all outstanding tasks
@@ -123,12 +113,12 @@ pub trait Spawner: Clone + Send + Sync + 'static {
 
 /// Interface to register and encode metrics.
 pub trait Metrics: Clone + Send + Sync + 'static {
-    /// Apply a suffix.
+    /// Apply a suffix to the tracked label on some context.
     fn with_suffix(self, label: &str) -> Self;
 
     /// Register a metric with the runtime.
     ///
-    /// Any metric registered will automatically include the prefix of the current task.
+    /// Any metric registered will automatically include the prefix of the current context's label.
     fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric);
 
     /// Encode all metrics into a buffer.
@@ -304,7 +294,7 @@ mod tests {
 
     fn test_root_finishes(runner: impl Runner, context: impl Spawner) {
         runner.start(async move {
-            context.spawn_ref(async move {
+            context.spawn(|_| async move {
                 loop {
                     reschedule().await;
                 }
@@ -314,7 +304,7 @@ mod tests {
 
     fn test_spawn_abort(runner: impl Runner, context: impl Spawner) {
         runner.start(async move {
-            let handle = context.spawn_ref(async move {
+            let handle = context.spawn(|_| async move {
                 loop {
                     reschedule().await;
                 }
@@ -335,7 +325,7 @@ mod tests {
 
     fn test_panic_aborts_spawn(runner: impl Runner, context: impl Spawner) {
         let result = runner.start(async move {
-            let result = context.spawn_ref(async move {
+            let result = context.spawn(|_| async move {
                 panic!("blah");
             });
             assert_eq!(result.await, Err(Error::Exited));
@@ -650,7 +640,7 @@ mod tests {
 
     fn test_blob_clone_and_concurrent_read<B>(
         runner: impl Runner,
-        context: impl Spawner + Storage<B>,
+        context: impl Spawner + Storage<B> + Metrics,
     ) where
         B: Blob,
     {
@@ -674,9 +664,9 @@ mod tests {
             blob.sync().await.expect("Failed to sync blob");
 
             // Read data from the blob in clone
-            let check1 = context.spawn_ref({
+            let check1 = context.clone().with_suffix("check1").spawn({
                 let blob = blob.clone();
-                async move {
+                move |_| async move {
                     let mut buffer = vec![0u8; data.len()];
                     blob.read_at(&mut buffer, 0)
                         .await
@@ -684,9 +674,9 @@ mod tests {
                     assert_eq!(&buffer, data);
                 }
             });
-            let check2 = context.spawn_ref({
+            let check2 = context.with_suffix("check2").spawn({
                 let blob = blob.clone();
-                async move {
+                move |_| async move {
                     let mut buffer = vec![0u8; data.len()];
                     blob.read_at(&mut buffer, 0)
                         .await
