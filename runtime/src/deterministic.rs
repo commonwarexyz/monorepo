@@ -57,7 +57,7 @@ const EPHEMERAL_PORT_RANGE: Range<u16> = 32768..61000;
 const ROOT_TASK: &str = "root";
 
 /// Prefix for runtime metrics.
-const RUNTIME_METRICS_PREFIX: &str = "runtime_deterministic";
+const METRICS_PREFIX: &str = "runtime";
 
 /// Map of names to blob contents.
 pub type Partition = HashMap<Vec<u8>, Vec<u8>>;
@@ -483,7 +483,7 @@ impl Executor {
 
         // Create a new registry
         let mut registry = Registry::default();
-        let runtime_registry = registry.sub_registry_with_prefix(RUNTIME_METRICS_PREFIX);
+        let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
 
         // Initialize runtime
         let metrics = Arc::new(Metrics::init(runtime_registry));
@@ -761,7 +761,7 @@ impl Context {
 
         // Rebuild metrics
         let mut registry = Registry::default();
-        let runtime_registry = registry.sub_registry_with_prefix(RUNTIME_METRICS_PREFIX);
+        let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
         let metrics = Arc::new(Metrics::init(runtime_registry));
 
         // Copy state

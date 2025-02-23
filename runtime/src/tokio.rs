@@ -53,7 +53,7 @@ use tokio::{
 use tracing::warn;
 
 /// Prefix for runtime metrics.
-const RUNTIME_METRICS_PREFIX: &str = "runtime_tokio";
+const METRICS_PREFIX: &str = "runtime";
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct Work {
@@ -224,7 +224,7 @@ impl Executor {
     pub fn init(cfg: Config) -> (Runner, Context) {
         // Create a new registry
         let mut registry = Registry::default();
-        let runtime_registry = registry.sub_registry_with_prefix(RUNTIME_METRICS_PREFIX);
+        let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
 
         // Initialize runtime
         let metrics = Arc::new(Metrics::init(runtime_registry));
