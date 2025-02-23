@@ -126,7 +126,7 @@ mod tests {
     use bytes::Bytes;
     use commonware_cryptography::{Ed25519, Scheme};
     use commonware_macros::select;
-    use commonware_runtime::{deterministic::Executor, Clock, Runner, Spawner};
+    use commonware_runtime::{deterministic::Executor, Clock, Metrics, Runner, Spawner};
     use futures::{channel::mpsc, SinkExt, StreamExt};
     use rand::Rng;
     use std::{
@@ -139,14 +139,14 @@ mod tests {
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.clone(),
+                runtime.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                 },
             );
 
             // Start network
-            runtime.spawn("network", network.run());
+            network.start();
 
             // Register agents
             let mut agents = BTreeMap::new();
@@ -156,14 +156,16 @@ mod tests {
                 let (sender, mut receiver) = oracle.register(pk.clone(), 0).await.unwrap();
                 agents.insert(pk, sender);
                 let mut agent_sender = seen_sender.clone();
-                runtime.spawn("agent_receiver", async move {
-                    for _ in 0..size {
-                        receiver.recv().await.unwrap();
-                    }
-                    agent_sender.send(i).await.unwrap();
+                runtime
+                    .with_label("agent_receiver")
+                    .spawn(move |_| async move {
+                        for _ in 0..size {
+                            receiver.recv().await.unwrap();
+                        }
+                        agent_sender.send(i).await.unwrap();
 
-                    // Exiting early here tests the case where the recipient end of an agent is dropped
-                });
+                        // Exiting early here tests the case where the recipient end of an agent is dropped
+                    });
             }
 
             // Randomly link agents
@@ -194,9 +196,9 @@ mod tests {
             }
 
             // Send messages
-            runtime.spawn("agent_sender", {
-                let mut runtime = runtime.clone();
-                async move {
+            runtime
+                .with_label("agent_sender")
+                .spawn(|mut runtime| async move {
                     // Sort agents for deterministic output
                     let keys = agents.keys().collect::<Vec<_>>();
 
@@ -217,8 +219,7 @@ mod tests {
                             assert_eq!(sent.len(), keys.len() - 1);
                         }
                     }
-                }
-            });
+                });
 
             // Wait for all recipients
             let mut results = Vec::new();
@@ -254,14 +255,14 @@ mod tests {
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.clone(),
+                runtime.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                 },
             );
 
             // Start network
-            runtime.spawn("network", network.run());
+            network.start();
 
             // Register agents
             let mut agents = HashMap::new();
@@ -294,14 +295,14 @@ mod tests {
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.clone(),
+                runtime.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                 },
             );
 
             // Start network
-            runtime.spawn("network", network.run());
+            network.start();
 
             // Register agents
             let pk = Ed25519::from_seed(0).public_key();
@@ -331,14 +332,14 @@ mod tests {
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.clone(),
+                runtime.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                 },
             );
 
             // Start network
-            runtime.spawn("network", network.run());
+            network.start();
 
             // Register agents
             let pk = Ed25519::from_seed(0).public_key();
@@ -356,14 +357,14 @@ mod tests {
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.clone(),
+                runtime.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                 },
             );
 
             // Start network
-            runtime.spawn("network", network.run());
+            network.start();
 
             // Register agents
             let pk1 = Ed25519::from_seed(0).public_key();
@@ -395,14 +396,14 @@ mod tests {
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.clone(),
+                runtime.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                 },
             );
 
             // Start network
-            runtime.spawn("network", network.run());
+            network.start();
 
             // Register agents
             let pk1 = Ed25519::from_seed(0).public_key();
@@ -450,14 +451,14 @@ mod tests {
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.clone(),
+                runtime.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                 },
             );
 
             // Start network
-            runtime.spawn("network", network.run());
+            network.start();
 
             // Register agents
             let pk1 = Ed25519::from_seed(0).public_key();
@@ -523,14 +524,14 @@ mod tests {
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.clone(),
+                runtime.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                 },
             );
 
             // Start network
-            runtime.spawn("network", network.run());
+            network.start();
 
             // Register agents
             let pk1 = Ed25519::from_seed(0).public_key();
@@ -575,14 +576,14 @@ mod tests {
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.clone(),
+                runtime.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                 },
             );
 
             // Start network
-            runtime.spawn("network", network.run());
+            network.start();
 
             // Define agents
             let pk1 = Ed25519::from_seed(0).public_key();
@@ -644,14 +645,14 @@ mod tests {
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.clone(),
+                runtime.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                 },
             );
 
             // Start network
-            runtime.spawn("network", network.run());
+            network.start();
 
             // Register agents
             let pk1 = Ed25519::from_seed(0).public_key();

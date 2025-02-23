@@ -58,7 +58,8 @@ mod logger;
 use clap::{value_parser, Arg, Command};
 use commonware_cryptography::{Ed25519, Scheme};
 use commonware_p2p::authenticated::{self, Network};
-use commonware_runtime::{tokio::Executor, Runner, Spawner};
+use commonware_runtime::Metrics;
+use commonware_runtime::{tokio::Executor, Runner};
 use governor::Quota;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::num::NonZeroU32;
@@ -160,7 +161,7 @@ fn main() {
     // Start runtime
     executor.start(async move {
         // Initialize network
-        let (mut network, mut oracle) = Network::new(runtime.clone(), p2p_cfg);
+        let (mut network, mut oracle) = Network::new(runtime.with_label("network"), p2p_cfg);
 
         // Provide authorized peers
         //
@@ -179,17 +180,18 @@ fn main() {
         );
 
         // Start network
-        let network_handler = runtime.spawn("network", network.run());
+        let network_handler = network.start();
 
         // Start chat
-        handler::run(
-            runtime.clone(),
+        handler::start(
+            runtime.with_label("handler"),
             signer.public_key().to_string(),
             logs,
             chat_sender,
             chat_receiver,
         )
-        .await;
+        .await
+        .expect("Chat failed");
 
         // Abort network
         network_handler.abort();

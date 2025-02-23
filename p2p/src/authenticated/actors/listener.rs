@@ -2,7 +2,7 @@
 
 use crate::authenticated::actors::{spawner, tracker};
 use commonware_cryptography::Scheme;
-use commonware_runtime::{Clock, Listener, Metrics, Network, Sink, Spawner, Stream};
+use commonware_runtime::{Clock, Handle, Listener, Metrics, Network, Sink, Spawner, Stream};
 use commonware_stream::public_key::{Config as StreamConfig, Connection, IncomingConnection};
 use governor::{
     clock::ReasonablyRealtime,
@@ -19,7 +19,7 @@ use tracing::debug;
 pub struct Config<C: Scheme> {
     pub address: SocketAddr,
     pub stream_cfg: StreamConfig<C>,
-    pub allowed_incoming_connectioned_rate: Quota,
+    pub allowed_incoming_connection_rate: Quota,
 }
 
 pub struct Actor<
@@ -65,7 +65,7 @@ impl<
             address: cfg.address,
             stream_cfg: cfg.stream_cfg,
             rate_limiter: RateLimiter::direct_with_clock(
-                cfg.allowed_incoming_connectioned_rate,
+                cfg.allowed_incoming_connection_rate,
                 &runtime,
             ),
 
@@ -123,7 +123,17 @@ impl<
         supervisor.spawn(peer, stream, reservation).await;
     }
 
-    pub async fn run(
+    pub fn start(
+        self,
+        tracker: tracker::Mailbox<E, C::PublicKey>,
+        supervisor: spawner::Mailbox<E, Si, St, C::PublicKey>,
+    ) -> Handle<()> {
+        self.runtime
+            .clone()
+            .spawn(|_| self.run(tracker, supervisor))
+    }
+
+    async fn run(
         self,
         tracker: tracker::Mailbox<E, C::PublicKey>,
         supervisor: spawner::Mailbox<E, Si, St, C::PublicKey>,
@@ -158,17 +168,14 @@ impl<
             debug!(ip = ?address.ip(), port = ?address.port(), "accepted incoming connection");
 
             // Spawn a new handshaker to upgrade connection
-            self.runtime.spawn(
-                "handshaker",
-                Self::handshake(
-                    self.runtime.clone(),
-                    self.stream_cfg.clone(),
-                    sink,
-                    stream,
-                    tracker.clone(),
-                    supervisor.clone(),
-                ),
-            );
+            self.runtime.with_label("handshaker").spawn({
+                let stream_cfg = self.stream_cfg.clone();
+                let tracker = tracker.clone();
+                let supervisor = supervisor.clone();
+                move |runtime| {
+                    Self::handshake(runtime, stream_cfg, sink, stream, tracker, supervisor)
+                }
+            });
         }
     }
 }

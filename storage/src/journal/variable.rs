@@ -1257,6 +1257,10 @@ mod tests {
     }
 
     impl Metrics for MockStorage {
+        fn with_label(&self, _: &str) -> Self {
+            self.clone()
+        }
+
         fn register<N: Into<String>, H: Into<String>>(&self, _: N, _: H, _: impl Metric) {}
 
         fn encode(&self) -> String {

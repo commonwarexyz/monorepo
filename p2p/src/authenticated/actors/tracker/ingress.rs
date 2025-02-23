@@ -1,13 +1,13 @@
 use crate::authenticated::{actors::peer, wire};
 use commonware_cryptography::Array;
-use commonware_runtime::Spawner;
+use commonware_runtime::{Metrics, Spawner};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
 };
 use std::net::SocketAddr;
 
-pub enum Message<E: Spawner, P: Array> {
+pub enum Message<E: Spawner + Metrics, P: Array> {
     // Used by oracle
     Register {
         index: u64,
@@ -47,11 +47,11 @@ pub enum Message<E: Spawner, P: Array> {
 }
 
 #[derive(Clone)]
-pub struct Mailbox<E: Spawner, P: Array> {
+pub struct Mailbox<E: Spawner + Metrics, P: Array> {
     sender: mpsc::Sender<Message<E, P>>,
 }
 
-impl<E: Spawner, P: Array> Mailbox<E, P> {
+impl<E: Spawner + Metrics, P: Array> Mailbox<E, P> {
     pub(super) fn new(sender: mpsc::Sender<Message<E, P>>) -> Self {
         Self { sender }
     }
@@ -108,11 +108,11 @@ impl<E: Spawner, P: Array> Mailbox<E, P> {
 /// Peers that are not explicitly authorized
 /// will be blocked by commonware-p2p.
 #[derive(Clone)]
-pub struct Oracle<E: Spawner, P: Array> {
+pub struct Oracle<E: Spawner + Metrics, P: Array> {
     sender: mpsc::Sender<Message<E, P>>,
 }
 
-impl<E: Spawner, P: Array> Oracle<E, P> {
+impl<E: Spawner + Metrics, P: Array> Oracle<E, P> {
     pub(super) fn new(sender: mpsc::Sender<Message<E, P>>) -> Self {
         Self { sender }
     }
@@ -133,12 +133,12 @@ impl<E: Spawner, P: Array> Oracle<E, P> {
     }
 }
 
-pub struct Reservation<E: Spawner, P: Array> {
+pub struct Reservation<E: Spawner + Metrics, P: Array> {
     runtime: E,
     closer: Option<(P, Mailbox<E, P>)>,
 }
 
-impl<E: Spawner, P: Array> Reservation<E, P> {
+impl<E: Spawner + Metrics, P: Array> Reservation<E, P> {
     pub fn new(runtime: E, peer: P, mailbox: Mailbox<E, P>) -> Self {
         Self {
             runtime,
@@ -147,11 +147,14 @@ impl<E: Spawner, P: Array> Reservation<E, P> {
     }
 }
 
-impl<E: Spawner, P: Array> Drop for Reservation<E, P> {
+impl<E: Spawner + Metrics, P: Array> Drop for Reservation<E, P> {
     fn drop(&mut self) {
         let (peer, mut mailbox) = self.closer.take().unwrap();
-        self.runtime.spawn("reservation", async move {
-            mailbox.release(peer).await;
-        });
+        self.runtime
+            .clone()
+            .with_label("reservation")
+            .spawn(move |_| async move {
+                mailbox.release(peer).await;
+            });
     }
 }

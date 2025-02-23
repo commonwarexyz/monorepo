@@ -6,7 +6,7 @@ pub use super::{
 use crate::authenticated::{ip, metrics, wire};
 use bitvec::prelude::*;
 use commonware_cryptography::{Array, Scheme};
-use commonware_runtime::{Clock, Metrics, Spawner};
+use commonware_runtime::{Clock, Handle, Metrics, Spawner};
 use commonware_utils::{union, SystemTimeExt};
 use futures::{channel::mpsc, StreamExt};
 use governor::{
@@ -552,7 +552,11 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
         ))
     }
 
-    pub async fn run(mut self) {
+    pub fn start(self) -> Handle<()> {
+        self.runtime.clone().spawn(|_| self.run())
+    }
+
+    async fn run(mut self) {
         while let Some(msg) = self.receiver.next().await {
             match msg {
                 Message::Construct {
@@ -674,12 +678,10 @@ mod tests {
         let (executor, runtime, _) = Executor::default();
         let cfg = test_config(Ed25519::from_seed(0), Vec::new());
         executor.start(async move {
-            let (actor, mut mailbox, mut oracle) = Actor::new(runtime.clone(), cfg);
-
             // Run actor in background
-            runtime.spawn("actor", async move {
-                actor.run().await;
-            });
+            let actor_runtime = runtime.with_label("actor");
+            let (actor, mut mailbox, mut oracle) = Actor::new(actor_runtime.clone(), cfg);
+            actor_runtime.spawn(|_| actor.run());
 
             // Create peer
             let peer = Ed25519::from_seed(1).public_key();
@@ -720,13 +722,11 @@ mod tests {
         let peer0 = Ed25519::from_seed(0);
         let cfg = test_config(peer0.clone(), Vec::new());
         executor.start(async move {
-            let (actor, mut mailbox, mut oracle) = Actor::new(runtime.clone(), cfg);
-            let ip_namespace = actor.ip_namespace.clone();
-
             // Run actor in background
-            runtime.spawn("actor", async move {
-                actor.run().await;
-            });
+            let actor_runtime = runtime.with_label("actor");
+            let (actor, mut mailbox, mut oracle) = Actor::new(actor_runtime.clone(), cfg);
+            let ip_namespace = actor.ip_namespace.clone();
+            actor_runtime.spawn(|_| actor.run());
 
             // Create peers
             let mut peer1_signer = Ed25519::from_seed(1);

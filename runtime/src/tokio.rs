@@ -47,7 +47,6 @@ use tokio::{
     net::{tcp::OwnedReadHalf, tcp::OwnedWriteHalf, TcpListener, TcpStream},
     runtime::{Builder, Runtime},
     sync::Mutex as AsyncMutex,
-    task_local,
     time::timeout,
 };
 use tracing::warn;
@@ -247,7 +246,10 @@ impl Executor {
             Runner {
                 executor: executor.clone(),
             },
-            Context { executor },
+            Context {
+                label: String::new(),
+                executor,
+            },
         )
     }
 
@@ -279,24 +281,20 @@ impl crate::Runner for Runner {
 /// runtime.
 #[derive(Clone)]
 pub struct Context {
+    label: String,
     executor: Arc<Executor>,
 }
 
-task_local! {
-    static PREFIX: String;
-}
-
 impl crate::Spawner for Context {
-    fn spawn<F, T>(&self, label: &str, f: F) -> Handle<T>
+    fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
     where
-        F: Future<Output = T> + Send + 'static,
+        F: FnOnce(Self) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        let label = PREFIX
-            .try_with(|prefix| format!("{}_{}", prefix, label))
-            .unwrap_or_else(|_| label.to_string());
-        let f = PREFIX.scope(label.clone(), f);
-        let work = Work { label };
+        let work = Work {
+            label: self.label.clone(),
+        };
         self.executor
             .metrics
             .tasks_spawned
@@ -308,8 +306,11 @@ impl crate::Spawner for Context {
             .tasks_running
             .get_or_create(&work)
             .clone();
-        let (f, handle) = Handle::init(f, gauge, self.executor.cfg.catch_panics);
-        self.executor.runtime.spawn(f);
+        let catch_panics = self.executor.cfg.catch_panics;
+        let executor = self.executor.clone();
+        let future = f(self);
+        let (f, handle) = Handle::init(future, gauge, catch_panics);
+        executor.runtime.spawn(f);
         handle
     }
 
@@ -724,11 +725,31 @@ impl Drop for Blob {
 }
 
 impl crate::Metrics for Context {
+    fn with_label(&self, label: &str) -> Self {
+        let label = {
+            let prefix = self.label.clone();
+            if prefix.is_empty() {
+                label.to_string()
+            } else {
+                format!("{}_{}", prefix, label)
+            }
+        };
+        Self {
+            label,
+            executor: self.executor.clone(),
+        }
+    }
+
     fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
         let name = name.into();
-        let prefixed_name = PREFIX
-            .try_with(|prefix| format!("{}_{}", prefix, name))
-            .unwrap_or(name);
+        let prefixed_name = {
+            let prefix = &self.label;
+            if prefix.is_empty() {
+                name
+            } else {
+                format!("{}_{}", *prefix, name)
+            }
+        };
         self.executor
             .registry
             .lock()

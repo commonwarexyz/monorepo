@@ -7,7 +7,7 @@ use crate::authenticated::{
     metrics,
 };
 use commonware_cryptography::Array;
-use commonware_runtime::{Clock, Metrics, Sink, Spawner, Stream};
+use commonware_runtime::{Clock, Handle, Metrics, Sink, Spawner, Stream};
 use futures::{channel::mpsc, StreamExt};
 use governor::{clock::ReasonablyRealtime, Quota};
 use prometheus_client::metrics::{counter::Counter, family::Family};
@@ -75,7 +75,11 @@ impl<
         )
     }
 
-    pub async fn run(mut self, tracker: tracker::Mailbox<E, P>, router: router::Mailbox<P>) {
+    pub fn start(self, tracker: tracker::Mailbox<E, P>, router: router::Mailbox<P>) -> Handle<()> {
+        self.runtime.clone().spawn(|_| self.run(tracker, router))
+    }
+
+    async fn run(mut self, tracker: tracker::Mailbox<E, P>, router: router::Mailbox<P>) {
         while let Some(msg) = self.receiver.next().await {
             match msg {
                 Message::Spawn {
@@ -91,9 +95,10 @@ impl<
                     let mut router = router.clone();
 
                     // Spawn peer
-                    self.runtime.spawn("peer", {
-                        let runtime = self.runtime.clone();
-                        async move {
+                    self.runtime
+                        .clone()
+                        .with_label("peer")
+                        .spawn(move |runtime| async move {
                             // Create peer
                             info!(?peer, "peer started");
                             let (actor, messenger) = peer::Actor::new(
@@ -119,8 +124,7 @@ impl<
                             // Let the router know the peer has exited
                             info!(error = ?e, ?peer, "peer shutdown");
                             router.release(peer).await;
-                        }
-                    });
+                        });
                 }
             }
         }

@@ -11,7 +11,7 @@ use commonware_cryptography::{
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::Clock;
+use commonware_runtime::{Clock, Spawner};
 use commonware_utils::quorum;
 use futures::{channel::mpsc, SinkExt};
 use prost::Message;
@@ -21,7 +21,7 @@ use tracing::{debug, info, warn};
 
 /// A DKG/Resharing contributor that can be configured to behave honestly
 /// or deviate as a rogue, lazy, or forger.
-pub struct Contributor<E: Clock + Rng, C: Scheme> {
+pub struct Contributor<E: Clock + Rng + Spawner, C: Scheme> {
     runtime: E,
     crypto: C,
     dkg_phase_timeout: Duration,
@@ -37,7 +37,7 @@ pub struct Contributor<E: Clock + Rng, C: Scheme> {
     signatures: mpsc::Sender<(u64, Output)>,
 }
 
-impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
+impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         runtime: E,
@@ -503,7 +503,15 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
         }
     }
 
-    pub async fn run(
+    pub fn start(
+        self,
+        sender: impl Sender<PublicKey = C::PublicKey>,
+        receiver: impl Receiver<PublicKey = C::PublicKey>,
+    ) {
+        self.runtime.clone().spawn(|_| self.run(sender, receiver));
+    }
+
+    async fn run(
         mut self,
         mut sender: impl Sender<PublicKey = C::PublicKey>,
         mut receiver: impl Receiver<PublicKey = C::PublicKey>,

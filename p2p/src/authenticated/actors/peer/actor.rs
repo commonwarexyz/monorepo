@@ -4,7 +4,7 @@ use crate::authenticated::{
 };
 use commonware_cryptography::Array;
 use commonware_macros::select;
-use commonware_runtime::{Clock, Handle, Sink, Spawner, Stream};
+use commonware_runtime::{Clock, Handle, Metrics, Sink, Spawner, Stream};
 use commonware_stream::{
     public_key::{Connection, Sender},
     Receiver as _, Sender as _,
@@ -17,7 +17,7 @@ use rand::{CryptoRng, Rng};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tracing::debug;
 
-pub struct Actor<E: Spawner + Clock + ReasonablyRealtime, P: Array> {
+pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, P: Array> {
     runtime: E,
 
     gossip_bit_vec_frequency: Duration,
@@ -37,7 +37,7 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime, P: Array> {
     _reservation: tracker::Reservation<E, P>,
 }
 
-impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng, P: Array> Actor<E, P> {
+impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, P: Array> Actor<E, P> {
     pub fn new(runtime: E, cfg: Config, reservation: tracker::Reservation<E, P>) -> (Self, Relay) {
         let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
@@ -112,13 +112,12 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng, P: Array> Actor<
 
         // Send/Receive messages from the peer
         let (mut conn_sender, mut conn_receiver) = connection.split();
-        let mut send_handler: Handle<Result<(), Error>> = self.runtime.spawn("sender", {
-            let runtime = self.runtime.clone();
+        let mut send_handler: Handle<Result<(), Error>> = self.runtime.with_label("sender").spawn( {
             let peer = peer.clone();
             let mut tracker = tracker.clone();
             let mailbox = self.mailbox.clone();
             let rate_limits = rate_limits.clone();
-            async move {
+            move |runtime| async move {
                 let mut deadline = runtime.current() + self.gossip_bit_vec_frequency;
                 loop {
                     select! {
@@ -160,9 +159,10 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng, P: Array> Actor<
                 }
             }
         });
-        let mut receive_handler: Handle<Result<(), Error>> = self.runtime.spawn("receiver", {
-            let runtime = self.runtime.clone();
-            async move {
+        let mut receive_handler: Handle<Result<(), Error>> = self
+            .runtime
+            .with_label("receiver")
+            .spawn(move |runtime| async move {
                 let bit_vec_rate_limiter =
                     RateLimiter::direct_with_clock(self.allowed_bit_vec_rate, &runtime);
                 let peers_rate_limiter =
@@ -265,8 +265,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng, P: Array> Actor<
                         }
                     }
                 }
-            }
-        });
+            });
 
         // Wait for one of the handlers to finish
         //

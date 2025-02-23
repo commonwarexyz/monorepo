@@ -5,7 +5,7 @@ use crate::authenticated::{
     metrics,
 };
 use commonware_cryptography::Scheme;
-use commonware_runtime::{Clock, Listener, Metrics, Network, Sink, Spawner, Stream};
+use commonware_runtime::{Clock, Handle, Listener, Metrics, Network, Sink, Spawner, Stream};
 use commonware_stream::public_key::{Config as StreamConfig, Connection};
 use governor::{
     clock::Clock as GClock,
@@ -90,11 +90,10 @@ impl<
                 .inc();
 
             // Spawn dialer to connect to peer
-            self.runtime.spawn("dialer", {
-                let runtime = self.runtime.clone();
+            self.runtime.with_label("dialer").spawn({
                 let config = self.stream_cfg.clone();
                 let mut supervisor = supervisor.clone();
-                async move {
+                move |runtime| async move {
                     // Attempt to dial peer
                     let (sink, stream) = match runtime.dial(address).await {
                         Ok(stream) => stream,
@@ -130,7 +129,17 @@ impl<
         }
     }
 
-    pub async fn run(
+    pub fn start(
+        self,
+        tracker: tracker::Mailbox<E, C::PublicKey>,
+        supervisor: spawner::Mailbox<E, Si, St, C::PublicKey>,
+    ) -> Handle<()> {
+        self.runtime
+            .clone()
+            .spawn(|_| self.run(tracker, supervisor))
+    }
+
+    async fn run(
         mut self,
         mut tracker: tracker::Mailbox<E, C::PublicKey>,
         mut supervisor: spawner::Mailbox<E, Si, St, C::PublicKey>,

@@ -172,7 +172,7 @@ mod tests {
     use super::*;
     use crate::utils::codec::send_frame;
     use commonware_cryptography::{Ed25519, Scheme};
-    use commonware_runtime::{deterministic::Executor, mocks, Runner};
+    use commonware_runtime::{deterministic::Executor, mocks, Metrics, Runner};
     use x25519_dalek::PublicKey;
 
     const TEST_NAMESPACE: &[u8] = b"test_namespace";
@@ -275,11 +275,14 @@ mod tests {
             let (mut stream_sender, stream) = mocks::Channel::init();
 
             // Send message over stream
-            runtime.spawn("stream_sender", async move {
-                send_frame(&mut stream_sender, &handshake_bytes, ONE_MEGABYTE)
-                    .await
-                    .unwrap();
-            });
+            runtime
+                .clone()
+                .with_label("stream_sender")
+                .spawn(|_| async move {
+                    send_frame(&mut stream_sender, &handshake_bytes, ONE_MEGABYTE)
+                        .await
+                        .unwrap();
+                });
 
             // Call the verify function
             let result = IncomingHandshake::verify(
@@ -326,11 +329,14 @@ mod tests {
             let (mut stream_sender, stream) = mocks::Channel::init();
 
             // Send message over stream
-            runtime.spawn("stream_sender", async move {
-                send_frame(&mut stream_sender, &handshake_bytes, ONE_MEGABYTE)
-                    .await
-                    .unwrap();
-            });
+            runtime
+                .clone()
+                .with_label("stream_sender")
+                .spawn(|_| async move {
+                    send_frame(&mut stream_sender, &handshake_bytes, ONE_MEGABYTE)
+                        .await
+                        .unwrap();
+                });
 
             // Call the verify function
             let result = IncomingHandshake::verify(
@@ -361,11 +367,14 @@ mod tests {
             let (mut stream_sender, stream) = mocks::Channel::init();
 
             // Send invalid data over stream
-            runtime.spawn("stream_sender", async move {
-                send_frame(&mut stream_sender, b"mock data", ONE_MEGABYTE)
-                    .await
-                    .unwrap();
-            });
+            runtime
+                .clone()
+                .with_label("stream_sender")
+                .spawn(|_| async move {
+                    send_frame(&mut stream_sender, b"mock data", ONE_MEGABYTE)
+                        .await
+                        .unwrap();
+                });
 
             // Call the verify function
             let result = IncomingHandshake::verify(
@@ -401,10 +410,9 @@ mod tests {
             let (mut stream_sender, stream) = mocks::Channel::init();
 
             // Accept connections but do nothing
-            runtime.spawn("stream_sender", {
-                let runtime = runtime.clone();
+            runtime.with_label("stream_sender").spawn({
                 let recipient = recipient.clone();
-                async move {
+                move |runtime| async move {
                     runtime.sleep(Duration::from_secs(10)).await;
                     let timestamp = runtime.current().epoch_millis();
                     let handshake_bytes = create_handshake(

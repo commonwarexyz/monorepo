@@ -14,7 +14,7 @@ use commonware_cryptography::{
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::Clock;
+use commonware_runtime::{Clock, Handle, Spawner};
 use commonware_utils::hex;
 use prost::Message;
 use std::{
@@ -23,7 +23,7 @@ use std::{
 };
 use tracing::{debug, info, warn};
 
-pub struct Arbiter<E: Clock, C: Scheme> {
+pub struct Arbiter<E: Clock + Spawner, C: Scheme> {
     runtime: E,
 
     dkg_frequency: Duration,
@@ -35,7 +35,7 @@ pub struct Arbiter<E: Clock, C: Scheme> {
 
 /// Implementation of a "trusted arbiter" that tracks commitments,
 /// acknowledgements, and complaints during a DKG round.
-impl<E: Clock, C: Scheme> Arbiter<E, C> {
+impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
     pub fn new(
         runtime: E,
         dkg_frequency: Duration,
@@ -267,7 +267,15 @@ impl<E: Clock, C: Scheme> Arbiter<E, C> {
         (Some(output.public), disqualified)
     }
 
-    pub async fn run(
+    pub fn start(
+        self,
+        sender: impl Sender<PublicKey = C::PublicKey>,
+        receiver: impl Receiver<PublicKey = C::PublicKey>,
+    ) -> Handle<()> {
+        self.runtime.clone().spawn(|_| self.run(sender, receiver))
+    }
+
+    async fn run(
         self,
         mut sender: impl Sender<PublicKey = C::PublicKey>,
         mut receiver: impl Receiver<PublicKey = C::PublicKey>,

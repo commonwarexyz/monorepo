@@ -13,7 +13,7 @@ use commonware_cryptography::{
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Blob, Clock, Metrics, Spawner, Storage};
+use commonware_runtime::{Blob, Clock, Handle, Metrics, Spawner, Storage};
 use commonware_storage::journal::{self, variable::Journal};
 use futures::{
     channel::{mpsc, oneshot},
@@ -234,7 +234,13 @@ impl<
     /// - Messages from the network:
     ///   - Nodes
     ///   - Acks
-    pub async fn run(mut self, chunk_network: (NetS, NetR), ack_network: (NetS, NetR)) {
+    pub fn start(self, chunk_network: (NetS, NetR), ack_network: (NetS, NetR)) -> Handle<()> {
+        self.runtime
+            .clone()
+            .spawn(|_| self.run(chunk_network, ack_network))
+    }
+
+    async fn run(mut self, chunk_network: (NetS, NetR), ack_network: (NetS, NetR)) {
         let (mut node_sender, mut node_receiver) = chunk_network;
         let (mut ack_sender, mut ack_receiver) = ack_network;
         let mut shutdown = self.runtime.stopped();

@@ -8,21 +8,23 @@ use crate::{
 };
 use bytes::Bytes;
 use commonware_cryptography::Array;
-use commonware_runtime::Metrics;
+use commonware_runtime::{Handle, Metrics, Spawner};
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::collections::BTreeMap;
 use tracing::debug;
 
-pub struct Actor<P: Array> {
+pub struct Actor<E: Spawner + Metrics, P: Array> {
+    runtime: E,
+
     control: mpsc::Receiver<Message<P>>,
     connections: BTreeMap<P, peer::Relay>,
 
     messages_dropped: Family<metrics::Message, Counter>,
 }
 
-impl<P: Array> Actor<P> {
-    pub fn new(runtime: &impl Metrics, cfg: Config) -> (Self, Mailbox<P>, Messenger<P>) {
+impl<E: Spawner + Metrics, P: Array> Actor<E, P> {
+    pub fn new(runtime: E, cfg: Config) -> (Self, Mailbox<P>, Messenger<P>) {
         // Create mailbox
         let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
 
@@ -37,6 +39,7 @@ impl<P: Array> Actor<P> {
         // Create actor
         (
             Self {
+                runtime,
                 control: control_receiver,
                 connections: BTreeMap::new(),
                 messages_dropped,
@@ -73,7 +76,11 @@ impl<P: Array> Actor<P> {
         }
     }
 
-    pub async fn run(mut self, routing: Channels<P>) {
+    pub fn start(self, routing: Channels<P>) -> Handle<()> {
+        self.runtime.clone().spawn(|_| self.run(routing))
+    }
+
+    async fn run(mut self, routing: Channels<P>) {
         while let Some(msg) = self.control.next().await {
             match msg {
                 Message::Ready {
