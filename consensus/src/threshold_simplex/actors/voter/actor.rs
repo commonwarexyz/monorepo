@@ -26,7 +26,7 @@ use commonware_cryptography::{
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Blob, Clock, Metrics, Spawner, Storage};
+use commonware_runtime::{Blob, Clock, Handle, Metrics, Spawner, Storage};
 use commonware_storage::journal::variable::Journal;
 use commonware_utils::quorum;
 use futures::{
@@ -2140,7 +2140,18 @@ impl<
         };
     }
 
-    pub async fn run(
+    pub fn start(
+        self,
+        backfiller: resolver::Mailbox,
+        sender: impl Sender<PublicKey = C::PublicKey>,
+        receiver: impl Receiver<PublicKey = C::PublicKey>,
+    ) -> Handle<()> {
+        self.runtime
+            .clone()
+            .spawn(|_| self.run(backfiller, sender, receiver))
+    }
+
+    async fn run(
         mut self,
         mut backfiller: resolver::Mailbox,
         mut sender: impl Sender<PublicKey = C::PublicKey>,

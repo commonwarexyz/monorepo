@@ -14,7 +14,7 @@ use crate::{
 use commonware_cryptography::{bls12381::primitives::poly, Array, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{utils::requester, Receiver, Recipients, Sender};
-use commonware_runtime::{Clock, Metrics};
+use commonware_runtime::{Clock, Handle, Metrics, Spawner};
 use futures::{channel::mpsc, future::Either, StreamExt};
 use governor::clock::Clock as GClock;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
@@ -96,7 +96,7 @@ impl Inflight {
 
 /// Requests are made concurrently to multiple peers.
 pub struct Actor<
-    E: Clock + GClock + Rng + Metrics,
+    E: Clock + GClock + Rng + Metrics + Spawner,
     C: Scheme,
     D: Array,
     S: ThresholdSupervisor<Index = View, Identity = poly::Public, PublicKey = C::PublicKey>,
@@ -131,7 +131,7 @@ pub struct Actor<
 }
 
 impl<
-        E: Clock + GClock + Rng + Metrics,
+        E: Clock + GClock + Rng + Metrics + Spawner,
         C: Scheme,
         D: Array,
         S: ThresholdSupervisor<Index = View, Identity = poly::Public, PublicKey = C::PublicKey>,
@@ -299,7 +299,18 @@ impl<
         }
     }
 
-    pub async fn run(
+    pub fn start(
+        self,
+        voter: voter::Mailbox<D>,
+        sender: impl Sender<PublicKey = C::PublicKey>,
+        receiver: impl Receiver<PublicKey = C::PublicKey>,
+    ) -> Handle<()> {
+        self.runtime
+            .clone()
+            .spawn(|_| self.run(voter, sender, receiver))
+    }
+
+    async fn run(
         mut self,
         mut voter: voter::Mailbox<D>,
         mut sender: impl Sender<PublicKey = C::PublicKey>,

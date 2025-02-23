@@ -3,7 +3,7 @@ use crate::{threshold_simplex::Context, Automaton as Au, Committer as Co, Proof,
 use bytes::{Buf, BufMut, Bytes};
 use commonware_cryptography::{Array, Hasher};
 use commonware_macros::select;
-use commonware_runtime::Clock;
+use commonware_runtime::{Clock, Handle, Spawner};
 use commonware_utils::SizedSerialize;
 use futures::{
     channel::{mpsc, oneshot},
@@ -149,7 +149,7 @@ pub struct Config<H: Hasher, P: Array> {
     pub tracker: mpsc::UnboundedSender<(P, Progress<H::Digest>)>,
 }
 
-pub struct Application<E: Clock + RngCore, H: Hasher, P: Array> {
+pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: Array> {
     runtime: E,
     hasher: H,
     participant: P,
@@ -170,7 +170,7 @@ pub struct Application<E: Clock + RngCore, H: Hasher, P: Array> {
     finalized_views: HashSet<H::Digest>,
 }
 
-impl<E: Clock + RngCore, H: Hasher, P: Array> Application<E, H, P> {
+impl<E: Clock + RngCore + Spawner, H: Hasher, P: Array> Application<E, H, P> {
     pub fn new(runtime: E, cfg: Config<H, P>) -> (Self, Mailbox<H::Digest>) {
         // Register self on relay
         let broadcast = cfg.relay.register(cfg.participant.clone());
@@ -315,7 +315,11 @@ impl<E: Clock + RngCore, H: Hasher, P: Array> Application<E, H, P> {
             .await;
     }
 
-    pub async fn run(mut self) {
+    pub fn start(self) -> Handle<()> {
+        self.runtime.clone().spawn(|_| self.run())
+    }
+
+    async fn run(mut self) {
         // Setup digest tracking
         #[allow(clippy::type_complexity)]
         let mut waiters: HashMap<

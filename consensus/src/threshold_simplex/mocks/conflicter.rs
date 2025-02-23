@@ -15,7 +15,7 @@ use commonware_cryptography::{
     Hasher,
 };
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Clock, Spawner};
+use commonware_runtime::{Clock, Handle, Spawner};
 use prost::Message;
 use rand::{CryptoRng, Rng};
 use std::marker::PhantomData;
@@ -60,11 +60,11 @@ impl<
         }
     }
 
-    pub async fn run(
-        mut self,
-        voter_network: (impl Sender, impl Receiver),
-        _backfiller_network: (impl Sender, impl Receiver),
-    ) {
+    pub fn start(self, voter_network: (impl Sender, impl Receiver)) -> Handle<()> {
+        self.runtime.clone().spawn(|_| self.run(voter_network))
+    }
+
+    async fn run(mut self, voter_network: (impl Sender, impl Receiver)) {
         let (mut sender, mut receiver) = voter_network;
         while let Ok((s, msg)) = receiver.recv().await {
             // Parse message
