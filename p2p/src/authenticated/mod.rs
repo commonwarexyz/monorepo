@@ -246,6 +246,9 @@ mod tests {
         // Create networks
         let mut waiters = Vec::new();
         for (i, peer) in peers.iter().enumerate() {
+            // Create peer runtime
+            let runtime = runtime.clone().with_label(&format!("peer-{}", i));
+
             // Derive port
             let port = base_port + i as u16;
 
@@ -266,7 +269,8 @@ mod tests {
                 bootstrappers,
                 max_message_size,
             );
-            let (mut network, mut oracle) = Network::new(runtime.clone(), config);
+            let network_runtime = runtime.clone().with_label("network");
+            let (mut network, mut oracle) = Network::new(network_runtime.clone(), config);
 
             // Register peers
             oracle.register(0, addresses.clone()).await;
@@ -280,25 +284,27 @@ mod tests {
             );
 
             // Wait to connect to all peers, and then send messages to everyone
-            runtime.spawn("network", network.run());
+            network_runtime.spawn(|_| network.run());
 
             // Send/Receive messages
-            let handler = runtime.spawn("agent", {
+            let handler = runtime.with_label("agent").spawn({
                 let addresses = addresses.clone();
-                let runtime = runtime.clone();
-                async move {
+                move |runtime| async move {
                     // Wait for all peers to send their identity
-                    let acker = runtime.spawn("receiver", async move {
-                        let mut received = HashSet::new();
-                        while received.len() < n - 1 {
-                            // Ensure message equals sender identity
-                            let (sender, message) = receiver.recv().await.unwrap();
-                            assert_eq!(sender.as_ref(), message.as_ref());
+                    let acker = runtime
+                        .clone()
+                        .with_label("receiver")
+                        .spawn(move |_| async move {
+                            let mut received = HashSet::new();
+                            while received.len() < n - 1 {
+                                // Ensure message equals sender identity
+                                let (sender, message) = receiver.recv().await.unwrap();
+                                assert_eq!(sender.as_ref(), message.as_ref());
 
-                            // Add to received set
-                            received.insert(sender);
-                        }
-                    });
+                                // Add to received set
+                                received.insert(sender);
+                            }
+                        });
 
                     // Send identity to all peers
                     let msg = signer.public_key();
@@ -469,6 +475,9 @@ mod tests {
             // Create networks
             let mut waiters = Vec::new();
             for (i, peer) in peers.iter().enumerate() {
+                // Create peer runtime
+                let runtime = runtime.clone().with_label(&format!("peer-{}", i));
+
                 // Derive port
                 let port = base_port + i as u16;
 
@@ -489,7 +498,8 @@ mod tests {
                     bootstrappers,
                     1_024 * 1_024, // 1MB
                 );
-                let (mut network, mut oracle) = Network::new(runtime.clone(), config);
+                let network_runtime = runtime.clone().with_label("network");
+                let (mut network, mut oracle) = Network::new(network_runtime.clone(), config);
 
                 // Register peers at separate indices
                 oracle.register(0, vec![addresses[0].clone()]).await;
@@ -509,12 +519,12 @@ mod tests {
                 );
 
                 // Wait to connect to all peers, and then send messages to everyone
-                runtime.spawn("network", network.run());
+                network_runtime.spawn(|_| network.run());
 
                 // Send/Receive messages
-                let handler = runtime.spawn("agent", {
-                    let runtime = runtime.clone();
-                    async move {
+                let handler = runtime
+                    .with_label("agent")
+                    .spawn(move |runtime| async move {
                         if i == 0 {
                             // Loop until success
                             let msg = signer.public_key();
@@ -537,8 +547,7 @@ mod tests {
                             let (sender, message) = receiver.recv().await.unwrap();
                             assert_eq!(sender.as_ref(), message.as_ref());
                         }
-                    }
-                });
+                    });
 
                 // Add to waiters
                 waiters.push(handler);
@@ -574,7 +583,8 @@ mod tests {
                 Vec::new(),
                 1_024 * 1_024, // 1MB
             );
-            let (mut network, mut oracle) = Network::new(runtime.clone(), config);
+            let network_runtime = runtime.clone().with_label("network");
+            let (mut network, mut oracle) = Network::new(network_runtime.clone(), config);
 
             // Register peers
             oracle.register(0, addresses.clone()).await;
@@ -588,7 +598,7 @@ mod tests {
             );
 
             // Wait to connect to all peers, and then send messages to everyone
-            runtime.spawn("network", network.run());
+            network_runtime.spawn(|_| network.run());
 
             // Crate random message
             let mut msg = vec![0u8; 10 * 1024 * 1024]; // 10MB (greater than frame capacity)

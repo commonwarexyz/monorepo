@@ -674,12 +674,10 @@ mod tests {
         let (executor, runtime, _) = Executor::default();
         let cfg = test_config(Ed25519::from_seed(0), Vec::new());
         executor.start(async move {
-            let (actor, mut mailbox, mut oracle) = Actor::new(runtime.clone(), cfg);
-
             // Run actor in background
-            runtime.spawn("actor", async move {
-                actor.run().await;
-            });
+            let actor_runtime = runtime.clone().with_label("actor");
+            let (actor, mut mailbox, mut oracle) = Actor::new(actor_runtime.clone(), cfg);
+            actor_runtime.spawn(|_| actor.run());
 
             // Create peer
             let peer = Ed25519::from_seed(1).public_key();
@@ -720,13 +718,11 @@ mod tests {
         let peer0 = Ed25519::from_seed(0);
         let cfg = test_config(peer0.clone(), Vec::new());
         executor.start(async move {
-            let (actor, mut mailbox, mut oracle) = Actor::new(runtime.clone(), cfg);
-            let ip_namespace = actor.ip_namespace.clone();
-
             // Run actor in background
-            runtime.spawn("actor", async move {
-                actor.run().await;
-            });
+            let actor_runtime = runtime.with_label("actor");
+            let (actor, mut mailbox, mut oracle) = Actor::new(actor_runtime.clone(), cfg);
+            let ip_namespace = actor.ip_namespace.clone();
+            actor_runtime.spawn(|_| actor.run());
 
             // Create peers
             let mut peer1_signer = Ed25519::from_seed(1);

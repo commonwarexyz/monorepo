@@ -91,9 +91,10 @@ impl<
                     let mut router = router.clone();
 
                     // Spawn peer
-                    self.runtime.spawn("peer", {
-                        let runtime = self.runtime.clone();
-                        async move {
+                    self.runtime
+                        .clone()
+                        .with_label("peer")
+                        .spawn(move |runtime| async move {
                             // Create peer
                             info!(?peer, "peer started");
                             let (actor, messenger) = peer::Actor::new(
@@ -119,8 +120,7 @@ impl<
                             // Let the router know the peer has exited
                             info!(error = ?e, ?peer, "peer shutdown");
                             router.release(peer).await;
-                        }
-                    });
+                        });
                 }
             }
         }
