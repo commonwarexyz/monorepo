@@ -34,6 +34,7 @@
 //! proof-of-availability could be produced by linking sequencer broadcasts.
 
 use commonware_utils::Array;
+
 mod namespace;
 mod parsed;
 mod serializer;
