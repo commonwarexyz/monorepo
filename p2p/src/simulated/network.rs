@@ -10,7 +10,7 @@ use commonware_cryptography::Array;
 use commonware_macros::select;
 use commonware_runtime::{
     deterministic::{Listener, Sink, Stream},
-    Clock, Listener as _, Metrics, Network as RNetwork, Spawner,
+    Clock, Handle, Listener as _, Metrics, Network as RNetwork, Spawner,
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_utils::SizedSerialize;
@@ -342,11 +342,15 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock + Metrics, P: A
             });
     }
 
+    pub fn start(self) -> Handle<()> {
+        self.runtime.clone().spawn(|_| self.run())
+    }
+
     /// Run the simulated network.
     ///
     /// It is not necessary to invoke this method before modifying the network topology, however,
     /// no messages will be sent until this method is called.
-    pub async fn run(mut self) {
+    async fn run(mut self) {
         loop {
             select! {
                 message = self.ingress.next() => {
