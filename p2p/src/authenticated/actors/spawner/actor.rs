@@ -75,11 +75,7 @@ impl<
         )
     }
 
-    pub async fn start(
-        self,
-        tracker: tracker::Mailbox<E, P>,
-        router: router::Mailbox<P>,
-    ) -> Handle<()> {
+    pub fn start(self, tracker: tracker::Mailbox<E, P>, router: router::Mailbox<P>) -> Handle<()> {
         self.runtime.clone().spawn(|_| self.run(tracker, router))
     }
 

@@ -19,7 +19,7 @@ use tracing::debug;
 pub struct Config<C: Scheme> {
     pub address: SocketAddr,
     pub stream_cfg: StreamConfig<C>,
-    pub allowed_incoming_connectioned_rate: Quota,
+    pub allowed_incoming_connection_rate: Quota,
 }
 
 pub struct Actor<
@@ -65,7 +65,7 @@ impl<
             address: cfg.address,
             stream_cfg: cfg.stream_cfg,
             rate_limiter: RateLimiter::direct_with_clock(
-                cfg.allowed_incoming_connectioned_rate,
+                cfg.allowed_incoming_connection_rate,
                 &runtime,
             ),
 
@@ -123,7 +123,7 @@ impl<
         supervisor.spawn(peer, stream, reservation).await;
     }
 
-    pub async fn start(
+    pub fn start(
         self,
         tracker: tracker::Mailbox<E, C::PublicKey>,
         supervisor: spawner::Mailbox<E, Si, St, C::PublicKey>,

@@ -129,7 +129,7 @@ impl<
         }
     }
 
-    pub async fn start(
+    pub fn start(
         self,
         tracker: tracker::Mailbox<E, C::PublicKey>,
         supervisor: spawner::Mailbox<E, Si, St, C::PublicKey>,

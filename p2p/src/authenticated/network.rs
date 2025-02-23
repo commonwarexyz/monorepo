@@ -148,7 +148,7 @@ impl<
         self.channels.register(channel, rate, backlog, compression)
     }
 
-    pub async fn start(self) -> Handle<()> {
+    pub fn start(self) -> Handle<()> {
         self.runtime.clone().spawn(|_| self.run())
     }
 
@@ -189,7 +189,7 @@ impl<
             listener::Config {
                 address: self.cfg.listen,
                 stream_cfg: stream_cfg.clone(),
-                allowed_incoming_connectioned_rate: self.cfg.allowed_incoming_connection_rate,
+                allowed_incoming_connection_rate: self.cfg.allowed_incoming_connection_rate,
             },
         );
         let mut listener_task =

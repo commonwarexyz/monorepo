@@ -552,7 +552,7 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
         ))
     }
 
-    pub async fn start(self) -> Handle<()> {
+    pub fn start(self) -> Handle<()> {
         self.runtime.clone().spawn(|_| self.run())
     }
 

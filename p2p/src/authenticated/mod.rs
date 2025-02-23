@@ -269,8 +269,8 @@ mod tests {
                 bootstrappers,
                 max_message_size,
             );
-            let network_runtime = runtime.clone().with_label("network");
-            let (mut network, mut oracle) = Network::new(network_runtime.clone(), config);
+            let (mut network, mut oracle) =
+                Network::new(runtime.clone().with_label("network"), config);
 
             // Register peers
             oracle.register(0, addresses.clone()).await;
