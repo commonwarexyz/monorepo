@@ -157,7 +157,6 @@ mod tests {
                 agents.insert(pk, sender);
                 let mut agent_sender = seen_sender.clone();
                 runtime
-                    .clone()
                     .with_label("agent_receiver")
                     .spawn(move |_| async move {
                         for _ in 0..size {

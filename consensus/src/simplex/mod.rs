@@ -329,9 +329,7 @@ mod tests {
             let mut engine_handlers = Vec::new();
             for scheme in schemes.into_iter() {
                 // Create scheme runtime
-                let runtime = runtime
-                    .clone()
-                    .with_label(&format!("validator-{}", scheme.public_key()));
+                let runtime = runtime.with_label(&format!("validator-{}", scheme.public_key()));
 
                 // Start engine
                 let validator = scheme.public_key();
@@ -765,9 +763,7 @@ mod tests {
                 }
 
                 // Create scheme runtime
-                let runtime = runtime
-                    .clone()
-                    .with_label(&format!("validator-{}", scheme.public_key()));
+                let runtime = runtime.with_label(&format!("validator-{}", scheme.public_key()));
 
                 // Start engine
                 let validator = scheme.public_key();
@@ -879,9 +875,7 @@ mod tests {
             let validator = scheme.public_key();
             {
                 // Create scheme runtime
-                let runtime = runtime
-                    .clone()
-                    .with_label(&format!("validator-{}", scheme.public_key()));
+                let runtime = runtime.with_label(&format!("validator-{}", scheme.public_key()));
 
                 // Link first peer to all (except second)
                 link_validators(
@@ -1053,9 +1047,7 @@ mod tests {
                 }
 
                 // Create scheme runtime
-                let runtime = runtime
-                    .clone()
-                    .with_label(&format!("validator-{}", scheme.public_key()));
+                let runtime = runtime.with_label(&format!("validator-{}", scheme.public_key()));
 
                 // Start engine
                 let validator = scheme.public_key();
@@ -1227,9 +1219,7 @@ mod tests {
             let mut engine_handlers = Vec::new();
             for (idx_scheme, scheme) in schemes.into_iter().enumerate() {
                 // Create scheme runtime
-                let runtime = runtime
-                    .clone()
-                    .with_label(&format!("validator-{}", scheme.public_key()));
+                let runtime = runtime.with_label(&format!("validator-{}", scheme.public_key()));
 
                 // Start engine
                 let validator = scheme.public_key();
@@ -1412,9 +1402,7 @@ mod tests {
             let mut engine_handlers = Vec::new();
             for scheme in schemes.iter() {
                 // Create scheme runtime
-                let runtime = runtime
-                    .clone()
-                    .with_label(&format!("validator-{}", scheme.public_key()));
+                let runtime = runtime.with_label(&format!("validator-{}", scheme.public_key()));
 
                 // Start engine
                 let validator = scheme.public_key();
@@ -1798,9 +1786,7 @@ mod tests {
             let mut engine_handlers = Vec::new();
             for scheme in schemes.into_iter() {
                 // Create scheme runtime
-                let runtime = runtime
-                    .clone()
-                    .with_label(&format!("validator-{}", scheme.public_key()));
+                let runtime = runtime.with_label(&format!("validator-{}", scheme.public_key()));
 
                 // Start engine
                 let validator = scheme.public_key();
@@ -1970,9 +1956,7 @@ mod tests {
             let (done_sender, mut done_receiver) = mpsc::unbounded();
             for (idx_scheme, scheme) in schemes.into_iter().enumerate() {
                 // Create scheme runtime
-                let runtime = runtime
-                    .clone()
-                    .with_label(&format!("validator-{}", scheme.public_key()));
+                let runtime = runtime.with_label(&format!("validator-{}", scheme.public_key()));
 
                 // Start engine
                 let validator = scheme.public_key();
@@ -2156,9 +2140,7 @@ mod tests {
             let (done_sender, mut done_receiver) = mpsc::unbounded();
             for (idx_scheme, scheme) in schemes.into_iter().enumerate() {
                 // Create scheme runtime
-                let runtime = runtime
-                    .clone()
-                    .with_label(&format!("validator-{}", scheme.public_key()));
+                let runtime = runtime.with_label(&format!("validator-{}", scheme.public_key()));
 
                 // Start engine
                 let validator = scheme.public_key();
