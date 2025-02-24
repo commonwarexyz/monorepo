@@ -76,9 +76,6 @@ pub struct Fetcher<
     // Configuration
     ////////////////////////////////////////
 
-    // Maximum number of fetches to be waiting for a response for
-    max_size: usize,
-
     // Time that fetches remain in the pending queue before being retried
     retry_timeout: Duration,
 }
@@ -86,18 +83,12 @@ pub struct Fetcher<
 impl<E: Clock + GClock + Rng, C: Scheme, Key: Array, NetS: Sender<PublicKey = C::PublicKey>>
     Fetcher<E, C, Key, NetS>
 {
-    pub fn new(
-        runtime: E,
-        requester: Requester<E, C>,
-        max_size: usize,
-        retry_timeout: Duration,
-    ) -> Self {
+    pub fn new(runtime: E, requester: Requester<E, C>, retry_timeout: Duration) -> Self {
         Self {
             runtime,
             requester,
             active: BiHashMap::new(),
             pending: PrioritySet::new(),
-            max_size,
             retry_timeout,
             _s: PhantomData,
         }
@@ -126,11 +117,6 @@ impl<E: Clock + GClock + Rng, C: Scheme, Key: Array, NetS: Sender<PublicKey = C:
         key: Key,
         shuffle: bool,
     ) -> Result<(), Error> {
-        // If there are are too many fetches, return an error
-        if self.len() >= self.max_size {
-            return Err(Error::TooManyFetches);
-        }
-
         // Check if the fetch is already in progress
         if self.active.contains_right(&key) || self.pending.contains(&key) {
             return Err(Error::DuplicateFetch);

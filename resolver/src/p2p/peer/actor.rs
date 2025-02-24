@@ -58,7 +58,6 @@ pub struct Actor<
     // Incoming Requests
     ////////////////////////////////////////
     serves: FuturesPool<(C::PublicKey, u64, Result<Value, oneshot::Canceled>)>,
-    serve_concurrent: usize,
 
     ////////////////////////////////////////
     // Phantom Data
@@ -81,12 +80,7 @@ impl<
     pub async fn new(runtime: E, cfg: Config<C, D, Key, Con, Pro>) -> (Self, Mailbox<Key>) {
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
         let requester = Requester::new(runtime.clone(), cfg.requester_config);
-        let fetcher = Fetcher::new(
-            runtime.clone(),
-            requester,
-            cfg.fetch_max_outstanding,
-            cfg.fetch_retry_timeout,
-        );
+        let fetcher = Fetcher::new(runtime.clone(), requester, cfg.fetch_retry_timeout);
         (
             Self {
                 runtime,
@@ -96,7 +90,6 @@ impl<
                 mailbox: receiver,
                 fetcher,
                 serves: FuturesPool::new(),
-                serve_concurrent: cfg.serve_concurrent,
                 _s: PhantomData,
                 _r: PhantomData,
             },
@@ -263,14 +256,6 @@ impl<
         // If the peer is not allowed to request, drop the request
         if !self.director.is_peer(&peer) {
             warn!(?peer, ?id, "dropping request: peer not allowed");
-            return;
-        }
-
-        // If there are too many pending requests, drop the request
-        // TODO: consider sending a failure response (?)
-        let n = self.serves.len();
-        if n >= self.serve_concurrent {
-            warn!(?peer, ?id, ?n, "dropping request: too many pending");
             return;
         }
 
