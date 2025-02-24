@@ -39,8 +39,8 @@ enum SendError<S: Sender> {
 /// Maintains requests for data from other peers, called fetches.
 ///
 /// Requests are called fetches. Fetches may be in one of two states:
-/// - Open: Sent to a peer and is waiting for a response.
-/// - Held: Not successfully sent to a peer. Waiting to be retried.
+/// - Active: Sent to a peer and is waiting for a response.
+/// - Pending: Not successfully sent to a peer. Waiting to be retried.
 pub struct Fetcher<
     E: Clock + GClock + Rng,
     C: Scheme,
@@ -54,7 +54,7 @@ pub struct Fetcher<
     _s: PhantomData<NetS>,
 
     ////////////////////////////////////////
-    // Open State
+    // Active State
     ////////////////////////////////////////
 
     // Helps find peers to fetch from
@@ -62,15 +62,15 @@ pub struct Fetcher<
 
     // Bi-directional map between requester ids and keys
     // The requester does not necessarily exist in the requester still
-    open: BiHashMap<ID, Key>,
+    active: BiHashMap<ID, Key>,
 
     ////////////////////////////////////////
-    // Held State
+    // Pending State
     ////////////////////////////////////////
 
     // If fetches fail to make a request to a peer, they are instead added to this map
     // and are retried after the deadline
-    held: PrioritySet<Key, SystemTime>,
+    pending: PrioritySet<Key, SystemTime>,
 
     ////////////////////////////////////////
     // Configuration
@@ -79,7 +79,7 @@ pub struct Fetcher<
     // Maximum number of fetches to be waiting for a response for
     max_size: usize,
 
-    // Time that fetches remain in the held queue before being retried
+    // Time that fetches remain in the pending queue before being retried
     retry_timeout: Duration,
 }
 
@@ -95,8 +95,8 @@ impl<E: Clock + GClock + Rng, C: Scheme, Key: Array, NetS: Sender<PublicKey = C:
         Self {
             runtime,
             requester,
-            open: BiHashMap::new(),
-            held: PrioritySet::new(),
+            active: BiHashMap::new(),
+            pending: PrioritySet::new(),
             max_size,
             retry_timeout,
             _s: PhantomData,
@@ -132,15 +132,15 @@ impl<E: Clock + GClock + Rng, C: Scheme, Key: Array, NetS: Sender<PublicKey = C:
         }
 
         // Check if the fetch is already in progress
-        if self.open.contains_right(&key) || self.held.contains(&key) {
+        if self.active.contains_right(&key) || self.pending.contains(&key) {
             return Err(Error::DuplicateFetch);
         }
 
         // Get peer to send request to
         let Some((peer, id)) = self.requester.request(shuffle) else {
-            // If there are no peers, add the key to the held queue
+            // If there are no peers, add the key to the pending queue
             warn!(?key, "requester failed");
-            self.hold(key);
+            self.add_pending(key);
             return Ok(());
         };
 
@@ -161,11 +161,11 @@ impl<E: Clock + GClock + Rng, C: Scheme, Key: Array, NetS: Sender<PublicKey = C:
                 warn!(?err, ?peer, "send failed");
                 let req = self.requester.handle(&peer, id).unwrap(); // Unwrap is safe
                 self.requester.timeout(req);
-                self.hold(key);
+                self.add_pending(key);
             }
             // If the message was sent to someone, add the request to the map
             Ok(()) => {
-                self.open.insert(id, key);
+                self.active.insert(id, key);
             }
         }
 
@@ -176,49 +176,50 @@ impl<E: Clock + GClock + Rng, C: Scheme, Key: Array, NetS: Sender<PublicKey = C:
     ///
     /// Returns `true` if the fetch was canceled.
     pub fn cancel(&mut self, key: &Key) -> bool {
-        // Check the held map first
-        if self.held.remove(key) {
+        // Check the pending queue first
+        if self.pending.remove(key) {
             return true;
         }
 
         // Check the outstanding fetches map second
-        self.open.remove_by_right(key).is_some()
+        self.active.remove_by_right(key).is_some()
 
         // Do not remove the requester entry.
         // It is useful for measuring performance if the peer ever responds.
         // If the peer never responds, the requester entry will be removed by timeout.
     }
 
-    /// Adds a key to the held queue.
-    /// Panics if the key is already held.
-    pub fn hold(&mut self, key: Key) {
-        assert!(!self.held.contains(&key));
-        self.held
-            .put(key, self.runtime.current() + self.retry_timeout);
+    /// Adds a key to the pending queue.
+    ///
+    /// Panics if the key is already pending.
+    pub fn add_pending(&mut self, key: Key) {
+        assert!(!self.pending.contains(&key));
+        let deadline = self.runtime.current() + self.retry_timeout;
+        self.pending.put(key, deadline);
     }
 
-    /// Returns the deadline for the next held retry.
-    pub fn get_held_deadline(&self) -> Option<SystemTime> {
-        self.held.peek().map(|(_, deadline)| *deadline)
+    /// Returns the deadline for the next pending retry.
+    pub fn get_pending_deadline(&self) -> Option<SystemTime> {
+        self.pending.peek().map(|(_, deadline)| *deadline)
     }
 
     /// Returns the deadline for the next requester timeout.
-    pub fn get_open_deadline(&self) -> Option<SystemTime> {
+    pub fn get_active_deadline(&self) -> Option<SystemTime> {
         self.requester.next().map(|(_, deadline)| deadline)
     }
 
-    /// Removes and returns the held key with the earliest deadline.
+    /// Removes and returns the pending key with the earliest deadline.
     ///
-    /// Panics if there are no held keys.
-    pub fn pop_held(&mut self) -> Key {
-        let (key, _deadline) = self.held.pop().unwrap();
+    /// Panics if there are no pending keys.
+    pub fn pop_pending(&mut self) -> Key {
+        let (key, _deadline) = self.pending.pop().unwrap();
         key
     }
 
     /// Removes and returns the key with the next requester timeout.
     ///
     /// Panics if there are no timeouts.
-    pub fn pop_open(&mut self) -> Option<Key> {
+    pub fn pop_active(&mut self) -> Option<Key> {
         // The ID must exist
         let (id, _) = self.requester.next().unwrap();
 
@@ -228,7 +229,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, Key: Array, NetS: Sender<PublicKey = C:
 
         // Remove the existing request information, if any.
         // It is possible that the request was canceled before it timed out.
-        self.open.remove_by_left(&id).map(|(_id, key)| key)
+        self.active.remove_by_left(&id).map(|(_id, key)| key)
     }
 
     /// Processes a response from a peer. Removes and returns the relevant key.
@@ -247,13 +248,13 @@ impl<E: Clock + GClock + Rng, C: Scheme, Key: Array, NetS: Sender<PublicKey = C:
 
         // Remove and return the relevant key if it exists
         // The key may not exist if the request was canceled before the peer responded
-        self.open.remove_by_left(&id).map(|(_id, key)| key)
+        self.active.remove_by_left(&id).map(|(_id, key)| key)
     }
 
     /// Returns the number of fetches that are currently being processed.
     #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
-        self.open.len() + self.held.len()
+        self.active.len() + self.pending.len()
     }
 
     /// Reconciles the list of peers that can be used to fetch data.

@@ -113,13 +113,13 @@ impl<
             self.fetcher.reconcile(self.director.peers());
 
             // Get retry timeout (if any)
-            let held_deadline = match self.fetcher.get_held_deadline() {
+            let deadline_pending = match self.fetcher.get_pending_deadline() {
                 Some(deadline) => Either::Left(self.runtime.sleep_until(deadline)),
                 None => Either::Right(future::pending()),
             };
 
             // Get requester timeout (if any)
-            let open_deadline = match self.fetcher.get_open_deadline() {
+            let deadline_active = match self.fetcher.get_active_deadline() {
                 Some(deadline) => Either::Left(self.runtime.sleep_until(deadline)),
                 None => Either::Right(future::pending()),
             };
@@ -214,16 +214,16 @@ impl<
                     }
                 },
 
-                // Handle held deadline
-                _ = held_deadline => {
-                    let key = self.fetcher.pop_held();
+                // Handle pending deadline
+                _ = deadline_pending => {
+                    let key = self.fetcher.pop_pending();
                     debug!(?key, "retrying");
                     self.fetcher.fetch_retry(&mut sender, key).await;
                 },
 
-                // Handle open deadline
-                _ = open_deadline => {
-                    if let Some(key) = self.fetcher.pop_open() {
+                // Handle active deadline
+                _ = deadline_active => {
+                    if let Some(key) = self.fetcher.pop_active() {
                         debug!(?key, "requester timeout");
                         self.fetcher.fetch_retry(&mut sender, key).await;
                     }
