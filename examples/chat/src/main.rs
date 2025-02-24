@@ -182,16 +182,15 @@ fn main() {
         // Start network
         let network_handler = network.start();
 
-        // Start chat
-        handler::start(
+        // Block on GUI
+        handler::run(
             runtime.with_label("handler"),
             signer.public_key().to_string(),
             logs,
             chat_sender,
             chat_receiver,
         )
-        .await
-        .expect("Chat failed");
+        .await;
 
         // Abort network
         network_handler.abort();

@@ -11,7 +11,7 @@ use commonware_cryptography::{
     bls12381::primitives::{group::Element, poly},
     Hasher,
 };
-use commonware_runtime::{Handle, Sink, Spawner, Stream};
+use commonware_runtime::{Sink, Spawner, Stream};
 use commonware_stream::{public_key::Connection, Receiver, Sender};
 use commonware_utils::{hex, Array, SizedSerialize};
 use futures::{channel::mpsc, StreamExt};
@@ -58,11 +58,7 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
     }
 
     /// Run the application actor.
-    pub fn start(self) -> Handle<()> {
-        self.runtime.clone().spawn(|_| self.run())
-    }
-
-    async fn run(mut self) {
+    pub async fn run(mut self) {
         let (mut indexer_sender, mut indexer_receiver) = self.indexer.split();
         while let Some(message) = self.mailbox.next().await {
             match message {

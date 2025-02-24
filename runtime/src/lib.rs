@@ -84,9 +84,9 @@ pub trait Runner {
 }
 
 /// Interface that any task scheduler must implement to spawn
-/// sub-tasks in a given root task.
+/// tasks from a given root task.
 pub trait Spawner: Clone + Send + Sync + 'static {
-    /// Enqueues a task to be executed.
+    /// Enqueue a task to be executed.
     ///
     /// Unlike a future, a spawned task will start executing immediately (even if the caller
     /// does not await the handle).
@@ -118,7 +118,7 @@ pub trait Metrics: Clone + Send + Sync + 'static {
 
     /// Register a metric with the runtime.
     ///
-    /// Any metric registered will automatically include the prefix of the current context's label.
+    /// Any metric registered will automatically include ...
     fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric);
 
     /// Encode all metrics into a buffer.

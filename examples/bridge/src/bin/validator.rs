@@ -274,6 +274,6 @@ fn main() {
         );
 
         // Block on application
-        application.start().await.expect("Application failed");
+        application.run().await;
     });
 }

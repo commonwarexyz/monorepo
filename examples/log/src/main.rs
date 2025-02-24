@@ -244,6 +244,6 @@ fn main() {
 
         // Block on GUI
         let gui = gui::Gui::new(runtime.with_label("gui"));
-        gui.start().await.expect("GUI failed");
+        gui.run().await;
     });
 }

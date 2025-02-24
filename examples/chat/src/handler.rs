@@ -1,6 +1,6 @@
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Handle, Metrics, Spawner};
+use commonware_runtime::{Metrics, Spawner};
 use commonware_utils::hex;
 use crossterm::{
     event::{self, Event as CEvent, KeyCode},
@@ -40,17 +40,7 @@ enum Focus {
     Messages,
 }
 
-pub fn start(
-    runtime: impl Spawner + Metrics,
-    me: String,
-    logs: Arc<Mutex<Vec<String>>>,
-    sender: impl Sender,
-    receiver: impl Receiver,
-) -> Handle<()> {
-    runtime.spawn(|runtime| run(runtime, me, logs, sender, receiver))
-}
-
-async fn run(
+pub async fn run(
     runtime: impl Spawner + Metrics,
     me: String,
     logs: Arc<Mutex<Vec<String>>>,

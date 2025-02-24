@@ -3,7 +3,7 @@
 //! This code has nothing to do with the application or consensus and was
 //! implemented to make consensus logging easier to follow.
 
-use commonware_runtime::{Handle, Metrics, Spawner};
+use commonware_runtime::{Metrics, Spawner};
 use crossterm::{
     event::{self, Event as CEvent, KeyCode},
     execute,
@@ -164,11 +164,7 @@ impl<E: Spawner + Metrics> Gui<E> {
         }
     }
 
-    pub fn start(self) -> Handle<()> {
-        self.runtime.clone().spawn(|_| self.run())
-    }
-
-    async fn run(self) {
+    pub async fn run(self) {
         // Setup terminal
         enable_raw_mode().unwrap();
         let mut stdout = stdout();
