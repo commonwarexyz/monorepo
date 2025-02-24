@@ -6,6 +6,12 @@
 //! For testing and simulation, the `deterministic` module provides a runtime
 //! that allows for deterministic execution of tasks (given a fixed seed).
 //!
+//! # Terminology
+//!
+//! Each runtime is typically composed of a `Runner` and a `Context`. The `Runner` is used
+//! to start the execution of a runtime and the `Context` implements any number of the traits
+//! defined in this crate.
+//!
 //! # Status
 //!
 //! `commonware-runtime` is **ALPHA** software and is not yet recommended for production use. Developers should
