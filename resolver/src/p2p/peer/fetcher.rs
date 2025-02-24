@@ -27,6 +27,7 @@ pub enum Error {
 }
 
 /// Errors that can occur when sending network messages.
+///
 /// Only used in this file.
 #[derive(Error, Debug, PartialEq)]
 enum SendError<S: Sender> {
@@ -40,44 +41,33 @@ enum SendError<S: Sender> {
 ///
 /// Requests are called fetches. Fetches may be in one of two states:
 /// - Active: Sent to a peer and is waiting for a response.
-/// - Pending: Not successfully sent to a peer. Waiting to be retried.
+/// - Pending: Not successfully sent to a peer. Waiting to be retried by timeout.
+///
+/// Both types of requests will be retried after a timeout if not resolved (i.e. a response or a
+/// cancelation). Upon retry, requests may either be placed in active or pending state again.
 pub struct Fetcher<
     E: Clock + GClock + Rng,
     C: Scheme,
     Key: Array,
     NetS: Sender<PublicKey = C::PublicKey>,
 > {
-    ////////////////////////////////////////
-    // Interfaces
-    ////////////////////////////////////////
     runtime: E,
-    _s: PhantomData<NetS>,
 
-    ////////////////////////////////////////
-    // Active State
-    ////////////////////////////////////////
-
-    // Helps find peers to fetch from
+    /// Helps find peers to fetch from and tracks which peers are assigned to which request ids.
     requester: Requester<E, C>,
 
-    // Bi-directional map between requester ids and keys
-    // The requester does not necessarily exist in the requester still
+    /// Manages active requests. If a fetch is sent to a peer, it is added to this map.
     active: BiHashMap<ID, Key>,
 
-    ////////////////////////////////////////
-    // Pending State
-    ////////////////////////////////////////
-
-    // If fetches fail to make a request to a peer, they are instead added to this map
-    // and are retried after the deadline
+    /// Manages pending requests. If fetches fail to make a request to a peer, they are instead
+    /// added to this map and are retried after the deadline.
     pending: PrioritySet<Key, SystemTime>,
-
-    ////////////////////////////////////////
-    // Configuration
-    ////////////////////////////////////////
 
     // Time that fetches remain in the pending queue before being retried
     retry_timeout: Duration,
+
+    /// Phantom data for networking types
+    _s: PhantomData<NetS>,
 }
 
 impl<E: Clock + GClock + Rng, C: Scheme, Key: Array, NetS: Sender<PublicKey = C::PublicKey>>
@@ -235,12 +225,6 @@ impl<E: Clock + GClock + Rng, C: Scheme, Key: Array, NetS: Sender<PublicKey = C:
         // Remove and return the relevant key if it exists
         // The key may not exist if the request was canceled before the peer responded
         self.active.remove_by_left(&id).map(|(_id, key)| key)
-    }
-
-    /// Returns the number of fetches that are currently being processed.
-    #[allow(clippy::len_without_is_empty)]
-    pub fn len(&self) -> usize {
-        self.active.len() + self.pending.len()
     }
 
     /// Reconciles the list of peers that can be used to fetch data.

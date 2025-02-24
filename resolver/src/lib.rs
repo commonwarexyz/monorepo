@@ -1,4 +1,4 @@
-//! TODO
+//! Resolve data by unique key.
 
 use commonware_utils::Array;
 use std::future::Future;
@@ -19,7 +19,9 @@ pub trait Consumer: Clone + Send + 'static {
     /// Deliver data to the consumer.
     fn deliver(&mut self, key: Self::Key, value: Self::Value) -> impl Future<Output = ()> + Send;
 
-    /// Let the consumer know that the data is not available.
+    /// Let the consumer know that the data is not being fetched anymore.
+    ///
+    /// The failure is used to indicate why.
     fn failed(&mut self, key: Self::Key, failure: Self::Failure)
         -> impl Future<Output = ()> + Send;
 }

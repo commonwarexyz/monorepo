@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use crate::{
     p2p::{Director, Producer},
     Consumer,
@@ -8,7 +6,9 @@ use bytes::Bytes;
 use commonware_cryptography::Scheme;
 use commonware_p2p::utils::requester;
 use commonware_utils::Array;
+use std::time::Duration;
 
+/// Configuration for the peer actor.
 pub struct Config<
     C: Scheme,
     D: Director<PublicKey = C::PublicKey>,

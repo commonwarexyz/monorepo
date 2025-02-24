@@ -28,7 +28,7 @@ use rand::Rng;
 use std::marker::PhantomData;
 use tracing::{debug, error, warn};
 
-/// An actor that makes and responds to requests using the P2P network.
+/// Manages incoming and outgoing P2P requests, coordinating fetch and serve operations.
 pub struct Actor<
     E: Clock + GClock + Spawner + Rng,
     C: Scheme,
@@ -39,30 +39,30 @@ pub struct Actor<
     NetS: Sender<PublicKey = C::PublicKey>,
     NetR: Receiver<PublicKey = C::PublicKey>,
 > {
-    ////////////////////////////////////////
-    // Interfaces
-    ////////////////////////////////////////
     runtime: E,
+
+    /// Consumes data that is fetched from the network
     consumer: Con,
+
+    /// Produces data for incoming requests
     producer: Pro,
+
+    /// Manages the list of peers that can be used to fetch data
     director: D,
 
-    ////////////////////////////////////////
-    // Outgoing Requests
-    ////////////////////////////////////////
     /// Mailbox that makes and cancels fetch requests
     mailbox: mpsc::Receiver<Message<Key>>,
 
+    /// Manages outgoing fetch requests
     fetcher: Fetcher<E, C, Key, NetS>,
 
-    ////////////////////////////////////////
-    // Incoming Requests
-    ////////////////////////////////////////
+    /// Holds futures that resolve once the `Producer` has produced the data.
+    /// Once the future is resolved, the data (or an error) is sent to the peer.
+    /// Has unbounded size; the number of concurrent requests should be limited
+    /// by the `Producer` which may drop requests.
     serves: FuturesPool<(C::PublicKey, u64, Result<Bytes, oneshot::Canceled>)>,
 
-    ////////////////////////////////////////
-    // Phantom Data
-    ////////////////////////////////////////
+    /// Phantom data for networking types
     _s: PhantomData<NetS>,
     _r: PhantomData<NetR>,
 }
@@ -233,7 +233,7 @@ impl<
         id: u64,
         response: Result<Bytes, oneshot::Canceled>,
     ) {
-        // Encode message
+        // Encode message. If the response is an error, send an empty response.
         let msg = wire::PeerMsg {
             id,
             payload: response.ok().map(|bytes| Payload::Response(bytes.to_vec())),
