@@ -731,9 +731,10 @@ impl crate::Metrics for Context {
                 format!("{}_{}", prefix, label)
             }
         };
-        if label.starts_with(METRICS_PREFIX) {
-            panic!("using runtime label is not allowed");
-        }
+        assert!(
+            !label.starts_with(METRICS_PREFIX),
+            "using runtime label is not allowed"
+        );
         Self {
             label,
             executor: self.executor.clone(),

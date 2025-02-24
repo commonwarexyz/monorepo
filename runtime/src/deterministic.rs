@@ -1314,12 +1314,11 @@ impl crate::Metrics for Context {
                 format!("{}_{}", prefix, label)
             }
         };
-        if label == ROOT_TASK {
-            panic!("root task cannot be spawned");
-        }
-        if label.starts_with(METRICS_PREFIX) {
-            panic!("using runtime label is not allowed");
-        }
+        assert_ne!(label, ROOT_TASK, "root task cannot be spawned");
+        assert!(
+            !label.starts_with(METRICS_PREFIX),
+            "using runtime label is not allowed"
+        );
         Self {
             label,
             executor: self.executor.clone(),
