@@ -194,7 +194,7 @@ pub type Signal = Shared<oneshot::Receiver<i32>>;
 ///
 /// ```rust
 /// use commonware_macros::select;
-/// use commonware_runtime::{Clock, Spawner, Runner, Signaler, deterministic::Executor};
+/// use commonware_runtime::{Clock, Spawner, Runner, Signaler, deterministic::Executor, Metrics};
 /// use futures::channel::oneshot;
 /// use std::time::Duration;
 ///
@@ -205,21 +205,18 @@ pub type Signal = Shared<oneshot::Receiver<i32>>;
 ///
 ///     // Loop on the signal until resolved
 ///     let (tx, rx) = oneshot::channel();
-///     context.spawn("task", {
-///         let context = context.clone();
-///         async move {
-///             loop {
-///                 // Wait for signal or sleep
-///                 select! {
-///                      sig = &mut signal => {
-///                          println!("Received signal: {}", sig.unwrap());
-///                          break;
-///                      },
-///                      _ = context.sleep(Duration::from_secs(1)) => {},
-///                 };
-///             }
-///             let _ = tx.send(());
+///     context.with_label("waiter").spawn(|context| async move {
+///         loop {
+///             // Wait for signal or sleep
+///             select! {
+///                  sig = &mut signal => {
+///                      println!("Received signal: {}", sig.unwrap());
+///                      break;
+///                  },
+///                  _ = context.sleep(Duration::from_secs(1)) => {},
+///             };
 ///         }
+///         let _ = tx.send(());
 ///     });
 ///
 ///     // Send signal
