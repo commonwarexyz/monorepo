@@ -1,6 +1,7 @@
 use crate::bn254::{self, Bn254, PublicKey, Signature};
 use commonware_cryptography::{Hasher, Scheme, Sha256};
 use commonware_p2p::{Receiver, Sender};
+use commonware_runtime::{Handle, Spawner};
 use commonware_utils::hex;
 use prost::Message;
 use std::collections::{HashMap, HashSet};
@@ -8,7 +9,8 @@ use tracing::info;
 
 use super::wire;
 
-pub struct Contributor {
+pub struct Contributor<E: Spawner> {
+    context: E,
     orchestrator: PublicKey,
     signer: Bn254,
     me: usize,
@@ -18,8 +20,9 @@ pub struct Contributor {
     t: usize,
 }
 
-impl Contributor {
+impl<E: Spawner> Contributor<E> {
     pub fn new(
+        context: E,
         orchestrator: PublicKey,
         signer: Bn254,
         mut contributors: Vec<PublicKey>,
@@ -32,6 +35,7 @@ impl Contributor {
         }
         let me = *ordered_contributors.get(&signer.public_key()).unwrap();
         Self {
+            context,
             orchestrator,
             signer,
             me,
@@ -41,7 +45,15 @@ impl Contributor {
         }
     }
 
-    pub async fn run(
+    pub fn start(
+        mut self,
+        sender: impl Sender,
+        receiver: impl Receiver<PublicKey = PublicKey>,
+    ) -> Handle<()> {
+        self.context.spawn_ref()(self.run(sender, receiver))
+    }
+
+    async fn run(
         mut self,
         mut sender: impl Sender,
         mut receiver: impl Receiver<PublicKey = PublicKey>,

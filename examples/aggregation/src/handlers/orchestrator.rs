@@ -1,8 +1,12 @@
 use crate::bn254::{G1PublicKey, PublicKey, Signature};
+use crate::{
+    bn254::{self, Bn254},
+    handlers::wire,
+};
 use commonware_cryptography::{Hasher, Scheme, Sha256};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Sender};
-use commonware_runtime::Clock;
+use commonware_runtime::{Clock, Handle, Spawner};
 use commonware_utils::hex;
 use eigen_crypto_bls::{convert_to_g1_point, convert_to_g2_point};
 use prost::Message;
@@ -12,13 +16,8 @@ use std::{
 };
 use tracing::info;
 
-use crate::{
-    bn254::{self, Bn254},
-    handlers::wire,
-};
-
-pub struct Orchestrator<E: Clock> {
-    runtime: E,
+pub struct Orchestrator<E: Clock + Spawner> {
+    context: E,
 
     aggregation_frequency: Duration,
 
@@ -28,9 +27,9 @@ pub struct Orchestrator<E: Clock> {
     t: usize,
 }
 
-impl<E: Clock> Orchestrator<E> {
+impl<E: Clock + Spawner> Orchestrator<E> {
     pub fn new(
-        runtime: E,
+        context: E,
         aggregation_frequency: Duration,
         mut contributors: Vec<PublicKey>,
         g1_map: HashMap<PublicKey, G1PublicKey>,
@@ -42,7 +41,7 @@ impl<E: Clock> Orchestrator<E> {
             ordered_contributors.insert(contributor.clone(), idx);
         }
         Self {
-            runtime,
+            context,
             aggregation_frequency,
             contributors,
             g1_map,
@@ -51,7 +50,15 @@ impl<E: Clock> Orchestrator<E> {
         }
     }
 
-    pub async fn run(
+    pub fn start(
+        mut self,
+        sender: impl Sender,
+        receiver: impl Receiver<PublicKey = PublicKey>,
+    ) -> Handle<()> {
+        self.context.spawn_ref()(self.run(sender, receiver))
+    }
+
+    async fn run(
         self,
         mut sender: impl Sender,
         mut receiver: impl Receiver<PublicKey = PublicKey>,
@@ -60,7 +67,7 @@ impl<E: Clock> Orchestrator<E> {
         let mut signatures = HashMap::new();
         loop {
             // Generate payload
-            let current = self.runtime.current();
+            let current = self.context.current();
             let current = current.duration_since(UNIX_EPOCH).unwrap().as_secs();
             hasher.update(&current.to_be_bytes());
             let payload = hasher.finalize();
@@ -80,10 +87,10 @@ impl<E: Clock> Orchestrator<E> {
             signatures.insert(current, HashMap::new());
 
             // Listen for messages until the next broadcast
-            let continue_time = self.runtime.current() + self.aggregation_frequency;
+            let continue_time = self.context.current() + self.aggregation_frequency;
             loop {
                 select! {
-                    _ = self.runtime.sleep_until(continue_time) => {break;},
+                    _ = self.context.sleep_until(continue_time) => {break;},
                     msg = receiver.recv() => {
                         // Parse message
                         let (sender, msg) = match msg {
