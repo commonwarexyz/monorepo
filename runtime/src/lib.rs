@@ -6,6 +6,12 @@
 //! For testing and simulation, the `deterministic` module provides a runtime
 //! that allows for deterministic execution of tasks (given a fixed seed).
 //!
+//! # Terminology
+//!
+//! Runtimes typically return at least two values when they are initialized: a `Runner` and a `Context`. The `Runner`
+//! is used to start the root task (just implements `Runner`) and the `Context` optionally implements the other
+//! traits defined in this crate.
+//!
 //! # Status
 //!
 //! `commonware-runtime` is **ALPHA** software and is not yet recommended for production use. Developers should
@@ -84,12 +90,16 @@ pub trait Runner {
 }
 
 /// Interface that any task scheduler must implement to spawn
-/// tasks from a given root task.
+/// tasks.
 pub trait Spawner: Clone + Send + Sync + 'static {
     /// Enqueue a task to be executed.
     ///
     /// Unlike a future, a spawned task will start executing immediately (even if the caller
     /// does not await the handle).
+    ///
+    /// Spawned tasks consume the context (i.e. the `Spawner`) used to create them. This upholds
+    /// the invariants that context cannot be shared across tasks and that context always comes
+    /// from somewhere.
     fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
@@ -113,12 +123,15 @@ pub trait Spawner: Clone + Send + Sync + 'static {
 
 /// Interface to register and encode metrics.
 pub trait Metrics: Clone + Send + Sync + 'static {
-    /// Append a suffix to the tracked label on some context.
+    /// Create a new instance of `Metrics` with the given label appended to the end
+    /// of the current `Metrics` label.
+    ///
+    /// This is commonly used to create nested context for `register`.
     fn with_label(&self, label: &str) -> Self;
 
     /// Register a metric with the runtime.
     ///
-    /// Any metric registered will automatically include ...
+    /// Any registered metric will include (as a prefix) the label of the current context.
     fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric);
 
     /// Encode all metrics into a buffer.
