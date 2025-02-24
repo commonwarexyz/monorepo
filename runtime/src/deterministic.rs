@@ -7,12 +7,12 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_runtime::{Spawner, Runner, deterministic::Executor};
+//! use commonware_runtime::{Spawner, Runner, deterministic::Executor, Metrics};
 //!
-//! let (executor, runtime, auditor) = Executor::default();
+//! let (executor, context, auditor) = Executor::default();
 //! executor.start(async move {
 //!     println!("Parent started");
-//!     let result = runtime.spawn("child", async move {
+//!     let result = context.with_label("child").spawn(|_| async move {
 //!         println!("Child started");
 //!         "hello"
 //!     });
@@ -22,7 +22,7 @@
 //! println!("Auditor state: {}", auditor.state());
 //! ```
 
-use crate::{mocks, utils::Signaler, Clock, Error, Handle, Signal};
+use crate::{mocks, utils::Signaler, Clock, Error, Handle, Signal, METRICS_PREFIX};
 use commonware_utils::{hex, SystemTimeExt};
 use futures::{
     channel::mpsc,
@@ -31,9 +31,9 @@ use futures::{
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
-    encoding::EncodeLabelSet,
+    encoding::{text::encode, EncodeLabelSet},
     metrics::{counter::Counter, family::Family, gauge::Gauge},
-    registry::Registry,
+    registry::{Metric, Registry},
 };
 use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
 use sha2::{Digest, Sha256};
@@ -52,9 +52,6 @@ use tracing::trace;
 
 /// Range of ephemeral ports assigned to dialers.
 const EPHEMERAL_PORT_RANGE: Range<u16> = 32768..61000;
-
-/// Label for root task created during `Runner::start`.
-const ROOT_TASK: &str = "root";
 
 /// Map of names to blob contents.
 pub type Partition = HashMap<Vec<u8>, Vec<u8>>;
@@ -80,7 +77,7 @@ struct Metrics {
 }
 
 impl Metrics {
-    pub fn init(registry: Arc<Mutex<Registry>>) -> Self {
+    pub fn init(registry: &mut Registry) -> Self {
         let metrics = Self {
             task_polls: Family::default(),
             tasks_running: Family::default(),
@@ -92,54 +89,51 @@ impl Metrics {
             storage_writes: Counter::default(),
             storage_write_bandwidth: Counter::default(),
         };
-        {
-            let mut registry = registry.lock().unwrap();
-            registry.register(
-                "tasks_spawned",
-                "Total number of tasks spawned",
-                metrics.tasks_spawned.clone(),
-            );
-            registry.register(
-                "tasks_running",
-                "Number of tasks currently running",
-                metrics.tasks_running.clone(),
-            );
-            registry.register(
-                "task_polls",
-                "Total number of task polls",
-                metrics.task_polls.clone(),
-            );
-            registry.register(
-                "bandwidth",
-                "Total amount of data sent over network",
-                metrics.network_bandwidth.clone(),
-            );
-            registry.register(
-                "open_blobs",
-                "Number of open blobs",
-                metrics.open_blobs.clone(),
-            );
-            registry.register(
-                "storage_reads",
-                "Total number of disk reads",
-                metrics.storage_reads.clone(),
-            );
-            registry.register(
-                "storage_read_bandwidth",
-                "Total amount of data read from disk",
-                metrics.storage_read_bandwidth.clone(),
-            );
-            registry.register(
-                "storage_writes",
-                "Total number of disk writes",
-                metrics.storage_writes.clone(),
-            );
-            registry.register(
-                "storage_write_bandwidth",
-                "Total amount of data written to disk",
-                metrics.storage_write_bandwidth.clone(),
-            );
-        }
+        registry.register(
+            "tasks_spawned",
+            "Total number of tasks spawned",
+            metrics.tasks_spawned.clone(),
+        );
+        registry.register(
+            "tasks_running",
+            "Number of tasks currently running",
+            metrics.tasks_running.clone(),
+        );
+        registry.register(
+            "task_polls",
+            "Total number of task polls",
+            metrics.task_polls.clone(),
+        );
+        registry.register(
+            "bandwidth",
+            "Total amount of data sent over network",
+            metrics.network_bandwidth.clone(),
+        );
+        registry.register(
+            "open_blobs",
+            "Number of open blobs",
+            metrics.open_blobs.clone(),
+        );
+        registry.register(
+            "storage_reads",
+            "Total number of disk reads",
+            metrics.storage_reads.clone(),
+        );
+        registry.register(
+            "storage_read_bandwidth",
+            "Total amount of data read from disk",
+            metrics.storage_read_bandwidth.clone(),
+        );
+        registry.register(
+            "storage_writes",
+            "Total number of disk writes",
+            metrics.storage_writes.clone(),
+        );
+        registry.register(
+            "storage_write_bandwidth",
+            "Total amount of data written to disk",
+            metrics.storage_write_bandwidth.clone(),
+        );
         metrics
     }
 }
@@ -339,6 +333,24 @@ impl Auditor {
         *hash = hasher.finalize().to_vec();
     }
 
+    fn register(&self, name: &str, help: &str) {
+        let mut hash = self.hash.lock().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(&*hash);
+        hasher.update(b"register");
+        hasher.update(name.as_bytes());
+        hasher.update(help.as_bytes());
+        *hash = hasher.finalize().to_vec();
+    }
+
+    fn encode(&self) {
+        let mut hash = self.hash.lock().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(&*hash);
+        hasher.update(b"encode");
+        *hash = hasher.finalize().to_vec();
+    }
+
     /// Generate a representation of the current state of the runtime.
     ///
     /// This can be used to ensure that logic running on top
@@ -415,9 +427,6 @@ impl Tasks {
 /// Configuration for the `deterministic` runtime.
 #[derive(Clone)]
 pub struct Config {
-    /// Registry for metrics.
-    pub registry: Arc<Mutex<Registry>>,
-
     /// Seed for the random number generator.
     pub seed: u64,
 
@@ -432,7 +441,6 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            registry: Arc::new(Mutex::new(Registry::default())),
             seed: 42,
             cycle: Duration::from_millis(1),
             timeout: None,
@@ -442,12 +450,12 @@ impl Default for Config {
 
 /// Deterministic runtime that randomly selects tasks to run based on a seed.
 pub struct Executor {
+    registry: Mutex<Registry>,
     cycle: Duration,
     deadline: Option<SystemTime>,
     metrics: Arc<Metrics>,
     auditor: Arc<Auditor>,
     rng: Mutex<StdRng>,
-    prefix: Mutex<String>,
     time: Mutex<SystemTime>,
     tasks: Arc<Tasks>,
     sleeping: Mutex<BinaryHeap<Alarm>>,
@@ -466,8 +474,12 @@ impl Executor {
             panic!("cycle duration must be non-zero when timeout is set");
         }
 
+        // Create a new registry
+        let mut registry = Registry::default();
+        let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
+
         // Initialize runtime
-        let metrics = Arc::new(Metrics::init(cfg.registry));
+        let metrics = Arc::new(Metrics::init(runtime_registry));
         let auditor = Arc::new(Auditor::new());
         let start_time = UNIX_EPOCH;
         let deadline = cfg
@@ -475,12 +487,12 @@ impl Executor {
             .map(|timeout| start_time.checked_add(timeout).expect("timeout overflowed"));
         let (signaler, signal) = Signaler::new();
         let executor = Arc::new(Self {
+            registry: Mutex::new(registry),
             cycle: cfg.cycle,
             deadline,
             metrics: metrics.clone(),
             auditor: auditor.clone(),
             rng: Mutex::new(StdRng::seed_from_u64(cfg.seed)),
-            prefix: Mutex::new(String::new()),
             time: Mutex::new(start_time),
             tasks: Arc::new(Tasks {
                 queue: Mutex::new(Vec::new()),
@@ -498,6 +510,8 @@ impl Executor {
                 executor: executor.clone(),
             },
             Context {
+                label: String::new(),
+                spawned: false,
                 executor,
                 networking: Arc::new(Networking::new(metrics, auditor.clone())),
             },
@@ -548,7 +562,7 @@ impl crate::Runner for Runner {
         let output = Arc::new(Mutex::new(None));
         Tasks::register(
             &self.executor.tasks,
-            ROOT_TASK,
+            "",
             true,
             Box::pin({
                 let output = output.clone();
@@ -587,12 +601,6 @@ impl crate::Runner for Runner {
             // processing a different task required for other tasks to make progress).
             trace!(iter, tasks = tasks.len(), "starting loop");
             for task in tasks {
-                // Set current task prefix
-                {
-                    let mut prefix = self.executor.prefix.lock().unwrap();
-                    prefix.clone_from(&task.label);
-                }
-
                 // Record task for auditing
                 self.executor.auditor.process_task(task.id, &task.label);
 
@@ -706,8 +714,9 @@ impl crate::Runner for Runner {
 /// Implementation of [`crate::Spawner`], [`crate::Clock`],
 /// [`crate::Network`], and [`crate::Storage`] for the `deterministic`
 /// runtime.
-#[derive(Clone)]
 pub struct Context {
+    label: String,
+    spawned: bool,
     executor: Arc<Executor>,
     networking: Arc<Networking>,
 }
@@ -739,10 +748,10 @@ impl Context {
             *recovered = true;
         }
 
-        // Prepare metrics
-        let metrics = self.executor.metrics.clone();
-        metrics.open_blobs.set(0);
-        metrics.tasks_running.clear();
+        // Rebuild metrics
+        let mut registry = Registry::default();
+        let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
+        let metrics = Arc::new(Metrics::init(runtime_registry));
 
         // Copy state
         let auditor = self.executor.auditor.clone();
@@ -751,14 +760,14 @@ impl Context {
             // Copied from the current runtime
             cycle: self.executor.cycle,
             deadline: self.executor.deadline,
-            metrics: metrics.clone(),
             auditor: auditor.clone(),
             rng: Mutex::new(self.executor.rng.lock().unwrap().clone()),
             time: Mutex::new(*self.executor.time.lock().unwrap()),
             partitions: Mutex::new(self.executor.partitions.lock().unwrap().clone()),
 
             // New state for the new runtime
-            prefix: Mutex::new(String::new()),
+            registry: Mutex::new(registry),
+            metrics: metrics.clone(),
             tasks: Arc::new(Tasks {
                 queue: Mutex::new(Vec::new()),
                 counter: Mutex::new(0),
@@ -774,6 +783,8 @@ impl Context {
                 executor: executor.clone(),
             },
             Self {
+                label: String::new(),
+                spawned: false,
                 executor,
                 networking: Arc::new(Networking::new(metrics, auditor.clone())),
             },
@@ -782,23 +793,29 @@ impl Context {
     }
 }
 
+impl Clone for Context {
+    fn clone(&self) -> Self {
+        Self {
+            label: self.label.clone(),
+            spawned: false,
+            executor: self.executor.clone(),
+            networking: self.networking.clone(),
+        }
+    }
+}
+
 impl crate::Spawner for Context {
-    fn spawn<F, T>(&self, label: &str, f: F) -> Handle<T>
+    fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
     where
-        F: Future<Output = T> + Send + 'static,
+        F: FnOnce(Self) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        let label = {
-            let prefix = self.executor.prefix.lock().unwrap();
-            if prefix.is_empty() || *prefix == ROOT_TASK {
-                label.to_string()
-            } else {
-                format!("{}_{}", *prefix, label)
-            }
-        };
-        if label == ROOT_TASK {
-            panic!("root task cannot be spawned");
-        }
+        // Ensure a context only spawns one task
+        assert!(!self.spawned, "already spawned");
+
+        // Get metrics
+        let label = self.label.clone();
         let work = Work {
             label: label.clone(),
         };
@@ -813,9 +830,52 @@ impl crate::Spawner for Context {
             .tasks_running
             .get_or_create(&work)
             .clone();
-        let (f, handle) = Handle::init(f, gauge, false);
-        Tasks::register(&self.executor.tasks, &label, false, Box::pin(f));
+
+        // Set up the task
+        let executor = self.executor.clone();
+        let future = f(self);
+        let (f, handle) = Handle::init(future, gauge, false);
+
+        // Spawn the task
+        Tasks::register(&executor.tasks, &label, false, Box::pin(f));
         handle
+    }
+
+    fn spawn_ref<F, T>(&mut self) -> impl FnOnce(F) -> Handle<T> + 'static
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        // Ensure a context only spawns one task
+        assert!(!self.spawned, "already spawned");
+        self.spawned = true;
+
+        // Get metrics
+        let work = Work {
+            label: self.label.clone(),
+        };
+        self.executor
+            .metrics
+            .tasks_spawned
+            .get_or_create(&work)
+            .inc();
+        let gauge = self
+            .executor
+            .metrics
+            .tasks_running
+            .get_or_create(&work)
+            .clone();
+
+        // Set up the task
+        let label = self.label.clone();
+        let executor = self.executor.clone();
+        move |f: F| {
+            let (f, handle) = Handle::init(f, gauge, false);
+
+            // Spawn the task
+            Tasks::register(&executor.tasks, &label, false, Box::pin(f));
+            handle
+        }
     }
 
     fn stop(&self, value: i32) {
@@ -826,6 +886,62 @@ impl crate::Spawner for Context {
     fn stopped(&self) -> Signal {
         self.executor.auditor.stopped();
         self.executor.signal.clone()
+    }
+}
+
+impl crate::Metrics for Context {
+    fn with_label(&self, label: &str) -> Self {
+        let label = {
+            let prefix = self.label.clone();
+            if prefix.is_empty() {
+                label.to_string()
+            } else {
+                format!("{}_{}", prefix, label)
+            }
+        };
+        assert!(
+            !label.starts_with(METRICS_PREFIX),
+            "using runtime label is not allowed"
+        );
+        Self {
+            label,
+            spawned: false,
+            executor: self.executor.clone(),
+            networking: self.networking.clone(),
+        }
+    }
+
+    fn label(&self) -> String {
+        self.label.clone()
+    }
+
+    fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
+        // Prepare args
+        let name = name.into();
+        let help = help.into();
+
+        // Register metric
+        self.executor.auditor.register(&name, &help);
+        let prefixed_name = {
+            let prefix = &self.label;
+            if prefix.is_empty() {
+                name
+            } else {
+                format!("{}_{}", *prefix, name)
+            }
+        };
+        self.executor
+            .registry
+            .lock()
+            .unwrap()
+            .register(prefixed_name, help, metric)
+    }
+
+    fn encode(&self) -> String {
+        self.executor.auditor.encode();
+        let mut buffer = String::new();
+        encode(&mut buffer, &self.executor.registry.lock().unwrap()).expect("encoding failed");
+        buffer
     }
 }
 
@@ -1302,13 +1418,13 @@ impl Drop for Blob {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{utils::run_tasks, Blob, Runner, Spawner, Storage};
+    use crate::{utils::run_tasks, Blob, Runner, Storage};
     use commonware_macros::test_traced;
     use futures::task::noop_waker;
 
     fn run_with_seed(seed: u64) -> (String, Vec<usize>) {
-        let (executor, runtime, auditor) = Executor::seeded(seed);
-        let messages = run_tasks(5, executor, runtime);
+        let (executor, context, auditor) = Executor::seeded(seed);
+        let messages = run_tasks(5, executor, context);
         (auditor.state(), messages)
     }
 
@@ -1381,10 +1497,10 @@ mod tests {
     #[test]
     #[should_panic(expected = "runtime timeout")]
     fn test_timeout() {
-        let (executor, runtime, _) = Executor::timed(Duration::from_secs(10));
+        let (executor, context, _) = Executor::timed(Duration::from_secs(10));
         executor.start(async move {
             loop {
-                runtime.sleep(Duration::from_secs(1)).await;
+                context.sleep(Duration::from_secs(1)).await;
             }
         });
     }
@@ -1398,21 +1514,6 @@ mod tests {
             ..Config::default()
         };
         Executor::init(cfg);
-    }
-
-    #[test]
-    #[should_panic(expected = "root task cannot be spawned")]
-    fn test_spawn_root_task() {
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
-            let _ = context
-                .spawn(ROOT_TASK, async move {
-                    // This task should never run
-                    panic!("root task should not run");
-                })
-                .await;
-            panic!("root task should not be spawned");
-        });
     }
 
     #[test]

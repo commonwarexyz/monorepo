@@ -15,6 +15,7 @@ use commonware_cryptography::{
     Hasher,
 };
 use commonware_p2p::{Receiver, Recipients, Sender};
+use commonware_runtime::{Handle, Spawner};
 use prost::Message;
 use std::marker::PhantomData;
 use tracing::debug;
@@ -27,9 +28,11 @@ pub struct Config<
 }
 
 pub struct Nuller<
+    E: Spawner,
     H: Hasher,
     S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
 > {
+    context: E,
     supervisor: S,
     _hasher: PhantomData<H>,
 
@@ -39,12 +42,14 @@ pub struct Nuller<
 }
 
 impl<
+        E: Spawner,
         H: Hasher,
         S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
-    > Nuller<H, S>
+    > Nuller<E, H, S>
 {
-    pub fn new(cfg: Config<S>) -> Self {
+    pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
+            context,
             supervisor: cfg.supervisor,
             _hasher: PhantomData,
 
@@ -54,11 +59,11 @@ impl<
         }
     }
 
-    pub async fn run(
-        self,
-        voter_network: (impl Sender, impl Receiver),
-        _backfiller_network: (impl Sender, impl Receiver),
-    ) {
+    pub fn start(mut self, voter_network: (impl Sender, impl Receiver)) -> Handle<()> {
+        self.context.spawn_ref()(self.run(voter_network))
+    }
+
+    async fn run(self, voter_network: (impl Sender, impl Receiver)) {
         let (mut sender, mut receiver) = voter_network;
         while let Ok((s, msg)) = receiver.recv().await {
             // Parse message

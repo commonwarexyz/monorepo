@@ -1687,7 +1687,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-bridge"
-version = "0.0.5"
+version = "0.0.7"
 dependencies = [
  "bytes",
  "clap",
@@ -1710,8 +1710,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-broadcast"
+version = "0.0.3"
+dependencies = [
+ "bytes",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-p2p",
+ "commonware-runtime",
+ "commonware-storage",
+ "commonware-utils",
+ "futures",
+ "prometheus-client",
+ "prost",
+ "prost-build",
+ "rand",
+ "thiserror",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "commonware-chat"
-version = "0.0.33"
+version = "0.0.35"
 dependencies = [
  "chrono",
  "clap",
@@ -1732,7 +1753,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-consensus"
-version = "0.0.8"
+version = "0.0.10"
 dependencies = [
  "bytes",
  "cfg-if",
@@ -1756,7 +1777,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-cryptography"
-version = "0.0.19"
+version = "0.0.21"
 dependencies = [
  "blst",
  "bytes",
@@ -1775,7 +1796,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-log"
-version = "0.0.8"
+version = "0.0.10"
 dependencies = [
  "bytes",
  "chrono",
@@ -1800,7 +1821,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-macros"
-version = "0.0.10"
+version = "0.0.12"
 dependencies = [
  "futures",
  "futures-timer",
@@ -1813,7 +1834,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-p2p"
-version = "0.0.30"
+version = "0.0.32"
 dependencies = [
  "bitvec",
  "bytes",
@@ -1838,12 +1859,14 @@ dependencies = [
 
 [[package]]
 name = "commonware-runtime"
-version = "0.0.16"
+version = "0.0.18"
 dependencies = [
  "bytes",
+ "cfg-if",
  "commonware-macros",
  "commonware-utils",
  "futures",
+ "getrandom",
  "governor",
  "prometheus-client",
  "rand",
@@ -1856,10 +1879,9 @@ dependencies = [
 
 [[package]]
 name = "commonware-storage"
-version = "0.0.11"
+version = "0.0.13"
 dependencies = [
  "bytes",
- "cfg-if",
  "commonware-cryptography",
  "commonware-macros",
  "commonware-runtime",
@@ -1879,7 +1901,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-stream"
-version = "0.0.8"
+version = "0.0.10"
 dependencies = [
  "bytes",
  "chacha20poly1305",
@@ -1898,16 +1920,18 @@ dependencies = [
 
 [[package]]
 name = "commonware-utils"
-version = "0.0.11"
+version = "0.0.13"
 dependencies = [
+ "bytes",
  "num-bigint",
  "prost",
  "rand",
+ "thiserror",
 ]
 
 [[package]]
 name = "commonware-vrf"
-version = "0.0.19"
+version = "0.0.21"
 dependencies = [
  "bytes",
  "clap",

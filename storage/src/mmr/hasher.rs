@@ -1,3 +1,5 @@
+//! Decorator for a cryptographic hasher that implements the MMR-specific hashing logic.
+
 use commonware_cryptography::Hasher as CHasher;
 
 /// Hasher decorator the MMR uses for computing leaf, node and root hashes.

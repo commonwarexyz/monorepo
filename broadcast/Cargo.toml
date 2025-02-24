@@ -1,0 +1,35 @@
+[package]
+name = "commonware-broadcast"
+edition = "2021"
+publish = true
+version = "0.0.3"
+license = "MIT OR Apache-2.0"
+description = "Disseminate data over a wide-area network."
+readme = "README.md"
+homepage = "https://commonware.xyz"
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/broadcast"
+documentation = "https://docs.rs/commonware-broadcast"
+
+[dependencies]
+bytes = { workspace = true }
+commonware-cryptography = { workspace = true }
+commonware-macros = { workspace = true }
+commonware-p2p = { workspace = true }
+commonware-runtime = { workspace = true }
+commonware-storage = { workspace = true }
+commonware-utils = { workspace = true }
+futures = { workspace = true }
+prometheus-client = { workspace = true }
+prost = { workspace = true }
+rand = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[build-dependencies]
+prost-build = { workspace = true }
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }
+
+[lib]
+bench = false

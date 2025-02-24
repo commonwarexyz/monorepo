@@ -5,7 +5,8 @@ use crate::{
     },
     Activity, Proof, Supervisor as Su,
 };
-use commonware_cryptography::{Array, Scheme};
+use commonware_cryptography::Scheme;
+use commonware_utils::Array;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     sync::{Arc, Mutex},

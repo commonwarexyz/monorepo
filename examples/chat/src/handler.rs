@@ -1,6 +1,6 @@
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::Spawner;
+use commonware_runtime::{Metrics, Spawner};
 use commonware_utils::hex;
 use crossterm::{
     event::{self, Event as CEvent, KeyCode},
@@ -8,7 +8,6 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use futures::{channel::mpsc, SinkExt, StreamExt};
-use prometheus_client::{encoding::text::encode, registry::Registry};
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
@@ -42,10 +41,8 @@ enum Focus {
 }
 
 pub async fn run(
-    runtime: impl Spawner,
+    context: impl Spawner + Metrics,
     me: String,
-    runtime_registry: Arc<Mutex<Registry>>,
-    p2p_registry: Arc<Mutex<Registry>>,
     logs: Arc<Mutex<Vec<String>>>,
     mut sender: impl Sender,
     mut receiver: impl Receiver,
@@ -59,7 +56,7 @@ pub async fn run(
 
     // Listen for input
     let (mut tx, mut rx) = mpsc::channel(100);
-    runtime.spawn("keyboard", async move {
+    context.with_label("keyboard").spawn(|_| async move {
         loop {
             match event::poll(Duration::from_millis(500)) {
                 Ok(true) => {}
@@ -136,15 +133,7 @@ pub async fn run(
                 f.render_widget(messages_block, messages_chunks[0]);
 
                 // Display metrics
-                let mut buffer = String::new();
-                {
-                    let registry = runtime_registry.lock().unwrap();
-                    encode(&mut buffer, &registry).unwrap();
-                }
-                {
-                    let registry = p2p_registry.lock().unwrap();
-                    encode(&mut buffer, &registry).unwrap();
-                }
+                let buffer = context.encode();
                 let metrics_text = Text::from(buffer);
                 let metrics_block = Paragraph::new(metrics_text)
                     .block(

@@ -79,6 +79,8 @@ jobs:
       run: cargo build --target wasm32-unknown-unknown --release --manifest-path macros/Cargo.toml # can't check size because it is a proc-macro
     - name: Build utils
       run: cargo build --target wasm32-unknown-unknown --release --manifest-path utils/Cargo.toml && du -h target/wasm32-unknown-unknown/release/commonware_utils.wasm
+    - name: Build runtime
+      run: cargo build --target wasm32-unknown-unknown --release --manifest-path runtime/Cargo.toml && du -h target/wasm32-unknown-unknown/release/commonware_runtime.wasm
     - name: Build consensus
       run: cargo build --target wasm32-unknown-unknown --release --manifest-path consensus/Cargo.toml && du -h target/wasm32-unknown-unknown/release/commonware_consensus.wasm
     - name: Build storage

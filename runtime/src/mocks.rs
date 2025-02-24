@@ -182,7 +182,7 @@ mod tests {
     #[test]
     fn test_send_error() {
         let (mut sink, mut stream) = Channel::init();
-        let (executor, runtime, _) = Executor::default();
+        let (executor, context, _) = Executor::default();
 
         // If the waiter value has a min, but the oneshot receiver is dropped,
         // the send function should return an error when attempting to send the data.
@@ -195,7 +195,7 @@ mod tests {
                 v = stream.recv(&mut buf) => {
                     panic!("unexpected value: {:?}", v);
                 },
-                _ = runtime.sleep(Duration::from_millis(100)) => {
+                _ = context.sleep(Duration::from_millis(100)) => {
                     "timeout"
                 },
             };
@@ -210,7 +210,7 @@ mod tests {
     #[test]
     fn test_recv_timeout() {
         let (_sink, mut stream) = Channel::init();
-        let (executor, runtime, _) = Executor::default();
+        let (executor, context, _) = Executor::default();
 
         // If there is no data to read, test that the recv function just blocks. A timeout should return first.
         executor.start(async move {
@@ -219,7 +219,7 @@ mod tests {
                 v = stream.recv(&mut buf) => {
                     panic!("unexpected value: {:?}", v);
                 },
-                _ = runtime.sleep(Duration::from_millis(100)) => {
+                _ = context.sleep(Duration::from_millis(100)) => {
                     "timeout"
                 },
             };

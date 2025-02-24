@@ -3,14 +3,12 @@ use super::{
     wire, View,
 };
 use crate::ThresholdSupervisor;
-use commonware_cryptography::{
-    bls12381::primitives::{
-        self,
-        group::{self, Element},
-        poly,
-    },
-    Array,
+use commonware_cryptography::bls12381::primitives::{
+    self,
+    group::{self, Element},
+    poly,
 };
+use commonware_utils::Array;
 use tracing::debug;
 
 pub fn verify_notarization<

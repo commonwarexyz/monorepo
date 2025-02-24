@@ -5,10 +5,10 @@
 //! to serve as a backing store for some in-memory data structure, or as a building block for a more
 //! complex construction that prescribes some meaning to items in the log.
 
+use thiserror::Error;
+
 pub mod fixed;
 pub mod variable;
-
-use thiserror::Error;
 
 /// Errors that can occur when interacting with `Journal`.
 #[derive(Debug, Error)]

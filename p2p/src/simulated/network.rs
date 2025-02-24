@@ -6,28 +6,23 @@ use super::{
 };
 use crate::{Channel, Message, Recipients};
 use bytes::Bytes;
-use commonware_cryptography::Array;
 use commonware_macros::select;
 use commonware_runtime::{
     deterministic::{Listener, Sink, Stream},
-    Clock, Listener as _, Network as RNetwork, Spawner,
+    Clock, Handle, Listener as _, Metrics, Network as RNetwork, Spawner,
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
-use commonware_utils::SizedSerialize;
+use commonware_utils::{Array, SizedSerialize};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
 };
-use prometheus_client::{
-    metrics::{counter::Counter, family::Family},
-    registry::Registry,
-};
+use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
 use std::{
     collections::{BTreeMap, HashMap},
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::{Arc, Mutex},
     time::Duration,
 };
 use tracing::{error, trace};
@@ -37,16 +32,14 @@ type Task<P> = (Channel, P, Recipients<P>, Bytes, oneshot::Sender<Vec<P>>);
 
 /// Configuration for the simulated network.
 pub struct Config {
-    /// Registry for prometheus metrics.
-    pub registry: Arc<Mutex<Registry>>,
-
     /// Maximum size of a message that can be sent over the network.
     pub max_size: usize,
 }
 
 /// Implementation of a simulated network.
-pub struct Network<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock, P: Array> {
-    runtime: E,
+pub struct Network<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock + Metrics, P: Array>
+{
+    context: E,
 
     // Maximum size of a message that can be sent over the network
     max_size: usize,
@@ -75,34 +68,33 @@ pub struct Network<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock, 
     sent_messages: Family<metrics::Message, Counter>,
 }
 
-impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock, P: Array> Network<E, P> {
+impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock + Metrics, P: Array>
+    Network<E, P>
+{
     /// Create a new simulated network with a given runtime and configuration.
     ///
     /// Returns a tuple containing the network instance and the oracle that can
-    /// be used to modify the state of the network during runtime.
-    pub fn new(runtime: E, cfg: Config) -> (Self, Oracle<P>) {
+    /// be used to modify the state of the network during context.
+    pub fn new(context: E, cfg: Config) -> (Self, Oracle<P>) {
         let (sender, receiver) = mpsc::unbounded();
         let (oracle_sender, oracle_receiver) = mpsc::unbounded();
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();
-        {
-            let mut registry = cfg.registry.lock().unwrap();
-            registry.register("messages_sent", "messages sent", sent_messages.clone());
-            registry.register(
-                "messages_received",
-                "messages received",
-                received_messages.clone(),
-            );
-        }
+        context.register("messages_sent", "messages sent", sent_messages.clone());
+        context.register(
+            "messages_received",
+            "messages received",
+            received_messages.clone(),
+        );
 
         // Start with a pseudo-random IP address to assign sockets to for new peers
         let next_addr = SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::from_bits(runtime.clone().next_u32())),
+            IpAddr::V4(Ipv4Addr::from_bits(context.clone().next_u32())),
             0,
         );
         (
             Self {
-                runtime,
+                context,
                 max_size: cfg.max_size,
                 next_addr,
                 ingress: oracle_receiver,
@@ -169,7 +161,7 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock, P: Array> Netw
                 // If peer does not exist, then create it.
                 if !self.peers.contains_key(&public_key) {
                     let peer = Peer::new(
-                        &mut self.runtime.clone(),
+                        &mut self.context.clone(),
                         public_key.clone(),
                         self.get_next_socket(),
                         self.max_size,
@@ -186,7 +178,7 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock, P: Array> Netw
 
                 // Create a sender that allows sending messages to the network for a certain channel
                 let sender = Sender::new(
-                    self.runtime.clone(),
+                    self.context.clone(),
                     public_key,
                     channel,
                     self.max_size,
@@ -217,7 +209,7 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock, P: Array> Netw
                 }
 
                 let link = Link::new(
-                    &mut self.runtime,
+                    &mut self.context,
                     sender,
                     peer.socket,
                     sampler,
@@ -284,19 +276,18 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock, P: Array> Netw
                 .inc();
 
             // Apply link settings
-            let delay = link.sampler.sample(&mut self.runtime);
-            let should_deliver = self.runtime.gen_bool(link.success_rate);
+            let delay = link.sampler.sample(&mut self.context);
+            let should_deliver = self.context.gen_bool(link.success_rate);
             trace!(?origin, ?recipient, ?delay, "sending message",);
 
             // Send message
-            self.runtime.spawn("messenger", {
-                let runtime = self.runtime.clone();
+            self.context.with_label("messenger").spawn({
                 let message = message.clone();
                 let recipient = recipient.clone();
                 let origin = origin.clone();
                 let mut acquired_sender = acquired_sender.clone();
                 let received_messages = self.received_messages.clone();
-                async move {
+                move |context| async move {
                     // Mark as sent as soon as soon as execution starts
                     acquired_sender.send(()).await.unwrap();
 
@@ -304,7 +295,7 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock, P: Array> Netw
                     //
                     // Note: messages can be sent out of order (will not occur when using a
                     // stable TCP connection)
-                    runtime.sleep(Duration::from_millis(delay as u64)).await;
+                    context.sleep(Duration::from_millis(delay as u64)).await;
 
                     // Drop message if success rate is too low
                     if !should_deliver {
@@ -333,25 +324,32 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock, P: Array> Netw
         }
 
         // Notify sender of successful sends
-        self.runtime.spawn("notifier", async move {
-            // Wait for semaphore to be acquired on all sends
-            for _ in 0..sent.len() {
-                acquired_receiver.next().await.unwrap();
-            }
+        self.context
+            .clone()
+            .with_label("notifier")
+            .spawn(|_| async move {
+                // Wait for semaphore to be acquired on all sends
+                for _ in 0..sent.len() {
+                    acquired_receiver.next().await.unwrap();
+                }
 
-            // Notify sender of successful sends
-            if let Err(err) = reply.send(sent) {
-                // This can only happen if the sender exited.
-                error!(?err, "failed to send ack");
-            }
-        });
+                // Notify sender of successful sends
+                if let Err(err) = reply.send(sent) {
+                    // This can only happen if the sender exited.
+                    error!(?err, "failed to send ack");
+                }
+            });
     }
 
     /// Run the simulated network.
     ///
     /// It is not necessary to invoke this method before modifying the network topology, however,
     /// no messages will be sent until this method is called.
-    pub async fn run(mut self) {
+    pub fn start(mut self) -> Handle<()> {
+        self.context.spawn_ref()(self.run())
+    }
+
+    async fn run(mut self) {
         loop {
             select! {
                 message = self.ingress.next() => {
@@ -387,7 +385,7 @@ pub struct Sender<P: Array> {
 
 impl<P: Array> Sender<P> {
     fn new(
-        runtime: impl Spawner,
+        context: impl Spawner + Metrics,
         me: P,
         channel: Channel,
         max_size: usize,
@@ -396,7 +394,7 @@ impl<P: Array> Sender<P> {
         // Listen for messages
         let (high, mut high_receiver) = mpsc::unbounded();
         let (low, mut low_receiver) = mpsc::unbounded();
-        runtime.spawn("sender", async move {
+        context.with_label("sender").spawn(move |_| async move {
             loop {
                 // Wait for task
                 let task;
@@ -493,8 +491,8 @@ impl<P: Array> Peer<P> {
     ///
     /// The peer will listen for incoming connections on the given `socket` address.
     /// `max_size` is the maximum size of a message that can be sent to the peer.
-    fn new<E: Spawner + RNetwork<Listener, Sink, Stream>>(
-        runtime: &mut E,
+    fn new<E: Spawner + RNetwork<Listener, Sink, Stream> + Metrics>(
+        context: &mut E,
         public_key: P,
         socket: SocketAddr,
         max_size: usize,
@@ -508,7 +506,7 @@ impl<P: Array> Peer<P> {
         let (inbox_sender, mut inbox_receiver) = mpsc::unbounded();
 
         // Spawn router
-        runtime.spawn("router", async move {
+        context.with_label("router").spawn(|_| async move {
             // Map of channels to mailboxes (senders to particular channels)
             let mut mailboxes = HashMap::new();
 
@@ -565,19 +563,18 @@ impl<P: Array> Peer<P> {
         });
 
         // Spawn a task that accepts new connections and spawns a task for each connection
-        runtime.spawn("listener", {
-            let runtime = runtime.clone();
+        context.with_label("listener").spawn({
             let inbox_sender = inbox_sender.clone();
-            async move {
+            move |context| async move {
                 // Initialize listener
-                let mut listener = runtime.bind(socket).await.unwrap();
+                let mut listener = context.bind(socket).await.unwrap();
 
                 // Continually accept new connections
                 while let Ok((_, _, mut stream)) = listener.accept().await {
                     // New connection accepted. Spawn a task for this connection
-                    runtime.spawn("receiver", {
+                    context.with_label("receiver").spawn({
                         let mut inbox_sender = inbox_sender.clone();
-                        async move {
+                        move |_| async move {
                             // Receive dialer's public key as a handshake
                             let dialer = match recv_frame(&mut stream, max_size).await {
                                 Ok(data) => data,
@@ -642,8 +639,8 @@ struct Link {
 }
 
 impl Link {
-    fn new<E: Spawner + RNetwork<Listener, Sink, Stream>, P: Array>(
-        runtime: &mut E,
+    fn new<E: Spawner + RNetwork<Listener, Sink, Stream> + Metrics, P: Array>(
+        context: &mut E,
         dialer: P,
         socket: SocketAddr,
         sampler: Normal<f64>,
@@ -659,11 +656,12 @@ impl Link {
 
         // Spawn a task that will wait for messages to be sent to the link and then send them
         // over the network.
-        runtime.spawn("link", {
-            let runtime = runtime.clone();
-            async move {
+        context
+            .clone()
+            .with_label("link")
+            .spawn(move |context| async move {
                 // Dial the peer and handshake by sending it the dialer's public key
-                let (mut sink, _) = runtime.dial(socket).await.unwrap();
+                let (mut sink, _) = context.dial(socket).await.unwrap();
                 if let Err(err) = send_frame(&mut sink, &dialer, max_size).await {
                     error!(?err, "failed to send public key to dialee");
                     return;
@@ -678,8 +676,7 @@ impl Link {
                     let data = data.freeze();
                     send_frame(&mut sink, &data, max_size).await.unwrap();
                 }
-            }
-        });
+            });
 
         result
     }
@@ -707,14 +704,14 @@ mod tests {
 
     #[test]
     fn test_register_and_link() {
-        let (executor, runtime, _) = Executor::default();
+        let (executor, context, _) = Executor::default();
         executor.start(async move {
             let cfg = Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 max_size: MAX_MESSAGE_SIZE,
             };
-            let (network, mut oracle) = Network::new(runtime.clone(), cfg);
-            runtime.spawn("network", network.run());
+            let network_context = context.with_label("network");
+            let (network, mut oracle) = Network::new(network_context.clone(), cfg);
+            network_context.spawn(|_| network.run());
 
             // Create two public keys
             let pk1 = Ed25519::from_seed(1).public_key();
@@ -754,12 +751,11 @@ mod tests {
     #[test]
     fn test_get_next_socket() {
         let cfg = Config {
-            registry: Arc::new(Mutex::new(Registry::default())),
             max_size: MAX_MESSAGE_SIZE,
         };
-        let (_, runtime, _) = Executor::default();
+        let (_, context, _) = Executor::default();
         type PublicKey = <Ed25519 as Scheme>::PublicKey;
-        let (mut network, _) = Network::<Context, PublicKey>::new(runtime.clone(), cfg);
+        let (mut network, _) = Network::<Context, PublicKey>::new(context.clone(), cfg);
 
         // Test that the next socket address is incremented correctly
         let mut original = network.next_addr;
