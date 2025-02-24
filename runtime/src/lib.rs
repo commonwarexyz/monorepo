@@ -8,9 +8,9 @@
 //!
 //! # Terminology
 //!
-//! Each runtime is typically composed of an `Executor` and a `Context`. The `Executor` implements
-//! the `Runner` trait and drives execution of a runtime. The `Context` implements any number of the
-//! other traits defined in this crate to provide core functionality.
+//! Each runtime is typically composed of an `Executor` and a `Context`. The `Executor` implements the
+//! `Runner` trait and drives execution of a runtime. The `Context` implements any number of the
+//! other traits to provide core functionality.
 //!
 //! # Status
 //!
@@ -86,6 +86,9 @@ pub enum Error {
 /// running tasks.
 pub trait Runner {
     /// Start running a root task.
+    ///
+    /// The root task does not create the initial context because it can be useful to have a reference
+    /// to context before starting task execution.
     fn start<F>(self, f: F) -> F::Output
     where
         F: Future + Send + 'static,
@@ -100,9 +103,8 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     /// Unlike a future, a spawned task will start executing immediately (even if the caller
     /// does not await the handle).
     ///
-    /// Spawned tasks consume the context (i.e. the `Spawner`) used to create them. This upholds
-    /// the invariants that context cannot be shared across tasks and that context always comes
-    /// from somewhere.
+    /// Spawned tasks consume the context used to create them. This ensures that context cannot
+    /// be shared between tasks and that a task's context always comes from somewhere.
     fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
