@@ -102,7 +102,7 @@ pub struct Actor<
     D: Array,
     S: ThresholdSupervisor<Index = View, Identity = poly::Public, PublicKey = C::PublicKey>,
 > {
-    runtime: E,
+    context: E,
     supervisor: S,
     _digest: PhantomData<D>,
 
@@ -138,7 +138,7 @@ impl<
         S: ThresholdSupervisor<Index = View, Identity = poly::Public, PublicKey = C::PublicKey>,
     > Actor<E, C, D, S>
 {
-    pub fn new(runtime: E, cfg: Config<C, S>) -> (Self, Mailbox) {
+    pub fn new(context: E, cfg: Config<C, S>) -> (Self, Mailbox) {
         // Initialize requester
         let config = requester::Config {
             crypto: cfg.crypto.clone(),
@@ -146,19 +146,19 @@ impl<
             initial: cfg.fetch_timeout / 2,
             timeout: cfg.fetch_timeout,
         };
-        let requester = requester::Requester::new(runtime.clone(), config);
+        let requester = requester::Requester::new(context.clone(), config);
 
         // Initialize metrics
         let unfulfilled = Gauge::default();
         let outstanding = Gauge::default();
         let served = Counter::default();
-        runtime.register(
+        context.register(
             "unfulfilled",
             "unfulfilled notarizations/nullifications",
             unfulfilled.clone(),
         );
-        runtime.register("outstanding", "outstanding requests", outstanding.clone());
-        runtime.register(
+        context.register("outstanding", "outstanding requests", outstanding.clone());
+        context.register(
             "served",
             "served notarizations/nullifications",
             served.clone(),
@@ -168,7 +168,7 @@ impl<
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
         (
             Self {
-                runtime,
+                context,
                 supervisor: cfg.supervisor,
                 _digest: PhantomData,
 
@@ -218,7 +218,7 @@ impl<
                 .required
                 .iter()
                 .filter(|entry| !self.inflight.contains(entry))
-                .choose_multiple(&mut self.runtime, self.max_fetch_count);
+                .choose_multiple(&mut self.context, self.max_fetch_count);
             if entries.is_empty() {
                 return;
             }
@@ -261,7 +261,7 @@ impl<
                     // learn of new notarizations or nullifications in the meantime.
                     warn!("failed to send request to any validator");
                     let deadline = self
-                        .runtime
+                        .context
                         .current()
                         .checked_add(self.fetch_timeout)
                         .expect("time overflowed");
@@ -306,7 +306,7 @@ impl<
         sender: impl Sender<PublicKey = C::PublicKey>,
         receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) -> Handle<()> {
-        self.runtime
+        self.context
             .clone()
             .spawn(|_| self.run(voter, sender, receiver))
     }
@@ -327,13 +327,13 @@ impl<
 
             // Set timeout for retry
             let retry = match self.retry {
-                Some(retry) => Either::Left(self.runtime.sleep_until(retry)),
+                Some(retry) => Either::Left(self.context.sleep_until(retry)),
                 None => Either::Right(futures::future::pending()),
             };
 
             // Set timeout for next request
             let (request, timeout) = if let Some((request, timeout)) = self.requester.next() {
-                (request, Either::Left(self.runtime.sleep_until(timeout)))
+                (request, Either::Left(self.context.sleep_until(timeout)))
             } else {
                 (0, Either::Right(futures::future::pending()))
             };

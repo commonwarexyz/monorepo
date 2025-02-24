@@ -29,7 +29,7 @@ pub struct Actor<
     E: Spawner + Clock + ReasonablyRealtime + Network<L, Si, St> + Rng + CryptoRng + Metrics,
     C: Scheme,
 > {
-    runtime: E,
+    context: E,
 
     address: SocketAddr,
     stream_cfg: StreamConfig<C>,
@@ -50,23 +50,23 @@ impl<
         C: Scheme,
     > Actor<Si, St, L, E, C>
 {
-    pub fn new(runtime: E, cfg: Config<C>) -> Self {
+    pub fn new(context: E, cfg: Config<C>) -> Self {
         // Create metrics
         let handshakes_rate_limited = Counter::default();
-        runtime.register(
+        context.register(
             "handshake_rate_limited",
             "number of handshakes rate limited",
             handshakes_rate_limited.clone(),
         );
 
         Self {
-            runtime: runtime.clone(),
+            context: context.clone(),
 
             address: cfg.address,
             stream_cfg: cfg.stream_cfg,
             rate_limiter: RateLimiter::direct_with_clock(
                 cfg.allowed_incoming_connection_rate,
-                &runtime,
+                &context,
             ),
 
             handshakes_rate_limited,
@@ -78,7 +78,7 @@ impl<
     }
 
     async fn handshake(
-        runtime: E,
+        context: E,
         stream_cfg: StreamConfig<C>,
         sink: Si,
         stream: St,
@@ -89,7 +89,7 @@ impl<
         //
         // IncomingConnection limits how long we will wait for the peer to send us their public key
         // to ensure an adversary can't force us to hold many pending connections open.
-        let incoming = match IncomingConnection::verify(&runtime, stream_cfg, sink, stream).await {
+        let incoming = match IncomingConnection::verify(&context, stream_cfg, sink, stream).await {
             Ok(partial) => partial,
             Err(e) => {
                 debug!(error = ?e, "failed to verify incoming handshake");
@@ -110,7 +110,7 @@ impl<
         };
 
         // Perform handshake
-        let stream = match Connection::upgrade_listener(runtime, incoming).await {
+        let stream = match Connection::upgrade_listener(context, incoming).await {
             Ok(connection) => connection,
             Err(e) => {
                 debug!(error = ?e, ?peer, "failed to upgrade connection");
@@ -128,7 +128,7 @@ impl<
         tracker: tracker::Mailbox<E, C::PublicKey>,
         supervisor: spawner::Mailbox<E, Si, St, C::PublicKey>,
     ) -> Handle<()> {
-        self.runtime
+        self.context
             .clone()
             .spawn(|_| self.run(tracker, supervisor))
     }
@@ -140,7 +140,7 @@ impl<
     ) {
         // Start listening for incoming connections
         let mut listener = self
-            .runtime
+            .context
             .bind(self.address)
             .await
             .expect("failed to bind listener");
@@ -152,8 +152,8 @@ impl<
                 Ok(_) => {}
                 Err(negative) => {
                     self.handshakes_rate_limited.inc();
-                    let wait = negative.wait_time_from(self.runtime.now());
-                    self.runtime.sleep(wait).await;
+                    let wait = negative.wait_time_from(self.context.now());
+                    self.context.sleep(wait).await;
                 }
             }
 
@@ -168,12 +168,12 @@ impl<
             debug!(ip = ?address.ip(), port = ?address.port(), "accepted incoming connection");
 
             // Spawn a new handshaker to upgrade connection
-            self.runtime.with_label("handshaker").spawn({
+            self.context.with_label("handshaker").spawn({
                 let stream_cfg = self.stream_cfg.clone();
                 let tracker = tracker.clone();
                 let supervisor = supervisor.clone();
-                move |runtime| {
-                    Self::handshake(runtime, stream_cfg, sink, stream, tracker, supervisor)
+                move |context| {
+                    Self::handshake(context, stream_cfg, sink, stream, tracker, supervisor)
                 }
             });
         }

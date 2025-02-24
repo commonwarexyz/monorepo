@@ -24,7 +24,7 @@ const GENESIS: &[u8] = b"commonware is neat";
 
 /// Application actor.
 pub struct Application<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> {
-    runtime: R,
+    context: R,
     indexer: Connection<Si, St>,
     prover: Prover<H::Digest>,
     other_prover: Prover<H::Digest>,
@@ -37,13 +37,13 @@ pub struct Application<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> {
 impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St> {
     /// Create a new application actor.
     pub fn new<P: Array>(
-        runtime: R,
+        context: R,
         config: Config<H, Si, St, P>,
     ) -> (Self, Supervisor<P>, Mailbox<H::Digest>) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
         (
             Self {
-                runtime,
+                context,
                 indexer: config.indexer,
                 prover: config.prover,
                 other_prover: config.other_prover,
@@ -71,11 +71,11 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                 }
                 Message::Propose { index, response } => {
                     // Either propose a random message (prefix=0) or include a consensus certificate (prefix=1)
-                    let msg = match self.runtime.gen_bool(0.5) {
+                    let msg = match self.context.gen_bool(0.5) {
                         true => {
                             // Generate a random message
                             let mut msg = vec![0; 17];
-                            self.runtime.fill(&mut msg[1..]);
+                            self.context.fill(&mut msg[1..]);
                             msg
                         }
                         false => {

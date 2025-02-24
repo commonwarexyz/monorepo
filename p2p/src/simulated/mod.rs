@@ -29,11 +29,11 @@
 //!     max_size: 1024 * 1024, // 1MB
 //! };
 //!
-//! // Start runtime
-//! let (executor, runtime, _) = Executor::seeded(0);
+//! // Start context
+//! let (executor, context, _) = Executor::seeded(0);
 //! executor.start(async move {
 //!     // Initialize network
-//!     let (network, mut oracle) = Network::new(runtime.with_label("network"), p2p_cfg);
+//!     let (network, mut oracle) = Network::new(context.with_label("network"), p2p_cfg);
 //!
 //!     // Start network
 //!     let network_handler = network.start();
@@ -135,11 +135,11 @@ mod tests {
     };
 
     fn simulate_messages(seed: u64, size: usize) -> (String, Vec<usize>) {
-        let (executor, runtime, auditor) = Executor::seeded(seed);
+        let (executor, context, auditor) = Executor::seeded(seed);
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.with_label("network"),
+                context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                 },
@@ -156,7 +156,7 @@ mod tests {
                 let (sender, mut receiver) = oracle.register(pk.clone(), 0).await.unwrap();
                 agents.insert(pk, sender);
                 let mut agent_sender = seen_sender.clone();
-                runtime
+                context
                     .with_label("agent_receiver")
                     .spawn(move |_| async move {
                         for _ in 0..size {
@@ -196,15 +196,15 @@ mod tests {
             }
 
             // Send messages
-            runtime
+            context
                 .with_label("agent_sender")
-                .spawn(|mut runtime| async move {
+                .spawn(|mut context| async move {
                     // Sort agents for deterministic output
                     let keys = agents.keys().collect::<Vec<_>>();
 
                     // Send messages
                     loop {
-                        let index = runtime.gen_range(0..keys.len());
+                        let index = context.gen_range(0..keys.len());
                         let sender = keys[index];
                         let msg = format!("hello from {:?}", sender);
                         let msg = Bytes::from(msg);
@@ -251,11 +251,11 @@ mod tests {
 
     #[test]
     fn test_message_too_big() {
-        let (executor, mut runtime, _) = Executor::default();
+        let (executor, mut context, _) = Executor::default();
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.with_label("network"),
+                context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                 },
@@ -274,11 +274,11 @@ mod tests {
 
             // Send invalid message
             let keys = agents.keys().collect::<Vec<_>>();
-            let index = runtime.gen_range(0..keys.len());
+            let index = context.gen_range(0..keys.len());
             let sender = keys[index];
             let mut message_sender = agents.get(sender).unwrap().clone();
             let mut msg = vec![0u8; 1024 * 1024 + 1];
-            runtime.fill(&mut msg[..]);
+            context.fill(&mut msg[..]);
             let result = message_sender
                 .send(Recipients::All, msg.into(), false)
                 .await
@@ -291,11 +291,11 @@ mod tests {
 
     #[test]
     fn test_linking_self() {
-        let (executor, runtime, _) = Executor::default();
+        let (executor, context, _) = Executor::default();
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.with_label("network"),
+                context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                 },
@@ -328,11 +328,11 @@ mod tests {
 
     #[test]
     fn test_duplicate_channel() {
-        let (executor, runtime, _) = Executor::default();
+        let (executor, context, _) = Executor::default();
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.with_label("network"),
+                context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                 },
@@ -353,11 +353,11 @@ mod tests {
 
     #[test]
     fn test_invalid_success_rate() {
-        let (executor, runtime, _) = Executor::default();
+        let (executor, context, _) = Executor::default();
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.with_label("network"),
+                context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                 },
@@ -392,11 +392,11 @@ mod tests {
 
     #[test]
     fn test_invalid_behavior() {
-        let (executor, runtime, _) = Executor::default();
+        let (executor, context, _) = Executor::default();
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.with_label("network"),
+                context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                 },
@@ -447,11 +447,11 @@ mod tests {
 
     #[test]
     fn test_simple_message_delivery() {
-        let (executor, runtime, _) = Executor::default();
+        let (executor, context, _) = Executor::default();
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.with_label("network"),
+                context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                 },
@@ -520,11 +520,11 @@ mod tests {
 
     #[test]
     fn test_send_wrong_channel() {
-        let (executor, runtime, _) = Executor::default();
+        let (executor, context, _) = Executor::default();
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.with_label("network"),
+                context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                 },
@@ -565,18 +565,18 @@ mod tests {
                 _ = receiver2.recv() => {
                     panic!("unexpected message");
                 },
-                _ = runtime.sleep(Duration::from_secs(1)) => {},
+                _ = context.sleep(Duration::from_secs(1)) => {},
             }
         });
     }
 
     #[test]
     fn test_dynamic_peers() {
-        let (executor, runtime, _) = Executor::default();
+        let (executor, context, _) = Executor::default();
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.with_label("network"),
+                context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                 },
@@ -641,11 +641,11 @@ mod tests {
 
     #[test]
     fn test_dynamic_links() {
-        let (executor, runtime, _) = Executor::default();
+        let (executor, context, _) = Executor::default();
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.with_label("network"),
+                context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                 },
@@ -680,7 +680,7 @@ mod tests {
                 _ = receiver2.recv() => {
                     panic!("unexpected message");
                 },
-                _ = runtime.sleep(Duration::from_secs(1)) => {},
+                _ = context.sleep(Duration::from_secs(1)) => {},
             }
 
             // Link agents
@@ -753,7 +753,7 @@ mod tests {
                 _ = receiver2.recv() => {
                     panic!("unexpected message");
                 },
-                _ = runtime.sleep(Duration::from_secs(1)) => {},
+                _ = context.sleep(Duration::from_secs(1)) => {},
             }
 
             // Remove non-existent links

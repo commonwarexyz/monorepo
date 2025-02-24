@@ -142,12 +142,12 @@ fn main() {
         .get_one::<String>("storage-dir")
         .expect("Please provide storage directory");
 
-    // Initialize runtime
+    // Initialize context
     let runtime_cfg = tokio::Config {
         storage_directory: storage_directory.into(),
         ..Default::default()
     };
-    let (executor, runtime) = Executor::init(runtime_cfg.clone());
+    let (executor, context) = Executor::init(runtime_cfg.clone());
 
     // Configure network
     let p2p_cfg = authenticated::Config::aggressive(
@@ -158,10 +158,10 @@ fn main() {
         1024 * 1024, // 1MB
     );
 
-    // Start runtime
+    // Start context
     executor.start(async move {
         // Initialize network
-        let (mut network, mut oracle) = Network::new(runtime.with_label("network"), p2p_cfg);
+        let (mut network, mut oracle) = Network::new(context.with_label("network"), p2p_cfg);
 
         // Provide authorized peers
         //
@@ -188,7 +188,7 @@ fn main() {
 
         // Initialize storage
         let journal = Journal::init(
-            runtime.with_label("journal"),
+            context.with_label("journal"),
             Config {
                 partition: String::from("log"),
             },
@@ -200,7 +200,7 @@ fn main() {
         let namespace = union(APPLICATION_NAMESPACE, b"_CONSENSUS");
         let prover: Prover<Ed25519, Sha256Digest> = Prover::new(&namespace);
         let (application, supervisor, mailbox) = application::Application::new(
-            runtime.with_label("application"),
+            context.with_label("application"),
             application::Config {
                 prover,
                 hasher: Sha256::default(),
@@ -211,7 +211,7 @@ fn main() {
 
         // Initialize consensus
         let engine = Engine::new(
-            runtime.with_label("engine"),
+            context.with_label("engine"),
             journal,
             simplex::Config {
                 crypto: signer.clone(),
@@ -243,7 +243,7 @@ fn main() {
         );
 
         // Block on GUI
-        let gui = gui::Gui::new(runtime.with_label("gui"));
+        let gui = gui::Gui::new(context.with_label("gui"));
         gui.run().await;
     });
 }

@@ -9,7 +9,7 @@
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, deterministic::Executor, Metrics};
 //!
-//! let (executor, runtime, auditor) = Executor::default();
+//! let (executor, context, auditor) = Executor::default();
 //! executor.start(async move {
 //!     println!("Parent started");
 //!     let result = runtime.with_label("child").spawn(|_| async move {
@@ -1369,8 +1369,8 @@ mod tests {
     use futures::task::noop_waker;
 
     fn run_with_seed(seed: u64) -> (String, Vec<usize>) {
-        let (executor, runtime, auditor) = Executor::seeded(seed);
-        let messages = run_tasks(5, executor, runtime);
+        let (executor, context, auditor) = Executor::seeded(seed);
+        let messages = run_tasks(5, executor, context);
         (auditor.state(), messages)
     }
 
@@ -1443,10 +1443,10 @@ mod tests {
     #[test]
     #[should_panic(expected = "runtime timeout")]
     fn test_timeout() {
-        let (executor, runtime, _) = Executor::timed(Duration::from_secs(10));
+        let (executor, context, _) = Executor::timed(Duration::from_secs(10));
         executor.start(async move {
             loop {
-                runtime.sleep(Duration::from_secs(1)).await;
+                context.sleep(Duration::from_secs(1)).await;
             }
         });
     }

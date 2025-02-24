@@ -32,7 +32,7 @@ pub struct Actor<
     E: Spawner + Clock + GClock + Network<L, Si, St> + Metrics,
     C: Scheme,
 > {
-    runtime: E,
+    context: E,
 
     stream_cfg: StreamConfig<C>,
     dial_frequency: Duration,
@@ -54,18 +54,18 @@ impl<
         C: Scheme,
     > Actor<Si, St, L, E, C>
 {
-    pub fn new(runtime: E, cfg: Config<C>) -> Self {
+    pub fn new(context: E, cfg: Config<C>) -> Self {
         let dial_attempts = Family::<metrics::Peer, Counter>::default();
-        runtime.register(
+        context.register(
             "dial_attempts",
             "number of dial attempts",
             dial_attempts.clone(),
         );
         Self {
-            runtime: runtime.clone(),
+            context: context.clone(),
             stream_cfg: cfg.stream_cfg,
             dial_frequency: cfg.dial_frequency,
-            dial_limiter: RateLimiter::direct_with_clock(cfg.dial_rate, &runtime),
+            dial_limiter: RateLimiter::direct_with_clock(cfg.dial_rate, &context),
             dial_attempts,
             _phantom_si: PhantomData,
             _phantom_st: PhantomData,
@@ -90,12 +90,12 @@ impl<
                 .inc();
 
             // Spawn dialer to connect to peer
-            self.runtime.with_label("dialer").spawn({
+            self.context.with_label("dialer").spawn({
                 let config = self.stream_cfg.clone();
                 let mut supervisor = supervisor.clone();
-                move |runtime| async move {
+                move |context| async move {
                     // Attempt to dial peer
-                    let (sink, stream) = match runtime.dial(address).await {
+                    let (sink, stream) = match context.dial(address).await {
                         Ok(stream) => stream,
                         Err(e) => {
                             debug!(?peer, error = ?e, "failed to dial peer");
@@ -106,7 +106,7 @@ impl<
 
                     // Upgrade connection
                     let instance = match Connection::upgrade_dialer(
-                        runtime,
+                        context,
                         config,
                         sink,
                         stream,
@@ -134,7 +134,7 @@ impl<
         tracker: tracker::Mailbox<E, C::PublicKey>,
         supervisor: spawner::Mailbox<E, Si, St, C::PublicKey>,
     ) -> Handle<()> {
-        self.runtime
+        self.context
             .clone()
             .spawn(|_| self.run(tracker, supervisor))
     }
@@ -150,9 +150,9 @@ impl<
 
             // Sleep for a random amount of time up to the dial frequency
             let wait = self
-                .runtime
+                .context
                 .gen_range(Duration::default()..self.dial_frequency);
-            self.runtime.sleep(wait).await;
+            self.context.sleep(wait).await;
         }
     }
 }

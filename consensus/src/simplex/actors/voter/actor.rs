@@ -463,7 +463,7 @@ pub struct Actor<
     F: Committer<Digest = D>,
     S: Supervisor<Index = View, PublicKey = C::PublicKey>,
 > {
-    runtime: E,
+    context: E,
     crypto: C,
     automaton: A,
     relay: R,
@@ -508,7 +508,7 @@ impl<
     > Actor<B, E, C, D, A, R, F, S>
 {
     pub fn new(
-        runtime: E,
+        context: E,
         journal: Journal<B, E>,
         cfg: Config<C, D, A, R, F, S>,
     ) -> (Self, Mailbox<D>) {
@@ -522,14 +522,14 @@ impl<
         let tracked_views = Gauge::<i64, AtomicI64>::default();
         let received_messages = Family::<metrics::PeerMessage, Counter>::default();
         let broadcast_messages = Family::<metrics::Message, Counter>::default();
-        runtime.register("current_view", "current view", current_view.clone());
-        runtime.register("tracked_views", "tracked views", tracked_views.clone());
-        runtime.register(
+        context.register("current_view", "current view", current_view.clone());
+        context.register("tracked_views", "tracked views", tracked_views.clone());
+        context.register(
             "received_messages",
             "received messages",
             received_messages.clone(),
         );
-        runtime.register(
+        context.register(
             "broadcast_messages",
             "broadcast messages",
             broadcast_messages.clone(),
@@ -540,7 +540,7 @@ impl<
         let mailbox = Mailbox::new(mailbox_sender);
         (
             Self {
-                runtime,
+                context,
                 crypto: cfg.crypto,
                 automaton: cfg.automaton,
                 relay: cfg.relay,
@@ -725,7 +725,7 @@ impl<
         }
 
         // Set nullify retry, if none already set
-        let null_retry = self.runtime.current() + self.nullify_retry;
+        let null_retry = self.context.current() + self.nullify_retry;
         view.nullify_retry = Some(null_retry);
         null_retry
     }
@@ -1063,8 +1063,8 @@ impl<
             .views
             .entry(view)
             .or_insert_with(|| Round::new(self.supervisor.clone(), view));
-        round.leader_deadline = Some(self.runtime.current() + self.leader_timeout);
-        round.advance_deadline = Some(self.runtime.current() + self.notarization_timeout);
+        round.leader_deadline = Some(self.context.current() + self.leader_timeout);
+        round.advance_deadline = Some(self.context.current() + self.notarization_timeout);
         self.view = view;
         info!(view, "entered view");
 
@@ -1100,7 +1100,7 @@ impl<
 
         // Reduce leader deadline to now
         debug!(view, ?leader, "skipping leader timeout due to inactivity");
-        self.views.get_mut(&view).unwrap().leader_deadline = Some(self.runtime.current());
+        self.views.get_mut(&view).unwrap().leader_deadline = Some(self.context.current());
     }
 
     fn interesting(&self, view: View, allow_future: bool) -> bool {
@@ -2028,7 +2028,7 @@ impl<
         sender: impl Sender,
         receiver: impl Receiver,
     ) -> Handle<()> {
-        self.runtime
+        self.context
             .clone()
             .spawn(|_| self.run(backfiller, sender, receiver))
     }
@@ -2166,14 +2166,14 @@ impl<
         self.enter_view(observed_view);
         {
             let round = self.views.get_mut(&observed_view).expect("missing round");
-            round.leader_deadline = Some(self.runtime.current());
-            round.advance_deadline = Some(self.runtime.current());
+            round.leader_deadline = Some(self.context.current());
+            round.advance_deadline = Some(self.context.current());
         }
         self.current_view.set(observed_view as i64);
         self.tracked_views.set(self.views.len() as i64);
 
         // Create shutdown tracker
-        let mut shutdown = self.runtime.stopped();
+        let mut shutdown = self.context.stopped();
 
         // Process messages
         let mut pending_propose_context = None;
@@ -2215,7 +2215,7 @@ impl<
                         .expect("unable to close journal");
                     return;
                 },
-                _ = self.runtime.sleep_until(timeout) => {
+                _ = self.context.sleep_until(timeout) => {
                     // Trigger the timeout
                     self.timeout(&mut sender).await;
                     view = self.view;

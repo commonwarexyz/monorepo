@@ -134,14 +134,14 @@ impl<E: Spawner + Metrics, P: Array> Oracle<E, P> {
 }
 
 pub struct Reservation<E: Spawner + Metrics, P: Array> {
-    runtime: E,
+    context: E,
     closer: Option<(P, Mailbox<E, P>)>,
 }
 
 impl<E: Spawner + Metrics, P: Array> Reservation<E, P> {
-    pub fn new(runtime: E, peer: P, mailbox: Mailbox<E, P>) -> Self {
+    pub fn new(context: E, peer: P, mailbox: Mailbox<E, P>) -> Self {
         Self {
-            runtime,
+            context,
             closer: Some((peer, mailbox)),
         }
     }
@@ -150,7 +150,7 @@ impl<E: Spawner + Metrics, P: Array> Reservation<E, P> {
 impl<E: Spawner + Metrics, P: Array> Drop for Reservation<E, P> {
     fn drop(&mut self) {
         let (peer, mut mailbox) = self.closer.take().unwrap();
-        self.runtime
+        self.context
             .clone()
             .with_label("reservation")
             .spawn(move |_| async move {

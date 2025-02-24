@@ -98,9 +98,9 @@ use tracing::info;
 const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_VRF_";
 
 fn main() {
-    // Initialize runtime
+    // Initialize context
     let runtime_cfg = tokio::Config::default();
-    let (executor, runtime) = Executor::init(runtime_cfg.clone());
+    let (executor, context) = Executor::init(runtime_cfg.clone());
 
     // Parse arguments
     let matches = Command::new("commonware-vrf")
@@ -218,9 +218,9 @@ fn main() {
         MAX_MESSAGE_SIZE,
     );
 
-    // Start runtime
+    // Start context
     executor.start(async move {
-        let (mut network, mut oracle) = Network::new(runtime.with_label("network"), p2p_cfg);
+        let (mut network, mut oracle) = Network::new(context.with_label("network"), p2p_cfg);
 
         // Provide authorized peers
         //
@@ -265,7 +265,7 @@ fn main() {
             );
             let arbiter = Ed25519::from_seed(*arbiter).public_key();
             let (contributor, requests) = handlers::Contributor::new(
-                runtime.with_label("contributor"),
+                context.with_label("contributor"),
                 signer,
                 DKG_PHASE_TIMEOUT,
                 arbiter,
@@ -284,7 +284,7 @@ fn main() {
                 None,
             );
             let signer = handlers::Vrf::new(
-                runtime.with_label("signer"),
+                context.with_label("signer"),
                 Duration::from_secs(5),
                 threshold,
                 contributors,
@@ -299,7 +299,7 @@ fn main() {
                 COMPRESSION_LEVEL,
             );
             let arbiter: handlers::Arbiter<_, Ed25519> = handlers::Arbiter::new(
-                runtime.with_label("arbiter"),
+                context.with_label("arbiter"),
                 DKG_FREQUENCY,
                 DKG_PHASE_TIMEOUT,
                 contributors,

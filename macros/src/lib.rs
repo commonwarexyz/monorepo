@@ -12,7 +12,7 @@ use syn::{
 /// Run a test function asynchronously.
 ///
 /// This macro is powered by the [futures](https://docs.rs/futures) crate
-/// and is not bound to a particular executor or runtime.
+/// and is not bound to a particular executor or context.
 ///
 /// # Example
 /// ```rust
@@ -171,7 +171,7 @@ impl Parse for SelectInput {
 /// Select the first future that completes (biased by order).
 ///
 /// This macro is powered by the [futures](https://docs.rs/futures) crate
-/// and is not bound to a particular executor or runtime.
+/// and is not bound to a particular executor or context.
 ///
 /// # Fusing
 ///

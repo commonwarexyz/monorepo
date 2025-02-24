@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use tracing::debug;
 
 pub struct Actor<E: Spawner + Metrics, P: Array> {
-    runtime: E,
+    context: E,
 
     control: mpsc::Receiver<Message<P>>,
     connections: BTreeMap<P, peer::Relay>,
@@ -24,13 +24,13 @@ pub struct Actor<E: Spawner + Metrics, P: Array> {
 }
 
 impl<E: Spawner + Metrics, P: Array> Actor<E, P> {
-    pub fn new(runtime: E, cfg: Config) -> (Self, Mailbox<P>, Messenger<P>) {
+    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<P>, Messenger<P>) {
         // Create mailbox
         let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
 
         // Create metrics
         let messages_dropped = Family::<metrics::Message, Counter>::default();
-        runtime.register(
+        context.register(
             "messages_dropped",
             "messages dropped",
             messages_dropped.clone(),
@@ -39,7 +39,7 @@ impl<E: Spawner + Metrics, P: Array> Actor<E, P> {
         // Create actor
         (
             Self {
-                runtime,
+                context,
                 control: control_receiver,
                 connections: BTreeMap::new(),
                 messages_dropped,
@@ -77,7 +77,7 @@ impl<E: Spawner + Metrics, P: Array> Actor<E, P> {
     }
 
     pub fn start(self, routing: Channels<P>) -> Handle<()> {
-        self.runtime.clone().spawn(|_| self.run(routing))
+        self.context.clone().spawn(|_| self.run(routing))
     }
 
     async fn run(mut self, routing: Channels<P>) {

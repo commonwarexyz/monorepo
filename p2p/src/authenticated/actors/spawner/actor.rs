@@ -21,7 +21,7 @@ pub struct Actor<
     St: Stream,
     P: Array,
 > {
-    runtime: E,
+    context: E,
 
     mailbox_size: usize,
     gossip_bit_vec_frequency: Duration,
@@ -42,17 +42,17 @@ impl<
         P: Array,
     > Actor<E, Si, St, P>
 {
-    pub fn new(runtime: E, cfg: Config) -> (Self, Mailbox<E, Si, St, P>) {
+    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<E, Si, St, P>) {
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();
         let rate_limited = Family::<metrics::Message, Counter>::default();
-        runtime.register("messages_sent", "messages sent", sent_messages.clone());
-        runtime.register(
+        context.register("messages_sent", "messages sent", sent_messages.clone());
+        context.register(
             "messages_received",
             "messages received",
             received_messages.clone(),
         );
-        runtime.register(
+        context.register(
             "messages_rate_limited",
             "messages rate limited",
             rate_limited.clone(),
@@ -61,7 +61,7 @@ impl<
 
         (
             Self {
-                runtime,
+                context,
                 mailbox_size: cfg.mailbox_size,
                 gossip_bit_vec_frequency: cfg.gossip_bit_vec_frequency,
                 allowed_bit_vec_rate: cfg.allowed_bit_vec_rate,
@@ -76,7 +76,7 @@ impl<
     }
 
     pub fn start(self, tracker: tracker::Mailbox<E, P>, router: router::Mailbox<P>) -> Handle<()> {
-        self.runtime.clone().spawn(|_| self.run(tracker, router))
+        self.context.clone().spawn(|_| self.run(tracker, router))
     }
 
     async fn run(mut self, tracker: tracker::Mailbox<E, P>, router: router::Mailbox<P>) {
@@ -95,14 +95,14 @@ impl<
                     let mut router = router.clone();
 
                     // Spawn peer
-                    self.runtime
+                    self.context
                         .clone()
                         .with_label("peer")
-                        .spawn(move |runtime| async move {
+                        .spawn(move |context| async move {
                             // Create peer
                             info!(?peer, "peer started");
                             let (actor, messenger) = peer::Actor::new(
-                                runtime,
+                                context,
                                 peer::Config {
                                     sent_messages,
                                     received_messages,

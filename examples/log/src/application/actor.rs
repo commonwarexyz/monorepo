@@ -16,7 +16,7 @@ const GENESIS: &[u8] = b"commonware is neat";
 
 /// Application actor.
 pub struct Application<R: Rng + Spawner, C: Scheme, H: Hasher> {
-    runtime: R,
+    context: R,
     prover: Prover<C, H::Digest>,
     hasher: H,
     mailbox: mpsc::Receiver<Message<H::Digest>>,
@@ -25,13 +25,13 @@ pub struct Application<R: Rng + Spawner, C: Scheme, H: Hasher> {
 impl<R: Rng + Spawner, C: Scheme, H: Hasher> Application<R, C, H> {
     /// Create a new application actor.
     pub fn new(
-        runtime: R,
+        context: R,
         config: Config<C, H>,
     ) -> (Self, Supervisor<C::PublicKey>, Mailbox<H::Digest>) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
         (
             Self {
-                runtime,
+                context,
                 prover: config.prover,
                 hasher: config.hasher,
                 mailbox,
@@ -43,7 +43,7 @@ impl<R: Rng + Spawner, C: Scheme, H: Hasher> Application<R, C, H> {
 
     /// Run the application actor.
     pub fn start(self) -> Handle<()> {
-        self.runtime.clone().spawn(|_| self.run())
+        self.context.clone().spawn(|_| self.run())
     }
 
     async fn run(mut self) {
@@ -63,7 +63,7 @@ impl<R: Rng + Spawner, C: Scheme, H: Hasher> Application<R, C, H> {
                 Message::Propose { response } => {
                     // Generate a random message (secret to us)
                     let mut msg = vec![0; 16];
-                    self.runtime.fill(&mut msg[..]);
+                    self.context.fill(&mut msg[..]);
 
                     // Hash the message
                     self.hasher.update(&msg);

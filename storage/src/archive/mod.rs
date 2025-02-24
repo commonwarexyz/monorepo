@@ -231,7 +231,7 @@ mod tests {
     const DEFAULT_SECTION_MASK: u64 = 0xffff_ffff_ffff_0000u64;
 
     fn test_archive_put_get(compression: Option<u8>) {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
         executor.start(async move {
             // Initialize an empty journal
@@ -338,7 +338,7 @@ mod tests {
 
     #[test_traced]
     fn test_archive_compression_then_none() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
         executor.start(async move {
             // Initialize an empty journal
@@ -415,7 +415,7 @@ mod tests {
 
     #[test_traced]
     fn test_archive_invalid_key_length() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
         executor.start(async move {
             // Initialize an empty journal
@@ -467,7 +467,7 @@ mod tests {
 
     #[test_traced]
     fn test_archive_record_corruption() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
         executor.start(async move {
             // Initialize an empty journal
@@ -551,7 +551,7 @@ mod tests {
 
     #[test_traced]
     fn test_archive_duplicate_key() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
         executor.start(async move {
             // Initialize an empty journal
@@ -616,7 +616,7 @@ mod tests {
 
     #[test_traced]
     fn test_archive_get_nonexistent() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
         executor.start(async move {
             // Initialize an empty journal
@@ -668,7 +668,7 @@ mod tests {
 
     #[test_traced]
     fn test_archive_overlapping_key() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
         executor.start(async move {
             // Initialize an empty journal
@@ -739,7 +739,7 @@ mod tests {
 
     #[test_traced]
     fn test_archive_overlapping_key_multiple_sections() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
         executor.start(async move {
             // Initialize an empty journal
@@ -804,7 +804,7 @@ mod tests {
 
     #[test_traced]
     fn test_archive_prune_keys() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
         executor.start(async move {
             // Initialize an empty journal
@@ -899,7 +899,7 @@ mod tests {
     }
 
     fn test_archive_keys_and_restart(num_keys: usize) -> String {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, mut context, auditor) = Executor::default();
         executor.start(async move {
             // Initialize an empty journal
@@ -1064,7 +1064,7 @@ mod tests {
 
     #[test_traced]
     fn test_ranges() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
         executor.start(async move {
             // Initialize an empty journal

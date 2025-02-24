@@ -279,18 +279,18 @@ mod tests {
 
     #[test_traced]
     fn test_all_online() {
-        // Create runtime
+        // Create context
         let n = 5;
         let threshold = quorum(n).expect("unable to calculate threshold");
         let max_exceptions = 4;
         let required_containers = 100;
         let activity_timeout = 10;
         let namespace = b"consensus".to_vec();
-        let (executor, runtime, _) = Executor::timed(Duration::from_secs(30));
+        let (executor, context, _) = Executor::timed(Duration::from_secs(30));
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.with_label("network"),
+                context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                 },
@@ -328,8 +328,8 @@ mod tests {
             let (done_sender, mut done_receiver) = mpsc::unbounded();
             let mut engine_handlers = Vec::new();
             for scheme in schemes.into_iter() {
-                // Create scheme runtime
-                let runtime = runtime.with_label(&format!("validator-{}", scheme.public_key()));
+                // Create scheme context
+                let context = context.with_label(&format!("validator-{}", scheme.public_key()));
 
                 // Start engine
                 let validator = scheme.public_key();
@@ -349,14 +349,14 @@ mod tests {
                     verify_latency: (10.0, 5.0),
                 };
                 let (actor, application) = mocks::application::Application::new(
-                    runtime.with_label("application"),
+                    context.with_label("application"),
                     application_cfg,
                 );
                 actor.start();
                 let cfg = JConfig {
                     partition: validator.to_string(),
                 };
-                let journal = Journal::init(runtime.with_label("journal"), cfg)
+                let journal = Journal::init(context.with_label("journal"), cfg)
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
@@ -378,7 +378,7 @@ mod tests {
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
                 };
-                let engine = Engine::new(runtime.with_label("engine"), journal, cfg);
+                let engine = Engine::new(context.with_label("engine"), journal, cfg);
                 let (voter, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
@@ -489,7 +489,7 @@ mod tests {
 
     #[test_traced]
     fn test_unclean_shutdown() {
-        // Create runtime
+        // Create context
         let n = 5;
         let required_containers = 100;
         let activity_timeout = 10;
@@ -501,7 +501,7 @@ mod tests {
         let finalized = Arc::new(Mutex::new(HashMap::new()));
         let completed = Arc::new(Mutex::new(HashSet::new()));
         let supervised = Arc::new(Mutex::new(Vec::new()));
-        let (mut executor, mut runtime, _) = Executor::timed(Duration::from_secs(30));
+        let (mut executor, mut context, _) = Executor::timed(Duration::from_secs(30));
         while completed.lock().unwrap().len() != n as usize {
             let namespace = namespace.clone();
             let shutdowns = shutdowns.clone();
@@ -510,11 +510,11 @@ mod tests {
             let completed = completed.clone();
             let supervised = supervised.clone();
             executor.start({
-                let mut runtime = runtime.clone();
+                let mut context = context.clone();
                 async move {
                 // Create simulated network
                 let (network, mut oracle) = Network::new(
-                    runtime.with_label("network"),
+                    context.with_label("network"),
                     Config {
                         max_size: 1024 * 1024,
                     },
@@ -552,8 +552,8 @@ mod tests {
                 let (done_sender, mut done_receiver) = mpsc::unbounded();
                 let mut engine_handlers = Vec::new();
                 for scheme in schemes.into_iter() {
-                    // Create scheme runtime
-                    let runtime = runtime
+                    // Create scheme context
+                    let context = context
                         .clone()
                         .with_label(&format!("validator-{}", scheme.public_key()));
 
@@ -575,12 +575,12 @@ mod tests {
                         verify_latency: (10.0, 5.0),
                     };
                     let (actor, application) =
-                        mocks::application::Application::new(runtime.with_label("application"), application_cfg);
+                        mocks::application::Application::new(context.with_label("application"), application_cfg);
                     actor.start();
                     let cfg = JConfig {
                         partition: validator.to_string(),
                     };
-                    let journal = Journal::init(runtime.with_label("journal"), cfg)
+                    let journal = Journal::init(context.with_label("journal"), cfg)
                         .await
                         .expect("unable to create journal");
                     let cfg = config::Config {
@@ -602,14 +602,14 @@ mod tests {
                         fetch_concurrent: 1,
                         replay_concurrency: 1,
                     };
-                    let engine = Engine::new(runtime.with_label("engine"), journal, cfg);
+                    let engine = Engine::new(context.with_label("engine"), journal, cfg);
                     let (voter_network, resolver_network) =
                         registrations.remove(&validator).expect("validator should be registered");
                     engine_handlers.push(engine.start(voter_network, resolver_network));
                 }
 
                 // Wait for all engines to finish
-                runtime.with_label("confirmed").spawn(move |_| async move {
+                context.with_label("confirmed").spawn(move |_| async move {
                     loop {
                         // Parse events
                         let (validator, event) = done_receiver.next().await.unwrap();
@@ -676,8 +676,8 @@ mod tests {
 
                 // Exit at random points for unclean shutdown of entire set
                 let wait =
-                    runtime.gen_range(Duration::from_millis(10)..Duration::from_millis(2_000));
-                runtime.sleep(wait).await;
+                    context.gen_range(Duration::from_millis(10)..Duration::from_millis(2_000));
+                context.sleep(wait).await;
                 {
                     let mut shutdowns = shutdowns.lock().unwrap();
                     debug!(shutdowns = *shutdowns, elapsed = ?wait, "restarting");
@@ -688,8 +688,8 @@ mod tests {
                 supervised.lock().unwrap().push(supervisors);
             }});
 
-            // Recover runtime
-            (executor, runtime, _) = runtime.recover();
+            // Recover context
+            (executor, context, _) = context.recover();
         }
 
         // Check supervisors for faults activity
@@ -704,16 +704,16 @@ mod tests {
 
     #[test_traced]
     fn test_backfill() {
-        // Create runtime
+        // Create context
         let n = 4;
         let required_containers = 100;
         let activity_timeout = 10;
         let namespace = b"consensus".to_vec();
-        let (executor, runtime, _) = Executor::timed(Duration::from_secs(360));
+        let (executor, context, _) = Executor::timed(Duration::from_secs(360));
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.with_label("network"),
+                context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                 },
@@ -762,8 +762,8 @@ mod tests {
                     continue;
                 }
 
-                // Create scheme runtime
-                let runtime = runtime.with_label(&format!("validator-{}", scheme.public_key()));
+                // Create scheme context
+                let context = context.with_label(&format!("validator-{}", scheme.public_key()));
 
                 // Start engine
                 let validator = scheme.public_key();
@@ -783,14 +783,14 @@ mod tests {
                     verify_latency: (10.0, 5.0),
                 };
                 let (actor, application) = mocks::application::Application::new(
-                    runtime.with_label("application"),
+                    context.with_label("application"),
                     application_cfg,
                 );
                 actor.start();
                 let cfg = JConfig {
                     partition: validator.to_string(),
                 };
-                let journal = Journal::init(runtime.with_label("journal"), cfg)
+                let journal = Journal::init(context.with_label("journal"), cfg)
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
@@ -815,7 +815,7 @@ mod tests {
                 let (voter, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                let engine = Engine::new(runtime.with_label("engine"), journal, cfg);
+                let engine = Engine::new(context.with_label("engine"), journal, cfg);
                 engine_handlers.push(engine.start(voter, resolver));
             }
 
@@ -859,7 +859,7 @@ mod tests {
             .await;
 
             // Wait for nullifications to accrue
-            runtime.sleep(Duration::from_secs(120)).await;
+            context.sleep(Duration::from_secs(120)).await;
 
             // Unlink second peer from all (except first)
             link_validators(
@@ -874,8 +874,8 @@ mod tests {
             let scheme = schemes[0].clone();
             let validator = scheme.public_key();
             {
-                // Create scheme runtime
-                let runtime = runtime.with_label(&format!("validator-{}", scheme.public_key()));
+                // Create scheme context
+                let context = context.with_label(&format!("validator-{}", scheme.public_key()));
 
                 // Link first peer to all (except second)
                 link_validators(
@@ -917,14 +917,14 @@ mod tests {
                     verify_latency: (10.0, 5.0),
                 };
                 let (actor, application) = mocks::application::Application::new(
-                    runtime.with_label("application"),
+                    context.with_label("application"),
                     application_cfg,
                 );
                 actor.start();
                 let cfg = JConfig {
                     partition: validator.to_string(),
                 };
-                let journal = Journal::init(runtime.with_label("journal"), cfg)
+                let journal = Journal::init(context.with_label("journal"), cfg)
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
@@ -949,7 +949,7 @@ mod tests {
                 let (voter, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                let engine = Engine::new(runtime.with_label("engine"), journal, cfg);
+                let engine = Engine::new(context.with_label("engine"), journal, cfg);
                 engine_handlers.push(engine.start(voter, resolver));
             }
 
@@ -988,16 +988,16 @@ mod tests {
 
     #[test_traced]
     fn test_one_offline() {
-        // Create runtime
+        // Create context
         let n = 5;
         let required_containers = 100;
         let activity_timeout = 10;
         let namespace = b"consensus".to_vec();
-        let (executor, runtime, _) = Executor::timed(Duration::from_secs(30));
+        let (executor, context, _) = Executor::timed(Duration::from_secs(30));
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.with_label("network"),
+                context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                 },
@@ -1046,8 +1046,8 @@ mod tests {
                     continue;
                 }
 
-                // Create scheme runtime
-                let runtime = runtime.with_label(&format!("validator-{}", scheme.public_key()));
+                // Create scheme context
+                let context = context.with_label(&format!("validator-{}", scheme.public_key()));
 
                 // Start engine
                 let validator = scheme.public_key();
@@ -1067,14 +1067,14 @@ mod tests {
                     verify_latency: (10.0, 5.0),
                 };
                 let (actor, application) = mocks::application::Application::new(
-                    runtime.with_label("application"),
+                    context.with_label("application"),
                     application_cfg,
                 );
                 actor.start();
                 let cfg = JConfig {
                     partition: validator.to_string(),
                 };
-                let journal = Journal::init(runtime.with_label("journal"), cfg)
+                let journal = Journal::init(context.with_label("journal"), cfg)
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
@@ -1099,7 +1099,7 @@ mod tests {
                 let (voter, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                let engine = Engine::new(runtime.with_label("engine"), journal, cfg);
+                let engine = Engine::new(context.with_label("engine"), journal, cfg);
                 engine_handlers.push(engine.start(voter, resolver));
             }
 
@@ -1171,16 +1171,16 @@ mod tests {
 
     #[test_traced]
     fn test_slow_validator() {
-        // Create runtime
+        // Create context
         let n = 5;
         let required_containers = 50;
         let activity_timeout = 10;
         let namespace = b"consensus".to_vec();
-        let (executor, runtime, _) = Executor::timed(Duration::from_secs(30));
+        let (executor, context, _) = Executor::timed(Duration::from_secs(30));
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.with_label("network"),
+                context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                 },
@@ -1218,8 +1218,8 @@ mod tests {
             let (done_sender, mut done_receiver) = mpsc::unbounded();
             let mut engine_handlers = Vec::new();
             for (idx_scheme, scheme) in schemes.into_iter().enumerate() {
-                // Create scheme runtime
-                let runtime = runtime.with_label(&format!("validator-{}", scheme.public_key()));
+                // Create scheme context
+                let context = context.with_label(&format!("validator-{}", scheme.public_key()));
 
                 // Start engine
                 let validator = scheme.public_key();
@@ -1250,14 +1250,14 @@ mod tests {
                     }
                 };
                 let (actor, application) = mocks::application::Application::new(
-                    runtime.with_label("application"),
+                    context.with_label("application"),
                     application_cfg,
                 );
                 actor.start();
                 let cfg = JConfig {
                     partition: validator.to_string(),
                 };
-                let journal = Journal::init(runtime.with_label("journal"), cfg)
+                let journal = Journal::init(context.with_label("journal"), cfg)
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
@@ -1282,7 +1282,7 @@ mod tests {
                 let (voter, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                let engine = Engine::new(runtime.with_label("engine"), journal, cfg);
+                let engine = Engine::new(context.with_label("engine"), journal, cfg);
                 engine_handlers.push(engine.start(voter, resolver));
             }
 
@@ -1354,16 +1354,16 @@ mod tests {
 
     #[test_traced]
     fn test_all_recovery() {
-        // Create runtime
+        // Create context
         let n = 5;
         let required_containers = 100;
         let activity_timeout = 10;
         let namespace = b"consensus".to_vec();
-        let (executor, runtime, _) = Executor::timed(Duration::from_secs(120));
+        let (executor, context, _) = Executor::timed(Duration::from_secs(120));
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.with_label("network"),
+                context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                 },
@@ -1401,8 +1401,8 @@ mod tests {
             let (done_sender, mut done_receiver) = mpsc::unbounded();
             let mut engine_handlers = Vec::new();
             for scheme in schemes.iter() {
-                // Create scheme runtime
-                let runtime = runtime.with_label(&format!("validator-{}", scheme.public_key()));
+                // Create scheme context
+                let context = context.with_label(&format!("validator-{}", scheme.public_key()));
 
                 // Start engine
                 let validator = scheme.public_key();
@@ -1422,14 +1422,14 @@ mod tests {
                     verify_latency: (10.0, 5.0),
                 };
                 let (actor, application) = mocks::application::Application::new(
-                    runtime.with_label("application"),
+                    context.with_label("application"),
                     application_cfg,
                 );
                 actor.start();
                 let cfg = JConfig {
                     partition: validator.to_string(),
                 };
-                let journal = Journal::init(runtime.with_label("journal"), cfg)
+                let journal = Journal::init(context.with_label("journal"), cfg)
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
@@ -1454,13 +1454,13 @@ mod tests {
                 let (voter, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                let engine = Engine::new(runtime.with_label("engine"), journal, cfg);
+                let engine = Engine::new(context.with_label("engine"), journal, cfg);
                 engine_handlers.push(engine.start(voter, resolver));
             }
 
             // Wait for a few virtual minutes (shouldn't finalize anything)
             select! {
-                _timeout = runtime.sleep(Duration::from_secs(60)) => {},
+                _timeout = context.sleep(Duration::from_secs(60)) => {},
                 _done = done_receiver.next() => {
                     panic!("engine should not notarize or finalize anything");
                 }
@@ -1519,16 +1519,16 @@ mod tests {
 
     #[test_traced]
     fn test_partition() {
-        // Create runtime
+        // Create context
         let n = 10;
         let required_containers = 50;
         let activity_timeout = 10;
         let namespace = b"consensus".to_vec();
-        let (executor, runtime, _) = Executor::timed(Duration::from_secs(900));
+        let (executor, context, _) = Executor::timed(Duration::from_secs(900));
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.with_label("network"),
+                context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                 },
@@ -1584,14 +1584,14 @@ mod tests {
                     verify_latency: (10.0, 5.0),
                 };
                 let (actor, application) = mocks::application::Application::new(
-                    runtime.with_label("application"),
+                    context.with_label("application"),
                     application_cfg,
                 );
                 actor.start();
                 let cfg = JConfig {
                     partition: validator.to_string(),
                 };
-                let journal = Journal::init(runtime.with_label("journal"), cfg)
+                let journal = Journal::init(context.with_label("journal"), cfg)
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
@@ -1616,7 +1616,7 @@ mod tests {
                 let (voter, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                let engine = Engine::new(runtime.with_label("engine"), journal, cfg);
+                let engine = Engine::new(context.with_label("engine"), journal, cfg);
                 engine_handlers.push(engine.start(voter, resolver));
             }
 
@@ -1664,7 +1664,7 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Unlink, Some(separated)).await;
 
             // Wait for any in-progress notarizations/finalizations to finish
-            runtime.sleep(Duration::from_secs(10)).await;
+            context.sleep(Duration::from_secs(10)).await;
 
             // Empty done receiver
             loop {
@@ -1675,7 +1675,7 @@ mod tests {
 
             // Wait for a few virtual minutes (shouldn't finalize anything)
             select! {
-                _timeout = runtime.sleep(Duration::from_secs(600)) => {},
+                _timeout = context.sleep(Duration::from_secs(600)) => {},
                 _done = done_receiver.next() => {
                     panic!("engine should not notarize or finalize anything");
                 }
@@ -1733,7 +1733,7 @@ mod tests {
     }
 
     fn slow_and_lossy_links(seed: u64) -> String {
-        // Create runtime
+        // Create context
         let n = 5;
         let required_containers = 50;
         let activity_timeout = 10;
@@ -1743,11 +1743,11 @@ mod tests {
             timeout: Some(Duration::from_secs(3_000)),
             ..deterministic::Config::default()
         };
-        let (executor, runtime, auditor) = Executor::init(cfg);
+        let (executor, context, auditor) = Executor::init(cfg);
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.with_label("network"),
+                context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                 },
@@ -1785,8 +1785,8 @@ mod tests {
             let (done_sender, mut done_receiver) = mpsc::unbounded();
             let mut engine_handlers = Vec::new();
             for scheme in schemes.into_iter() {
-                // Create scheme runtime
-                let runtime = runtime.with_label(&format!("validator-{}", scheme.public_key()));
+                // Create scheme context
+                let context = context.with_label(&format!("validator-{}", scheme.public_key()));
 
                 // Start engine
                 let validator = scheme.public_key();
@@ -1806,14 +1806,14 @@ mod tests {
                     verify_latency: (10.0, 5.0),
                 };
                 let (actor, application) = mocks::application::Application::new(
-                    runtime.with_label("application"),
+                    context.with_label("application"),
                     application_cfg,
                 );
                 actor.start();
                 let cfg = JConfig {
                     partition: validator.to_string(),
                 };
-                let journal = Journal::init(runtime.with_label("journal"), cfg)
+                let journal = Journal::init(context.with_label("journal"), cfg)
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
@@ -1838,7 +1838,7 @@ mod tests {
                 let (voter, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                let engine = Engine::new(runtime.with_label("engine"), journal, cfg);
+                let engine = Engine::new(context.with_label("engine"), journal, cfg);
                 engine_handlers.push(engine.start(voter, resolver));
             }
 
@@ -1909,16 +1909,16 @@ mod tests {
 
     #[test_traced]
     fn test_conflicter() {
-        // Create runtime
+        // Create context
         let n = 4;
         let required_containers = 50;
         let activity_timeout = 10;
         let namespace = b"consensus".to_vec();
-        let (executor, runtime, _) = Executor::timed(Duration::from_secs(30));
+        let (executor, context, _) = Executor::timed(Duration::from_secs(30));
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.with_label("network"),
+                context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                 },
@@ -1955,8 +1955,8 @@ mod tests {
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
             for (idx_scheme, scheme) in schemes.into_iter().enumerate() {
-                // Create scheme runtime
-                let runtime = runtime.with_label(&format!("validator-{}", scheme.public_key()));
+                // Create scheme context
+                let context = context.with_label(&format!("validator-{}", scheme.public_key()));
 
                 // Start engine
                 let validator = scheme.public_key();
@@ -1977,7 +1977,7 @@ mod tests {
                         .expect("validator should be registered");
                     let engine: mocks::conflicter::Conflicter<_, _, Sha256, _> =
                         mocks::conflicter::Conflicter::new(
-                            runtime.with_label("byzantine_engine"),
+                            context.with_label("byzantine_engine"),
                             cfg,
                         );
                     engine.start(voter);
@@ -1992,14 +1992,14 @@ mod tests {
                         verify_latency: (10.0, 5.0),
                     };
                     let (actor, application) = mocks::application::Application::new(
-                        runtime.with_label("application"),
+                        context.with_label("application"),
                         application_cfg,
                     );
                     actor.start();
                     let cfg = JConfig {
                         partition: validator.to_string(),
                     };
-                    let journal = Journal::init(runtime.with_label("journal"), cfg)
+                    let journal = Journal::init(context.with_label("journal"), cfg)
                         .await
                         .expect("unable to create journal");
                     let cfg = config::Config {
@@ -2024,7 +2024,7 @@ mod tests {
                     let (voter, resolver) = registrations
                         .remove(&validator)
                         .expect("validator should be registered");
-                    let engine = Engine::new(runtime.with_label("engine"), journal, cfg);
+                    let engine = Engine::new(context.with_label("engine"), journal, cfg);
                     engine.start(voter, resolver);
                 }
             }
@@ -2093,16 +2093,16 @@ mod tests {
 
     #[test_traced]
     fn test_nuller() {
-        // Create runtime
+        // Create context
         let n = 4;
         let required_containers = 50;
         let activity_timeout = 10;
         let namespace = b"consensus".to_vec();
-        let (executor, runtime, _) = Executor::timed(Duration::from_secs(30));
+        let (executor, context, _) = Executor::timed(Duration::from_secs(30));
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.with_label("network"),
+                context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                 },
@@ -2139,8 +2139,8 @@ mod tests {
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
             for (idx_scheme, scheme) in schemes.into_iter().enumerate() {
-                // Create scheme runtime
-                let runtime = runtime.with_label(&format!("validator-{}", scheme.public_key()));
+                // Create scheme context
+                let context = context.with_label(&format!("validator-{}", scheme.public_key()));
 
                 // Start engine
                 let validator = scheme.public_key();
@@ -2160,7 +2160,7 @@ mod tests {
                         .remove(&validator)
                         .expect("validator should be registered");
                     let engine: mocks::nuller::Nuller<_, _, Sha256, _> =
-                        mocks::nuller::Nuller::new(runtime.with_label("byzantine_engine"), cfg);
+                        mocks::nuller::Nuller::new(context.with_label("byzantine_engine"), cfg);
                     engine.start(voter);
                 } else {
                     supervisors.push(supervisor.clone());
@@ -2173,14 +2173,14 @@ mod tests {
                         verify_latency: (10.0, 5.0),
                     };
                     let (actor, application) = mocks::application::Application::new(
-                        runtime.with_label("application"),
+                        context.with_label("application"),
                         application_cfg,
                     );
                     actor.start();
                     let cfg = JConfig {
                         partition: validator.to_string(),
                     };
-                    let journal = Journal::init(runtime.with_label("journal"), cfg)
+                    let journal = Journal::init(context.with_label("journal"), cfg)
                         .await
                         .expect("unable to create journal");
                     let cfg = config::Config {
@@ -2205,7 +2205,7 @@ mod tests {
                     let (voter, resolver) = registrations
                         .remove(&validator)
                         .expect("validator should be registered");
-                    let engine = Engine::new(runtime.with_label("engine"), journal, cfg);
+                    let engine = Engine::new(context.with_label("engine"), journal, cfg);
                     engine.start(voter, resolver);
                 }
             }

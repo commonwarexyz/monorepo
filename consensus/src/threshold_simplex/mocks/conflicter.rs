@@ -33,7 +33,7 @@ pub struct Conflicter<
     H: Hasher,
     S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
 > {
-    runtime: E,
+    context: E,
     supervisor: S,
     _hasher: PhantomData<H>,
 
@@ -48,9 +48,9 @@ impl<
         S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
     > Conflicter<E, H, S>
 {
-    pub fn new(runtime: E, cfg: Config<S>) -> Self {
+    pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
-            runtime,
+            context,
             supervisor: cfg.supervisor,
             _hasher: PhantomData,
 
@@ -61,7 +61,7 @@ impl<
     }
 
     pub fn start(self, voter_network: (impl Sender, impl Receiver)) -> Handle<()> {
-        self.runtime.clone().spawn(|_| self.run(voter_network))
+        self.context.clone().spawn(|_| self.run(voter_network))
     }
 
     async fn run(mut self, voter_network: (impl Sender, impl Receiver)) {
@@ -125,7 +125,7 @@ impl<
                     sender.send(Recipients::All, msg, true).await.unwrap();
 
                     // Notarize random digest
-                    let payload = H::random(&mut self.runtime);
+                    let payload = H::random(&mut self.context);
                     let message = proposal_message(view, parent, &payload);
                     let proposal_signature =
                         ops::partial_sign_message(share, Some(&self.notarize_namespace), &message)
@@ -180,7 +180,7 @@ impl<
                     sender.send(Recipients::All, msg, true).await.unwrap();
 
                     // Finalize random digest
-                    let payload = H::random(&mut self.runtime);
+                    let payload = H::random(&mut self.context);
                     let message = proposal_message(view, parent, &payload);
                     let signature =
                         ops::partial_sign_message(share, Some(&self.finalize_namespace), &message);
