@@ -357,11 +357,7 @@ mod tests {
                 Duration::from_millis(100),
                 Duration::from_secs(5),
             );
-            spawn_proposer(
-                context.with_label("proposer"),
-                mailboxes.clone(),
-                |_| false,
-            );
+            spawn_proposer(context.with_label("proposer"), mailboxes.clone(), |_| false);
             await_collectors(context.with_label("collector"), &collectors, 100).await;
         });
     }
@@ -434,11 +430,7 @@ mod tests {
                         Duration::from_millis(100),
                         Duration::from_secs(5),
                     );
-                    spawn_proposer(
-                        context.with_label("proposer"),
-                        mailboxes.clone(),
-                        |_| false,
-                    );
+                    spawn_proposer(context.with_label("proposer"), mailboxes.clone(), |_| false);
 
                     let collector_pairs: Vec<(
                         PublicKey,
@@ -449,8 +441,9 @@ mod tests {
                         .collect();
                     for (validator, mut mailbox) in collector_pairs {
                         let completed_clone = completed.clone();
-                        context.with_label("collector_unclean").spawn(
-                            |context| async move {
+                        context
+                            .with_label("collector_unclean")
+                            .spawn(|context| async move {
                                 loop {
                                     let tip = mailbox.get_tip(validator.clone()).await.unwrap_or(0);
                                     if tip >= 100 {
@@ -459,8 +452,7 @@ mod tests {
                                     }
                                     context.sleep(Duration::from_millis(100)).await;
                                 }
-                            },
-                        );
+                            });
                     }
                     context.sleep(Duration::from_millis(1000)).await;
                     *shutdowns.lock().unwrap() += 1;
@@ -505,11 +497,7 @@ mod tests {
                 Duration::from_millis(100),
                 Duration::from_secs(1),
             );
-            spawn_proposer(
-                context.with_label("proposer"),
-                mailboxes.clone(),
-                |_| false,
-            );
+            spawn_proposer(context.with_label("proposer"), mailboxes.clone(), |_| false);
             // Simulate partition by removing all links.
             link_validators(&mut oracle, &pks, Action::Unlink, None).await;
             context.sleep(Duration::from_secs(5)).await;
@@ -570,11 +558,7 @@ mod tests {
                 Duration::from_millis(150),
             );
 
-            spawn_proposer(
-                context.with_label("proposer"),
-                mailboxes.clone(),
-                |_| false,
-            );
+            spawn_proposer(context.with_label("proposer"), mailboxes.clone(), |_| false);
             await_collectors(context.with_label("collector"), &collectors, 40).await;
         });
         auditor.state()
@@ -630,11 +614,9 @@ mod tests {
                 Duration::from_secs(5),
             );
 
-            spawn_proposer(
-                context.with_label("proposer"),
-                mailboxes.clone(),
-                |i| i % 10 == 0,
-            );
+            spawn_proposer(context.with_label("proposer"), mailboxes.clone(), |i| {
+                i % 10 == 0
+            });
             await_collectors(context.with_label("collector"), &collectors, 100).await;
         });
     }
