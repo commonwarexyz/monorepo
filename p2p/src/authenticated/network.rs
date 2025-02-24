@@ -152,7 +152,7 @@ impl<
     ///
     /// After the network is started, it is not possible to add more channels.
     pub fn start(self) -> Handle<()> {
-        self.context.clone().spawn(|_| self.run())
+        self.context.spawn_ref()(self.run())
     }
 
     async fn run(self) {

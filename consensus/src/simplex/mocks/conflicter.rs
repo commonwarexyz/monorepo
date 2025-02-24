@@ -56,7 +56,7 @@ impl<
     }
 
     pub fn start(self, voter_network: (impl Sender, impl Receiver)) -> Handle<()> {
-        self.context.clone().spawn(|_| self.run(voter_network))
+        self.context.spawn_ref()(self.run(voter_network))
     }
 
     async fn run(mut self, voter_network: (impl Sender, impl Receiver)) {
