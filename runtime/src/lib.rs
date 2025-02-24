@@ -117,8 +117,8 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     /// does not await the handle).
     ///
     /// In some cases, it may be useful to spawn a task without consuming the context (e.g. starting
-    /// an actor that already holds a context). It is up to the caller to ensure context reuse
-    /// does not lead to unexpected behavior.
+    /// an actor that already holds a context). Once used this way, the context should not be used
+    /// to spawn additional tasks.
     fn spawn_ref<F, T>(&self) -> impl FnOnce(F) -> Handle<T> + 'static
     where
         F: Future<Output = T> + Send + 'static,
