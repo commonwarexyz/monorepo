@@ -111,7 +111,7 @@ pub trait Spawner: Clone + Send + Sync + 'static {
         Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static;
 
-    fn spawn_ref<Fut, T>(&self) -> impl FnOnce(Fut) -> Handle<T>
+    fn spawn_ref<Fut, T>(&self) -> impl FnOnce(Fut) -> Handle<T> + 'static
     where
         Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static;

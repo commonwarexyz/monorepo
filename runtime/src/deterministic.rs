@@ -825,7 +825,7 @@ impl crate::Spawner for Context {
         handle
     }
 
-    fn spawn_ref<Fut, T>(&self) -> impl FnOnce(Fut) -> Handle<T>
+    fn spawn_ref<Fut, T>(&self) -> impl FnOnce(Fut) -> Handle<T> + 'static
     where
         Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static,
@@ -847,11 +847,13 @@ impl crate::Spawner for Context {
             .clone();
 
         // Set up the task
+        let label = self.label.clone();
+        let executor = self.executor.clone();
         move |f: Fut| {
             let (f, handle) = Handle::init(f, gauge, false);
 
             // Spawn the task
-            Tasks::register(&self.executor.tasks, &self.label, false, Box::pin(f));
+            Tasks::register(&executor.tasks, &label, false, Box::pin(f));
             handle
         }
     }
