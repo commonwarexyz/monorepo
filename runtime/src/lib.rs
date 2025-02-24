@@ -111,6 +111,18 @@ pub trait Spawner: Clone + Send + Sync + 'static {
         Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static;
 
+    /// Enqueue a task to be executed (without consuming the context).
+    ///
+    /// Unlike a future, a spawned task will start executing immediately (even if the caller
+    /// does not await the handle).
+    ///
+    /// In some cases, it may be useful to spawn a task without consuming the context (e.g. starting
+    /// an actor that already holds a context).
+    fn spawn_ref<F, T>(self, f: F) -> Handle<T>
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static;
+
     /// Signals the runtime to stop execution and that all outstanding tasks
     /// should perform any required cleanup and exit. This method is idempotent and
     /// can be called multiple times.

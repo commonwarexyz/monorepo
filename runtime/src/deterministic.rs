@@ -799,9 +799,8 @@ impl crate::Spawner for Context {
         T: Send + 'static,
     {
         // Get metrics
-        let label = self.label.clone();
         let work = Work {
-            label: label.clone(),
+            label: self.label.clone(),
         };
         self.executor
             .metrics
@@ -816,12 +815,42 @@ impl crate::Spawner for Context {
             .clone();
 
         // Set up the task
+        let label = self.label.clone();
         let executor = self.executor.clone();
         let future = f(self);
         let (f, handle) = Handle::init(future, gauge, false);
 
         // Spawn the task
         Tasks::register(&executor.tasks, &label, false, Box::pin(f));
+        handle
+    }
+
+    fn spawn_ref<F, T>(self, f: F) -> Handle<T>
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        // Get metrics
+        let work = Work {
+            label: self.label.clone(),
+        };
+        self.executor
+            .metrics
+            .tasks_spawned
+            .get_or_create(&work)
+            .inc();
+        let gauge = self
+            .executor
+            .metrics
+            .tasks_running
+            .get_or_create(&work)
+            .clone();
+
+        // Set up the task
+        let (f, handle) = Handle::init(f, gauge, false);
+
+        // Spawn the task
+        Tasks::register(&self.executor.tasks, &self.label, false, Box::pin(f));
         handle
     }
 

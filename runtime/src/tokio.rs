@@ -316,6 +316,35 @@ impl crate::Spawner for Context {
         handle
     }
 
+    fn spawn_ref<F, T>(self, f: F) -> Handle<T>
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        // Get metrics
+        let work = Work {
+            label: self.label.clone(),
+        };
+        self.executor
+            .metrics
+            .tasks_spawned
+            .get_or_create(&work)
+            .inc();
+        let gauge = self
+            .executor
+            .metrics
+            .tasks_running
+            .get_or_create(&work)
+            .clone();
+
+        // Set up the task
+        let (f, handle) = Handle::init(f, gauge, self.executor.cfg.catch_panics);
+
+        // Spawn the task
+        self.executor.runtime.spawn(f);
+        handle
+    }
+
     fn stop(&self, value: i32) {
         self.executor.signaler.lock().unwrap().signal(value);
     }
