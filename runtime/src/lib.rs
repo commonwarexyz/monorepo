@@ -8,9 +8,9 @@
 //!
 //! # Terminology
 //!
-//! Each runtime is typically composed of a `Runner` and a `Context`. The `Runner` is used
-//! to start the execution of a runtime and the `Context` implements any number of the traits
-//! defined in this crate.
+//! Each runtime is typically composed of an `Executor` and a `Context`. The `Executor` implements
+//! the `Runner` trait and drives execution of a runtime. The `Context` implements any number of the
+//! other traits defined in this crate to provide core functionality.
 //!
 //! # Status
 //!
