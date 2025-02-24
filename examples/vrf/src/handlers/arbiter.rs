@@ -268,11 +268,11 @@ impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
     }
 
     pub fn start(
-        self,
+        mut self,
         sender: impl Sender<PublicKey = C::PublicKey>,
         receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) -> Handle<()> {
-        self.context.clone().spawn(|_| self.run(sender, receiver))
+        self.context.spawn_ref()(self.run(sender, receiver))
     }
 
     async fn run(

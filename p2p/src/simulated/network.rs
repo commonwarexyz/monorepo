@@ -345,8 +345,8 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock + Metrics, P: A
     ///
     /// It is not necessary to invoke this method before modifying the network topology, however,
     /// no messages will be sent until this method is called.
-    pub fn start(self) -> Handle<()> {
-        self.context.clone().spawn(|_| self.run())
+    pub fn start(mut self) -> Handle<()> {
+        self.context.spawn_ref()(self.run())
     }
 
     async fn run(mut self) {

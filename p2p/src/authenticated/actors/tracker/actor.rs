@@ -552,8 +552,8 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
         ))
     }
 
-    pub fn start(self) -> Handle<()> {
-        self.context.clone().spawn(|_| self.run())
+    pub fn start(mut self) -> Handle<()> {
+        self.context.spawn_ref()(self.run())
     }
 
     async fn run(mut self) {

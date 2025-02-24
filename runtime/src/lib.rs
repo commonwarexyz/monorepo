@@ -111,6 +111,23 @@ pub trait Spawner: Clone + Send + Sync + 'static {
         Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static;
 
+    /// Enqueue a task to be executed (without consuming the context).
+    ///
+    /// Unlike a future, a spawned task will start executing immediately (even if the caller
+    /// does not await the handle).
+    ///
+    /// In some cases, it may be useful to spawn a task without consuming the context (e.g. starting
+    /// an actor that already has a reference to context).
+    ///
+    /// # Warning
+    ///
+    /// If this function is used to spawn multiple tasks from the same context, the runtime will panic
+    /// to prevent accidental misuse.
+    fn spawn_ref<F, T>(&mut self) -> impl FnOnce(F) -> Handle<T> + 'static
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static;
+
     /// Signals the runtime to stop execution and that all outstanding tasks
     /// should perform any required cleanup and exit. This method is idempotent and
     /// can be called multiple times.
@@ -775,6 +792,39 @@ mod tests {
         });
     }
 
+    fn test_spawn_ref(runner: impl Runner, mut context: impl Spawner) {
+        runner.start(async move {
+            let handle = context.spawn_ref();
+            let result = handle(async move { 42 }).await;
+            assert_eq!(result, Ok(42));
+        });
+    }
+
+    fn test_spawn_ref_duplicate(runner: impl Runner, mut context: impl Spawner) {
+        runner.start(async move {
+            let handle = context.spawn_ref();
+            let result = handle(async move { 42 }).await;
+            assert_eq!(result, Ok(42));
+
+            // Ensure context is consumed
+            let handle = context.spawn_ref();
+            let result = handle(async move { 42 }).await;
+            assert_eq!(result, Ok(42));
+        });
+    }
+
+    fn test_spawn_duplicate(runner: impl Runner, mut context: impl Spawner) {
+        runner.start(async move {
+            let handle = context.spawn_ref();
+            let result = handle(async move { 42 }).await;
+            assert_eq!(result, Ok(42));
+
+            // Ensure context is consumed
+            context.spawn(|_| async move { 42 });
+            panic!("should not be possible to spawn a task with the same context");
+        });
+    }
+
     fn test_metrics(runner: impl Runner, context: impl Spawner + Metrics) {
         runner.start(async move {
             // Assert label
@@ -912,6 +962,26 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_spawn_ref() {
+        let (executor, context, _) = deterministic::Executor::default();
+        test_spawn_ref(executor, context);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_deterministic_spawn_ref_duplicate() {
+        let (executor, context, _) = deterministic::Executor::default();
+        test_spawn_ref_duplicate(executor, context);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_deterministic_spawn_duplicate() {
+        let (executor, context, _) = deterministic::Executor::default();
+        test_spawn_duplicate(executor, context);
+    }
+
+    #[test]
     fn test_deterministic_metrics() {
         let (executor, context, _) = deterministic::Executor::default();
         test_metrics(executor, context);
@@ -1017,6 +1087,26 @@ mod tests {
     fn test_tokio_shutdown() {
         let (executor, context) = tokio::Executor::default();
         test_shutdown(executor, context);
+    }
+
+    #[test]
+    fn test_tokio_spawn_ref() {
+        let (executor, context) = tokio::Executor::default();
+        test_spawn_ref(executor, context);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_tokio_spawn_ref_duplicate() {
+        let (executor, context) = tokio::Executor::default();
+        test_spawn_ref_duplicate(executor, context);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_tokio_spawn_duplicate() {
+        let (executor, context) = tokio::Executor::default();
+        test_spawn_duplicate(executor, context);
     }
 
     #[test]

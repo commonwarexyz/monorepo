@@ -76,8 +76,8 @@ impl<E: Spawner + Metrics, P: Array> Actor<E, P> {
         }
     }
 
-    pub fn start(self, routing: Channels<P>) -> Handle<()> {
-        self.context.clone().spawn(|_| self.run(routing))
+    pub fn start(mut self, routing: Channels<P>) -> Handle<()> {
+        self.context.spawn_ref()(self.run(routing))
     }
 
     async fn run(mut self, routing: Channels<P>) {

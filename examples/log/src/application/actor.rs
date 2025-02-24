@@ -42,8 +42,8 @@ impl<R: Rng + Spawner, C: Scheme, H: Hasher> Application<R, C, H> {
     }
 
     /// Run the application actor.
-    pub fn start(self) -> Handle<()> {
-        self.context.clone().spawn(|_| self.run())
+    pub fn start(mut self) -> Handle<()> {
+        self.context.spawn_ref()(self.run())
     }
 
     async fn run(mut self) {

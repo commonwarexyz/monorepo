@@ -158,11 +158,11 @@ impl<E: Clock + Spawner, P: Array> Vrf<E, P> {
     }
 
     pub fn start(
-        self,
+        mut self,
         sender: impl Sender<PublicKey = P>,
         receiver: impl Receiver<PublicKey = P>,
     ) -> Handle<()> {
-        self.context.clone().spawn(|_| self.run(sender, receiver))
+        self.context.spawn_ref()(self.run(sender, receiver))
     }
 
     async fn run(

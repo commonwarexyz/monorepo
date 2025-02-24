@@ -245,6 +245,7 @@ impl Executor {
             },
             Context {
                 label: String::new(),
+                spawned: false,
                 executor,
             },
         )
@@ -276,10 +277,20 @@ impl crate::Runner for Runner {
 /// Implementation of [`crate::Spawner`], [`crate::Clock`],
 /// [`crate::Network`], and [`crate::Storage`] for the `tokio`
 /// runtime.
-#[derive(Clone)]
 pub struct Context {
     label: String,
+    spawned: bool,
     executor: Arc<Executor>,
+}
+
+impl Clone for Context {
+    fn clone(&self) -> Self {
+        Self {
+            label: self.label.clone(),
+            spawned: false,
+            executor: self.executor.clone(),
+        }
+    }
 }
 
 impl crate::Spawner for Context {
@@ -289,6 +300,9 @@ impl crate::Spawner for Context {
         Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
+        // Ensure a context only spawns one task
+        assert!(!self.spawned, "already spawned");
+
         // Get metrics
         let work = Work {
             label: self.label.clone(),
@@ -316,6 +330,42 @@ impl crate::Spawner for Context {
         handle
     }
 
+    fn spawn_ref<F, T>(&mut self) -> impl FnOnce(F) -> Handle<T> + 'static
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        // Ensure a context only spawns one task
+        assert!(!self.spawned, "already spawned");
+        self.spawned = true;
+
+        // Get metrics
+        let work = Work {
+            label: self.label.clone(),
+        };
+        self.executor
+            .metrics
+            .tasks_spawned
+            .get_or_create(&work)
+            .inc();
+        let gauge = self
+            .executor
+            .metrics
+            .tasks_running
+            .get_or_create(&work)
+            .clone();
+
+        // Set up the task
+        let executor = self.executor.clone();
+        move |f: F| {
+            let (f, handle) = Handle::init(f, gauge, executor.cfg.catch_panics);
+
+            // Spawn the task
+            executor.runtime.spawn(f);
+            handle
+        }
+    }
+
     fn stop(&self, value: i32) {
         self.executor.signaler.lock().unwrap().signal(value);
     }
@@ -341,6 +391,7 @@ impl crate::Metrics for Context {
         );
         Self {
             label,
+            spawned: false,
             executor: self.executor.clone(),
         }
     }
