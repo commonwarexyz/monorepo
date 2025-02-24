@@ -1,7 +1,6 @@
 use super::View;
 use bytes::BufMut;
-use commonware_cryptography::Array;
-use commonware_utils::{union, SizedSerialize};
+use commonware_utils::{union, Array, SizedSerialize};
 
 pub const SEED_SUFFIX: &[u8] = b"_SEED";
 pub const NOTARIZE_SUFFIX: &[u8] = b"_NOTARIZE";

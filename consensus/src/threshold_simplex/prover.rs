@@ -7,15 +7,12 @@ use super::{
 };
 use crate::Proof;
 use bytes::{Buf, BufMut};
-use commonware_cryptography::{
-    bls12381::primitives::{
-        group::{self, Element},
-        ops,
-        poly::{self, Eval},
-    },
-    Array,
+use commonware_cryptography::bls12381::primitives::{
+    group::{self, Element},
+    ops,
+    poly::{self, Eval},
 };
-use commonware_utils::SizedSerialize;
+use commonware_utils::{Array, SizedSerialize};
 use std::marker::PhantomData;
 
 type Callback = Box<dyn Fn(&poly::Poly<group::Public>) -> Option<u32>>;

@@ -1,7 +1,6 @@
 //! Parsed wrappers around wire types.
 
 use crate::linked::{wire, Epoch};
-use commonware_cryptography::Array;
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{Element, Signature as ThresholdSignature},
@@ -9,6 +8,7 @@ use commonware_cryptography::{
     },
     Scheme,
 };
+use commonware_utils::Array;
 use prost::Message;
 
 #[derive(Debug, thiserror::Error)]
@@ -25,8 +25,12 @@ pub enum Error {
     InvalidPartial,
     #[error("Invalid threshold")]
     InvalidThreshold,
-    #[error("Cryptographic error: {0}")]
-    Crypto(#[from] commonware_cryptography::Error),
+    #[error("Invalid sequencer")]
+    InvalidSequencer,
+    #[error("Invalid payload")]
+    InvalidPayload,
+    #[error("Invalid signature")]
+    InvalidSignature,
 }
 
 /// Parsed version of a `Chunk`.
@@ -41,9 +45,9 @@ impl<D: Array, P: Array> Chunk<D, P> {
     /// Returns a `Chunk` from a `wire::Chunk`.
     pub fn from_wire(chunk: wire::Chunk) -> Result<Self, Error> {
         Ok(Self {
-            sequencer: P::try_from(chunk.sequencer).map_err(Error::Crypto)?,
+            sequencer: P::try_from(chunk.sequencer).map_err(|_| Error::InvalidSequencer)?,
             height: chunk.height,
-            payload: D::try_from(chunk.payload).map_err(Error::Crypto)?,
+            payload: D::try_from(chunk.payload).map_err(|_| Error::InvalidPayload)?,
         })
     }
 
@@ -69,7 +73,7 @@ impl<D: Array> Parent<D> {
     /// Returns a `Parent` from a `wire::Parent`.
     pub fn from_wire(parent: wire::Parent) -> Result<Self, Error> {
         Ok(Self {
-            payload: D::try_from(parent.payload).map_err(Error::Crypto)?,
+            payload: D::try_from(parent.payload).map_err(|_| Error::InvalidPayload)?,
             epoch: parent.epoch,
             threshold: ThresholdSignature::deserialize(&parent.threshold)
                 .ok_or(Error::InvalidThreshold)?,
@@ -106,7 +110,8 @@ impl<C: Scheme, D: Array> Node<C, D> {
         } else if chunk.height > 0 && parent.is_none() {
             return Err(Error::ParentMissing);
         }
-        let signature = C::Signature::try_from(node.signature).map_err(Error::Crypto)?;
+        let signature =
+            C::Signature::try_from(node.signature).map_err(|_| Error::InvalidSignature)?;
         Ok(Self {
             chunk,
             signature,

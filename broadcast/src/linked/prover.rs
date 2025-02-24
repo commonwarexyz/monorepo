@@ -10,9 +10,9 @@ use commonware_cryptography::{
         group::{self, Element},
         ops,
     },
-    Array, Scheme,
+    Scheme,
 };
-use commonware_utils::SizedSerialize;
+use commonware_utils::{Array, SizedSerialize};
 use std::marker::PhantomData;
 
 /// Encode and decode proofs of broadcast.

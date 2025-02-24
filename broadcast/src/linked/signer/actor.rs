@@ -9,12 +9,13 @@ use commonware_cryptography::{
         ops,
         poly::{self},
     },
-    Array, Scheme,
+    Scheme,
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Blob, Clock, Handle, Metrics, Spawner, Storage};
 use commonware_storage::journal::{self, variable::Journal};
+use commonware_utils::Array;
 use futures::{
     channel::{mpsc, oneshot},
     future::{self, Either},

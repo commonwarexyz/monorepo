@@ -1,6 +1,7 @@
 use super::{Context, View};
 use crate::{Automaton, Committer, Relay, Supervisor};
-use commonware_cryptography::{Array, Scheme};
+use commonware_cryptography::Scheme;
+use commonware_utils::Array;
 use governor::Quota;
 use std::time::Duration;
 

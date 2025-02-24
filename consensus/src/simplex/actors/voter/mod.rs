@@ -5,7 +5,8 @@ use crate::simplex::Context;
 use crate::{simplex::View, Automaton, Supervisor};
 use crate::{Committer, Relay};
 pub use actor::Actor;
-use commonware_cryptography::{Array, Scheme};
+use commonware_cryptography::Scheme;
+use commonware_utils::Array;
 pub use ingress::{Mailbox, Message};
 use std::time::Duration;
 

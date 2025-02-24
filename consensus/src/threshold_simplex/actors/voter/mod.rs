@@ -6,8 +6,9 @@ use crate::{
     Automaton, Committer, Relay, ThresholdSupervisor,
 };
 pub use actor::Actor;
+use commonware_cryptography::bls12381::primitives::group;
 use commonware_cryptography::Scheme;
-use commonware_cryptography::{bls12381::primitives::group, Array};
+use commonware_utils::Array;
 pub use ingress::{Mailbox, Message};
 use std::time::Duration;
 

@@ -91,7 +91,9 @@ pub struct PrivateKey {
     key: group::Private,
 }
 
-impl Array for PrivateKey {}
+impl Array for PrivateKey {
+    type Error = Error;
+}
 
 impl SizedSerialize for PrivateKey {
     const SERIALIZED_LEN: usize = group::PRIVATE_KEY_LENGTH;
@@ -179,7 +181,9 @@ pub struct PublicKey {
     key: group::Public,
 }
 
-impl Array for PublicKey {}
+impl Array for PublicKey {
+    type Error = Error;
+}
 
 impl SizedSerialize for PublicKey {
     const SERIALIZED_LEN: usize = group::PUBLIC_KEY_LENGTH;
@@ -267,7 +271,9 @@ pub struct Signature {
     signature: group::Signature,
 }
 
-impl Array for Signature {}
+impl Array for Signature {
+    type Error = Error;
+}
 
 impl SizedSerialize for Signature {
     const SERIALIZED_LEN: usize = group::SIGNATURE_LENGTH;

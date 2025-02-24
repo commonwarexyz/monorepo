@@ -612,9 +612,11 @@ dependencies = [
 name = "commonware-utils"
 version = "0.0.13"
 dependencies = [
+ "bytes",
  "num-bigint",
  "prost",
  "rand",
+ "thiserror",
 ]
 
 [[package]]
