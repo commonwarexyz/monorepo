@@ -1,0 +1,17 @@
+syntax = "proto3";
+package wire;
+
+// All messages that can be sent over AGGREGATION_CHANNEL.
+message Aggregation {
+  uint64 round = 1;
+  oneof payload {
+    Start start = 2;
+    Signature signature = 3;
+  }
+}
+
+// Send by orchestrator to start aggregation
+message Start {}
+
+// Sent by signer to all others
+message Signature { bytes signature = 1; }

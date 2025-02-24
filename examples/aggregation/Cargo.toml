@@ -1,0 +1,40 @@
+[package]
+name = "commonware-aggregation"
+edition = "2021"
+publish = true
+version = "0.0.1"
+license = "MIT OR Apache-2.0"
+description = "aggregate signatures from multiple contributors over the BN254 curve."
+readme = "README.md"
+homepage = "https://commonware.xyz"
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/aggregation"
+documentation = "https://docs.rs/commonware-aggregation"
+
+[dependencies]
+commonware-cryptography = { workspace = true }
+commonware-macros = { workspace = true }
+commonware-p2p = { workspace = true }
+commonware-runtime = { workspace = true }
+commonware-utils = { workspace = true }
+bytes = { workspace = true }
+rand = { workspace = true }
+tracing = { workspace = true }
+prost = { workspace = true }
+futures = { workspace = true }
+clap = { workspace = true }
+tracing-subscriber = { workspace = true }
+prometheus-client = { workspace = true }
+governor = { workspace = true }
+ark-bn254 = "0.5.0"
+ark-ff = "0.5.0"
+ark-ec = "0.5.0"
+ark-serialize = "0.5.0"
+eigen-crypto-bn254 = "0.1.3"
+eigen-crypto-bls = "0.1.3"
+
+[build-dependencies]
+prost-build = { workspace = true }
+
+[[bin]]
+name = "commonware-aggregation"
+bench = false
