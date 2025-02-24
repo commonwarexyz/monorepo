@@ -99,12 +99,15 @@ impl<H: CHasher> Mmr<H> {
 
     /// Return the position of the oldest retained node in the MMR, not including the peaks which
     /// are always retained.
-    pub fn oldest_retained_pos(&self) -> u64 {
-        self.oldest_retained_pos
+    pub fn oldest_retained_pos(&self) -> Option<u64> {
+        if self.size() == 0 {
+            return None;
+        }
+        Some(self.oldest_retained_pos)
     }
 
     /// Return a new iterator over the peaks of the MMR.
-    fn peak_iterator(&self) -> PeakIterator {
+    pub(crate) fn peak_iterator(&self) -> PeakIterator {
         PeakIterator::new(self.size())
     }
 
@@ -189,10 +192,13 @@ impl<H: CHasher> Mmr<H> {
 
     /// Prune the maximum amount of nodes possible while still allowing nodes with position `pos`
     /// or newer to be provable, returning the position of the oldest retained node.
-    pub fn prune(&mut self, pos: u64) -> u64 {
+    pub fn prune(&mut self, pos: u64) -> Option<u64> {
+        if self.size() == 0 {
+            return None;
+        }
         let oldest_pos = oldest_required_proof_pos(self.peak_iterator(), pos);
         self.prune_to_pos(oldest_pos);
-        oldest_pos
+        Some(oldest_pos)
     }
 
     /// Prune all nodes up to but not including the given position (except for any peaks in that
@@ -216,10 +222,14 @@ impl<H: CHasher> Mmr<H> {
     }
 
     /// Return the oldest node position provable by this MMR.
-    ///
-    /// Will return 0 unless pruning has been invoked.
-    pub fn oldest_provable_pos(&self) -> u64 {
-        oldest_provable_pos(self.peak_iterator(), self.oldest_retained_pos)
+    pub fn oldest_provable_pos(&self) -> Option<u64> {
+        if self.size() == 0 {
+            return None;
+        }
+        Some(oldest_provable_pos(
+            self.peak_iterator(),
+            self.oldest_retained_pos,
+        ))
     }
 }
 
@@ -241,10 +251,19 @@ mod tests {
                 None,
                 "empty iterator should have no peaks"
             );
+            assert_eq!(mmr.size(), 0);
+            assert_eq!(mmr.oldest_provable_pos(), None);
+            assert_eq!(mmr.oldest_retained_pos(), None);
+            assert_eq!(mmr.get_node(0).await.unwrap(), None);
+            assert_eq!(mmr.prune(0), None);
             mmr.prune_all();
             assert_eq!(mmr.size(), 0, "prune_all on empty MMR should do nothing");
-            assert_eq!(mmr.oldest_provable_pos(), 0);
-            assert_eq!(mmr.prune(0), 0);
+
+            let mut hasher = Sha256::default();
+            assert_eq!(
+                mmr.root(&mut hasher),
+                Hasher::new(&mut hasher).root_hash(0, [].iter())
+            );
         });
     }
 
@@ -267,7 +286,7 @@ mod tests {
                 let nodes_needing_parents = nodes_needing_parents(mmr.peak_iterator());
                 assert!(nodes_needing_parents.len() <= peaks.len());
             }
-            assert_eq!(mmr.oldest_retained_pos(), 0);
+            assert_eq!(mmr.oldest_retained_pos().unwrap(), 0);
             assert_eq!(mmr.size(), 19, "mmr not of expected size");
             assert_eq!(
                 leaves,
@@ -331,7 +350,7 @@ mod tests {
 
             // pruning tests
             mmr.prune_to_pos(14); // prune up to the tallest peak
-            assert_eq!(mmr.oldest_retained_pos(), 14);
+            assert_eq!(mmr.oldest_retained_pos().unwrap(), 14);
 
             // After pruning up to a peak, we shouldn't be able to prove any elements before it.
             assert!(matches!(mmr.proof(0).await, Err(ElementPruned)));
@@ -361,12 +380,15 @@ mod tests {
             // Test that we can initialize a new MMR from another's elements.
             let mut old_peaks = Vec::new();
             mmr.peak_iterator().for_each(|peak| {
-                if peak.0 < mmr.oldest_retained_pos() {
+                if peak.0 < mmr.oldest_retained_pos().unwrap() {
                     old_peaks.push(mmr.get_node_unchecked(peak.0).clone());
                 }
             });
-            let mmr_copy =
-                Mmr::<Sha256>::init(mmr.nodes.clone(), mmr.oldest_retained_pos(), old_peaks);
+            let mmr_copy = Mmr::<Sha256>::init(
+                mmr.nodes.clone(),
+                mmr.oldest_retained_pos().unwrap(),
+                old_peaks,
+            );
             assert_eq!(mmr_copy.size(), 19);
             assert_eq!(mmr_copy.oldest_retained_pos(), mmr.oldest_retained_pos());
         });

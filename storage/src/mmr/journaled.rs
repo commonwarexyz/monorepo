@@ -32,7 +32,10 @@ impl<B: Blob, E: RStorage<B> + Metrics, H: Hasher> Storage<H> for Mmr<B, E, H> {
     }
 
     async fn get_node(&self, position: u64) -> Result<Option<H::Digest>, Error> {
-        if position >= self.mem_mmr.oldest_retained_pos() {
+        let Some(oldest_retained_pos) = self.mem_mmr.oldest_retained_pos() else {
+            return Ok(None);
+        };
+        if position >= oldest_retained_pos {
             return self.mem_mmr.get_node(position).await;
         }
         match self.journal.read(position).await {
@@ -115,7 +118,7 @@ impl<B: Blob, E: RStorage<B> + Metrics, H: Hasher> Mmr<B, E, H> {
     }
 
     /// Return the root hash of the MMR.
-    pub fn root(&mut self, h: &mut H) -> H::Digest {
+    pub fn root(&self, h: &mut H) -> H::Digest {
         self.mem_mmr.root(h)
     }
 
@@ -179,6 +182,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(mmr.size().await.unwrap(), 0);
+            assert_eq!(mmr.get_node(0).await.unwrap(), None);
 
             // Build a test MMR with 255 leaves
             const LEAF_COUNT: usize = 255;
@@ -211,7 +215,7 @@ mod tests {
             // Sync the MMR, make sure it flushes the in-mem MMR as expected.
             mmr.sync().await.unwrap();
             assert_eq!(mmr.journal_size, 502);
-            assert_eq!(mmr.mem_mmr.oldest_retained_pos(), 501);
+            assert_eq!(mmr.mem_mmr.oldest_retained_pos().unwrap(), 501);
 
             // Now that the element is flushed from the in-mem MMR, make its proof is still is
             // generated correctly.
