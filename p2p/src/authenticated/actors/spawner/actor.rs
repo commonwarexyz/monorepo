@@ -96,7 +96,6 @@ impl<
 
                     // Spawn peer
                     self.context
-                        .clone()
                         .with_label("peer")
                         .spawn(move |context| async move {
                             // Create peer
