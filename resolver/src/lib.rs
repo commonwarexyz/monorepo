@@ -14,17 +14,14 @@ pub trait Consumer: Clone + Send + 'static {
     type Value;
 
     /// Type used to indicate why data is not available.
-    type FailureCode;
+    type Failure;
 
     /// Deliver data to the consumer.
     fn deliver(&mut self, key: Self::Key, value: Self::Value) -> impl Future<Output = ()> + Send;
 
     /// Let the consumer know that the data is not available.
-    fn failed(
-        &mut self,
-        key: Self::Key,
-        reason: Self::FailureCode,
-    ) -> impl Future<Output = ()> + Send;
+    fn failed(&mut self, key: Self::Key, failure: Self::Failure)
+        -> impl Future<Output = ()> + Send;
 }
 
 /// The interface responsible for fetching data from the network.

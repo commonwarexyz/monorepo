@@ -40,7 +40,7 @@ pub trait Director: Clone + Send + 'static {
     /// Returns the current list of peers that can be used to fetch data.
     ///
     /// This is also used to filter requests from peers.
-    fn peers(&self) -> Vec<Self::PublicKey>;
+    fn peers(&self) -> &Vec<Self::PublicKey>;
 
     /// Returns true if the given public key is a peer.
     fn is_peer(&self, public_key: &Self::PublicKey) -> bool;

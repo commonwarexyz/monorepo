@@ -12,7 +12,7 @@ pub struct Config<
     C: Scheme,
     D: Director<PublicKey = C::PublicKey>,
     Key: Array,
-    Con: Consumer<Key = Key, Value = Value, FailureCode = ()>,
+    Con: Consumer<Key = Key, Value = Value, Failure = ()>,
     Pro: Producer<Key = Key, Value = Value>,
 > {
     pub crypto: C,

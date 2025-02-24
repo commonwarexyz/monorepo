@@ -21,10 +21,7 @@ use futures::{
     future::{self, Either},
     StreamExt,
 };
-use governor::{
-    clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore,
-    RateLimiter,
-};
+use governor::clock::Clock as GClock;
 use prost::Message as _;
 use rand::Rng;
 use std::marker::PhantomData;
@@ -36,7 +33,7 @@ pub struct Actor<
     C: Scheme,
     D: Director<PublicKey = C::PublicKey>,
     Key: Array,
-    Con: Consumer<Key = Key, Value = Value, FailureCode = ()>,
+    Con: Consumer<Key = Key, Value = Value, Failure = ()>,
     Pro: Producer<Key = Key, Value = Value>,
     NetS: Sender<PublicKey = C::PublicKey>,
     NetR: Receiver<PublicKey = C::PublicKey>,
@@ -63,11 +60,6 @@ pub struct Actor<
     serves: FuturesPool<(C::PublicKey, u64, Result<Value, oneshot::Canceled>)>,
     serve_concurrent: usize,
 
-    // Rate limit for incoming requests per peer
-    #[allow(clippy::type_complexity)]
-    rate_limiter:
-        RateLimiter<C::PublicKey, HashMapStateStore<C::PublicKey>, E, NoOpMiddleware<E::Instant>>,
-
     ////////////////////////////////////////
     // Phantom Data
     ////////////////////////////////////////
@@ -80,7 +72,7 @@ impl<
         C: Scheme,
         D: Director<PublicKey = C::PublicKey>,
         Key: Array,
-        Con: Consumer<Key = Key, Value = Value, FailureCode = ()>,
+        Con: Consumer<Key = Key, Value = Value, Failure = ()>,
         Pro: Producer<Key = Key, Value = Value>,
         NetS: Sender<PublicKey = C::PublicKey>,
         NetR: Receiver<PublicKey = C::PublicKey>,
@@ -89,7 +81,6 @@ impl<
     pub async fn new(runtime: E, cfg: Config<C, D, Key, Con, Pro>) -> (Self, Mailbox<Key>) {
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
         let requester = Requester::new(runtime.clone(), cfg.requester_config);
-        let rate_limiter = RateLimiter::hashmap_with_clock(cfg.rate_limit, &runtime);
         let fetcher = Fetcher::new(
             runtime.clone(),
             requester,
@@ -106,8 +97,6 @@ impl<
                 fetcher,
                 serves: FuturesPool::new(),
                 serve_concurrent: cfg.serve_concurrent,
-                rate_limiter,
-
                 _s: PhantomData,
                 _r: PhantomData,
             },
@@ -121,7 +110,7 @@ impl<
 
         loop {
             // Update peer list
-            self.fetcher.reconcile(&self.director.peers());
+            self.fetcher.reconcile(self.director.peers());
 
             // Get retry timeout (if any)
             let held_deadline = match self.fetcher.get_held_deadline() {
@@ -152,7 +141,7 @@ impl<
                     match msg {
                         Message::Fetch { key } => {
                             debug!(?key, "mailbox: fetch");
-                            if let Err(err) = self.fetcher.fetch(&mut sender, key.clone(), false).await {
+                            if let Err(err) = self.fetcher.fetch_new(&mut sender, key.clone()).await {
                                 warn!(?err, ?key, "failed to fetch");
                                 self.consumer.failed(key, ()).await;
                             }
@@ -203,7 +192,7 @@ impl<
                             debug!(?peer, ?id, "peer response: data");
 
                             // Get the key associate with the response, if any
-                            let Some(key) = self.fetcher.got_response(&peer, id, true) else {
+                            let Some(key) = self.fetcher.pop_by_id(id, &peer, true) else {
                                 continue;
                             };
 
@@ -215,12 +204,12 @@ impl<
                             warn!(?peer, ?id, "peer response: error");
 
                             // Get the key associate with the response, if any
-                            let Some(key) = self.fetcher.got_response(&peer, id, false) else {
+                            let Some(key) = self.fetcher.pop_by_id(id, &peer, false) else {
                                 continue;
                             };
 
                             // The peer did not have the data, so we need to try again
-                            self.fetcher.fetch(&mut sender, key, true).await.unwrap(); // Unwrap must be safe
+                            self.fetcher.fetch_retry(&mut sender, key).await;
                         },
                     }
                 },
@@ -229,14 +218,14 @@ impl<
                 _ = held_deadline => {
                     let key = self.fetcher.pop_held();
                     debug!(?key, "retrying");
-                    self.fetcher.fetch(&mut sender, key, true).await.unwrap(); // Unwrap must be safe
+                    self.fetcher.fetch_retry(&mut sender, key).await;
                 },
 
                 // Handle open deadline
                 _ = open_deadline => {
                     if let Some(key) = self.fetcher.pop_open() {
                         debug!(?key, "requester timeout");
-                        self.fetcher.fetch(&mut sender, key, true).await.unwrap(); // Unwrap must be safe
+                        self.fetcher.fetch_retry(&mut sender, key).await;
                     }
                 },
             }
@@ -274,12 +263,6 @@ impl<
         // If the peer is not allowed to request, drop the request
         if !self.director.is_peer(&peer) {
             warn!(?peer, ?id, "dropping request: peer not allowed");
-            return;
-        }
-
-        // If there are too many requests from this peer, drop the request
-        if self.rate_limiter.check_key(&peer).is_err() {
-            warn!(?peer, ?id, "dropping request: rate limit exceeded");
             return;
         }
 

@@ -72,6 +72,7 @@ impl<I: Ord + Hash + Clone, P: Ord + Copy> PrioritySet<I, P> {
     }
 
     /// Remove an item from the set.
+    ///
     /// Returns `true` if the item was present.
     pub fn remove(&mut self, item: &I) -> bool {
         let Some(entry) = self.keys.remove(item).map(|priority| Entry {

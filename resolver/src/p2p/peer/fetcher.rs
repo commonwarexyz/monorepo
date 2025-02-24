@@ -1,8 +1,4 @@
-use std::{
-    marker::PhantomData,
-    time::{Duration, SystemTime},
-};
-
+use crate::p2p::wire::{self, peer_msg::Payload};
 use bimap::BiHashMap;
 use commonware_cryptography::{Array, Scheme};
 use commonware_p2p::{
@@ -14,10 +10,12 @@ use commonware_utils::PrioritySet;
 use governor::clock::Clock as GClock;
 use prost::Message;
 use rand::Rng;
+use std::{
+    marker::PhantomData,
+    time::{Duration, SystemTime},
+};
 use thiserror::Error;
 use tracing::warn;
-
-use crate::p2p::wire::{self, peer_msg::Payload};
 
 /// Errors that can occur when using the fetcher.
 #[derive(Error, Debug, PartialEq)]
@@ -105,10 +103,29 @@ impl<E: Clock + GClock + Rng, C: Scheme, Key: Array, NetS: Sender<PublicKey = C:
         }
     }
 
+    /// Makes a new fetch request.
+    pub async fn fetch_new(&mut self, sender: &mut NetS, key: Key) -> Result<(), Error> {
+        self.fetch_inner(sender, key, false).await
+    }
+
+    /// Makes a fetch request that has been popped.
+    ///
+    /// The request must have been removed before immediately before this is called using
+    /// one of the `pop_*` methods.
+    pub async fn fetch_retry(&mut self, sender: &mut NetS, key: Key) {
+        // Panic if an error was returned.
+        self.fetch_inner(sender, key, true).await.unwrap();
+    }
+
     /// Updates all data structures for fetching.
     ///
     /// Returns an error if the fetch was rejected.
-    pub async fn fetch(&mut self, sender: &mut NetS, key: Key, shuffle: bool) -> Result<(), Error> {
+    async fn fetch_inner(
+        &mut self,
+        sender: &mut NetS,
+        key: Key,
+        shuffle: bool,
+    ) -> Result<(), Error> {
         // If there are are too many fetches, return an error
         if self.len() >= self.max_size {
             return Err(Error::TooManyFetches);
@@ -214,6 +231,25 @@ impl<E: Clock + GClock + Rng, C: Scheme, Key: Array, NetS: Sender<PublicKey = C:
         self.open.remove_by_left(&id).map(|(_id, key)| key)
     }
 
+    /// Processes a response from a peer. Removes and returns the relevant key.
+    ///
+    /// Returns the key that was fetched if the response was valid.
+    /// Returns None if the response was invalid or not needed.
+    pub fn pop_by_id(&mut self, id: ID, peer: &C::PublicKey, has_response: bool) -> Option<Key> {
+        // Pop the request from requester if the peer was assigned to this id, otherwise return none
+        let request = self.requester.handle(peer, id)?;
+
+        // Update the peer's performance, treating a lack of response as a timeout
+        match has_response {
+            true => self.requester.resolve(request),
+            false => self.requester.timeout(request),
+        };
+
+        // Remove and return the relevant key if it exists
+        // The key may not exist if the request was canceled before the peer responded
+        self.open.remove_by_left(&id).map(|(_id, key)| key)
+    }
+
     /// Returns the number of fetches that are currently being processed.
     #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
@@ -223,23 +259,5 @@ impl<E: Clock + GClock + Rng, C: Scheme, Key: Array, NetS: Sender<PublicKey = C:
     /// Reconciles the list of peers that can be used to fetch data.
     pub fn reconcile(&mut self, keep: &[C::PublicKey]) {
         self.requester.reconcile(keep);
-    }
-
-    /// Updates the fetcher with the response from a peer.
-    /// Returns the key that was fetched if the response was valid.
-    /// Returns None if the response was invalid or not needed.
-    pub fn got_response(&mut self, peer: &C::PublicKey, id: ID, has_response: bool) -> Option<Key> {
-        // Update the requester
-        let request = self.requester.handle(peer, id)?;
-
-        // Update the peer's score.
-        // If they don't give a reponse, treat it as a timeout
-        match has_response {
-            true => self.requester.resolve(request),
-            false => self.requester.timeout(request),
-        };
-
-        // Remove and return the relevant key if it exists
-        self.open.remove_by_left(&id).map(|(_id, key)| key)
     }
 }
