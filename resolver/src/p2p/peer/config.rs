@@ -4,8 +4,9 @@ use crate::{
     p2p::{Director, Producer, Value},
     Consumer,
 };
-use commonware_cryptography::{Array, Scheme};
+use commonware_cryptography::Scheme;
 use commonware_p2p::utils::requester;
+use commonware_utils::Array;
 
 pub struct Config<
     C: Scheme,

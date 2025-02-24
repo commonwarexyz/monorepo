@@ -1,12 +1,12 @@
 use crate::p2p::wire::{self, peer_msg::Payload};
 use bimap::BiHashMap;
-use commonware_cryptography::{Array, Scheme};
+use commonware_cryptography::Scheme;
 use commonware_p2p::{
     utils::requester::{Requester, ID},
     Recipients, Sender,
 };
 use commonware_runtime::Clock;
-use commonware_utils::PrioritySet;
+use commonware_utils::{Array, PrioritySet};
 use governor::clock::Clock as GClock;
 use prost::Message;
 use rand::Rng;

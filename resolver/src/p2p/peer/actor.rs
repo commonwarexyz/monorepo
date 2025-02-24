@@ -10,12 +10,12 @@ use crate::{
     },
     Consumer,
 };
-use commonware_cryptography::{Array, Scheme};
+use commonware_cryptography::Scheme;
 use commonware_macros::select;
 use commonware_p2p::utils::requester::Requester;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Spawner};
-use commonware_utils::futures::Pool as FuturesPool;
+use commonware_utils::{futures::Pool as FuturesPool, Array};
 use futures::{
     channel::{mpsc, oneshot},
     future::{self, Either},

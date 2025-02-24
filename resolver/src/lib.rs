@@ -1,6 +1,6 @@
 //! TODO
 
-use commonware_cryptography::Array;
+use commonware_utils::Array;
 use std::future::Future;
 
 pub mod p2p;

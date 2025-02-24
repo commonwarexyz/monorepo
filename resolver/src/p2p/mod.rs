@@ -2,7 +2,7 @@
 
 use std::future::Future;
 
-use commonware_cryptography::Array;
+use commonware_utils::Array;
 use futures::channel::oneshot;
 
 #[cfg(test)]

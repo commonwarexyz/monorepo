@@ -1,5 +1,5 @@
 use crate::Resolver;
-use commonware_cryptography::Array;
+use commonware_utils::Array;
 use futures::{channel::mpsc, SinkExt};
 
 /// Messages that can be sent to the peer actor.
