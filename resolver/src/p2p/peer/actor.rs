@@ -50,6 +50,9 @@ pub struct Actor<
     /// Manages the list of peers that can be used to fetch data
     director: D,
 
+    /// Used to detect changes in the peer set
+    last_peer_set_id: Option<u64>,
+
     /// Mailbox that makes and cancels fetch requests
     mailbox: mpsc::Receiver<Message<Key>>,
 
@@ -88,6 +91,7 @@ impl<
                 consumer: cfg.consumer,
                 producer: cfg.producer,
                 director: cfg.director,
+                last_peer_set_id: None,
                 mailbox: receiver,
                 fetcher,
                 serves: FuturesPool::new(),
@@ -102,9 +106,17 @@ impl<
         let (mut sender, mut receiver) = network;
         let mut shutdown = self.runtime.stopped();
 
+        // Set initial peer set.
+        self.last_peer_set_id = Some(self.director.peer_set_id());
+        self.fetcher.reconcile(self.director.peers());
+
         loop {
-            // Update peer list
-            self.fetcher.reconcile(self.director.peers());
+            // Update peer list if-and-only-if it has changed
+            let peer_set_id = self.director.peer_set_id();
+            if self.last_peer_set_id != Some(peer_set_id) {
+                self.last_peer_set_id = Some(peer_set_id);
+                self.fetcher.reconcile(self.director.peers());
+            }
 
             // Get retry timeout (if any)
             let deadline_pending = match self.fetcher.get_pending_deadline() {

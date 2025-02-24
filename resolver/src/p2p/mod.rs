@@ -32,6 +32,12 @@ pub trait Director: Clone + Send + 'static {
     /// This is also used to filter requests from peers.
     fn peers(&self) -> &Vec<Self::PublicKey>;
 
+    /// Returns an identifier for the peer set.
+    ///
+    /// Used as a low-overhead way to check if the list of peers has changed,
+    /// this value should increment whenever the list of peers changes.
+    fn peer_set_id(&self) -> u64;
+
     /// Returns true if the given public key is a peer.
     fn is_peer(&self, public_key: &Self::PublicKey) -> bool;
 }
