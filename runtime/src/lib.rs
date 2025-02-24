@@ -822,27 +822,27 @@ mod tests {
 
     #[test]
     fn test_deterministic_clock_sleep() {
-        let (executor, runtime, _) = deterministic::Executor::default();
-        assert_eq!(runtime.current(), SystemTime::UNIX_EPOCH);
-        test_clock_sleep(executor, runtime);
+        let (executor, context, _) = deterministic::Executor::default();
+        assert_eq!(context.current(), SystemTime::UNIX_EPOCH);
+        test_clock_sleep(executor, context);
     }
 
     #[test]
     fn test_deterministic_clock_sleep_until() {
-        let (executor, runtime, _) = deterministic::Executor::default();
-        test_clock_sleep_until(executor, runtime);
+        let (executor, context, _) = deterministic::Executor::default();
+        test_clock_sleep_until(executor, context);
     }
 
     #[test]
     fn test_deterministic_root_finishes() {
-        let (executor, runtime, _) = deterministic::Executor::default();
-        test_root_finishes(executor, runtime);
+        let (executor, context, _) = deterministic::Executor::default();
+        test_root_finishes(executor, context);
     }
 
     #[test]
     fn test_deterministic_spawn_abort() {
-        let (executor, runtime, _) = deterministic::Executor::default();
-        test_spawn_abort(executor, runtime);
+        let (executor, context, _) = deterministic::Executor::default();
+        test_spawn_abort(executor, context);
     }
 
     #[test]
@@ -854,8 +854,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "blah")]
     fn test_deterministic_panic_aborts_spawn() {
-        let (executor, runtime, _) = deterministic::Executor::default();
-        test_panic_aborts_spawn(executor, runtime);
+        let (executor, context, _) = deterministic::Executor::default();
+        test_panic_aborts_spawn(executor, context);
     }
 
     #[test]
@@ -866,62 +866,62 @@ mod tests {
 
     #[test]
     fn test_deterministic_select_loop() {
-        let (executor, runtime, _) = deterministic::Executor::default();
-        test_select_loop(executor, runtime);
+        let (executor, context, _) = deterministic::Executor::default();
+        test_select_loop(executor, context);
     }
 
     #[test]
     fn test_deterministic_storage_operations() {
-        let (executor, runtime, _) = deterministic::Executor::default();
-        test_storage_operations(executor, runtime);
+        let (executor, context, _) = deterministic::Executor::default();
+        test_storage_operations(executor, context);
     }
 
     #[test]
     fn test_deterministic_blob_read_write() {
-        let (executor, runtime, _) = deterministic::Executor::default();
-        test_blob_read_write(executor, runtime);
+        let (executor, context, _) = deterministic::Executor::default();
+        test_blob_read_write(executor, context);
     }
 
     #[test]
     fn test_deterministic_many_partition_read_write() {
-        let (executor, runtime, _) = deterministic::Executor::default();
-        test_many_partition_read_write(executor, runtime);
+        let (executor, context, _) = deterministic::Executor::default();
+        test_many_partition_read_write(executor, context);
     }
 
     #[test]
     fn test_deterministic_blob_read_past_length() {
-        let (executor, runtime, _) = deterministic::Executor::default();
-        test_blob_read_past_length(executor, runtime);
+        let (executor, context, _) = deterministic::Executor::default();
+        test_blob_read_past_length(executor, context);
     }
 
     #[test]
     fn test_deterministic_blob_clone_and_concurrent_read() {
         // Run test
-        let (executor, runtime, _) = deterministic::Executor::default();
-        test_blob_clone_and_concurrent_read(executor, runtime.clone());
+        let (executor, context, _) = deterministic::Executor::default();
+        test_blob_clone_and_concurrent_read(executor, context.clone());
 
         // Ensure no blobs still open
-        let buffer = runtime.encode();
+        let buffer = context.encode();
         assert!(buffer.contains("open_blobs 0"));
     }
 
     #[test]
     fn test_deterministic_shutdown() {
-        let (executor, runtime, _) = deterministic::Executor::default();
-        test_shutdown(executor, runtime);
+        let (executor, context, _) = deterministic::Executor::default();
+        test_shutdown(executor, context);
     }
 
     #[test]
     fn test_deterministic_metrics() {
-        let (executor, runtime, _) = deterministic::Executor::default();
-        test_metrics(executor, runtime);
+        let (executor, context, _) = deterministic::Executor::default();
+        test_metrics(executor, context);
     }
 
     #[test]
     #[should_panic]
     fn test_deterministic_metrics_label() {
-        let (executor, runtime, _) = deterministic::Executor::default();
-        test_metrics_label(executor, runtime);
+        let (executor, context, _) = deterministic::Executor::default();
+        test_metrics_label(executor, context);
     }
 
     #[test]
@@ -932,26 +932,26 @@ mod tests {
 
     #[test]
     fn test_tokio_clock_sleep() {
-        let (executor, runtime) = tokio::Executor::default();
-        test_clock_sleep(executor, runtime);
+        let (executor, context) = tokio::Executor::default();
+        test_clock_sleep(executor, context);
     }
 
     #[test]
     fn test_tokio_clock_sleep_until() {
-        let (executor, runtime) = tokio::Executor::default();
-        test_clock_sleep_until(executor, runtime);
+        let (executor, context) = tokio::Executor::default();
+        test_clock_sleep_until(executor, context);
     }
 
     #[test]
     fn test_tokio_root_finishes() {
-        let (executor, runtime) = tokio::Executor::default();
-        test_root_finishes(executor, runtime);
+        let (executor, context) = tokio::Executor::default();
+        test_root_finishes(executor, context);
     }
 
     #[test]
     fn test_tokio_spawn_abort() {
-        let (executor, runtime) = tokio::Executor::default();
-        test_spawn_abort(executor, runtime);
+        let (executor, context) = tokio::Executor::default();
+        test_spawn_abort(executor, context);
     }
 
     #[test]
@@ -962,8 +962,8 @@ mod tests {
 
     #[test]
     fn test_tokio_panic_aborts_spawn() {
-        let (executor, runtime) = tokio::Executor::default();
-        test_panic_aborts_spawn(executor, runtime);
+        let (executor, context) = tokio::Executor::default();
+        test_panic_aborts_spawn(executor, context);
     }
 
     #[test]
@@ -974,61 +974,61 @@ mod tests {
 
     #[test]
     fn test_tokio_select_loop() {
-        let (executor, runtime) = tokio::Executor::default();
-        test_select_loop(executor, runtime);
+        let (executor, context) = tokio::Executor::default();
+        test_select_loop(executor, context);
     }
 
     #[test]
     fn test_tokio_storage_operations() {
-        let (executor, runtime) = tokio::Executor::default();
-        test_storage_operations(executor, runtime);
+        let (executor, context) = tokio::Executor::default();
+        test_storage_operations(executor, context);
     }
 
     #[test]
     fn test_tokio_blob_read_write() {
-        let (executor, runtime) = tokio::Executor::default();
-        test_blob_read_write(executor, runtime);
+        let (executor, context) = tokio::Executor::default();
+        test_blob_read_write(executor, context);
     }
 
     #[test]
     fn test_tokio_many_partition_read_write() {
-        let (executor, runtime) = tokio::Executor::default();
-        test_many_partition_read_write(executor, runtime);
+        let (executor, context) = tokio::Executor::default();
+        test_many_partition_read_write(executor, context);
     }
 
     #[test]
     fn test_tokio_blob_read_past_length() {
-        let (executor, runtime) = tokio::Executor::default();
-        test_blob_read_past_length(executor, runtime);
+        let (executor, context) = tokio::Executor::default();
+        test_blob_read_past_length(executor, context);
     }
 
     #[test]
     fn test_tokio_blob_clone_and_concurrent_read() {
         // Run test
-        let (executor, runtime) = tokio::Executor::default();
-        test_blob_clone_and_concurrent_read(executor, runtime.clone());
+        let (executor, context) = tokio::Executor::default();
+        test_blob_clone_and_concurrent_read(executor, context.clone());
 
         // Ensure no blobs still open
-        let buffer = runtime.encode();
+        let buffer = context.encode();
         assert!(buffer.contains("open_blobs 0"));
     }
 
     #[test]
     fn test_tokio_shutdown() {
-        let (executor, runtime) = tokio::Executor::default();
-        test_shutdown(executor, runtime);
+        let (executor, context) = tokio::Executor::default();
+        test_shutdown(executor, context);
     }
 
     #[test]
     fn test_tokio_metrics() {
-        let (executor, runtime) = tokio::Executor::default();
-        test_metrics(executor, runtime);
+        let (executor, context) = tokio::Executor::default();
+        test_metrics(executor, context);
     }
 
     #[test]
     #[should_panic]
     fn test_tokio_metrics_label() {
-        let (executor, runtime) = tokio::Executor::default();
-        test_metrics_label(executor, runtime);
+        let (executor, context) = tokio::Executor::default();
+        test_metrics_label(executor, context);
     }
 }
