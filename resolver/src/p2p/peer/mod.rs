@@ -4,7 +4,11 @@
 //! - Fetching data from other peers and notifying the `Consumer`
 //! - Serving data to other peers by requesting it from the `Producer`
 
-pub mod actor;
-pub mod config;
-pub mod fetcher;
-pub mod ingress;
+mod actor;
+mod config;
+mod fetcher;
+mod ingress;
+
+pub use actor::Actor;
+pub use config::Config;
+pub use ingress::{Mailbox, Message};

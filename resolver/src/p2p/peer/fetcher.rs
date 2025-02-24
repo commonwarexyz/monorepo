@@ -15,23 +15,14 @@ use std::{
     time::{Duration, SystemTime},
 };
 use thiserror::Error;
-use tracing::warn;
-
-/// Errors that can occur when using the fetcher.
-#[derive(Error, Debug, PartialEq)]
-pub enum Error {
-    #[error("duplicate fetch")]
-    DuplicateFetch,
-    #[error("too many fetches")]
-    TooManyFetches,
-}
+use tracing::{info, warn};
 
 /// Errors that can occur when sending network messages.
 ///
 /// Only used in this file.
 #[derive(Error, Debug, PartialEq)]
 enum SendError<S: Sender> {
-    #[error("send failed")]
+    #[error("send returned empty")]
     Empty,
     #[error("send failed: {0}")]
     Failed(S::Error),
@@ -85,31 +76,26 @@ impl<E: Clock + GClock + Rng, C: Scheme, Key: Array, NetS: Sender<PublicKey = C:
     }
 
     /// Makes a new fetch request.
-    pub async fn fetch_new(&mut self, sender: &mut NetS, key: Key) -> Result<(), Error> {
+    pub async fn fetch_new(&mut self, sender: &mut NetS, key: Key) {
         self.fetch_inner(sender, key, false).await
     }
 
-    /// Makes a fetch request that has been popped.
+    /// Retries a fetch request that has been popped.
     ///
-    /// The request must have been removed before immediately before this is called using
+    /// The request should have been removed before immediately before this is called using
     /// one of the `pop_*` methods.
     pub async fn fetch_retry(&mut self, sender: &mut NetS, key: Key) {
-        // Panic if an error was returned.
-        self.fetch_inner(sender, key, true).await.unwrap();
+        self.fetch_inner(sender, key, true).await;
     }
 
     /// Updates all data structures for fetching.
     ///
     /// Returns an error if the fetch was rejected.
-    async fn fetch_inner(
-        &mut self,
-        sender: &mut NetS,
-        key: Key,
-        shuffle: bool,
-    ) -> Result<(), Error> {
+    async fn fetch_inner(&mut self, sender: &mut NetS, key: Key, shuffle: bool) {
         // Check if the fetch is already in progress
         if self.active.contains_right(&key) || self.pending.contains(&key) {
-            return Err(Error::DuplicateFetch);
+            info!(?key, "duplicate fetch");
+            return;
         }
 
         // Get peer to send request to
@@ -117,7 +103,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, Key: Array, NetS: Sender<PublicKey = C:
             // If there are no peers, add the key to the pending queue
             warn!(?key, "requester failed");
             self.add_pending(key);
-            return Ok(());
+            return;
         };
 
         // Send message to peer
@@ -144,8 +130,6 @@ impl<E: Clock + GClock + Rng, C: Scheme, Key: Array, NetS: Sender<PublicKey = C:
                 self.active.insert(id, key);
             }
         }
-
-        Ok(())
     }
 
     /// Cancels a fetch request.

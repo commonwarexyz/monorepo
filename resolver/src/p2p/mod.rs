@@ -23,7 +23,7 @@ pub trait Producer: Clone + Send + 'static {
 }
 
 /// The interface responsible for managing the list of peers that can be used to fetch data.
-pub trait Director: Clone + Send + 'static {
+pub trait Director: Clone + Send + Sync + 'static {
     /// Type used to uniquely identify peers.
     type PublicKey: Array;
 

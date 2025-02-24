@@ -147,10 +147,7 @@ impl<
                     match msg {
                         Message::Fetch { key } => {
                             debug!(?key, "mailbox: fetch");
-                            if let Err(err) = self.fetcher.fetch_new(&mut sender, key.clone()).await {
-                                warn!(?err, ?key, "failed to fetch");
-                                self.consumer.failed(key, ()).await;
-                            }
+                            self.fetcher.fetch_new(&mut sender, key.clone()).await;
                         }
                         Message::Cancel { key } => {
                             debug!(?key, "mailbox: cancel");
