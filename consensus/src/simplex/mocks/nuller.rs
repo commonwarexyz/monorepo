@@ -50,7 +50,7 @@ impl<E: Spawner, C: Scheme, H: Hasher, S: Supervisor<Index = View, PublicKey = C
         }
     }
 
-    pub fn start(self, voter_network: (impl Sender, impl Receiver)) -> Handle<()> {
+    pub fn start(mut self, voter_network: (impl Sender, impl Receiver)) -> Handle<()> {
         self.context.spawn_ref()(self.run(voter_network))
     }
 

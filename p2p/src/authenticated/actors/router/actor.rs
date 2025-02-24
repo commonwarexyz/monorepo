@@ -76,7 +76,7 @@ impl<E: Spawner + Metrics, P: Array> Actor<E, P> {
         }
     }
 
-    pub fn start(self, routing: Channels<P>) -> Handle<()> {
+    pub fn start(mut self, routing: Channels<P>) -> Handle<()> {
         self.context.spawn_ref()(self.run(routing))
     }
 

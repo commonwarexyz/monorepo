@@ -151,7 +151,7 @@ impl<
     /// Starts the network.
     ///
     /// After the network is started, it is not possible to add more channels.
-    pub fn start(self) -> Handle<()> {
+    pub fn start(mut self) -> Handle<()> {
         self.context.spawn_ref()(self.run())
     }
 

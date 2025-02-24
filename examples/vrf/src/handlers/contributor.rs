@@ -504,7 +504,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
     }
 
     pub fn start(
-        self,
+        mut self,
         sender: impl Sender<PublicKey = C::PublicKey>,
         receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) {

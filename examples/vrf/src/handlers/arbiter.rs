@@ -268,7 +268,7 @@ impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
     }
 
     pub fn start(
-        self,
+        mut self,
         sender: impl Sender<PublicKey = C::PublicKey>,
         receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) -> Handle<()> {

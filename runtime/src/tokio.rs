@@ -245,6 +245,7 @@ impl Executor {
             },
             Context {
                 label: String::new(),
+                spawned: false,
                 executor,
             },
         )
@@ -276,10 +277,20 @@ impl crate::Runner for Runner {
 /// Implementation of [`crate::Spawner`], [`crate::Clock`],
 /// [`crate::Network`], and [`crate::Storage`] for the `tokio`
 /// runtime.
-#[derive(Clone)]
 pub struct Context {
     label: String,
+    spawned: bool,
     executor: Arc<Executor>,
+}
+
+impl Clone for Context {
+    fn clone(&self) -> Self {
+        Self {
+            label: self.label.clone(),
+            spawned: false,
+            executor: self.executor.clone(),
+        }
+    }
 }
 
 impl crate::Spawner for Context {
@@ -289,6 +300,9 @@ impl crate::Spawner for Context {
         Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
+        // Ensure a context only spawns one task
+        assert!(!self.spawned, "already spawned");
+
         // Get metrics
         let work = Work {
             label: self.label.clone(),
@@ -316,11 +330,15 @@ impl crate::Spawner for Context {
         handle
     }
 
-    fn spawn_ref<F, T>(&self) -> impl FnOnce(F) -> Handle<T> + 'static
+    fn spawn_ref<F, T>(&mut self) -> impl FnOnce(F) -> Handle<T> + 'static
     where
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
+        // Ensure a context only spawns one task
+        assert!(!self.spawned, "already spawned");
+        self.spawned = true;
+
         // Get metrics
         let work = Work {
             label: self.label.clone(),
@@ -373,6 +391,7 @@ impl crate::Metrics for Context {
         );
         Self {
             label,
+            spawned: false,
             executor: self.executor.clone(),
         }
     }

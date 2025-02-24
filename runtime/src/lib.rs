@@ -119,7 +119,7 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     /// In some cases, it may be useful to spawn a task without consuming the context (e.g. starting
     /// an actor that already holds a context). Once used this way, the context should not be used
     /// to spawn additional tasks.
-    fn spawn_ref<F, T>(&self) -> impl FnOnce(F) -> Handle<T> + 'static
+    fn spawn_ref<F, T>(&mut self) -> impl FnOnce(F) -> Handle<T> + 'static
     where
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static;
@@ -788,11 +788,36 @@ mod tests {
         });
     }
 
-    fn test_spawn_ref(runner: impl Runner, context: impl Spawner) {
+    fn test_spawn_ref(runner: impl Runner, mut context: impl Spawner) {
         runner.start(async move {
             let handle = context.spawn_ref();
             let result = handle(async move { 42 }).await;
             assert_eq!(result, Ok(42));
+        });
+    }
+
+    fn test_spawn_ref_duplicate(runner: impl Runner, mut context: impl Spawner) {
+        runner.start(async move {
+            let handle = context.spawn_ref();
+            let result = handle(async move { 42 }).await;
+            assert_eq!(result, Ok(42));
+
+            // Ensure context is consumed
+            let handle = context.spawn_ref();
+            let result = handle(async move { 42 }).await;
+            assert_eq!(result, Ok(42));
+        });
+    }
+
+    fn test_spawn_duplicate(runner: impl Runner, mut context: impl Spawner) {
+        runner.start(async move {
+            let handle = context.spawn_ref();
+            let result = handle(async move { 42 }).await;
+            assert_eq!(result, Ok(42));
+
+            // Ensure context is consumed
+            context.spawn(|_| async move { 42 });
+            panic!("should not be possible to spawn a task with the same context");
         });
     }
 
@@ -939,6 +964,20 @@ mod tests {
     }
 
     #[test]
+    #[should_panic]
+    fn test_deterministic_spawn_ref_duplicate() {
+        let (executor, context, _) = deterministic::Executor::default();
+        test_spawn_ref_duplicate(executor, context);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_deterministic_spawn_duplicate() {
+        let (executor, context, _) = deterministic::Executor::default();
+        test_spawn_duplicate(executor, context);
+    }
+
+    #[test]
     fn test_deterministic_metrics() {
         let (executor, context, _) = deterministic::Executor::default();
         test_metrics(executor, context);
@@ -1050,6 +1089,20 @@ mod tests {
     fn test_tokio_spawn_ref() {
         let (executor, context) = tokio::Executor::default();
         test_spawn_ref(executor, context);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_tokio_spawn_ref_duplicate() {
+        let (executor, context) = tokio::Executor::default();
+        test_spawn_ref_duplicate(executor, context);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_tokio_spawn_duplicate() {
+        let (executor, context) = tokio::Executor::default();
+        test_spawn_duplicate(executor, context);
     }
 
     #[test]

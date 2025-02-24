@@ -316,7 +316,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: Array> Application<E, H, P> {
             .await;
     }
 
-    pub fn start(self) -> Handle<()> {
+    pub fn start(mut self) -> Handle<()> {
         self.context.spawn_ref()(self.run())
     }
 

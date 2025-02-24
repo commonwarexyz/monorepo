@@ -235,10 +235,8 @@ impl<
     /// - Messages from the network:
     ///   - Nodes
     ///   - Acks
-    pub fn start(self, chunk_network: (NetS, NetR), ack_network: (NetS, NetR)) -> Handle<()> {
-        self.context
-            .clone()
-            .spawn(|_| self.run(chunk_network, ack_network))
+    pub fn start(mut self, chunk_network: (NetS, NetR), ack_network: (NetS, NetR)) -> Handle<()> {
+        self.context.spawn_ref()(self.run(chunk_network, ack_network))
     }
 
     async fn run(mut self, chunk_network: (NetS, NetR), ack_network: (NetS, NetR)) {

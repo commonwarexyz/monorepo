@@ -158,7 +158,7 @@ impl<E: Clock + Spawner, P: Array> Vrf<E, P> {
     }
 
     pub fn start(
-        self,
+        mut self,
         sender: impl Sender<PublicKey = P>,
         receiver: impl Receiver<PublicKey = P>,
     ) -> Handle<()> {

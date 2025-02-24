@@ -552,7 +552,7 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
         ))
     }
 
-    pub fn start(self) -> Handle<()> {
+    pub fn start(mut self) -> Handle<()> {
         self.context.spawn_ref()(self.run())
     }
 

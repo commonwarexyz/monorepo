@@ -75,7 +75,11 @@ impl<
         )
     }
 
-    pub fn start(self, tracker: tracker::Mailbox<E, P>, router: router::Mailbox<P>) -> Handle<()> {
+    pub fn start(
+        mut self,
+        tracker: tracker::Mailbox<E, P>,
+        router: router::Mailbox<P>,
+    ) -> Handle<()> {
         self.context.spawn_ref()(self.run(tracker, router))
     }
 
