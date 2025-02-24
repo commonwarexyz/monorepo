@@ -23,7 +23,7 @@
 //! });
 //! ```
 
-use crate::{utils::Signaler, Clock, Error, Handle, Signal};
+use crate::{utils::Signaler, Clock, Error, Handle, Signal, METRICS_PREFIX};
 use commonware_utils::{from_hex, hex};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
@@ -50,9 +50,6 @@ use tokio::{
     time::timeout,
 };
 use tracing::warn;
-
-/// Prefix for runtime metrics.
-const METRICS_PREFIX: &str = "runtime";
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct Work {
@@ -734,6 +731,9 @@ impl crate::Metrics for Context {
                 format!("{}_{}", prefix, label)
             }
         };
+        if label.starts_with(METRICS_PREFIX) {
+            panic!("using runtime label is not allowed");
+        }
         Self {
             label,
             executor: self.executor.clone(),

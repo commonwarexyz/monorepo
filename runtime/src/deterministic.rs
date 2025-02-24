@@ -22,7 +22,7 @@
 //! println!("Auditor state: {}", auditor.state());
 //! ```
 
-use crate::{mocks, utils::Signaler, Clock, Error, Handle, Signal};
+use crate::{mocks, utils::Signaler, Clock, Error, Handle, Signal, METRICS_PREFIX};
 use commonware_utils::{hex, SystemTimeExt};
 use futures::{
     channel::mpsc,
@@ -55,9 +55,6 @@ const EPHEMERAL_PORT_RANGE: Range<u16> = 32768..61000;
 
 /// Label for root task created during `Runner::start`.
 const ROOT_TASK: &str = "root";
-
-/// Prefix for runtime metrics.
-const METRICS_PREFIX: &str = "runtime";
 
 /// Map of names to blob contents.
 pub type Partition = HashMap<Vec<u8>, Vec<u8>>;
@@ -1319,6 +1316,9 @@ impl crate::Metrics for Context {
         };
         if label == ROOT_TASK {
             panic!("root task cannot be spawned");
+        }
+        if label.starts_with(METRICS_PREFIX) {
+            panic!("using runtime label is not allowed");
         }
         Self {
             label,

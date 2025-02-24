@@ -30,6 +30,9 @@ cfg_if::cfg_if! {
 mod utils;
 pub use utils::{reschedule, Handle, Signal, Signaler};
 
+/// Prefix for runtime metrics.
+const METRICS_PREFIX: &str = "runtime";
+
 /// Errors that can occur when interacting with the runtime.
 #[derive(Error, Debug, PartialEq)]
 pub enum Error {
@@ -121,6 +124,9 @@ pub trait Metrics: Clone + Send + Sync + 'static {
     /// of the current `Metrics` label.
     ///
     /// This is commonly used to create nested context for `register`.
+    ///
+    /// It is not permitted for any implementation to use `METRICS_PREFIX` as the start of a
+    /// label (reserved for metrics for the runtime).
     fn with_label(&self, label: &str) -> Self;
 
     /// Get the current label of the context.
@@ -795,6 +801,13 @@ mod tests {
         });
     }
 
+    fn test_metrics_label(runner: impl Runner, context: impl Spawner + Metrics) {
+        runner.start(async move {
+            context.with_label(METRICS_PREFIX);
+            panic!("should not be possible to create a context with the METRICS_PREFIX");
+        })
+    }
+
     #[test]
     fn test_deterministic_future() {
         let (runner, _, _) = deterministic::Executor::default();
@@ -899,6 +912,13 @@ mod tests {
     }
 
     #[test]
+    #[should_panic]
+    fn test_deterministic_metrics_label() {
+        let (executor, runtime, _) = deterministic::Executor::default();
+        test_metrics_label(executor, runtime);
+    }
+
+    #[test]
     fn test_tokio_error_future() {
         let (runner, _) = tokio::Executor::default();
         test_error_future(runner);
@@ -997,5 +1017,12 @@ mod tests {
     fn test_tokio_metrics() {
         let (executor, runtime) = tokio::Executor::default();
         test_metrics(executor, runtime);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_tokio_metrics_label() {
+        let (executor, runtime) = tokio::Executor::default();
+        test_metrics_label(executor, runtime);
     }
 }
