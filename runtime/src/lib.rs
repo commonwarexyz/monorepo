@@ -95,8 +95,7 @@ pub trait Runner {
         F::Output: Send + 'static;
 }
 
-/// Interface that any task scheduler must implement to spawn
-/// tasks.
+/// Interface that any task scheduler must implement to spawn tasks.
 pub trait Spawner: Clone + Send + Sync + 'static {
     /// Enqueue a task to be executed.
     ///
@@ -148,7 +147,7 @@ pub trait Metrics: Clone + Send + Sync + 'static {
     /// Create a new instance of `Metrics` with the given label appended to the end
     /// of the current `Metrics` label.
     ///
-    /// This is commonly used to create nested context for `register`.
+    /// This is commonly used to create a nested context for `register`.
     ///
     /// It is not permitted for any implementation to use `METRICS_PREFIX` as the start of a
     /// label (reserved for metrics for the runtime).
@@ -839,7 +838,6 @@ mod tests {
 
             // Encode metrics
             let buffer = context.encode();
-            println!("{}", buffer);
             assert!(buffer.contains("test_total 1"));
 
             // Nested context
@@ -860,7 +858,6 @@ mod tests {
     fn test_metrics_label(runner: impl Runner, context: impl Spawner + Metrics) {
         runner.start(async move {
             context.with_label(METRICS_PREFIX);
-            panic!("should not be possible to create a context with the METRICS_PREFIX");
         })
     }
 
