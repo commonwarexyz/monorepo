@@ -14,7 +14,7 @@
 //! ```rust
 //! use commonware_p2p::simulated::{Config, Link, Network};
 //! use commonware_cryptography::{Ed25519, Scheme};
-//! use commonware_runtime::{deterministic::Executor, Spawner, Runner};
+//! use commonware_runtime::{deterministic::Executor, Spawner, Runner, Metrics};
 //!
 //! // Generate peers
 //! let peers = vec![
@@ -33,10 +33,10 @@
 //! let (executor, runtime, _) = Executor::seeded(0);
 //! executor.start(async move {
 //!     // Initialize network
-//!     let (network, mut oracle) = Network::new(runtime.clone(), p2p_cfg);
+//!     let (network, mut oracle) = Network::new(runtime.with_label("network"), p2p_cfg);
 //!
 //!     // Start network
-//!     let network_handler = runtime.spawn("network", network.run());
+//!     let network_handler = network.start();
 //!
 //!     // Register some peers
 //!     let (sender, receiver) = oracle.register(peers[0].clone(), 0).await.unwrap();

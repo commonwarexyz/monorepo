@@ -86,7 +86,7 @@
 //! ```rust
 //! use commonware_p2p::authenticated::{self, Network};
 //! use commonware_cryptography::{Ed25519, Scheme};
-//! use commonware_runtime::{tokio::{self, Executor}, Spawner, Runner};
+//! use commonware_runtime::{tokio::{self, Executor}, Spawner, Runner, Metrics};
 //! use governor::Quota;
 //! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 //! use std::num::NonZeroU32;
@@ -133,7 +133,7 @@
 //! // Start runtime
 //! executor.start(async move {
 //!     // Initialize network
-//!     let (mut network, mut oracle) = Network::new(runtime.clone(), p2p_cfg);
+//!     let (mut network, mut oracle) = Network::new(runtime.with_label("network"), p2p_cfg);
 //!
 //!     // Register authorized peers
 //!     //
@@ -152,7 +152,7 @@
 //!     );
 //!
 //!     // Run network
-//!     let network_handler = runtime.spawn("network", network.run());
+//!     let network_handler = network.start();
 //!
 //!     // ... Use sender and receiver ...
 //!
