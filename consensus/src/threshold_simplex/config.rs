@@ -3,11 +3,7 @@ use crate::{Automaton, Committer, Relay, ThresholdSupervisor};
 use commonware_cryptography::{bls12381::primitives::group, Scheme};
 use commonware_utils::Array;
 use governor::Quota;
-use prometheus_client::registry::Registry;
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::time::Duration;
 
 /// Configuration for the consensus engine.
 pub struct Config<
@@ -32,9 +28,6 @@ pub struct Config<
 
     /// Supervisor for the consensus engine.
     pub supervisor: S,
-
-    /// Prometheus metrics registry.
-    pub registry: Arc<Mutex<Registry>>,
 
     /// Maximum number of messages to buffer on channels inside the consensus
     /// engine before blocking.

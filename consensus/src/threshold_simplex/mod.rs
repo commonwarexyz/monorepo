@@ -218,14 +218,13 @@ mod tests {
     use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{
         deterministic::{self, Executor},
-        Clock, Runner, Spawner,
+        Clock, Metrics, Runner, Spawner,
     };
     use commonware_storage::journal::variable::{Config as JConfig, Journal};
     use commonware_utils::quorum;
     use engine::Engine;
     use futures::{channel::mpsc, StreamExt};
     use governor::Quota;
-    use prometheus_client::registry::Registry;
     use rand::{rngs::StdRng, Rng, SeedableRng};
     use std::{
         collections::{BTreeMap, HashMap, HashSet},
@@ -313,26 +312,25 @@ mod tests {
 
     #[test_traced]
     fn test_all_online() {
-        // Create runtime
+        // Create context
         let n = 5;
         let threshold = quorum(n).expect("unable to calculate threshold");
         let max_exceptions = 4;
         let required_containers = 100;
         let activity_timeout = 10;
         let namespace = b"consensus".to_vec();
-        let (executor, mut runtime, _) = Executor::timed(Duration::from_secs(30));
+        let (executor, mut context, _) = Executor::timed(Duration::from_secs(30));
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.clone(),
+                context.with_label("network"),
                 Config {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     max_size: 1024 * 1024,
                 },
             );
 
             // Start network
-            runtime.spawn("network", network.run());
+            network.start();
 
             // Register participants
             let mut schemes = Vec::new();
@@ -356,7 +354,7 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
             // Derive threshold
-            let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
+            let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
             let pk = poly::public(&public);
             let prover = Prover::new(pk, &namespace);
 
@@ -366,6 +364,9 @@ mod tests {
             let (done_sender, mut done_receiver) = mpsc::unbounded();
             let mut engine_handlers = Vec::new();
             for (idx, scheme) in schemes.into_iter().enumerate() {
+                // Create scheme context
+                let context = context.with_label(&format!("validator-{}", scheme.public_key()));
+
                 // Configure engine
                 let validator = scheme.public_key();
                 let mut participants = BTreeMap::new();
@@ -384,16 +385,15 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                 };
-                let (actor, application) =
-                    mocks::application::Application::new(runtime.clone(), application_cfg);
-                runtime.spawn("application", async move {
-                    actor.run().await;
-                });
+                let (actor, application) = mocks::application::Application::new(
+                    context.with_label("application"),
+                    application_cfg,
+                );
+                actor.start();
                 let cfg = JConfig {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     partition: validator.to_string(),
                 };
-                let journal = Journal::init(runtime.clone(), cfg)
+                let journal = Journal::init(context.with_label("journal"), cfg)
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
@@ -402,7 +402,6 @@ mod tests {
                     relay: application.clone(),
                     committer: application,
                     supervisor,
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     mailbox_size: 1024,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
@@ -416,15 +415,13 @@ mod tests {
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
                 };
-                let engine = Engine::new(runtime.clone(), journal, cfg);
+                let engine = Engine::new(context.with_label("engine"), journal, cfg);
 
                 // Start engine
                 let (voter, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                engine_handlers.push(runtime.spawn("engine", async move {
-                    engine.run(voter, resolver).await;
-                }));
+                engine_handlers.push(engine.start(voter, resolver));
             }
 
             // Wait for all engines to finish
@@ -530,7 +527,7 @@ mod tests {
 
     #[test_traced]
     fn test_unclean_shutdown() {
-        // Create runtime
+        // Create context
         let n = 5;
         let threshold = quorum(n).expect("unable to calculate threshold");
         let required_containers = 100;
@@ -548,7 +545,7 @@ mod tests {
         let finalized = Arc::new(Mutex::new(HashMap::new()));
         let completed = Arc::new(Mutex::new(HashSet::new()));
         let supervised = Arc::new(Mutex::new(Vec::new()));
-        let (mut executor, mut runtime, _) = Executor::timed(Duration::from_secs(300));
+        let (mut executor, mut context, _) = Executor::timed(Duration::from_secs(300));
         while completed.lock().unwrap().len() != n as usize {
             let namespace = namespace.clone();
             let shutdowns = shutdowns.clone();
@@ -557,21 +554,20 @@ mod tests {
             let completed = completed.clone();
             let supervised = supervised.clone();
             executor.start({
-                let mut runtime = runtime.clone();
+                let mut context = context.clone();
                 let public = public.clone();
                 let shares = shares.clone();
                 async move {
                 // Create simulated network
                 let (network, mut oracle) = Network::new(
-                    runtime.clone(),
+                    context.with_label("network"),
                     Config {
-                        registry: Arc::new(Mutex::new(Registry::default())),
                         max_size: 1024 * 1024,
                     },
                 );
 
                 // Start network
-                runtime.spawn("network", network.run());
+                network.start();
 
                 // Register participants
                 let mut schemes = Vec::new();
@@ -601,6 +597,11 @@ mod tests {
                 let (done_sender, mut done_receiver) = mpsc::unbounded();
                 let mut engine_handlers = Vec::new();
                 for (idx, scheme) in schemes.into_iter().enumerate() {
+                    // Create scheme context
+                    let context = context
+                        .clone()
+                        .with_label(&format!("validator-{}", scheme.public_key()));
+
                     // Configure engine
                     let validator = scheme.public_key();
                     let mut participants = BTreeMap::new();
@@ -621,15 +622,12 @@ mod tests {
                         verify_latency: (10.0, 5.0),
                     };
                     let (actor, application) =
-                        mocks::application::Application::new(runtime.clone(), application_cfg);
-                    runtime.spawn("application", async move {
-                        actor.run().await;
-                    });
+                        mocks::application::Application::new(context.with_label("application"), application_cfg);
+                    actor.start();
                     let cfg = JConfig {
-                        registry: Arc::new(Mutex::new(Registry::default())),
                         partition: validator.to_string(),
                     };
-                    let journal = Journal::init(runtime.clone(), cfg)
+                    let journal = Journal::init(context.with_label("journal"), cfg)
                         .await
                         .expect("unable to create journal");
                     let cfg = config::Config {
@@ -638,7 +636,6 @@ mod tests {
                         relay: application.clone(),
                         committer: application,
                         supervisor,
-                        registry: Arc::new(Mutex::new(Registry::default())),
                         mailbox_size: 1024,
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
@@ -652,24 +649,17 @@ mod tests {
                         fetch_concurrent: 1,
                         replay_concurrency: 1,
                     };
-                    let engine = Engine::new(runtime.clone(), journal, cfg);
+                    let engine = Engine::new(context.with_label("engine"), journal, cfg);
 
                     // Start engine
                     let (voter, resolver) = registrations
                         .remove(&validator)
                         .expect("validator should be registered");
-                    engine_handlers.push(runtime.spawn("engine", async move {
-                        engine
-                            .run(
-                                voter,
-                                resolver,
-                            )
-                            .await;
-                    }));
+                    engine_handlers.push(engine.start(voter, resolver));
                 }
 
                 // Wait for all engines to finish
-                runtime.spawn("confirmed", async move {
+                context.with_label("confirmed").spawn(move |_| async move {
                     loop {
                         // Parse events
                         let (validator, event) = done_receiver.next().await.unwrap();
@@ -736,8 +726,8 @@ mod tests {
 
                 // Exit at random points for unclean shutdown of entire set
                 let wait =
-                    runtime.gen_range(Duration::from_millis(10)..Duration::from_millis(2_000));
-                runtime.sleep(wait).await;
+                    context.gen_range(Duration::from_millis(10)..Duration::from_millis(2_000));
+                context.sleep(wait).await;
                 {
                     let mut shutdowns = shutdowns.lock().unwrap();
                     debug!(shutdowns = *shutdowns, elapsed = ?wait, "restarting");
@@ -748,8 +738,8 @@ mod tests {
                 supervised.lock().unwrap().push(supervisors);
             }});
 
-            // Recover runtime
-            (executor, runtime, _) = runtime.recover();
+            // Recover context
+            (executor, context, _) = context.recover();
         }
 
         // Check supervisors for faults activity
@@ -764,25 +754,24 @@ mod tests {
 
     #[test_traced]
     fn test_backfill() {
-        // Create runtime
+        // Create context
         let n = 4;
         let threshold = quorum(n).expect("unable to calculate threshold");
         let required_containers = 100;
         let activity_timeout = 10;
         let namespace = b"consensus".to_vec();
-        let (executor, mut runtime, _) = Executor::timed(Duration::from_secs(360));
+        let (executor, mut context, _) = Executor::timed(Duration::from_secs(360));
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.clone(),
+                context.with_label("network"),
                 Config {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     max_size: 1024 * 1024,
                 },
             );
 
             // Start network
-            runtime.spawn("network", network.run());
+            network.start();
 
             // Register participants
             let mut schemes = Vec::new();
@@ -812,7 +801,7 @@ mod tests {
             .await;
 
             // Derive threshold
-            let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
+            let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
             let pk = poly::public(&public);
             let prover = Prover::new(pk, &namespace);
 
@@ -826,6 +815,9 @@ mod tests {
                 if idx_scheme == 0 {
                     continue;
                 }
+
+                // Create scheme context
+                let context = context.with_label(&format!("validator-{}", scheme.public_key()));
 
                 // Configure engine
                 let validator = scheme.public_key();
@@ -845,16 +837,15 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                 };
-                let (actor, application) =
-                    mocks::application::Application::new(runtime.clone(), application_cfg);
-                runtime.spawn("application", async move {
-                    actor.run().await;
-                });
+                let (actor, application) = mocks::application::Application::new(
+                    context.with_label("application"),
+                    application_cfg,
+                );
+                actor.start();
                 let cfg = JConfig {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     partition: validator.to_string(),
                 };
-                let journal = Journal::init(runtime.clone(), cfg)
+                let journal = Journal::init(context.with_label("journal"), cfg)
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
@@ -863,7 +854,6 @@ mod tests {
                     relay: application.clone(),
                     committer: application,
                     supervisor,
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     mailbox_size: 1024,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
@@ -877,15 +867,13 @@ mod tests {
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
                 };
-                let engine = Engine::new(runtime.clone(), journal, cfg);
+                let engine = Engine::new(context.with_label("engine"), journal, cfg);
 
                 // Start engine
                 let (voter, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                engine_handlers.push(runtime.spawn("engine", async move {
-                    engine.run(voter, resolver).await;
-                }));
+                engine_handlers.push(engine.start(voter, resolver));
             }
 
             // Wait for all online engines to finish
@@ -927,7 +915,7 @@ mod tests {
             .await;
 
             // Wait for nullifications to accrue
-            runtime.sleep(Duration::from_secs(120)).await;
+            context.sleep(Duration::from_secs(120)).await;
 
             // Unlink second peer from all (except first)
             link_validators(
@@ -941,88 +929,88 @@ mod tests {
             // Configure engine for first peer
             let scheme = schemes[0].clone();
             let validator = scheme.public_key();
+            {
+                // Create scheme context
+                let context = context.with_label(&format!("validator-{}", validator));
 
-            // Link first peer to all (except second)
-            link_validators(
-                &mut oracle,
-                &validators,
-                Action::Link(link),
-                Some(|_, i, j| [i, j].contains(&0usize) && ![i, j].contains(&1usize)),
-            )
-            .await;
+                // Link first peer to all (except second)
+                link_validators(
+                    &mut oracle,
+                    &validators,
+                    Action::Link(link),
+                    Some(|_, i, j| [i, j].contains(&0usize) && ![i, j].contains(&1usize)),
+                )
+                .await;
 
-            // Restore network connections for all online peers
-            let link = Link {
-                latency: 10.0,
-                jitter: 2.5,
-                success_rate: 1.0,
-            };
-            link_validators(
-                &mut oracle,
-                &validators,
-                Action::Update(link),
-                Some(|_, i, j| ![i, j].contains(&1usize)),
-            )
-            .await;
+                // Restore network connections for all online peers
+                let link = Link {
+                    latency: 10.0,
+                    jitter: 2.5,
+                    success_rate: 1.0,
+                };
+                link_validators(
+                    &mut oracle,
+                    &validators,
+                    Action::Update(link),
+                    Some(|_, i, j| ![i, j].contains(&1usize)),
+                )
+                .await;
 
-            // Configure engine
-            let mut participants = BTreeMap::new();
-            participants.insert(0, (public.clone(), validators.clone(), shares[0]));
-            let supervisor_config = mocks::supervisor::Config {
-                prover: prover.clone(),
-                participants,
-            };
-            let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
-            supervisors.push(supervisor.clone());
-            let application_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
-                relay: relay.clone(),
-                participant: validator.clone(),
-                tracker: done_sender.clone(),
-                propose_latency: (10.0, 5.0),
-                verify_latency: (10.0, 5.0),
-            };
-            let (actor, application) =
-                mocks::application::Application::new(runtime.clone(), application_cfg);
-            runtime.spawn("application", async move {
-                actor.run().await;
-            });
-            let cfg = JConfig {
-                registry: Arc::new(Mutex::new(Registry::default())),
-                partition: validator.to_string(),
-            };
-            let journal = Journal::init(runtime.clone(), cfg)
-                .await
-                .expect("unable to create journal");
-            let cfg = config::Config {
-                crypto: scheme,
-                automaton: application.clone(),
-                relay: application.clone(),
-                committer: application,
-                supervisor,
-                registry: Arc::new(Mutex::new(Registry::default())),
-                mailbox_size: 1024,
-                namespace: namespace.clone(),
-                leader_timeout: Duration::from_secs(1),
-                notarization_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(10),
-                fetch_timeout: Duration::from_secs(1),
-                activity_timeout,
-                max_fetch_count: 1,
-                max_fetch_size: 1024 * 512,
-                fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
-                fetch_concurrent: 1,
-                replay_concurrency: 1,
-            };
-            let engine = Engine::new(runtime.clone(), journal, cfg);
+                // Configure engine
+                let mut participants = BTreeMap::new();
+                participants.insert(0, (public.clone(), validators.clone(), shares[0]));
+                let supervisor_config = mocks::supervisor::Config {
+                    prover: prover.clone(),
+                    participants,
+                };
+                let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
+                supervisors.push(supervisor.clone());
+                let application_cfg = mocks::application::Config {
+                    hasher: Sha256::default(),
+                    relay: relay.clone(),
+                    participant: validator.clone(),
+                    tracker: done_sender.clone(),
+                    propose_latency: (10.0, 5.0),
+                    verify_latency: (10.0, 5.0),
+                };
+                let (actor, application) = mocks::application::Application::new(
+                    context.with_label("application"),
+                    application_cfg,
+                );
+                actor.start();
+                let cfg = JConfig {
+                    partition: validator.to_string(),
+                };
+                let journal = Journal::init(context.with_label("journal"), cfg)
+                    .await
+                    .expect("unable to create journal");
+                let cfg = config::Config {
+                    crypto: scheme,
+                    automaton: application.clone(),
+                    relay: application.clone(),
+                    committer: application,
+                    supervisor,
+                    mailbox_size: 1024,
+                    namespace: namespace.clone(),
+                    leader_timeout: Duration::from_secs(1),
+                    notarization_timeout: Duration::from_secs(2),
+                    nullify_retry: Duration::from_secs(10),
+                    fetch_timeout: Duration::from_secs(1),
+                    activity_timeout,
+                    max_fetch_count: 1,
+                    max_fetch_size: 1024 * 512,
+                    fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                    fetch_concurrent: 1,
+                    replay_concurrency: 1,
+                };
+                let engine = Engine::new(context.with_label("engine"), journal, cfg);
 
-            // Start engine
-            let (voter, resolver) = registrations
-                .remove(&validator)
-                .expect("validator should be registered");
-            engine_handlers.push(runtime.spawn("engine", async move {
-                engine.run(voter, resolver).await;
-            }));
+                // Start engine
+                let (voter, resolver) = registrations
+                    .remove(&validator)
+                    .expect("validator should be registered");
+                engine_handlers.push(engine.start(voter, resolver));
+            }
 
             // Wait for new engine to finalize required
             let mut finalized = HashMap::new();
@@ -1058,25 +1046,24 @@ mod tests {
 
     #[test_traced]
     fn test_one_offline() {
-        // Create runtime
+        // Create context
         let n = 5;
         let threshold = quorum(n).expect("unable to calculate threshold");
         let required_containers = 100;
         let activity_timeout = 10;
         let namespace = b"consensus".to_vec();
-        let (executor, mut runtime, _) = Executor::timed(Duration::from_secs(30));
+        let (executor, mut context, _) = Executor::timed(Duration::from_secs(30));
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.clone(),
+                context.with_label("network"),
                 Config {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     max_size: 1024 * 1024,
                 },
             );
 
             // Start network
-            runtime.spawn("network", network.run());
+            network.start();
 
             // Register participants
             let mut schemes = Vec::new();
@@ -1106,7 +1093,7 @@ mod tests {
             .await;
 
             // Derive threshold
-            let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
+            let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
             let pk = poly::public(&public);
             let prover = Prover::new(pk, &namespace);
 
@@ -1120,6 +1107,9 @@ mod tests {
                 if idx_scheme == 0 {
                     continue;
                 }
+
+                // Create scheme context
+                let context = context.with_label(&format!("validator-{}", scheme.public_key()));
 
                 // Configure engine
                 let validator = scheme.public_key();
@@ -1139,16 +1129,15 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                 };
-                let (actor, application) =
-                    mocks::application::Application::new(runtime.clone(), application_cfg);
-                runtime.spawn("application", async move {
-                    actor.run().await;
-                });
+                let (actor, application) = mocks::application::Application::new(
+                    context.with_label("application"),
+                    application_cfg,
+                );
+                actor.start();
                 let cfg = JConfig {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     partition: validator.to_string(),
                 };
-                let journal = Journal::init(runtime.clone(), cfg)
+                let journal = Journal::init(context.with_label("journal"), cfg)
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
@@ -1157,7 +1146,6 @@ mod tests {
                     relay: application.clone(),
                     committer: application,
                     supervisor,
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     mailbox_size: 1024,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
@@ -1171,15 +1159,13 @@ mod tests {
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
                 };
-                let engine = Engine::new(runtime.clone(), journal, cfg);
+                let engine = Engine::new(context.with_label("engine"), journal, cfg);
 
                 // Start engine
                 let (voter, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                engine_handlers.push(runtime.spawn("engine", async move {
-                    engine.run(voter, resolver).await;
-                }));
+                engine_handlers.push(engine.start(voter, resolver));
             }
 
             // Wait for all engines to finish
@@ -1249,25 +1235,24 @@ mod tests {
 
     #[test_traced]
     fn test_slow_validator() {
-        // Create runtime
+        // Create context
         let n = 5;
         let threshold = quorum(n).expect("unable to calculate threshold");
         let required_containers = 50;
         let activity_timeout = 10;
         let namespace = b"consensus".to_vec();
-        let (executor, mut runtime, _) = Executor::timed(Duration::from_secs(30));
+        let (executor, mut context, _) = Executor::timed(Duration::from_secs(30));
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.clone(),
+                context.with_label("network"),
                 Config {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     max_size: 1024 * 1024,
                 },
             );
 
             // Start network
-            runtime.spawn("network", network.run());
+            network.start();
 
             // Register participants
             let mut schemes = Vec::new();
@@ -1291,7 +1276,7 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
             // Derive threshold
-            let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
+            let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
             let pk = poly::public(&public);
             let prover = Prover::new(pk, &namespace);
 
@@ -1301,6 +1286,9 @@ mod tests {
             let (done_sender, mut done_receiver) = mpsc::unbounded();
             let mut engine_handlers = Vec::new();
             for (idx_scheme, scheme) in schemes.into_iter().enumerate() {
+                // Create scheme context
+                let context = context.with_label(&format!("validator-{}", scheme.public_key()));
+
                 // Configure engine
                 let validator = scheme.public_key();
                 let mut participants = BTreeMap::new();
@@ -1330,16 +1318,15 @@ mod tests {
                         verify_latency: (10.0, 5.0),
                     }
                 };
-                let (actor, application) =
-                    mocks::application::Application::new(runtime.clone(), application_cfg);
-                runtime.spawn("application", async move {
-                    actor.run().await;
-                });
+                let (actor, application) = mocks::application::Application::new(
+                    context.with_label("application"),
+                    application_cfg,
+                );
+                actor.start();
                 let cfg = JConfig {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     partition: validator.to_string(),
                 };
-                let journal = Journal::init(runtime.clone(), cfg)
+                let journal = Journal::init(context.with_label("journal"), cfg)
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
@@ -1348,7 +1335,6 @@ mod tests {
                     relay: application.clone(),
                     committer: application,
                     supervisor,
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     mailbox_size: 1024,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
@@ -1362,15 +1348,13 @@ mod tests {
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
                 };
-                let engine = Engine::new(runtime.clone(), journal, cfg);
+                let engine = Engine::new(context.with_label("engine"), journal, cfg);
 
                 // Start engine
                 let (voter, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                engine_handlers.push(runtime.spawn("engine", async move {
-                    engine.run(voter, resolver).await;
-                }));
+                engine_handlers.push(engine.start(voter, resolver));
             }
 
             // Wait for all engines to finish
@@ -1440,25 +1424,24 @@ mod tests {
 
     #[test_traced]
     fn test_all_recovery() {
-        // Create runtime
+        // Create context
         let n = 5;
         let threshold = quorum(n).expect("unable to calculate threshold");
         let required_containers = 100;
         let activity_timeout = 10;
         let namespace = b"consensus".to_vec();
-        let (executor, mut runtime, _) = Executor::timed(Duration::from_secs(120));
+        let (executor, mut context, _) = Executor::timed(Duration::from_secs(120));
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.clone(),
+                context.with_label("network"),
                 Config {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     max_size: 1024 * 1024,
                 },
             );
 
             // Start network
-            runtime.spawn("network", network.run());
+            network.start();
 
             // Register participants
             let mut schemes = Vec::new();
@@ -1482,7 +1465,7 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
             // Derive threshold
-            let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
+            let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
             let pk = poly::public(&public);
             let prover = Prover::new(pk, &namespace);
 
@@ -1492,6 +1475,9 @@ mod tests {
             let (done_sender, mut done_receiver) = mpsc::unbounded();
             let mut engine_handlers = Vec::new();
             for (idx, scheme) in schemes.iter().enumerate() {
+                // Create scheme context
+                let context = context.with_label(&format!("validator-{}", scheme.public_key()));
+
                 // Configure engine
                 let validator = scheme.public_key();
                 let mut participants = BTreeMap::new();
@@ -1510,16 +1496,15 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                 };
-                let (actor, application) =
-                    mocks::application::Application::new(runtime.clone(), application_cfg);
-                runtime.spawn("application", async move {
-                    actor.run().await;
-                });
+                let (actor, application) = mocks::application::Application::new(
+                    context.with_label("application"),
+                    application_cfg,
+                );
+                actor.start();
                 let cfg = JConfig {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     partition: validator.to_string(),
                 };
-                let journal = Journal::init(runtime.clone(), cfg)
+                let journal = Journal::init(context.with_label("journal"), cfg)
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
@@ -1528,7 +1513,6 @@ mod tests {
                     relay: application.clone(),
                     committer: application,
                     supervisor,
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     mailbox_size: 1024,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
@@ -1542,20 +1526,18 @@ mod tests {
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
                 };
-                let engine = Engine::new(runtime.clone(), journal, cfg);
+                let engine = Engine::new(context.with_label("engine"), journal, cfg);
 
                 // Start engine
                 let (voter, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                engine_handlers.push(runtime.spawn("engine", async move {
-                    engine.run(voter, resolver).await;
-                }));
+                engine_handlers.push(engine.start(voter, resolver));
             }
 
             // Wait for a few virtual minutes (shouldn't finalize anything)
             select! {
-                _timeout = runtime.sleep(Duration::from_secs(60)) => {},
+                _timeout = context.sleep(Duration::from_secs(60)) => {},
                 _done = done_receiver.next() => {
                     panic!("engine should not notarize or finalize anything");
                 }
@@ -1613,25 +1595,24 @@ mod tests {
 
     #[test_traced]
     fn test_partition() {
-        // Create runtime
+        // Create context
         let n = 10;
         let threshold = quorum(n).expect("unable to calculate threshold");
         let required_containers = 50;
         let activity_timeout = 10;
         let namespace = b"consensus".to_vec();
-        let (executor, mut runtime, _) = Executor::timed(Duration::from_secs(900));
+        let (executor, mut context, _) = Executor::timed(Duration::from_secs(900));
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.clone(),
+                context.with_label("network"),
                 Config {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     max_size: 1024 * 1024,
                 },
             );
 
             // Start network
-            runtime.spawn("network", network.run());
+            network.start();
 
             // Register participants
             let mut schemes = Vec::new();
@@ -1655,7 +1636,7 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(link.clone()), None).await;
 
             // Derive threshold
-            let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
+            let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
             let pk = poly::public(&public);
             let prover = Prover::new(pk, &namespace);
 
@@ -1665,6 +1646,9 @@ mod tests {
             let (done_sender, mut done_receiver) = mpsc::unbounded();
             let mut engine_handlers = Vec::new();
             for (idx, scheme) in schemes.iter().enumerate() {
+                // Create scheme context
+                let context = context.with_label(&format!("validator-{}", scheme.public_key()));
+
                 // Configure engine
                 let validator = scheme.public_key();
                 let mut participants = BTreeMap::new();
@@ -1683,16 +1667,15 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                 };
-                let (actor, application) =
-                    mocks::application::Application::new(runtime.clone(), application_cfg);
-                runtime.spawn("application", async move {
-                    actor.run().await;
-                });
+                let (actor, application) = mocks::application::Application::new(
+                    context.with_label("application"),
+                    application_cfg,
+                );
+                actor.start();
                 let cfg = JConfig {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     partition: validator.to_string(),
                 };
-                let journal = Journal::init(runtime.clone(), cfg)
+                let journal = Journal::init(context.with_label("journal"), cfg)
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
@@ -1701,7 +1684,6 @@ mod tests {
                     relay: application.clone(),
                     committer: application,
                     supervisor,
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     mailbox_size: 1024,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
@@ -1715,15 +1697,13 @@ mod tests {
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
                 };
-                let engine = Engine::new(runtime.clone(), journal, cfg);
+                let engine = Engine::new(context.with_label("engine"), journal, cfg);
 
                 // Start engine
                 let (voter, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                engine_handlers.push(runtime.spawn("engine", async move {
-                    engine.run(voter, resolver).await;
-                }));
+                engine_handlers.push(engine.start(voter, resolver));
             }
 
             // Wait for all engines to finish
@@ -1769,7 +1749,7 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Unlink, Some(separated)).await;
 
             // Wait for any in-progress notarizations/finalizations to finish
-            runtime.sleep(Duration::from_secs(10)).await;
+            context.sleep(Duration::from_secs(10)).await;
 
             // Empty done receiver
             loop {
@@ -1780,7 +1760,7 @@ mod tests {
 
             // Wait for a few virtual minutes (shouldn't finalize anything)
             select! {
-                _timeout = runtime.sleep(Duration::from_secs(600)) => {},
+                _timeout = context.sleep(Duration::from_secs(600)) => {},
                 _done = done_receiver.next() => {
                     panic!("engine should not notarize or finalize anything");
                 }
@@ -1837,7 +1817,7 @@ mod tests {
     }
 
     fn slow_and_lossy_links(seed: u64) -> String {
-        // Create runtime
+        // Create context
         let n = 5;
         let threshold = quorum(n).expect("unable to calculate threshold");
         let required_containers = 50;
@@ -1848,19 +1828,18 @@ mod tests {
             timeout: Some(Duration::from_secs(3_000)),
             ..deterministic::Config::default()
         };
-        let (executor, mut runtime, auditor) = Executor::init(cfg);
+        let (executor, mut context, auditor) = Executor::init(cfg);
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.clone(),
+                context.with_label("network"),
                 Config {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     max_size: 1024 * 1024,
                 },
             );
 
             // Start network
-            runtime.spawn("network", network.run());
+            network.start();
 
             // Register participants
             let mut schemes = Vec::new();
@@ -1884,7 +1863,7 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(degraded_link), None).await;
 
             // Derive threshold
-            let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
+            let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
             let pk = poly::public(&public);
             let prover = Prover::new(pk, &namespace);
 
@@ -1894,6 +1873,9 @@ mod tests {
             let (done_sender, mut done_receiver) = mpsc::unbounded();
             let mut engine_handlers = Vec::new();
             for (idx, scheme) in schemes.into_iter().enumerate() {
+                // Create scheme context
+                let context = context.with_label(&format!("validator-{}", scheme.public_key()));
+
                 // Configure engine
                 let validator = scheme.public_key();
                 let mut participants = BTreeMap::new();
@@ -1912,16 +1894,15 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                 };
-                let (actor, application) =
-                    mocks::application::Application::new(runtime.clone(), application_cfg);
-                runtime.spawn("application", async move {
-                    actor.run().await;
-                });
+                let (actor, application) = mocks::application::Application::new(
+                    context.with_label("application"),
+                    application_cfg,
+                );
+                actor.start();
                 let cfg = JConfig {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     partition: validator.to_string(),
                 };
-                let journal = Journal::init(runtime.clone(), cfg)
+                let journal = Journal::init(context.with_label("journal"), cfg)
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
@@ -1930,7 +1911,6 @@ mod tests {
                     relay: application.clone(),
                     committer: application,
                     supervisor,
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     mailbox_size: 1024,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
@@ -1944,15 +1924,13 @@ mod tests {
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
                 };
-                let engine = Engine::new(runtime.clone(), journal, cfg);
+                let engine = Engine::new(context.with_label("engine"), journal, cfg);
 
                 // Start engine
                 let (voter, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                engine_handlers.push(runtime.spawn("engine", async move {
-                    engine.run(voter, resolver).await;
-                }));
+                engine_handlers.push(engine.start(voter, resolver));
             }
 
             // Wait for all engines to finish
@@ -2021,25 +1999,24 @@ mod tests {
 
     #[test_traced]
     fn test_conflicter() {
-        // Create runtime
+        // Create context
         let n = 4;
         let threshold = quorum(n).expect("unable to calculate threshold");
         let required_containers = 50;
         let activity_timeout = 10;
         let namespace = b"consensus".to_vec();
-        let (executor, mut runtime, _) = Executor::timed(Duration::from_secs(30));
+        let (executor, mut context, _) = Executor::timed(Duration::from_secs(30));
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.clone(),
+                context.with_label("network"),
                 Config {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     max_size: 1024 * 1024,
                 },
             );
 
             // Start network
-            runtime.spawn("network", network.run());
+            network.start();
 
             // Register participants
             let mut schemes = Vec::new();
@@ -2063,7 +2040,7 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
             // Derive threshold
-            let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
+            let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
             let pk = poly::public(&public);
             let prover = Prover::new(pk, &namespace);
 
@@ -2072,6 +2049,9 @@ mod tests {
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
             for (idx_scheme, scheme) in schemes.into_iter().enumerate() {
+                // Create scheme context
+                let context = context.with_label(&format!("validator-{}", scheme.public_key()));
+
                 // Start engine
                 let validator = scheme.public_key();
                 let mut participants = BTreeMap::new();
@@ -2090,10 +2070,11 @@ mod tests {
                         namespace: namespace.clone(),
                     };
                     let engine: mocks::conflicter::Conflicter<_, Sha256, _> =
-                        mocks::conflicter::Conflicter::new(runtime.clone(), cfg);
-                    runtime.spawn("byzantine_engine", async move {
-                        engine.run(voter, resolver).await;
-                    });
+                        mocks::conflicter::Conflicter::new(
+                            context.with_label("byzantine_engine"),
+                            cfg,
+                        );
+                    engine.start(voter);
                 } else {
                     supervisors.push(supervisor.clone());
                     let application_cfg = mocks::application::Config {
@@ -2104,16 +2085,15 @@ mod tests {
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
                     };
-                    let (actor, application) =
-                        mocks::application::Application::new(runtime.clone(), application_cfg);
-                    runtime.spawn("application", async move {
-                        actor.run().await;
-                    });
+                    let (actor, application) = mocks::application::Application::new(
+                        context.with_label("application"),
+                        application_cfg,
+                    );
+                    actor.start();
                     let cfg = JConfig {
-                        registry: Arc::new(Mutex::new(Registry::default())),
                         partition: validator.to_string(),
                     };
-                    let journal = Journal::init(runtime.clone(), cfg)
+                    let journal = Journal::init(context.with_label("journal"), cfg)
                         .await
                         .expect("unable to create journal");
                     let cfg = config::Config {
@@ -2122,7 +2102,6 @@ mod tests {
                         relay: application.clone(),
                         committer: application,
                         supervisor,
-                        registry: Arc::new(Mutex::new(Registry::default())),
                         mailbox_size: 1024,
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
@@ -2136,10 +2115,8 @@ mod tests {
                         fetch_concurrent: 1,
                         replay_concurrency: 1,
                     };
-                    let engine = Engine::new(runtime.clone(), journal, cfg);
-                    runtime.spawn("engine", async move {
-                        engine.run(voter, resolver).await;
-                    });
+                    let engine = Engine::new(context.with_label("engine"), journal, cfg);
+                    engine.start(voter, resolver);
                 }
             }
 
@@ -2206,25 +2183,24 @@ mod tests {
 
     #[test_traced]
     fn test_nuller() {
-        // Create runtime
+        // Create context
         let n = 4;
         let threshold = quorum(n).expect("unable to calculate threshold");
         let required_containers = 50;
         let activity_timeout = 10;
         let namespace = b"consensus".to_vec();
-        let (executor, mut runtime, _) = Executor::timed(Duration::from_secs(30));
+        let (executor, mut context, _) = Executor::timed(Duration::from_secs(30));
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
-                runtime.clone(),
+                context.with_label("network"),
                 Config {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     max_size: 1024 * 1024,
                 },
             );
 
             // Start network
-            runtime.spawn("network", network.run());
+            network.start();
 
             // Register participants
             let mut schemes = Vec::new();
@@ -2248,7 +2224,7 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
             // Derive threshold
-            let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
+            let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
             let pk = poly::public(&public);
             let prover = Prover::new(pk, &namespace);
 
@@ -2257,6 +2233,9 @@ mod tests {
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
             for (idx_scheme, scheme) in schemes.into_iter().enumerate() {
+                // Create scheme context
+                let context = context.with_label(&format!("validator-{}", scheme.public_key()));
+
                 // Start engine
                 let validator = scheme.public_key();
                 let mut participants = BTreeMap::new();
@@ -2274,10 +2253,9 @@ mod tests {
                         supervisor,
                         namespace: namespace.clone(),
                     };
-                    let engine: mocks::nuller::Nuller<Sha256, _> = mocks::nuller::Nuller::new(cfg);
-                    runtime.spawn("byzantine_engine", async move {
-                        engine.run(voter, resolver).await;
-                    });
+                    let engine: mocks::nuller::Nuller<_, Sha256, _> =
+                        mocks::nuller::Nuller::new(context.with_label("byzantine_engine"), cfg);
+                    engine.start(voter);
                 } else {
                     supervisors.push(supervisor.clone());
                     let application_cfg = mocks::application::Config {
@@ -2288,16 +2266,15 @@ mod tests {
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
                     };
-                    let (actor, application) =
-                        mocks::application::Application::new(runtime.clone(), application_cfg);
-                    runtime.spawn("application", async move {
-                        actor.run().await;
-                    });
+                    let (actor, application) = mocks::application::Application::new(
+                        context.with_label("application"),
+                        application_cfg,
+                    );
+                    actor.start();
                     let cfg = JConfig {
-                        registry: Arc::new(Mutex::new(Registry::default())),
                         partition: validator.to_string(),
                     };
-                    let journal = Journal::init(runtime.clone(), cfg)
+                    let journal = Journal::init(context.with_label("journal"), cfg)
                         .await
                         .expect("unable to create journal");
                     let cfg = config::Config {
@@ -2306,7 +2283,6 @@ mod tests {
                         relay: application.clone(),
                         committer: application,
                         supervisor,
-                        registry: Arc::new(Mutex::new(Registry::default())),
                         mailbox_size: 1024,
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
@@ -2320,10 +2296,8 @@ mod tests {
                         fetch_concurrent: 1,
                         replay_concurrency: 1,
                     };
-                    let engine = Engine::new(runtime.clone(), journal, cfg);
-                    runtime.spawn("engine", async move {
-                        engine.run(voter, resolver).await;
-                    });
+                    let engine = Engine::new(context.with_label("engine"), journal, cfg);
+                    engine.start(voter, resolver);
                 }
             }
 

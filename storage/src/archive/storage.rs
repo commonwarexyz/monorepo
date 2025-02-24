@@ -1,7 +1,7 @@
 use super::{Config, Error, Translator};
 use crate::journal::variable::Journal;
 use bytes::{Buf, BufMut, Bytes};
-use commonware_runtime::{Blob, Storage};
+use commonware_runtime::{Blob, Metrics, Storage};
 use futures::{pin_mut, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use rangemap::RangeInclusiveSet;
@@ -32,7 +32,7 @@ struct Record {
 }
 
 /// Implementation of `Archive` storage.
-pub struct Archive<T: Translator, B: Blob, E: Storage<B>> {
+pub struct Archive<T: Translator, B: Blob, E: Storage<B> + Metrics> {
     cfg: Config<T>,
     journal: Journal<B, E>,
 
@@ -58,12 +58,16 @@ pub struct Archive<T: Translator, B: Blob, E: Storage<B>> {
     syncs: Counter,
 }
 
-impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
+impl<T: Translator, B: Blob, E: Storage<B> + Metrics> Archive<T, B, E> {
     /// Initialize a new `Archive` instance.
     ///
     /// The in-memory index for `Archive` is populated during this call
     /// by replaying the journal.
-    pub async fn init(mut journal: Journal<B, E>, cfg: Config<T>) -> Result<Self, Error> {
+    pub async fn init(
+        context: E,
+        mut journal: Journal<B, E>,
+        cfg: Config<T>,
+    ) -> Result<Self, Error> {
         // Initialize keys and run corruption check
         let mut indices = BTreeMap::new();
         let mut keys = HashMap::new();
@@ -115,28 +119,25 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         let gets = Counter::default();
         let has = Counter::default();
         let syncs = Counter::default();
-        {
-            let mut registry = cfg.registry.lock().unwrap();
-            registry.register(
-                "items_tracked",
-                "Number of items tracked",
-                items_tracked.clone(),
-            );
-            registry.register(
-                "indices_pruned",
-                "Number of indices pruned",
-                indices_pruned.clone(),
-            );
-            registry.register("keys_pruned", "Number of keys pruned", keys_pruned.clone());
-            registry.register(
-                "unnecessary_reads",
-                "Number of unnecessary reads performed during key lookups",
-                unnecessary_reads.clone(),
-            );
-            registry.register("gets", "Number of gets performed", gets.clone());
-            registry.register("has", "Number of has performed", has.clone());
-            registry.register("syncs", "Number of syncs called", syncs.clone());
-        }
+        context.register(
+            "items_tracked",
+            "Number of items tracked",
+            items_tracked.clone(),
+        );
+        context.register(
+            "indices_pruned",
+            "Number of indices pruned",
+            indices_pruned.clone(),
+        );
+        context.register("keys_pruned", "Number of keys pruned", keys_pruned.clone());
+        context.register(
+            "unnecessary_reads",
+            "Number of unnecessary reads performed during key lookups",
+            unnecessary_reads.clone(),
+        );
+        context.register("gets", "Number of gets performed", gets.clone());
+        context.register("has", "Number of has performed", has.clone());
+        context.register("syncs", "Number of syncs called", syncs.clone());
         items_tracked.set(indices.len() as i64);
 
         // Return populated archive

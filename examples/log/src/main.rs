@@ -53,13 +53,11 @@ use commonware_cryptography::{sha256::Digest as Sha256Digest, Ed25519, Scheme, S
 use commonware_p2p::authenticated::{self, Network};
 use commonware_runtime::{
     tokio::{self, Executor},
-    Runner, Spawner,
+    Metrics, Runner,
 };
 use commonware_storage::journal::variable::{Config, Journal};
 use commonware_utils::union;
 use governor::Quota;
-use prometheus_client::registry::Registry;
-use std::sync::{Arc, Mutex};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::NonZeroU32,
@@ -91,9 +89,6 @@ fn main() {
         )
         .arg(Arg::new("storage-dir").long("storage-dir").required(true))
         .get_matches();
-
-    // Create GUI
-    let gui = gui::Gui::new();
 
     // Configure my identity
     let me = matches
@@ -147,26 +142,26 @@ fn main() {
         .get_one::<String>("storage-dir")
         .expect("Please provide storage directory");
 
-    // Initialize runtime
+    // Initialize context
     let runtime_cfg = tokio::Config {
         storage_directory: storage_directory.into(),
         ..Default::default()
     };
-    let (executor, runtime) = Executor::init(runtime_cfg.clone());
+    let (executor, context) = Executor::init(runtime_cfg.clone());
 
     // Configure network
     let p2p_cfg = authenticated::Config::aggressive(
         signer.clone(),
         &union(APPLICATION_NAMESPACE, b"_P2P"),
-        Arc::new(Mutex::new(Registry::default())),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
         1024 * 1024, // 1MB
     );
 
-    // Start runtime
+    // Start context
     executor.start(async move {
-        let (mut network, mut oracle) = Network::new(runtime.clone(), p2p_cfg);
+        // Initialize network
+        let (mut network, mut oracle) = Network::new(context.with_label("network"), p2p_cfg);
 
         // Provide authorized peers
         //
@@ -193,9 +188,8 @@ fn main() {
 
         // Initialize storage
         let journal = Journal::init(
-            runtime.clone(),
+            context.with_label("journal"),
             Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: String::from("log"),
             },
         )
@@ -206,7 +200,7 @@ fn main() {
         let namespace = union(APPLICATION_NAMESPACE, b"_CONSENSUS");
         let prover: Prover<Ed25519, Sha256Digest> = Prover::new(&namespace);
         let (application, supervisor, mailbox) = application::Application::new(
-            runtime.clone(),
+            context.with_label("application"),
             application::Config {
                 prover,
                 hasher: Sha256::default(),
@@ -217,7 +211,7 @@ fn main() {
 
         // Initialize consensus
         let engine = Engine::new(
-            runtime.clone(),
+            context.with_label("engine"),
             journal,
             simplex::Config {
                 crypto: signer.clone(),
@@ -225,7 +219,6 @@ fn main() {
                 relay: mailbox.clone(),
                 committer: mailbox,
                 supervisor,
-                registry: Arc::new(Mutex::new(Registry::default())),
                 namespace,
                 mailbox_size: 1024,
                 replay_concurrency: 1,
@@ -242,17 +235,15 @@ fn main() {
         );
 
         // Start consensus
-        runtime.spawn("application", application.run());
-        runtime.spawn("network", network.run());
-        runtime.spawn(
-            "engine",
-            engine.run(
-                (voter_sender, voter_receiver),
-                (resolver_sender, resolver_receiver),
-            ),
+        application.start();
+        network.start();
+        engine.start(
+            (voter_sender, voter_receiver),
+            (resolver_sender, resolver_receiver),
         );
 
         // Block on GUI
-        gui.run(runtime).await;
+        let gui = gui::Gui::new(context.with_label("gui"));
+        gui.run().await;
     });
 }

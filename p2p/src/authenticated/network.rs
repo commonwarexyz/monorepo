@@ -8,7 +8,9 @@ use super::{
 use crate::Channel;
 use commonware_cryptography::Scheme;
 use commonware_macros::select;
-use commonware_runtime::{Clock, Listener, Network as RNetwork, Sink, Spawner, Stream};
+use commonware_runtime::{
+    Clock, Handle, Listener, Metrics, Network as RNetwork, Sink, Spawner, Stream,
+};
 use commonware_stream::public_key;
 use commonware_utils::union;
 use governor::{clock::ReasonablyRealtime, Quota};
@@ -41,16 +43,16 @@ pub struct Network<
     Si: Sink,
     St: Stream,
     L: Listener<Si, St>,
-    E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork<L, Si, St>,
+    E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork<L, Si, St> + Metrics,
     C: Scheme,
 > {
-    runtime: E,
+    context: E,
     cfg: Config<C>,
 
     channels: Channels<C::PublicKey>,
     tracker: tracker::Actor<E, C>,
     tracker_mailbox: tracker::Mailbox<E, C::PublicKey>,
-    router: router::Actor<C::PublicKey>,
+    router: router::Actor<E, C::PublicKey>,
     router_mailbox: router::Mailbox<C::PublicKey>,
 
     _phantom_si: PhantomData<Si>,
@@ -62,7 +64,7 @@ impl<
         Si: Sink,
         St: Stream,
         L: Listener<Si, St>,
-        E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork<L, Si, St>,
+        E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork<L, Si, St> + Metrics,
         C: Scheme,
     > Network<Si, St, L, E, C>
 {
@@ -76,13 +78,12 @@ impl<
     ///
     /// * A tuple containing the network instance and the oracle that
     ///   can be used by a developer to configure which peers are authorized.
-    pub fn new(runtime: E, cfg: Config<C>) -> (Self, tracker::Oracle<E, C::PublicKey>) {
+    pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle<E, C::PublicKey>) {
         let (tracker, tracker_mailbox, oracle) = tracker::Actor::new(
-            runtime.clone(),
+            context.with_label("tracker"),
             tracker::Config {
                 crypto: cfg.crypto.clone(),
                 namespace: union(&cfg.namespace, TRACKER_SUFFIX),
-                registry: cfg.registry.clone(),
                 address: cfg.dialable,
                 bootstrappers: cfg.bootstrappers.clone(),
                 allow_private_ips: cfg.allow_private_ips,
@@ -93,15 +94,17 @@ impl<
                 peer_gossip_max_count: cfg.peer_gossip_max_count,
             },
         );
-        let (router, router_mailbox, messenger) = router::Actor::new(router::Config {
-            registry: cfg.registry.clone(),
-            mailbox_size: cfg.mailbox_size,
-        });
+        let (router, router_mailbox, messenger) = router::Actor::new(
+            context.with_label("router"),
+            router::Config {
+                mailbox_size: cfg.mailbox_size,
+            },
+        );
         let channels = Channels::new(messenger, cfg.max_message_size);
 
         (
             Self {
-                runtime,
+                context,
                 cfg,
 
                 channels,
@@ -148,28 +151,29 @@ impl<
     /// Starts the network.
     ///
     /// After the network is started, it is not possible to add more channels.
-    pub async fn run(self) {
+    pub fn start(mut self) -> Handle<()> {
+        self.context.spawn_ref()(self.run())
+    }
+
+    async fn run(self) {
         // Start tracker
-        let mut tracker_task = self.runtime.spawn("tracker", self.tracker.run());
+        let mut tracker_task = self.tracker.start();
 
         // Start router
-        let mut router_task = self.runtime.spawn("router", self.router.run(self.channels));
+        let mut router_task = self.router.start(self.channels);
 
         // Start spawner
         let (spawner, spawner_mailbox) = spawner::Actor::new(
-            self.runtime.clone(),
+            self.context.with_label("spawner"),
             spawner::Config {
-                registry: self.cfg.registry.clone(),
                 mailbox_size: self.cfg.mailbox_size,
                 gossip_bit_vec_frequency: self.cfg.gossip_bit_vec_frequency,
                 allowed_bit_vec_rate: self.cfg.allowed_bit_vec_rate,
                 allowed_peers_rate: self.cfg.allowed_peers_rate,
             },
         );
-        let mut spawner_task = self.runtime.spawn(
-            "spawner",
-            spawner.run(self.tracker_mailbox.clone(), self.router_mailbox),
-        );
+        let mut spawner_task =
+            spawner.start(self.tracker_mailbox.clone(), self.router_mailbox.clone());
 
         // Start listener
         let stream_cfg = public_key::Config {
@@ -181,32 +185,26 @@ impl<
             handshake_timeout: self.cfg.handshake_timeout,
         };
         let listener = listener::Actor::new(
-            self.runtime.clone(),
+            self.context.with_label("listener"),
             listener::Config {
-                registry: self.cfg.registry.clone(),
                 address: self.cfg.listen,
                 stream_cfg: stream_cfg.clone(),
-                allowed_incoming_connectioned_rate: self.cfg.allowed_incoming_connection_rate,
+                allowed_incoming_connection_rate: self.cfg.allowed_incoming_connection_rate,
             },
         );
-        let mut listener_task = self.runtime.spawn(
-            "listener",
-            listener.run(self.tracker_mailbox.clone(), spawner_mailbox.clone()),
-        );
+        let mut listener_task =
+            listener.start(self.tracker_mailbox.clone(), spawner_mailbox.clone());
 
         // Start dialer
         let dialer = dialer::Actor::new(
-            self.runtime.clone(),
+            self.context.with_label("dialer"),
             dialer::Config {
-                registry: self.cfg.registry,
                 stream_cfg,
                 dial_frequency: self.cfg.dial_frequency,
                 dial_rate: self.cfg.dial_rate,
             },
         );
-        let mut dialer_task = self
-            .runtime
-            .spawn("dialer", dialer.run(self.tracker_mailbox, spawner_mailbox));
+        let mut dialer_task = dialer.start(self.tracker_mailbox, spawner_mailbox);
 
         // Wait for first actor to exit
         info!("network started");

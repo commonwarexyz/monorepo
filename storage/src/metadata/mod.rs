@@ -41,14 +41,11 @@
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, deterministic::Executor};
 //! use commonware_storage::metadata::{Metadata, Config};
-//! use prometheus_client::registry::Registry;
-//! use std::sync::{Arc, Mutex};
 //!
 //! let (executor, context, _) = Executor::default();
 //! executor.start(async move {
 //!     // Create a store
 //!     let mut metadata = Metadata::init(context, Config{
-//!         registry: Arc::new(Mutex::new(Registry::default())),
 //!         partition: "partition".to_string()
 //!     }).await.unwrap();
 //!
@@ -68,9 +65,6 @@
 //! ```
 
 mod storage;
-use std::sync::{Arc, Mutex};
-
-use prometheus_client::registry::Registry;
 pub use storage::Metadata;
 
 use thiserror::Error;
@@ -89,9 +83,6 @@ pub enum Error {
 /// Configuration for `Metadata` storage.
 #[derive(Clone)]
 pub struct Config {
-    /// Registry for metrics.
-    pub registry: Arc<Mutex<Registry>>,
-
     /// The `commonware_runtime::Storage` partition to
     /// use for storing metadata.
     pub partition: String,
@@ -102,19 +93,16 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic::Executor, Blob, Runner, Storage};
-    use prometheus_client::encoding::text::encode;
+    use commonware_runtime::{deterministic::Executor, Blob, Metrics, Runner, Storage};
     use std::time::UNIX_EPOCH;
 
     #[test_traced]
     fn test_put_get_clear() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
         executor.start(async move {
             // Create a metadata store
-            let registry = Arc::new(Mutex::new(Registry::default()));
             let cfg = Config {
-                registry: registry.clone(),
                 partition: "test".to_string(),
             };
             let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
@@ -129,8 +117,7 @@ mod tests {
             assert!(value.is_none());
 
             // Check metrics
-            let mut buffer = String::new();
-            encode(&mut buffer, &registry.lock().unwrap()).unwrap();
+            let buffer = context.encode();
             assert!(buffer.contains("syncs_total 0"));
             assert!(buffer.contains("keys 0"));
 
@@ -143,8 +130,7 @@ mod tests {
             assert_eq!(value, &hello);
 
             // Check metrics
-            let mut buffer = String::new();
-            encode(&mut buffer, &registry.lock().unwrap()).unwrap();
+            let buffer = context.encode();
             assert!(buffer.contains("syncs_total 0"));
             assert!(buffer.contains("keys 1"));
 
@@ -152,15 +138,12 @@ mod tests {
             metadata.close().await.unwrap();
 
             // Check metrics
-            let mut buffer = String::new();
-            encode(&mut buffer, &registry.lock().unwrap()).unwrap();
+            let buffer = context.encode();
             assert!(buffer.contains("syncs_total 1"));
             assert!(buffer.contains("keys 1"));
 
             // Reopen the metadata store
-            let registry = Arc::new(Mutex::new(Registry::default()));
             let cfg = Config {
-                registry: registry.clone(),
                 partition: "test".to_string(),
             };
             let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
@@ -173,8 +156,7 @@ mod tests {
             );
 
             // Check metrics
-            let mut buffer = String::new();
-            encode(&mut buffer, &registry.lock().unwrap()).unwrap();
+            let buffer = context.encode();
             assert!(buffer.contains("syncs_total 0"));
             assert!(buffer.contains("keys 1"));
 
@@ -188,8 +170,7 @@ mod tests {
             assert!(value.is_none());
 
             // Check metrics
-            let mut buffer = String::new();
-            encode(&mut buffer, &registry.lock().unwrap()).unwrap();
+            let buffer = context.encode();
             assert!(buffer.contains("syncs_total 0"));
             assert!(buffer.contains("keys 0"));
         });
@@ -197,13 +178,11 @@ mod tests {
 
     #[test_traced]
     fn test_multi_sync() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
         executor.start(async move {
             // Create a metadata store
-            let registry = Arc::new(Mutex::new(Registry::default()));
             let cfg = Config {
-                registry: registry.clone(),
                 partition: "test".to_string(),
             };
             let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
@@ -222,8 +201,7 @@ mod tests {
             );
 
             // Check metrics
-            let mut buffer = String::new();
-            encode(&mut buffer, &registry.lock().unwrap()).unwrap();
+            let buffer = context.encode();
             assert!(buffer.contains("syncs_total 1"));
             assert!(buffer.contains("keys 1"));
 
@@ -238,22 +216,18 @@ mod tests {
             metadata.close().await.unwrap();
 
             // Check metrics
-            let mut buffer = String::new();
-            encode(&mut buffer, &registry.lock().unwrap()).unwrap();
+            let buffer = context.encode();
             assert!(buffer.contains("syncs_total 2"));
             assert!(buffer.contains("keys 2"));
 
             // Reopen the metadata store
-            let registry = Arc::new(Mutex::new(Registry::default()));
             let cfg = Config {
-                registry: registry.clone(),
                 partition: "test".to_string(),
             };
             let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
 
             // Check metrics
-            let mut buffer = String::new();
-            encode(&mut buffer, &registry.lock().unwrap()).unwrap();
+            let buffer = context.encode();
             assert!(buffer.contains("syncs_total 0"));
             assert!(buffer.contains("keys 2"));
 
@@ -275,8 +249,7 @@ mod tests {
             );
 
             // Check metrics
-            let mut buffer = String::new();
-            encode(&mut buffer, &registry.lock().unwrap()).unwrap();
+            let buffer = context.encode();
             assert!(buffer.contains("syncs_total 1"));
             assert!(buffer.contains("keys 1"));
 
@@ -284,16 +257,13 @@ mod tests {
             metadata.close().await.unwrap();
 
             // Reopen the metadata store
-            let registry = Arc::new(Mutex::new(Registry::default()));
             let cfg = Config {
-                registry: registry.clone(),
                 partition: "test".to_string(),
             };
             let metadata = Metadata::init(context.clone(), cfg).await.unwrap();
 
             // Check metrics
-            let mut buffer = String::new();
-            encode(&mut buffer, &registry.lock().unwrap()).unwrap();
+            let buffer = context.encode();
             assert!(buffer.contains("syncs_total 0"));
             assert!(buffer.contains("keys 1"));
 
@@ -307,12 +277,11 @@ mod tests {
 
     #[test_traced]
     fn test_recover_corrupted_one() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
         executor.start(async move {
             // Create a metadata store
             let cfg = Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test".to_string(),
             };
             let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
@@ -342,7 +311,6 @@ mod tests {
 
             // Reopen the metadata store
             let cfg = Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test".to_string(),
             };
             let metadata = Metadata::init(context.clone(), cfg).await.unwrap();
@@ -355,12 +323,11 @@ mod tests {
 
     #[test_traced]
     fn test_recover_corrupted_both() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
         executor.start(async move {
             // Create a metadata store
             let cfg = Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test".to_string(),
             };
             let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
@@ -392,9 +359,7 @@ mod tests {
             blob.close().await.unwrap();
 
             // Reopen the metadata store
-            let registry = Arc::new(Mutex::new(Registry::default()));
             let cfg = Config {
-                registry: registry.clone(),
                 partition: "test".to_string(),
             };
             let metadata = Metadata::init(context.clone(), cfg).await.unwrap();
@@ -404,8 +369,7 @@ mod tests {
             assert!(value.is_none());
 
             // Check metrics
-            let mut buffer = String::new();
-            encode(&mut buffer, &registry.lock().unwrap()).unwrap();
+            let buffer = context.encode();
             assert!(buffer.contains("syncs_total 0"));
             assert!(buffer.contains("keys 0"));
         });
@@ -413,12 +377,11 @@ mod tests {
 
     #[test_traced]
     fn test_recover_corrupted_truncate() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
         executor.start(async move {
             // Create a metadata store
             let cfg = Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test".to_string(),
             };
             let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
@@ -449,7 +412,6 @@ mod tests {
 
             // Reopen the metadata store
             let cfg = Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test".to_string(),
             };
             let metadata = Metadata::init(context.clone(), cfg).await.unwrap();
@@ -462,12 +424,11 @@ mod tests {
 
     #[test_traced]
     fn test_recover_corrupted_short() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
         executor.start(async move {
             // Create a metadata store
             let cfg = Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test".to_string(),
             };
             let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
@@ -497,7 +458,6 @@ mod tests {
 
             // Reopen the metadata store
             let cfg = Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test".to_string(),
             };
             let metadata = Metadata::init(context.clone(), cfg).await.unwrap();
@@ -510,7 +470,7 @@ mod tests {
 
     #[test_traced]
     fn test_unclean_shutdown() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
         executor.start(async move {
             let key = 42;
@@ -518,7 +478,6 @@ mod tests {
             {
                 // Create a metadata store
                 let cfg = Config {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     partition: "test".to_string(),
                 };
                 let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
@@ -530,9 +489,7 @@ mod tests {
             }
 
             // Reopen the metadata store
-            let registry = Arc::new(Mutex::new(Registry::default()));
             let cfg = Config {
-                registry: registry.clone(),
                 partition: "test".to_string(),
             };
             let metadata = Metadata::init(context.clone(), cfg).await.unwrap();
@@ -542,8 +499,7 @@ mod tests {
             assert!(value.is_none());
 
             // Check metrics
-            let mut buffer = String::new();
-            encode(&mut buffer, &registry.lock().unwrap()).unwrap();
+            let buffer = context.encode();
             assert!(buffer.contains("syncs_total 0"));
             assert!(buffer.contains("keys 0"));
         });
@@ -551,12 +507,11 @@ mod tests {
 
     #[test_traced]
     fn test_value_too_big_error() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
         executor.start(async move {
             // Create a metadata store
             let cfg = Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test".to_string(),
             };
             let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();

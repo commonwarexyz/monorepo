@@ -13,7 +13,7 @@ use commonware_cryptography::{
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Blob, Clock, Spawner, Storage};
+use commonware_runtime::{Blob, Clock, Handle, Metrics, Spawner, Storage};
 use commonware_storage::journal::{self, variable::Journal};
 use commonware_utils::Array;
 use futures::{
@@ -23,13 +23,11 @@ use futures::{
     stream::FuturesUnordered,
     StreamExt,
 };
-use prometheus_client::registry::Registry;
 use std::{
     collections::BTreeMap,
     future::Future,
     marker::PhantomData,
     pin::Pin,
-    sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
 use thiserror::Error;
@@ -42,7 +40,7 @@ type VerifyFuture<D, P> =
 /// The actor that implements the `Broadcaster` trait.
 pub struct Actor<
     B: Blob,
-    E: Clock + Spawner + Storage<B>,
+    E: Clock + Spawner + Storage<B> + Metrics,
     C: Scheme,
     D: Array,
     A: Application<Context = Context<C::PublicKey>, Digest = D> + Clone,
@@ -59,7 +57,7 @@ pub struct Actor<
     ////////////////////////////////////////
     // Interfaces
     ////////////////////////////////////////
-    runtime: E,
+    context: E,
     crypto: C,
     coordinator: S,
     application: A,
@@ -161,7 +159,7 @@ pub struct Actor<
 
 impl<
         B: Blob,
-        E: Clock + Spawner + Storage<B>,
+        E: Clock + Spawner + Storage<B> + Metrics,
         C: Scheme,
         D: Array,
         A: Application<Context = Context<C::PublicKey>, Digest = D> + Clone,
@@ -178,7 +176,7 @@ impl<
 {
     /// Creates a new actor with the given runtime and configuration.
     /// Returns the actor and a mailbox for sending messages to the actor.
-    pub fn new(runtime: E, cfg: Config<C, D, A, Z, S>) -> (Self, Mailbox<D>) {
+    pub fn new(context: E, cfg: Config<C, D, A, Z, S>) -> (Self, Mailbox<D>) {
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::new(mailbox_sender);
 
@@ -195,7 +193,7 @@ impl<
         }
 
         let result = Self {
-            runtime,
+            context,
             crypto: cfg.crypto,
             _sender: PhantomData,
             _receiver: PhantomData,
@@ -237,10 +235,14 @@ impl<
     /// - Messages from the network:
     ///   - Nodes
     ///   - Acks
-    pub async fn run(mut self, chunk_network: (NetS, NetR), ack_network: (NetS, NetR)) {
+    pub fn start(mut self, chunk_network: (NetS, NetR), ack_network: (NetS, NetR)) -> Handle<()> {
+        self.context.spawn_ref()(self.run(chunk_network, ack_network))
+    }
+
+    async fn run(mut self, chunk_network: (NetS, NetR), ack_network: (NetS, NetR)) {
         let (mut node_sender, mut node_receiver) = chunk_network;
         let (mut ack_sender, mut ack_receiver) = ack_network;
-        let mut shutdown = self.runtime.stopped();
+        let mut shutdown = self.context.stopped();
 
         // Before starting on the main runtime loop, initialize my own sequencer journal
         // and attempt to rebroadcast if necessary.
@@ -258,11 +260,11 @@ impl<
             // Create deadline futures.
             // If the deadline is None, the future will never resolve.
             let refresh_epoch = match self.refresh_epoch_deadline {
-                Some(deadline) => Either::Left(self.runtime.sleep_until(deadline)),
+                Some(deadline) => Either::Left(self.context.sleep_until(deadline)),
                 None => Either::Right(future::pending()),
             };
             let rebroadcast = match self.rebroadcast_deadline {
-                Some(deadline) => Either::Left(self.runtime.sleep_until(deadline)),
+                Some(deadline) => Either::Left(self.context.sleep_until(deadline)),
                 None => Either::Right(future::pending()),
             };
 
@@ -696,7 +698,7 @@ impl<
             .map_err(|_| Error::BroadcastFailed)?;
 
         // Set the rebroadcast deadline
-        self.rebroadcast_deadline = Some(self.runtime.current() + self.rebroadcast_timeout);
+        self.rebroadcast_deadline = Some(self.context.current() + self.rebroadcast_timeout);
 
         Ok(())
     }
@@ -898,10 +900,9 @@ impl<
 
         // Initialize journal
         let cfg = journal::variable::Config {
-            registry: Arc::new(Mutex::new(Registry::default())),
             partition: format!("{}{}", &self.journal_name_prefix, sequencer),
         };
-        let mut journal = Journal::init(self.runtime.clone(), cfg)
+        let mut journal = Journal::init(self.context.clone(), cfg)
             .await
             .expect("unable to init journal");
 
@@ -990,7 +991,7 @@ impl<
     /// Updates the epoch to the value of the coordinator, and sets the refresh epoch deadline.
     fn refresh_epoch(&mut self) {
         // Set the refresh epoch deadline
-        self.refresh_epoch_deadline = Some(self.runtime.current() + self.refresh_epoch_timeout);
+        self.refresh_epoch_deadline = Some(self.context.current() + self.refresh_epoch_timeout);
 
         // Ensure epoch is not before the current epoch
         let epoch = self.coordinator.index();

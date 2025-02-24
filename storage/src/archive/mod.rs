@@ -113,21 +113,17 @@
 //! use commonware_runtime::{Spawner, Runner, deterministic::Executor};
 //! use commonware_storage::archive::{Archive, Config, translator::FourCap};
 //! use commonware_storage::journal::{Error, variable::{Config as JConfig, Journal}};
-//! use prometheus_client::registry::Registry;
-//! use std::sync::{Arc, Mutex};
 //!
 //! let (executor, context, _) = Executor::default();
 //! executor.start(async move {
 //!     // Create a journal
 //!     let cfg = JConfig {
-//!         registry: Arc::new(Mutex::new(Registry::default())),
 //!         partition: "partition".to_string()
 //!     };
-//!     let journal = Journal::init(context, cfg).await.unwrap();
+//!     let journal = Journal::init(context.clone(), cfg).await.unwrap();
 //!
 //!     // Create an archive
 //!     let cfg = Config {
-//!         registry: Arc::new(Mutex::new(Registry::default())),
 //!         key_len: 8,
 //!         translator: FourCap,
 //!         section_mask: 0xffff_ffff_ffff_0000u64,
@@ -135,7 +131,7 @@
 //!         replay_concurrency: 4,
 //!         compression: Some(3),
 //!     };
-//!     let mut archive = Archive::init(journal, cfg).await.unwrap();
+//!     let mut archive = Archive::init(context, journal, cfg).await.unwrap();
 //!
 //!     // Put a key
 //!     archive.put(1, b"test-key", "data".into()).await.unwrap();
@@ -149,11 +145,7 @@ mod storage;
 pub use storage::{Archive, Identifier};
 pub mod translator;
 
-use prometheus_client::registry::Registry;
-use std::{
-    hash::Hash,
-    sync::{Arc, Mutex},
-};
+use std::hash::Hash;
 use thiserror::Error;
 
 /// Errors that can occur when interacting with the archive.
@@ -192,9 +184,6 @@ pub trait Translator: Clone {
 /// Configuration for `Archive` storage.
 #[derive(Clone)]
 pub struct Config<T: Translator> {
-    /// Registry for metrics.
-    pub registry: Arc<Mutex<Registry>>,
-
     /// Mask to apply to indices to determine section.
     ///
     /// This value is `index & section_mask`.
@@ -233,29 +222,22 @@ mod tests {
     use crate::journal::Error as JournalError;
     use bytes::Bytes;
     use commonware_macros::test_traced;
+    use commonware_runtime::Metrics;
     use commonware_runtime::{deterministic::Executor, Blob, Runner, Storage};
-    use prometheus_client::{encoding::text::encode, registry::Registry};
     use rand::Rng;
-    use std::{
-        collections::BTreeMap,
-        sync::{Arc, Mutex},
-    };
+    use std::collections::BTreeMap;
     use translator::{FourCap, TwoCap};
 
     const DEFAULT_SECTION_MASK: u64 = 0xffff_ffff_ffff_0000u64;
 
     fn test_archive_put_get(compression: Option<u8>) {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
         executor.start(async move {
-            // Create a registry for metrics
-            let registry = Arc::new(Mutex::new(Registry::default()));
-
             // Initialize an empty journal
             let journal = Journal::init(
-                context,
+                context.clone(),
                 JConfig {
-                    registry: registry.clone(),
                     partition: "test_partition".into(),
                 },
             )
@@ -264,7 +246,6 @@ mod tests {
 
             // Initialize the archive
             let cfg = Config {
-                registry,
                 key_len: 7,
                 translator: FourCap,
                 pending_writes: 10,
@@ -272,7 +253,7 @@ mod tests {
                 compression,
                 section_mask: DEFAULT_SECTION_MASK,
             };
-            let mut archive = Archive::init(journal, cfg.clone())
+            let mut archive = Archive::init(context.clone(), journal, cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
@@ -325,8 +306,7 @@ mod tests {
             assert_eq!(retrieved, data);
 
             // Check metrics
-            let mut buffer = String::new();
-            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            let buffer = context.encode();
             assert!(buffer.contains("items_tracked 1"));
             assert!(buffer.contains("unnecessary_reads_total 0"));
             assert!(buffer.contains("gets_total 2"));
@@ -337,8 +317,7 @@ mod tests {
             archive.sync().await.expect("Failed to sync data");
 
             // Check metrics
-            let mut buffer = String::new();
-            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            let buffer = context.encode();
             assert!(buffer.contains("items_tracked 1"));
             assert!(buffer.contains("unnecessary_reads_total 0"));
             assert!(buffer.contains("gets_total 2"));
@@ -359,14 +338,13 @@ mod tests {
 
     #[test_traced]
     fn test_archive_compression_then_none() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
         executor.start(async move {
             // Initialize an empty journal
             let journal = Journal::init(
                 context.clone(),
                 JConfig {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     partition: "test_partition".into(),
                 },
             )
@@ -375,7 +353,6 @@ mod tests {
 
             // Initialize the archive
             let cfg = Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 key_len: 7,
                 translator: FourCap,
                 pending_writes: 10,
@@ -383,7 +360,7 @@ mod tests {
                 compression: Some(3),
                 section_mask: DEFAULT_SECTION_MASK,
             };
-            let mut archive = Archive::init(journal, cfg.clone())
+            let mut archive = Archive::init(context.clone(), journal, cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
@@ -401,16 +378,14 @@ mod tests {
 
             // Initialize the archive again without compression
             let journal = Journal::init(
-                context,
+                context.clone(),
                 JConfig {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     partition: "test_partition".into(),
                 },
             )
             .await
             .expect("Failed to initialize journal");
             let cfg = Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 key_len: 7,
                 translator: FourCap,
                 pending_writes: 10,
@@ -418,7 +393,7 @@ mod tests {
                 compression: None,
                 section_mask: DEFAULT_SECTION_MASK,
             };
-            let archive = Archive::init(journal, cfg.clone())
+            let archive = Archive::init(context, journal, cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
@@ -440,17 +415,13 @@ mod tests {
 
     #[test_traced]
     fn test_archive_invalid_key_length() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
         executor.start(async move {
-            // Create a registry for metrics
-            let registry = Arc::new(Mutex::new(Registry::default()));
-
             // Initialize an empty journal
             let journal = Journal::init(
-                context,
+                context.clone(),
                 JConfig {
-                    registry: registry.clone(),
                     partition: "test_partition".into(),
                 },
             )
@@ -459,7 +430,6 @@ mod tests {
 
             // Initialize the archive
             let cfg = Config {
-                registry,
                 key_len: 8,
                 translator: FourCap,
                 pending_writes: 10,
@@ -467,7 +437,7 @@ mod tests {
                 compression: None,
                 section_mask: DEFAULT_SECTION_MASK,
             };
-            let mut archive = Archive::init(journal, cfg.clone())
+            let mut archive = Archive::init(context.clone(), journal, cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
@@ -488,8 +458,7 @@ mod tests {
             assert!(matches!(result, Err(Error::InvalidKeyLength)));
 
             // Check metrics
-            let mut buffer = String::new();
-            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            let buffer = context.encode();
             assert!(buffer.contains("items_tracked 0"));
             assert!(buffer.contains("unnecessary_reads_total 0"));
             assert!(buffer.contains("gets_total 0"));
@@ -498,14 +467,13 @@ mod tests {
 
     #[test_traced]
     fn test_archive_record_corruption() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
         executor.start(async move {
             // Initialize an empty journal
             let journal = Journal::init(
                 context.clone(),
                 JConfig {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     partition: "test_partition".into(),
                 },
             )
@@ -514,7 +482,6 @@ mod tests {
 
             // Initialize the archive
             let cfg = Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 key_len: 7,
                 translator: FourCap,
                 pending_writes: 10,
@@ -522,7 +489,7 @@ mod tests {
                 compression: None,
                 section_mask: DEFAULT_SECTION_MASK,
             };
-            let mut archive = Archive::init(journal, cfg.clone())
+            let mut archive = Archive::init(context.clone(), journal, cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
@@ -551,18 +518,17 @@ mod tests {
 
             // Initialize the archive again
             let journal = Journal::init(
-                context,
+                context.clone(),
                 JConfig {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     partition: "test_partition".into(),
                 },
             )
             .await
             .expect("Failed to initialize journal");
             let archive = Archive::init(
+                context,
                 journal,
                 Config {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     key_len: 7,
                     translator: FourCap,
                     pending_writes: 10,
@@ -585,17 +551,13 @@ mod tests {
 
     #[test_traced]
     fn test_archive_duplicate_key() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
         executor.start(async move {
-            // Create a registry for metrics
-            let registry = Arc::new(Mutex::new(Registry::default()));
-
             // Initialize an empty journal
             let journal = Journal::init(
-                context,
+                context.clone(),
                 JConfig {
-                    registry: registry.clone(),
                     partition: "test_partition".into(),
                 },
             )
@@ -604,7 +566,6 @@ mod tests {
 
             // Initialize the archive
             let cfg = Config {
-                registry,
                 key_len: 9,
                 translator: FourCap,
                 pending_writes: 10,
@@ -612,7 +573,7 @@ mod tests {
                 compression: None,
                 section_mask: DEFAULT_SECTION_MASK,
             };
-            let mut archive = Archive::init(journal, cfg.clone())
+            let mut archive = Archive::init(context.clone(), journal, cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
@@ -646,8 +607,7 @@ mod tests {
             assert_eq!(retrieved, data1);
 
             // Check metrics
-            let mut buffer = String::new();
-            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            let buffer = context.encode();
             assert!(buffer.contains("items_tracked 1"));
             assert!(buffer.contains("unnecessary_reads_total 0"));
             assert!(buffer.contains("gets_total 2"));
@@ -656,17 +616,13 @@ mod tests {
 
     #[test_traced]
     fn test_archive_get_nonexistent() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
         executor.start(async move {
-            // Create a registry for metrics
-            let registry = Arc::new(Mutex::new(Registry::default()));
-
             // Initialize an empty journal
             let journal = Journal::init(
-                context,
+                context.clone(),
                 JConfig {
-                    registry: registry.clone(),
                     partition: "test_partition".into(),
                 },
             )
@@ -675,7 +631,6 @@ mod tests {
 
             // Initialize the archive
             let cfg = Config {
-                registry,
                 key_len: 11,
                 translator: FourCap,
                 pending_writes: 10,
@@ -683,7 +638,7 @@ mod tests {
                 compression: None,
                 section_mask: DEFAULT_SECTION_MASK,
             };
-            let archive = Archive::init(journal, cfg.clone())
+            let archive = Archive::init(context.clone(), journal, cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
@@ -704,8 +659,7 @@ mod tests {
             assert!(retrieved.is_none());
 
             // Check metrics
-            let mut buffer = String::new();
-            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            let buffer = context.encode();
             assert!(buffer.contains("items_tracked 0"));
             assert!(buffer.contains("unnecessary_reads_total 0"));
             assert!(buffer.contains("gets_total 2"));
@@ -714,17 +668,13 @@ mod tests {
 
     #[test_traced]
     fn test_archive_overlapping_key() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
         executor.start(async move {
-            // Create a registry for metrics
-            let registry = Arc::new(Mutex::new(Registry::default()));
-
             // Initialize an empty journal
             let journal = Journal::init(
-                context,
+                context.clone(),
                 JConfig {
-                    registry: registry.clone(),
                     partition: "test_partition".into(),
                 },
             )
@@ -733,7 +683,6 @@ mod tests {
 
             // Initialize the archive
             let cfg = Config {
-                registry,
                 key_len: 5,
                 translator: FourCap,
                 pending_writes: 10,
@@ -741,7 +690,7 @@ mod tests {
                 compression: None,
                 section_mask: DEFAULT_SECTION_MASK,
             };
-            let mut archive = Archive::init(journal, cfg.clone())
+            let mut archive = Archive::init(context.clone(), journal, cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
@@ -781,8 +730,7 @@ mod tests {
             assert_eq!(retrieved, data2);
 
             // Check metrics
-            let mut buffer = String::new();
-            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            let buffer = context.encode();
             assert!(buffer.contains("items_tracked 2"));
             assert!(buffer.contains("unnecessary_reads_total 1"));
             assert!(buffer.contains("gets_total 2"));
@@ -791,17 +739,13 @@ mod tests {
 
     #[test_traced]
     fn test_archive_overlapping_key_multiple_sections() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
         executor.start(async move {
-            // Create a registry for metrics
-            let registry = Arc::new(Mutex::new(Registry::default()));
-
             // Initialize an empty journal
             let journal = Journal::init(
-                context,
+                context.clone(),
                 JConfig {
-                    registry: registry.clone(),
                     partition: "test_partition".into(),
                 },
             )
@@ -810,7 +754,6 @@ mod tests {
 
             // Initialize the archive
             let cfg = Config {
-                registry,
                 key_len: 5,
                 translator: FourCap,
                 pending_writes: 10,
@@ -818,7 +761,7 @@ mod tests {
                 compression: None,
                 section_mask: DEFAULT_SECTION_MASK,
             };
-            let mut archive = Archive::init(journal, cfg.clone())
+            let mut archive = Archive::init(context.clone(), journal, cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
@@ -861,17 +804,13 @@ mod tests {
 
     #[test_traced]
     fn test_archive_prune_keys() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
         executor.start(async move {
-            // Create a registry for metrics
-            let registry = Arc::new(Mutex::new(Registry::default()));
-
             // Initialize an empty journal
             let journal = Journal::init(
                 context.clone(),
                 JConfig {
-                    registry: registry.clone(),
                     partition: "test_partition".into(),
                 },
             )
@@ -880,7 +819,6 @@ mod tests {
 
             // Initialize the archive
             let cfg = Config {
-                registry: registry.clone(),
                 key_len: 9,
                 translator: FourCap,
                 pending_writes: 10,
@@ -888,7 +826,7 @@ mod tests {
                 compression: None,
                 section_mask: 0xffff_ffff_ffff_ffffu64, // no mask
             };
-            let mut archive = Archive::init(journal, cfg.clone())
+            let mut archive = Archive::init(context.clone(), journal, cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
@@ -909,8 +847,7 @@ mod tests {
             }
 
             // Check metrics
-            let mut buffer = String::new();
-            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            let buffer = context.encode();
             assert!(buffer.contains("items_tracked 5"));
 
             // Prune sections less than 3
@@ -930,8 +867,7 @@ mod tests {
             }
 
             // Check metrics
-            let mut buffer = String::new();
-            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            let buffer = context.encode();
             assert!(buffer.contains("items_tracked 3"));
             assert!(buffer.contains("indices_pruned_total 2"));
             assert!(buffer.contains("keys_pruned_total 0")); // no lazy cleanup yet
@@ -955,8 +891,7 @@ mod tests {
                 .expect("Failed to put data");
 
             // Check metrics
-            let mut buffer = String::new();
-            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            let buffer = context.encode();
             assert!(buffer.contains("items_tracked 4")); // lazily remove one, add one
             assert!(buffer.contains("indices_pruned_total 2"));
             assert!(buffer.contains("keys_pruned_total 1"));
@@ -964,17 +899,13 @@ mod tests {
     }
 
     fn test_archive_keys_and_restart(num_keys: usize) -> String {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, mut context, auditor) = Executor::default();
         executor.start(async move {
-            // Create a registry for metrics
-            let registry = Arc::new(Mutex::new(Registry::default()));
-
             // Initialize an empty journal
             let journal = Journal::init(
                 context.clone(),
                 JConfig {
-                    registry: registry.clone(),
                     partition: "test_partition".into(),
                 },
             )
@@ -984,7 +915,6 @@ mod tests {
             // Initialize the archive
             let section_mask = 0xffff_ffff_ffff_ff00u64;
             let cfg = Config {
-                registry: registry.clone(),
                 key_len: 32,
                 translator: TwoCap,
                 pending_writes: 10,
@@ -992,7 +922,7 @@ mod tests {
                 compression: None,
                 section_mask,
             };
-            let mut archive = Archive::init(journal, cfg.clone())
+            let mut archive = Archive::init(context.clone(), journal, cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
@@ -1029,8 +959,7 @@ mod tests {
             }
 
             // Check metrics
-            let mut buffer = String::new();
-            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            let buffer = context.encode();
             let tracked = format!("items_tracked {:?}", num_keys);
             assert!(buffer.contains(&tracked));
             assert!(buffer.contains("keys_pruned_total 0"));
@@ -1039,18 +968,15 @@ mod tests {
             archive.close().await.expect("Failed to close archive");
 
             // Reinitialize the archive
-            let registry = Arc::new(Mutex::new(Registry::default()));
             let journal = Journal::init(
                 context.clone(),
                 JConfig {
-                    registry: registry.clone(),
                     partition: "test_partition".into(),
                 },
             )
             .await
             .expect("Failed to initialize journal");
             let cfg = Config {
-                registry: registry.clone(),
                 key_len: 32,
                 translator: TwoCap,
                 pending_writes: 10,
@@ -1058,7 +984,7 @@ mod tests {
                 compression: None,
                 section_mask,
             };
-            let mut archive = Archive::init(journal, cfg.clone())
+            let mut archive = Archive::init(context.clone(), journal, cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
@@ -1114,8 +1040,7 @@ mod tests {
             }
 
             // Check metrics
-            let mut buffer = String::new();
-            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            let buffer = context.encode();
             let tracked = format!("items_tracked {:?}", num_keys - removed);
             assert!(buffer.contains(&tracked));
             let pruned = format!("indices_pruned_total {}", removed);
@@ -1139,17 +1064,13 @@ mod tests {
 
     #[test_traced]
     fn test_ranges() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
         executor.start(async move {
-            // Create a registry for metrics
-            let registry = Arc::new(Mutex::new(Registry::default()));
-
             // Initialize an empty journal
             let journal = Journal::init(
                 context.clone(),
                 JConfig {
-                    registry: registry.clone(),
                     partition: "test_partition".into(),
                 },
             )
@@ -1158,7 +1079,6 @@ mod tests {
 
             // Initialize the archive
             let cfg = Config {
-                registry,
                 key_len: 9,
                 translator: FourCap,
                 pending_writes: 10,
@@ -1166,7 +1086,7 @@ mod tests {
                 compression: None,
                 section_mask: DEFAULT_SECTION_MASK,
             };
-            let mut archive = Archive::init(journal, cfg.clone())
+            let mut archive = Archive::init(context.clone(), journal, cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
@@ -1213,15 +1133,14 @@ mod tests {
             archive.close().await.expect("Failed to close archive");
 
             let journal = Journal::init(
-                context,
+                context.clone(),
                 JConfig {
-                    registry: Arc::new(Mutex::new(Registry::default())),
                     partition: "test_partition".into(),
                 },
             )
             .await
             .expect("Failed to initialize journal");
-            let archive = Archive::init(journal, cfg.clone())
+            let archive = Archive::init(context, journal, cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 

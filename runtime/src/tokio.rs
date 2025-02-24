@@ -9,12 +9,12 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_runtime::{Spawner, Runner, tokio::Executor};
+//! use commonware_runtime::{Spawner, Runner, tokio::Executor, Metrics};
 //!
 //! let (executor, runtime) = Executor::default();
 //! executor.start(async move {
 //!     println!("Parent started");
-//!     let result = runtime.spawn("child", async move {
+//!     let result = runtime.with_label("child").spawn(|_| async move {
 //!         println!("Child started");
 //!         "hello"
 //!     });
@@ -23,13 +23,13 @@
 //! });
 //! ```
 
-use crate::{utils::Signaler, Clock, Error, Handle, Signal};
+use crate::{utils::Signaler, Clock, Error, Handle, Signal, METRICS_PREFIX};
 use commonware_utils::{from_hex, hex};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
-    encoding::EncodeLabelSet,
+    encoding::{text::encode, EncodeLabelSet},
     metrics::{counter::Counter, family::Family, gauge::Gauge},
-    registry::Registry,
+    registry::{Metric, Registry},
 };
 use rand::{rngs::OsRng, CryptoRng, RngCore};
 use std::{
@@ -47,7 +47,6 @@ use tokio::{
     net::{tcp::OwnedReadHalf, tcp::OwnedWriteHalf, TcpListener, TcpStream},
     runtime::{Builder, Runtime},
     sync::Mutex as AsyncMutex,
-    task_local,
     time::timeout,
 };
 use tracing::warn;
@@ -77,7 +76,7 @@ struct Metrics {
 }
 
 impl Metrics {
-    pub fn init(registry: Arc<Mutex<Registry>>) -> Self {
+    pub fn init(registry: &mut Registry) -> Self {
         let metrics = Self {
             tasks_spawned: Family::default(),
             tasks_running: Family::default(),
@@ -91,64 +90,61 @@ impl Metrics {
             storage_writes: Counter::default(),
             storage_write_bytes: Counter::default(),
         };
-        {
-            let mut registry = registry.lock().unwrap();
-            registry.register(
-                "tasks_spawned",
-                "Total number of tasks spawned",
-                metrics.tasks_spawned.clone(),
-            );
-            registry.register(
-                "tasks_running",
-                "Number of tasks currently running",
-                metrics.tasks_running.clone(),
-            );
-            registry.register(
-                "inbound_connections",
-                "Number of connections created by dialing us",
-                metrics.inbound_connections.clone(),
-            );
-            registry.register(
-                "outbound_connections",
-                "Number of connections created by dialing others",
-                metrics.outbound_connections.clone(),
-            );
-            registry.register(
-                "inbound_bandwidth",
-                "Bandwidth used by receiving data from others",
-                metrics.inbound_bandwidth.clone(),
-            );
-            registry.register(
-                "outbound_bandwidth",
-                "Bandwidth used by sending data to others",
-                metrics.outbound_bandwidth.clone(),
-            );
-            registry.register(
-                "open_blobs",
-                "Number of open blobs",
-                metrics.open_blobs.clone(),
-            );
-            registry.register(
-                "storage_reads",
-                "Total number of disk reads",
-                metrics.storage_reads.clone(),
-            );
-            registry.register(
-                "storage_read_bytes",
-                "Total amount of data read from disk",
-                metrics.storage_read_bytes.clone(),
-            );
-            registry.register(
-                "storage_writes",
-                "Total number of disk writes",
-                metrics.storage_writes.clone(),
-            );
-            registry.register(
-                "storage_write_bytes",
-                "Total amount of data written to disk",
-                metrics.storage_write_bytes.clone(),
-            );
-        }
+        registry.register(
+            "tasks_spawned",
+            "Total number of tasks spawned",
+            metrics.tasks_spawned.clone(),
+        );
+        registry.register(
+            "tasks_running",
+            "Number of tasks currently running",
+            metrics.tasks_running.clone(),
+        );
+        registry.register(
+            "inbound_connections",
+            "Number of connections created by dialing us",
+            metrics.inbound_connections.clone(),
+        );
+        registry.register(
+            "outbound_connections",
+            "Number of connections created by dialing others",
+            metrics.outbound_connections.clone(),
+        );
+        registry.register(
+            "inbound_bandwidth",
+            "Bandwidth used by receiving data from others",
+            metrics.inbound_bandwidth.clone(),
+        );
+        registry.register(
+            "outbound_bandwidth",
+            "Bandwidth used by sending data to others",
+            metrics.outbound_bandwidth.clone(),
+        );
+        registry.register(
+            "open_blobs",
+            "Number of open blobs",
+            metrics.open_blobs.clone(),
+        );
+        registry.register(
+            "storage_reads",
+            "Total number of disk reads",
+            metrics.storage_reads.clone(),
+        );
+        registry.register(
+            "storage_read_bytes",
+            "Total amount of data read from disk",
+            metrics.storage_read_bytes.clone(),
+        );
+        registry.register(
+            "storage_writes",
+            "Total number of disk writes",
+            metrics.storage_writes.clone(),
+        );
+        registry.register(
+            "storage_write_bytes",
+            "Total amount of data written to disk",
+            metrics.storage_write_bytes.clone(),
+        );
         metrics
     }
 }
@@ -156,9 +152,6 @@ impl Metrics {
 /// Configuration for the `tokio` runtime.
 #[derive(Clone)]
 pub struct Config {
-    /// Registry for metrics.
-    pub registry: Arc<Mutex<Registry>>,
-
     /// Number of threads to use for the runtime.
     pub threads: usize,
 
@@ -200,7 +193,6 @@ impl Default for Config {
 
         // Return the configuration
         Self {
-            registry: Arc::new(Mutex::new(Registry::default())),
             threads: 2,
             catch_panics: true,
             read_timeout: Duration::from_secs(60),
@@ -215,6 +207,7 @@ impl Default for Config {
 /// Runtime based on [Tokio](https://tokio.rs).
 pub struct Executor {
     cfg: Config,
+    registry: Mutex<Registry>,
     metrics: Arc<Metrics>,
     runtime: Runtime,
     fs: AsyncMutex<()>,
@@ -225,7 +218,12 @@ pub struct Executor {
 impl Executor {
     /// Initialize a new `tokio` runtime with the given number of threads.
     pub fn init(cfg: Config) -> (Runner, Context) {
-        let metrics = Arc::new(Metrics::init(cfg.registry.clone()));
+        // Create a new registry
+        let mut registry = Registry::default();
+        let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
+
+        // Initialize runtime
+        let metrics = Arc::new(Metrics::init(runtime_registry));
         let runtime = Builder::new_multi_thread()
             .worker_threads(cfg.threads)
             .enable_all()
@@ -234,6 +232,7 @@ impl Executor {
         let (signaler, signal) = Signaler::new();
         let executor = Arc::new(Self {
             cfg,
+            registry: Mutex::new(registry),
             metrics,
             runtime,
             fs: AsyncMutex::new(()),
@@ -244,7 +243,11 @@ impl Executor {
             Runner {
                 executor: executor.clone(),
             },
-            Context { executor },
+            Context {
+                label: String::new(),
+                spawned: false,
+                executor,
+            },
         )
     }
 
@@ -274,26 +277,36 @@ impl crate::Runner for Runner {
 /// Implementation of [`crate::Spawner`], [`crate::Clock`],
 /// [`crate::Network`], and [`crate::Storage`] for the `tokio`
 /// runtime.
-#[derive(Clone)]
 pub struct Context {
+    label: String,
+    spawned: bool,
     executor: Arc<Executor>,
 }
 
-task_local! {
-    static PREFIX: String;
+impl Clone for Context {
+    fn clone(&self) -> Self {
+        Self {
+            label: self.label.clone(),
+            spawned: false,
+            executor: self.executor.clone(),
+        }
+    }
 }
 
 impl crate::Spawner for Context {
-    fn spawn<F, T>(&self, label: &str, f: F) -> Handle<T>
+    fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
     where
-        F: Future<Output = T> + Send + 'static,
+        F: FnOnce(Self) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        let label = PREFIX
-            .try_with(|prefix| format!("{}_{}", prefix, label))
-            .unwrap_or_else(|_| label.to_string());
-        let f = PREFIX.scope(label.clone(), f);
-        let work = Work { label };
+        // Ensure a context only spawns one task
+        assert!(!self.spawned, "already spawned");
+
+        // Get metrics
+        let work = Work {
+            label: self.label.clone(),
+        };
         self.executor
             .metrics
             .tasks_spawned
@@ -305,9 +318,52 @@ impl crate::Spawner for Context {
             .tasks_running
             .get_or_create(&work)
             .clone();
-        let (f, handle) = Handle::init(f, gauge, self.executor.cfg.catch_panics);
-        self.executor.runtime.spawn(f);
+
+        // Set up the task
+        let catch_panics = self.executor.cfg.catch_panics;
+        let executor = self.executor.clone();
+        let future = f(self);
+        let (f, handle) = Handle::init(future, gauge, catch_panics);
+
+        // Spawn the task
+        executor.runtime.spawn(f);
         handle
+    }
+
+    fn spawn_ref<F, T>(&mut self) -> impl FnOnce(F) -> Handle<T> + 'static
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        // Ensure a context only spawns one task
+        assert!(!self.spawned, "already spawned");
+        self.spawned = true;
+
+        // Get metrics
+        let work = Work {
+            label: self.label.clone(),
+        };
+        self.executor
+            .metrics
+            .tasks_spawned
+            .get_or_create(&work)
+            .inc();
+        let gauge = self
+            .executor
+            .metrics
+            .tasks_running
+            .get_or_create(&work)
+            .clone();
+
+        // Set up the task
+        let executor = self.executor.clone();
+        move |f: F| {
+            let (f, handle) = Handle::init(f, gauge, executor.cfg.catch_panics);
+
+            // Spawn the task
+            executor.runtime.spawn(f);
+            handle
+        }
     }
 
     fn stop(&self, value: i32) {
@@ -316,6 +372,55 @@ impl crate::Spawner for Context {
 
     fn stopped(&self) -> Signal {
         self.executor.signal.clone()
+    }
+}
+
+impl crate::Metrics for Context {
+    fn with_label(&self, label: &str) -> Self {
+        let label = {
+            let prefix = self.label.clone();
+            if prefix.is_empty() {
+                label.to_string()
+            } else {
+                format!("{}_{}", prefix, label)
+            }
+        };
+        assert!(
+            !label.starts_with(METRICS_PREFIX),
+            "using runtime label is not allowed"
+        );
+        Self {
+            label,
+            spawned: false,
+            executor: self.executor.clone(),
+        }
+    }
+
+    fn label(&self) -> String {
+        self.label.clone()
+    }
+
+    fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
+        let name = name.into();
+        let prefixed_name = {
+            let prefix = &self.label;
+            if prefix.is_empty() {
+                name
+            } else {
+                format!("{}_{}", *prefix, name)
+            }
+        };
+        self.executor
+            .registry
+            .lock()
+            .unwrap()
+            .register(prefixed_name, help, metric)
+    }
+
+    fn encode(&self) -> String {
+        let mut buffer = String::new();
+        encode(&mut buffer, &self.executor.registry.lock().unwrap()).expect("encoding failed");
+        buffer
     }
 }
 

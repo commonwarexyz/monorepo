@@ -6,7 +6,7 @@ use crate::authenticated::{
     actors::{peer, router, tracker},
     metrics,
 };
-use commonware_runtime::{Clock, Sink, Spawner, Stream};
+use commonware_runtime::{Clock, Handle, Metrics, Sink, Spawner, Stream};
 use commonware_utils::Array;
 use futures::{channel::mpsc, StreamExt};
 use governor::{clock::ReasonablyRealtime, Quota};
@@ -15,8 +15,13 @@ use rand::{CryptoRng, Rng};
 use std::time::Duration;
 use tracing::{debug, info};
 
-pub struct Actor<E: Spawner + Clock, Si: Sink, St: Stream, P: Array> {
-    runtime: E,
+pub struct Actor<
+    E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics,
+    Si: Sink,
+    St: Stream,
+    P: Array,
+> {
+    context: E,
 
     mailbox_size: usize,
     gossip_bit_vec_frequency: Duration,
@@ -30,32 +35,33 @@ pub struct Actor<E: Spawner + Clock, Si: Sink, St: Stream, P: Array> {
     rate_limited: Family<metrics::Message, Counter>,
 }
 
-impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng, Si: Sink, St: Stream, P: Array>
-    Actor<E, Si, St, P>
+impl<
+        E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics,
+        Si: Sink,
+        St: Stream,
+        P: Array,
+    > Actor<E, Si, St, P>
 {
-    pub fn new(runtime: E, cfg: Config) -> (Self, Mailbox<E, Si, St, P>) {
+    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<E, Si, St, P>) {
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();
         let rate_limited = Family::<metrics::Message, Counter>::default();
-        {
-            let mut registry = cfg.registry.lock().unwrap();
-            registry.register("messages_sent", "messages sent", sent_messages.clone());
-            registry.register(
-                "messages_received",
-                "messages received",
-                received_messages.clone(),
-            );
-            registry.register(
-                "messages_rate_limited",
-                "messages rate limited",
-                rate_limited.clone(),
-            );
-        }
+        context.register("messages_sent", "messages sent", sent_messages.clone());
+        context.register(
+            "messages_received",
+            "messages received",
+            received_messages.clone(),
+        );
+        context.register(
+            "messages_rate_limited",
+            "messages rate limited",
+            rate_limited.clone(),
+        );
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
 
         (
             Self {
-                runtime,
+                context,
                 mailbox_size: cfg.mailbox_size,
                 gossip_bit_vec_frequency: cfg.gossip_bit_vec_frequency,
                 allowed_bit_vec_rate: cfg.allowed_bit_vec_rate,
@@ -69,7 +75,15 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng, Si: Sink, St: St
         )
     }
 
-    pub async fn run(mut self, tracker: tracker::Mailbox<E, P>, router: router::Mailbox<P>) {
+    pub fn start(
+        mut self,
+        tracker: tracker::Mailbox<E, P>,
+        router: router::Mailbox<P>,
+    ) -> Handle<()> {
+        self.context.spawn_ref()(self.run(tracker, router))
+    }
+
+    async fn run(mut self, tracker: tracker::Mailbox<E, P>, router: router::Mailbox<P>) {
         while let Some(msg) = self.receiver.next().await {
             match msg {
                 Message::Spawn {
@@ -85,13 +99,13 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng, Si: Sink, St: St
                     let mut router = router.clone();
 
                     // Spawn peer
-                    self.runtime.spawn("peer", {
-                        let runtime = self.runtime.clone();
-                        async move {
+                    self.context
+                        .with_label("peer")
+                        .spawn(move |context| async move {
                             // Create peer
                             info!(?peer, "peer started");
                             let (actor, messenger) = peer::Actor::new(
-                                runtime,
+                                context,
                                 peer::Config {
                                     sent_messages,
                                     received_messages,
@@ -113,8 +127,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng, Si: Sink, St: St
                             // Let the router know the peer has exited
                             info!(error = ?e, ?peer, "peer shutdown");
                             router.release(peer).await;
-                        }
-                    });
+                        });
                 }
             }
         }

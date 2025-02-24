@@ -6,7 +6,7 @@ pub use super::{
 use crate::authenticated::{ip, metrics, wire};
 use bitvec::prelude::*;
 use commonware_cryptography::Scheme;
-use commonware_runtime::{Clock, Spawner};
+use commonware_runtime::{Clock, Handle, Metrics, Spawner};
 use commonware_utils::{union, Array, SystemTimeExt};
 use futures::{channel::mpsc, StreamExt};
 use governor::{
@@ -132,8 +132,8 @@ impl AddressCount {
     }
 }
 
-pub struct Actor<E: Spawner + Rng + GClock, C: Scheme> {
-    runtime: E,
+pub struct Actor<E: Spawner + Rng + GClock + Metrics, C: Scheme> {
+    context: E,
 
     crypto: C,
     ip_namespace: Vec<u8>,
@@ -159,14 +159,14 @@ pub struct Actor<E: Spawner + Rng + GClock, C: Scheme> {
     ip_signature: wire::Peer,
 }
 
-impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
+impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
     #[allow(clippy::type_complexity)]
     pub fn new(
-        runtime: E,
+        context: E,
         mut cfg: Config<C>,
     ) -> (Self, Mailbox<E, C::PublicKey>, Oracle<E, C::PublicKey>) {
         // Construct IP signature
-        let timestamp = runtime.current().epoch_millis();
+        let timestamp = context.current().epoch_millis();
         let (socket_bytes, payload_bytes) = socket_peer_payload(&cfg.address, timestamp);
         let ip_namespace = union(&cfg.namespace, NAMESPACE_SUFFIX_IP);
         let ip_signature = cfg.crypto.sign(Some(&ip_namespace), &payload_bytes);
@@ -200,36 +200,33 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
 
         // Create connections
         let connections_rate_limiter =
-            RateLimiter::hashmap_with_clock(cfg.allowed_connection_rate_per_peer, &runtime);
+            RateLimiter::hashmap_with_clock(cfg.allowed_connection_rate_per_peer, &context);
 
         // Create metrics
         let tracked_peers = Gauge::default();
         let reserved_connections = Gauge::default();
         let rate_limited_connections = Family::<metrics::Peer, Counter>::default();
         let updated_peers = Family::<metrics::Peer, Counter>::default();
-        {
-            let mut registry = cfg.registry.lock().unwrap();
-            registry.register("tracked_peers", "tracked peers", tracked_peers.clone());
-            registry.register(
-                "connections",
-                "number of connections",
-                reserved_connections.clone(),
-            );
-            registry.register(
-                "rate_limited_connections",
-                "number of rate limited connections",
-                rate_limited_connections.clone(),
-            );
-            registry.register(
-                "updated_peers",
-                "number of peer records updated",
-                updated_peers.clone(),
-            );
-        }
+        context.register("tracked_peers", "tracked peers", tracked_peers.clone());
+        context.register(
+            "connections",
+            "number of connections",
+            reserved_connections.clone(),
+        );
+        context.register(
+            "rate_limited_connections",
+            "number of rate limited connections",
+            rate_limited_connections.clone(),
+        );
+        context.register(
+            "updated_peers",
+            "number of peer records updated",
+            updated_peers.clone(),
+        );
 
         (
             Self {
-                runtime,
+                context,
                 crypto: cfg.crypto,
                 ip_namespace,
                 allow_private_ips: cfg.allow_private_ips,
@@ -430,7 +427,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
 
             // If any timestamp is too far into the future, disconnect from the peer
             if Duration::from_millis(peer.timestamp)
-                > self.runtime.current().epoch() + self.synchrony_bound
+                > self.context.current().epoch() + self.synchrony_bound
             {
                 return Err(Error::InvalidSignature);
             }
@@ -522,7 +519,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
         // select a subset to send (this increases the likelihood that
         // the recipient will hear about different peers from different sources)
         if peers.len() > self.peer_gossip_max_count {
-            peers.shuffle(&mut self.runtime);
+            peers.shuffle(&mut self.context);
             peers.truncate(self.peer_gossip_max_count);
         }
         Ok(Some(wire::Peers { peers }))
@@ -549,13 +546,17 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
         self.connections.insert(peer.clone());
         self.reserved_connections.inc();
         Some(Reservation::new(
-            self.runtime.clone(),
+            self.context.clone(),
             peer,
             Mailbox::new(self.sender.clone()),
         ))
     }
 
-    pub async fn run(mut self) {
+    pub fn start(mut self) -> Handle<()> {
+        self.context.spawn_ref()(self.run())
+    }
+
+    async fn run(mut self) {
         while let Some(msg) = self.receiver.next().await {
             match msg {
                 Message::Construct {
@@ -570,7 +571,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
 
                     // Select a random peer set (we want to learn about all peers in
                     // our tracked sets)
-                    let set = match self.sets.values().choose(&mut self.runtime) {
+                    let set = match self.sets.values().choose(&mut self.context) {
                         Some(set) => set,
                         None => {
                             debug!("no peer sets available");
@@ -609,7 +610,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
                     let mut dialable = self.handle_dialable();
 
                     // Shuffle to prevent starvation
-                    dialable.shuffle(&mut self.runtime);
+                    dialable.shuffle(&mut self.context);
 
                     // Inform dialer of dialable peers
                     let _ = peers.send(dialable);
@@ -651,7 +652,6 @@ mod tests {
     use governor::Quota;
     use std::net::{IpAddr, Ipv4Addr};
     use std::num::NonZeroU32;
-    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     fn test_config<C: Scheme>(
@@ -661,7 +661,6 @@ mod tests {
         Config {
             crypto,
             namespace: b"test_namespace".to_vec(),
-            registry: Arc::new(Mutex::new(prometheus_client::registry::Registry::default())),
             address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
             bootstrappers,
             allow_private_ips: true,
@@ -676,15 +675,13 @@ mod tests {
     #[test]
     fn test_reserve_peer() {
         // Create actor
-        let (executor, runtime, _) = Executor::default();
+        let (executor, context, _) = Executor::default();
         let cfg = test_config(Ed25519::from_seed(0), Vec::new());
         executor.start(async move {
-            let (actor, mut mailbox, mut oracle) = Actor::new(runtime.clone(), cfg);
-
             // Run actor in background
-            runtime.spawn("actor", async move {
-                actor.run().await;
-            });
+            let actor_context = context.with_label("actor");
+            let (actor, mut mailbox, mut oracle) = Actor::new(actor_context.clone(), cfg);
+            actor_context.spawn(|_| actor.run());
 
             // Create peer
             let peer = Ed25519::from_seed(1).public_key();
@@ -713,7 +710,7 @@ mod tests {
                 if reservation.is_some() {
                     break;
                 }
-                runtime.sleep(Duration::from_millis(10)).await;
+                context.sleep(Duration::from_millis(10)).await;
             }
         });
     }
@@ -721,17 +718,15 @@ mod tests {
     #[test]
     fn test_bit_vec() {
         // Create actor
-        let (executor, runtime, _) = Executor::default();
+        let (executor, context, _) = Executor::default();
         let peer0 = Ed25519::from_seed(0);
         let cfg = test_config(peer0.clone(), Vec::new());
         executor.start(async move {
-            let (actor, mut mailbox, mut oracle) = Actor::new(runtime.clone(), cfg);
-            let ip_namespace = actor.ip_namespace.clone();
-
             // Run actor in background
-            runtime.spawn("actor", async move {
-                actor.run().await;
-            });
+            let actor_context = context.with_label("actor");
+            let (actor, mut mailbox, mut oracle) = Actor::new(actor_context.clone(), cfg);
+            let ip_namespace = actor.ip_namespace.clone();
+            actor_context.spawn(|_| actor.run());
 
             // Create peers
             let mut peer1_signer = Ed25519::from_seed(1);

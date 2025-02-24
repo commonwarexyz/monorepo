@@ -83,12 +83,10 @@ use commonware_cryptography::{Ed25519, Scheme};
 use commonware_p2p::authenticated::{self, Network};
 use commonware_runtime::{
     tokio::{self, Executor},
-    Runner, Spawner,
+    Metrics, Runner,
 };
 use commonware_utils::quorum;
 use governor::Quota;
-use prometheus_client::registry::Registry;
-use std::sync::{Arc, Mutex};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::NonZeroU32,
@@ -100,9 +98,9 @@ use tracing::info;
 const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_VRF_";
 
 fn main() {
-    // Initialize runtime
+    // Initialize context
     let runtime_cfg = tokio::Config::default();
-    let (executor, runtime) = Executor::init(runtime_cfg.clone());
+    let (executor, context) = Executor::init(runtime_cfg.clone());
 
     // Parse arguments
     let matches = Command::new("commonware-vrf")
@@ -215,15 +213,14 @@ fn main() {
     let p2p_cfg = authenticated::Config::aggressive(
         signer.clone(),
         APPLICATION_NAMESPACE,
-        Arc::new(Mutex::new(Registry::default())),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
         MAX_MESSAGE_SIZE,
     );
 
-    // Start runtime
+    // Start context
     executor.start(async move {
-        let (mut network, mut oracle) = Network::new(runtime.clone(), p2p_cfg);
+        let (mut network, mut oracle) = Network::new(context.with_label("network"), p2p_cfg);
 
         // Provide authorized peers
         //
@@ -268,7 +265,7 @@ fn main() {
             );
             let arbiter = Ed25519::from_seed(*arbiter).public_key();
             let (contributor, requests) = handlers::Contributor::new(
-                runtime.clone(),
+                context.with_label("contributor"),
                 signer,
                 DKG_PHASE_TIMEOUT,
                 arbiter,
@@ -277,10 +274,7 @@ fn main() {
                 lazy,
                 forger,
             );
-            runtime.spawn(
-                "contributor",
-                contributor.run(contributor_sender, contributor_receiver),
-            );
+            contributor.start(contributor_sender, contributor_receiver);
 
             // Create vrf
             let (vrf_sender, vrf_receiver) = network.register(
@@ -290,13 +284,13 @@ fn main() {
                 None,
             );
             let signer = handlers::Vrf::new(
-                runtime.clone(),
+                context.with_label("signer"),
                 Duration::from_secs(5),
                 threshold,
                 contributors,
                 requests,
             );
-            runtime.spawn("signer", signer.run(vrf_sender, vrf_receiver));
+            signer.start(vrf_sender, vrf_receiver);
         } else {
             let (arbiter_sender, arbiter_receiver) = network.register(
                 handlers::DKG_CHANNEL,
@@ -305,14 +299,14 @@ fn main() {
                 COMPRESSION_LEVEL,
             );
             let arbiter: handlers::Arbiter<_, Ed25519> = handlers::Arbiter::new(
-                runtime.clone(),
+                context.with_label("arbiter"),
                 DKG_FREQUENCY,
                 DKG_PHASE_TIMEOUT,
                 contributors,
                 threshold,
             );
-            runtime.spawn("arbiter", arbiter.run(arbiter_sender, arbiter_receiver));
+            arbiter.start(arbiter_sender, arbiter_receiver);
         }
-        network.run().await;
+        network.start().await.expect("Network failed");
     });
 }

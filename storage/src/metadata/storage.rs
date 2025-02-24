@@ -1,6 +1,6 @@
 use super::{Config, Error};
 use bytes::{BufMut, Bytes};
-use commonware_runtime::{Blob, Clock, Storage};
+use commonware_runtime::{Blob, Clock, Metrics, Storage};
 use commonware_utils::SystemTimeExt as _;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::{
@@ -14,8 +14,8 @@ const BLOB_NAMES: [&[u8]; 2] = [b"left", b"right"];
 const SECONDS_IN_NANOSECONDS: u128 = 1_000_000_000;
 
 /// Implementation of `Metadata` storage.
-pub struct Metadata<B: Blob, E: Clock + Storage<B>> {
-    runtime: E,
+pub struct Metadata<B: Blob, E: Clock + Storage<B> + Metrics> {
+    context: E,
 
     // Data is stored in a BTreeMap to enable deterministic serialization.
     data: BTreeMap<u32, Bytes>,
@@ -28,12 +28,12 @@ pub struct Metadata<B: Blob, E: Clock + Storage<B>> {
     _phantom_e: PhantomData<E>,
 }
 
-impl<B: Blob, E: Clock + Storage<B>> Metadata<B, E> {
+impl<B: Blob, E: Clock + Storage<B> + Metrics> Metadata<B, E> {
     /// Initialize a new `Metadata` instance.
-    pub async fn init(runtime: E, cfg: Config) -> Result<Self, Error> {
+    pub async fn init(context: E, cfg: Config) -> Result<Self, Error> {
         // Open dedicated blobs
-        let left = runtime.open(&cfg.partition, BLOB_NAMES[0]).await?;
-        let right = runtime.open(&cfg.partition, BLOB_NAMES[1]).await?;
+        let left = context.open(&cfg.partition, BLOB_NAMES[0]).await?;
+        let right = context.open(&cfg.partition, BLOB_NAMES[1]).await?;
 
         // Find latest blob (check which includes a hash of the other)
         let left_result = Self::load(0, &left).await?;
@@ -64,16 +64,13 @@ impl<B: Blob, E: Clock + Storage<B>> Metadata<B, E> {
         // Create metrics
         let syncs = Counter::default();
         let keys = Gauge::default();
-        {
-            let mut registry = cfg.registry.lock().unwrap();
-            registry.register("syncs", "number of syncs of data to disk", syncs.clone());
-            registry.register("keys", "number of tracked keys", keys.clone());
-        }
+        context.register("syncs", "number of syncs of data to disk", syncs.clone());
+        context.register("keys", "number of tracked keys", keys.clone());
 
         // Return metadata
         keys.set(data.len() as i64);
         Ok(Self {
-            runtime,
+            context,
 
             data,
             cursor,
@@ -206,7 +203,7 @@ impl<B: Blob, E: Clock + Storage<B>> Metadata<B, E> {
     pub async fn sync(&mut self) -> Result<(), Error> {
         // Compute next timestamp
         let past_timestamp = &self.blobs[self.cursor].1;
-        let mut next_timestamp = self.runtime.current().epoch().as_nanos();
+        let mut next_timestamp = self.context.current().epoch().as_nanos();
         if next_timestamp <= *past_timestamp {
             // While it is possible that extremely high-frequency updates to `Metadata` (more than
             // one update per nanosecond) could cause an eventual overflow of the timestamp, this

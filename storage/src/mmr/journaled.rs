@@ -11,13 +11,13 @@ use crate::mmr::{
     Error,
 };
 use commonware_cryptography::Hasher;
-use commonware_runtime::{Blob, Storage as RStorage};
+use commonware_runtime::{Blob, Metrics, Storage as RStorage};
 use commonware_utils::SizedSerialize;
 use futures::future::try_join_all;
 use tracing::warn;
 
 /// A MMR backed by a fixed-item-length journal.
-pub struct Mmr<B: Blob, E: RStorage<B>, H: Hasher>
+pub struct Mmr<B: Blob, E: RStorage<B> + Metrics, H: Hasher>
 where
     H::Digest: SizedSerialize,
 {
@@ -26,7 +26,7 @@ where
     journal_size: u64,
 }
 
-impl<B: Blob, E: RStorage<B>, H: Hasher> Storage<H> for Mmr<B, E, H> {
+impl<B: Blob, E: RStorage<B> + Metrics, H: Hasher> Storage<H> for Mmr<B, E, H> {
     async fn size(&self) -> Result<u64, Error> {
         Ok(self.mem_mmr.size())
     }
@@ -43,7 +43,7 @@ impl<B: Blob, E: RStorage<B>, H: Hasher> Storage<H> for Mmr<B, E, H> {
     }
 }
 
-impl<B: Blob, E: RStorage<B>, H: Hasher> Mmr<B, E, H> {
+impl<B: Blob, E: RStorage<B> + Metrics, H: Hasher> Mmr<B, E, H> {
     /// Initialize a new `Mmr` instance.
     pub async fn init(context: E, journal_cfg: JConfig) -> Result<Self, Error> {
         let mut journal = Journal::<B, E, H::Digest>::init(context, journal_cfg).await?;
@@ -162,8 +162,6 @@ mod tests {
     use commonware_cryptography::{hash, sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic::Executor, Runner};
-    use prometheus_client::registry::Registry;
-    use std::sync::{Arc, Mutex};
 
     fn test_digest(v: u8) -> Digest {
         hash(&v.to_be_bytes())
@@ -174,7 +172,6 @@ mod tests {
         let (executor, context, _) = Executor::default();
         executor.start(async move {
             let cfg = JConfig {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
                 items_per_blob: 7,
             };
@@ -245,7 +242,6 @@ mod tests {
         let (executor, context, _) = Executor::default();
         executor.start(async move {
             let cfg = JConfig {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
                 items_per_blob: 7,
             };

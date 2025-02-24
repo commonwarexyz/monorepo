@@ -7,36 +7,39 @@ use crate::{
     Channel, Recipients,
 };
 use bytes::Bytes;
+use commonware_runtime::{Handle, Metrics, Spawner};
 use commonware_utils::Array;
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::collections::BTreeMap;
 use tracing::debug;
 
-pub struct Actor<P: Array> {
+pub struct Actor<E: Spawner + Metrics, P: Array> {
+    context: E,
+
     control: mpsc::Receiver<Message<P>>,
     connections: BTreeMap<P, peer::Relay>,
 
     messages_dropped: Family<metrics::Message, Counter>,
 }
 
-impl<P: Array> Actor<P> {
-    pub fn new(cfg: Config) -> (Self, Mailbox<P>, Messenger<P>) {
+impl<E: Spawner + Metrics, P: Array> Actor<E, P> {
+    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<P>, Messenger<P>) {
+        // Create mailbox
         let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
 
         // Create metrics
         let messages_dropped = Family::<metrics::Message, Counter>::default();
-        {
-            let mut registry = cfg.registry.lock().unwrap();
-            registry.register(
-                "messages_dropped",
-                "messages dropped",
-                messages_dropped.clone(),
-            );
-        }
+        context.register(
+            "messages_dropped",
+            "messages dropped",
+            messages_dropped.clone(),
+        );
 
+        // Create actor
         (
             Self {
+                context,
                 control: control_receiver,
                 connections: BTreeMap::new(),
                 messages_dropped,
@@ -73,7 +76,11 @@ impl<P: Array> Actor<P> {
         }
     }
 
-    pub async fn run(mut self, routing: Channels<P>) {
+    pub fn start(mut self, routing: Channels<P>) -> Handle<()> {
+        self.context.spawn_ref()(self.run(routing))
+    }
+
+    async fn run(mut self, routing: Channels<P>) {
         while let Some(msg) = self.control.next().await {
             match msg {
                 Message::Ready {

@@ -53,7 +53,7 @@ impl<D: Array, P: Array> Application<D, P> {
         (Application { mailbox: receiver }, Mailbox { sender })
     }
 
-    pub async fn run(&mut self, mut signer: signer::Mailbox<D>) {
+    pub async fn run(mut self, mut signer: signer::Mailbox<D>) {
         while let Some(msg) = self.mailbox.next().await {
             match msg {
                 Message::Broadcast(payload) => {

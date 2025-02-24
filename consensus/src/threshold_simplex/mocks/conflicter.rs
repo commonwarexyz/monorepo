@@ -15,7 +15,7 @@ use commonware_cryptography::{
     Hasher,
 };
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Clock, Spawner};
+use commonware_runtime::{Clock, Handle, Spawner};
 use prost::Message;
 use rand::{CryptoRng, Rng};
 use std::marker::PhantomData;
@@ -33,7 +33,7 @@ pub struct Conflicter<
     H: Hasher,
     S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
 > {
-    runtime: E,
+    context: E,
     supervisor: S,
     _hasher: PhantomData<H>,
 
@@ -48,9 +48,9 @@ impl<
         S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
     > Conflicter<E, H, S>
 {
-    pub fn new(runtime: E, cfg: Config<S>) -> Self {
+    pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
-            runtime,
+            context,
             supervisor: cfg.supervisor,
             _hasher: PhantomData,
 
@@ -60,11 +60,11 @@ impl<
         }
     }
 
-    pub async fn run(
-        mut self,
-        voter_network: (impl Sender, impl Receiver),
-        _backfiller_network: (impl Sender, impl Receiver),
-    ) {
+    pub fn start(mut self, voter_network: (impl Sender, impl Receiver)) -> Handle<()> {
+        self.context.spawn_ref()(self.run(voter_network))
+    }
+
+    async fn run(mut self, voter_network: (impl Sender, impl Receiver)) {
         let (mut sender, mut receiver) = voter_network;
         while let Ok((s, msg)) = receiver.recv().await {
             // Parse message
@@ -125,7 +125,7 @@ impl<
                     sender.send(Recipients::All, msg, true).await.unwrap();
 
                     // Notarize random digest
-                    let payload = H::random(&mut self.runtime);
+                    let payload = H::random(&mut self.context);
                     let message = proposal_message(view, parent, &payload);
                     let proposal_signature =
                         ops::partial_sign_message(share, Some(&self.notarize_namespace), &message)
@@ -180,7 +180,7 @@ impl<
                     sender.send(Recipients::All, msg, true).await.unwrap();
 
                     // Finalize random digest
-                    let payload = H::random(&mut self.runtime);
+                    let payload = H::random(&mut self.context);
                     let message = proposal_message(view, parent, &payload);
                     let signature =
                         ops::partial_sign_message(share, Some(&self.finalize_namespace), &message);
