@@ -788,6 +788,14 @@ mod tests {
         });
     }
 
+    fn test_spawn_ref(runner: impl Runner, context: impl Spawner) {
+        runner.start(async move {
+            let handle = context.spawn_ref();
+            let result = handle(async move { 42 }).await;
+            assert_eq!(result, Ok(42));
+        });
+    }
+
     fn test_metrics(runner: impl Runner, context: impl Spawner + Metrics) {
         runner.start(async move {
             // Assert label
@@ -925,6 +933,12 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_spawn_ref() {
+        let (executor, context, _) = deterministic::Executor::default();
+        test_spawn_ref(executor, context);
+    }
+
+    #[test]
     fn test_deterministic_metrics() {
         let (executor, context, _) = deterministic::Executor::default();
         test_metrics(executor, context);
@@ -1030,6 +1044,12 @@ mod tests {
     fn test_tokio_shutdown() {
         let (executor, context) = tokio::Executor::default();
         test_shutdown(executor, context);
+    }
+
+    #[test]
+    fn test_tokio_spawn_ref() {
+        let (executor, context) = tokio::Executor::default();
+        test_spawn_ref(executor, context);
     }
 
     #[test]
