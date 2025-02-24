@@ -94,6 +94,11 @@ impl<H: CHasher> Mmr<H> {
 
     /// Return the total number of nodes in the MMR, irrespective of any pruning.
     pub fn size(&self) -> u64 {
+        println!(
+            "Mem mmr size {} {}",
+            self.nodes.len(),
+            self.oldest_retained_pos,
+        );
         self.nodes.len() as u64 + self.oldest_retained_pos
     }
 
