@@ -275,14 +275,11 @@ mod tests {
             let (mut stream_sender, stream) = mocks::Channel::init();
 
             // Send message over stream
-            context
-                .clone()
-                .with_label("stream_sender")
-                .spawn(|_| async move {
-                    send_frame(&mut stream_sender, &handshake_bytes, ONE_MEGABYTE)
-                        .await
-                        .unwrap();
-                });
+            context.with_label("stream_sender").spawn(|_| async move {
+                send_frame(&mut stream_sender, &handshake_bytes, ONE_MEGABYTE)
+                    .await
+                    .unwrap();
+            });
 
             // Call the verify function
             let result = IncomingHandshake::verify(
@@ -329,14 +326,11 @@ mod tests {
             let (mut stream_sender, stream) = mocks::Channel::init();
 
             // Send message over stream
-            context
-                .clone()
-                .with_label("stream_sender")
-                .spawn(|_| async move {
-                    send_frame(&mut stream_sender, &handshake_bytes, ONE_MEGABYTE)
-                        .await
-                        .unwrap();
-                });
+            context.with_label("stream_sender").spawn(|_| async move {
+                send_frame(&mut stream_sender, &handshake_bytes, ONE_MEGABYTE)
+                    .await
+                    .unwrap();
+            });
 
             // Call the verify function
             let result = IncomingHandshake::verify(
@@ -367,14 +361,11 @@ mod tests {
             let (mut stream_sender, stream) = mocks::Channel::init();
 
             // Send invalid data over stream
-            context
-                .clone()
-                .with_label("stream_sender")
-                .spawn(|_| async move {
-                    send_frame(&mut stream_sender, b"mock data", ONE_MEGABYTE)
-                        .await
-                        .unwrap();
-                });
+            context.with_label("stream_sender").spawn(|_| async move {
+                send_frame(&mut stream_sender, b"mock data", ONE_MEGABYTE)
+                    .await
+                    .unwrap();
+            });
 
             // Call the verify function
             let result = IncomingHandshake::verify(

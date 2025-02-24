@@ -219,10 +219,7 @@ mod tests {
                     namespace,
                     poly::public(&identity),
                 );
-            context
-                .clone()
-                .with_label("collector")
-                .spawn(|_| collector.run());
+            context.with_label("collector").spawn(|_| collector.run());
             collectors.insert(validator.clone(), collector_mailbox);
 
             let (signer, signer_mailbox) = signer::Actor::new(
@@ -245,10 +242,7 @@ mod tests {
                 },
             );
 
-            context
-                .clone()
-                .with_label("app")
-                .spawn(|_| app.run(signer_mailbox));
+            context.with_label("app").spawn(|_| app.run(signer_mailbox));
             let ((a1, a2), (b1, b2)) = registrations.remove(validator).unwrap();
             signer.start((a1, a2), (b1, b2));
         }

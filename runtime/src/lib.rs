@@ -736,7 +736,6 @@ mod tests {
         runner.start(async move {
             // Spawn a task that waits for signal
             let before = context
-                .clone()
                 .with_label("before")
                 .spawn(move |context| async move {
                     let sig = context.stopped().await;
@@ -745,7 +744,6 @@ mod tests {
 
             // Spawn a task after stop is called
             let after = context
-                .clone()
                 .with_label("after")
                 .spawn(move |context| async move {
                     // Wait for stop signal
