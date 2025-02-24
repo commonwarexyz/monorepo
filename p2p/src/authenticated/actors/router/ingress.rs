@@ -3,7 +3,7 @@ use crate::{
     Channel, Recipients,
 };
 use bytes::Bytes;
-use commonware_cryptography::Array;
+use commonware_utils::Array;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,

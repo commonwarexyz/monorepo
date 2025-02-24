@@ -2,8 +2,8 @@ use ark_bn254::{Fr as Scalar, G1Affine, G1Projective, G2Affine, G2Projective};
 use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup, PrimeGroup};
 use ark_ff::{AdditiveGroup, UniformRand};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use commonware_cryptography::{Array, Error, Hasher as _, Scheme, Sha256};
-use commonware_utils::{hex, union_unique, SizedSerialize};
+use commonware_cryptography::{Error, Hasher as _, Scheme, Sha256};
+use commonware_utils::{hex, union_unique, Array, SizedSerialize};
 use eigen_crypto_bn254::utils::map_to_curve;
 use rand::{CryptoRng, Rng};
 use std::{
@@ -120,7 +120,9 @@ pub struct PrivateKey {
     key: Scalar,
 }
 
-impl Array for PrivateKey {}
+impl Array for PrivateKey {
+    type Error = Error;
+}
 
 impl SizedSerialize for PrivateKey {
     const SERIALIZED_LEN: usize = PRIVATE_KEY_LENGTH;
@@ -211,7 +213,9 @@ pub struct PublicKey {
     key: G2Affine,
 }
 
-impl Array for PublicKey {}
+impl Array for PublicKey {
+    type Error = Error;
+}
 
 impl SizedSerialize for PublicKey {
     const SERIALIZED_LEN: usize = PUBLIC_KEY_LENGTH;
@@ -302,7 +306,9 @@ pub struct Signature {
     sig: G1Affine,
 }
 
-impl Array for Signature {}
+impl Array for Signature {
+    type Error = Error;
+}
 
 impl SizedSerialize for Signature {
     const SERIALIZED_LEN: usize = SIGNATURE_LENGTH;
@@ -394,7 +400,9 @@ pub struct G1PublicKey {
     key: G1Affine,
 }
 
-impl Array for G1PublicKey {}
+impl Array for G1PublicKey {
+    type Error = Error;
+}
 
 impl SizedSerialize for G1PublicKey {
     const SERIALIZED_LEN: usize = G1_LENGTH;

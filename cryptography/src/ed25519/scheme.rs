@@ -117,7 +117,9 @@ pub struct PrivateKey {
     key: ed25519_consensus::SigningKey,
 }
 
-impl Array for PrivateKey {}
+impl Array for PrivateKey {
+    type Error = Error;
+}
 
 impl SizedSerialize for PrivateKey {
     const SERIALIZED_LEN: usize = PRIVATE_KEY_LENGTH;
@@ -213,7 +215,9 @@ pub struct PublicKey {
     key: ed25519_consensus::VerificationKey,
 }
 
-impl Array for PublicKey {}
+impl Array for PublicKey {
+    type Error = Error;
+}
 
 impl SizedSerialize for PublicKey {
     const SERIALIZED_LEN: usize = PUBLIC_KEY_LENGTH;
@@ -283,7 +287,9 @@ pub struct Signature {
     signature: ed25519_consensus::Signature,
 }
 
-impl Array for Signature {}
+impl Array for Signature {
+    type Error = Error;
+}
 
 impl SizedSerialize for Signature {
     const SERIALIZED_LEN: usize = SIGNATURE_LENGTH;

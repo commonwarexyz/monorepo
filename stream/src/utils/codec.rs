@@ -67,10 +67,10 @@ mod tests {
     fn test_send_recv_at_max_message_size() {
         let (mut sink, mut stream) = mocks::Channel::init();
 
-        let (executor, mut runtime, _) = Executor::default();
+        let (executor, mut context, _) = Executor::default();
         executor.start(async move {
             let mut buf = [0u8; MAX_MESSAGE_SIZE];
-            runtime.fill(&mut buf);
+            context.fill(&mut buf);
 
             let result = send_frame(&mut sink, &buf, MAX_MESSAGE_SIZE).await;
             assert!(result.is_ok());
@@ -85,12 +85,12 @@ mod tests {
     fn test_send_recv_multiple() {
         let (mut sink, mut stream) = mocks::Channel::init();
 
-        let (executor, mut runtime, _) = Executor::default();
+        let (executor, mut context, _) = Executor::default();
         executor.start(async move {
             let mut buf1 = [0u8; MAX_MESSAGE_SIZE];
             let mut buf2 = [0u8; MAX_MESSAGE_SIZE / 2];
-            runtime.fill(&mut buf1);
-            runtime.fill(&mut buf2);
+            context.fill(&mut buf1);
+            context.fill(&mut buf2);
 
             // Send two messages of different sizes
             let result = send_frame(&mut sink, &buf1, MAX_MESSAGE_SIZE).await;
@@ -112,10 +112,10 @@ mod tests {
     fn test_send_frame() {
         let (mut sink, mut stream) = mocks::Channel::init();
 
-        let (executor, mut runtime, _) = Executor::default();
+        let (executor, mut context, _) = Executor::default();
         executor.start(async move {
             let mut buf = [0u8; MAX_MESSAGE_SIZE];
-            runtime.fill(&mut buf);
+            context.fill(&mut buf);
 
             let result = send_frame(&mut sink, &buf, MAX_MESSAGE_SIZE).await;
             assert!(result.is_ok());
@@ -135,10 +135,10 @@ mod tests {
         const MAX_MESSAGE_SIZE: usize = 1024;
         let (mut sink, _) = mocks::Channel::init();
 
-        let (executor, mut runtime, _) = Executor::default();
+        let (executor, mut context, _) = Executor::default();
         executor.start(async move {
             let mut buf = [0u8; MAX_MESSAGE_SIZE];
-            runtime.fill(&mut buf);
+            context.fill(&mut buf);
 
             let result = send_frame(&mut sink, &buf, MAX_MESSAGE_SIZE - 1).await;
             assert!(matches!(&result, Err(Error::SendTooLarge(n)) if *n == MAX_MESSAGE_SIZE));
@@ -161,11 +161,11 @@ mod tests {
     fn test_read_frame() {
         let (mut sink, mut stream) = mocks::Channel::init();
 
-        let (executor, mut runtime, _) = Executor::default();
+        let (executor, mut context, _) = Executor::default();
         executor.start(async move {
             // Do the writing manually without using send_frame
             let mut buf = [0u8; MAX_MESSAGE_SIZE];
-            runtime.fill(&mut buf);
+            context.fill(&mut buf);
             sink.send(&(MAX_MESSAGE_SIZE as u32).to_be_bytes())
                 .await
                 .unwrap();

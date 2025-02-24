@@ -1,7 +1,7 @@
 use super::{actors::Messenger, Error};
 use crate::{Channel, Message, Recipients};
 use bytes::Bytes;
-use commonware_cryptography::Array;
+use commonware_utils::Array;
 use futures::{channel::mpsc, StreamExt};
 use governor::Quota;
 use std::collections::BTreeMap;

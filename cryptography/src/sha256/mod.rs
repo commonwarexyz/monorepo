@@ -91,7 +91,9 @@ impl Hasher for Sha256 {
 #[repr(transparent)]
 pub struct Digest([u8; DIGEST_LENGTH]);
 
-impl Array for Digest {}
+impl Array for Digest {
+    type Error = Error;
+}
 
 impl SizedSerialize for Digest {
     const SERIALIZED_LEN: usize = DIGEST_LENGTH;

@@ -39,21 +39,18 @@ use commonware_cryptography::Scheme;
 use commonware_p2p::authenticated::{self, Network};
 use commonware_runtime::{
     tokio::{self, Executor},
-    Runner, Spawner,
+    Metrics, Runner,
 };
 use commonware_utils::quorum;
+use futures::try_join;
 use governor::Quota;
-use prometheus_client::registry::Registry;
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use std::collections::HashMap;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::NonZeroU32,
 };
 use std::{str::FromStr, time::Duration};
-use tracing::info;
+use tracing::{error, info};
 
 // Unique namespace to avoid message replay attacks.
 const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_AGGREGATION_";
@@ -61,7 +58,7 @@ const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_AGGREGATION_";
 fn main() {
     // Initialize runtime
     let runtime_cfg = tokio::Config::default();
-    let (executor, runtime) = Executor::init(runtime_cfg.clone());
+    let (executor, context) = Executor::init(runtime_cfg.clone());
 
     // Parse arguments
     let matches = Command::new("commonware-aggregation")
@@ -156,7 +153,6 @@ fn main() {
     let p2p_cfg = authenticated::Config::aggressive(
         signer.clone(),
         APPLICATION_NAMESPACE,
-        Arc::new(Mutex::new(Registry::default())),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
         MAX_MESSAGE_SIZE,
@@ -164,7 +160,8 @@ fn main() {
 
     // Start runtime
     executor.start(async move {
-        let (mut network, mut oracle) = Network::new(runtime.clone(), p2p_cfg);
+        // Initialize network
+        let (mut network, mut oracle) = Network::new(context.with_label("network"), p2p_cfg);
 
         // Provide authorized peers
         //
@@ -199,6 +196,7 @@ fn main() {
         const DEFAULT_MESSAGE_BACKLOG: usize = 256;
         const COMPRESSION_LEVEL: Option<i32> = Some(3);
         const AGGREGATION_FREQUENCY: Duration = Duration::from_secs(10);
+        let actor_handle;
         if let Some(orchestrator) = matches.get_one::<u64>("orchestrator") {
             // Create contributor
             let (sender, receiver) = network.register(
@@ -208,9 +206,14 @@ fn main() {
                 COMPRESSION_LEVEL,
             );
             let orchestrator = Bn254::from_seed(*orchestrator).public_key();
-            let contributor =
-                handlers::Contributor::new(orchestrator, signer, contributors, threshold as usize);
-            runtime.spawn("contributor", contributor.run(sender, receiver));
+            let contributor = handlers::Contributor::new(
+                context.with_label("contributor"),
+                orchestrator,
+                signer,
+                contributors,
+                threshold as usize,
+            );
+            actor_handle = contributor.start(sender, receiver);
         } else {
             let (sender, receiver) = network.register(
                 0,
@@ -219,14 +222,18 @@ fn main() {
                 COMPRESSION_LEVEL,
             );
             let orchestrator = handlers::Orchestrator::new(
-                runtime.clone(),
+                context.with_label("orchestrator"),
                 AGGREGATION_FREQUENCY,
                 contributors,
                 contributors_map,
                 threshold as usize,
             );
-            runtime.spawn("orchestrator", orchestrator.run(sender, receiver));
+            actor_handle = orchestrator.start(sender, receiver);
         }
-        network.run().await;
+
+        // Wait for any handle to return
+        if let Err(e) = try_join!(actor_handle, network.start()) {
+            error!(?e, "actor failed");
+        }
     });
 }

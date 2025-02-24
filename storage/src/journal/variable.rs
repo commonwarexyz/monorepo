@@ -81,14 +81,11 @@
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, deterministic::Executor};
 //! use commonware_storage::journal::variable::{Journal, Config};
-//! use prometheus_client::registry::Registry;
-//! use std::sync::{Arc, Mutex};
 //!
 //! let (executor, context, _) = Executor::default();
 //! executor.start(async move {
 //!     // Create a journal
 //!     let mut journal = Journal::init(context, Config{
-//!         registry: Arc::new(Mutex::new(Registry::default())),
 //!         partition: "partition".to_string()
 //!     }).await.unwrap();
 //!
@@ -102,41 +99,22 @@
 
 use super::Error;
 use bytes::{BufMut, Bytes};
-use commonware_runtime::{Blob, Error as RError, Storage};
+use commonware_runtime::{Blob, Error as RError, Metrics, Storage};
 use commonware_utils::hex;
 use futures::stream::{self, Stream, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
-use prometheus_client::registry::Registry;
 use std::collections::{btree_map::Entry, BTreeMap};
-use std::sync::{Arc, Mutex};
 use tracing::{debug, trace, warn};
 
 /// Configuration for `Journal` storage.
 #[derive(Clone)]
 pub struct Config {
-    /// Registry for metrics.
-    pub registry: Arc<Mutex<Registry>>,
-
     /// The `commonware-runtime::Storage` partition to use
     /// for storing journal blobs.
     pub partition: String,
 }
 
 const ITEM_ALIGNMENT: u64 = 16;
-
-/// Implementation of `Journal` storage.
-pub struct Journal<B: Blob, E: Storage<B>> {
-    runtime: E,
-    cfg: Config,
-
-    oldest_allowed: Option<u64>,
-
-    blobs: BTreeMap<u64, B>,
-
-    tracked: Gauge,
-    synced: Counter,
-    pruned: Counter,
-}
 
 /// Computes the next offset for an item using the underlying `u64`
 /// offset of `Blob`.
@@ -150,22 +128,36 @@ fn compute_next_offset(mut offset: u64) -> Result<u32, Error> {
     Ok(aligned_offset)
 }
 
-impl<B: Blob, E: Storage<B>> Journal<B, E> {
+/// Implementation of `Journal` storage.
+pub struct Journal<B: Blob, E: Storage<B> + Metrics> {
+    context: E,
+    cfg: Config,
+
+    oldest_allowed: Option<u64>,
+
+    blobs: BTreeMap<u64, B>,
+
+    tracked: Gauge,
+    synced: Counter,
+    pruned: Counter,
+}
+
+impl<B: Blob, E: Storage<B> + Metrics> Journal<B, E> {
     /// Initialize a new `Journal` instance.
     ///
     /// All backing blobs are opened but not read during
     /// initialization. The `replay` method can be used
     /// to iterate over all items in the `Journal`.
-    pub async fn init(runtime: E, cfg: Config) -> Result<Self, Error> {
+    pub async fn init(context: E, cfg: Config) -> Result<Self, Error> {
         // Iterate over blobs in partition
         let mut blobs = BTreeMap::new();
-        let stored_blobs = match runtime.scan(&cfg.partition).await {
+        let stored_blobs = match context.scan(&cfg.partition).await {
             Ok(blobs) => blobs,
             Err(RError::PartitionMissing(_)) => Vec::new(),
             Err(err) => return Err(Error::Runtime(err)),
         };
         for name in stored_blobs {
-            let blob = runtime.open(&cfg.partition, &name).await?;
+            let blob = context.open(&cfg.partition, &name).await?;
             let hex_name = hex(&name);
             let section = match name.try_into() {
                 Ok(section) => u64::from_be_bytes(section),
@@ -179,17 +171,14 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
         let tracked = Gauge::default();
         let synced = Counter::default();
         let pruned = Counter::default();
-        {
-            let mut registry = cfg.registry.lock().unwrap();
-            registry.register("tracked", "Number of blobs", tracked.clone());
-            registry.register("synced", "Number of syncs", synced.clone());
-            registry.register("pruned", "Number of blobs pruned", pruned.clone());
-        }
+        context.register("tracked", "Number of blobs", tracked.clone());
+        context.register("synced", "Number of syncs", synced.clone());
+        context.register("pruned", "Number of blobs pruned", pruned.clone());
         tracked.set(blobs.len() as i64);
 
         // Create journal instance
         Ok(Self {
-            runtime,
+            context,
             cfg,
 
             oldest_allowed: None,
@@ -460,7 +449,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => {
                 let name = section.to_be_bytes();
-                let blob = self.runtime.open(&self.cfg.partition, &name).await?;
+                let blob = self.context.open(&self.cfg.partition, &name).await?;
                 self.tracked.inc();
                 entry.insert(blob)
             }
@@ -558,7 +547,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
             blob.close().await?;
 
             // Remove blob from storage
-            self.runtime
+            self.context
                 .remove(&self.cfg.partition, Some(&section.to_be_bytes()))
                 .await?;
             debug!(blob = section, "pruned blob");
@@ -588,18 +577,17 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic::Executor, Blob, Error as RError, Runner, Storage};
     use futures::{pin_mut, StreamExt};
-    use prometheus_client::encoding::text::encode;
+    use prometheus_client::registry::Metric;
 
     #[test_traced]
     fn test_journal_append_and_read() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
 
         // Start the test within the executor
         executor.start(async move {
             // Initialize the journal
             let cfg = Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
             };
             let index = 1u64;
@@ -615,8 +603,7 @@ mod tests {
                 .expect("Failed to append data");
 
             // Check metrics
-            let mut buffer = String::new();
-            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            let buffer = context.encode();
             assert!(buffer.contains("tracked 1"));
 
             // Close the journal
@@ -624,10 +611,9 @@ mod tests {
 
             // Re-initialize the journal to simulate a restart
             let cfg = Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
             };
-            let mut journal = Journal::init(context, cfg.clone())
+            let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
 
@@ -654,22 +640,20 @@ mod tests {
             assert_eq!(items[0].1, data);
 
             // Check metrics
-            let mut buffer = String::new();
-            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            let buffer = context.encode();
             assert!(buffer.contains("tracked 1"));
         });
     }
 
     #[test_traced]
     fn test_journal_multiple_appends_and_reads() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
 
         // Start the test within the executor
         executor.start(async move {
             // Create a journal configuration
             let cfg = Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
             };
 
@@ -694,8 +678,7 @@ mod tests {
             }
 
             // Check metrics
-            let mut buffer = String::new();
-            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            let buffer = context.encode();
             assert!(buffer.contains("tracked 3"));
             assert!(buffer.contains("synced_total 4"));
 
@@ -757,14 +740,13 @@ mod tests {
 
     #[test_traced]
     fn test_journal_prune_blobs() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
 
         // Start the test within the executor
         executor.start(async move {
             // Create a journal configuration
             let cfg = Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
             };
 
@@ -803,8 +785,7 @@ mod tests {
             assert!(matches!(result, Err(Error::AlreadyPrunedToSection(3))));
 
             // Check metrics
-            let mut buffer = String::new();
-            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            let buffer = context.encode();
             assert!(buffer.contains("pruned_total 2"));
 
             // Close the journal
@@ -858,14 +839,13 @@ mod tests {
 
     #[test_traced]
     fn test_journal_with_invalid_blob_name() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
 
         // Start the test within the executor
         executor.start(async move {
             // Create a journal configuration
             let cfg = Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
             };
 
@@ -886,14 +866,13 @@ mod tests {
     }
 
     fn journal_read_size_missing(exact: Option<u32>) {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
 
         // Start the test within the executor
         executor.start(async move {
             // Create a journal configuration
             let cfg = Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
             };
 
@@ -945,14 +924,13 @@ mod tests {
     }
 
     fn journal_read_item_missing(exact: Option<u32>) {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
 
         // Start the test within the executor
         executor.start(async move {
             // Create a journal configuration
             let cfg = Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
             };
 
@@ -1010,14 +988,13 @@ mod tests {
 
     #[test_traced]
     fn test_journal_read_checksum_missing() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
 
         // Start the test within the executor
         executor.start(async move {
             // Create a journal configuration
             let cfg = Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
             };
 
@@ -1074,14 +1051,13 @@ mod tests {
 
     #[test_traced]
     fn test_journal_read_checksum_mismatch() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
 
         // Start the test within the executor
         executor.start(async move {
             // Create a journal configuration
             let cfg = Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
             };
 
@@ -1148,14 +1124,13 @@ mod tests {
 
     #[test_traced]
     fn test_journal_handling_truncated_data() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
 
         // Start the test within the executor
         executor.start(async move {
             // Create a journal configuration
             let cfg = Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
             };
 
@@ -1281,24 +1256,39 @@ mod tests {
         }
     }
 
+    impl Metrics for MockStorage {
+        fn with_label(&self, _: &str) -> Self {
+            self.clone()
+        }
+
+        fn label(&self) -> String {
+            String::new()
+        }
+
+        fn register<N: Into<String>, H: Into<String>>(&self, _: N, _: H, _: impl Metric) {}
+
+        fn encode(&self) -> String {
+            String::new()
+        }
+    }
+
     // Define the `INDEX_ALIGNMENT` again explicitly to ensure we catch any accidental
     // changes to the value
     const INDEX_ALIGNMENT: u64 = 16;
 
     #[test_traced]
     fn test_journal_large_offset() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, _, _) = Executor::default();
         executor.start(async move {
             // Create journal
             let cfg = Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "partition".to_string(),
             };
-            let runtime = MockStorage {
+            let context = MockStorage {
                 len: u32::MAX as u64 * INDEX_ALIGNMENT, // can store up to u32::Max at the last offset
             };
-            let mut journal = Journal::init(runtime, cfg).await.unwrap();
+            let mut journal = Journal::init(context, cfg).await.unwrap();
 
             // Append data
             let data = Bytes::from("Test data");
@@ -1312,18 +1302,17 @@ mod tests {
 
     #[test_traced]
     fn test_journal_offset_overflow() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, _, _) = Executor::default();
         executor.start(async move {
             // Create journal
             let cfg = Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "partition".to_string(),
             };
-            let runtime = MockStorage {
+            let context = MockStorage {
                 len: u32::MAX as u64 * INDEX_ALIGNMENT + 1,
             };
-            let mut journal = Journal::init(runtime, cfg).await.unwrap();
+            let mut journal = Journal::init(context, cfg).await.unwrap();
 
             // Append data
             let data = Bytes::from("Test data");

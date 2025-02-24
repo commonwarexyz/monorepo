@@ -1,19 +1,16 @@
 use crate::handlers::wire;
-use commonware_cryptography::{
-    bls12381::{
-        dkg::player::Output,
-        primitives::{
-            group::{self, Element},
-            ops,
-            poly::PartialSignature,
-        },
+use commonware_cryptography::bls12381::{
+    dkg::player::Output,
+    primitives::{
+        group::{self, Element},
+        ops,
+        poly::PartialSignature,
     },
-    Array,
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::Clock;
-use commonware_utils::hex;
+use commonware_runtime::{Clock, Handle, Spawner};
+use commonware_utils::{hex, Array};
 use futures::{channel::mpsc, StreamExt};
 use prost::Message;
 use std::collections::{HashMap, HashSet};
@@ -24,8 +21,8 @@ const VRF_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_VRF_";
 
 /// Generate bias-resistant, verifiable randomness using BLS12-381
 /// Threshold Signatures.
-pub struct Vrf<E: Clock, P: Array> {
-    runtime: E,
+pub struct Vrf<E: Clock + Spawner, P: Array> {
+    context: E,
     timeout: Duration,
     threshold: u32,
     contributors: Vec<P>,
@@ -33,9 +30,9 @@ pub struct Vrf<E: Clock, P: Array> {
     requests: mpsc::Receiver<(u64, Output)>,
 }
 
-impl<E: Clock, P: Array> Vrf<E, P> {
+impl<E: Clock + Spawner, P: Array> Vrf<E, P> {
     pub fn new(
-        runtime: E,
+        context: E,
         timeout: Duration,
         threshold: u32,
         mut contributors: Vec<P>,
@@ -48,7 +45,7 @@ impl<E: Clock, P: Array> Vrf<E, P> {
             .map(|(i, pk)| (pk.clone(), i as u32))
             .collect();
         Self {
-            runtime,
+            context,
             timeout,
             threshold,
             contributors,
@@ -87,12 +84,12 @@ impl<E: Clock, P: Array> Vrf<E, P> {
             .expect("failed to send signature");
 
         // Wait for partial signatures from peers or timeout
-        let start = self.runtime.current();
+        let start = self.context.current();
         let t_signature = start + self.timeout;
         let mut received = HashSet::new();
         loop {
             select! {
-                _ = self.runtime.sleep_until(t_signature) => {
+                _ = self.context.sleep_until(t_signature) => {
                     debug!(round, "signature timeout");
                     break;
                 },
@@ -160,7 +157,15 @@ impl<E: Clock, P: Array> Vrf<E, P> {
         }
     }
 
-    pub async fn run(
+    pub fn start(
+        mut self,
+        sender: impl Sender<PublicKey = P>,
+        receiver: impl Receiver<PublicKey = P>,
+    ) -> Handle<()> {
+        self.context.spawn_ref()(self.run(sender, receiver))
+    }
+
+    async fn run(
         mut self,
         mut sender: impl Sender<PublicKey = P>,
         mut receiver: impl Receiver<PublicKey = P>,

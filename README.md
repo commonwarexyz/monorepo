@@ -3,13 +3,14 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE-MIT)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](./LICENSE-APACHE)
 [![Discussions](https://img.shields.io/github/discussions/commonwarexyz/monorepo?label=Discussions&color=purple)](https://github.com/commonwarexyz/monorepo/discussions)
-[![Benchmarks](https://img.shields.io/badge/216-benchmarks?style=flat&label=Benchmarks&color=orange)](https://commonware.xyz/benchmarks.html)
+[![Benchmarks](https://img.shields.io/badge/230-benchmarks?style=flat&label=Benchmarks&color=orange)](https://commonware.xyz/benchmarks.html)
 [![Coverage](https://codecov.io/gh/commonwarexyz/monorepo/graph/badge.svg?token=847TBNH49H)](https://codecov.io/gh/commonwarexyz/monorepo)
 
 ## Primitives
 
 _Primitives are designed for deployment in adversarial environments. If you find an exploit, please refer to our [security policy](./SECURITY.md) before disclosing it publicly (an exploit may equip a malicious party to attack users of a primitive)._
 
+* [broadcast](./broadcast/README.md): Disseminate data over a wide-area network.
 * [consensus](./consensus/README.md): Order opaque messages in a Byzantine environment.
 * [cryptography](./cryptography/README.md): Generate keys, sign arbitrary messages, and deterministically verify signatures.
 * [p2p](./p2p/README.md): Communicate with authenticated peers over encrypted connections.
