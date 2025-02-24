@@ -64,7 +64,7 @@ impl<T: Translator, B: Blob, E: Storage<B> + Metrics> Archive<T, B, E> {
     /// The in-memory index for `Archive` is populated during this call
     /// by replaying the journal.
     pub async fn init(
-        runtime: E,
+        context: E,
         mut journal: Journal<B, E>,
         cfg: Config<T>,
     ) -> Result<Self, Error> {
@@ -119,25 +119,25 @@ impl<T: Translator, B: Blob, E: Storage<B> + Metrics> Archive<T, B, E> {
         let gets = Counter::default();
         let has = Counter::default();
         let syncs = Counter::default();
-        runtime.register(
+        context.register(
             "items_tracked",
             "Number of items tracked",
             items_tracked.clone(),
         );
-        runtime.register(
+        context.register(
             "indices_pruned",
             "Number of indices pruned",
             indices_pruned.clone(),
         );
-        runtime.register("keys_pruned", "Number of keys pruned", keys_pruned.clone());
-        runtime.register(
+        context.register("keys_pruned", "Number of keys pruned", keys_pruned.clone());
+        context.register(
             "unnecessary_reads",
             "Number of unnecessary reads performed during key lookups",
             unnecessary_reads.clone(),
         );
-        runtime.register("gets", "Number of gets performed", gets.clone());
-        runtime.register("has", "Number of has performed", has.clone());
-        runtime.register("syncs", "Number of syncs called", syncs.clone());
+        context.register("gets", "Number of gets performed", gets.clone());
+        context.register("has", "Number of has performed", has.clone());
+        context.register("syncs", "Number of syncs called", syncs.clone());
         items_tracked.set(indices.len() as i64);
 
         // Return populated archive

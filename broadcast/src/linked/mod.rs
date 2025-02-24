@@ -147,7 +147,7 @@ mod tests {
     }
 
     async fn initialize_simulation(
-        runtime: Context,
+        context: Context,
         num_validators: u32,
         shares_vec: &mut [Share],
     ) -> (
@@ -157,7 +157,7 @@ mod tests {
         Registrations<PublicKey>,
     ) {
         let (network, mut oracle) = Network::new(
-            runtime.with_label("network"),
+            context.with_label("network"),
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
             },
@@ -190,7 +190,7 @@ mod tests {
 
     #[allow(clippy::too_many_arguments)]
     fn spawn_validator_engines(
-        runtime: Context,
+        context: Context,
         identity: poly::Public,
         pks: &[PublicKey],
         validators: &[(PublicKey, Ed25519, Share)],
@@ -202,7 +202,7 @@ mod tests {
     ) {
         let namespace = b"my testing namespace";
         for (validator, scheme, share) in validators.iter() {
-            let runtime = runtime.with_label(&validator.to_string());
+            let context = context.with_label(&validator.to_string());
             let mut coordinator = mocks::coordinator::Coordinator::<PublicKey>::new(
                 identity.clone(),
                 pks.to_vec(),
@@ -219,14 +219,14 @@ mod tests {
                     namespace,
                     poly::public(&identity),
                 );
-            runtime
+            context
                 .clone()
                 .with_label("collector")
                 .spawn(|_| collector.run());
             collectors.insert(validator.clone(), collector_mailbox);
 
             let (signer, signer_mailbox) = signer::Actor::new(
-                runtime.with_label("signer"),
+                context.with_label("signer"),
                 signer::Config {
                     crypto: scheme.clone(),
                     application: app_mailbox.clone(),
@@ -245,7 +245,7 @@ mod tests {
                 },
             );
 
-            runtime
+            context
                 .clone()
                 .with_label("app")
                 .spawn(|_| app.run(signer_mailbox));
@@ -255,16 +255,16 @@ mod tests {
     }
 
     fn spawn_proposer(
-        runtime: Context,
+        context: Context,
         mailboxes: Arc<
             Mutex<BTreeMap<PublicKey, mocks::application::Mailbox<Sha256Digest, PublicKey>>>,
         >,
         invalid_when: fn(u64) -> bool,
     ) {
-        runtime
+        context
             .clone()
             .with_label("invalid signature proposer")
-            .spawn(move |runtime| async move {
+            .spawn(move |context| async move {
                 let mut iter = 0;
                 loop {
                     iter += 1;
@@ -285,13 +285,13 @@ mod tests {
                         let digest = hasher.finalize();
                         mailbox.broadcast(digest).await;
                     }
-                    runtime.sleep(Duration::from_millis(250)).await;
+                    context.sleep(Duration::from_millis(250)).await;
                 }
             });
     }
 
     async fn await_collectors(
-        runtime: Context,
+        context: Context,
         collectors: &BTreeMap<PublicKey, mocks::collector::Mailbox<Ed25519, Sha256Digest>>,
         threshold: u64,
     ) {
@@ -302,10 +302,10 @@ mod tests {
             receivers.push(rx);
 
             // Spawn a watcher for the collector.
-            runtime.with_label("collector_watcher").spawn({
+            context.with_label("collector_watcher").spawn({
                 let sequencer = sequencer.clone();
                 let mut mailbox = mailbox.clone();
-                move |runtime| async move {
+                move |context| async move {
                     loop {
                         let tip = mailbox.get_tip(sequencer.clone()).await.unwrap_or(0);
                         debug!(tip, ?sequencer, "collector");
@@ -313,7 +313,7 @@ mod tests {
                             let _ = tx.send(sequencer.clone());
                             break;
                         }
-                        runtime.sleep(Duration::from_millis(100)).await;
+                        context.sleep(Duration::from_millis(100)).await;
                     }
                 }
             });

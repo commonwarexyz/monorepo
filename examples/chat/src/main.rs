@@ -72,8 +72,8 @@ const APPLICATION_NAMESPACE: &[u8] = b"commonware-chat";
 
 #[doc(hidden)]
 fn main() {
-    // Initialize runtime
-    let (executor, runtime) = Executor::default();
+    // Initialize context
+    let (executor, context) = Executor::default();
 
     // Parse arguments
     let matches = Command::new("commonware-chat")
@@ -158,10 +158,10 @@ fn main() {
         MAX_MESSAGE_SIZE,
     );
 
-    // Start runtime
+    // Start context
     executor.start(async move {
         // Initialize network
-        let (mut network, mut oracle) = Network::new(runtime.with_label("network"), p2p_cfg);
+        let (mut network, mut oracle) = Network::new(context.with_label("network"), p2p_cfg);
 
         // Provide authorized peers
         //
@@ -184,7 +184,7 @@ fn main() {
 
         // Block on GUI
         handler::run(
-            runtime.with_label("handler"),
+            context.with_label("handler"),
             signer.public_key().to_string(),
             logs,
             chat_sender,

@@ -46,7 +46,7 @@ pub struct Handshake<C: Scheme> {
 
 impl<C: Scheme> Handshake<C> {
     pub fn verify<E: Clock>(
-        runtime: &E,
+        context: &E,
         crypto: &C,
         namespace: &[u8],
         synchrony_bound: Duration,
@@ -78,7 +78,7 @@ impl<C: Scheme> Handshake<C> {
         // unlike the peer identity) and/or from blocking a peer from connecting
         // to others (if an adversary recovered a handshake message could open a
         // connection to a peer first, peers only maintain one connection per peer).
-        let current_timestamp = runtime.current().epoch();
+        let current_timestamp = context.current().epoch();
         let handshake_timestamp = Duration::from_millis(handshake.timestamp);
         if handshake_timestamp + max_handshake_age < current_timestamp {
             return Err(Error::InvalidTimestampOld(handshake.timestamp));
@@ -125,7 +125,7 @@ pub struct IncomingHandshake<Si: Sink, St: Stream, C: Scheme> {
 impl<Si: Sink, St: Stream, C: Scheme> IncomingHandshake<Si, St, C> {
     #[allow(clippy::too_many_arguments)]
     pub async fn verify<E: Clock + Spawner>(
-        runtime: &E,
+        context: &E,
         crypto: &C,
         namespace: &[u8],
         max_message_size: usize,
@@ -136,11 +136,11 @@ impl<Si: Sink, St: Stream, C: Scheme> IncomingHandshake<Si, St, C> {
         mut stream: St,
     ) -> Result<Self, Error> {
         // Set handshake deadline
-        let deadline = runtime.current() + handshake_timeout;
+        let deadline = context.current() + handshake_timeout;
 
         // Wait for up to handshake timeout for response
         let msg = select! {
-            _ = runtime.sleep_until(deadline) => {
+            _ = context.sleep_until(deadline) => {
                 return Err(Error::HandshakeTimeout);
             },
             result = recv_frame(&mut stream, max_message_size) => {
@@ -150,7 +150,7 @@ impl<Si: Sink, St: Stream, C: Scheme> IncomingHandshake<Si, St, C> {
 
         // Verify handshake message from peer
         let handshake = Handshake::verify(
-            runtime,
+            context,
             crypto,
             namespace,
             synchrony_bound,
@@ -180,8 +180,8 @@ mod tests {
 
     #[test]
     fn test_handshake_create_verify() {
-        // Initialize runtime
-        let (executor, runtime, _) = Executor::default();
+        // Initialize context
+        let (executor, context, _) = Executor::default();
         executor.start(async move {
             // Create participants
             let mut sender = Ed25519::from_seed(0);
@@ -189,7 +189,7 @@ mod tests {
             let ephemeral_public_key = PublicKey::from([3u8; 32]);
 
             // Create handshake message
-            let epoch_millis = runtime.current().epoch_millis();
+            let epoch_millis = context.current().epoch_millis();
             let handshake_bytes = create_handshake(
                 &mut sender,
                 TEST_NAMESPACE,
@@ -237,7 +237,7 @@ mod tests {
 
             // Verify using the handshake struct
             let handshake = Handshake::verify(
-                &runtime,
+                &context,
                 &recipient,
                 TEST_NAMESPACE,
                 synchrony_bound,
@@ -252,8 +252,8 @@ mod tests {
 
     #[test]
     fn test_handshake() {
-        // Initialize runtime
-        let (executor, runtime, _) = Executor::default();
+        // Initialize context
+        let (executor, context, _) = Executor::default();
         executor.start(async move {
             // Create participants
             let mut sender = Ed25519::from_seed(0);
@@ -275,7 +275,7 @@ mod tests {
             let (mut stream_sender, stream) = mocks::Channel::init();
 
             // Send message over stream
-            runtime
+            context
                 .clone()
                 .with_label("stream_sender")
                 .spawn(|_| async move {
@@ -286,7 +286,7 @@ mod tests {
 
             // Call the verify function
             let result = IncomingHandshake::verify(
-                &runtime,
+                &context,
                 &recipient,
                 TEST_NAMESPACE,
                 ONE_MEGABYTE,
@@ -307,8 +307,8 @@ mod tests {
 
     #[test]
     fn test_handshake_not_for_us() {
-        // Initialize runtime
-        let (executor, runtime, _) = Executor::default();
+        // Initialize context
+        let (executor, context, _) = Executor::default();
         executor.start(async move {
             // Create participants
             let mut sender = Ed25519::from_seed(0);
@@ -329,7 +329,7 @@ mod tests {
             let (mut stream_sender, stream) = mocks::Channel::init();
 
             // Send message over stream
-            runtime
+            context
                 .clone()
                 .with_label("stream_sender")
                 .spawn(|_| async move {
@@ -340,7 +340,7 @@ mod tests {
 
             // Call the verify function
             let result = IncomingHandshake::verify(
-                &runtime,
+                &context,
                 &Ed25519::from_seed(2),
                 TEST_NAMESPACE,
                 ONE_MEGABYTE,
@@ -359,15 +359,15 @@ mod tests {
 
     #[test]
     fn test_incoming_handshake_invalid_data() {
-        // Initialize runtime
-        let (executor, runtime, _) = Executor::default();
+        // Initialize context
+        let (executor, context, _) = Executor::default();
         executor.start(async move {
             // Setup a mock sink and stream
             let (sink, _) = mocks::Channel::init();
             let (mut stream_sender, stream) = mocks::Channel::init();
 
             // Send invalid data over stream
-            runtime
+            context
                 .clone()
                 .with_label("stream_sender")
                 .spawn(|_| async move {
@@ -378,7 +378,7 @@ mod tests {
 
             // Call the verify function
             let result = IncomingHandshake::verify(
-                &runtime,
+                &context,
                 &Ed25519::from_seed(0),
                 TEST_NAMESPACE,
                 ONE_MEGABYTE,
@@ -397,8 +397,8 @@ mod tests {
 
     #[test]
     fn test_incoming_handshake_verify_timeout() {
-        // Initialize runtime
-        let (executor, runtime, _) = Executor::default();
+        // Initialize context
+        let (executor, context, _) = Executor::default();
         executor.start(async move {
             // Create participants
             let mut sender = Ed25519::from_seed(0);
@@ -410,11 +410,11 @@ mod tests {
             let (mut stream_sender, stream) = mocks::Channel::init();
 
             // Accept connections but do nothing
-            runtime.with_label("stream_sender").spawn({
+            context.with_label("stream_sender").spawn({
                 let recipient = recipient.clone();
-                move |runtime| async move {
-                    runtime.sleep(Duration::from_secs(10)).await;
-                    let timestamp = runtime.current().epoch_millis();
+                move |context| async move {
+                    context.sleep(Duration::from_secs(10)).await;
+                    let timestamp = context.current().epoch_millis();
                     let handshake_bytes = create_handshake(
                         &mut sender,
                         TEST_NAMESPACE,
@@ -431,7 +431,7 @@ mod tests {
 
             // Call the verify function
             let result = IncomingHandshake::verify(
-                &runtime,
+                &context,
                 &recipient,
                 TEST_NAMESPACE,
                 ONE_MEGABYTE,
@@ -450,7 +450,7 @@ mod tests {
 
     #[test]
     fn test_handshake_verify_invalid_public_key() {
-        let (executor, runtime, _) = Executor::default();
+        let (executor, context, _) = Executor::default();
         executor.start(async move {
             let mut crypto = Ed25519::from_seed(0);
             let recipient_public_key = crypto.public_key();
@@ -484,7 +484,7 @@ mod tests {
 
             // Verify the handshake
             let result = Handshake::verify(
-                &runtime,
+                &context,
                 &crypto,
                 TEST_NAMESPACE,
                 Duration::from_secs(5),
@@ -497,7 +497,7 @@ mod tests {
 
     #[test]
     fn test_handshake_verify_invalid_ephemeral_public_key() {
-        let (executor, runtime, _) = Executor::default();
+        let (executor, context, _) = Executor::default();
         executor.start(async move {
             let mut crypto = Ed25519::from_seed(0);
             let recipient_public_key = crypto.public_key();
@@ -521,7 +521,7 @@ mod tests {
 
             // Verify the handshake
             let result = Handshake::verify(
-                &runtime,
+                &context,
                 &crypto,
                 TEST_NAMESPACE,
                 Duration::from_secs(5),
@@ -534,7 +534,7 @@ mod tests {
 
     #[test]
     fn test_handshake_verify_invalid_signature() {
-        let (executor, runtime, _) = Executor::default();
+        let (executor, context, _) = Executor::default();
         executor.start(async move {
             let mut crypto = Ed25519::from_seed(0);
             let recipient_public_key = crypto.public_key();
@@ -568,7 +568,7 @@ mod tests {
 
             // Verify the handshake
             let result = Handshake::verify(
-                &runtime,
+                &context,
                 &crypto,
                 TEST_NAMESPACE,
                 Duration::from_secs(5),
@@ -581,7 +581,7 @@ mod tests {
 
     #[test]
     fn test_handshake_verify_invalid_timestamp_old() {
-        let (executor, runtime, _) = Executor::default();
+        let (executor, context, _) = Executor::default();
         executor.start(async move {
             let mut crypto = Ed25519::from_seed(0);
             let recipient_public_key = crypto.public_key();
@@ -602,11 +602,11 @@ mod tests {
 
             // Time starts at 0 in deterministic executor.
             // Sleep for the exact timeout duration.
-            runtime.sleep(timeout_duration).await;
+            context.sleep(timeout_duration).await;
 
             // Verify the handshake, it should be fine still.
             Handshake::verify(
-                &runtime,
+                &context,
                 &crypto,
                 TEST_NAMESPACE,
                 synchrony_bound,
@@ -616,11 +616,11 @@ mod tests {
             .unwrap(); // no error
 
             // Timeout by waiting 1 more millisecond.
-            runtime.sleep(Duration::from_millis(1)).await;
+            context.sleep(Duration::from_millis(1)).await;
 
             // Verify that a timeout error is returned.
             let result = Handshake::verify(
-                &runtime,
+                &context,
                 &crypto,
                 TEST_NAMESPACE,
                 synchrony_bound,
@@ -633,7 +633,7 @@ mod tests {
 
     #[test]
     fn test_handshake_verify_invalid_timestamp_future() {
-        let (executor, runtime, _) = Executor::default();
+        let (executor, context, _) = Executor::default();
         executor.start(async move {
             let mut crypto = Ed25519::from_seed(0);
             let recipient_public_key = crypto.public_key();
@@ -663,7 +663,7 @@ mod tests {
 
             // Verify the okay handshake.
             Handshake::verify(
-                &runtime,
+                &context,
                 &crypto,
                 TEST_NAMESPACE,
                 synchrony_bound,
@@ -673,7 +673,7 @@ mod tests {
 
             // Handshake too far into the future fails.
             let result = Handshake::verify(
-                &runtime,
+                &context,
                 &crypto,
                 TEST_NAMESPACE,
                 synchrony_bound,

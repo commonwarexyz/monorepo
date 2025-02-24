@@ -150,7 +150,7 @@ pub struct Config<H: Hasher, P: Array> {
 }
 
 pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: Array> {
-    runtime: E,
+    context: E,
     hasher: H,
     participant: P,
 
@@ -171,7 +171,7 @@ pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: Array> {
 }
 
 impl<E: Clock + RngCore + Spawner, H: Hasher, P: Array> Application<E, H, P> {
-    pub fn new(runtime: E, cfg: Config<H, P>) -> (Self, Mailbox<H::Digest>) {
+    pub fn new(context: E, cfg: Config<H, P>) -> (Self, Mailbox<H::Digest>) {
         // Register self on relay
         let broadcast = cfg.relay.register(cfg.participant.clone());
 
@@ -183,7 +183,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: Array> Application<E, H, P> {
         let (sender, receiver) = mpsc::channel(1024);
         (
             Self {
-                runtime,
+                context,
                 hasher: cfg.hasher,
                 participant: cfg.participant,
 
@@ -223,8 +223,8 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: Array> Application<E, H, P> {
     /// Backfilling verification dependencies is considered out-of-scope for consensus.
     async fn propose(&mut self, context: Context<H::Digest>) -> H::Digest {
         // Simulate the propose latency
-        let duration = self.propose_latency.sample(&mut self.runtime);
-        self.runtime
+        let duration = self.propose_latency.sample(&mut self.context);
+        self.context
             .sleep(Duration::from_millis(duration as u64))
             .await;
 
@@ -233,7 +233,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: Array> Application<E, H, P> {
         let mut payload = Vec::with_capacity(payload_len);
         payload.put_u64(context.view);
         payload.extend_from_slice(&context.parent.1);
-        payload.put_u64(self.runtime.gen::<u64>()); // Ensures we always have a unique payload
+        payload.put_u64(self.context.gen::<u64>()); // Ensures we always have a unique payload
         self.hasher.update(&payload);
         let digest = self.hasher.finalize();
 
@@ -252,8 +252,8 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: Array> Application<E, H, P> {
         mut contents: Bytes,
     ) -> bool {
         // Simulate the verify latency
-        let duration = self.verify_latency.sample(&mut self.runtime);
-        self.runtime
+        let duration = self.verify_latency.sample(&mut self.context);
+        self.context
             .sleep(Duration::from_millis(duration as u64))
             .await;
 
@@ -316,7 +316,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: Array> Application<E, H, P> {
     }
 
     pub fn start(self) -> Handle<()> {
-        self.runtime.clone().spawn(|_| self.run())
+        self.context.clone().spawn(|_| self.run())
     }
 
     async fn run(mut self) {

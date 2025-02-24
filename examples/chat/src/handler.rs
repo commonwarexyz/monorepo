@@ -41,7 +41,7 @@ enum Focus {
 }
 
 pub async fn run(
-    runtime: impl Spawner + Metrics,
+    context: impl Spawner + Metrics,
     me: String,
     logs: Arc<Mutex<Vec<String>>>,
     mut sender: impl Sender,
@@ -56,7 +56,7 @@ pub async fn run(
 
     // Listen for input
     let (mut tx, mut rx) = mpsc::channel(100);
-    runtime.with_label("keyboard").spawn(|_| async move {
+    context.with_label("keyboard").spawn(|_| async move {
         loop {
             match event::poll(Duration::from_millis(500)) {
                 Ok(true) => {}
@@ -133,7 +133,7 @@ pub async fn run(
                 f.render_widget(messages_block, messages_chunks[0]);
 
                 // Display metrics
-                let buffer = runtime.encode();
+                let buffer = context.encode();
                 let metrics_text = Text::from(buffer);
                 let metrics_block = Paragraph::new(metrics_text)
                     .block(

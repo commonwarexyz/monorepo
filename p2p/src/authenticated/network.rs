@@ -46,7 +46,7 @@ pub struct Network<
     E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork<L, Si, St> + Metrics,
     C: Scheme,
 > {
-    runtime: E,
+    context: E,
     cfg: Config<C>,
 
     channels: Channels<C::PublicKey>,
@@ -78,9 +78,9 @@ impl<
     ///
     /// * A tuple containing the network instance and the oracle that
     ///   can be used by a developer to configure which peers are authorized.
-    pub fn new(runtime: E, cfg: Config<C>) -> (Self, tracker::Oracle<E, C::PublicKey>) {
+    pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle<E, C::PublicKey>) {
         let (tracker, tracker_mailbox, oracle) = tracker::Actor::new(
-            runtime.with_label("tracker"),
+            context.with_label("tracker"),
             tracker::Config {
                 crypto: cfg.crypto.clone(),
                 namespace: union(&cfg.namespace, TRACKER_SUFFIX),
@@ -95,7 +95,7 @@ impl<
             },
         );
         let (router, router_mailbox, messenger) = router::Actor::new(
-            runtime.with_label("router"),
+            context.with_label("router"),
             router::Config {
                 mailbox_size: cfg.mailbox_size,
             },
@@ -104,7 +104,7 @@ impl<
 
         (
             Self {
-                runtime,
+                context,
                 cfg,
 
                 channels,
@@ -152,7 +152,7 @@ impl<
     ///
     /// After the network is started, it is not possible to add more channels.
     pub fn start(self) -> Handle<()> {
-        self.runtime.clone().spawn(|_| self.run())
+        self.context.clone().spawn(|_| self.run())
     }
 
     async fn run(self) {
@@ -164,7 +164,7 @@ impl<
 
         // Start spawner
         let (spawner, spawner_mailbox) = spawner::Actor::new(
-            self.runtime.with_label("spawner"),
+            self.context.with_label("spawner"),
             spawner::Config {
                 mailbox_size: self.cfg.mailbox_size,
                 gossip_bit_vec_frequency: self.cfg.gossip_bit_vec_frequency,
@@ -185,7 +185,7 @@ impl<
             handshake_timeout: self.cfg.handshake_timeout,
         };
         let listener = listener::Actor::new(
-            self.runtime.with_label("listener"),
+            self.context.with_label("listener"),
             listener::Config {
                 address: self.cfg.listen,
                 stream_cfg: stream_cfg.clone(),
@@ -197,7 +197,7 @@ impl<
 
         // Start dialer
         let dialer = dialer::Actor::new(
-            self.runtime.with_label("dialer"),
+            self.context.with_label("dialer"),
             dialer::Config {
                 stream_cfg,
                 dial_frequency: self.cfg.dial_frequency,

@@ -147,12 +147,12 @@ fn main() {
     let other_identity =
         group::Public::deserialize(&other_identity).expect("Other identity not well-formed");
 
-    // Initialize runtime
+    // Initialize context
     let runtime_cfg = tokio::Config {
         storage_directory: storage_directory.into(),
         ..Default::default()
     };
-    let (executor, runtime) = Executor::init(runtime_cfg.clone());
+    let (executor, context) = Executor::init(runtime_cfg.clone());
 
     // Configure indexer
     let indexer_cfg = public_key::Config {
@@ -173,21 +173,21 @@ fn main() {
         1024 * 1024, // 1MB
     );
 
-    // Start runtime
+    // Start context
     executor.start(async move {
         // Dial indexer
-        let (sink, stream) = runtime
+        let (sink, stream) = context
             .dial(indexer_address)
             .await
             .expect("Failed to dial indexer");
         let indexer =
-            Connection::upgrade_dialer(runtime.clone(), indexer_cfg, sink, stream, indexer)
+            Connection::upgrade_dialer(context.clone(), indexer_cfg, sink, stream, indexer)
                 .await
                 .expect("Failed to upgrade connection with indexer");
 
         // Setup p2p
         let (mut network, mut oracle) =
-            authenticated::Network::new(runtime.with_label("network"), p2p_cfg);
+            authenticated::Network::new(context.with_label("network"), p2p_cfg);
 
         // Provide authorized peers
         //
@@ -214,7 +214,7 @@ fn main() {
 
         // Initialize storage
         let journal = Journal::init(
-            runtime.clone(),
+            context.clone(),
             Config {
                 partition: String::from("log"),
             },
@@ -227,7 +227,7 @@ fn main() {
         let prover = Prover::new(public, &consensus_namespace);
         let other_prover = Prover::new(other_identity, &consensus_namespace);
         let (application, supervisor, mailbox) = application::Application::new(
-            runtime.with_label("application"),
+            context.with_label("application"),
             application::Config {
                 indexer,
                 prover,
@@ -243,7 +243,7 @@ fn main() {
 
         // Initialize consensus
         let engine = Engine::new(
-            runtime.with_label("engine"),
+            context.with_label("engine"),
             journal,
             threshold_simplex::Config {
                 crypto: signer.clone(),

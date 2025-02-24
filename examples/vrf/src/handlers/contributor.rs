@@ -22,7 +22,7 @@ use tracing::{debug, info, warn};
 /// A DKG/Resharing contributor that can be configured to behave honestly
 /// or deviate as a rogue, lazy, or forger.
 pub struct Contributor<E: Clock + Rng + Spawner, C: Scheme> {
-    runtime: E,
+    context: E,
     crypto: C,
     dkg_phase_timeout: Duration,
     arbiter: C::PublicKey,
@@ -40,7 +40,7 @@ pub struct Contributor<E: Clock + Rng + Spawner, C: Scheme> {
 impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        runtime: E,
+        context: E,
         crypto: C,
         dkg_phase_timeout: Duration,
         arbiter: C::PublicKey,
@@ -58,7 +58,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
         let (sender, receiver) = mpsc::channel(32);
         (
             Self {
-                runtime,
+                context,
                 crypto,
                 dkg_phase_timeout,
                 arbiter,
@@ -167,7 +167,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
         let mut dealer_obj = if should_deal {
             let previous = previous.map(|previous| previous.share);
             let (dealer, commitment, shares) =
-                Dealer::new(&mut self.runtime, previous, self.contributors.clone());
+                Dealer::new(&mut self.context, previous, self.contributors.clone());
             let serialized_commitment = commitment.serialize();
             Some((
                 dealer,
@@ -220,7 +220,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
                     // If we are corrupt, randomly modify the share.
                     serialized_share = group::Share {
                         index: share.index,
-                        private: group::Scalar::rand(&mut self.runtime),
+                        private: group::Scalar::rand(&mut self.context),
                     }
                     .serialize();
                     warn!(round, ?player, "modified share");
@@ -257,10 +257,10 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
         }
 
         // Respond to commitments and wait for acks
-        let t = self.runtime.current() + 2 * self.dkg_phase_timeout;
+        let t = self.context.current() + 2 * self.dkg_phase_timeout;
         loop {
             select! {
-                    _ = self.runtime.sleep_until(t) => {
+                    _ = self.context.sleep_until(t) => {
                         debug!(round, "ack timeout");
                         break;
                     },
@@ -508,7 +508,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
         sender: impl Sender<PublicKey = C::PublicKey>,
         receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) {
-        self.runtime.clone().spawn(|_| self.run(sender, receiver));
+        self.context.clone().spawn(|_| self.run(sender, receiver));
     }
 
     async fn run(

@@ -24,7 +24,7 @@ use std::{
 use tracing::{debug, info, warn};
 
 pub struct Arbiter<E: Clock + Spawner, C: Scheme> {
-    runtime: E,
+    context: E,
 
     dkg_frequency: Duration,
     dkg_phase_timeout: Duration,
@@ -37,7 +37,7 @@ pub struct Arbiter<E: Clock + Spawner, C: Scheme> {
 /// acknowledgements, and complaints during a DKG round.
 impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
     pub fn new(
-        runtime: E,
+        context: E,
         dkg_frequency: Duration,
         dkg_phase_timeout: Duration,
         mut contributors: Vec<C::PublicKey>,
@@ -45,7 +45,7 @@ impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
     ) -> Self {
         contributors.sort();
         Self {
-            runtime,
+            context,
 
             dkg_frequency,
             dkg_phase_timeout,
@@ -63,7 +63,7 @@ impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
         receiver: &mut impl Receiver<PublicKey = C::PublicKey>,
     ) -> (Option<poly::Public>, HashSet<C::PublicKey>) {
         // Create a new round
-        let start = self.runtime.current();
+        let start = self.context.current();
         let timeout = start + 4 * self.dkg_phase_timeout; // start -> commitment/share -> ack -> arbiter
 
         // Send round start message to contributors
@@ -98,7 +98,7 @@ impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
         );
         loop {
             select! {
-                _ = self.runtime.sleep_until(timeout) => {
+                _ = self.context.sleep_until(timeout) => {
                     warn!(round, "timed out waiting for commitments");
                     break
                 },
@@ -272,7 +272,7 @@ impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
         sender: impl Sender<PublicKey = C::PublicKey>,
         receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) -> Handle<()> {
-        self.runtime.clone().spawn(|_| self.run(sender, receiver))
+        self.context.clone().spawn(|_| self.run(sender, receiver))
     }
 
     async fn run(
@@ -309,7 +309,7 @@ impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
             round += 1;
 
             // Wait for next round
-            self.runtime.sleep(self.dkg_frequency).await;
+            self.context.sleep(self.dkg_frequency).await;
         }
     }
 }

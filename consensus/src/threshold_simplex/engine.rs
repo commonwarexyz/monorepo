@@ -34,7 +34,7 @@ pub struct Engine<
         PublicKey = C::PublicKey,
     >,
 > {
-    runtime: E,
+    context: E,
 
     voter: voter::Actor<B, E, C, D, A, R, F, S>,
     voter_mailbox: voter::Mailbox<D>,
@@ -60,13 +60,13 @@ impl<
     > Engine<B, E, C, D, A, R, F, S>
 {
     /// Create a new `threshold-simplex` consensus engine.
-    pub fn new(runtime: E, journal: Journal<B, E>, cfg: Config<C, D, A, R, F, S>) -> Self {
+    pub fn new(context: E, journal: Journal<B, E>, cfg: Config<C, D, A, R, F, S>) -> Self {
         // Ensure configuration is valid
         cfg.assert();
 
         // Create voter
         let (voter, voter_mailbox) = voter::Actor::new(
-            runtime.clone(),
+            context.clone(),
             journal,
             voter::Config {
                 crypto: cfg.crypto.clone(),
@@ -86,7 +86,7 @@ impl<
 
         // Create resolver
         let (resolver, resolver_mailbox) = resolver::Actor::new(
-            runtime.clone(),
+            context.clone(),
             resolver::Config {
                 crypto: cfg.crypto,
                 supervisor: cfg.supervisor,
@@ -103,7 +103,7 @@ impl<
 
         // Return the engine
         Self {
-            runtime,
+            context,
 
             voter,
             voter_mailbox,
@@ -126,7 +126,7 @@ impl<
             impl Receiver<PublicKey = C::PublicKey>,
         ),
     ) -> Handle<()> {
-        self.runtime
+        self.context
             .clone()
             .spawn(|_| self.run(voter_network, resolver_network))
     }

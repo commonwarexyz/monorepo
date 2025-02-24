@@ -139,13 +139,13 @@ impl<'a> MakeWriter<'a> for Writer {
 }
 
 pub struct Gui<E: Spawner + Metrics> {
-    runtime: E,
+    context: E,
     progress: Arc<Mutex<Vec<String>>>,
     logs: Arc<Mutex<Vec<String>>>,
 }
 
 impl<E: Spawner + Metrics> Gui<E> {
-    pub fn new(runtime: E) -> Self {
+    pub fn new(context: E) -> Self {
         // Create writer
         let progress = Arc::new(Mutex::new(Vec::new()));
         let logs = Arc::new(Mutex::new(Vec::new()));
@@ -158,7 +158,7 @@ impl<E: Spawner + Metrics> Gui<E> {
             .with_writer(writer)
             .init();
         Self {
-            runtime,
+            context,
             progress,
             logs,
         }
@@ -174,7 +174,7 @@ impl<E: Spawner + Metrics> Gui<E> {
 
         // Listen for input
         let (mut tx, mut rx) = mpsc::channel(100);
-        self.runtime.with_label("keyboard").spawn(|_| async move {
+        self.context.with_label("keyboard").spawn(|_| async move {
             loop {
                 match event::poll(Duration::from_millis(500)) {
                     Ok(true) => {}

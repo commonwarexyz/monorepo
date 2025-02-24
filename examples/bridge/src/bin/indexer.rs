@@ -124,15 +124,15 @@ fn main() {
         finalizations.insert(network, BTreeMap::new());
     }
 
-    // Create runtime
-    let (executor, runtime) = Executor::default();
+    // Create context
+    let (executor, context) = Executor::default();
     executor.start(async move {
         // Create message handler
         let (handler, mut receiver) = mpsc::unbounded();
 
         // Start handler
         let mut hasher = Sha256::new();
-        runtime.with_label("handler").spawn(|_| async move {
+        context.with_label("handler").spawn(|_| async move {
             while let Some(msg) = receiver.next().await {
                 match msg {
                     Message::PutBlock { incoming, response } => {
@@ -212,7 +212,7 @@ fn main() {
         });
 
         // Start listener
-        let mut listener = runtime.bind(socket).await.expect("failed to bind listener");
+        let mut listener = context.bind(socket).await.expect("failed to bind listener");
         let config = Config {
             crypto: signer,
             namespace: INDEXER_NAMESPACE.to_vec(),
@@ -230,7 +230,7 @@ fn main() {
 
             // Handshake
             let incoming =
-                match IncomingConnection::verify(&runtime, config.clone(), sink, stream).await {
+                match IncomingConnection::verify(&context, config.clone(), sink, stream).await {
                     Ok(partial) => partial,
                     Err(e) => {
                         debug!(error = ?e, "failed to verify incoming handshake");
@@ -242,7 +242,7 @@ fn main() {
                 debug!(?peer, "unauthorized peer");
                 continue;
             }
-            let stream = match Connection::upgrade_listener(runtime.clone(), incoming).await {
+            let stream = match Connection::upgrade_listener(context.clone(), incoming).await {
                 Ok(connection) => connection,
                 Err(e) => {
                     debug!(error = ?e, ?peer, "failed to upgrade connection");
@@ -252,7 +252,7 @@ fn main() {
             info!(?peer, "upgraded connection");
 
             // Spawn message handler
-            runtime.with_label("connection").spawn({
+            context.with_label("connection").spawn({
                 let mut handler = handler.clone();
                 move |_| async move {
                     // Split stream

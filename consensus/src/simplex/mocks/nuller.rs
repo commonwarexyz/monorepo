@@ -26,7 +26,7 @@ pub struct Nuller<
     H: Hasher,
     S: Supervisor<Index = View, PublicKey = C::PublicKey>,
 > {
-    runtime: E,
+    context: E,
     crypto: C,
     supervisor: S,
     _hasher: PhantomData<H>,
@@ -38,9 +38,9 @@ pub struct Nuller<
 impl<E: Spawner, C: Scheme, H: Hasher, S: Supervisor<Index = View, PublicKey = C::PublicKey>>
     Nuller<E, C, H, S>
 {
-    pub fn new(runtime: E, cfg: Config<C, S>) -> Self {
+    pub fn new(context: E, cfg: Config<C, S>) -> Self {
         Self {
-            runtime,
+            context,
             crypto: cfg.crypto,
             supervisor: cfg.supervisor,
             _hasher: PhantomData,
@@ -51,7 +51,7 @@ impl<E: Spawner, C: Scheme, H: Hasher, S: Supervisor<Index = View, PublicKey = C
     }
 
     pub fn start(self, voter_network: (impl Sender, impl Receiver)) -> Handle<()> {
-        self.runtime.clone().spawn(|_| self.run(voter_network))
+        self.context.clone().spawn(|_| self.run(voter_network))
     }
 
     async fn run(mut self, voter_network: (impl Sender, impl Receiver)) {

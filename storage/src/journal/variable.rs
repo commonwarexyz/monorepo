@@ -130,7 +130,7 @@ fn compute_next_offset(mut offset: u64) -> Result<u32, Error> {
 
 /// Implementation of `Journal` storage.
 pub struct Journal<B: Blob, E: Storage<B> + Metrics> {
-    runtime: E,
+    context: E,
     cfg: Config,
 
     oldest_allowed: Option<u64>,
@@ -148,16 +148,16 @@ impl<B: Blob, E: Storage<B> + Metrics> Journal<B, E> {
     /// All backing blobs are opened but not read during
     /// initialization. The `replay` method can be used
     /// to iterate over all items in the `Journal`.
-    pub async fn init(runtime: E, cfg: Config) -> Result<Self, Error> {
+    pub async fn init(context: E, cfg: Config) -> Result<Self, Error> {
         // Iterate over blobs in partition
         let mut blobs = BTreeMap::new();
-        let stored_blobs = match runtime.scan(&cfg.partition).await {
+        let stored_blobs = match context.scan(&cfg.partition).await {
             Ok(blobs) => blobs,
             Err(RError::PartitionMissing(_)) => Vec::new(),
             Err(err) => return Err(Error::Runtime(err)),
         };
         for name in stored_blobs {
-            let blob = runtime.open(&cfg.partition, &name).await?;
+            let blob = context.open(&cfg.partition, &name).await?;
             let hex_name = hex(&name);
             let section = match name.try_into() {
                 Ok(section) => u64::from_be_bytes(section),
@@ -171,14 +171,14 @@ impl<B: Blob, E: Storage<B> + Metrics> Journal<B, E> {
         let tracked = Gauge::default();
         let synced = Counter::default();
         let pruned = Counter::default();
-        runtime.register("tracked", "Number of blobs", tracked.clone());
-        runtime.register("synced", "Number of syncs", synced.clone());
-        runtime.register("pruned", "Number of blobs pruned", pruned.clone());
+        context.register("tracked", "Number of blobs", tracked.clone());
+        context.register("synced", "Number of syncs", synced.clone());
+        context.register("pruned", "Number of blobs pruned", pruned.clone());
         tracked.set(blobs.len() as i64);
 
         // Create journal instance
         Ok(Self {
-            runtime,
+            context,
             cfg,
 
             oldest_allowed: None,
@@ -449,7 +449,7 @@ impl<B: Blob, E: Storage<B> + Metrics> Journal<B, E> {
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => {
                 let name = section.to_be_bytes();
-                let blob = self.runtime.open(&self.cfg.partition, &name).await?;
+                let blob = self.context.open(&self.cfg.partition, &name).await?;
                 self.tracked.inc();
                 entry.insert(blob)
             }
@@ -547,7 +547,7 @@ impl<B: Blob, E: Storage<B> + Metrics> Journal<B, E> {
             blob.close().await?;
 
             // Remove blob from storage
-            self.runtime
+            self.context
                 .remove(&self.cfg.partition, Some(&section.to_be_bytes()))
                 .await?;
             debug!(blob = section, "pruned blob");
@@ -581,7 +581,7 @@ mod tests {
 
     #[test_traced]
     fn test_journal_append_and_read() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
 
         // Start the test within the executor
@@ -647,7 +647,7 @@ mod tests {
 
     #[test_traced]
     fn test_journal_multiple_appends_and_reads() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
 
         // Start the test within the executor
@@ -740,7 +740,7 @@ mod tests {
 
     #[test_traced]
     fn test_journal_prune_blobs() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
 
         // Start the test within the executor
@@ -839,7 +839,7 @@ mod tests {
 
     #[test_traced]
     fn test_journal_with_invalid_blob_name() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
 
         // Start the test within the executor
@@ -866,7 +866,7 @@ mod tests {
     }
 
     fn journal_read_size_missing(exact: Option<u32>) {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
 
         // Start the test within the executor
@@ -924,7 +924,7 @@ mod tests {
     }
 
     fn journal_read_item_missing(exact: Option<u32>) {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
 
         // Start the test within the executor
@@ -988,7 +988,7 @@ mod tests {
 
     #[test_traced]
     fn test_journal_read_checksum_missing() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
 
         // Start the test within the executor
@@ -1051,7 +1051,7 @@ mod tests {
 
     #[test_traced]
     fn test_journal_read_checksum_mismatch() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
 
         // Start the test within the executor
@@ -1124,7 +1124,7 @@ mod tests {
 
     #[test_traced]
     fn test_journal_handling_truncated_data() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
 
         // Start the test within the executor
@@ -1278,17 +1278,17 @@ mod tests {
 
     #[test_traced]
     fn test_journal_large_offset() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, _, _) = Executor::default();
         executor.start(async move {
             // Create journal
             let cfg = Config {
                 partition: "partition".to_string(),
             };
-            let runtime = MockStorage {
+            let context = MockStorage {
                 len: u32::MAX as u64 * INDEX_ALIGNMENT, // can store up to u32::Max at the last offset
             };
-            let mut journal = Journal::init(runtime, cfg).await.unwrap();
+            let mut journal = Journal::init(context, cfg).await.unwrap();
 
             // Append data
             let data = Bytes::from("Test data");
@@ -1302,17 +1302,17 @@ mod tests {
 
     #[test_traced]
     fn test_journal_offset_overflow() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, _, _) = Executor::default();
         executor.start(async move {
             // Create journal
             let cfg = Config {
                 partition: "partition".to_string(),
             };
-            let runtime = MockStorage {
+            let context = MockStorage {
                 len: u32::MAX as u64 * INDEX_ALIGNMENT + 1,
             };
-            let mut journal = Journal::init(runtime, cfg).await.unwrap();
+            let mut journal = Journal::init(context, cfg).await.unwrap();
 
             // Append data
             let data = Bytes::from("Test data");

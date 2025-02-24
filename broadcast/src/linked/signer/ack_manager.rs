@@ -155,8 +155,8 @@ mod tests {
 
         /// Generate shares using the default executor.
         pub fn setup_shares(num_validators: u32, quorum: u32) -> Vec<Share> {
-            let (_, mut runtime, _) = Executor::default();
-            let (_identity, shares) = generate_shares(&mut runtime, None, num_validators, quorum);
+            let (_, mut context, _) = Executor::default();
+            let (_identity, shares) = generate_shares(&mut context, None, num_validators, quorum);
             shares
         }
 

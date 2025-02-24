@@ -32,7 +32,7 @@ pub struct Nuller<
     H: Hasher,
     S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
 > {
-    runtime: E,
+    context: E,
     supervisor: S,
     _hasher: PhantomData<H>,
 
@@ -47,9 +47,9 @@ impl<
         S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
     > Nuller<E, H, S>
 {
-    pub fn new(runtime: E, cfg: Config<S>) -> Self {
+    pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
-            runtime,
+            context,
             supervisor: cfg.supervisor,
             _hasher: PhantomData,
 
@@ -60,7 +60,7 @@ impl<
     }
 
     pub fn start(self, voter_network: (impl Sender, impl Receiver)) -> Handle<()> {
-        self.runtime.clone().spawn(|_| self.run(voter_network))
+        self.context.clone().spawn(|_| self.run(voter_network))
     }
 
     async fn run(self, voter_network: (impl Sender, impl Receiver)) {

@@ -43,7 +43,7 @@ pub struct Config<C: Scheme> {
 /// exploration, set the value of `initial` to less than the expected latency of
 /// performant peers and/or periodically set `shuffle` in `request`.
 pub struct Requester<E: Clock + GClock + Rng, C: Scheme> {
-    runtime: E,
+    context: E,
     crypto: C,
     initial: Duration,
     timeout: Duration,
@@ -85,10 +85,10 @@ pub struct Request<P: Array> {
 
 impl<E: Clock + GClock + Rng, C: Scheme> Requester<E, C> {
     /// Create a new requester.
-    pub fn new(runtime: E, config: Config<C>) -> Self {
-        let rate_limiter = RateLimiter::hashmap_with_clock(config.rate_limit, &runtime);
+    pub fn new(context: E, config: Config<C>) -> Self {
+        let rate_limiter = RateLimiter::hashmap_with_clock(config.rate_limit, &context);
         Self {
-            runtime,
+            context,
             crypto: config.crypto,
             initial: config.initial,
             timeout: config.timeout,
@@ -128,7 +128,7 @@ impl<E: Clock + GClock + Rng, C: Scheme> Requester<E, C> {
         // Prepare participant iterator
         let participant_iter = if shuffle {
             let mut participants = self.participants.iter().collect::<Vec<_>>();
-            participants.shuffle(&mut self.runtime);
+            participants.shuffle(&mut self.context);
             Either::Left(participants.into_iter())
         } else {
             Either::Right(self.participants.iter())
@@ -156,7 +156,7 @@ impl<E: Clock + GClock + Rng, C: Scheme> Requester<E, C> {
             self.id = self.id.wrapping_add(1);
 
             // Record request issuance time
-            let now = self.runtime.current();
+            let now = self.context.current();
             self.requests.insert(id, (participant.clone(), now));
             let deadline = now.checked_add(self.timeout).expect("time overflowed");
             self.deadlines.put(id, deadline);
@@ -209,7 +209,7 @@ impl<E: Clock + GClock + Rng, C: Scheme> Requester<E, C> {
         // not monotonically increase), we should still credit the participant for a
         // timely response.
         let elapsed = self
-            .runtime
+            .context
             .current()
             .duration_since(request.start)
             .unwrap_or_default();
@@ -249,8 +249,8 @@ mod tests {
 
     #[test]
     fn test_requester_basic() {
-        // Instantiate runtime
-        let (executor, runtime, _auditor) = Executor::seeded(0);
+        // Instantiate context
+        let (executor, context, _auditor) = Executor::seeded(0);
         executor.start(async move {
             // Create requester
             let scheme = Ed25519::from_seed(0);
@@ -262,7 +262,7 @@ mod tests {
                 initial: Duration::from_millis(100),
                 timeout,
             };
-            let mut requester = Requester::new(runtime.clone(), config);
+            let mut requester = Requester::new(context.clone(), config);
 
             // Request before any participants
             assert_eq!(requester.request(false), None);
@@ -279,7 +279,7 @@ mod tests {
             requester.reconcile(&[me.clone(), other.clone()]);
 
             // Get request
-            let current = runtime.current();
+            let current = context.current();
             let (participant, id) = requester.request(false).expect("failed to get participant");
             assert_eq!(id, 0);
             assert_eq!(participant, other);
@@ -294,7 +294,7 @@ mod tests {
             assert_eq!(requester.request(false), None);
 
             // Simulate processing time
-            runtime.sleep(Duration::from_millis(10)).await;
+            context.sleep(Duration::from_millis(10)).await;
 
             // Mark request as resolved with wrong participant
             assert!(requester.handle(&me, id).is_none());
@@ -313,7 +313,7 @@ mod tests {
             assert_eq!(requester.request(false), None);
 
             // Wait for rate limit to reset
-            runtime.sleep(Duration::from_secs(1)).await;
+            context.sleep(Duration::from_secs(1)).await;
 
             // Get request
             let (participant, id) = requester.request(false).expect("failed to get participant");
@@ -330,7 +330,7 @@ mod tests {
             assert_eq!(requester.request(false), None);
 
             // Sleep until reset
-            runtime.sleep(Duration::from_secs(1)).await;
+            context.sleep(Duration::from_secs(1)).await;
 
             // Get request
             let (participant, id) = requester.request(false).expect("failed to get participant");
@@ -345,7 +345,7 @@ mod tests {
             assert_eq!(requester.len(), 0);
 
             // Sleep until reset
-            runtime.sleep(Duration::from_secs(1)).await;
+            context.sleep(Duration::from_secs(1)).await;
 
             // Block participant
             requester.block(other);
@@ -357,8 +357,8 @@ mod tests {
 
     #[test]
     fn test_requester_multiple() {
-        // Instantiate runtime
-        let (executor, runtime, _auditor) = Executor::seeded(0);
+        // Instantiate context
+        let (executor, context, _auditor) = Executor::seeded(0);
         executor.start(async move {
             // Create requester
             let scheme = Ed25519::from_seed(0);
@@ -370,7 +370,7 @@ mod tests {
                 initial: Duration::from_millis(100),
                 timeout,
             };
-            let mut requester = Requester::new(runtime.clone(), config);
+            let mut requester = Requester::new(context.clone(), config);
 
             // Request before any participants
             assert_eq!(requester.request(false), None);
@@ -399,7 +399,7 @@ mod tests {
             let (participant, id) = requester.request(false).expect("failed to get participant");
             assert_eq!(id, 1);
             if participant == other1 {
-                runtime.sleep(Duration::from_millis(10)).await;
+                context.sleep(Duration::from_millis(10)).await;
                 let request = requester
                     .handle(&participant, id)
                     .expect("failed to get request");
@@ -412,7 +412,7 @@ mod tests {
             assert_eq!(requester.request(false), None);
 
             // Wait for rate limit to reset
-            runtime.sleep(Duration::from_secs(1)).await;
+            context.sleep(Duration::from_secs(1)).await;
 
             // Get request
             let (participant, id) = requester.request(false).expect("failed to get participant");
@@ -432,7 +432,7 @@ mod tests {
             assert_eq!(id, 3);
 
             // Wait until eventually get slower participant
-            runtime.sleep(Duration::from_secs(1)).await;
+            context.sleep(Duration::from_secs(1)).await;
             loop {
                 // Shuffle participants
                 let (participant, _) = requester.request(true).unwrap();
@@ -441,7 +441,7 @@ mod tests {
                 }
 
                 // Sleep until reset
-                runtime.sleep(Duration::from_secs(1)).await;
+                context.sleep(Duration::from_secs(1)).await;
             }
         });
     }

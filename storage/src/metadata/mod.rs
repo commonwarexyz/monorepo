@@ -98,7 +98,7 @@ mod tests {
 
     #[test_traced]
     fn test_put_get_clear() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
         executor.start(async move {
             // Create a metadata store
@@ -178,7 +178,7 @@ mod tests {
 
     #[test_traced]
     fn test_multi_sync() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
         executor.start(async move {
             // Create a metadata store
@@ -277,7 +277,7 @@ mod tests {
 
     #[test_traced]
     fn test_recover_corrupted_one() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
         executor.start(async move {
             // Create a metadata store
@@ -323,7 +323,7 @@ mod tests {
 
     #[test_traced]
     fn test_recover_corrupted_both() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
         executor.start(async move {
             // Create a metadata store
@@ -377,7 +377,7 @@ mod tests {
 
     #[test_traced]
     fn test_recover_corrupted_truncate() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
         executor.start(async move {
             // Create a metadata store
@@ -424,7 +424,7 @@ mod tests {
 
     #[test_traced]
     fn test_recover_corrupted_short() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
         executor.start(async move {
             // Create a metadata store
@@ -470,7 +470,7 @@ mod tests {
 
     #[test_traced]
     fn test_unclean_shutdown() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
         executor.start(async move {
             let key = 42;
@@ -507,7 +507,7 @@ mod tests {
 
     #[test_traced]
     fn test_value_too_big_error() {
-        // Initialize the deterministic runtime
+        // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
         executor.start(async move {
             // Create a metadata store
