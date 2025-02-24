@@ -289,6 +289,7 @@ impl crate::Spawner for Context {
         Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
+        // Get metrics
         let work = Work {
             label: self.label.clone(),
         };
@@ -303,10 +304,14 @@ impl crate::Spawner for Context {
             .tasks_running
             .get_or_create(&work)
             .clone();
+
+        // Set up the task
         let catch_panics = self.executor.cfg.catch_panics;
         let executor = self.executor.clone();
         let future = f(self);
         let (f, handle) = Handle::init(future, gauge, catch_panics);
+
+        // Spawn the task
         executor.runtime.spawn(f);
         handle
     }
@@ -317,6 +322,54 @@ impl crate::Spawner for Context {
 
     fn stopped(&self) -> Signal {
         self.executor.signal.clone()
+    }
+}
+
+impl crate::Metrics for Context {
+    fn with_label(&self, label: &str) -> Self {
+        let label = {
+            let prefix = self.label.clone();
+            if prefix.is_empty() {
+                label.to_string()
+            } else {
+                format!("{}_{}", prefix, label)
+            }
+        };
+        assert!(
+            !label.starts_with(METRICS_PREFIX),
+            "using runtime label is not allowed"
+        );
+        Self {
+            label,
+            executor: self.executor.clone(),
+        }
+    }
+
+    fn label(&self) -> String {
+        self.label.clone()
+    }
+
+    fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
+        let name = name.into();
+        let prefixed_name = {
+            let prefix = &self.label;
+            if prefix.is_empty() {
+                name
+            } else {
+                format!("{}_{}", *prefix, name)
+            }
+        };
+        self.executor
+            .registry
+            .lock()
+            .unwrap()
+            .register(prefixed_name, help, metric)
+    }
+
+    fn encode(&self) -> String {
+        let mut buffer = String::new();
+        encode(&mut buffer, &self.executor.registry.lock().unwrap()).expect("encoding failed");
+        buffer
     }
 }
 
@@ -718,53 +771,5 @@ impl crate::Blob for Blob {
 impl Drop for Blob {
     fn drop(&mut self) {
         self.metrics.open_blobs.dec();
-    }
-}
-
-impl crate::Metrics for Context {
-    fn with_label(&self, label: &str) -> Self {
-        let label = {
-            let prefix = self.label.clone();
-            if prefix.is_empty() {
-                label.to_string()
-            } else {
-                format!("{}_{}", prefix, label)
-            }
-        };
-        assert!(
-            !label.starts_with(METRICS_PREFIX),
-            "using runtime label is not allowed"
-        );
-        Self {
-            label,
-            executor: self.executor.clone(),
-        }
-    }
-
-    fn label(&self) -> String {
-        self.label.clone()
-    }
-
-    fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
-        let name = name.into();
-        let prefixed_name = {
-            let prefix = &self.label;
-            if prefix.is_empty() {
-                name
-            } else {
-                format!("{}_{}", *prefix, name)
-            }
-        };
-        self.executor
-            .registry
-            .lock()
-            .unwrap()
-            .register(prefixed_name, help, metric)
-    }
-
-    fn encode(&self) -> String {
-        let mut buffer = String::new();
-        encode(&mut buffer, &self.executor.registry.lock().unwrap()).expect("encoding failed");
-        buffer
     }
 }

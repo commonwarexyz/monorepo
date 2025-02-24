@@ -53,9 +53,6 @@ use tracing::trace;
 /// Range of ephemeral ports assigned to dialers.
 const EPHEMERAL_PORT_RANGE: Range<u16> = 32768..61000;
 
-/// Label for root task created during `Runner::start`.
-const ROOT_TASK: &str = "root";
-
 /// Map of names to blob contents.
 pub type Partition = HashMap<Vec<u8>, Vec<u8>>;
 
@@ -564,7 +561,7 @@ impl crate::Runner for Runner {
         let output = Arc::new(Mutex::new(None));
         Tasks::register(
             &self.executor.tasks,
-            ROOT_TASK,
+            "",
             true,
             Box::pin({
                 let output = output.clone();
@@ -801,10 +798,10 @@ impl crate::Spawner for Context {
         Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        let executor = self.executor.clone();
+        // Get metrics
         let label = self.label.clone();
         let work = Work {
-            label: self.label.clone(),
+            label: label.clone(),
         };
         self.executor
             .metrics
@@ -817,8 +814,13 @@ impl crate::Spawner for Context {
             .tasks_running
             .get_or_create(&work)
             .clone();
+
+        // Set up the task
+        let executor = self.executor.clone();
         let future = f(self);
         let (f, handle) = Handle::init(future, gauge, false);
+
+        // Spawn the task
         Tasks::register(&executor.tasks, &label, false, Box::pin(f));
         handle
     }
@@ -831,6 +833,61 @@ impl crate::Spawner for Context {
     fn stopped(&self) -> Signal {
         self.executor.auditor.stopped();
         self.executor.signal.clone()
+    }
+}
+
+impl crate::Metrics for Context {
+    fn with_label(&self, label: &str) -> Self {
+        let label = {
+            let prefix = self.label.clone();
+            if prefix.is_empty() {
+                label.to_string()
+            } else {
+                format!("{}_{}", prefix, label)
+            }
+        };
+        assert!(
+            !label.starts_with(METRICS_PREFIX),
+            "using runtime label is not allowed"
+        );
+        Self {
+            label,
+            executor: self.executor.clone(),
+            networking: self.networking.clone(),
+        }
+    }
+
+    fn label(&self) -> String {
+        self.label.clone()
+    }
+
+    fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
+        // Prepare args
+        let name = name.into();
+        let help = help.into();
+
+        // Register metric
+        self.executor.auditor.register(&name, &help);
+        let prefixed_name = {
+            let prefix = &self.label;
+            if prefix.is_empty() {
+                name
+            } else {
+                format!("{}_{}", *prefix, name)
+            }
+        };
+        self.executor
+            .registry
+            .lock()
+            .unwrap()
+            .register(prefixed_name, help, metric)
+    }
+
+    fn encode(&self) -> String {
+        self.executor.auditor.encode();
+        let mut buffer = String::new();
+        encode(&mut buffer, &self.executor.registry.lock().unwrap()).expect("encoding failed");
+        buffer
     }
 }
 
@@ -1304,66 +1361,10 @@ impl Drop for Blob {
     }
 }
 
-impl crate::Metrics for Context {
-    fn with_label(&self, label: &str) -> Self {
-        let label = {
-            let prefix = self.label.clone();
-            if prefix.is_empty() || prefix == ROOT_TASK {
-                label.to_string()
-            } else {
-                format!("{}_{}", prefix, label)
-            }
-        };
-        assert_ne!(label, ROOT_TASK, "root task cannot be spawned");
-        assert!(
-            !label.starts_with(METRICS_PREFIX),
-            "using runtime label is not allowed"
-        );
-        Self {
-            label,
-            executor: self.executor.clone(),
-            networking: self.networking.clone(),
-        }
-    }
-
-    fn label(&self) -> String {
-        self.label.clone()
-    }
-
-    fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
-        // Prepare args
-        let name = name.into();
-        let help = help.into();
-
-        // Register metric
-        self.executor.auditor.register(&name, &help);
-        let prefixed_name = {
-            let prefix = &self.label;
-            if prefix.is_empty() {
-                name
-            } else {
-                format!("{}_{}", *prefix, name)
-            }
-        };
-        self.executor
-            .registry
-            .lock()
-            .unwrap()
-            .register(prefixed_name, help, metric)
-    }
-
-    fn encode(&self) -> String {
-        self.executor.auditor.encode();
-        let mut buffer = String::new();
-        encode(&mut buffer, &self.executor.registry.lock().unwrap()).expect("encoding failed");
-        buffer
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{utils::run_tasks, Blob, Metrics, Runner, Storage};
+    use crate::{utils::run_tasks, Blob, Runner, Storage};
     use commonware_macros::test_traced;
     use futures::task::noop_waker;
 
@@ -1459,14 +1460,6 @@ mod tests {
             ..Config::default()
         };
         Executor::init(cfg);
-    }
-
-    #[test]
-    #[should_panic(expected = "root task cannot be spawned")]
-    fn test_spawn_root_task() {
-        let (_, context, _) = Executor::default();
-        context.with_label(ROOT_TASK);
-        panic!("using root_task should not be possible");
     }
 
     #[test]
