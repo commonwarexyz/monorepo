@@ -111,6 +111,11 @@ pub trait Spawner: Clone + Send + Sync + 'static {
         Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static;
 
+    fn spawn_ref<Fut, T>(&self) -> impl FnOnce(Fut) -> Handle<T>
+    where
+        Fut: Future<Output = T> + Send + 'static,
+        T: Send + 'static;
+
     /// Signals the runtime to stop execution and that all outstanding tasks
     /// should perform any required cleanup and exit. This method is idempotent and
     /// can be called multiple times.
