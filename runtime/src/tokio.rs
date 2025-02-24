@@ -740,6 +740,10 @@ impl crate::Metrics for Context {
         }
     }
 
+    fn label(&self) -> String {
+        self.label.clone()
+    }
+
     fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
         let name = name.into();
         let prefixed_name = {

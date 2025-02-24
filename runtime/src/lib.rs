@@ -6,12 +6,6 @@
 //! For testing and simulation, the `deterministic` module provides a runtime
 //! that allows for deterministic execution of tasks (given a fixed seed).
 //!
-//! # Terminology
-//!
-//! Runtimes typically return at least two values when they are initialized: a `Runner` and a `Context`. The `Runner`
-//! is used to start the root task (just implements `Runner`) and the `Context` optionally implements the other
-//! traits defined in this crate.
-//!
 //! # Status
 //!
 //! `commonware-runtime` is **ALPHA** software and is not yet recommended for production use. Developers should
@@ -128,6 +122,9 @@ pub trait Metrics: Clone + Send + Sync + 'static {
     ///
     /// This is commonly used to create nested context for `register`.
     fn with_label(&self, label: &str) -> Self;
+
+    /// Get the current label of the context.
+    fn label(&self) -> String;
 
     /// Register a metric with the runtime.
     ///
@@ -268,6 +265,7 @@ mod tests {
     use super::*;
     use commonware_macros::select;
     use futures::{channel::mpsc, future::ready, join, SinkExt, StreamExt};
+    use prometheus_client::metrics::counter::Counter;
     use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::sync::Mutex;
     use utils::reschedule;
@@ -765,6 +763,38 @@ mod tests {
         });
     }
 
+    fn test_metrics(runner: impl Runner, context: impl Spawner + Metrics) {
+        runner.start(async move {
+            // Assert label
+            assert_eq!(context.label(), "");
+
+            // Register a metric
+            let counter = Counter::<u64>::default();
+            context.register("test", "test", counter.clone());
+
+            // Increment the counter
+            counter.inc();
+
+            // Encode metrics
+            let buffer = context.encode();
+            println!("{}", buffer);
+            assert!(buffer.contains("test_total 1"));
+
+            // Nested context
+            let context = context.with_label("nested");
+            let nested_counter = Counter::<u64>::default();
+            context.register("test", "test", nested_counter.clone());
+
+            // Increment the counter
+            nested_counter.inc();
+
+            // Encode metrics
+            let buffer = context.encode();
+            assert!(buffer.contains("nested_test_total 1"));
+            assert!(buffer.contains("test_total 1"));
+        });
+    }
+
     #[test]
     fn test_deterministic_future() {
         let (runner, _, _) = deterministic::Executor::default();
@@ -863,6 +893,12 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_metrics() {
+        let (executor, runtime, _) = deterministic::Executor::default();
+        test_metrics(executor, runtime);
+    }
+
+    #[test]
     fn test_tokio_error_future() {
         let (runner, _) = tokio::Executor::default();
         test_error_future(runner);
@@ -955,5 +991,11 @@ mod tests {
     fn test_tokio_shutdown() {
         let (executor, runtime) = tokio::Executor::default();
         test_shutdown(executor, runtime);
+    }
+
+    #[test]
+    fn test_tokio_metrics() {
+        let (executor, runtime) = tokio::Executor::default();
+        test_metrics(executor, runtime);
     }
 }

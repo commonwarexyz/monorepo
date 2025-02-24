@@ -1261,6 +1261,10 @@ mod tests {
             self.clone()
         }
 
+        fn label(&self) -> String {
+            String::new()
+        }
+
         fn register<N: Into<String>, H: Into<String>>(&self, _: N, _: H, _: impl Metric) {}
 
         fn encode(&self) -> String {
