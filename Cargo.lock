@@ -1725,9 +1725,9 @@ dependencies = [
  "prost",
  "prost-build",
  "rand",
- "thiserror",
+ "thiserror 1.0.63",
  "tracing",
- "tracing-subscriber",
+ "tracing-subscriber 0.3.18",
 ]
 
 [[package]]
@@ -1926,7 +1926,7 @@ dependencies = [
  "num-bigint",
  "prost",
  "rand",
- "thiserror",
+ "thiserror 1.0.63",
 ]
 
 [[package]]
