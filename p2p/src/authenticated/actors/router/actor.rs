@@ -8,6 +8,7 @@ use crate::{
 };
 use bytes::Bytes;
 use commonware_runtime::{Handle, Metrics, Spawner};
+use commonware_utils::Array;
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::collections::BTreeMap;
