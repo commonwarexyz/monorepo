@@ -820,7 +820,6 @@ mod tests {
 
             // Ensure context is consumed
             context.spawn(|_| async move { 42 });
-            panic!("should not be possible to spawn a task with the same context");
         });
     }
 
