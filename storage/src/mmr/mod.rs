@@ -63,6 +63,7 @@
 //! )
 //! ```
 
+use commonware_utils::array;
 use thiserror::Error;
 
 mod hasher;
@@ -76,6 +77,10 @@ pub mod verification;
 pub enum Error {
     #[error("an element required for this operation has been pruned")]
     ElementPruned,
+    #[error("metadata error: {0}")]
+    MetadataError(#[from] crate::metadata::Error<array::U64>),
     #[error("journal error: {0}")]
     JournalError(#[from] crate::journal::Error),
+    #[error("missing peak: {0}")]
+    MissingPeak(u64),
 }

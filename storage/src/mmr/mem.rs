@@ -183,7 +183,9 @@ impl<H: CHasher> Mmr<H> {
         Proof::<H>::range_proof::<Mmr<H>>(self, start_element_pos, end_element_pos).await
     }
 
-    /// Prune all but the very last node (and any peak).
+    /// Prune all but the very last node.
+    ///
+    /// This always leaves the MMR in a valid state since the last node is always a peak.
     pub fn prune_all(&mut self) {
         if !self.nodes.is_empty() {
             self.prune_to_pos(self.index_to_pos(self.nodes.len() - 1));
