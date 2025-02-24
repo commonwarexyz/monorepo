@@ -219,10 +219,7 @@ mod tests {
                     namespace,
                     poly::public(&identity),
                 );
-            context
-                .clone()
-                .with_label("collector")
-                .spawn(|_| collector.run());
+            context.with_label("collector").spawn(|_| collector.run());
             collectors.insert(validator.clone(), collector_mailbox);
 
             let (signer, signer_mailbox) = signer::Actor::new(

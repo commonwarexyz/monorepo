@@ -76,7 +76,7 @@ impl<
     }
 
     pub fn start(self, tracker: tracker::Mailbox<E, P>, router: router::Mailbox<P>) -> Handle<()> {
-        self.context.clone().spawn(|_| self.run(tracker, router))
+        self.context.spawn_ref(self.run(tracker, router))
     }
 
     async fn run(mut self, tracker: tracker::Mailbox<E, P>, router: router::Mailbox<P>) {

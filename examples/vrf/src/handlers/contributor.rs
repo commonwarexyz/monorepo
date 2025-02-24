@@ -508,7 +508,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
         sender: impl Sender<PublicKey = C::PublicKey>,
         receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) {
-        self.context.clone().spawn(|_| self.run(sender, receiver));
+        self.context.spawn_ref(self.run(sender, receiver));
     }
 
     async fn run(
