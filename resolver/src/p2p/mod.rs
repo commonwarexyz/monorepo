@@ -1,9 +1,9 @@
 //! Makes and responds to requests using the P2P network.
 
-use std::future::Future;
-
+use bytes::Bytes;
 use commonware_utils::Array;
 use futures::channel::oneshot;
+use std::future::Future;
 
 #[cfg(test)]
 pub mod mocks;
@@ -13,23 +13,13 @@ mod wire {
     include!(concat!(env!("OUT_DIR"), "/wire.rs"));
 }
 
-/// Type of data resolved by the p2p network.
-/// This is a blob of bytes that is opaque to the resolver.
-pub type Value = Vec<u8>;
-
 /// The interface responsible for serving data requested by the network.
 pub trait Producer: Clone + Send + 'static {
     /// Type used to uniquely identify data.
     type Key: Array;
 
-    /// Type of data returned by the producer.
-    type Value;
-
     /// Serve a request received from the network.
-    fn produce(
-        &mut self,
-        key: Self::Key,
-    ) -> impl Future<Output = oneshot::Receiver<Self::Value>> + Send;
+    fn produce(&mut self, key: Self::Key) -> impl Future<Output = oneshot::Receiver<Bytes>> + Send;
 }
 
 /// The interface responsible for managing the list of peers that can be used to fetch data.

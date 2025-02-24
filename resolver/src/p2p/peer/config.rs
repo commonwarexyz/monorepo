@@ -1,9 +1,10 @@
 use std::time::Duration;
 
 use crate::{
-    p2p::{Director, Producer, Value},
+    p2p::{Director, Producer},
     Consumer,
 };
+use bytes::Bytes;
 use commonware_cryptography::Scheme;
 use commonware_p2p::utils::requester;
 use commonware_utils::Array;
@@ -12,8 +13,8 @@ pub struct Config<
     C: Scheme,
     D: Director<PublicKey = C::PublicKey>,
     Key: Array,
-    Con: Consumer<Key = Key, Value = Value, Failure = ()>,
-    Pro: Producer<Key = Key, Value = Value>,
+    Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
+    Pro: Producer<Key = Key>,
 > {
     pub crypto: C,
     pub director: D,

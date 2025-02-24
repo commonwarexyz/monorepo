@@ -6,10 +6,11 @@ use super::{
 use crate::{
     p2p::{
         wire::{self, peer_msg::Payload},
-        Director, Producer, Value,
+        Director, Producer,
     },
     Consumer,
 };
+use bytes::Bytes;
 use commonware_cryptography::Scheme;
 use commonware_macros::select;
 use commonware_p2p::utils::requester::Requester;
@@ -33,8 +34,8 @@ pub struct Actor<
     C: Scheme,
     D: Director<PublicKey = C::PublicKey>,
     Key: Array,
-    Con: Consumer<Key = Key, Value = Value, Failure = ()>,
-    Pro: Producer<Key = Key, Value = Value>,
+    Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
+    Pro: Producer<Key = Key>,
     NetS: Sender<PublicKey = C::PublicKey>,
     NetR: Receiver<PublicKey = C::PublicKey>,
 > {
@@ -57,7 +58,7 @@ pub struct Actor<
     ////////////////////////////////////////
     // Incoming Requests
     ////////////////////////////////////////
-    serves: FuturesPool<(C::PublicKey, u64, Result<Value, oneshot::Canceled>)>,
+    serves: FuturesPool<(C::PublicKey, u64, Result<Bytes, oneshot::Canceled>)>,
 
     ////////////////////////////////////////
     // Phantom Data
@@ -71,8 +72,8 @@ impl<
         C: Scheme,
         D: Director<PublicKey = C::PublicKey>,
         Key: Array,
-        Con: Consumer<Key = Key, Value = Value, Failure = ()>,
-        Pro: Producer<Key = Key, Value = Value>,
+        Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
+        Pro: Producer<Key = Key>,
         NetS: Sender<PublicKey = C::PublicKey>,
         NetR: Receiver<PublicKey = C::PublicKey>,
     > Actor<E, C, D, Key, Con, Pro, NetS, NetR>
@@ -190,7 +191,7 @@ impl<
                             };
 
                             // The peer had the data, so we can deliver it to the consumer
-                            self.consumer.deliver(key, response).await;
+                            self.consumer.deliver(key, Bytes::from(response)).await;
                         },
                         // Peer is responding to a request with an error
                         None => {
@@ -230,12 +231,12 @@ impl<
         sender: &mut NetS,
         peer: C::PublicKey,
         id: u64,
-        response: Result<Value, oneshot::Canceled>,
+        response: Result<Bytes, oneshot::Canceled>,
     ) {
         // Encode message
         let msg = wire::PeerMsg {
             id,
-            payload: response.ok().map(Payload::Response),
+            payload: response.ok().map(|bytes| Payload::Response(bytes.to_vec())),
         }
         .encode_to_vec()
         .into();
