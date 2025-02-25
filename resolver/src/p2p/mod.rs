@@ -534,4 +534,109 @@ mod tests {
             }
         });
     }
+
+    /// Tests that a peer is blocked after delivering invalid data,
+    /// preventing further fetches from that peer.
+    #[test_traced]
+    fn test_blocking_peer() {
+        let (executor, context, _) = Executor::timed(Duration::from_secs(10));
+        executor.start(async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2, 3]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 1, 2).await;
+
+            let key_a = Key(1);
+            let key_b = Key(2);
+            let invalid_data_a = Bytes::from("invalid for A");
+            let valid_data_a = Bytes::from("valid for A");
+            let valid_data_b = Bytes::from("valid for B");
+
+            // Set up producers
+            let mut prod2 = Producer::default();
+            prod2.insert(key_a.clone(), invalid_data_a.clone());
+            prod2.insert(key_b.clone(), valid_data_b.clone());
+
+            let mut prod3 = Producer::default();
+            prod3.insert(key_a.clone(), valid_data_a.clone());
+
+            // Set up coordinators
+            let coordinator1 = Coordinator::new(vec![peers[1].clone(), peers[2].clone()]);
+            let coordinator2 = Coordinator::new(vec![peers[0].clone()]);
+            let coordinator3 = Coordinator::new(vec![peers[0].clone()]);
+
+            // Set up consumer for Peer1 with expected values
+            let (sender1, mut cons_out1) = mpsc::channel(MAILBOX_SIZE);
+            let mut cons1 = Consumer::new(sender1);
+            cons1.add_expected(key_a.clone(), valid_data_a.clone());
+            cons1.add_expected(key_b.clone(), valid_data_b.clone());
+
+            // Spawn actors
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                &coordinator1,
+                schemes.remove(0),
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            )
+            .await;
+
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                &coordinator2,
+                schemes.remove(0),
+                connections.remove(0),
+                Consumer::dummy(),
+                prod2,
+            )
+            .await;
+
+            let _mailbox3 = setup_and_spawn_actor(
+                &context,
+                &coordinator3,
+                schemes.remove(0),
+                connections.remove(0),
+                Consumer::dummy(),
+                prod3,
+            )
+            .await;
+
+            // Fetch keyA multiple times to ensure that Peer2 is blocked.
+            for _ in 0..10 {
+                // Fetch keyA
+                mailbox1.fetch(key_a.clone()).await;
+
+                // Wait for success event for keyA
+                let event = cons_out1.next().await.unwrap();
+                match event {
+                    Event::Success(key_actual, value) => {
+                        assert_eq!(key_actual, key_a);
+                        assert_eq!(value, valid_data_a);
+                    }
+                    Event::Failed(_) => panic!("Fetch failed unexpectedly"),
+                }
+            }
+
+            // Fetch keyB
+            mailbox1.fetch(key_b.clone()).await;
+
+            // Wait for some time (longer than retry timeout)
+            context.sleep(Duration::from_secs(5)).await;
+
+            // Cancel the fetch for keyB
+            mailbox1.cancel(key_b.clone()).await;
+
+            // Wait for failure event for keyB
+            let event = cons_out1.next().await.unwrap();
+            match event {
+                Event::Failed(key_actual) => {
+                    assert_eq!(key_actual, key_b);
+                }
+                Event::Success(_, _) => panic!("Fetch should have been canceled"),
+            }
+        });
+    }
 }
