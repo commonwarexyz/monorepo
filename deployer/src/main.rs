@@ -465,6 +465,7 @@ sudo systemctl enable grafana-server
                 LOKI_VERSION
             );
             ssh_execute(private_key, &monitoring_ip, &install_monitoring_cmd).await?;
+            println!("Initialized monitoring host");
 
             // Configure regular instances
             let temp_dir_path = temp_dir.path();
@@ -543,7 +544,10 @@ nohup /opt/promtail/promtail -config.file=/etc/promtail/promtail.yml &
                         PROMTAIL_VERSION
                     );
                     ssh_execute(private_key, &ip, &install_promtail_cmd).await?;
-
+                    println!(
+                        "Initialized instance({}): {}",
+                        instance.region, instance.name
+                    );
                     Ok::<String, Box<dyn Error>>(ip)
                 };
                 start_futures.push(future);
@@ -552,12 +556,12 @@ nohup /opt/promtail/promtail -config.file=/etc/promtail/promtail.yml &
                 .await
                 .into_iter()
                 .collect::<Result<Vec<_>, _>>()?;
+            println!("all instances started");
 
             // Update Monitoring Security Group to Restrict Port 3100
             let monitoring_resources = region_resources.get(&monitoring_region).unwrap();
             let monitoring_sg_id = monitoring_resources.monitoring_sg_id.as_ref().unwrap();
             let monitoring_ec2_client = &ec2_clients[&monitoring_region];
-
             if regular_regions.contains(&monitoring_region) {
                 let regular_sg_id = region_resources[&monitoring_region]
                     .regular_sg_id
@@ -572,12 +576,18 @@ nohup /opt/promtail/promtail -config.file=/etc/promtail/promtail.yml &
                             .from_port(3100)
                             .to_port(3100)
                             .user_id_group_pairs(
-                                UserIdGroupPair::builder().group_id(regular_sg_id).build(),
+                                UserIdGroupPair::builder()
+                                    .group_id(regular_sg_id.clone())
+                                    .build(),
                             )
                             .build(),
                     )
                     .send()
                     .await?;
+                println!(
+                    "Update monitoring security group to allow port 3100 from sg in same region: {:?}",
+                    regular_sg_id
+                );
             }
             for region in &regions {
                 if region != &monitoring_region && regular_regions.contains(region) {
@@ -595,9 +605,12 @@ nohup /opt/promtail/promtail -config.file=/etc/promtail/promtail.yml &
                         )
                         .send()
                         .await?;
+                    println!(
+                        "Update monitoring security group to allow port 3100 from regular region: {:?}",
+                        regular_cidr
+                    );
                 }
             }
-
             println!("Monitoring instance IP: {}", monitoring_ip);
             println!("Deployed to: {:?}", all_regular_ips);
             println!("Deployment tag: {}", tag);
