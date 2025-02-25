@@ -34,8 +34,9 @@ pub trait Coordinator: Clone + Send + Sync + 'static {
 
     /// Returns an identifier for the peer set.
     ///
-    /// Used as a low-overhead way to check if the list of peers has changed,
-    /// this value should increment whenever the list of peers changes.
+    /// Used as a low-overhead way to check if the list of peers has changed, this value must change
+    /// to a novel value whenever the list of peers changes. For example, it could be an
+    /// incrementing counter, or an epoch.
     fn peer_set_id(&self) -> u64;
 
     /// Returns true if the given public key is a peer.
