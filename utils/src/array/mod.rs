@@ -9,7 +9,10 @@ use std::{
 };
 use thiserror::Error;
 
-/// Errors that can occur when interacting with cryptographic primitives.
+pub mod u64;
+pub use u64::U64;
+
+/// Errors returned by the `Array` trait's functions.
 #[derive(Error, Debug, PartialEq)]
 pub enum Error<E: StdError + Send + Sync + 'static> {
     #[error("invalid bytes")]
