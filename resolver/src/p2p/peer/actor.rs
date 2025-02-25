@@ -65,6 +65,9 @@ pub struct Actor<
     /// by the `Producer` which may drop requests.
     serves: FuturesPool<(C::PublicKey, u64, Result<Bytes, oneshot::Canceled>)>,
 
+    /// Whether responses are sent with priority over other network messages
+    priority_responses: bool,
+
     /// Phantom data for networking types
     _s: PhantomData<NetS>,
     _r: PhantomData<NetR>,
@@ -84,7 +87,12 @@ impl<
     pub async fn new(context: E, cfg: Config<C, D, Key, Con, Pro>) -> (Self, Mailbox<Key>) {
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
         let requester = Requester::new(context.clone(), cfg.requester_config);
-        let fetcher = Fetcher::new(context.clone(), requester, cfg.fetch_retry_timeout);
+        let fetcher = Fetcher::new(
+            context.clone(),
+            requester,
+            cfg.fetch_retry_timeout,
+            cfg.priority_requests,
+        );
         (
             Self {
                 context,
@@ -95,6 +103,7 @@ impl<
                 mailbox: receiver,
                 fetcher,
                 serves: FuturesPool::new(),
+                priority_responses: cfg.priority_responses,
                 _s: PhantomData,
                 _r: PhantomData,
             },
@@ -171,7 +180,7 @@ impl<
                 // Handle completed server requests
                 msg = self.serves.stream() => {
                     let (peer, id, result) = msg;
-                    Self::handle_serve(&mut sender, peer, id, result).await;
+                    Self::handle_serve(&mut sender, peer, id, result, self.priority_responses).await;
                 },
 
                 // Handle network messages
@@ -252,6 +261,7 @@ impl<
         peer: C::PublicKey,
         id: u64,
         response: Result<Bytes, oneshot::Canceled>,
+        priority: bool,
     ) {
         // Encode message. If the response is an error, send an empty response.
         let msg = wire::PeerMsg {
@@ -262,7 +272,9 @@ impl<
         .into();
 
         // Send message to peer
-        let result = sender.send(Recipients::One(peer.clone()), msg, false).await;
+        let result = sender
+            .send(Recipients::One(peer.clone()), msg, priority)
+            .await;
 
         // Log result, but do not handle errors
         match result {

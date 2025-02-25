@@ -52,8 +52,11 @@ pub struct Fetcher<
     /// added to this map and are retried after the deadline.
     pending: PrioritySet<Key, SystemTime>,
 
-    // Time that fetches remain in the pending queue before being retried
+    /// Time that fetches remain in the pending queue before being retried
     retry_timeout: Duration,
+
+    /// Whether requests are sent with priority over other network messages
+    priority_requests: bool,
 
     /// Phantom data for networking types
     _s: PhantomData<NetS>,
@@ -62,13 +65,19 @@ pub struct Fetcher<
 impl<E: Clock + GClock + Rng, C: Scheme, Key: Array, NetS: Sender<PublicKey = C::PublicKey>>
     Fetcher<E, C, Key, NetS>
 {
-    pub fn new(context: E, requester: Requester<E, C>, retry_timeout: Duration) -> Self {
+    pub fn new(
+        context: E,
+        requester: Requester<E, C>,
+        retry_timeout: Duration,
+        priority_requests: bool,
+    ) -> Self {
         Self {
             context,
             requester,
             active: BiHashMap::new(),
             pending: PrioritySet::new(),
             retry_timeout,
+            priority_requests,
             _s: PhantomData,
         }
     }
@@ -96,7 +105,9 @@ impl<E: Clock + GClock + Rng, C: Scheme, Key: Array, NetS: Sender<PublicKey = C:
         // Send message to peer
         let payload = Some(Payload::Request(key.to_vec().into()));
         let msg = wire::PeerMsg { id, payload }.encode_to_vec().into();
-        let result = sender.send(Recipients::One(peer.clone()), msg, false).await;
+        let result = sender
+            .send(Recipients::One(peer.clone()), msg, self.priority_requests)
+            .await;
         let result = match result {
             Err(err) => Err(SendError::Failed::<NetS>(err)),
             Ok(to) if to.is_empty() => Err(SendError::Empty),

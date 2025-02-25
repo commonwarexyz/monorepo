@@ -23,4 +23,6 @@ pub struct Config<
     pub mailbox_size: usize,
     pub requester_config: requester::Config<C>,
     pub fetch_retry_timeout: Duration,
+    pub priority_requests: bool,
+    pub priority_responses: bool,
 }

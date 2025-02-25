@@ -160,6 +160,8 @@ mod tests {
                     timeout: TIMEOUT,
                 },
                 fetch_retry_timeout: FETCH_RETRY_TIMEOUT,
+                priority_requests: false,
+                priority_responses: false,
             },
         )
         .await;
