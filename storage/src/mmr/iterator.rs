@@ -182,7 +182,7 @@ pub(crate) fn oldest_required_proof_pos(peak_iterator: PeakIterator, provable_po
 /// path from a given perfect binary tree peak to a designated leaf, not including the peak itself.
 ///
 /// For example, consider the tree below and the path from the peak to leaf node 3. Nodes on the
-/// path are [6, 5, 3] and tagged with '*' in the diagram):
+/// path are [6, 5, 3] and tagged with '*' in the diagram:**
 ///
 /// ```text
 ///
