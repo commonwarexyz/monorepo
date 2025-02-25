@@ -1,7 +1,7 @@
 use super::{Config, Error};
 use bytes::{BufMut, Bytes};
 use commonware_runtime::{Blob, Clock, Metrics, Storage};
-use commonware_utils::SystemTimeExt as _;
+use commonware_utils::{Array, SizedSerialize, SystemTimeExt as _};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::{
     collections::BTreeMap,
@@ -14,11 +14,11 @@ const BLOB_NAMES: [&[u8]; 2] = [b"left", b"right"];
 const SECONDS_IN_NANOSECONDS: u128 = 1_000_000_000;
 
 /// Implementation of `Metadata` storage.
-pub struct Metadata<B: Blob, E: Clock + Storage<B> + Metrics> {
+pub struct Metadata<B: Blob, E: Clock + Storage<B> + Metrics, K: Array> {
     context: E,
 
     // Data is stored in a BTreeMap to enable deterministic serialization.
-    data: BTreeMap<u32, Bytes>,
+    data: BTreeMap<K, Bytes>,
     cursor: usize,
     blobs: [(B, u128); 2],
 
@@ -28,9 +28,9 @@ pub struct Metadata<B: Blob, E: Clock + Storage<B> + Metrics> {
     _phantom_e: PhantomData<E>,
 }
 
-impl<B: Blob, E: Clock + Storage<B> + Metrics> Metadata<B, E> {
+impl<B: Blob, E: Clock + Storage<B> + Metrics, K: Array> Metadata<B, E, K> {
     /// Initialize a new `Metadata` instance.
-    pub async fn init(context: E, cfg: Config) -> Result<Self, Error> {
+    pub async fn init(context: E, cfg: Config) -> Result<Self, Error<K>> {
         // Open dedicated blobs
         let left = context.open(&cfg.partition, BLOB_NAMES[0]).await?;
         let right = context.open(&cfg.partition, BLOB_NAMES[1]).await?;
@@ -83,7 +83,7 @@ impl<B: Blob, E: Clock + Storage<B> + Metrics> Metadata<B, E> {
         })
     }
 
-    async fn load(index: usize, blob: &B) -> Result<Option<(u128, BTreeMap<u32, Bytes>)>, Error> {
+    async fn load(index: usize, blob: &B) -> Result<Option<(u128, BTreeMap<K, Bytes>)>, Error<K>> {
         // Get blob length
         let len = blob.len().await?;
         if len == 0 {
@@ -134,11 +134,11 @@ impl<B: Blob, E: Clock + Storage<B> + Metrics> Metadata<B, E> {
         // If the checksum is correct, we assume data is correctly packed and we don't perform
         // length checks on the cursor.
         let mut data = BTreeMap::new();
-        let mut cursor = 16;
+        let mut cursor = u128::SERIALIZED_LEN;
         while cursor < checksum_index {
             // Read key
-            let next_cursor = cursor + 4;
-            let key = u32::from_be_bytes(buf[cursor..next_cursor].try_into().unwrap());
+            let next_cursor = cursor + K::SERIALIZED_LEN;
+            let key = K::read_from(&mut buf[cursor..next_cursor].as_ref()).unwrap();
             cursor = next_cursor;
 
             // Read value length
@@ -159,8 +159,8 @@ impl<B: Blob, E: Clock + Storage<B> + Metrics> Metadata<B, E> {
     }
 
     /// Get a value from `Metadata` (if it exists).
-    pub fn get(&self, key: u32) -> Option<&Bytes> {
-        self.data.get(&key)
+    pub fn get(&self, key: &K) -> Option<&Bytes> {
+        self.data.get(key)
     }
 
     /// Clear all values from `Metadata`. The new state will not be persisted until `sync` is
@@ -174,14 +174,14 @@ impl<B: Blob, E: Clock + Storage<B> + Metrics> Metadata<B, E> {
     ///
     /// If the key already exists, the value will be overwritten. The
     /// value stored will not be persisted until `sync` is called.
-    pub fn put(&mut self, key: u32, value: Bytes) {
+    pub fn put(&mut self, key: K, value: Bytes) {
         self.data.insert(key, value);
         self.keys.set(self.data.len() as i64);
     }
 
     /// Remove a value from `Metadata` (if it exists).
-    pub fn remove(&mut self, key: u32) {
-        self.data.remove(&key);
+    pub fn remove(&mut self, key: &K) {
+        self.data.remove(key);
         self.keys.set(self.data.len() as i64);
     }
 
@@ -200,7 +200,7 @@ impl<B: Blob, E: Clock + Storage<B> + Metrics> Metadata<B, E> {
     }
 
     /// Atomically commit the current state of `Metadata`.
-    pub async fn sync(&mut self) -> Result<(), Error> {
+    pub async fn sync(&mut self) -> Result<(), Error<K>> {
         // Compute next timestamp
         let past_timestamp = &self.blobs[self.cursor].1;
         let mut next_timestamp = self.context.current().epoch().as_nanos();
@@ -223,11 +223,11 @@ impl<B: Blob, E: Clock + Storage<B> + Metrics> Metadata<B, E> {
         let mut buf = Vec::new();
         buf.put_u128(next_timestamp);
         for (key, value) in &self.data {
-            buf.put_u32(*key);
+            buf.put_slice(key.as_ref());
             let value_len = value
                 .len()
                 .try_into()
-                .map_err(|_| Error::ValueTooBig(*key))?;
+                .map_err(|_| Error::ValueTooBig(key.clone()))?;
             buf.put_u32(value_len);
             buf.put(&value[..]);
         }
@@ -251,7 +251,7 @@ impl<B: Blob, E: Clock + Storage<B> + Metrics> Metadata<B, E> {
     }
 
     /// Sync outstanding data and close `Metadata`.
-    pub async fn close(mut self) -> Result<(), Error> {
+    pub async fn close(mut self) -> Result<(), Error<K>> {
         // Sync and close blobs
         self.sync().await?;
         for (blob, _) in self.blobs.into_iter() {
