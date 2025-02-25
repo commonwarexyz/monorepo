@@ -8,33 +8,26 @@ use commonware_deployer::Peers;
 use commonware_flood::Config;
 use commonware_p2p::{authenticated, Receiver, Recipients, Sender};
 use commonware_runtime::{
-    tokio::{self, Executor},
-    Network, Runner, Spawner,
+    tokio::{Context, Executor},
+    Metrics, Network, Runner, Spawner,
 };
 use commonware_utils::{from_hex_formatted, union};
 use futures::future::try_join_all;
 use governor::Quota;
-use prometheus_client::{encoding::text::encode, registry::Registry};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::NonZeroU32,
     str::FromStr,
-    sync::{Arc, Mutex},
 };
 use tracing::{error, info, Level};
 
 const FLOOD_NAMESPACE: &[u8] = b"_COMMONWARE_FLOOD";
 const METRICS_PORT: u16 = 9090;
 
-async fn metrics_handler(registries: Extension<Vec<Arc<Mutex<Registry>>>>) -> String {
-    let mut buffer = String::new();
-    for registry in registries.iter() {
-        let registry = registry.lock().unwrap();
-        encode(&mut buffer, &registry).expect("Could not encode metrics");
-    }
-    buffer
+async fn metrics_handler<E: Metrics>(extension: Extension<E>) -> String {
+    extension.0.encode()
 }
 
 fn main() {
@@ -102,19 +95,12 @@ fn main() {
     }
 
     // Initialize runtime
-    let runtime_registry = Arc::new(Mutex::new(Registry::with_prefix("runtime")));
-    let runtime_cfg = tokio::Config {
-        registry: runtime_registry.clone(),
-        ..Default::default()
-    };
-    let (executor, runtime) = Executor::init(runtime_cfg);
+    let (executor, context) = Executor::default();
 
     // Configure network
-    let p2p_registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
     let p2p_cfg = authenticated::Config::aggressive(
         signer.clone(),
         &union(FLOOD_NAMESPACE, b"_P2P"),
-        p2p_registry.clone(),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), config.port),
         bootstrappers,
         config.message_size,
@@ -123,7 +109,8 @@ fn main() {
     // Start runtime
     executor.start(async move {
         // Start p2p
-        let (mut network, mut oracle) = authenticated::Network::new(runtime.clone(), p2p_cfg);
+        let (mut network, mut oracle) =
+            authenticated::Network::new(context.with_label("network"), p2p_cfg);
 
         // Provide authorized peers
         oracle.register(0, peer_keys).await;
@@ -137,44 +124,40 @@ fn main() {
         );
 
         // Serve metrics
-        let metrics = runtime.spawn("metrics", {
-            let runtime = runtime.clone();
-            async move {
-                let app = Router::new()
-                    .route("/metrics", get(metrics_handler))
-                    .layer(Extension(vec![
-                        runtime_registry.clone(),
-                        p2p_registry.clone(),
-                    ]));
-                let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), METRICS_PORT);
-                let listener = runtime
-                    .bind(addr)
-                    .await
-                    .expect("Could not bind to metrics address");
-                serve(listener, app.into_make_service())
-                    .await
-                    .expect("Could not serve metrics");
-            }
+        let metrics = context.with_label("metrics").spawn(|context| async move {
+            let app = Router::new()
+                .route("/metrics", get(metrics_handler::<Context>))
+                .layer(Extension(context.clone()));
+            let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), METRICS_PORT);
+            let listener = context
+                .bind(addr)
+                .await
+                .expect("Could not bind to metrics address");
+            serve(listener, app.into_make_service())
+                .await
+                .expect("Could not serve metrics");
         });
 
         // Create network
-        let p2p = runtime.spawn("network", network.run());
+        let p2p = network.start();
 
         // Create flood
-        let flood_sender = runtime.spawn("flood_sender", async move {
-            let mut rng = StdRng::seed_from_u64(0);
-            loop {
-                // Create message
-                let mut msg = Vec::with_capacity(config.message_size);
-                rng.fill_bytes(&mut msg);
+        let flood_sender = context
+            .with_label("flood_sender")
+            .spawn(move |_| async move {
+                let mut rng = StdRng::seed_from_u64(0);
+                loop {
+                    // Create message
+                    let mut msg = Vec::with_capacity(config.message_size);
+                    rng.fill_bytes(&mut msg);
 
-                // Send to all peers
-                if let Err(e) = flood_sender.send(Recipients::All, msg.into(), false).await {
-                    error!(?e, "could not send flood message");
+                    // Send to all peers
+                    if let Err(e) = flood_sender.send(Recipients::All, msg.into(), false).await {
+                        error!(?e, "could not send flood message");
+                    }
                 }
-            }
-        });
-        let flood_receiver = runtime.spawn("flood_receiver", async move {
+            });
+        let flood_receiver = context.with_label("flood_receiver").spawn(|_| async move {
             loop {
                 if let Err(e) = flood_receiver.recv().await {
                     error!(?e, "could not receive flood message");
