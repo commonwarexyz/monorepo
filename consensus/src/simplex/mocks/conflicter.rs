@@ -9,7 +9,7 @@ use crate::{
 };
 use commonware_cryptography::{Hasher, Scheme};
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Clock, Spawner};
+use commonware_runtime::{Clock, Handle, Spawner};
 use prost::Message;
 use rand::{CryptoRng, Rng};
 use std::marker::PhantomData;
@@ -27,7 +27,7 @@ pub struct Conflicter<
     H: Hasher,
     S: Supervisor<Index = View, PublicKey = C::PublicKey>,
 > {
-    runtime: E,
+    context: E,
     crypto: C,
     supervisor: S,
     _hasher: PhantomData<H>,
@@ -43,9 +43,9 @@ impl<
         S: Supervisor<Index = View, PublicKey = C::PublicKey>,
     > Conflicter<E, C, H, S>
 {
-    pub fn new(runtime: E, cfg: Config<C, S>) -> Self {
+    pub fn new(context: E, cfg: Config<C, S>) -> Self {
         Self {
-            runtime,
+            context,
             crypto: cfg.crypto,
             supervisor: cfg.supervisor,
             _hasher: PhantomData,
@@ -55,11 +55,11 @@ impl<
         }
     }
 
-    pub async fn run(
-        mut self,
-        voter_network: (impl Sender, impl Receiver),
-        _backfiller_network: (impl Sender, impl Receiver),
-    ) {
+    pub fn start(mut self, voter_network: (impl Sender, impl Receiver)) -> Handle<()> {
+        self.context.spawn_ref()(self.run(voter_network))
+    }
+
+    async fn run(mut self, voter_network: (impl Sender, impl Receiver)) {
         let (mut sender, mut receiver) = voter_network;
         while let Ok((s, msg)) = receiver.recv().await {
             // Parse message
@@ -122,7 +122,7 @@ impl<
                         .unwrap();
 
                     // Notarize random digest
-                    let payload = H::random(&mut self.runtime);
+                    let payload = H::random(&mut self.context);
                     let msg = proposal_message(view, parent, &payload);
                     let n = wire::Notarize {
                         proposal: Some(wire::Proposal {
@@ -189,7 +189,7 @@ impl<
                         .unwrap();
 
                     // Finalize random digest
-                    let payload = H::random(&mut self.runtime);
+                    let payload = H::random(&mut self.context);
                     let msg = proposal_message(view, parent, &payload);
                     let f = wire::Finalize {
                         proposal: Some(wire::Proposal {

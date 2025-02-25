@@ -1,8 +1,6 @@
 use crate::linked::{parsed, Epoch};
-use commonware_cryptography::{
-    bls12381::primitives::{group, ops, poly::PartialSignature},
-    Array,
-};
+use commonware_cryptography::bls12381::primitives::{group, ops, poly::PartialSignature};
+use commonware_utils::Array;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// A struct representing a set of partial signatures for a payload digest.
@@ -157,8 +155,8 @@ mod tests {
 
         /// Generate shares using the default executor.
         pub fn setup_shares(num_validators: u32, quorum: u32) -> Vec<Share> {
-            let (_, mut runtime, _) = Executor::default();
-            let (_identity, shares) = generate_shares(&mut runtime, None, num_validators, quorum);
+            let (_, mut context, _) = Executor::default();
+            let (_identity, shares) = generate_shares(&mut context, None, num_validators, quorum);
             shares
         }
 

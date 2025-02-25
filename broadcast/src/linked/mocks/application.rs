@@ -2,7 +2,7 @@ use crate::{
     linked::{signer, Context},
     Application as A, Broadcaster,
 };
-use commonware_cryptography::Array;
+use commonware_utils::Array;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
@@ -53,7 +53,7 @@ impl<D: Array, P: Array> Application<D, P> {
         (Application { mailbox: receiver }, Mailbox { sender })
     }
 
-    pub async fn run(&mut self, mut signer: signer::Mailbox<D>) {
+    pub async fn run(mut self, mut signer: signer::Mailbox<D>) {
         while let Some(msg) = self.mailbox.next().await {
             match msg {
                 Message::Broadcast(payload) => {

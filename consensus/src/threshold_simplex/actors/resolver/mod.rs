@@ -6,17 +6,12 @@ pub use actor::Actor;
 use commonware_cryptography::Scheme;
 use governor::Quota;
 pub use ingress::Mailbox;
-use prometheus_client::registry::Registry;
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::time::Duration;
 
 pub struct Config<C: Scheme, S: Supervisor> {
     pub crypto: C,
     pub supervisor: S,
 
-    pub registry: Arc<Mutex<Registry>>,
     pub namespace: Vec<u8>,
     pub mailbox_size: usize,
     pub activity_timeout: u64,

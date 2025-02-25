@@ -7,8 +7,8 @@ use crate::mmr::{
     Error,
 };
 use bytes::{Buf, BufMut};
-use commonware_cryptography::{Array, Hasher as CHasher};
-use commonware_utils::SizedSerialize;
+use commonware_cryptography::Hasher as CHasher;
+use commonware_utils::{Array, SizedSerialize};
 use futures::future::try_join_all;
 use std::future::Future;
 

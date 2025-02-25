@@ -1,5 +1,6 @@
 use crate::{linked::prover::Prover, Collector as Z, Proof};
-use commonware_cryptography::{bls12381::primitives::group, Array, Scheme};
+use commonware_cryptography::{bls12381::primitives::group, Scheme};
+use commonware_utils::Array;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,

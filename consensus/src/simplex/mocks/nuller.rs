@@ -9,6 +9,7 @@ use crate::{
 };
 use commonware_cryptography::{Hasher, Scheme};
 use commonware_p2p::{Receiver, Recipients, Sender};
+use commonware_runtime::{Handle, Spawner};
 use prost::Message;
 use std::marker::PhantomData;
 use tracing::debug;
@@ -19,7 +20,13 @@ pub struct Config<C: Scheme, S: Supervisor<Index = View, PublicKey = C::PublicKe
     pub namespace: Vec<u8>,
 }
 
-pub struct Nuller<C: Scheme, H: Hasher, S: Supervisor<Index = View, PublicKey = C::PublicKey>> {
+pub struct Nuller<
+    E: Spawner,
+    C: Scheme,
+    H: Hasher,
+    S: Supervisor<Index = View, PublicKey = C::PublicKey>,
+> {
+    context: E,
     crypto: C,
     supervisor: S,
     _hasher: PhantomData<H>,
@@ -28,9 +35,12 @@ pub struct Nuller<C: Scheme, H: Hasher, S: Supervisor<Index = View, PublicKey = 
     finalize_namespace: Vec<u8>,
 }
 
-impl<C: Scheme, H: Hasher, S: Supervisor<Index = View, PublicKey = C::PublicKey>> Nuller<C, H, S> {
-    pub fn new(cfg: Config<C, S>) -> Self {
+impl<E: Spawner, C: Scheme, H: Hasher, S: Supervisor<Index = View, PublicKey = C::PublicKey>>
+    Nuller<E, C, H, S>
+{
+    pub fn new(context: E, cfg: Config<C, S>) -> Self {
         Self {
+            context,
             crypto: cfg.crypto,
             supervisor: cfg.supervisor,
             _hasher: PhantomData,
@@ -40,11 +50,11 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View, PublicKey = C::PublicKey>
         }
     }
 
-    pub async fn run(
-        mut self,
-        voter_network: (impl Sender, impl Receiver),
-        _backfiller_network: (impl Sender, impl Receiver),
-    ) {
+    pub fn start(mut self, voter_network: (impl Sender, impl Receiver)) -> Handle<()> {
+        self.context.spawn_ref()(self.run(voter_network))
+    }
+
+    async fn run(mut self, voter_network: (impl Sender, impl Receiver)) {
         let (mut sender, mut receiver) = voter_network;
         while let Ok((s, msg)) = receiver.recv().await {
             // Parse message

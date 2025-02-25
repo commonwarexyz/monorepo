@@ -14,7 +14,7 @@ use commonware_cryptography::{
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::Clock;
+use commonware_runtime::{Clock, Handle, Spawner};
 use commonware_utils::hex;
 use prost::Message;
 use std::{
@@ -23,8 +23,8 @@ use std::{
 };
 use tracing::{debug, info, warn};
 
-pub struct Arbiter<E: Clock, C: Scheme> {
-    runtime: E,
+pub struct Arbiter<E: Clock + Spawner, C: Scheme> {
+    context: E,
 
     dkg_frequency: Duration,
     dkg_phase_timeout: Duration,
@@ -35,9 +35,9 @@ pub struct Arbiter<E: Clock, C: Scheme> {
 
 /// Implementation of a "trusted arbiter" that tracks commitments,
 /// acknowledgements, and complaints during a DKG round.
-impl<E: Clock, C: Scheme> Arbiter<E, C> {
+impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
     pub fn new(
-        runtime: E,
+        context: E,
         dkg_frequency: Duration,
         dkg_phase_timeout: Duration,
         mut contributors: Vec<C::PublicKey>,
@@ -45,7 +45,7 @@ impl<E: Clock, C: Scheme> Arbiter<E, C> {
     ) -> Self {
         contributors.sort();
         Self {
-            runtime,
+            context,
 
             dkg_frequency,
             dkg_phase_timeout,
@@ -63,7 +63,7 @@ impl<E: Clock, C: Scheme> Arbiter<E, C> {
         receiver: &mut impl Receiver<PublicKey = C::PublicKey>,
     ) -> (Option<poly::Public>, HashSet<C::PublicKey>) {
         // Create a new round
-        let start = self.runtime.current();
+        let start = self.context.current();
         let timeout = start + 4 * self.dkg_phase_timeout; // start -> commitment/share -> ack -> arbiter
 
         // Send round start message to contributors
@@ -98,7 +98,7 @@ impl<E: Clock, C: Scheme> Arbiter<E, C> {
         );
         loop {
             select! {
-                _ = self.runtime.sleep_until(timeout) => {
+                _ = self.context.sleep_until(timeout) => {
                     warn!(round, "timed out waiting for commitments");
                     break
                 },
@@ -267,7 +267,15 @@ impl<E: Clock, C: Scheme> Arbiter<E, C> {
         (Some(output.public), disqualified)
     }
 
-    pub async fn run(
+    pub fn start(
+        mut self,
+        sender: impl Sender<PublicKey = C::PublicKey>,
+        receiver: impl Receiver<PublicKey = C::PublicKey>,
+    ) -> Handle<()> {
+        self.context.spawn_ref()(self.run(sender, receiver))
+    }
+
+    async fn run(
         self,
         mut sender: impl Sender<PublicKey = C::PublicKey>,
         mut receiver: impl Receiver<PublicKey = C::PublicKey>,
@@ -301,7 +309,7 @@ impl<E: Clock, C: Scheme> Arbiter<E, C> {
             round += 1;
 
             // Wait for next round
-            self.runtime.sleep(self.dkg_frequency).await;
+            self.context.sleep(self.dkg_frequency).await;
         }
     }
 }

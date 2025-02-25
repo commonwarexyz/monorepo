@@ -2,8 +2,7 @@
 
 use super::{parsed, Epoch};
 use bytes::BufMut;
-use commonware_cryptography::Array;
-use commonware_utils::SizedSerialize;
+use commonware_utils::{Array, SizedSerialize};
 
 /// Serializes an Ack message into a byte array.
 pub fn ack<D: Array, P: Array>(chunk: &parsed::Chunk<D, P>, epoch: Epoch) -> Vec<u8> {

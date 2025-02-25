@@ -86,19 +86,14 @@
 //! ```rust
 //! use commonware_p2p::authenticated::{self, Network};
 //! use commonware_cryptography::{Ed25519, Scheme};
-//! use commonware_runtime::{tokio::{self, Executor}, Spawner, Runner};
+//! use commonware_runtime::{tokio::{self, Executor}, Spawner, Runner, Metrics};
 //! use governor::Quota;
-//! use prometheus_client::registry::Registry;
 //! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 //! use std::num::NonZeroU32;
-//! use std::sync::{Arc, Mutex};
 //!
-//! // Configure runtime
+//! // Configure context
 //! let runtime_cfg = tokio::Config::default();
-//! let (executor, runtime) = Executor::init(runtime_cfg.clone());
-//!
-//! // Configure prometheus registry
-//! let registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
+//! let (executor, context) = Executor::init(runtime_cfg.clone());
 //!
 //! // Generate identity
 //! //
@@ -130,16 +125,15 @@
 //! let p2p_cfg = authenticated::Config::aggressive(
 //!     signer.clone(),
 //!     application_namespace,
-//!     registry,
 //!     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3000),
 //!     bootstrappers,
 //!     MAX_MESSAGE_SIZE,
 //! );
 //!
-//! // Start runtime
+//! // Start context
 //! executor.start(async move {
 //!     // Initialize network
-//!     let (mut network, mut oracle) = Network::new(runtime.clone(), p2p_cfg);
+//!     let (mut network, mut oracle) = Network::new(context.with_label("network"), p2p_cfg);
 //!
 //!     // Register authorized peers
 //!     //
@@ -158,7 +152,7 @@
 //!     );
 //!
 //!     // Run network
-//!     let network_handler = runtime.spawn("network", network.run());
+//!     let network_handler = network.start();
 //!
 //!     // ... Use sender and receiver ...
 //!
@@ -204,16 +198,15 @@ mod tests {
     use commonware_cryptography::{Ed25519, Scheme};
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        deterministic, tokio, Clock, Listener, Network as RNetwork, Runner, Sink, Spawner, Stream,
+        deterministic, tokio, Clock, Listener, Metrics, Network as RNetwork, Runner, Sink, Spawner,
+        Stream,
     };
     use governor::{clock::ReasonablyRealtime, Quota};
-    use prometheus_client::registry::Registry;
     use rand::{CryptoRng, Rng};
     use std::collections::HashSet;
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
         num::NonZeroU32,
-        sync::{Arc, Mutex},
         time::Duration,
     };
 
@@ -231,7 +224,13 @@ mod tests {
     /// We set a unique `base_port` for each test to avoid "address already in use"
     /// errors when tests are run immediately after each other.
     async fn run_network<Si: Sink, St: Stream, L: Listener<Si, St>>(
-        runtime: impl Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork<L, Si, St>,
+        context: impl Spawner
+            + Clock
+            + ReasonablyRealtime
+            + Rng
+            + CryptoRng
+            + RNetwork<L, Si, St>
+            + Metrics,
         max_message_size: usize,
         base_port: u16,
         n: usize,
@@ -247,6 +246,9 @@ mod tests {
         // Create networks
         let mut waiters = Vec::new();
         for (i, peer) in peers.iter().enumerate() {
+            // Create peer context
+            let context = context.with_label(&format!("peer-{}", i));
+
             // Derive port
             let port = base_port + i as u16;
 
@@ -261,15 +263,13 @@ mod tests {
 
             // Create network
             let signer = peer.clone();
-            let registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
             let config = Config::test(
                 signer.clone(),
-                registry,
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
                 bootstrappers,
                 max_message_size,
             );
-            let (mut network, mut oracle) = Network::new(runtime.clone(), config);
+            let (mut network, mut oracle) = Network::new(context.with_label("network"), config);
 
             // Register peers
             oracle.register(0, addresses.clone()).await;
@@ -283,25 +283,27 @@ mod tests {
             );
 
             // Wait to connect to all peers, and then send messages to everyone
-            runtime.spawn("network", network.run());
+            network.start();
 
             // Send/Receive messages
-            let handler = runtime.spawn("agent", {
+            let handler = context.with_label("agent").spawn({
                 let addresses = addresses.clone();
-                let runtime = runtime.clone();
-                async move {
+                move |context| async move {
                     // Wait for all peers to send their identity
-                    let acker = runtime.spawn("receiver", async move {
-                        let mut received = HashSet::new();
-                        while received.len() < n - 1 {
-                            // Ensure message equals sender identity
-                            let (sender, message) = receiver.recv().await.unwrap();
-                            assert_eq!(sender.as_ref(), message.as_ref());
+                    let acker = context
+                        .clone()
+                        .with_label("receiver")
+                        .spawn(move |_| async move {
+                            let mut received = HashSet::new();
+                            while received.len() < n - 1 {
+                                // Ensure message equals sender identity
+                                let (sender, message) = receiver.recv().await.unwrap();
+                                assert_eq!(sender.as_ref(), message.as_ref());
 
-                            // Add to received set
-                            received.insert(sender);
-                        }
-                    });
+                                // Add to received set
+                                received.insert(sender);
+                            }
+                        });
 
                     // Send identity to all peers
                     let msg = signer.public_key();
@@ -324,7 +326,7 @@ mod tests {
                                         .await
                                         .unwrap();
                                     if sent.len() != 1 {
-                                        runtime.sleep(Duration::from_millis(100)).await;
+                                        context.sleep(Duration::from_millis(100)).await;
                                         continue;
                                     }
                                     assert_eq!(&sent[0], recipient);
@@ -349,7 +351,7 @@ mod tests {
                                     .await
                                     .unwrap();
                                 if sent.len() != n - 1 {
-                                    runtime.sleep(Duration::from_millis(100)).await;
+                                    context.sleep(Duration::from_millis(100)).await;
                                     continue;
                                 }
 
@@ -372,7 +374,7 @@ mod tests {
                                     .await
                                     .unwrap();
                                 if sent.len() != n - 1 {
-                                    runtime.sleep(Duration::from_millis(100)).await;
+                                    context.sleep(Duration::from_millis(100)).await;
                                     continue;
                                 }
 
@@ -406,16 +408,16 @@ mod tests {
         const BASE_PORT: u16 = 3000;
 
         // Run first instance
-        let (executor, runtime, auditor) = deterministic::Executor::seeded(seed);
+        let (executor, context, auditor) = deterministic::Executor::seeded(seed);
         executor.start(async move {
-            run_network(runtime, MAX_MESSAGE_SIZE, BASE_PORT, NUM_PEERS, mode).await;
+            run_network(context, MAX_MESSAGE_SIZE, BASE_PORT, NUM_PEERS, mode).await;
         });
         let state = auditor.state();
 
         // Compare result to second instance
-        let (executor, runtime, auditor) = deterministic::Executor::seeded(seed);
+        let (executor, context, auditor) = deterministic::Executor::seeded(seed);
         executor.start(async move {
-            run_network(runtime, MAX_MESSAGE_SIZE, BASE_PORT, NUM_PEERS, mode).await;
+            run_network(context, MAX_MESSAGE_SIZE, BASE_PORT, NUM_PEERS, mode).await;
         });
         assert_eq!(state, auditor.state());
     }
@@ -444,12 +446,12 @@ mod tests {
     #[test_traced]
     fn test_tokio_connectivity() {
         let cfg = tokio::Config::default();
-        let (executor, runtime) = tokio::Executor::init(cfg.clone());
+        let (executor, context) = tokio::Executor::init(cfg.clone());
         executor.start(async move {
             const MAX_MESSAGE_SIZE: usize = 1_024 * 1_024; // 1MB
             let base_port = 3000;
             let n = 10;
-            run_network(runtime, MAX_MESSAGE_SIZE, base_port, n, Mode::One).await;
+            run_network(context, MAX_MESSAGE_SIZE, base_port, n, Mode::One).await;
         });
     }
 
@@ -459,8 +461,8 @@ mod tests {
         let base_port = 3000;
         let n: usize = 100;
 
-        // Initialize runtime
-        let (executor, runtime, _) = deterministic::Executor::default();
+        // Initialize context
+        let (executor, context, _) = deterministic::Executor::default();
         executor.start(async move {
             // Create peers
             let mut peers = Vec::new();
@@ -472,6 +474,9 @@ mod tests {
             // Create networks
             let mut waiters = Vec::new();
             for (i, peer) in peers.iter().enumerate() {
+                // Create peer context
+                let context = context.with_label(&format!("peer-{}", i));
+
                 // Derive port
                 let port = base_port + i as u16;
 
@@ -486,15 +491,13 @@ mod tests {
 
                 // Create network
                 let signer = peer.clone();
-                let registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
                 let config = Config::test(
                     signer.clone(),
-                    registry,
                     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
                     bootstrappers,
                     1_024 * 1_024, // 1MB
                 );
-                let (mut network, mut oracle) = Network::new(runtime.clone(), config);
+                let (mut network, mut oracle) = Network::new(context.with_label("network"), config);
 
                 // Register peers at separate indices
                 oracle.register(0, vec![addresses[0].clone()]).await;
@@ -514,12 +517,12 @@ mod tests {
                 );
 
                 // Wait to connect to all peers, and then send messages to everyone
-                runtime.spawn("network", network.run());
+                network.start();
 
                 // Send/Receive messages
-                let handler = runtime.spawn("agent", {
-                    let runtime = runtime.clone();
-                    async move {
+                let handler = context
+                    .with_label("agent")
+                    .spawn(move |context| async move {
                         if i == 0 {
                             // Loop until success
                             let msg = signer.public_key();
@@ -535,15 +538,14 @@ mod tests {
                                 }
 
                                 // Sleep and try again (avoid busy loop)
-                                runtime.sleep(Duration::from_millis(100)).await;
+                                context.sleep(Duration::from_millis(100)).await;
                             }
                         } else {
                             // Ensure message equals sender identity
                             let (sender, message) = receiver.recv().await.unwrap();
                             assert_eq!(sender.as_ref(), message.as_ref());
                         }
-                    }
-                });
+                    });
 
                 // Add to waiters
                 waiters.push(handler);
@@ -561,8 +563,8 @@ mod tests {
         let base_port = 3000;
         let n: usize = 2;
 
-        // Initialize runtime
-        let (executor, mut runtime, _) = deterministic::Executor::seeded(0);
+        // Initialize context
+        let (executor, mut context, _) = deterministic::Executor::seeded(0);
         executor.start(async move {
             // Create peers
             let mut peers = Vec::new();
@@ -573,15 +575,13 @@ mod tests {
 
             // Create network
             let signer = peers[0].clone();
-            let registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
             let config = Config::test(
                 signer.clone(),
-                registry,
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port),
                 Vec::new(),
                 1_024 * 1_024, // 1MB
             );
-            let (mut network, mut oracle) = Network::new(runtime.clone(), config);
+            let (mut network, mut oracle) = Network::new(context.with_label("network"), config);
 
             // Register peers
             oracle.register(0, addresses.clone()).await;
@@ -595,11 +595,11 @@ mod tests {
             );
 
             // Wait to connect to all peers, and then send messages to everyone
-            runtime.spawn("network", network.run());
+            network.start();
 
             // Crate random message
             let mut msg = vec![0u8; 10 * 1024 * 1024]; // 10MB (greater than frame capacity)
-            runtime.fill(&mut msg[..]);
+            context.fill(&mut msg[..]);
 
             // Send message
             let recipient = Recipients::One(addresses[1].clone());

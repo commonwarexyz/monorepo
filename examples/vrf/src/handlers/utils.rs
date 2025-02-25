@@ -1,9 +1,6 @@
 use bytes::BufMut;
-use commonware_cryptography::{
-    bls12381::primitives::{group::Element, poly},
-    Array,
-};
-use commonware_utils::{hex, SizedSerialize};
+use commonware_cryptography::bls12381::primitives::{group::Element, poly};
+use commonware_utils::{hex, Array, SizedSerialize};
 
 pub const ACK_NAMESPACE: &[u8] = b"_COMMONWARE_DKG_ACK_";
 

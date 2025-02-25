@@ -30,13 +30,13 @@ pub struct IncomingConnection<C: Scheme, Si: Sink, St: Stream> {
 impl<C: Scheme, Si: Sink, St: Stream> IncomingConnection<C, Si, St> {
     /// Verify the handshake of an incoming connection.
     pub async fn verify<R: Rng + CryptoRng + Spawner + Clock>(
-        runtime: &R,
+        context: &R,
         config: Config<C>,
         sink: Si,
         stream: St,
     ) -> Result<Self, Error> {
         let handshake = IncomingHandshake::verify(
-            runtime,
+            context,
             &config.crypto,
             &config.namespace,
             config.max_message_size,
@@ -90,21 +90,21 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
     /// This will send a handshake message to the peer, wait for a response,
     /// and verify the peer's handshake message.
     pub async fn upgrade_dialer<R: Rng + CryptoRng + Spawner + Clock, C: Scheme>(
-        mut runtime: R,
+        mut context: R,
         mut config: Config<C>,
         mut sink: Si,
         mut stream: St,
         peer: C::PublicKey,
     ) -> Result<Self, Error> {
         // Set handshake deadline
-        let deadline = runtime.current() + config.handshake_timeout;
+        let deadline = context.current() + config.handshake_timeout;
 
         // Generate shared secret
-        let secret = x25519::new(&mut runtime);
+        let secret = x25519::new(&mut context);
         let ephemeral = x25519_dalek::PublicKey::from(&secret);
 
         // Send handshake
-        let timestamp = runtime.current().epoch_millis();
+        let timestamp = context.current().epoch_millis();
         let msg = create_handshake(
             &mut config.crypto,
             &config.namespace,
@@ -115,7 +115,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
 
         // Wait for up to handshake timeout to send
         select! {
-            _ = runtime.sleep_until(deadline) => {
+            _ = context.sleep_until(deadline) => {
                 return Err(Error::HandshakeTimeout)
             },
             result = send_frame(&mut sink, &msg, config.max_message_size) => {
@@ -125,7 +125,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
 
         // Wait for up to handshake timeout for response
         let msg = select! {
-            _ = runtime.sleep_until(deadline) => {
+            _ = context.sleep_until(deadline) => {
                 return Err(Error::HandshakeTimeout)
             },
             result = recv_frame(&mut stream, config.max_message_size) => {
@@ -135,7 +135,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
 
         // Verify handshake message from peer
         let handshake = Handshake::verify(
-            &runtime,
+            &context,
             &config.crypto,
             &config.namespace,
             config.synchrony_bound,
@@ -169,16 +169,16 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
     /// only needs to send our handshake message for the connection to be fully
     /// initialized.
     pub async fn upgrade_listener<R: Rng + CryptoRng + Spawner + Clock, C: Scheme>(
-        mut runtime: R,
+        mut context: R,
         incoming: IncomingConnection<C, Si, St>,
     ) -> Result<Self, Error> {
         // Generate shared secret
-        let secret = x25519::new(&mut runtime);
+        let secret = x25519::new(&mut context);
         let ephemeral = x25519_dalek::PublicKey::from(&secret);
 
         // Send handshake
         let (mut handshake, mut config) = (incoming.handshake, incoming.config);
-        let timestamp = runtime.current().epoch_millis();
+        let timestamp = context.current().epoch_millis();
         let msg = create_handshake(
             &mut config.crypto,
             &config.namespace,
@@ -189,7 +189,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
 
         // Wait for up to handshake timeout
         select! {
-            _ = runtime.sleep_until(handshake.deadline) => {
+            _ = context.sleep_until(handshake.deadline) => {
                 return Err(Error::HandshakeTimeout)
             },
             result = send_frame(&mut handshake.sink, &msg, config.max_message_size) => {

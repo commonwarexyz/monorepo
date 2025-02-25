@@ -2,13 +2,13 @@ use super::{Config, Error, Mailbox, Message, Relay};
 use crate::authenticated::{
     actors::tracker, channels::Channels, metrics, wire, wire::message::Payload,
 };
-use commonware_cryptography::Array;
 use commonware_macros::select;
-use commonware_runtime::{Clock, Handle, Sink, Spawner, Stream};
+use commonware_runtime::{Clock, Handle, Metrics, Sink, Spawner, Stream};
 use commonware_stream::{
     public_key::{Connection, Sender},
     Receiver as _, Sender as _,
 };
+use commonware_utils::Array;
 use futures::{channel::mpsc, SinkExt, StreamExt};
 use governor::{clock::ReasonablyRealtime, Quota, RateLimiter};
 use prometheus_client::metrics::{counter::Counter, family::Family};
@@ -17,8 +17,8 @@ use rand::{CryptoRng, Rng};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tracing::debug;
 
-pub struct Actor<E: Spawner + Clock + ReasonablyRealtime, P: Array> {
-    runtime: E,
+pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, P: Array> {
+    context: E,
 
     gossip_bit_vec_frequency: Duration,
     allowed_bit_vec_rate: Quota,
@@ -37,15 +37,15 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime, P: Array> {
     _reservation: tracker::Reservation<E, P>,
 }
 
-impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng, P: Array> Actor<E, P> {
-    pub fn new(runtime: E, cfg: Config, reservation: tracker::Reservation<E, P>) -> (Self, Relay) {
+impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, P: Array> Actor<E, P> {
+    pub fn new(context: E, cfg: Config, reservation: tracker::Reservation<E, P>) -> (Self, Relay) {
         let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
         let (low_sender, low_receiver) = mpsc::channel(cfg.mailbox_size);
 
         (
             Self {
-                runtime,
+                context,
                 mailbox: Mailbox::new(control_sender),
                 gossip_bit_vec_frequency: cfg.gossip_bit_vec_frequency,
                 allowed_bit_vec_rate: cfg.allowed_bit_vec_rate,
@@ -104,7 +104,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng, P: Array> Actor<
         let mut rate_limits = HashMap::new();
         let mut senders = HashMap::new();
         for (channel, (rate, sender)) in channels.collect() {
-            let rate_limiter = RateLimiter::direct_with_clock(rate, &self.runtime);
+            let rate_limiter = RateLimiter::direct_with_clock(rate, &self.context);
             rate_limits.insert(channel, rate_limiter);
             senders.insert(channel, sender);
         }
@@ -112,22 +112,21 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng, P: Array> Actor<
 
         // Send/Receive messages from the peer
         let (mut conn_sender, mut conn_receiver) = connection.split();
-        let mut send_handler: Handle<Result<(), Error>> = self.runtime.spawn("sender", {
-            let runtime = self.runtime.clone();
+        let mut send_handler: Handle<Result<(), Error>> = self.context.with_label("sender").spawn( {
             let peer = peer.clone();
             let mut tracker = tracker.clone();
             let mailbox = self.mailbox.clone();
             let rate_limits = rate_limits.clone();
-            async move {
-                let mut deadline = runtime.current() + self.gossip_bit_vec_frequency;
+            move |context| async move {
+                let mut deadline = context.current() + self.gossip_bit_vec_frequency;
                 loop {
                     select! {
-                        _ = runtime.sleep_until(deadline) => {
+                        _ = context.sleep_until(deadline) => {
                             // Get latest bitset from tracker (also used as ping)
                             tracker.construct(peer.clone(), mailbox.clone()).await;
 
                             // Reset ticker
-                            deadline = runtime.current() + self.gossip_bit_vec_frequency;
+                            deadline = context.current() + self.gossip_bit_vec_frequency;
                         },
                         msg_control = self.control.next() => {
                             let msg = match msg_control {
@@ -160,13 +159,14 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng, P: Array> Actor<
                 }
             }
         });
-        let mut receive_handler: Handle<Result<(), Error>> = self.runtime.spawn("receiver", {
-            let runtime = self.runtime.clone();
-            async move {
+        let mut receive_handler: Handle<Result<(), Error>> = self
+            .context
+            .with_label("receiver")
+            .spawn(move |context| async move {
                 let bit_vec_rate_limiter =
-                    RateLimiter::direct_with_clock(self.allowed_bit_vec_rate, &runtime);
+                    RateLimiter::direct_with_clock(self.allowed_bit_vec_rate, &context);
                 let peers_rate_limiter =
-                    RateLimiter::direct_with_clock(self.allowed_peers_rate, &runtime);
+                    RateLimiter::direct_with_clock(self.allowed_peers_rate, &context);
                 loop {
                     let msg = conn_receiver
                         .receive()
@@ -186,8 +186,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng, P: Array> Actor<
                                     self.rate_limited
                                         .get_or_create(&metrics::Message::new_bit_vec(&peer))
                                         .inc();
-                                    let wait = negative.wait_time_from(runtime.now());
-                                    runtime.sleep(wait).await;
+                                    let wait = negative.wait_time_from(context.now());
+                                    context.sleep(wait).await;
                                 }
                             }
 
@@ -206,8 +206,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng, P: Array> Actor<
                                     self.rate_limited
                                         .get_or_create(&metrics::Message::new_peers(&peer))
                                         .inc();
-                                    let wait = negative.wait_time_from(runtime.now());
-                                    runtime.sleep(wait).await;
+                                    let wait = negative.wait_time_from(context.now());
+                                    context.sleep(wait).await;
                                 }
                             }
 
@@ -236,8 +236,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng, P: Array> Actor<
                                             data.channel,
                                         ))
                                         .inc();
-                                    let wait = negative.wait_time_from(runtime.now());
-                                    runtime.sleep(wait).await;
+                                    let wait = negative.wait_time_from(context.now());
+                                    context.sleep(wait).await;
                                 }
                             }
 
@@ -265,8 +265,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng, P: Array> Actor<
                         }
                     }
                 }
-            }
-        });
+            });
 
         // Wait for one of the handlers to finish
         //

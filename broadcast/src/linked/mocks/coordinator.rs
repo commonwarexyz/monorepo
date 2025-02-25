@@ -1,11 +1,9 @@
 use crate::{linked::Epoch, Coordinator as S, ThresholdCoordinator as T};
-use commonware_cryptography::{
-    bls12381::primitives::{
-        group::{Public, Share},
-        poly::Poly,
-    },
-    Array,
+use commonware_cryptography::bls12381::primitives::{
+    group::{Public, Share},
+    poly::Poly,
 };
+use commonware_utils::Array;
 use std::collections::HashMap;
 
 /// Implementation of `commonware-consensus::Coordinator`.

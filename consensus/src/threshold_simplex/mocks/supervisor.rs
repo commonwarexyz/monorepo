@@ -5,14 +5,11 @@ use crate::{
     },
     Activity, Proof, Supervisor as Su, ThresholdSupervisor as TSu,
 };
-use commonware_cryptography::{
-    bls12381::primitives::{
-        group::{self, Element},
-        poly,
-    },
-    Array,
+use commonware_cryptography::bls12381::primitives::{
+    group::{self, Element},
+    poly,
 };
-use commonware_utils::modulo;
+use commonware_utils::{modulo, Array};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     sync::{Arc, Mutex},

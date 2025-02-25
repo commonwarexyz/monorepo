@@ -11,10 +11,11 @@ use crate::{
     },
     Parsed, Supervisor,
 };
-use commonware_cryptography::{Array, Scheme};
+use commonware_cryptography::Scheme;
 use commonware_macros::select;
 use commonware_p2p::{utils::requester, Receiver, Recipients, Sender};
-use commonware_runtime::Clock;
+use commonware_runtime::{Clock, Handle, Metrics, Spawner};
+use commonware_utils::Array;
 use futures::{channel::mpsc, future::Either, StreamExt};
 use governor::clock::Clock as GClock;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
@@ -96,12 +97,12 @@ impl Inflight {
 
 /// Requests are made concurrently to multiple peers.
 pub struct Actor<
-    E: Clock + GClock + Rng,
+    E: Clock + GClock + Rng + Metrics + Spawner,
     C: Scheme,
     D: Array,
     S: Supervisor<Index = View, PublicKey = C::PublicKey>,
 > {
-    runtime: E,
+    context: E,
     supervisor: S,
     _digest: PhantomData<D>,
 
@@ -130,13 +131,13 @@ pub struct Actor<
 }
 
 impl<
-        E: Clock + GClock + Rng,
+        E: Clock + GClock + Rng + Metrics + Spawner,
         C: Scheme,
         D: Array,
         S: Supervisor<Index = View, PublicKey = C::PublicKey>,
     > Actor<E, C, D, S>
 {
-    pub fn new(runtime: E, cfg: Config<C, S>) -> (Self, Mailbox) {
+    pub fn new(context: E, cfg: Config<C, S>) -> (Self, Mailbox) {
         // Initialize requester
         let config = requester::Config {
             crypto: cfg.crypto.clone(),
@@ -144,32 +145,29 @@ impl<
             initial: cfg.fetch_timeout / 2,
             timeout: cfg.fetch_timeout,
         };
-        let requester = requester::Requester::new(runtime.clone(), config);
+        let requester = requester::Requester::new(context.clone(), config);
 
         // Initialize metrics
         let unfulfilled = Gauge::default();
         let outstanding = Gauge::default();
         let served = Counter::default();
-        {
-            let mut registry = cfg.registry.lock().unwrap();
-            registry.register(
-                "unfulfilled",
-                "unfulfilled notarizations/nullifications",
-                unfulfilled.clone(),
-            );
-            registry.register("outstanding", "outstanding requests", outstanding.clone());
-            registry.register(
-                "served",
-                "served notarizations/nullifications",
-                served.clone(),
-            );
-        }
+        context.register(
+            "unfulfilled",
+            "unfulfilled notarizations/nullifications",
+            unfulfilled.clone(),
+        );
+        context.register("outstanding", "outstanding requests", outstanding.clone());
+        context.register(
+            "served",
+            "served notarizations/nullifications",
+            served.clone(),
+        );
 
         // Initialize mailbox
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
         (
             Self {
-                runtime,
+                context,
                 supervisor: cfg.supervisor,
                 _digest: PhantomData,
 
@@ -218,7 +216,7 @@ impl<
                 .required
                 .iter()
                 .filter(|entry| !self.inflight.contains(entry))
-                .choose_multiple(&mut self.runtime, self.max_fetch_count);
+                .choose_multiple(&mut self.context, self.max_fetch_count);
             if entries.is_empty() {
                 return;
             }
@@ -261,7 +259,7 @@ impl<
                     // learn of new notarizations or nullifications in the meantime.
                     warn!("failed to send request to any validator");
                     let deadline = self
-                        .runtime
+                        .context
                         .current()
                         .checked_add(self.fetch_timeout)
                         .expect("time overflowed");
@@ -300,7 +298,18 @@ impl<
         }
     }
 
-    pub async fn run(
+    pub fn start(
+        self,
+        voter: voter::Mailbox<D>,
+        sender: impl Sender<PublicKey = C::PublicKey>,
+        receiver: impl Receiver<PublicKey = C::PublicKey>,
+    ) -> Handle<()> {
+        self.context
+            .clone()
+            .spawn(|_| self.run(voter, sender, receiver))
+    }
+
+    async fn run(
         mut self,
         mut voter: voter::Mailbox<D>,
         mut sender: impl Sender<PublicKey = C::PublicKey>,
@@ -316,13 +325,13 @@ impl<
 
             // Set timeout for retry
             let retry = match self.retry {
-                Some(retry) => Either::Left(self.runtime.sleep_until(retry)),
+                Some(retry) => Either::Left(self.context.sleep_until(retry)),
                 None => Either::Right(futures::future::pending()),
             };
 
             // Set timeout for next request
             let (request, timeout) = if let Some((request, timeout)) = self.requester.next() {
-                (request, Either::Left(self.runtime.sleep_until(timeout)))
+                (request, Either::Left(self.context.sleep_until(timeout)))
             } else {
                 (0, Either::Right(futures::future::pending()))
             };

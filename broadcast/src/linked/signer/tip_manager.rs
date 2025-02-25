@@ -1,5 +1,6 @@
 use crate::linked::parsed;
-use commonware_cryptography::{Array, Scheme};
+use commonware_cryptography::Scheme;
+use commonware_utils::Array;
 use std::collections::{hash_map::Entry, HashMap};
 
 /// Manages the highest-height chunk for each sequencer.
@@ -61,8 +62,8 @@ mod tests {
     use commonware_cryptography::{
         ed25519::{self, Ed25519, PublicKey, Signature},
         sha256::{self, Digest},
-        Array,
     };
+    use commonware_utils::Array;
     use commonware_utils::SizedSerialize;
     use rand::SeedableRng;
 
