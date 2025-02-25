@@ -31,7 +31,7 @@ pub struct Config<
     /// Configuration for the requester
     pub requester_config: requester::Config<C>,
 
-    /// Time that fetches remain in the pending queue before being retried
+    /// How long fetches remain in the pending queue before being retried
     pub fetch_retry_timeout: Duration,
 
     /// Whether requests are sent with priority over other network messages

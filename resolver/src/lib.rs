@@ -33,7 +33,7 @@ pub trait Resolver: Clone + Send + 'static {
     /// Type used to uniquely identify data.
     type Key: Array;
 
-    /// Fetch data from the network.
+    /// Initiate a fetch request.
     fn fetch(&mut self, key: Self::Key) -> impl Future<Output = ()> + Send;
 
     /// Cancel a fetch request.

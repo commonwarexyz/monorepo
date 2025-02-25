@@ -52,7 +52,7 @@ pub struct Fetcher<
     /// added to this map and are retried after the deadline.
     pending: PrioritySet<Key, SystemTime>,
 
-    /// Time that fetches remain in the pending queue before being retried
+    /// How long fetches remain in the pending queue before being retried
     retry_timeout: Duration,
 
     /// Whether requests are sent with priority over other network messages

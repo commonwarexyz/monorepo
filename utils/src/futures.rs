@@ -29,16 +29,19 @@ impl<T: Send> Pool<T> {
         // Insert a dummy future (that never resolves) to prevent the stream from being empty.
         // Else, the `select_next_some()` function returns `None` instantly.
         let pool = FuturesUnordered::new();
-        let dummy: PooledFuture<T> = Box::pin(async { future::pending::<T>().await });
-        pool.push(dummy);
+        pool.push(Self::create_dummy_future());
         Self { pool }
     }
 
     /// Returns the number of futures in the pool.
-    #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         // Subtract the dummy future.
         self.pool.len().checked_sub(1).unwrap()
+    }
+
+    /// Returns `true` if the pool is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     /// Adds a future to the pool.
@@ -53,8 +56,15 @@ impl<T: Send> Pool<T> {
         self.pool.select_next_some()
     }
 
-    /// Cancels all futures in the pool.
-    pub fn cancel_all(&mut self) {
+    /// Cancels all futures in the pool, including the dummy future.
+    ///
+    /// Intended to be used only if the pool is no longer needed.
+    pub fn shutdown(&mut self) {
         self.pool.clear();
+    }
+
+    /// Creates a dummy future that never resolves.
+    fn create_dummy_future() -> PooledFuture<T> {
+        Box::pin(async { future::pending::<T>().await })
     }
 }

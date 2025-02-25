@@ -157,7 +157,7 @@ impl<
             select! {
                 _ = &mut shutdown => {
                     debug!("shutdown");
-                    self.serves.cancel_all();
+                    self.serves.shutdown();
                     return;
                 },
 
