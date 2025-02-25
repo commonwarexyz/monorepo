@@ -75,23 +75,11 @@ impl<E: Clock + GClock + Rng, C: Scheme, Key: Array, NetS: Sender<PublicKey = C:
         }
     }
 
-    /// Makes a new fetch request.
-    pub async fn fetch_new(&mut self, sender: &mut NetS, key: Key) {
-        self.fetch_inner(sender, key, false).await
-    }
-
-    /// Retries a fetch request that has been popped.
+    /// Makes a fetch request.
     ///
-    /// The request should have been removed before immediately before this is called using
-    /// one of the `pop_*` methods.
-    pub async fn fetch_retry(&mut self, sender: &mut NetS, key: Key) {
-        self.fetch_inner(sender, key, true).await;
-    }
-
-    /// Updates all data structures for fetching.
-    ///
-    /// Returns an error if the fetch was rejected.
-    async fn fetch_inner(&mut self, sender: &mut NetS, key: Key, shuffle: bool) {
+    /// If `is_new` is true, the fetch is treated as a new request.
+    /// If false, the fetch is treated as a retry.
+    pub async fn fetch(&mut self, sender: &mut NetS, key: Key, is_new: bool) {
         // Check if the fetch is already in progress
         if self.active.contains_right(&key) || self.pending.contains(&key) {
             info!(?key, "duplicate fetch");
@@ -99,6 +87,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, Key: Array, NetS: Sender<PublicKey = C:
         }
 
         // Get peer to send request to
+        let shuffle = !is_new;
         let Some((peer, id)) = self.requester.request(shuffle) else {
             // If there are no peers, add the key to the pending queue
             warn!(?key, "requester failed");

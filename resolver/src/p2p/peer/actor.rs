@@ -15,7 +15,7 @@ use commonware_cryptography::Scheme;
 use commonware_macros::select;
 use commonware_p2p::utils::requester::Requester;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Clock, Spawner};
+use commonware_runtime::{Clock, Handle, Metrics, Spawner};
 use commonware_utils::{futures::Pool as FuturesPool, Array};
 use futures::{
     channel::{mpsc, oneshot},
@@ -30,7 +30,7 @@ use tracing::{debug, error, warn};
 
 /// Manages incoming and outgoing P2P requests, coordinating fetch and serve operations.
 pub struct Actor<
-    E: Clock + GClock + Spawner + Rng,
+    E: Clock + GClock + Spawner + Rng + Metrics,
     C: Scheme,
     D: Director<PublicKey = C::PublicKey>,
     Key: Array,
@@ -39,7 +39,7 @@ pub struct Actor<
     NetS: Sender<PublicKey = C::PublicKey>,
     NetR: Receiver<PublicKey = C::PublicKey>,
 > {
-    runtime: E,
+    context: E,
 
     /// Consumes data that is fetched from the network
     consumer: Con,
@@ -71,7 +71,7 @@ pub struct Actor<
 }
 
 impl<
-        E: Clock + GClock + Spawner + Rng,
+        E: Clock + GClock + Spawner + Rng + Metrics,
         C: Scheme,
         D: Director<PublicKey = C::PublicKey>,
         Key: Array,
@@ -81,13 +81,13 @@ impl<
         NetR: Receiver<PublicKey = C::PublicKey>,
     > Actor<E, C, D, Key, Con, Pro, NetS, NetR>
 {
-    pub async fn new(runtime: E, cfg: Config<C, D, Key, Con, Pro>) -> (Self, Mailbox<Key>) {
+    pub async fn new(context: E, cfg: Config<C, D, Key, Con, Pro>) -> (Self, Mailbox<Key>) {
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
-        let requester = Requester::new(runtime.clone(), cfg.requester_config);
-        let fetcher = Fetcher::new(runtime.clone(), requester, cfg.fetch_retry_timeout);
+        let requester = Requester::new(context.clone(), cfg.requester_config);
+        let fetcher = Fetcher::new(context.clone(), requester, cfg.fetch_retry_timeout);
         (
             Self {
-                runtime,
+                context,
                 consumer: cfg.consumer,
                 producer: cfg.producer,
                 director: cfg.director,
@@ -102,9 +102,19 @@ impl<
         )
     }
 
-    pub async fn run(&mut self, network: (NetS, NetR)) {
+    /// Runs the actor until the context is stopped.
+    ///
+    /// The actor will handle:
+    /// - Fetching data from other peers and notifying the `Consumer`
+    /// - Serving data to other peers by requesting it from the `Producer`
+    pub fn start(mut self, network: (NetS, NetR)) -> Handle<()> {
+        self.context.spawn_ref()(self.run(network))
+    }
+
+    /// Inner run loop called by `start`.
+    async fn run(mut self, network: (NetS, NetR)) {
         let (mut sender, mut receiver) = network;
-        let mut shutdown = self.runtime.stopped();
+        let mut shutdown = self.context.stopped();
 
         // Set initial peer set.
         self.last_peer_set_id = Some(self.director.peer_set_id());
@@ -120,13 +130,13 @@ impl<
 
             // Get retry timeout (if any)
             let deadline_pending = match self.fetcher.get_pending_deadline() {
-                Some(deadline) => Either::Left(self.runtime.sleep_until(deadline)),
+                Some(deadline) => Either::Left(self.context.sleep_until(deadline)),
                 None => Either::Right(future::pending()),
             };
 
             // Get requester timeout (if any)
             let deadline_active = match self.fetcher.get_active_deadline() {
-                Some(deadline) => Either::Left(self.runtime.sleep_until(deadline)),
+                Some(deadline) => Either::Left(self.context.sleep_until(deadline)),
                 None => Either::Right(future::pending()),
             };
 
@@ -147,7 +157,7 @@ impl<
                     match msg {
                         Message::Fetch { key } => {
                             debug!(?key, "mailbox: fetch");
-                            self.fetcher.fetch_new(&mut sender, key.clone()).await;
+                            self.fetcher.fetch(&mut sender, key.clone(), true).await;
                         }
                         Message::Cancel { key } => {
                             debug!(?key, "mailbox: cancel");
@@ -212,7 +222,7 @@ impl<
                             };
 
                             // The peer did not have the data, so we need to try again
-                            self.fetcher.fetch_retry(&mut sender, key).await;
+                            self.fetcher.fetch(&mut sender, key, false).await;
                         },
                     }
                 },
@@ -221,14 +231,14 @@ impl<
                 _ = deadline_pending => {
                     let key = self.fetcher.pop_pending();
                     debug!(?key, "retrying");
-                    self.fetcher.fetch_retry(&mut sender, key).await;
+                    self.fetcher.fetch(&mut sender, key, false).await;
                 },
 
                 // Handle active deadline
                 _ = deadline_active => {
                     if let Some(key) = self.fetcher.pop_active() {
                         debug!(?key, "requester timeout");
-                        self.fetcher.fetch_retry(&mut sender, key).await;
+                        self.fetcher.fetch(&mut sender, key, false).await;
                     }
                 },
             }

@@ -2,8 +2,8 @@ use commonware_utils::{Array, SizedSerialize};
 use std::{fmt, ops::Deref};
 use thiserror::Error;
 
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Debug, Hash)]
-pub struct Key(u8);
+#[derive(Clone, Default, Eq, PartialEq, Ord, PartialOrd, Debug, Hash)]
+pub struct Key(pub u8);
 
 impl fmt::Display for Key {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

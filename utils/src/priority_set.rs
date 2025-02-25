@@ -123,9 +123,10 @@ impl<I: Ord + Hash + Clone, P: Ord + Copy> PrioritySet<I, P> {
 
     /// Removes and returns the item with the highest priority.
     pub fn pop(&mut self) -> Option<(I, P)> {
-        self.entries
-            .pop_first()
-            .map(|entry| (entry.item, entry.priority))
+        self.entries.pop_first().map(|entry| {
+            self.keys.remove(&entry.item);
+            (entry.item, entry.priority)
+        })
     }
 
     /// Returns an iterator over all items in the set in priority-ascending order.
