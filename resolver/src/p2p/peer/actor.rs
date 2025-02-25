@@ -157,7 +157,7 @@ impl<
             select! {
                 _ = &mut shutdown => {
                     debug!("shutdown");
-                    self.serves.shutdown();
+                    self.serves.cancel_all();
                     return;
                 },
 
@@ -182,7 +182,7 @@ impl<
                 },
 
                 // Handle completed server requests
-                msg = self.serves.stream() => {
+                msg = self.serves.next_completed() => {
                     let (peer, id, result) = msg;
                     Self::handle_serve(&mut sender, peer, id, result, self.priority_responses).await;
                 },
