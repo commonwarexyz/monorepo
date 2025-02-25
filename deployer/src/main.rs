@@ -615,6 +615,7 @@ nohup /opt/promtail/promtail -config.file=/etc/promtail/promtail.yml &
                 // Delete instances
                 let instance_ids = find_instances_by_tag(&ec2_client, &tag).await?;
                 if !instance_ids.is_empty() {
+                    println!("Terminating instances({}): {:?}", region, instance_ids);
                     terminate_instances(&ec2_client, &instance_ids).await?;
                     wait_for_instances_terminated(&ec2_client, &instance_ids).await?;
                     println!("Terminated instances({}): {:?}", region, instance_ids);
@@ -623,6 +624,7 @@ nohup /opt/promtail/promtail -config.file=/etc/promtail/promtail.yml &
                 // Delete security groups
                 let sg_ids = find_security_groups_by_tag(&ec2_client, &tag).await?;
                 for sg_id in sg_ids {
+                    println!("Deleting security group({}): {}", region, sg_id);
                     delete_security_group(&ec2_client, &sg_id).await?;
                     println!("Deleted security group({}): {}", region, sg_id);
                 }
@@ -630,6 +632,7 @@ nohup /opt/promtail/promtail -config.file=/etc/promtail/promtail.yml &
                 // Delete subnets
                 let subnet_ids = find_subnets_by_tag(&ec2_client, &tag).await?;
                 for subnet_id in subnet_ids {
+                    println!("Deleting subnet({}): {}", region, subnet_id);
                     delete_subnet(&ec2_client, &subnet_id).await?;
                     println!("Deleted subnet({}): {}", region, subnet_id);
                 }
@@ -637,6 +640,7 @@ nohup /opt/promtail/promtail -config.file=/etc/promtail/promtail.yml &
                 // Delete route tables
                 let route_table_ids = find_route_tables_by_tag(&ec2_client, &tag).await?;
                 for rt_id in route_table_ids {
+                    println!("Deleting route table({}): {}", region, rt_id);
                     delete_route_table(&ec2_client, &rt_id).await?;
                     println!("Deleted route table({}): {}", region, rt_id);
                 }
@@ -644,6 +648,10 @@ nohup /opt/promtail/promtail -config.file=/etc/promtail/promtail.yml &
                 // Delete VPC peering connections
                 let peering_ids = find_vpc_peering_by_tag(&ec2_client, &tag).await?;
                 for peering_id in peering_ids {
+                    println!(
+                        "Deleting VPC peering connection({}): {}",
+                        region, peering_id
+                    );
                     delete_vpc_peering(&ec2_client, &peering_id).await?;
                     wait_for_vpc_peering_deletion(&ec2_client, &peering_id).await?;
                     println!("Deleted VPC peering connection({}): {}", region, peering_id);
@@ -652,6 +660,10 @@ nohup /opt/promtail/promtail -config.file=/etc/promtail/promtail.yml &
                 // Delete internet gateways
                 let igw_ids = find_igws_by_tag(&ec2_client, &tag).await?;
                 for igw_id in igw_ids {
+                    println!(
+                        "Detaching and deleting internet gateway({}): {}",
+                        region, igw_id
+                    );
                     let vpc_id = find_vpc_by_igw(&ec2_client, &igw_id).await?;
                     detach_igw(&ec2_client, &igw_id, &vpc_id).await?;
                     delete_igw(&ec2_client, &igw_id).await?;
@@ -663,6 +675,7 @@ nohup /opt/promtail/promtail -config.file=/etc/promtail/promtail.yml &
 
                 // Delete key pair
                 let key_name = format!("deployer-{}", tag);
+                println!("Deleting key pair({}): {}", region, key_name);
                 delete_key_pair(&ec2_client, &key_name).await?;
                 println!("Deleted key pair({}): {}", region, key_name);
             }
@@ -676,6 +689,7 @@ nohup /opt/promtail/promtail -config.file=/etc/promtail/promtail.yml &
                 // Delete VPCs
                 let vpc_ids = find_vpcs_by_tag(&ec2_client, &tag).await?;
                 for vpc_id in vpc_ids {
+                    println!("Deleting VPC({}): {}", region, vpc_id);
                     delete_vpc(&ec2_client, &vpc_id).await?;
                     println!("Deleted VPC({}): {}", region, vpc_id);
                 }
@@ -983,8 +997,14 @@ async fn launch_instances(
         .key_name(key_name)
         .min_count(count)
         .max_count(count)
-        .subnet_id(subnet_id)
-        .security_group_ids(sg_id)
+        .network_interfaces(
+            aws_sdk_ec2::types::InstanceNetworkInterfaceSpecification::builder()
+                .associate_public_ip_address(true)
+                .device_index(0)
+                .subnet_id(subnet_id)
+                .groups(sg_id)
+                .build(),
+        )
         .tag_specifications(
             TagSpecification::builder()
                 .resource_type(ResourceType::Instance)
