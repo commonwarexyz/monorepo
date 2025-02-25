@@ -106,7 +106,7 @@ impl<
                 last_peer_set_id: None,
                 mailbox: receiver,
                 fetcher,
-                serves: FuturesPool::new(),
+                serves: FuturesPool::default(),
                 priority_responses: cfg.priority_responses,
                 _s: PhantomData,
                 _r: PhantomData,

@@ -19,20 +19,15 @@ pub struct Pool<T> {
 
 impl<T: Send> Default for Pool<T> {
     fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<T: Send> Pool<T> {
-    /// Creates a new futures pool.
-    pub fn new() -> Self {
         // Insert a dummy future (that never resolves) to prevent the stream from being empty.
         // Else, the `select_next_some()` function returns `None` instantly.
         let pool = FuturesUnordered::new();
         pool.push(Self::create_dummy_future());
         Self { pool }
     }
+}
 
+impl<T: Send> Pool<T> {
     /// Returns the number of futures in the pool.
     pub fn len(&self) -> usize {
         // Subtract the dummy future.

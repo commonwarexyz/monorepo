@@ -65,6 +65,7 @@ pub struct Fetcher<
 impl<E: Clock + GClock + Rng, C: Scheme, Key: Array, NetS: Sender<PublicKey = C::PublicKey>>
     Fetcher<E, C, Key, NetS>
 {
+    /// Creates a new fetcher.
     pub fn new(
         context: E,
         requester: Requester<E, C>,
