@@ -96,7 +96,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, Key: Array, NetS: Sender<PublicKey = C:
         };
 
         // Send message to peer
-        let payload = Some(Payload::Request(key.to_vec()));
+        let payload = Some(Payload::Request(key.to_vec().into()));
         let msg = wire::PeerMsg { id, payload }.encode_to_vec().into();
         let result = sender.send(Recipients::One(peer.clone()), msg, false).await;
         let result = match result {

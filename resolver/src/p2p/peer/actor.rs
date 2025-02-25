@@ -195,7 +195,7 @@ impl<
                         // Peer is requesting data
                         Some(Payload::Request(request)) => {
                             // Parse request
-                            let Ok(key) = Key::try_from(request) else {
+                            let Ok(key) = Key::try_from(request.to_vec()) else {
                                 warn!(?peer, ?id, "peer invalid request");
                                 continue;
                             };
@@ -211,7 +211,7 @@ impl<
                             };
 
                             // The peer had the data, so we can deliver it to the consumer
-                            self.consumer.deliver(key, Bytes::from(response)).await;
+                            self.consumer.deliver(key, response).await;
                         },
                         // Peer is responding to a request with an error
                         None => {
@@ -256,7 +256,7 @@ impl<
         // Encode message. If the response is an error, send an empty response.
         let msg = wire::PeerMsg {
             id,
-            payload: response.ok().map(|bytes| Payload::Response(bytes.to_vec())),
+            payload: response.ok().map(Payload::Response),
         }
         .encode_to_vec()
         .into();
