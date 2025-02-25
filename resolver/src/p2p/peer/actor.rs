@@ -161,8 +161,9 @@ impl<
                         }
                         Message::Cancel { key } => {
                             debug!(?key, "mailbox: cancel");
-                            self.fetcher.cancel(&key);
-                            self.consumer.failed(key, ()).await;
+                            if self.fetcher.cancel(&key) {
+                                self.consumer.failed(key, ()).await;
+                            }
                         }
                     }
                 },

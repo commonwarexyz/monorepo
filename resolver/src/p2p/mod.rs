@@ -52,7 +52,7 @@ mod tests {
     use bytes::Bytes;
     use commonware_cryptography::ed25519::PublicKey;
     use commonware_cryptography::{Ed25519, Scheme};
-    use commonware_macros::test_traced;
+    use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::deterministic::{Context, Executor};
     use commonware_runtime::{Clock, Metrics, Runner, Spawner};
@@ -425,6 +425,7 @@ mod tests {
             add_link(&mut oracle, LINK_UNRELIABLE.clone(), &peers, 0, 1).await;
             add_link(&mut oracle, LINK_UNRELIABLE.clone(), &peers, 0, 2).await;
 
+            // Run the fetches multiple times to ensure that the peer tries both of its peers
             for _ in 0..10 {
                 // Initiate concurrent fetch requests
                 mailbox1.fetch(key2.clone()).await;
@@ -458,6 +459,85 @@ mod tests {
                     found_key2 && found_key3,
                     "Both keys should have been successfully fetched"
                 );
+            }
+        });
+    }
+
+    /// Tests that canceling an inactive fetch request has no effect.
+    /// Cancels a request before, after, and during the fetch process,
+    #[test_traced]
+    fn test_cancel() {
+        let (executor, context, _) = Executor::timed(Duration::from_secs(10));
+        executor.start(async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            let key = Key(6);
+            let mut prod2 = Producer::default();
+            prod2.insert(key.clone(), Bytes::from("data for key 6"));
+
+            let director = Director::new(peers);
+            let (cons1, mut cons_out1) = setup_consumer();
+
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                &director,
+                schemes.remove(0),
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            )
+            .await;
+
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                &director,
+                schemes.remove(0),
+                connections.remove(0),
+                Consumer::dummy(),
+                prod2,
+            )
+            .await;
+
+            // Cancel before sending the fetch request, expecting no effect
+            mailbox1.cancel(key.clone()).await;
+            select! {
+                _ = cons_out1.next() => { panic!("unexpected event"); },
+                _ = context.sleep(Duration::from_millis(100)) => {},
+            };
+
+            // Initiate fetch and wait for data to be delivered
+            mailbox1.fetch(key.clone()).await;
+            let event = cons_out1.next().await.unwrap();
+            match event {
+                Event::Success(key_actual, value) => {
+                    assert_eq!(key_actual, key);
+                    assert_eq!(value, Bytes::from("data for key 6"));
+                }
+                Event::Failed(_, _) => panic!("Fetch failed unexpectedly"),
+            }
+
+            // Attempt to cancel after data has been delivered, expecting no effect
+            mailbox1.cancel(key.clone()).await;
+            select! {
+                _ = cons_out1.next() => { panic!("unexpected event"); },
+                _ = context.sleep(Duration::from_millis(100)) => {},
+            };
+
+            // Initiate and cancel another fetch request
+            let key = Key(7);
+            mailbox1.fetch(key.clone()).await;
+            mailbox1.cancel(key.clone()).await;
+
+            // Make sure we receive a failure event
+            let event = cons_out1.next().await.unwrap();
+            match event {
+                Event::Failed(key_actual, _failure) => {
+                    assert_eq!(key_actual, key);
+                }
+                Event::Success(_, _) => panic!("Fetch should have been canceled"),
             }
         });
     }
