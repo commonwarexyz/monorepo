@@ -2,17 +2,17 @@ use crate::Array;
 use futures::channel::mpsc;
 use futures::SinkExt;
 
-pub enum Event<K, V, F> {
+pub enum Event<K, V> {
     Success(K, V),
-    Failed(K, F),
+    Failed(K),
 }
 
-pub struct Consumer<K: Array, V, F> {
-    sender: mpsc::Sender<Event<K, V, F>>,
+pub struct Consumer<K: Array, V> {
+    sender: mpsc::Sender<Event<K, V>>,
 }
 
-impl<K: Array, V: Clone, F: Clone> Consumer<K, V, F> {
-    pub fn new(sender: mpsc::Sender<Event<K, V, F>>) -> Self {
+impl<K: Array, V: Clone> Consumer<K, V> {
+    pub fn new(sender: mpsc::Sender<Event<K, V>>) -> Self {
         Self { sender }
     }
 
@@ -22,23 +22,22 @@ impl<K: Array, V: Clone, F: Clone> Consumer<K, V, F> {
     }
 }
 
-impl<K: Array, V: Clone + Send + 'static, F: Clone + Send + 'static> crate::Consumer
-    for Consumer<K, V, F>
-{
+impl<K: Array, V: Clone + Send + 'static> crate::Consumer for Consumer<K, V> {
     type Key = K;
     type Value = V;
-    type Failure = F;
+    type Failure = ();
 
-    async fn deliver(&mut self, key: Self::Key, value: Self::Value) {
+    async fn deliver(&mut self, key: Self::Key, value: Self::Value) -> bool {
         let _ = self.sender.send(Event::Success(key, value)).await;
+        true
     }
 
-    async fn failed(&mut self, key: Self::Key, failure: Self::Failure) {
-        let _ = self.sender.send(Event::Failed(key, failure)).await;
+    async fn failed(&mut self, key: Self::Key, _failure: ()) {
+        let _ = self.sender.send(Event::Failed(key)).await;
     }
 }
 
-impl<K: Array, V: Clone, F: Clone> Clone for Consumer<K, V, F> {
+impl<K: Array, V: Clone> Clone for Consumer<K, V> {
     fn clone(&self) -> Self {
         Self {
             sender: self.sender.clone(),

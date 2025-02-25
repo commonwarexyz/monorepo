@@ -5,7 +5,7 @@ use std::future::Future;
 
 pub mod p2p;
 
-/// The interface that gets notified when data is available.
+/// Notified when data is available, and must validate it.
 pub trait Consumer: Clone + Send + 'static {
     /// Type used to uniquely identify data.
     type Key: Array;
@@ -17,7 +17,9 @@ pub trait Consumer: Clone + Send + 'static {
     type Failure;
 
     /// Deliver data to the consumer.
-    fn deliver(&mut self, key: Self::Key, value: Self::Value) -> impl Future<Output = ()> + Send;
+    ///
+    /// Returns `true` if the data is valid.
+    fn deliver(&mut self, key: Self::Key, value: Self::Value) -> impl Future<Output = bool> + Send;
 
     /// Let the consumer know that the data is not being fetched anymore.
     ///
@@ -26,7 +28,7 @@ pub trait Consumer: Clone + Send + 'static {
         -> impl Future<Output = ()> + Send;
 }
 
-/// The interface responsible for fetching data from the network.
+/// Responsible for fetching data and notifying a `Consumer`.
 pub trait Resolver: Clone + Send + 'static {
     /// Type used to uniquely identify data.
     type Key: Array;

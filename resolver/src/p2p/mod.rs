@@ -13,7 +13,7 @@ mod wire {
     include!(concat!(env!("OUT_DIR"), "/wire.rs"));
 }
 
-/// The interface responsible for serving data requested by the network.
+/// Serves data requested by the network.
 pub trait Producer: Clone + Send + 'static {
     /// Type used to uniquely identify data.
     type Key: Array;
@@ -22,7 +22,7 @@ pub trait Producer: Clone + Send + 'static {
     fn produce(&mut self, key: Self::Key) -> impl Future<Output = oneshot::Receiver<Bytes>> + Send;
 }
 
-/// The interface responsible for managing the list of peers that can be used to fetch data.
+/// Manages the set of peers that can be used to fetch data.
 pub trait Coordinator: Clone + Send + Sync + 'static {
     /// Type used to uniquely identify peers.
     type PublicKey: Array;
@@ -126,11 +126,7 @@ mod tests {
             .unwrap();
     }
 
-    #[allow(clippy::type_complexity)]
-    fn setup_consumer() -> (
-        Consumer<Key, Bytes, ()>,
-        mpsc::Receiver<Event<Key, Bytes, ()>>,
-    ) {
+    fn setup_consumer() -> (Consumer<Key, Bytes>, mpsc::Receiver<Event<Key, Bytes>>) {
         let (sender, receiver) = mpsc::channel(MAILBOX_SIZE);
         let consumer = Consumer::new(sender);
         (consumer, receiver)
@@ -141,7 +137,7 @@ mod tests {
         coordinator: &Coordinator<PublicKey>,
         scheme: Ed25519,
         connection: (Sender<PublicKey>, Receiver<PublicKey>),
-        consumer: Consumer<Key, Bytes, ()>,
+        consumer: Consumer<Key, Bytes>,
         producer: Producer<Key, Bytes>,
     ) -> peer::Mailbox<Key> {
         let (actor, mailbox) = peer::Actor::new(
@@ -217,7 +213,7 @@ mod tests {
                     assert_eq!(key_actual, key);
                     assert_eq!(value, Bytes::from("data for key 2"));
                 }
-                Event::Failed(_, _) => panic!("Fetch failed unexpectedly"),
+                Event::Failed(_) => panic!("Fetch failed unexpectedly"),
             }
         });
     }
@@ -252,7 +248,7 @@ mod tests {
 
             let event = cons_out1.next().await.unwrap();
             match event {
-                Event::Failed(key_actual, _failure) => {
+                Event::Failed(key_actual) => {
                     assert_eq!(key_actual, key);
                 }
                 Event::Success(_, _) => panic!("Fetch should have been canceled"),
@@ -321,7 +317,7 @@ mod tests {
                     assert_eq!(key_actual, key);
                     assert_eq!(value, Bytes::from("data for key 3"));
                 }
-                Event::Failed(_, _) => panic!("Fetch failed unexpectedly"),
+                Event::Failed(_) => panic!("Fetch failed unexpectedly"),
             }
         });
     }
@@ -358,7 +354,7 @@ mod tests {
 
             let event = cons_out1.next().await.expect("Consumer channel closed");
             match event {
-                Event::Failed(key_actual, _failure) => {
+                Event::Failed(key_actual) => {
                     assert_eq!(key_actual, key);
                 }
                 Event::Success(_, _) => {
@@ -449,7 +445,7 @@ mod tests {
                                 panic!("Unexpected key received");
                             }
                         }
-                        Event::Failed(_, _) => panic!("Fetch failed unexpectedly"),
+                        Event::Failed(_) => panic!("Fetch failed unexpectedly"),
                     }
                 }
                 assert!(
@@ -513,7 +509,7 @@ mod tests {
                     assert_eq!(key_actual, key);
                     assert_eq!(value, Bytes::from("data for key 6"));
                 }
-                Event::Failed(_, _) => panic!("Fetch failed unexpectedly"),
+                Event::Failed(_) => panic!("Fetch failed unexpectedly"),
             }
 
             // Attempt to cancel after data has been delivered, expecting no effect
@@ -531,7 +527,7 @@ mod tests {
             // Make sure we receive a failure event
             let event = cons_out1.next().await.unwrap();
             match event {
-                Event::Failed(key_actual, _failure) => {
+                Event::Failed(key_actual) => {
                     assert_eq!(key_actual, key);
                 }
                 Event::Success(_, _) => panic!("Fetch should have been canceled"),

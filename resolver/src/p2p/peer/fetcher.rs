@@ -213,4 +213,9 @@ impl<E: Clock + GClock + Rng, C: Scheme, Key: Array, NetS: Sender<PublicKey = C:
     pub fn reconcile(&mut self, keep: &[C::PublicKey]) {
         self.requester.reconcile(keep);
     }
+
+    /// Blocks a peer from being used to fetch data.
+    pub fn block(&mut self, peer: C::PublicKey) {
+        self.requester.block(peer);
+    }
 }

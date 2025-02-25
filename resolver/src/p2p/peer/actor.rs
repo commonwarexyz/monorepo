@@ -85,6 +85,9 @@ impl<
         NetR: Receiver<PublicKey = C::PublicKey>,
     > Actor<E, C, D, Key, Con, Pro, NetS, NetR>
 {
+    /// Creates a new `Actor` with the given configuration.
+    ///
+    /// Returns the actor and a mailbox to send messages to it.
     pub async fn new(context: E, cfg: Config<C, D, Key, Con, Pro>) -> (Self, Mailbox<Key>) {
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
         let requester = Requester::new(context.clone(), cfg.requester_config);
@@ -221,7 +224,14 @@ impl<
                             };
 
                             // The peer had the data, so we can deliver it to the consumer
-                            self.consumer.deliver(key, response).await;
+                            if self.consumer.deliver(key.clone(), response).await {
+                                // If the data is valid, the fetch is complete
+                                continue;
+                            }
+
+                            // If the data is invalid, we need to block the peer and try again
+                            self.fetcher.block(peer);
+                            self.fetcher.fetch(&mut sender, key, false).await;
                         },
                         // Peer is responding to a request with an error
                         None => {
