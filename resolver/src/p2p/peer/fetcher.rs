@@ -18,8 +18,6 @@ use thiserror::Error;
 use tracing::{info, warn};
 
 /// Errors that can occur when sending network messages.
-///
-/// Only used in this file.
 #[derive(Error, Debug, PartialEq)]
 enum SendError<S: Sender> {
     #[error("send returned empty")]
@@ -42,7 +40,7 @@ pub struct Fetcher<
     Key: Array,
     NetS: Sender<PublicKey = C::PublicKey>,
 > {
-    runtime: E,
+    context: E,
 
     /// Helps find peers to fetch from and tracks which peers are assigned to which request ids.
     requester: Requester<E, C>,
@@ -64,9 +62,9 @@ pub struct Fetcher<
 impl<E: Clock + GClock + Rng, C: Scheme, Key: Array, NetS: Sender<PublicKey = C::PublicKey>>
     Fetcher<E, C, Key, NetS>
 {
-    pub fn new(runtime: E, requester: Requester<E, C>, retry_timeout: Duration) -> Self {
+    pub fn new(context: E, requester: Requester<E, C>, retry_timeout: Duration) -> Self {
         Self {
-            runtime,
+            context,
             requester,
             active: BiHashMap::new(),
             pending: PrioritySet::new(),
@@ -143,7 +141,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, Key: Array, NetS: Sender<PublicKey = C:
     /// Panics if the key is already pending.
     pub fn add_pending(&mut self, key: Key) {
         assert!(!self.pending.contains(&key));
-        let deadline = self.runtime.current() + self.retry_timeout;
+        let deadline = self.context.current() + self.retry_timeout;
         self.pending.put(key, deadline);
     }
 

@@ -55,7 +55,7 @@ mod tests {
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::deterministic::{Context, Executor};
-    use commonware_runtime::{Clock, Metrics, Runner, Spawner};
+    use commonware_runtime::{Clock, Metrics, Runner};
     use futures::channel::mpsc;
     use futures::StreamExt;
     use std::time::Duration;
@@ -143,7 +143,6 @@ mod tests {
         consumer: Consumer<Key, Bytes, ()>,
         producer: Producer<Key, Bytes>,
     ) -> peer::Mailbox<Key> {
-        let public_key = scheme.public_key();
         let (actor, mailbox) = peer::Actor::new(
             context.with_label(&format!("actor_{}", scheme.public_key())),
             peer::Config {
@@ -164,10 +163,7 @@ mod tests {
             },
         )
         .await;
-
-        context
-            .with_label(&format!("actor_{}", public_key))
-            .spawn(|_| actor.start(connection));
+        actor.start(connection);
 
         mailbox
     }

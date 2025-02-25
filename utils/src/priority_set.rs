@@ -135,12 +135,6 @@ impl<I: Ord + Hash + Clone, P: Ord + Copy> PrioritySet<I, P> {
             .iter()
             .map(|entry| (&entry.item, &entry.priority))
     }
-
-    /// Returns the number of items in the set.
-    #[allow(clippy::len_without_is_empty)]
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
 }
 
 #[cfg(test)]
