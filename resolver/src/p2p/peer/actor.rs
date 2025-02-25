@@ -203,49 +203,11 @@ impl<
                             continue;
                         }
                     };
-                    let id = msg.id;
                     match msg.payload {
-                        // Peer is requesting data
-                        Some(Payload::Request(request)) => {
-                            // Parse request
-                            let Ok(key) = Key::try_from(request.to_vec()) else {
-                                warn!(?peer, ?id, "peer invalid request");
-                                continue;
-                            };
-                            self.handle_request(peer, id, key);
-                        },
-                        // Peer is responding to a request with a full response
-                        Some(Payload::Response(response)) => {
-                            debug!(?peer, ?id, "peer response: data");
-
-                            // Get the key d with the response, if any
-                            let Some(key) = self.fetcher.pop_by_id(id, &peer, true) else {
-                                continue;
-                            };
-
-                            // The peer had the data, so we can deliver it to the consumer
-                            if self.consumer.deliver(key.clone(), response).await {
-                                // If the data is valid, the fetch is complete
-                                continue;
-                            }
-
-                            // If the data is invalid, we need to block the peer and try again
-                            self.fetcher.block(peer);
-                            self.fetcher.fetch(&mut sender, key, false).await;
-                        },
-                        // Peer is responding to a request with an error
-                        None => {
-                            warn!(?peer, ?id, "peer response: error");
-
-                            // Get the key associated with the response, if any
-                            let Some(key) = self.fetcher.pop_by_id(id, &peer, false) else {
-                                continue;
-                            };
-
-                            // The peer did not have the data, so we need to try again
-                            self.fetcher.fetch(&mut sender, key, false).await;
-                        },
-                    }
+                        Some(Payload::Request(request)) => self.handle_network_request(peer, msg.id, request).await,
+                        Some(Payload::Response(response)) => self.handle_network_response(&mut sender, peer, msg.id, response).await,
+                        None => self.handle_network_response_empty(&mut sender, peer, msg.id).await,
+                    };
                 },
 
                 // Handle pending deadline
@@ -295,8 +257,14 @@ impl<
         };
     }
 
-    /// Handles the case where a peer sends a request to this peer.
-    fn handle_request(&mut self, peer: C::PublicKey, id: u64, request: Key) {
+    /// Handle a network request from a peer.
+    async fn handle_network_request(&mut self, peer: C::PublicKey, id: u64, request: Bytes) {
+        // Parse request
+        let Ok(key) = Key::try_from(request.to_vec()) else {
+            warn!(?peer, ?id, "peer invalid request");
+            return;
+        };
+
         // If the peer is not allowed to request, drop the request
         if !self.coordinator.is_peer(&peer) {
             warn!(?peer, ?id, "dropping request: peer not allowed");
@@ -307,9 +275,55 @@ impl<
         debug!(?peer, ?id, "peer request");
         let mut producer = self.producer.clone();
         self.serves.push(async move {
-            let receiver = producer.produce(request).await;
+            let receiver = producer.produce(key).await;
             let result = receiver.await;
             (peer, id, result)
         });
+    }
+
+    /// Handle a network response from a peer.
+    async fn handle_network_response(
+        &mut self,
+        sender: &mut NetS,
+        peer: C::PublicKey,
+        id: u64,
+        response: Bytes,
+    ) {
+        debug!(?peer, ?id, "peer response: data");
+
+        // Get the key associated with the response, if any
+        let Some(key) = self.fetcher.pop_by_id(id, &peer, true) else {
+            // It's possible that the key does not exist if the request was canceled
+            return;
+        };
+
+        // The peer had the data, so we can deliver it to the consumer
+        if self.consumer.deliver(key.clone(), response).await {
+            // If the data is valid, the fetch is complete
+            return;
+        }
+
+        // If the data is invalid, we need to block the peer and try again
+        self.fetcher.block(peer);
+        self.fetcher.fetch(sender, key, false).await;
+    }
+
+    /// Handle a network response from a peer that did not have the data.
+    async fn handle_network_response_empty(
+        &mut self,
+        sender: &mut NetS,
+        peer: C::PublicKey,
+        id: u64,
+    ) {
+        warn!(?peer, ?id, "peer response: error");
+
+        // Get the key associated with the response, if any
+        let Some(key) = self.fetcher.pop_by_id(id, &peer, false) else {
+            // It's possible that the key does not exist if the request was canceled
+            return;
+        };
+
+        // The peer did not have the data, so we need to try again
+        self.fetcher.fetch(sender, key, false).await;
     }
 }
