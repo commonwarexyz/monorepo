@@ -18,6 +18,7 @@ use tokio::process::Command;
 use tokio::time::{sleep, Duration};
 use uuid::Uuid;
 
+const MAX_SSH_ATTEMPTS: usize = 10;
 const MONITORING_REGION: &str = "us-east-1";
 const PROMETHEUS_VERSION: &str = "2.30.3";
 const LOKI_VERSION: &str = "2.9.2";
@@ -1249,35 +1250,51 @@ async fn scp_file(
     ip: &str,
     remote_path: &str,
 ) -> Result<(), Box<dyn Error>> {
-    let status = Command::new("scp")
-        .arg("-i")
-        .arg(key_file)
-        .arg("-o")
-        .arg("StrictHostKeyChecking=no")
-        .arg(local_path)
-        .arg(format!("ubuntu@{}:{}", ip, remote_path))
-        .status()
-        .await?;
-    if !status.success() {
-        return Err("SCP failed".into());
+    for _ in 0..MAX_SSH_ATTEMPTS {
+        // Attempt to copy file to remote instance
+        let status = Command::new("scp")
+            .arg("-i")
+            .arg(key_file)
+            .arg("-o")
+            .arg("StrictHostKeyChecking=no")
+            .arg(local_path)
+            .arg(format!("ubuntu@{}:{}", ip, remote_path))
+            .status()
+            .await?;
+        if status.success() {
+            return Ok(());
+        }
+
+        // Retry if the file copy failed
+        println!("SCP failed: {:?}", status);
+        sleep(Duration::from_secs(5)).await;
     }
-    Ok(())
+    // TODO: fix this error
+    Err("SCP failed".into())
 }
 
 async fn ssh_execute(key_file: &str, ip: &str, command: &str) -> Result<(), Box<dyn Error>> {
-    let status = Command::new("ssh")
-        .arg("-i")
-        .arg(key_file)
-        .arg("-o")
-        .arg("StrictHostKeyChecking=no")
-        .arg(format!("ubuntu@{}", ip))
-        .arg(command)
-        .status()
-        .await?;
-    if !status.success() {
-        return Err("SSH failed".into());
+    for _ in 0..MAX_SSH_ATTEMPTS {
+        // Attempt to execute command on remote instance
+        let status = Command::new("ssh")
+            .arg("-i")
+            .arg(key_file)
+            .arg("-o")
+            .arg("StrictHostKeyChecking=no")
+            .arg(format!("ubuntu@{}", ip))
+            .arg(command)
+            .status()
+            .await?;
+        if status.success() {
+            return Ok(());
+        }
+
+        // Retry if the command execution failed
+        println!("SSH failed: {:?}", status);
+        sleep(Duration::from_secs(5)).await;
     }
-    Ok(())
+    // TODO: fix this error
+    Err("SSH failed".into())
 }
 
 async fn find_instances_by_tag(ec2_client: &Ec2Client, tag: &str) -> Result<Vec<String>, Ec2Error> {
