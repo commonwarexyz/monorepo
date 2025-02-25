@@ -147,7 +147,6 @@ mod tests {
         let (actor, mailbox) = peer::Actor::new(
             context.with_label(&format!("actor_{}", scheme.public_key())),
             peer::Config {
-                crypto: scheme.clone(),
                 coordinator: coordinator.clone(),
                 consumer,
                 producer,

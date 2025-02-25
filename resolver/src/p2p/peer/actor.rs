@@ -39,6 +39,7 @@ pub struct Actor<
     NetS: Sender<PublicKey = C::PublicKey>,
     NetR: Receiver<PublicKey = C::PublicKey>,
 > {
+    /// Context used to spawn tasks, manage time, etc.
     context: E,
 
     /// Consumes data that is fetched from the network

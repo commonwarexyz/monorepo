@@ -16,13 +16,27 @@ pub struct Config<
     Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
     Pro: Producer<Key = Key>,
 > {
-    pub crypto: C,
+    /// Manages the current set of peers
     pub coordinator: D,
+
+    /// The consumer that gets notified when data is available
     pub consumer: Con,
+
+    /// The producer that serves data requests
     pub producer: Pro,
+
+    /// The maximum size of the mailbox backlog
     pub mailbox_size: usize,
+
+    /// Configuration for the requester
     pub requester_config: requester::Config<C>,
+
+    /// Time that fetches remain in the pending queue before being retried
     pub fetch_retry_timeout: Duration,
+
+    /// Whether requests are sent with priority over other network messages
     pub priority_requests: bool,
+
+    /// Whether responses are sent with priority over other network messages
     pub priority_responses: bool,
 }
