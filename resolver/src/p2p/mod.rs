@@ -1,4 +1,30 @@
-//! Makes and responds to requests using the P2P network.
+//! Resolve data identified by a fixed-length key by using the P2P network.
+//!
+//! # Overview
+//!
+//! The `p2p` module enables resolving data by fixed-length keys in a P2P network. Central to the
+//! module is the `peer` actor which manages the fetch-request lifecycle. Its mailbox allows
+//! initiation and cancellation of fetch requests via the `Resolver` interface.
+//!
+//! The peer handles an arbitrarily large number of concurrent fetch requests by sending requests
+//! to other peers and processing their responses. It uses a `Requester` to select peers based on
+//! performance, retrying with another peer if one fails or provides invalid data. Requests persist
+//! until canceled or fulfilled, delivering data to the `Consumer` for verification.
+//!
+//! The `Consumer` checks data integrity and authenticity (critical in an adversarial environment)
+//! and returns `true` if valid, completing the fetch, or `false` to retry.
+//!
+//! The peer also serves data to other peers, forwarding network requests to the `Producer`. The
+//! `Producer` provides data asynchronously (e.g., from storage). If it fails, the  peer sends an
+//! empty response, prompting the requester to retry elsewhere. Peer communication uses Protobuf for
+//! message serialization, with unique IDs to match requests and responses.
+//!
+//! Lastly, the `Coordinator` manages the set of peers that can be used to fetch data.
+//!
+//! # Performance Considerations
+//!
+//! The peer supports arbitrarily many concurrent fetch requests, but resource usage generally
+//! depends on the rate-limiting configuration of the `Requester` and of the underlying P2P network.
 
 use bytes::Bytes;
 use commonware_utils::Array;
