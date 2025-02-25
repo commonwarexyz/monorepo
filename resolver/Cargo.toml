@@ -11,13 +11,13 @@ repository = "https://github.com/commonwarexyz/monorepo/tree/main/resolver"
 documentation = "https://docs.rs/commonware-resolver"
 
 [dependencies]
-bimap = { workspace = true }
 commonware-cryptography = { workspace = true }
 commonware-macros = { workspace = true }
 commonware-p2p = { workspace = true }
 commonware-runtime = { workspace = true }
 commonware-stream = { workspace = true }
 commonware-utils = { workspace = true }
+bimap = { workspace = true }
 bytes = { workspace = true }
 rand = { workspace = true }
 futures = { workspace = true }

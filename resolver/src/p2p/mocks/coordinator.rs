@@ -1,7 +1,7 @@
 use crate::Array;
 use std::sync::{Arc, Mutex};
 
-pub struct Director<P: Array> {
+pub struct Coordinator<P: Array> {
     state: Arc<Mutex<State<P>>>,
 }
 
@@ -10,7 +10,7 @@ struct State<P: Array> {
     peer_set_id: u64,
 }
 
-impl<P: Array> Director<P> {
+impl<P: Array> Coordinator<P> {
     pub fn new(initial_peers: Vec<P>) -> Self {
         let state = State {
             peers: initial_peers,
@@ -34,7 +34,7 @@ impl<P: Array> Director<P> {
     }
 }
 
-impl<P: Array> Clone for Director<P> {
+impl<P: Array> Clone for Coordinator<P> {
     fn clone(&self) -> Self {
         Self {
             state: self.state.clone(),
@@ -42,7 +42,7 @@ impl<P: Array> Clone for Director<P> {
     }
 }
 
-impl<P: Array> crate::p2p::Director for Director<P> {
+impl<P: Array> crate::p2p::Coordinator for Coordinator<P> {
     type PublicKey = P;
 
     fn peers(&self) -> &Vec<Self::PublicKey> {

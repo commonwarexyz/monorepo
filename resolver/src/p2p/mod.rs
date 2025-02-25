@@ -23,7 +23,7 @@ pub trait Producer: Clone + Send + 'static {
 }
 
 /// The interface responsible for managing the list of peers that can be used to fetch data.
-pub trait Director: Clone + Send + Sync + 'static {
+pub trait Coordinator: Clone + Send + Sync + 'static {
     /// Type used to uniquely identify peers.
     type PublicKey: Array;
 
@@ -45,7 +45,7 @@ pub trait Director: Clone + Send + Sync + 'static {
 #[cfg(test)]
 mod tests {
     use super::{
-        mocks::{Consumer, Director, Event, Key, Producer},
+        mocks::{Consumer, Coordinator, Event, Key, Producer},
         peer,
     };
     use crate::Resolver;
@@ -137,7 +137,7 @@ mod tests {
 
     async fn setup_and_spawn_actor(
         context: &Context,
-        director: &Director<PublicKey>,
+        coordinator: &Coordinator<PublicKey>,
         scheme: Ed25519,
         connection: (Sender<PublicKey>, Receiver<PublicKey>),
         consumer: Consumer<Key, Bytes, ()>,
@@ -148,7 +148,7 @@ mod tests {
             context.with_label(&format!("actor_{}", scheme.public_key())),
             peer::Config {
                 crypto: scheme.clone(),
-                director: director.clone(),
+                coordinator: coordinator.clone(),
                 consumer,
                 producer,
                 mailbox_size: MAILBOX_SIZE,
@@ -165,10 +165,9 @@ mod tests {
         )
         .await;
 
-        let (sender, receiver) = connection;
         context
             .with_label(&format!("actor_{}", public_key))
-            .spawn(|_| actor.start((sender, receiver)));
+            .spawn(|_| actor.start(connection));
 
         mailbox
     }
@@ -189,12 +188,12 @@ mod tests {
             let mut prod2 = Producer::default();
             prod2.insert(key.clone(), Bytes::from("data for key 2"));
 
-            let director = Director::new(peers);
+            let coordinator = Coordinator::new(peers);
             let (cons1, mut cons_out1) = setup_consumer();
 
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                &director,
+                &coordinator,
                 schemes.remove(0),
                 connections.remove(0),
                 cons1,
@@ -204,7 +203,7 @@ mod tests {
 
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                &director,
+                &coordinator,
                 schemes.remove(0),
                 connections.remove(0),
                 Consumer::dummy(),
@@ -235,13 +234,13 @@ mod tests {
             let (_oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1]).await;
 
-            let director = Director::new(peers);
+            let coordinator = Coordinator::new(peers);
             let (cons1, mut cons_out1) = setup_consumer();
             let prod1 = Producer::default();
 
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                &director,
+                &coordinator,
                 schemes.remove(0),
                 connections.remove(0),
                 cons1,
@@ -283,12 +282,12 @@ mod tests {
             let key = Key(3);
             prod3.insert(key.clone(), Bytes::from("data for key 3"));
 
-            let director = Director::new(peers);
+            let coordinator = Coordinator::new(peers);
             let (cons1, mut cons_out1) = setup_consumer();
 
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                &director,
+                &coordinator,
                 schemes.remove(0),
                 connections.remove(0),
                 cons1,
@@ -298,7 +297,7 @@ mod tests {
 
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                &director,
+                &coordinator,
                 schemes.remove(0),
                 connections.remove(0),
                 Consumer::dummy(),
@@ -308,7 +307,7 @@ mod tests {
 
             let _mailbox3 = setup_and_spawn_actor(
                 &context,
-                &director,
+                &coordinator,
                 schemes.remove(0),
                 connections.remove(0),
                 Consumer::dummy(),
@@ -330,7 +329,7 @@ mod tests {
     }
 
     /// Tests fetching when no peers are available.
-    /// This test sets up a single peer with an empty director (no peers).
+    /// This test sets up a single peer with an empty coordinator (no peers).
     /// It initiates a fetch, waits beyond the retry timeout, cancels the fetch,
     /// and verifies that the consumer receives a failure notification.
     #[test_traced]
@@ -340,13 +339,13 @@ mod tests {
             let (_oracle, mut schemes, _peers, mut connections) =
                 setup_network_and_peers(&context, &[1]).await;
 
-            let director = Director::new(vec![]);
+            let coordinator = Coordinator::new(vec![]);
             let (cons1, mut cons_out1) = setup_consumer();
             let prod1 = Producer::default();
 
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                &director,
+                &coordinator,
                 schemes.remove(0),
                 connections.remove(0),
                 cons1,
@@ -388,12 +387,12 @@ mod tests {
             let mut prod3 = Producer::default();
             prod3.insert(key3.clone(), Bytes::from("data for key 3"));
 
-            let director = Director::new(peers.clone());
+            let coordinator = Coordinator::new(peers.clone());
             let (cons1, mut cons_out1) = setup_consumer();
 
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                &director,
+                &coordinator,
                 schemes.remove(0),
                 connections.remove(0),
                 cons1,
@@ -403,7 +402,7 @@ mod tests {
 
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                &director,
+                &coordinator,
                 schemes.remove(0),
                 connections.remove(0),
                 Consumer::dummy(),
@@ -413,7 +412,7 @@ mod tests {
 
             let _mailbox3 = setup_and_spawn_actor(
                 &context,
-                &director,
+                &coordinator,
                 schemes.remove(0),
                 connections.remove(0),
                 Consumer::dummy(),
@@ -478,12 +477,12 @@ mod tests {
             let mut prod2 = Producer::default();
             prod2.insert(key.clone(), Bytes::from("data for key 6"));
 
-            let director = Director::new(peers);
+            let coordinator = Coordinator::new(peers);
             let (cons1, mut cons_out1) = setup_consumer();
 
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                &director,
+                &coordinator,
                 schemes.remove(0),
                 connections.remove(0),
                 cons1,
@@ -493,7 +492,7 @@ mod tests {
 
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                &director,
+                &coordinator,
                 schemes.remove(0),
                 connections.remove(0),
                 Consumer::dummy(),

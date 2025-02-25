@@ -1,5 +1,5 @@
 use crate::{
-    p2p::{Director, Producer},
+    p2p::{Coordinator, Producer},
     Consumer,
 };
 use bytes::Bytes;
@@ -11,13 +11,13 @@ use std::time::Duration;
 /// Configuration for the peer actor.
 pub struct Config<
     C: Scheme,
-    D: Director<PublicKey = C::PublicKey>,
+    D: Coordinator<PublicKey = C::PublicKey>,
     Key: Array,
     Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
     Pro: Producer<Key = Key>,
 > {
     pub crypto: C,
-    pub director: D,
+    pub coordinator: D,
     pub consumer: Con,
     pub producer: Pro,
     pub mailbox_size: usize,

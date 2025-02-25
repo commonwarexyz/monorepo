@@ -1,11 +1,11 @@
 //! Mock implementations for testing.
 
 mod consumer;
-mod director;
+mod coordinator;
 mod key;
 mod producer;
 
 pub use consumer::{Consumer, Event};
-pub use director::Director;
+pub use coordinator::Coordinator;
 pub use key::Key;
 pub use producer::Producer;

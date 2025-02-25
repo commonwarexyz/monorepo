@@ -6,7 +6,7 @@ use super::{
 use crate::{
     p2p::{
         wire::{self, peer_msg::Payload},
-        Director, Producer,
+        Coordinator, Producer,
     },
     Consumer,
 };
@@ -32,7 +32,7 @@ use tracing::{debug, error, warn};
 pub struct Actor<
     E: Clock + GClock + Spawner + Rng + Metrics,
     C: Scheme,
-    D: Director<PublicKey = C::PublicKey>,
+    D: Coordinator<PublicKey = C::PublicKey>,
     Key: Array,
     Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
     Pro: Producer<Key = Key>,
@@ -48,7 +48,7 @@ pub struct Actor<
     producer: Pro,
 
     /// Manages the list of peers that can be used to fetch data
-    director: D,
+    coordinator: D,
 
     /// Used to detect changes in the peer set
     last_peer_set_id: Option<u64>,
@@ -73,7 +73,7 @@ pub struct Actor<
 impl<
         E: Clock + GClock + Spawner + Rng + Metrics,
         C: Scheme,
-        D: Director<PublicKey = C::PublicKey>,
+        D: Coordinator<PublicKey = C::PublicKey>,
         Key: Array,
         Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
         Pro: Producer<Key = Key>,
@@ -90,7 +90,7 @@ impl<
                 context,
                 consumer: cfg.consumer,
                 producer: cfg.producer,
-                director: cfg.director,
+                coordinator: cfg.coordinator,
                 last_peer_set_id: None,
                 mailbox: receiver,
                 fetcher,
@@ -117,15 +117,15 @@ impl<
         let mut shutdown = self.context.stopped();
 
         // Set initial peer set.
-        self.last_peer_set_id = Some(self.director.peer_set_id());
-        self.fetcher.reconcile(self.director.peers());
+        self.last_peer_set_id = Some(self.coordinator.peer_set_id());
+        self.fetcher.reconcile(self.coordinator.peers());
 
         loop {
-            // Update peer list if-and-only-if it has changed
-            let peer_set_id = self.director.peer_set_id();
+            // Update peer list if-and-only-if it might have changed.
+            let peer_set_id = self.coordinator.peer_set_id();
             if self.last_peer_set_id != Some(peer_set_id) {
                 self.last_peer_set_id = Some(peer_set_id);
-                self.fetcher.reconcile(self.director.peers());
+                self.fetcher.reconcile(self.coordinator.peers());
             }
 
             // Get retry timeout (if any)
@@ -205,7 +205,7 @@ impl<
                         Some(Payload::Response(response)) => {
                             debug!(?peer, ?id, "peer response: data");
 
-                            // Get the key associate with the response, if any
+                            // Get the key d with the response, if any
                             let Some(key) = self.fetcher.pop_by_id(id, &peer, true) else {
                                 continue;
                             };
@@ -217,7 +217,7 @@ impl<
                         None => {
                             warn!(?peer, ?id, "peer response: error");
 
-                            // Get the key associate with the response, if any
+                            // Get the key associated with the response, if any
                             let Some(key) = self.fetcher.pop_by_id(id, &peer, false) else {
                                 continue;
                             };
@@ -275,7 +275,7 @@ impl<
     /// Handles the case where a peer sends a request to this peer.
     fn handle_request(&mut self, peer: C::PublicKey, id: u64, request: Key) {
         // If the peer is not allowed to request, drop the request
-        if !self.director.is_peer(&peer) {
+        if !self.coordinator.is_peer(&peer) {
             warn!(?peer, ?id, "dropping request: peer not allowed");
             return;
         }
