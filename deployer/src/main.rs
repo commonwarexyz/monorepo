@@ -271,6 +271,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 &monitoring_resources.subnet_id,
                 monitoring_resources.monitoring_sg_id.as_ref().unwrap(),
                 1,
+                "monitoring",
                 &tag,
             )
             .await?[0]
@@ -283,6 +284,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .clone();
             let monitoring_private_ip =
                 get_private_ip(monitoring_ec2_client, &monitoring_instance_id).await?;
+            println!(
+                "Launched monitoring instance({:?}): {}",
+                monitoring_region, monitoring_instance_id
+            );
 
             // Create regular security groups for each region
             for (region, resources) in region_resources.iter_mut() {
@@ -296,6 +301,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     &config.ports,
                 )
                 .await?;
+                println!("Created regular group({:?}): {}", region, regular_sg_id);
                 resources.regular_sg_id = Some(regular_sg_id);
             }
 
@@ -325,6 +331,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         &resources.subnet_id,
                         regular_sg_id,
                         1,
+                        &instance.name,
                         &tag,
                     )
                     .await?[0]
@@ -332,6 +339,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     let ip = wait_for_instances_running(ec2_client, &[instance_id.clone()]).await?
                         [0]
                     .clone();
+                    println!(
+                        "Launched instance({:?}): {}({})",
+                        region, instance.name, instance_id,
+                    );
                     Ok::<Deployment, Box<dyn Error>>(Deployment {
                         instance: instance.clone(),
                         ip,
@@ -988,6 +999,7 @@ async fn launch_instances(
     subnet_id: &str,
     sg_id: &str,
     count: i32,
+    name: &str,
     tag: &str,
 ) -> Result<Vec<String>, Ec2Error> {
     let resp = client
@@ -1008,7 +1020,10 @@ async fn launch_instances(
         .tag_specifications(
             TagSpecification::builder()
                 .resource_type(ResourceType::Instance)
-                .tags(Tag::builder().key("deployer").value(tag).build())
+                .set_tags(Some(vec![
+                    Tag::builder().key("deployer").value(tag).build(),
+                    Tag::builder().key("name").value(name).build(),
+                ]))
                 .build(),
         )
         .block_device_mappings(
