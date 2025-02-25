@@ -2,6 +2,7 @@ use commonware_utils::{Array, SizedSerialize};
 use std::{fmt, ops::Deref};
 use thiserror::Error;
 
+/// A key that can be used for testing
 #[derive(Clone, Default, Eq, PartialEq, Ord, PartialOrd, Debug, Hash)]
 pub struct Key(pub u8);
 
@@ -56,6 +57,7 @@ impl Array for Key {
     type Error = Error;
 }
 
+/// Error type for the Array trait
 #[derive(Error, Debug, PartialEq)]
 pub enum Error {
     #[error("try_from failed")]

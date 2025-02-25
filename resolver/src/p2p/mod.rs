@@ -57,7 +57,6 @@ mod tests {
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::deterministic::{Context, Executor};
     use commonware_runtime::{Clock, Metrics, Runner};
-    use futures::channel::mpsc;
     use futures::StreamExt;
     use std::time::Duration;
 
@@ -126,12 +125,6 @@ mod tests {
             .unwrap();
     }
 
-    fn setup_consumer() -> (Consumer<Key, Bytes>, mpsc::Receiver<Event<Key, Bytes>>) {
-        let (sender, receiver) = mpsc::channel(MAILBOX_SIZE);
-        let consumer = Consumer::new(sender);
-        (consumer, receiver)
-    }
-
     async fn setup_and_spawn_actor(
         context: &Context,
         coordinator: &Coordinator<PublicKey>,
@@ -183,7 +176,7 @@ mod tests {
             prod2.insert(key.clone(), Bytes::from("data for key 2"));
 
             let coordinator = Coordinator::new(peers);
-            let (cons1, mut cons_out1) = setup_consumer();
+            let (cons1, mut cons_out1) = Consumer::new();
 
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
@@ -229,7 +222,7 @@ mod tests {
                 setup_network_and_peers(&context, &[1]).await;
 
             let coordinator = Coordinator::new(peers);
-            let (cons1, mut cons_out1) = setup_consumer();
+            let (cons1, mut cons_out1) = Consumer::new();
             let prod1 = Producer::default();
 
             let mut mailbox1 = setup_and_spawn_actor(
@@ -277,7 +270,7 @@ mod tests {
             prod3.insert(key.clone(), Bytes::from("data for key 3"));
 
             let coordinator = Coordinator::new(peers);
-            let (cons1, mut cons_out1) = setup_consumer();
+            let (cons1, mut cons_out1) = Consumer::new();
 
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
@@ -334,7 +327,7 @@ mod tests {
                 setup_network_and_peers(&context, &[1]).await;
 
             let coordinator = Coordinator::new(vec![]);
-            let (cons1, mut cons_out1) = setup_consumer();
+            let (cons1, mut cons_out1) = Consumer::new();
             let prod1 = Producer::default();
 
             let mut mailbox1 = setup_and_spawn_actor(
@@ -382,7 +375,7 @@ mod tests {
             prod3.insert(key3.clone(), Bytes::from("data for key 3"));
 
             let coordinator = Coordinator::new(peers.clone());
-            let (cons1, mut cons_out1) = setup_consumer();
+            let (cons1, mut cons_out1) = Consumer::new();
 
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
@@ -472,7 +465,7 @@ mod tests {
             prod2.insert(key.clone(), Bytes::from("data for key 6"));
 
             let coordinator = Coordinator::new(peers);
-            let (cons1, mut cons_out1) = setup_consumer();
+            let (cons1, mut cons_out1) = Consumer::new();
 
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
@@ -568,8 +561,7 @@ mod tests {
             let coordinator3 = Coordinator::new(vec![peers[0].clone()]);
 
             // Set up consumer for Peer1 with expected values
-            let (sender1, mut cons_out1) = mpsc::channel(MAILBOX_SIZE);
-            let mut cons1 = Consumer::new(sender1);
+            let (mut cons1, mut cons_out1) = Consumer::new();
             cons1.add_expected(key_a.clone(), valid_data_a.clone());
             cons1.add_expected(key_b.clone(), valid_data_b.clone());
 

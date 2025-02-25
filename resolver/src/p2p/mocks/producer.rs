@@ -2,14 +2,16 @@ use crate::Array;
 use bytes::Bytes;
 use futures::channel::oneshot;
 use std::collections::HashMap;
-use std::hash::Hash;
 
+/// A producer that can be used for testing
 #[derive(Clone, Default)]
-pub struct Producer<K: Hash + Eq, V> {
+pub struct Producer<K: Array, V> {
+    /// The data that the producer produces upon request
     data: HashMap<K, V>,
 }
 
-impl<K: Hash + Eq, V> Producer<K, V> {
+impl<K: Array, V> Producer<K, V> {
+    /// Adds a key-value pair to the producer
     pub fn insert(&mut self, key: K, value: V) {
         self.data.insert(key, value);
     }

@@ -1,16 +1,21 @@
 use crate::Array;
 use std::sync::{Arc, Mutex};
 
+/// A coordinator that can be used for testing
+#[derive(Clone)]
 pub struct Coordinator<P: Array> {
+    /// The state of the coordinator
     state: Arc<Mutex<State<P>>>,
 }
 
+/// The state of the coordinator
 struct State<P: Array> {
     peers: Vec<P>,
     peer_set_id: u64,
 }
 
 impl<P: Array> Coordinator<P> {
+    /// Creates a new coordinator with the given initial peers
     pub fn new(initial_peers: Vec<P>) -> Self {
         let state = State {
             peers: initial_peers,
@@ -21,6 +26,7 @@ impl<P: Array> Coordinator<P> {
         }
     }
 
+    /// Updates the peers of the coordinator
     pub fn set_peers(&self, new_peers: Vec<P>) {
         let mut state = self.state.lock().unwrap();
         state.peers = new_peers;
@@ -31,14 +37,6 @@ impl<P: Array> Coordinator<P> {
     fn get_peers(&self) -> Vec<P> {
         let state = self.state.lock().unwrap();
         state.peers.clone()
-    }
-}
-
-impl<P: Array> Clone for Coordinator<P> {
-    fn clone(&self) -> Self {
-        Self {
-            state: self.state.clone(),
-        }
     }
 }
 

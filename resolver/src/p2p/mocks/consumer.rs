@@ -3,8 +3,13 @@ use futures::channel::mpsc;
 use futures::SinkExt;
 use std::collections::HashMap;
 
+/// An event that indicates the messages that were sent to the consumer
+#[derive(Debug)]
 pub enum Event<K, V> {
+    /// The consumer received a value for a key and considered it valid
     Success(K, V),
+
+    /// The consumer failed to fetch a value for a key
     Failed(K),
 }
 
@@ -12,7 +17,7 @@ pub enum Event<K, V> {
 #[derive(Clone)]
 pub struct Consumer<K: Array, V> {
     /// The sender to send events to
-    sender: mpsc::Sender<Event<K, V>>,
+    sender: mpsc::UnboundedSender<Event<K, V>>,
 
     /// The expected values for each key
     ///
@@ -22,16 +27,22 @@ pub struct Consumer<K: Array, V> {
 
 impl<K: Array, V: Clone + PartialEq> Consumer<K, V> {
     /// Create a new consumer
-    pub fn new(sender: mpsc::Sender<Event<K, V>>) -> Self {
-        Self {
-            sender,
-            expected: HashMap::new(),
-        }
+    ///
+    /// Returns the consumer and a receiver that can be used to get the events
+    pub fn new() -> (Self, mpsc::UnboundedReceiver<Event<K, V>>) {
+        let (sender, receiver) = mpsc::unbounded();
+        (
+            Self {
+                sender,
+                expected: HashMap::new(),
+            },
+            receiver,
+        )
     }
 
     /// Create a dummy consumer that is not expected to be used
     pub fn dummy() -> Self {
-        let (sender, _) = mpsc::channel(0);
+        let (sender, _) = mpsc::unbounded();
         Self {
             sender,
             expected: HashMap::new(),
