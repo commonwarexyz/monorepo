@@ -35,7 +35,8 @@ cargo build --release && mv ../target/release/commonware-deployer ~/.cargo/bin/
 ### Deploy Infrastructure
 
 ```bash
-commonware-deployer setup --config config.yaml
+cd assets;
+commonware-deployer setup --config config.yaml;
 ```
 
 ### Check Metrics

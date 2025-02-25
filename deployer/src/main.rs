@@ -83,7 +83,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .get_matches();
 
     // Determine deployer IP
-    let deployer_ip = reqwest::get("http://ipv4.icanhazip.com")
+    let deployer_ip = reqwest::get("https://ipv4.icanhazip.com")
         .await?
         .text()
         .await?
