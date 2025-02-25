@@ -26,10 +26,6 @@ use tracing::{error, info, Level};
 const FLOOD_NAMESPACE: &[u8] = b"_COMMONWARE_FLOOD";
 const METRICS_PORT: u16 = 9090;
 
-async fn metrics_handler<E: Metrics>(extension: Extension<E>) -> String {
-    extension.0.encode()
-}
-
 fn main() {
     // Parse arguments
     let matches = Command::new("runner")
@@ -125,9 +121,10 @@ fn main() {
 
         // Serve metrics
         let metrics = context.with_label("metrics").spawn(|context| async move {
-            let app = Router::new()
-                .route("/metrics", get(metrics_handler::<Context>))
-                .layer(Extension(context.clone()));
+            let app = Router::new().route(
+                "/metrics",
+                get(|extension: Extension<Context>| async move { extension.0.encode() }),
+            );
             let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), METRICS_PORT);
             let listener = context
                 .bind(addr)
