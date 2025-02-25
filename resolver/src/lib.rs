@@ -1,4 +1,4 @@
-//! Resolve data by unique key.
+//! Resolve data identified by a fixed-length key.
 
 use commonware_utils::Array;
 use std::future::Future;
