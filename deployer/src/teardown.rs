@@ -63,16 +63,20 @@ pub async fn teardown(tag: &str, config_path: &str) -> Result<(), Box<dyn Error>
                 .to_port(3100)
                 .user_id_group_pairs(UserIdGroupPair::builder().group_id(regular_sg).build())
                 .build();
-            ec2_client
+            if let Err(e) = ec2_client
                 .revoke_security_group_ingress()
                 .group_id(monitoring_sg)
                 .ip_permissions(ip_permission)
                 .send()
-                .await?;
-            println!(
+                .await
+            {
+                println!("Error revoking ingress rule: {:?}", e);
+            } else {
+                println!(
                 "Revoked ingress rule from monitoring security group({}) to regular security group({})",
                 monitoring_sg, regular_sg
             );
+            }
         }
 
         let sgs = find_security_groups_by_tag(&ec2_client, tag).await?;
