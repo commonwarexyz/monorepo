@@ -369,11 +369,18 @@ pub async fn wait_for_instances_running(
     instance_ids: &[String],
 ) -> Result<Vec<String>, Ec2Error> {
     loop {
-        let resp = client
+        // Ask for instance details
+        let Ok(resp) = client
             .describe_instances()
             .set_instance_ids(Some(instance_ids.to_vec()))
             .send()
-            .await?;
+            .await
+        else {
+            sleep(Duration::from_secs(5)).await;
+            continue;
+        };
+
+        // Confirm all are running
         let reservations = resp.reservations.unwrap();
         let instances = reservations[0].instances.as_ref().unwrap();
         if instances.iter().all(|i| {
