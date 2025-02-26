@@ -3,13 +3,16 @@ use commonware_deployer::Config;
 use std::collections::HashSet;
 use std::error::Error;
 use std::fs::File;
+use std::path::PathBuf;
+use uuid::Uuid;
 
 /// Tears down all resources associated with the deployment tag
 pub async fn teardown(tag: &str, config_path: &str) -> Result<(), Box<dyn Error>> {
+    println!("Deployment tag: {}", tag);
+
     // Load configuration
     let config_file = File::open(config_path)?;
     let config: Config = serde_yaml::from_reader(config_file)?;
-    println!("Deployment tag: {}", tag);
 
     // Determine all regions involved
     let mut all_regions = HashSet::new();
@@ -94,6 +97,12 @@ pub async fn teardown(tag: &str, config_path: &str) -> Result<(), Box<dyn Error>
             println!("Deleted VPC({}): {}", region, vpc_id);
         }
     }
+
+    // Delete temp directory
+    let temp_dir = format!("deployer-{}", Uuid::new_v4());
+    let temp_dir = PathBuf::from("/tmp").join(temp_dir);
+    std::fs::remove_dir_all(&temp_dir)?;
+    println!("Deleted temp directory: {:?}", temp_dir);
 
     println!("Teardown complete for tag: {}", tag);
     Ok(())

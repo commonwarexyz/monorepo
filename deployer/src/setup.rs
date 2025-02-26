@@ -6,7 +6,7 @@ use futures::future::join_all;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::error::Error;
 use std::fs::File;
-use tempdir::TempDir;
+use std::path::PathBuf;
 use tokio::process::Command;
 use uuid::Uuid;
 
@@ -38,8 +38,11 @@ pub async fn setup(config_path: &str, deployer_ip: &str) -> Result<String, Box<d
     println!("Deployment tag: {}", tag);
 
     // Create a temporary directory for local files
-    let temp_dir = TempDir::new("deployer")?;
-    println!("Temp directory: {:?}", temp_dir.path());
+    let temp_dir = format!("deployer-{}", Uuid::new_v4());
+    let temp_dir = PathBuf::from("/tmp").join(temp_dir);
+    std::fs::create_dir_all(&temp_dir)?;
+    let temp_dir_path = temp_dir.to_str().unwrap();
+    println!("Temp directory: {:?}", temp_dir_path);
 
     // Download monitoring artifacts
     println!("Downloading artifacts...");
@@ -60,10 +63,10 @@ pub async fn setup(config_path: &str, deployer_ip: &str) -> Result<String, Box<d
         PROMTAIL_VERSION
     );
 
-    let prometheus_tar = temp_dir.path().join("prometheus.tar.gz");
-    let grafana_deb = temp_dir.path().join("grafana.deb");
-    let loki_zip = temp_dir.path().join("loki.zip");
-    let promtail_zip = temp_dir.path().join("promtail.zip");
+    let prometheus_tar = temp_dir.join("prometheus.tar.gz");
+    let grafana_deb = temp_dir.join("grafana.deb");
+    let loki_zip = temp_dir.join("loki.zip");
+    let promtail_zip = temp_dir.join("promtail.zip");
 
     download_file(&prometheus_url, &prometheus_tar).await?;
     download_file(&loki_url, &loki_zip).await?;
@@ -72,8 +75,8 @@ pub async fn setup(config_path: &str, deployer_ip: &str) -> Result<String, Box<d
 
     // Generate SSH key pair
     let key_name = format!("deployer-{}", tag);
-    let private_key_path = temp_dir.path().join(format!("id_rsa_{}", tag));
-    let public_key_path = temp_dir.path().join(format!("id_rsa_{}.pub", tag));
+    let private_key_path = temp_dir.join(format!("id_rsa_{}", tag));
+    let public_key_path = temp_dir.join(format!("id_rsa_{}.pub", tag));
     let output = Command::new("ssh-keygen")
         .arg("-t")
         .arg("rsa")
@@ -266,7 +269,6 @@ pub async fn setup(config_path: &str, deployer_ip: &str) -> Result<String, Box<d
     }
 
     // Launch regular instances
-    let temp_dir = TempDir::new("deployer")?;
     let mut launch_futures = Vec::new();
     for instance in &config.instances {
         let key_name = key_name.clone();
@@ -327,29 +329,29 @@ pub async fn setup(config_path: &str, deployer_ip: &str) -> Result<String, Box<d
             .collect(),
     };
     let peers_yaml = serde_yaml::to_string(&peers)?;
-    let peers_path = temp_dir.path().join("peers.yaml");
+    let peers_path = temp_dir.join("peers.yaml");
     std::fs::write(&peers_path, peers_yaml)?;
 
     // Write systemd service files
-    let prometheus_service_path = temp_dir.path().join("prometheus.service");
+    let prometheus_service_path = temp_dir.join("prometheus.service");
     std::fs::write(&prometheus_service_path, PROMETHEUS_SERVICE)?;
-    let promtail_service_path = temp_dir.path().join("promtail.service");
+    let promtail_service_path = temp_dir.join("promtail.service");
     std::fs::write(&promtail_service_path, PROMTAIL_SERVICE)?;
-    let loki_service_path = temp_dir.path().join("loki.service");
+    let loki_service_path = temp_dir.join("loki.service");
     std::fs::write(&loki_service_path, LOKI_SERVICE)?;
-    let binary_service_path = temp_dir.path().join("binary.service");
+    let binary_service_path = temp_dir.join("binary.service");
     std::fs::write(&binary_service_path, BINARY_SERVICE)?;
 
     // Configure monitoring instance
     let all_ips: Vec<String> = deployments.iter().map(|d| d.ip.clone()).collect();
     let prom_config = generate_prometheus_config(&all_ips);
-    let prom_path = temp_dir.path().join("prometheus.yml");
+    let prom_path = temp_dir.join("prometheus.yml");
     std::fs::write(&prom_path, prom_config)?;
-    let datasources_path = temp_dir.path().join("datasources.yml");
+    let datasources_path = temp_dir.join("datasources.yml");
     std::fs::write(&datasources_path, DATASOURCES_YML)?;
-    let all_yaml_path = temp_dir.path().join("all.yml");
+    let all_yaml_path = temp_dir.join("all.yml");
     std::fs::write(&all_yaml_path, ALL_YML)?;
-    let loki_config_path = temp_dir.path().join("loki.yml");
+    let loki_config_path = temp_dir.join("loki.yml");
     std::fs::write(&loki_config_path, LOKI_CONFIG)?;
 
     scp_file(
@@ -429,9 +431,9 @@ pub async fn setup(config_path: &str, deployer_ip: &str) -> Result<String, Box<d
     println!("Initialized monitoring host");
 
     // Configure regular instances
-    let temp_dir_path = temp_dir.path();
     let mut start_futures = Vec::new();
     for deployment in &deployments {
+        let temp_dir = temp_dir.clone();
         let instance = deployment.instance.clone();
         let ip = deployment.ip.clone();
         let monitoring_private_ip = monitoring_private_ip.clone();
@@ -462,8 +464,7 @@ pub async fn setup(config_path: &str, deployer_ip: &str) -> Result<String, Box<d
                 "/home/ubuntu/promtail.zip",
             )
             .await?;
-            let promtail_config_path =
-                temp_dir_path.join(format!("promtail_{}.yml", instance.name));
+            let promtail_config_path = temp_dir.join(format!("promtail_{}.yml", instance.name));
             std::fs::write(
                 &promtail_config_path,
                 promtail_config(&monitoring_private_ip, &instance.name),
