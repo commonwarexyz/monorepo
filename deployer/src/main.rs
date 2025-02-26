@@ -80,6 +80,36 @@ User=ubuntu
 WantedBy=multi-user.target
 "#;
 
+const LOKI_SERVICE: &str = r#"
+[Unit]
+Description=Loki Log Aggregation Service
+After=network.target
+
+[Service]
+ExecStart=/opt/loki/loki -config.file=/etc/loki/loki.yml
+Restart=always
+User=ubuntu
+
+[Install]
+WantedBy=multi-user.target
+"#;
+
+const BINARY_SERVICE: &str = r#"
+[Unit]
+Description=Deployed Binary Service
+After=network.target
+
+[Service]
+ExecStart=/home/ubuntu/binary --peers /home/ubuntu/peers.yaml --config /home/ubuntu/config.conf
+Restart=always
+User=ubuntu
+StandardOutput=append:/var/log/binary.log
+StandardError=append:/var/log/binary.log
+
+[Install]
+WantedBy=multi-user.target
+"#;
+
 const LOKI_CONFIG: &str = r#"
 auth_enabled: false
 server:
@@ -115,7 +145,6 @@ __path__: /var/log/binary.log
     )
 }
 
-// TODO: fix grafana install
 const INSTALL_MONITORING_CMD: &str = r#"
 sudo apt-get update -y
 sudo apt-get install -y wget curl unzip adduser libfontconfig1
@@ -132,19 +161,27 @@ sudo apt-get install -f -y
 sudo mkdir -p /etc/grafana/provisioning/datasources /etc/grafana/provisioning/dashboards /var/lib/grafana/dashboards
 sudo mv /home/ubuntu/prometheus.yml /opt/prometheus/prometheus.yml
 sudo mv /home/ubuntu/datasources.yml /etc/grafana/provisioning/datasources/datasources.yml
+sudo mv /home/ubuntu/all.yml /etc/grafana/provisioning/dashboards/all.yml
+sudo mv /home/ubuntu/dashboard.json /var/lib/grafana/dashboards/dashboard.json
 sudo mv /home/ubuntu/prometheus.service /etc/systemd/system/prometheus.service
+sudo mv /home/ubuntu/loki.service /etc/systemd/system/loki.service
 sudo chown -R grafana:grafana /etc/grafana /var/lib/grafana
+sudo systemctl daemon-reload
 sudo systemctl start prometheus
 sudo systemctl enable prometheus
-sudo systemctl daemon-reload
-nohup /opt/loki/loki -config.file=/etc/loki/loki.yml &
-sudo systemctl enable grafana-server
+sudo systemctl start loki
+sudo systemctl enable loki
 sudo systemctl start grafana-server
+sudo systemctl enable grafana-server
 "#;
 
 const INSTALL_BINARY_CMD: &str = r#"
+chmod +x /home/ubuntu/binary
 sudo touch /var/log/binary.log && sudo chown ubuntu:ubuntu /var/log/binary.log
-chmod +x /home/ubuntu/binary && nohup /home/ubuntu/binary --peers /home/ubuntu/peers.yaml --config /home/ubuntu/config.conf > /var/log/binary.log 2>&1 &
+sudo mv /home/ubuntu/binary.service /etc/systemd/system/binary.service
+sudo systemctl daemon-reload
+sudo systemctl start binary
+sudo systemctl enable binary
 "#;
 
 const SETUP_PROMTAIL_CMD: &str = r#"
@@ -520,6 +557,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
             std::fs::write(&prometheus_service_path, PROMETHEUS_SERVICE)?;
             let promtail_service_path = temp_dir.path().join("promtail.service");
             std::fs::write(&promtail_service_path, PROMTAIL_SERVICE)?;
+            let loki_service_path = temp_dir.path().join("loki.service");
+            std::fs::write(&loki_service_path, LOKI_SERVICE)?;
+            let binary_service_path = temp_dir.path().join("binary.service");
+            std::fs::write(&binary_service_path, BINARY_SERVICE)?;
 
             // Configure monitoring instance
             let all_ips: Vec<String> = deployments.iter().map(|d| d.ip.clone()).collect();
@@ -595,8 +636,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 "/home/ubuntu/prometheus.service",
             )
             .await?;
+            scp_file(
+                private_key,
+                loki_service_path.to_str().unwrap(),
+                &monitoring_ip,
+                "/home/ubuntu/loki.service",
+            )
+            .await?;
             ssh_execute(private_key, &monitoring_ip, INSTALL_MONITORING_CMD).await?;
             poll_service_status(private_key, &monitoring_ip, "prometheus").await?;
+            poll_service_status(private_key, &monitoring_ip, "loki").await?;
+            poll_service_status(private_key, &monitoring_ip, "grafana-server").await?;
             println!("Initialized monitoring host");
 
             // Configure regular instances
@@ -609,6 +659,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 let peers_path = peers_path.clone();
                 let promtail_zip = promtail_zip.clone();
                 let promtail_service_path = promtail_service_path.clone();
+                let binary_service_path = binary_service_path.clone();
                 let future = async move {
                     scp_file(private_key, &instance.binary, &ip, "/home/ubuntu/binary").await?;
                     scp_file(
@@ -652,9 +703,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         "/home/ubuntu/promtail.service",
                     )
                     .await?;
-                    ssh_execute(private_key, &ip, INSTALL_BINARY_CMD).await?;
+                    scp_file(
+                        private_key,
+                        binary_service_path.to_str().unwrap(),
+                        &ip,
+                        "/home/ubuntu/binary.service",
+                    )
+                    .await?;
                     ssh_execute(private_key, &ip, SETUP_PROMTAIL_CMD).await?;
                     poll_service_status(private_key, &ip, "promtail").await?;
+                    ssh_execute(private_key, &ip, INSTALL_BINARY_CMD).await?;
+                    poll_service_status(private_key, &ip, "binary").await?;
                     println!("Instance {} fully initialized at {}", instance.name, ip);
                     Ok::<String, Box<dyn Error>>(ip)
                 };
