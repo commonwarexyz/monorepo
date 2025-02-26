@@ -16,8 +16,9 @@
 //!
 //! The peer also serves data to other peers, forwarding network requests to the `Producer`. The
 //! `Producer` provides data asynchronously (e.g., from storage). If it fails, the  peer sends an
-//! empty response, prompting the requester to retry elsewhere. Peer communication uses Protobuf for
-//! message serialization, with unique IDs to match requests and responses.
+//! empty response, prompting the requester to retry elsewhere. Each message between peers contains
+//! an ID. Each request is sent with a unique ID, and each response includes the ID of the request
+//! it responds to.
 //!
 //! Lastly, the `Coordinator` manages the set of peers that can be used to fetch data.
 //!
