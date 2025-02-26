@@ -148,6 +148,7 @@ pub async fn setup(config_path: &str, deployer_ip: &str) -> Result<String, Box<d
         };
 
         import_key_pair(&ec2_clients[region], &key_name, &public_key).await?;
+        println!("Imported key pair {} to region {}", key_name, region);
 
         region_resources.insert(
             region.clone(),
