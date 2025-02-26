@@ -38,7 +38,7 @@ pub async fn setup(config_path: &str, deployer_ip: &str) -> Result<String, Box<d
     println!("Deployment tag: {}", tag);
 
     // Create a temporary directory for local files
-    let temp_dir = format!("deployer-{}", Uuid::new_v4());
+    let temp_dir = format!("deployer-{}", tag);
     let temp_dir = PathBuf::from("/tmp").join(temp_dir);
     std::fs::create_dir_all(&temp_dir)?;
     let temp_dir_path = temp_dir.to_str().unwrap();

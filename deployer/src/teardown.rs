@@ -4,7 +4,6 @@ use std::collections::HashSet;
 use std::error::Error;
 use std::fs::File;
 use std::path::PathBuf;
-use uuid::Uuid;
 
 /// Tears down all resources associated with the deployment tag
 pub async fn teardown(tag: &str, config_path: &str) -> Result<(), Box<dyn Error>> {
@@ -99,7 +98,7 @@ pub async fn teardown(tag: &str, config_path: &str) -> Result<(), Box<dyn Error>
     }
 
     // Delete temp directory
-    let temp_dir = format!("deployer-{}", Uuid::new_v4());
+    let temp_dir = format!("deployer-{}", tag);
     let temp_dir = PathBuf::from("/tmp").join(temp_dir);
     std::fs::remove_dir_all(&temp_dir)?;
     println!("Deleted temp directory: {:?}", temp_dir);
