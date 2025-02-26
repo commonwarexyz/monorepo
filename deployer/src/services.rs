@@ -105,6 +105,21 @@ pub const LOKI_CONFIG: &str = r#"
 auth_enabled: false
 server:
   http_listen_port: 3100
+schema_config:
+  configs:
+    - from: 2020-10-24
+      store: tsdb
+      object_store: filesystem
+      schema: v12
+      index:
+        prefix: index_
+        period: 24h
+storage_config:
+  tsdb_shipper:
+    active_index_directory: /loki/index
+    cache_location: /loki/index_cache
+  filesystem:
+    directory: /loki/chunks
 chunk_store_config:
   max_look_back_period: 0s
 table_manager:
@@ -118,13 +133,15 @@ pub fn install_monitoring_cmd(prometheus_version: &str) -> String {
         r#"
 sudo apt-get update -y
 sudo apt-get install -y wget curl unzip adduser libfontconfig1
-sudo mkdir -p /opt/loki /opt/prometheus /opt/prometheus/data
-sudo chown -R ubuntu:ubuntu /opt/prometheus
+sudo mkdir -p /opt/loki /loki/index /loki/index_cache /loki/chunks
+sudo chown -R ubuntu:ubuntu /loki
 unzip -o /home/ubuntu/loki.zip -d /home/ubuntu
 sudo mv /home/ubuntu/loki-linux-arm64 /opt/loki/loki
 sudo mkdir -p /etc/loki
 sudo mv /home/ubuntu/loki.yml /etc/loki/loki.yml
 sudo chown root:root /etc/loki/loki.yml
+sudo mkdir -p /opt/prometheus /opt/prometheus/data
+sudo chown -R ubuntu:ubuntu /opt/prometheus
 tar xvfz /home/ubuntu/prometheus.tar.gz -C /home/ubuntu
 sudo mv /home/ubuntu/prometheus-{}.linux-arm64 /opt/prometheus/prometheus-{}.linux-arm64
 sudo ln -s /opt/prometheus/prometheus-{}.linux-arm64/prometheus /opt/prometheus/prometheus
