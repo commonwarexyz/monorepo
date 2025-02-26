@@ -73,7 +73,7 @@ pub trait Coordinator: Clone + Send + Sync + 'static {
 #[cfg(test)]
 mod tests {
     use super::{
-        mocks::{Consumer, Coordinator, Event, Key, Producer},
+        mocks::{Consumer, Coordinator, CoordinatorMsg, Event, Key, Producer},
         peer,
     };
     use crate::Resolver;
@@ -84,7 +84,7 @@ mod tests {
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::deterministic::{Context, Executor};
     use commonware_runtime::{Clock, Metrics, Runner};
-    use futures::StreamExt;
+    use futures::{SinkExt, StreamExt};
     use std::time::Duration;
 
     const MAILBOX_SIZE: usize = 1024;
@@ -468,10 +468,7 @@ mod tests {
                         Event::Failed(_) => panic!("Fetch failed unexpectedly"),
                     }
                 }
-                assert!(
-                    found_key2 && found_key3,
-                    "Both keys should have been successfully fetched"
-                );
+                assert!(found_key2 && found_key3,);
             }
         });
     }
@@ -655,6 +652,168 @@ mod tests {
                     assert_eq!(key_actual, key_b);
                 }
                 Event::Success(_, _) => panic!("Fetch should have been canceled"),
+            }
+        });
+    }
+
+    /// Tests that duplicate fetch requests for the same key are handled properly.
+    /// The test verifies that when the same key is requested multiple times,
+    /// the data is correctly delivered once without errors.
+    #[test_traced]
+    fn test_duplicate_fetch_request() {
+        let (executor, context, _) = Executor::timed(Duration::from_secs(10));
+        executor.start(async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            let key = Key(5);
+            let mut prod2 = Producer::default();
+            prod2.insert(key.clone(), Bytes::from("data for key 5"));
+
+            let coordinator = Coordinator::new(peers);
+            let (cons1, mut cons_out1) = Consumer::new();
+
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                &coordinator,
+                schemes.remove(0),
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            )
+            .await;
+
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                &coordinator,
+                schemes.remove(0),
+                connections.remove(0),
+                Consumer::dummy(),
+                prod2,
+            )
+            .await;
+
+            // Send duplicate fetch requests for the same key
+            mailbox1.fetch(key.clone()).await;
+            mailbox1.fetch(key.clone()).await;
+
+            // Should receive the data only once
+            let event = cons_out1.next().await.unwrap();
+            match event {
+                Event::Success(key_actual, value) => {
+                    assert_eq!(key_actual, key);
+                    assert_eq!(value, Bytes::from("data for key 5"));
+                }
+                Event::Failed(_) => panic!("Fetch failed unexpectedly"),
+            }
+
+            // Make sure we don't receive a second event for the duplicate fetch
+            select! {
+                _ = cons_out1.next() => {
+                    panic!("Unexpected second event received for duplicate fetch");
+                },
+                _ = context.sleep(Duration::from_millis(500)) => {
+                    // This is expected - no additional events should be produced
+                },
+            };
+        });
+    }
+
+    /// Tests that changing peer sets is handled correctly using the update channel.
+    /// This test verifies that when the peer set changes from peer A to peer B,
+    /// the resolver correctly adapts and fetches from the new peer.
+    #[test_traced]
+    fn test_changing_peer_sets() {
+        let (executor, context, _) = Executor::timed(Duration::from_secs(10));
+        executor.start(async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2, 3]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+
+            let key1 = Key(1);
+            let key2 = Key(2);
+
+            let mut prod2 = Producer::default();
+            prod2.insert(key1.clone(), Bytes::from("data from peer 2"));
+
+            let mut prod3 = Producer::default();
+            prod3.insert(key2.clone(), Bytes::from("data from peer 3"));
+
+            // Create a coordinator with initial peer 2
+            let coordinator = Coordinator::new(vec![peers[1].clone()]);
+
+            // Create an update channel for the coordinator
+            let mut update_sender = coordinator.create_update_channel(context.clone());
+
+            let (cons1, mut cons_out1) = Consumer::new();
+
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                &coordinator,
+                schemes.remove(0),
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            )
+            .await;
+
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                &Coordinator::new(vec![peers[0].clone()]),
+                schemes.remove(0),
+                connections.remove(0),
+                Consumer::dummy(),
+                prod2,
+            )
+            .await;
+
+            let _mailbox3 = setup_and_spawn_actor(
+                &context,
+                &Coordinator::new(vec![peers[0].clone()]),
+                schemes.remove(0),
+                connections.remove(0),
+                Consumer::dummy(),
+                prod3,
+            )
+            .await;
+
+            // Fetch key1 from peer 2
+            mailbox1.fetch(key1.clone()).await;
+
+            // Wait for successful fetch
+            let event = cons_out1.next().await.unwrap();
+            match event {
+                Event::Success(key_actual, value) => {
+                    assert_eq!(key_actual, key1);
+                    assert_eq!(value, Bytes::from("data from peer 2"));
+                }
+                Event::Failed(_) => panic!("Fetch failed unexpectedly"),
+            }
+
+            // Change peer set to only include peer 3 via the update channel
+            update_sender
+                .send(CoordinatorMsg::UpdatePeers(vec![peers[2].clone()]))
+                .await
+                .expect("Failed to send update");
+
+            // Need to wait for the peer set change to propagate
+            context.sleep(Duration::from_millis(200)).await;
+
+            // Fetch key2 from peer 3
+            mailbox1.fetch(key2.clone()).await;
+
+            // Wait for successful fetch
+            let event = cons_out1.next().await.unwrap();
+            match event {
+                Event::Success(key_actual, value) => {
+                    assert_eq!(key_actual, key2);
+                    assert_eq!(value, Bytes::from("data from peer 3"));
+                }
+                Event::Failed(_) => panic!("Fetch failed unexpectedly"),
             }
         });
     }

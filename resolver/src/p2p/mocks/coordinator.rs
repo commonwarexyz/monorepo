@@ -1,5 +1,14 @@
 use crate::Array;
+use commonware_runtime::Spawner;
+use futures::channel::mpsc;
+use futures::StreamExt;
 use std::sync::{Arc, Mutex};
+
+/// Message type for coordinator updates
+pub enum CoordinatorMsg<P> {
+    /// Update the peers list
+    UpdatePeers(Vec<P>),
+}
 
 /// A coordinator that can be used for testing
 #[derive(Clone)]
@@ -21,19 +30,41 @@ impl<P: Array> Coordinator<P> {
             peers: initial_peers,
             peer_set_id: 0,
         };
+
         Self {
             state: Arc::new(Mutex::new(state)),
         }
     }
 
-    /// Updates the peers of the coordinator
+    /// Creates a channel for sending updates to this coordinator
+    pub fn create_update_channel<E: Spawner>(&self, context: E) -> mpsc::Sender<CoordinatorMsg<P>> {
+        let (sender, mut receiver) = mpsc::channel(8);
+        let coordinator = self.clone();
+
+        context.spawn(|_| async move {
+            while let Some(msg) = receiver.next().await {
+                match msg {
+                    CoordinatorMsg::UpdatePeers(new_peers) => {
+                        let mut state = coordinator.state.lock().unwrap();
+                        state.peers = new_peers;
+                        state.peer_set_id += 1;
+                    }
+                }
+            }
+        });
+
+        sender
+    }
+
+    /// Updates the peers of the coordinator directly
+    /// Note: Prefer using the update channel in multithreaded contexts
     pub fn set_peers(&self, new_peers: Vec<P>) {
         let mut state = self.state.lock().unwrap();
         state.peers = new_peers;
         state.peer_set_id += 1;
     }
 
-    // Helper to get a cloned vector as a workaround
+    // Helper to get a cloned vector to support the trait implementation
     fn get_peers(&self) -> Vec<P> {
         let state = self.state.lock().unwrap();
         state.peers.clone()
@@ -44,8 +75,7 @@ impl<P: Array> crate::p2p::Coordinator for Coordinator<P> {
     type PublicKey = P;
 
     fn peers(&self) -> &Vec<Self::PublicKey> {
-        // This is a hack: we leak a cloned vector to satisfy the trait.
-        // Not recommended for production, only for testing.
+        // Still using the hack for testing purposes
         let peers = self.get_peers();
         Box::leak(Box::new(peers))
     }

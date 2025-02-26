@@ -6,6 +6,6 @@ mod key;
 mod producer;
 
 pub use consumer::{Consumer, Event};
-pub use coordinator::Coordinator;
+pub use coordinator::{Coordinator, CoordinatorMsg};
 pub use key::Key;
 pub use producer::Producer;
