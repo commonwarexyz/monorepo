@@ -41,6 +41,7 @@
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, deterministic::Executor};
 //! use commonware_storage::metadata::{Metadata, Config};
+//! use commonware_utils::array::U64;
 //!
 //! let (executor, context, _) = Executor::default();
 //! executor.start(async move {
@@ -50,14 +51,14 @@
 //!     }).await.unwrap();
 //!
 //!     // Store metadata
-//!     metadata.put(1, "hello".into());
-//!     metadata.put(2, "world".into());
+//!     metadata.put(U64::new(1), "hello".into());
+//!     metadata.put(U64::new(2), "world".into());
 //!
 //!     // Sync the metadata store (batch write changes)
 //!     metadata.sync().await.unwrap();
 //!
 //!     // Retrieve some metadata
-//!     let value = metadata.get(1);
+//!     let value = metadata.get(&U64::new(1));
 //!
 //!     // Close the store
 //!     metadata.close().await.unwrap();
@@ -67,17 +68,18 @@
 mod storage;
 pub use storage::Metadata;
 
+use commonware_utils::Array;
 use thiserror::Error;
 
 /// Errors that can occur when interacting with `Metadata`.
 #[derive(Debug, Error)]
-pub enum Error {
+pub enum Error<K: Array> {
     #[error("runtime error: {0}")]
     Runtime(#[from] commonware_runtime::Error),
     #[error("blob too large: {0}")]
     BlobTooLarge(u64),
     #[error("value too big: {0}")]
-    ValueTooBig(u32),
+    ValueTooBig(K),
 }
 
 /// Configuration for `Metadata` storage.
@@ -94,6 +96,7 @@ mod tests {
     use bytes::Bytes;
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic::Executor, Blob, Metrics, Runner, Storage};
+    use commonware_utils::array::U64;
     use std::time::UNIX_EPOCH;
 
     #[test_traced]
@@ -112,8 +115,8 @@ mod tests {
             assert!(last_update.is_none());
 
             // Get a key that doesn't exist
-            let key = 42;
-            let value = metadata.get(key);
+            let key = U64::new(42);
+            let value = metadata.get(&key);
             assert!(value.is_none());
 
             // Check metrics
@@ -123,10 +126,10 @@ mod tests {
 
             // Put a key
             let hello = Bytes::from("hello");
-            metadata.put(key, hello.clone());
+            metadata.put(key.clone(), hello.clone());
 
             // Get the key
-            let value = metadata.get(key).unwrap();
+            let value = metadata.get(&key).unwrap();
             assert_eq!(value, &hello);
 
             // Check metrics
@@ -161,12 +164,12 @@ mod tests {
             assert!(buffer.contains("keys 1"));
 
             // Get the key
-            let value = metadata.get(key).unwrap();
+            let value = metadata.get(&key).unwrap();
             assert_eq!(value, &hello);
 
             // Test clearing the metadata store
             metadata.clear();
-            let value = metadata.get(key);
+            let value = metadata.get(&key);
             assert!(value.is_none());
 
             // Check metrics
@@ -188,9 +191,9 @@ mod tests {
             let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
 
             // Put a key
-            let key = 42;
+            let key = U64::new(42);
             let hello = Bytes::from("hello");
-            metadata.put(key, hello.clone());
+            metadata.put(key.clone(), hello.clone());
 
             // Sync the metadata store
             metadata.sync().await.unwrap();
@@ -207,10 +210,10 @@ mod tests {
 
             // Put an overlapping key and a new key
             let world = Bytes::from("world");
-            metadata.put(key, world.clone());
-            let key2 = 43;
+            metadata.put(key.clone(), world.clone());
+            let key2 = U64::new(43);
             let foo = Bytes::from("foo");
-            metadata.put(key2, foo.clone());
+            metadata.put(key2.clone(), foo.clone());
 
             // Close the metadata store
             metadata.close().await.unwrap();
@@ -232,13 +235,13 @@ mod tests {
             assert!(buffer.contains("keys 2"));
 
             // Get the key
-            let value = metadata.get(key).unwrap();
+            let value = metadata.get(&key).unwrap();
             assert_eq!(value, &world);
-            let value = metadata.get(key2).unwrap();
+            let value = metadata.get(&key2).unwrap();
             assert_eq!(value, &foo);
 
             // Remove the key
-            metadata.remove(key);
+            metadata.remove(&key);
 
             // Sync the metadata store
             metadata.sync().await.unwrap();
@@ -268,9 +271,9 @@ mod tests {
             assert!(buffer.contains("keys 1"));
 
             // Get the key
-            let value = metadata.get(key);
+            let value = metadata.get(&key);
             assert!(value.is_none());
-            let value = metadata.get(key2).unwrap();
+            let value = metadata.get(&key2).unwrap();
             assert_eq!(value, &foo);
         });
     }
@@ -287,17 +290,17 @@ mod tests {
             let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
 
             // Put a key
-            let key = 42;
+            let key = U64::new(42);
             let hello = Bytes::from("hello");
-            metadata.put(key, hello.clone());
+            metadata.put(key.clone(), hello.clone());
 
             // Sync the metadata store
             metadata.sync().await.unwrap();
 
             // Put an overlapping key and a new key
             let world = Bytes::from("world");
-            metadata.put(key, world.clone());
-            let key2 = 43;
+            metadata.put(key.clone(), world.clone());
+            let key2 = U64::new(43);
             let foo = Bytes::from("foo");
             metadata.put(key2, foo.clone());
 
@@ -316,7 +319,7 @@ mod tests {
             let metadata = Metadata::init(context.clone(), cfg).await.unwrap();
 
             // Get the key (falls back to non-corrupt)
-            let value = metadata.get(key).unwrap();
+            let value = metadata.get(&key).unwrap();
             assert_eq!(value, &hello);
         });
     }
@@ -333,17 +336,17 @@ mod tests {
             let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
 
             // Put a key
-            let key = 42;
+            let key = U64::new(42);
             let hello = Bytes::from("hello");
-            metadata.put(key, hello.clone());
+            metadata.put(key.clone(), hello.clone());
 
             // Sync the metadata store
             metadata.sync().await.unwrap();
 
             // Put an overlapping key and a new key
             let world = Bytes::from("world");
-            metadata.put(key, world.clone());
-            let key2 = 43;
+            metadata.put(key.clone(), world.clone());
+            let key2 = U64::new(43);
             let foo = Bytes::from("foo");
             metadata.put(key2, foo.clone());
 
@@ -365,7 +368,7 @@ mod tests {
             let metadata = Metadata::init(context.clone(), cfg).await.unwrap();
 
             // Get the key (falls back to non-corrupt)
-            let value = metadata.get(key);
+            let value = metadata.get(&key);
             assert!(value.is_none());
 
             // Check metrics
@@ -387,17 +390,17 @@ mod tests {
             let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
 
             // Put a key
-            let key = 42;
+            let key = U64::new(42);
             let hello = Bytes::from("hello");
-            metadata.put(key, hello.clone());
+            metadata.put(key.clone(), hello.clone());
 
             // Sync the metadata store
             metadata.sync().await.unwrap();
 
             // Put an overlapping key and a new key
             let world = Bytes::from("world");
-            metadata.put(key, world.clone());
-            let key2 = 43;
+            metadata.put(key.clone(), world.clone());
+            let key2 = U64::new(43);
             let foo = Bytes::from("foo");
             metadata.put(key2, foo.clone());
 
@@ -417,7 +420,7 @@ mod tests {
             let metadata = Metadata::init(context.clone(), cfg).await.unwrap();
 
             // Get the key (falls back to non-corrupt)
-            let value = metadata.get(key).unwrap();
+            let value = metadata.get(&key).unwrap();
             assert_eq!(value, &hello);
         });
     }
@@ -434,17 +437,17 @@ mod tests {
             let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
 
             // Put a key
-            let key = 42;
+            let key = U64::new(42);
             let hello = Bytes::from("hello");
-            metadata.put(key, hello.clone());
+            metadata.put(key.clone(), hello.clone());
 
             // Sync the metadata store
             metadata.sync().await.unwrap();
 
             // Put an overlapping key and a new key
             let world = Bytes::from("world");
-            metadata.put(key, world.clone());
-            let key2 = 43;
+            metadata.put(key.clone(), world.clone());
+            let key2 = U64::new(43);
             let foo = Bytes::from("foo");
             metadata.put(key2, foo.clone());
 
@@ -463,7 +466,7 @@ mod tests {
             let metadata = Metadata::init(context.clone(), cfg).await.unwrap();
 
             // Get the key (falls back to non-corrupt)
-            let value = metadata.get(key).unwrap();
+            let value = metadata.get(&key).unwrap();
             assert_eq!(value, &hello);
         });
     }
@@ -473,7 +476,7 @@ mod tests {
         // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
         executor.start(async move {
-            let key = 42;
+            let key = U64::new(42);
             let hello = Bytes::from("hello");
             {
                 // Create a metadata store
@@ -483,7 +486,7 @@ mod tests {
                 let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
 
                 // Put a key
-                metadata.put(key, hello.clone());
+                metadata.put(key.clone(), hello.clone());
 
                 // Drop metadata before sync
             }
@@ -495,7 +498,7 @@ mod tests {
             let metadata = Metadata::init(context.clone(), cfg).await.unwrap();
 
             // Get the key
-            let value = metadata.get(key);
+            let value = metadata.get(&key);
             assert!(value.is_none());
 
             // Check metrics
@@ -518,7 +521,7 @@ mod tests {
 
             // Create a value that exceeds u32::MAX bytes
             let value = vec![0u8; (u32::MAX as usize) + 1];
-            metadata.put(1, Bytes::from(value));
+            metadata.put(U64::new(1), Bytes::from(value));
 
             // Assert
             let result = metadata.sync().await;

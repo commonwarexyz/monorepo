@@ -113,6 +113,10 @@ impl SizedSerialize for u64 {
     const SERIALIZED_LEN: usize = 8;
 }
 
+impl SizedSerialize for u128 {
+    const SERIALIZED_LEN: usize = 16;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
