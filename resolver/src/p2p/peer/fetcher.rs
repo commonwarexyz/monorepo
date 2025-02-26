@@ -15,7 +15,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 use thiserror::Error;
-use tracing::{info, warn};
+use tracing::warn;
 
 /// Errors that can occur when sending network messages.
 #[derive(Error, Debug, PartialEq)]
@@ -90,7 +90,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, Key: Array, NetS: Sender<PublicKey = C:
     pub async fn fetch(&mut self, sender: &mut NetS, key: Key, is_new: bool) {
         // Check if the fetch is already in progress
         if self.active.contains_right(&key) || self.pending.contains(&key) {
-            info!(?key, "duplicate fetch");
+            warn!(?key, "duplicate fetch");
             return;
         }
 

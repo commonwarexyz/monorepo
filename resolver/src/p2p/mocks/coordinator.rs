@@ -84,9 +84,4 @@ impl<P: Array> crate::p2p::Coordinator for Coordinator<P> {
         let state = self.state.lock().unwrap();
         state.peer_set_id
     }
-
-    fn is_peer(&self, public_key: &Self::PublicKey) -> bool {
-        let state = self.state.lock().unwrap();
-        state.peers.contains(public_key)
-    }
 }

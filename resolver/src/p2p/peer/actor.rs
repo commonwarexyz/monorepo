@@ -265,12 +265,6 @@ impl<
             return;
         };
 
-        // If the peer is not allowed to request, drop the request
-        if !self.coordinator.is_peer(&peer) {
-            warn!(?peer, ?id, "dropping request: peer not allowed");
-            return;
-        }
-
         // Serve the request
         debug!(?peer, ?id, "peer request");
         let mut producer = self.producer.clone();

@@ -7,15 +7,16 @@
 //! initiation and cancellation of fetch requests via the `Resolver` interface.
 //!
 //! The peer handles an arbitrarily large number of concurrent fetch requests by sending requests
-//! to other peers and processing their responses. It uses a `Requester` to select peers based on
-//! performance, retrying with another peer if one fails or provides invalid data. Requests persist
-//! until canceled or fulfilled, delivering data to the `Consumer` for verification.
+//! to other peers and processing their responses. It uses [commonware_p2p::utils::requester] to
+//! select peers based on performance, retrying with another peer if one fails or provides invalid
+//! data. Requests persist until canceled or fulfilled, delivering data to the `Consumer` for
+//! verification.
 //!
 //! The `Consumer` checks data integrity and authenticity (critical in an adversarial environment)
 //! and returns `true` if valid, completing the fetch, or `false` to retry.
 //!
 //! The peer also serves data to other peers, forwarding network requests to the `Producer`. The
-//! `Producer` provides data asynchronously (e.g., from storage). If it fails, the  peer sends an
+//! `Producer` provides data asynchronously (e.g., from storage). If it fails, the peer sends an
 //! empty response, prompting the requester to retry elsewhere. Each message between peers contains
 //! an ID. Each request is sent with a unique ID, and each response includes the ID of the request
 //! it responds to.
@@ -65,9 +66,6 @@ pub trait Coordinator: Clone + Send + Sync + 'static {
     /// to a novel value whenever the list of peers changes. For example, it could be an
     /// incrementing counter, or an epoch.
     fn peer_set_id(&self) -> u64;
-
-    /// Returns true if the given public key is a peer.
-    fn is_peer(&self, public_key: &Self::PublicKey) -> bool;
 }
 
 #[cfg(test)]
