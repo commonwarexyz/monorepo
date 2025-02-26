@@ -110,6 +110,7 @@ common:
   ring:
     kvstore:
       store: inmemory
+  replication_factor: 1
   instance_addr: 127.0.0.1
 schema_config:
   configs:
