@@ -125,6 +125,8 @@ chunk_store_config:
 table_manager:
   retention_deletes_enabled: false
   retention_period: 0s
+compactor:
+  working_directory: /loki/compactor
 "#;
 
 /// Command to install monitoring services (Prometheus, Loki, Grafana) on the monitoring instance
@@ -133,7 +135,7 @@ pub fn install_monitoring_cmd(prometheus_version: &str) -> String {
         r#"
 sudo apt-get update -y
 sudo apt-get install -y wget curl unzip adduser libfontconfig1
-sudo mkdir -p /opt/loki /loki/index /loki/index_cache /loki/chunks
+sudo mkdir -p /opt/loki /loki/index /loki/index_cache /loki/chunks /loki/compactor
 sudo chown -R ubuntu:ubuntu /loki
 unzip -o /home/ubuntu/loki.zip -d /home/ubuntu
 sudo mv /home/ubuntu/loki-linux-arm64 /opt/loki/loki
@@ -148,6 +150,9 @@ sudo ln -s /opt/prometheus/prometheus-{}.linux-arm64/prometheus /opt/prometheus/
 sudo chmod +x /opt/prometheus/prometheus
 sudo dpkg -i /home/ubuntu/grafana.deb || echo "Grafana installation failed"
 sudo apt-get install -f -y
+if [ -f /etc/grafana/grafana.ini ]; then
+    sudo sed -i '/^\[auth.anonymous\]$/,/^\[/ {{ /^; *enabled = /s/.*/enabled = true/; /^; *org_role = /s/.*/org_role = Admin/ }}' /etc/grafana/grafana.ini
+fi
 sudo mkdir -p /etc/grafana/provisioning/datasources /etc/grafana/provisioning/dashboards /var/lib/grafana/dashboards
 sudo mv /home/ubuntu/prometheus.yml /opt/prometheus/prometheus.yml
 sudo mv /home/ubuntu/datasources.yml /etc/grafana/provisioning/datasources/datasources.yml
