@@ -22,7 +22,7 @@ commonware-consensus = { version = "0.0.11", path = "consensus" }
 commonware-cryptography = { version = "0.0.22", path = "cryptography" }
 commonware-macros = { version = "0.0.13", path = "macros" }
 commonware-p2p = { version = "0.0.33", path = "p2p" }
-commonware-resolver = { version = "0.0.3", path = "resolver" }
+commonware-resolver = { version = "0.0.2", path = "resolver" }
 commonware-runtime = { version = "0.0.19", path = "runtime" }
 commonware-storage = { version = "0.0.14", path = "storage" }
 commonware-stream = { version = "0.0.11", path = "stream" }
