@@ -1,0 +1,105 @@
+use std::error::Error;
+use std::path::Path;
+use tokio::process::Command;
+use tokio::time::{sleep, Duration};
+
+/// Maximum number of SSH connection attempts before failing
+pub const MAX_SSH_ATTEMPTS: usize = 10;
+
+/// Maximum number of polling attempts for service status
+pub const MAX_POLL_ATTEMPTS: usize = 30;
+
+/// Interval between retries
+pub const RETRY_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Downloads a file from a URL to a local destination
+pub async fn download_file(url: &str, dest: &Path) -> Result<(), Box<dyn Error>> {
+    let response = reqwest::get(url).await?;
+    let bytes = response.bytes().await?;
+    std::fs::write(dest, bytes)?;
+    Ok(())
+}
+
+/// Copies a local file to a remote instance via SCP with retries
+pub async fn scp_file(
+    key_file: &str,
+    local_path: &str,
+    ip: &str,
+    remote_path: &str,
+) -> Result<(), Box<dyn Error>> {
+    for _ in 0..MAX_SSH_ATTEMPTS {
+        let status = Command::new("scp")
+            .arg("-i")
+            .arg(key_file)
+            .arg("-o")
+            .arg("StrictHostKeyChecking=no")
+            .arg(local_path)
+            .arg(format!("ubuntu@{}:{}", ip, remote_path))
+            .status()
+            .await?;
+        if status.success() {
+            return Ok(());
+        }
+        println!("SCP failed: {:?}", status);
+        sleep(RETRY_INTERVAL).await;
+    }
+    Err("SCP failed after maximum attempts".into()) // TODO: Improve error handling
+}
+
+/// Executes a command on a remote instance via SSH with retries
+pub async fn ssh_execute(key_file: &str, ip: &str, command: &str) -> Result<(), Box<dyn Error>> {
+    for _ in 0..MAX_SSH_ATTEMPTS {
+        let status = Command::new("ssh")
+            .arg("-i")
+            .arg(key_file)
+            .arg("-o")
+            .arg("StrictHostKeyChecking=no")
+            .arg(format!("ubuntu@{}", ip))
+            .arg(command)
+            .status()
+            .await?;
+        if status.success() {
+            return Ok(());
+        }
+        println!("SSH failed: {:?}", status);
+        sleep(RETRY_INTERVAL).await;
+    }
+    Err("SSH failed after maximum attempts".into()) // TODO: Improve error handling
+}
+
+/// Polls the status of a systemd service on a remote instance until active
+pub async fn poll_service_status(
+    key_file: &str,
+    ip: &str,
+    service: &str,
+) -> Result<(), Box<dyn Error>> {
+    for attempt in 0..MAX_POLL_ATTEMPTS {
+        let status = Command::new("ssh")
+            .arg("-i")
+            .arg(key_file)
+            .arg("-o")
+            .arg("StrictHostKeyChecking=no")
+            .arg(format!("ubuntu@{}", ip))
+            .arg(format!("systemctl is-active {}", service))
+            .output()
+            .await?;
+        if status.status.success() && String::from_utf8_lossy(&status.stdout).trim() == "active" {
+            println!(
+                "Service {} is active on {} after {} attempts",
+                service,
+                ip,
+                attempt + 1
+            );
+            return Ok(());
+        }
+        println!(
+            "Waiting for {} to become active on {} (attempt {}/{})",
+            service,
+            ip,
+            attempt + 1,
+            MAX_POLL_ATTEMPTS
+        );
+        sleep(RETRY_INTERVAL).await;
+    }
+    Err(format!("Service {} failed to become active on {}", service, ip).into())
+}
