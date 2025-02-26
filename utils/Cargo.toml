@@ -2,7 +2,7 @@
 name = "commonware-utils"
 edition = "2021"
 publish = true
-version = "0.0.13"
+version = "0.0.14"
 license = "MIT OR Apache-2.0"
 description = "Leverage common functionality across multiple primitives."
 readme = "README.md"
@@ -12,6 +12,7 @@ documentation = "https://docs.rs/commonware-utils"
 
 [dependencies]
 bytes = { workspace = true }
+futures = { workspace = true }
 prost = { workspace = true }
 thiserror = { workspace = true }
 

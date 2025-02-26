@@ -174,7 +174,7 @@ impl<
         NetR: Receiver<PublicKey = C::PublicKey>,
     > Actor<B, E, C, D, A, Z, S, NetS, NetR>
 {
-    /// Creates a new actor with the given runtime and configuration.
+    /// Creates a new actor with the given context and configuration.
     /// Returns the actor and a mailbox for sending messages to the actor.
     pub fn new(context: E, cfg: Config<C, D, A, Z, S>) -> (Self, Mailbox<D>) {
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
@@ -223,7 +223,7 @@ impl<
         (result, mailbox)
     }
 
-    /// Runs the actor until the runtime is stopped.
+    /// Runs the actor until the context is stopped.
     ///
     /// The actor will handle:
     /// - Timeouts
@@ -239,12 +239,13 @@ impl<
         self.context.spawn_ref()(self.run(chunk_network, ack_network))
     }
 
+    /// Inner run loop called by `start`.
     async fn run(mut self, chunk_network: (NetS, NetR), ack_network: (NetS, NetR)) {
         let (mut node_sender, mut node_receiver) = chunk_network;
         let (mut ack_sender, mut ack_receiver) = ack_network;
         let mut shutdown = self.context.stopped();
 
-        // Before starting on the main runtime loop, initialize my own sequencer journal
+        // Before starting on the main loop, initialize my own sequencer journal
         // and attempt to rebroadcast if necessary.
         self.refresh_epoch();
         self.journal_prepare(&self.crypto.public_key()).await;

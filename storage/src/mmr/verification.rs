@@ -673,83 +673,82 @@ mod tests {
     fn test_range_proofs_after_pruning() {
         let (executor, _, _) = Executor::default();
         executor.start(async move {
-
-        // create a new MMR and add a non-trivial amount (49) of elements
-        let mut mmr: Mmr<Sha256> = Mmr::default();
-        let mut elements = Vec::<Digest>::new();
-        let mut element_positions = Vec::<u64>::new();
-        let mut hasher = Sha256::default();
-        for i in 0..49 {
-            elements.push(test_digest(i));
-            element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));
-        }
-
-        // prune up to the first peak
-        mmr.prune_to_pos(62);
-        assert_eq!(mmr.oldest_retained_pos(), 62);
-        assert_eq!(mmr.oldest_provable_pos(), 62); // peaks are always their own oldest-provable-point
-
-        // Prune the elements from our lists that can no longer be proven after pruning.
-        for i in 0..elements.len() {
-            if element_positions[i] > 62 {
-                elements = elements[i..elements.len()].to_vec();
-                element_positions = element_positions[i..element_positions.len()].to_vec();
-                break;
+            // create a new MMR and add a non-trivial amount (49) of elements
+            let mut mmr: Mmr<Sha256> = Mmr::default();
+            let mut elements = Vec::<Digest>::new();
+            let mut element_positions = Vec::<u64>::new();
+            let mut hasher = Sha256::default();
+            for i in 0..49 {
+                elements.push(test_digest(i));
+                element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));
             }
-        }
 
-        // test range proofs over all possible ranges of at least 2 elements
-        let root_hash = mmr.root(&mut hasher);
-        let mut hasher = Sha256::default();
-        for i in 0..elements.len() {
-            for j in i + 1..elements.len() {
-                let start_pos = element_positions[i];
-                let end_pos = element_positions[j];
-                let range_proof = mmr.range_proof(start_pos, end_pos).await.unwrap();
-                assert!(
-                    range_proof.verify_range_inclusion(
-                        &mut hasher,
-                        &elements[i..j + 1],
-                        start_pos,
-                        end_pos,
-                        &root_hash,
-                    ),
-                    "valid range proof over remaining elements should verify successfully",
-                );
+            // prune up to the first peak
+            mmr.prune_to_pos(62);
+            assert_eq!(mmr.oldest_retained_pos().unwrap(), 62);
+            assert_eq!(mmr.oldest_provable_pos().unwrap(), 62); // peaks are always their own oldest-provable-point
+
+            // Prune the elements from our lists that can no longer be proven after pruning.
+            for i in 0..elements.len() {
+                if element_positions[i] > 62 {
+                    elements = elements[i..elements.len()].to_vec();
+                    element_positions = element_positions[i..element_positions.len()].to_vec();
+                    break;
+                }
             }
-        }
 
-        // add a few more nodes, prune again, and test again to make sure repeated pruning works
-        for i in 0..37 {
-            elements.push(test_digest(i));
-            element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));
-        }
-        mmr.prune_to_pos(126); // the new highest peak
-        assert_eq!(mmr.oldest_retained_pos(), 126);
-        assert_eq!(mmr.oldest_provable_pos(), 126); // peaks are always their own oldest-provable-point
-
-        let updated_root_hash = mmr.root(&mut hasher);
-        for i in 0..elements.len() {
-            if element_positions[i] > 126 {
-                elements = elements[i..elements.len()].to_vec();
-                element_positions = element_positions[i..element_positions.len()].to_vec();
-                break;
+            // test range proofs over all possible ranges of at least 2 elements
+            let root_hash = mmr.root(&mut hasher);
+            let mut hasher = Sha256::default();
+            for i in 0..elements.len() {
+                for j in i + 1..elements.len() {
+                    let start_pos = element_positions[i];
+                    let end_pos = element_positions[j];
+                    let range_proof = mmr.range_proof(start_pos, end_pos).await.unwrap();
+                    assert!(
+                        range_proof.verify_range_inclusion(
+                            &mut hasher,
+                            &elements[i..j + 1],
+                            start_pos,
+                            end_pos,
+                            &root_hash,
+                        ),
+                        "valid range proof over remaining elements should verify successfully",
+                    );
+                }
             }
-        }
-        let start_pos = element_positions[0];
-        let end_pos = *element_positions.last().unwrap();
-        let range_proof = mmr.range_proof(start_pos, end_pos).await.unwrap();
-        assert!(
-            range_proof.verify_range_inclusion(
-                &mut hasher,
-                &elements,
-                start_pos,
-                end_pos,
-                &updated_root_hash,
-            ),
-            "valid range proof over remaining elements after 2 pruning rounds should verify successfully",
-        );
-    });
+
+            // add a few more nodes, prune again, and test again to make sure repeated pruning works
+            for i in 0..37 {
+                elements.push(test_digest(i));
+                element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));
+            }
+            mmr.prune_to_pos(126); // the new highest peak
+            assert_eq!(mmr.oldest_retained_pos().unwrap(), 126);
+            assert_eq!(mmr.oldest_provable_pos().unwrap(), 126); // peaks are always their own oldest-provable-point
+
+            let updated_root_hash = mmr.root(&mut hasher);
+            for i in 0..elements.len() {
+                if element_positions[i] > 126 {
+                    elements = elements[i..elements.len()].to_vec();
+                    element_positions = element_positions[i..element_positions.len()].to_vec();
+                    break;
+                }
+            }
+            let start_pos = element_positions[0];
+            let end_pos = *element_positions.last().unwrap();
+            let range_proof = mmr.range_proof(start_pos, end_pos).await.unwrap();
+            assert!(
+		range_proof.verify_range_inclusion(
+                    &mut hasher,
+                    &elements,
+                    start_pos,
+                    end_pos,
+                    &updated_root_hash,
+		),
+		"valid range proof over remaining elements after 2 pruning rounds should verify successfully",
+            );
+        });
     }
 
     #[test]

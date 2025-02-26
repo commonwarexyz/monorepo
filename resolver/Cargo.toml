@@ -1,33 +1,31 @@
 [package]
-name = "commonware-p2p"
+name = "commonware-resolver"
 edition = "2021"
 publish = true
-version = "0.0.33"
+version = "0.0.2"
 license = "MIT OR Apache-2.0"
-description = "Communicate with authenticated peers over encrypted connections."
+description = "Resolve data identified by a fixed-length key."
 readme = "README.md"
 homepage = "https://commonware.xyz"
-repository = "https://github.com/commonwarexyz/monorepo/tree/main/p2p"
-documentation = "https://docs.rs/commonware-p2p"
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/resolver"
+documentation = "https://docs.rs/commonware-resolver"
 
 [dependencies]
 commonware-cryptography = { workspace = true }
 commonware-macros = { workspace = true }
+commonware-p2p = { workspace = true }
 commonware-runtime = { workspace = true }
 commonware-stream = { workspace = true }
 commonware-utils = { workspace = true }
+bimap = { workspace = true }
 bytes = { workspace = true }
 rand = { workspace = true }
-rand_distr = { workspace = true }
-thiserror = { workspace = true }
 futures = { workspace = true }
 tracing = { workspace = true }
 prost = { workspace = true }
 governor = { workspace = true }
 prometheus-client = { workspace = true }
-zstd = { workspace = true }
-bitvec = "1.0.1"
-either = "1.13.0"
+thiserror = { workspace = true }
 
 [build-dependencies]
 prost-build = { workspace = true }
