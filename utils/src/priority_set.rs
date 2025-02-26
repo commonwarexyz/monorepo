@@ -72,14 +72,17 @@ impl<I: Ord + Hash + Clone, P: Ord + Copy> PrioritySet<I, P> {
     }
 
     /// Remove an item from the set.
-    pub fn remove(&mut self, item: &I) {
+    ///
+    /// Returns `true` if the item was present.
+    pub fn remove(&mut self, item: &I) -> bool {
         let Some(entry) = self.keys.remove(item).map(|priority| Entry {
             item: item.clone(),
             priority,
         }) else {
-            return;
+            return false;
         };
-        self.entries.remove(&entry);
+        assert!(self.entries.remove(&entry));
+        true
     }
 
     /// Remove all previously inserted items not included in `keep`
@@ -103,6 +106,27 @@ impl<I: Ord + Hash + Clone, P: Ord + Copy> PrioritySet<I, P> {
         for item in retained {
             self.put(item.clone(), default);
         }
+    }
+
+    /// Returns `true` if the set contains the item.
+    pub fn contains(&self, item: &I) -> bool {
+        self.keys.contains_key(item)
+    }
+
+    /// Returns the item with the highest priority.
+    pub fn peek(&self) -> Option<(&I, &P)> {
+        self.entries
+            .iter()
+            .next()
+            .map(|entry| (&entry.item, &entry.priority))
+    }
+
+    /// Removes and returns the item with the highest priority.
+    pub fn pop(&mut self) -> Option<(I, P)> {
+        self.entries.pop_first().map(|entry| {
+            self.keys.remove(&entry.item);
+            (entry.item, entry.priority)
+        })
     }
 
     /// Returns an iterator over all items in the set in priority-ascending order.
