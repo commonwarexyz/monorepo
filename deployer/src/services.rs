@@ -200,22 +200,22 @@ pub fn promtail_config(monitoring_private_ip: &str, instance_name: &str) -> Stri
     format!(
         r#"
 server:
-http_listen_port: 9080
-grpc_listen_port: 0
+  http_listen_port: 9080
+  grpc_listen_port: 0
 positions:
-filename: /tmp/positions.yaml
+  filename: /tmp/positions.yaml
 clients:
-- url: http://{}:3100/loki/api/v1/push
+  - url: http://{}:3100/loki/api/v1/push
 scrape_configs:
-- job_name: binary_logs
-static_configs:
-- targets:
-- localhost
-labels:
-job: binary
-instance: {}
-__path__: /var/log/binary.log
-"#,
+  - job_name: binary_logs
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: binary
+          instance: {}
+          __path__: /var/log/binary.log
+      "#,
         monitoring_private_ip, instance_name
     )
 }
