@@ -374,8 +374,11 @@ pub async fn setup(config_path: &str, deployer_ip: &str) -> Result<String, Box<d
     std::fs::write(&binary_service_path, BINARY_SERVICE)?;
 
     // Configure monitoring instance
-    let all_ips: Vec<String> = deployments.iter().map(|d| d.ip.clone()).collect();
-    let prom_config = generate_prometheus_config(&all_ips);
+    let instances: Vec<(&str, &str)> = deployments
+        .iter()
+        .map(|d| (d.instance.name.as_str(), d.ip.as_str()))
+        .collect();
+    let prom_config = generate_prometheus_config(&instances);
     let prom_path = temp_dir.join("prometheus.yml");
     std::fs::write(&prom_path, prom_config)?;
     let datasources_path = temp_dir.join("datasources.yml");
