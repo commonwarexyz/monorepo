@@ -7,7 +7,7 @@ pub struct Metrics {
     pub fetch_pending: Gauge,
     /// Number of active fetch requests
     pub fetch_active: Gauge,
-    /// Number of serving operations currently in flight
+    /// Number of serves currently in flight
     pub serve_in_flight: Gauge,
     /// Total number of successful fetches
     pub fetch_success: Counter,
@@ -35,7 +35,7 @@ impl Metrics {
         );
         registry.register(
             "serve_in_flight",
-            "Number of serving operations currently in flight",
+            "Number of serves currently in flight",
             metrics.serve_in_flight.clone(),
         );
         registry.register(
