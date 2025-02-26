@@ -97,7 +97,7 @@ fn main() {
     let p2p_cfg = authenticated::Config::aggressive(
         signer.clone(),
         &union(FLOOD_NAMESPACE, b"_P2P"),
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), config.port),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), config.port),
         bootstrappers,
         config.message_size,
     );
