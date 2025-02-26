@@ -781,6 +781,12 @@ pub async fn find_availability_zone(
     let offerings = client
         .describe_instance_type_offerings()
         .location_type("availability-zone".into())
+        .set_filters(Some(
+            instance_types
+                .iter()
+                .map(|it| Filter::builder().name("instance-type").values(it).build())
+                .collect(),
+        ))
         .send()
         .await?
         .instance_type_offerings
