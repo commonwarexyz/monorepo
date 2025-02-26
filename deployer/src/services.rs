@@ -103,8 +103,14 @@ WantedBy=multi-user.target
 /// YAML configuration for Loki
 pub const LOKI_CONFIG: &str = r#"
 auth_enabled: false
+target: all
 server:
   http_listen_port: 3100
+common:
+  ring:
+    kvstore:
+      store: inmemory
+  instance_addr: 127.0.0.1
 schema_config:
   configs:
     - from: 2020-10-24
