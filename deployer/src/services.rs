@@ -127,6 +127,9 @@ table_manager:
   retention_period: 0s
 compactor:
   working_directory: /loki/compactor
+ingester:
+  wal:
+    dir: /loki/wal
 "#;
 
 /// Command to install monitoring services (Prometheus, Loki, Grafana) on the monitoring instance
@@ -135,7 +138,7 @@ pub fn install_monitoring_cmd(prometheus_version: &str) -> String {
         r#"
 sudo apt-get update -y
 sudo apt-get install -y wget curl unzip adduser libfontconfig1
-sudo mkdir -p /opt/loki /loki/index /loki/index_cache /loki/chunks /loki/compactor
+sudo mkdir -p /opt/loki /loki/index /loki/index_cache /loki/chunks /loki/compactor /loki/wal
 sudo chown -R ubuntu:ubuntu /loki
 unzip -o /home/ubuntu/loki.zip -d /home/ubuntu
 sudo mv /home/ubuntu/loki-linux-arm64 /opt/loki/loki
