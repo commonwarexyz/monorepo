@@ -25,6 +25,7 @@ const MAX_POLL_ATTEMPTS: usize = 30;
 const MONITORING_REGION: &str = "us-east-1";
 const PROMETHEUS_VERSION: &str = "2.30.3";
 const LOKI_VERSION: &str = "2.9.2";
+const GRAFANA_VERSION: &str = "10.0.3";
 const PROMTAIL_VERSION: &str = "2.9.2";
 const DATASOURCES_YML: &str = r#"
 apiVersion: 1
@@ -117,31 +118,28 @@ __path__: /var/log/binary.log
 // TODO: fix grafana install
 const INSTALL_MONITORING_CMD: &str = r#"
 sudo apt-get update -y
-sudo apt-get install -y curl unzip
-tar xvfz /home/ubuntu/prometheus.tar.gz -C /home/ubuntu
-sudo mv /home/ubuntu/prometheus.linux-arm64 /opt/prometheus
+sudo apt-get install -y wget curl unzip adduser libfontconfig1
 unzip /home/ubuntu/loki.zip -d /home/ubuntu
 sudo mv /home/ubuntu/loki-linux-arm64 /opt/loki/loki
 sudo mkdir -p /etc/loki
 sudo mv /home/ubuntu/loki.yml /etc/loki/loki.yml
 sudo chown root:root /etc/loki/loki.yml
-curl https://packages.grafana.com/gpg.key | sudo apt-key add -
-sudo add-apt-repository "deb https://packages.grafana.com/oss/deb stable main"
-sudo apt-get update -y
-sudo apt-get install -y grafana
+tar xvfz /home/ubuntu/prometheus.tar.gz -C /home/ubuntu
+sudo mv /home/ubuntu/prometheus.linux-arm64 /opt/prometheus
+sudo chmod +x /opt/prometheus/prometheus
+sudo dpkg -i /home/ubuntu/grafana.deb
+sudo apt-get install -f -y
 sudo mkdir -p /etc/grafana/provisioning/datasources /etc/grafana/provisioning/dashboards /var/lib/grafana/dashboards
 sudo mv /home/ubuntu/prometheus.yml /opt/prometheus/prometheus.yml
 sudo mv /home/ubuntu/datasources.yml /etc/grafana/provisioning/datasources/datasources.yml
-sudo mv /home/ubuntu/all.yml /etc/grafana/provisioning/dashboards/all.yml
-sudo mv /home/ubuntu/dashboard.json /var/lib/grafana/dashboards/dashboard.json
 sudo mv /home/ubuntu/prometheus.service /etc/systemd/system/prometheus.service
 sudo chown -R grafana:grafana /etc/grafana /var/lib/grafana
-sudo systemctl daemon-reload
 sudo systemctl start prometheus
 sudo systemctl enable prometheus
+sudo systemctl daemon-reload
 nohup /opt/loki/loki -config.file=/etc/loki/loki.yml &
-sudo systemctl start grafana-server
 sudo systemctl enable grafana-server
+sudo systemctl start grafana-server
 "#;
 
 const INSTALL_BINARY_CMD: &str = r#"
@@ -227,6 +225,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                  "https://github.com/prometheus/prometheus/releases/download/v{}/prometheus-{}.linux-arm64.tar.gz",
                  PROMETHEUS_VERSION, PROMETHEUS_VERSION
              );
+            let grafana_url = format!(
+                "https://dl.grafana.com/oss/release/grafana-{}-1.arm64.deb",
+                GRAFANA_VERSION
+            );
             let loki_url = format!(
                 "https://github.com/grafana/loki/releases/download/v{}/loki-linux-arm64.zip",
                 LOKI_VERSION
@@ -236,16 +238,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 PROMTAIL_VERSION
             );
 
-            let prometheus_tar = temp_dir.path().join(format!(
-                "prometheus-{}.linux-arm64.tar.gz",
-                PROMETHEUS_VERSION
-            ));
-            let loki_zip = temp_dir.path().join("loki-linux-arm64.zip");
-            let promtail_zip = temp_dir.path().join("promtail-linux-arm64.zip");
+            let prometheus_tar = temp_dir.path().join("prometheus.tar.gz");
+            let grafana_deb = temp_dir.path().join("grafana.deb");
+            let loki_zip = temp_dir.path().join("loki.zip");
+            let promtail_zip = temp_dir.path().join("promtail.zip");
 
             download_file(&prometheus_url, &prometheus_tar).await?;
             download_file(&loki_url, &loki_zip).await?;
             download_file(&promtail_url, &promtail_zip).await?;
+            download_file(&grafana_url, &grafana_deb).await?;
 
             // Generate SSH key pair
             let key_name = format!("deployer-{}", tag);
@@ -571,6 +572,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 prometheus_tar.to_str().unwrap(),
                 &monitoring_ip,
                 "/home/ubuntu/prometheus.tar.gz",
+            )
+            .await?;
+            scp_file(
+                private_key,
+                grafana_deb.to_str().unwrap(),
+                &monitoring_ip,
+                "/home/ubuntu/grafana.deb",
             )
             .await?;
             scp_file(
