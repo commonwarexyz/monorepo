@@ -270,20 +270,8 @@ pub async fn create_security_group_regular(
         .ip_permissions(
             IpPermission::builder()
                 .ip_protocol("tcp")
-                .from_port(9080)
-                .to_port(9080)
-                .ip_ranges(
-                    IpRange::builder()
-                        .cidr_ip(format!("{}/32", monitoring_ip))
-                        .build(),
-                )
-                .build(),
-        )
-        .ip_permissions(
-            IpPermission::builder()
-                .ip_protocol("tcp")
-                .from_port(9100)
-                .to_port(9100)
+                .from_port(9090)
+                .to_port(9090)
                 .ip_ranges(
                     IpRange::builder()
                         .cidr_ip(format!("{}/32", monitoring_ip))

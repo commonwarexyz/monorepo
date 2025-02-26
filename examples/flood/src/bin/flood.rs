@@ -121,7 +121,7 @@ fn main() {
 
         // Serve metrics
         let metrics = context.with_label("metrics").spawn(|context| async move {
-            let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), METRICS_PORT);
+            let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), METRICS_PORT);
             let listener = context
                 .bind(addr)
                 .await
