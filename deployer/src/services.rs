@@ -45,7 +45,7 @@ Description=Prometheus Monitoring Service
 After=network.target
 
 [Service]
-ExecStart=/opt/prometheus/prometheus --config.file=/opt/prometheus/prometheus.yml
+ExecStart=/opt/prometheus/prometheus --config.file=/opt/prometheus/prometheus.yml --storage.tsdb.path=/opt/prometheus/data
 Restart=always
 User=ubuntu
 
@@ -118,7 +118,8 @@ pub fn install_monitoring_cmd(prometheus_version: &str) -> String {
         r#"
 sudo apt-get update -y
 sudo apt-get install -y wget curl unzip adduser libfontconfig1
-sudo mkdir -p /opt/loki /opt/prometheus
+sudo mkdir -p /opt/loki /opt/prometheus /opt/prometheus/data
+sudo chown -R ubuntu:ubuntu /opt/prometheus
 unzip -o /home/ubuntu/loki.zip -d /home/ubuntu
 sudo mv /home/ubuntu/loki-linux-arm64 /opt/loki/loki
 sudo mkdir -p /etc/loki
