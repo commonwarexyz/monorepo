@@ -13,12 +13,15 @@ use futures::future::join_all;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::error::Error;
 use std::fs::File;
+use std::path::Path;
 use tempdir::TempDir;
 use tokio::process::Command;
 use tokio::time::{sleep, Duration};
 use uuid::Uuid;
 
 const MAX_SSH_ATTEMPTS: usize = 10;
+const POLL_INTERVAL: Duration = Duration::from_secs(5);
+const MAX_POLL_ATTEMPTS: usize = 30;
 const MONITORING_REGION: &str = "us-east-1";
 const PROMETHEUS_VERSION: &str = "2.30.3";
 const LOKI_VERSION: &str = "2.9.2";
@@ -46,6 +49,118 @@ providers:
     type: file
     options:
       path: /var/lib/grafana/dashboards
+"#;
+
+const PROMETHEUS_SERVICE: &str = r#"
+[Unit]
+Description=Prometheus Monitoring Service
+After=network.target
+
+[Service]
+ExecStart=/opt/prometheus/prometheus --config.file=/opt/prometheus/prometheus.yml
+Restart=always
+User=ubuntu
+
+[Install]
+WantedBy=multi-user.target
+"#;
+
+const PROMTAIL_SERVICE: &str = r#"
+[Unit]
+Description=Promtail Log Forwarder
+After=network.target
+
+[Service]
+ExecStart=/opt/promtail/promtail -config.file=/etc/promtail/promtail.yml
+Restart=always
+User=ubuntu
+
+[Install]
+WantedBy=multi-user.target
+"#;
+
+const LOKI_CONFIG: &str = r#"
+auth_enabled: false
+server:
+  http_listen_port: 3100
+chunk_store_config:
+  max_look_back_period: 0s
+table_manager:
+  retention_deletes_enabled: false
+  retention_period: 0s
+"#;
+
+fn promtail_config(monitoring_private_ip: &str, instance_name: &str) -> String {
+    format!(
+        r#"
+server:
+http_listen_port: 9080
+grpc_listen_port: 0
+positions:
+filename: /tmp/positions.yaml
+clients:
+- url: http://{}:3100/loki/api/v1/push
+scrape_configs:
+- job_name: binary_logs
+static_configs:
+- targets:
+- localhost
+labels:
+job: binary
+instance: {}
+__path__: /var/log/binary.log
+"#,
+        monitoring_private_ip, instance_name
+    )
+}
+
+// TODO: fix grafana install
+const INSTALL_MONITORING_CMD: &str = r#"
+sudo apt-get update -y
+sudo apt-get install -y curl unzip
+tar xvfz /home/ubuntu/prometheus.tar.gz -C /home/ubuntu
+sudo mv /home/ubuntu/prometheus.linux-arm64 /opt/prometheus
+unzip /home/ubuntu/loki.zip -d /home/ubuntu
+sudo mv /home/ubuntu/loki-linux-arm64 /opt/loki/loki
+sudo mkdir -p /etc/loki
+sudo mv /home/ubuntu/loki.yml /etc/loki/loki.yml
+sudo chown root:root /etc/loki/loki.yml
+curl https://packages.grafana.com/gpg.key | sudo apt-key add -
+sudo add-apt-repository "deb https://packages.grafana.com/oss/deb stable main"
+sudo apt-get update -y
+sudo apt-get install -y grafana
+sudo mkdir -p /etc/grafana/provisioning/datasources /etc/grafana/provisioning/dashboards /var/lib/grafana/dashboards
+sudo mv /home/ubuntu/prometheus.yml /opt/prometheus/prometheus.yml
+sudo mv /home/ubuntu/datasources.yml /etc/grafana/provisioning/datasources/datasources.yml
+sudo mv /home/ubuntu/all.yml /etc/grafana/provisioning/dashboards/all.yml
+sudo mv /home/ubuntu/dashboard.json /var/lib/grafana/dashboards/dashboard.json
+sudo mv /home/ubuntu/prometheus.service /etc/systemd/system/prometheus.service
+sudo chown -R grafana:grafana /etc/grafana /var/lib/grafana
+sudo systemctl daemon-reload
+sudo systemctl start prometheus
+sudo systemctl enable prometheus
+nohup /opt/loki/loki -config.file=/etc/loki/loki.yml &
+sudo systemctl start grafana-server
+sudo systemctl enable grafana-server
+"#;
+
+const INSTALL_BINARY_CMD: &str = r#"
+sudo touch /var/log/binary.log && sudo chown ubuntu:ubuntu /var/log/binary.log
+chmod +x /home/ubuntu/binary && nohup /home/ubuntu/binary --peers /home/ubuntu/peers.yaml --config /home/ubuntu/config.conf > /var/log/binary.log 2>&1 &
+"#;
+
+const SETUP_PROMTAIL_CMD: &str = r#"
+sudo apt-get update -y
+sudo apt-get install -y unzip
+unzip /home/ubuntu/promtail.zip -d /home/ubuntu
+sudo mv /home/ubuntu/promtail-linux-arm64 /opt/promtail/promtail
+sudo mkdir -p /etc/promtail
+sudo mv /home/ubuntu/promtail.yml /etc/promtail/promtail.yml
+sudo mv /home/ubuntu/promtail.service /etc/systemd/system/promtail.service
+sudo chown root:root /etc/promtail/promtail.yml
+sudo systemctl daemon-reload
+sudo systemctl start promtail
+sudo systemctl enable promtail
 "#;
 
 #[derive(Clone)]
@@ -105,6 +220,32 @@ async fn main() -> Result<(), Box<dyn Error>> {
             // Create temp directory
             let temp_dir = TempDir::new("deployer")?;
             println!("Temp directory: {:?}", temp_dir.path());
+
+            // Download artifacts locally
+            println!("Downloading artifacts...");
+            let prometheus_url = format!(
+                 "https://github.com/prometheus/prometheus/releases/download/v{}/prometheus-{}.linux-arm64.tar.gz",
+                 PROMETHEUS_VERSION, PROMETHEUS_VERSION
+             );
+            let loki_url = format!(
+                "https://github.com/grafana/loki/releases/download/v{}/loki-linux-arm64.zip",
+                LOKI_VERSION
+            );
+            let promtail_url = format!(
+                "https://github.com/grafana/loki/releases/download/v{}/promtail-linux-arm64.zip",
+                PROMTAIL_VERSION
+            );
+
+            let prometheus_tar = temp_dir.path().join(format!(
+                "prometheus-{}.linux-arm64.tar.gz",
+                PROMETHEUS_VERSION
+            ));
+            let loki_zip = temp_dir.path().join("loki-linux-arm64.zip");
+            let promtail_zip = temp_dir.path().join("promtail-linux-arm64.zip");
+
+            download_file(&prometheus_url, &prometheus_tar).await?;
+            download_file(&loki_url, &loki_zip).await?;
+            download_file(&promtail_url, &promtail_zip).await?;
 
             // Generate SSH key pair
             let key_name = format!("deployer-{}", tag);
@@ -373,6 +514,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let peers_path = temp_dir.path().join("peers.yaml");
             std::fs::write(&peers_path, peers_yaml)?;
 
+            // Write systemd service files locally
+            let prometheus_service_path = temp_dir.path().join("prometheus.service");
+            std::fs::write(&prometheus_service_path, PROMETHEUS_SERVICE)?;
+            let promtail_service_path = temp_dir.path().join("promtail.service");
+            std::fs::write(&promtail_service_path, PROMTAIL_SERVICE)?;
+
             // Configure monitoring instance
             let all_ips: Vec<String> = deployments.iter().map(|d| d.ip.clone()).collect();
             let prom_config = generate_prometheus_config(&all_ips);
@@ -382,18 +529,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             std::fs::write(&datasources_path, DATASOURCES_YML)?;
             let all_yaml_path = temp_dir.path().join("all.yml");
             std::fs::write(&all_yaml_path, ALL_YML)?;
-            let loki_config = r#"
-auth_enabled: false
-server:
-  http_listen_port: 3100
-chunk_store_config:
-  max_look_back_period: 0s
-table_manager:
-  retention_deletes_enabled: false
-  retention_period: 0s
-"#;
             let loki_config_path = temp_dir.path().join("loki.yml");
-            std::fs::write(&loki_config_path, loki_config)?;
+            std::fs::write(&loki_config_path, LOKI_CONFIG)?;
             scp_file(
                 private_key,
                 prom_path.to_str().unwrap(),
@@ -429,42 +566,29 @@ table_manager:
                 "/home/ubuntu/loki.yml",
             )
             .await?;
-
-            let install_monitoring_cmd = format!(
-                r#"
-sudo apt-get update -y
-sudo apt-get install -y wget curl unzip
-wget https://github.com/prometheus/prometheus/releases/download/v{}/prometheus-{}.linux-arm64.tar.gz
-tar xvfz prometheus-{}.linux-arm64.tar.gz
-sudo mv prometheus-{}.linux-arm64 /opt/prometheus
-wget https://github.com/grafana/loki/releases/download/v{}/loki-linux-arm64.zip
-unzip loki-linux-arm64.zip
-sudo mv loki-linux-arm64 /opt/loki/loki
-sudo mkdir -p /etc/loki
-sudo mv /home/ubuntu/loki.yml /etc/loki/loki.yml
-sudo chown root:root /etc/loki/loki.yml
-curl https://packages.grafana.com/gpg.key | sudo apt-key add -
-sudo add-apt-repository "deb https://packages.grafana.com/oss/deb stable main"
-sudo apt-get update -y
-sudo apt-get install -y grafana
-sudo mkdir -p /etc/grafana/provisioning/datasources /etc/grafana/provisioning/dashboards /var/lib/grafana/dashboards
-sudo mv /home/ubuntu/prometheus.yml /opt/prometheus/prometheus.yml
-sudo mv /home/ubuntu/datasources.yml /etc/grafana/provisioning/datasources/datasources.yml
-sudo mv /home/ubuntu/all.yml /etc/grafana/provisioning/dashboards/all.yml
-sudo mv /home/ubuntu/dashboard.json /var/lib/grafana/dashboards/dashboard.json
-sudo chown -R grafana:grafana /etc/grafana /var/lib/grafana
-nohup /opt/prometheus/prometheus --config.file=/opt/prometheus/prometheus.yml &
-nohup /opt/loki/loki -config.file=/etc/loki/loki.yml &
-sudo systemctl start grafana-server
-sudo systemctl enable grafana-server
-"#,
-                PROMETHEUS_VERSION,
-                PROMETHEUS_VERSION,
-                PROMETHEUS_VERSION,
-                PROMETHEUS_VERSION,
-                LOKI_VERSION
-            );
-            ssh_execute(private_key, &monitoring_ip, &install_monitoring_cmd).await?;
+            scp_file(
+                private_key,
+                prometheus_tar.to_str().unwrap(),
+                &monitoring_ip,
+                "/home/ubuntu/prometheus.tar.gz",
+            )
+            .await?;
+            scp_file(
+                private_key,
+                loki_zip.to_str().unwrap(),
+                &monitoring_ip,
+                "/home/ubuntu/loki.zip",
+            )
+            .await?;
+            scp_file(
+                private_key,
+                prometheus_service_path.to_str().unwrap(),
+                &monitoring_ip,
+                "/home/ubuntu/prometheus.service",
+            )
+            .await?;
+            ssh_execute(private_key, &monitoring_ip, INSTALL_MONITORING_CMD).await?;
+            poll_service_status(private_key, &monitoring_ip, "prometheus").await?;
             println!("Initialized monitoring host");
 
             // Configure regular instances
@@ -475,8 +599,9 @@ sudo systemctl enable grafana-server
                 let ip = deployment.ip.clone();
                 let monitoring_private_ip = monitoring_private_ip.clone();
                 let peers_path = peers_path.clone();
+                let promtail_zip = promtail_zip.clone();
+                let promtail_service_path = promtail_service_path.clone();
                 let future = async move {
-                    // Upload binary, config, and peers
                     scp_file(private_key, &instance.binary, &ip, "/home/ubuntu/binary").await?;
                     scp_file(
                         private_key,
@@ -492,38 +617,19 @@ sudo systemctl enable grafana-server
                         "/home/ubuntu/peers.yaml",
                     )
                     .await?;
-
-                    // Create log file and start binary with logging
-                    let create_log_cmd = "sudo touch /var/log/binary.log && sudo chown ubuntu:ubuntu /var/log/binary.log";
-                    ssh_execute(private_key, &ip, create_log_cmd).await?;
-                    let run_cmd = "chmod +x /home/ubuntu/binary && nohup /home/ubuntu/binary --peers /home/ubuntu/peers.yaml --config /home/ubuntu/config.conf > /var/log/binary.log 2>&1 &";
-                    ssh_execute(private_key, &ip, run_cmd).await?;
-
-                    // Install and configure Promtail
-                    let promtail_config = format!(
-                        r#"
-server:
-  http_listen_port: 9080
-  grpc_listen_port: 0
-positions:
-  filename: /tmp/positions.yaml
-clients:
-  - url: http://{}:3100/loki/api/v1/push
-scrape_configs:
-  - job_name: binary_logs
-    static_configs:
-      - targets:
-          - localhost
-        labels:
-          job: binary
-          instance: {}
-          __path__: /var/log/binary.log
-"#,
-                        monitoring_private_ip, instance.name
-                    );
+                    scp_file(
+                        private_key,
+                        promtail_zip.to_str().unwrap(),
+                        &ip,
+                        "/home/ubuntu/promtail.zip",
+                    )
+                    .await?;
                     let promtail_config_path =
                         temp_dir_path.join(format!("promtail_{}.yml", instance.name));
-                    std::fs::write(&promtail_config_path, promtail_config)?;
+                    std::fs::write(
+                        &promtail_config_path,
+                        promtail_config(&monitoring_private_ip, &instance.name),
+                    )?;
                     scp_file(
                         private_key,
                         promtail_config_path.to_str().unwrap(),
@@ -531,23 +637,17 @@ scrape_configs:
                         "/home/ubuntu/promtail.yml",
                     )
                     .await?;
-                    let install_promtail_cmd = format!(
-                        r#"
-wget https://github.com/grafana/loki/releases/download/v{}/promtail-linux-arm64.zip
-unzip promtail-linux-arm64.zip
-sudo mv promtail-linux-arm64 /opt/promtail/promtail
-sudo mkdir -p /etc/promtail
-sudo mv /home/ubuntu/promtail.yml /etc/promtail/promtail.yml
-sudo chown root:root /etc/promtail/promtail.yml
-nohup /opt/promtail/promtail -config.file=/etc/promtail/promtail.yml &
-"#,
-                        PROMTAIL_VERSION
-                    );
-                    ssh_execute(private_key, &ip, &install_promtail_cmd).await?;
-                    println!(
-                        "Initialized instance({}): {}",
-                        instance.region, instance.name
-                    );
+                    scp_file(
+                        private_key,
+                        promtail_service_path.to_str().unwrap(),
+                        &ip,
+                        "/home/ubuntu/promtail.service",
+                    )
+                    .await?;
+                    ssh_execute(private_key, &ip, INSTALL_BINARY_CMD).await?;
+                    ssh_execute(private_key, &ip, SETUP_PROMTAIL_CMD).await?;
+                    poll_service_status(private_key, &ip, "promtail").await?;
+                    println!("Instance {} fully initialized at {}", instance.name, ip);
                     Ok::<String, Box<dyn Error>>(ip)
                 };
                 start_futures.push(future);
@@ -725,6 +825,49 @@ nohup /opt/promtail/promtail -config.file=/etc/promtail/promtail.yml &
     }
 
     Ok(())
+}
+
+async fn download_file(url: &str, dest: &Path) -> Result<(), Box<dyn Error>> {
+    let response = reqwest::get(url).await?;
+    let bytes = response.bytes().await?;
+    std::fs::write(dest, bytes)?;
+    Ok(())
+}
+
+async fn poll_service_status(
+    key_file: &str,
+    ip: &str,
+    service: &str,
+) -> Result<(), Box<dyn Error>> {
+    for attempt in 0..MAX_POLL_ATTEMPTS {
+        let status = Command::new("ssh")
+            .arg("-i")
+            .arg(key_file)
+            .arg("-o")
+            .arg("StrictHostKeyChecking=no")
+            .arg(format!("ubuntu@{}", ip))
+            .arg(format!("systemctl is-active {}", service))
+            .output()
+            .await?;
+        if status.status.success() && String::from_utf8_lossy(&status.stdout).trim() == "active" {
+            println!(
+                "Service {} is active on {} after {} attempts",
+                service,
+                ip,
+                attempt + 1
+            );
+            return Ok(());
+        }
+        println!(
+            "Waiting for {} to become active on {} (attempt {}/{})",
+            service,
+            ip,
+            attempt + 1,
+            MAX_POLL_ATTEMPTS
+        );
+        sleep(POLL_INTERVAL).await;
+    }
+    Err(format!("Service {} failed to become active on {}", service, ip).into())
 }
 
 // Helper functions remain the same as in the original code
