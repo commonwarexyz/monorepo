@@ -235,6 +235,11 @@ impl<E: Clock + GClock + Rng, C: Scheme> Requester<E, C> {
     pub fn len(&self) -> usize {
         self.requests.len()
     }
+
+    /// Get the number of blocked participants.
+    pub fn len_blocked(&self) -> usize {
+        self.excluded.len()
+    }
 }
 
 #[cfg(test)]

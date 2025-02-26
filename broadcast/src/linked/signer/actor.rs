@@ -1,4 +1,4 @@
-use super::{AckManager, Config, Mailbox, Message, TipManager};
+use super::{metrics, AckManager, Config, Mailbox, Message, TipManager};
 use crate::{
     linked::{namespace, parsed, prover::Prover, serializer, Context, Epoch},
     Application, Collector, ThresholdCoordinator,
@@ -15,8 +15,11 @@ use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Blob, Clock, Handle, Metrics, Spawner, Storage};
 use commonware_storage::journal::{self, variable::Journal};
-use commonware_utils::futures::Pool as FuturesPool;
-use commonware_utils::Array;
+use commonware_utils::{
+    futures::Pool as FuturesPool,
+    metrics::status::{CounterExt, Value as StatusValue},
+    Array,
+};
 use futures::{
     channel::{mpsc, oneshot},
     future::{self, Either},
@@ -149,6 +152,13 @@ pub struct Actor<
 
     // The current epoch.
     epoch: Epoch,
+
+    ////////////////////////////////////////
+    // Metrics
+    ////////////////////////////////////////
+
+    // Metrics
+    metrics: metrics::Metrics,
 }
 
 impl<
@@ -173,6 +183,7 @@ impl<
     pub fn new(context: E, cfg: Config<C, D, A, Z, S>) -> (Self, Mailbox<D>) {
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::new(mailbox_sender);
+        let metrics = metrics::Metrics::init(context.clone());
 
         let result = Self {
             context,
@@ -200,6 +211,7 @@ impl<
             tip_manager: TipManager::<C, D>::new(),
             ack_manager: AckManager::<D, C::PublicKey>::new(),
             epoch: 0,
+            metrics,
         };
 
         (result, mailbox)
@@ -289,6 +301,7 @@ impl<
                             break;
                         }
                     };
+                    let mut guard = self.metrics.nodes.guard(StatusValue::Invalid);
                     let node = match parsed::Node::<C, D>::decode(&msg) {
                         Ok(node) => node,
                         Err(err) => {
@@ -311,6 +324,7 @@ impl<
 
                     // Process the new node
                     self.handle_node(&node).await;
+                    guard.set(StatusValue::Success);
                 },
 
                 // Handle incoming acks
@@ -324,6 +338,7 @@ impl<
                             break;
                         }
                     };
+                    let mut guard = self.metrics.acks.guard(StatusValue::Invalid);
                     let ack = match parsed::Ack::decode(&msg) {
                         Ok(ack) => ack,
                         Err(err) => {
@@ -337,25 +352,24 @@ impl<
                     };
                     if let Err(err) = self.handle_ack(&ack).await {
                         warn!(?err, ?ack, "ack handle failed");
+                        guard.set(StatusValue::Failure);
                         continue;
                     }
+                    guard.set(StatusValue::Success);
                 },
 
                 // Handle completed verification futures.
                 maybe_verified = self.pending_verifies.next_completed() => {
                     let (context, digest, verify_result) = maybe_verified;
+                    self.metrics.verify.inc_with_bool(verify_result.is_ok());
                     match verify_result {
+                        Err(err) => warn!(?err, ?context, ?digest, "verified returned error"),
+                        Ok(false) => warn!(?context, ?digest, "verified was false"),
                         Ok(true) => {
                             debug!(?context, ?digest, "verified");
                             if let Err(err) = self.handle_app_verified(&context, &digest, &mut ack_sender).await {
                                 warn!(?err, ?context, ?digest, "verified handle failed");
                             }
-                        },
-                        Ok(false) => {
-                            warn!(?context, ?digest, "verified was false");
-                        },
-                        Err(err) => {
-                            warn!(?err, ?context, ?digest, "verified returned error");
                         },
                     }
                 },
@@ -507,7 +521,7 @@ impl<
 
         // Add the partial signature. If a new threshold is formed, handle it.
         if let Some(threshold) = self.ack_manager.add_ack(ack, quorum) {
-            // Handle the threshold signature
+            self.metrics.threshold.inc();
             self.handle_threshold(&ack.chunk, ack.epoch, threshold)
                 .await;
         }
@@ -522,10 +536,17 @@ impl<
         // Store the tip
         let is_new = self.tip_manager.put(node);
 
-        // Append to journal if the `Node` is new, making sure to sync the journal
-        // to prevent sending two conflicting chunks to the application, even if
-        // the node crashes and restarts.
+        // If a higher height than the previous tip...
         if is_new {
+            // Update metrics for sequencer height
+            self.metrics
+                .sequencer_heights
+                .get_or_create(&metrics::SequencerLabel::from(&node.chunk.sequencer))
+                .set(node.chunk.height as i64);
+
+            // Append to journal if the `Node` is new, making sure to sync the journal
+            // to prevent sending two conflicting chunks to the application, even if
+            // the node crashes and restarts.
             self.journal_append(node).await;
             self.journal_sync(&node.chunk.sequencer, node.chunk.height)
                 .await;
@@ -566,6 +587,7 @@ impl<
         result: oneshot::Sender<bool>,
         node_sender: &mut NetS,
     ) -> Result<(), Error> {
+        let mut guard = self.metrics.new_broadcast.guard(StatusValue::Dropped);
         let me = self.crypto.public_key();
 
         // Get parent Chunk and threshold signature
@@ -613,11 +635,13 @@ impl<
         // Broadcast to network
         if let Err(err) = self.broadcast(&node, node_sender, self.epoch).await {
             let _ = result.send(false);
+            guard.set(StatusValue::Failure);
             return Err(err);
         };
 
         // Return success
         let _ = result.send(true);
+        guard.set(StatusValue::Success);
         Ok(())
     }
 
@@ -628,6 +652,8 @@ impl<
     /// - this instance has a chunk to rebroadcast.
     /// - this instance has not yet collected the threshold signature for the chunk.
     async fn rebroadcast(&mut self, node_sender: &mut NetS) -> Result<(), Error> {
+        let mut guard = self.metrics.rebroadcast.guard(StatusValue::Dropped);
+
         // Unset the rebroadcast deadline
         self.rebroadcast_deadline = None;
 
@@ -652,8 +678,9 @@ impl<
         }
 
         // Broadcast the message, which resets the rebroadcast deadline
+        guard.set(StatusValue::Failure);
         self.broadcast(&tip, node_sender, self.epoch).await?;
-
+        guard.set(StatusValue::Success);
         Ok(())
     }
 

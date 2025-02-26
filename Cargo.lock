@@ -644,6 +644,7 @@ dependencies = [
  "bytes",
  "futures",
  "num-bigint",
+ "prometheus-client",
  "prost",
  "rand",
  "thiserror",

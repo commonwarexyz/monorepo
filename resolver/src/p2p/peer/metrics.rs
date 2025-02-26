@@ -1,22 +1,23 @@
-use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
+use commonware_utils::metrics::status;
+use prometheus_client::metrics::gauge::Gauge;
 
 /// Metrics for the peer actor.
 #[derive(Default, Debug)]
 pub struct Metrics {
-    /// Number of pending fetch requests
+    /// Current number of pending fetch requests
     pub fetch_pending: Gauge,
-    /// Number of active fetch requests
+    /// Current number of active fetch requests
     pub fetch_active: Gauge,
-    /// Number of serving operations currently in flight
-    pub serve_in_flight: Gauge,
-    /// Total number of successful fetches
-    pub fetch_success: Counter,
-    /// Total number of failed fetches
-    pub fetch_failure: Counter,
-    /// Total number of successful serves
-    pub serve_success: Counter,
-    /// Total number of failed serves
-    pub serve_failure: Counter,
+    /// Current number of serves currently in flight
+    pub serve_processing: Gauge,
+    /// Current number of blocked peers
+    pub peers_blocked: Gauge,
+    /// Number of fetches by status
+    pub fetch: status::Counter,
+    /// Number of canceled fetches by status
+    pub cancel: status::Counter,
+    /// Number of serves by status
+    pub serve: status::Counter,
 }
 
 impl Metrics {
@@ -25,38 +26,38 @@ impl Metrics {
         let metrics = Self::default();
         registry.register(
             "fetch_pending",
-            "Number of pending fetch requests",
+            "Current number of pending fetch requests",
             metrics.fetch_pending.clone(),
         );
         registry.register(
             "fetch_active",
-            "Number of active fetch requests",
+            "Current number of active fetch requests",
             metrics.fetch_active.clone(),
         );
         registry.register(
-            "serve_in_flight",
-            "Number of serving operations currently in flight",
-            metrics.serve_in_flight.clone(),
+            "serve_processing",
+            "Current number of serves currently processing",
+            metrics.serve_processing.clone(),
         );
         registry.register(
-            "fetch_success",
-            "Total number of successful fetches",
-            metrics.fetch_success.clone(),
+            "peers_blocked",
+            "Current number of blocked peers",
+            metrics.peers_blocked.clone(),
         );
         registry.register(
-            "fetch_failure",
-            "Total number of failed fetches",
-            metrics.fetch_failure.clone(),
+            "fetch",
+            "Number of fetches by status",
+            metrics.fetch.clone(),
         );
         registry.register(
-            "serve_success",
-            "Total number of successful serves",
-            metrics.serve_success.clone(),
+            "cancel",
+            "Number of canceled fetches by status",
+            metrics.cancel.clone(),
         );
         registry.register(
-            "serve_failure",
-            "Total number of failed serves",
-            metrics.serve_failure.clone(),
+            "serve",
+            " Number of serves by status",
+            metrics.serve.clone(),
         );
         metrics
     }
