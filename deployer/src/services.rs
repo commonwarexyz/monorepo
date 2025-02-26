@@ -164,8 +164,10 @@ sudo systemctl enable binary
 pub const SETUP_PROMTAIL_CMD: &str = r#"
 sudo apt-get update -y
 sudo apt-get install -y unzip
+sudo mkdir -p /opt/promtail
 unzip /home/ubuntu/promtail.zip -d /home/ubuntu
 sudo mv /home/ubuntu/promtail-linux-arm64 /opt/promtail/promtail
+sudo chmod +x /opt/promtail/promtail
 sudo mkdir -p /etc/promtail
 sudo mv /home/ubuntu/promtail.yml /etc/promtail/promtail.yml
 sudo mv /home/ubuntu/promtail.service /etc/systemd/system/promtail.service
