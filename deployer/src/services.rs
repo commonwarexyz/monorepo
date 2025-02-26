@@ -113,18 +113,22 @@ table_manager:
 "#;
 
 /// Command to install monitoring services (Prometheus, Loki, Grafana) on the monitoring instance
-pub const INSTALL_MONITORING_CMD: &str = r#"
+pub fn install_monitoring_cmd(prometheus_version: &str) -> String {
+    format!(
+        r#"
 sudo apt-get update -y
 sudo apt-get install -y wget curl unzip adduser libfontconfig1
-unzip /home/ubuntu/loki.zip -d /home/ubuntu
+sudo mkdir -p /opt/loki /opt/prometheus
+unzip -o /home/ubuntu/loki.zip -d /home/ubuntu
 sudo mv /home/ubuntu/loki-linux-arm64 /opt/loki/loki
 sudo mkdir -p /etc/loki
 sudo mv /home/ubuntu/loki.yml /etc/loki/loki.yml
 sudo chown root:root /etc/loki/loki.yml
 tar xvfz /home/ubuntu/prometheus.tar.gz -C /home/ubuntu
-sudo mv /home/ubuntu/prometheus.linux-arm64 /opt/prometheus
+sudo mv /home/ubuntu/prometheus-{}.linux-arm64 /opt/prometheus/prometheus-{}.linux-arm64
+sudo ln -s /opt/prometheus/prometheus-{}.linux-arm64/prometheus /opt/prometheus/prometheus
 sudo chmod +x /opt/prometheus/prometheus
-sudo dpkg -i /home/ubuntu/grafana.deb
+sudo dpkg -i /home/ubuntu/grafana.deb || echo "Grafana installation failed"
 sudo apt-get install -f -y
 sudo mkdir -p /etc/grafana/provisioning/datasources /etc/grafana/provisioning/dashboards /var/lib/grafana/dashboards
 sudo mv /home/ubuntu/prometheus.yml /opt/prometheus/prometheus.yml
@@ -133,7 +137,7 @@ sudo mv /home/ubuntu/all.yml /etc/grafana/provisioning/dashboards/all.yml
 sudo mv /home/ubuntu/dashboard.json /var/lib/grafana/dashboards/dashboard.json
 sudo mv /home/ubuntu/prometheus.service /etc/systemd/system/prometheus.service
 sudo mv /home/ubuntu/loki.service /etc/systemd/system/loki.service
-sudo chown -R grafana:grafana /etc/grafana /var/lib/grafana
+if id "grafana" &>/dev/null; then sudo chown -R grafana:grafana /etc/grafana /var/lib/grafana; fi
 sudo systemctl daemon-reload
 sudo systemctl start prometheus
 sudo systemctl enable prometheus
@@ -141,7 +145,10 @@ sudo systemctl start loki
 sudo systemctl enable loki
 sudo systemctl start grafana-server
 sudo systemctl enable grafana-server
-"#;
+"#,
+        prometheus_version, prometheus_version, prometheus_version
+    )
+}
 
 /// Command to install the binary on regular instances
 pub const INSTALL_BINARY_CMD: &str = r#"

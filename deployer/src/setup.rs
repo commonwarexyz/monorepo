@@ -58,7 +58,7 @@ pub async fn setup(config_path: &str, deployer_ip: &str) -> Result<String, Box<d
         PROMETHEUS_VERSION, PROMETHEUS_VERSION
     );
     let grafana_url = format!(
-        "https://dl.grafana.com/oss/release/grafana-{}-1.arm64.deb",
+        "https://dl.grafana.com/oss/release/grafana_{}_arm64.deb",
         GRAFANA_VERSION
     );
     let loki_url = format!(
@@ -436,7 +436,12 @@ pub async fn setup(config_path: &str, deployer_ip: &str) -> Result<String, Box<d
         "/home/ubuntu/loki.service",
     )
     .await?;
-    ssh_execute(private_key, &monitoring_ip, INSTALL_MONITORING_CMD).await?;
+    ssh_execute(
+        private_key,
+        &monitoring_ip,
+        &install_monitoring_cmd(PROMETHEUS_VERSION),
+    )
+    .await?;
     poll_service_status(private_key, &monitoring_ip, "prometheus").await?;
     poll_service_status(private_key, &monitoring_ip, "loki").await?;
     poll_service_status(private_key, &monitoring_ip, "grafana-server").await?;
