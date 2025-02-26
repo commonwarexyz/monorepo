@@ -1052,7 +1052,7 @@ dependencies = [
  "prometheus-client",
  "prost",
  "prost-build",
- "rand",
+ "rand 0.8.5",
  "thiserror",
  "tracing",
  "tracing-subscriber",
