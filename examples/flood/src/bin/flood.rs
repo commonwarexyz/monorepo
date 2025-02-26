@@ -30,8 +30,8 @@ fn main() {
     // Parse arguments
     let matches = Command::new("runner")
         .about("flood the network with messages")
-        .arg(Arg::new("peers").required(true))
-        .arg(Arg::new("config").required(true))
+        .arg(Arg::new("peers").long("peers").required(true))
+        .arg(Arg::new("config").long("config").required(true))
         .get_matches();
 
     // Create logger
@@ -97,7 +97,7 @@ fn main() {
     let p2p_cfg = authenticated::Config::aggressive(
         signer.clone(),
         &union(FLOOD_NAMESPACE, b"_P2P"),
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), config.port),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), config.port),
         bootstrappers,
         config.message_size,
     );
@@ -121,15 +121,17 @@ fn main() {
 
         // Serve metrics
         let metrics = context.with_label("metrics").spawn(|context| async move {
-            let app = Router::new().route(
-                "/metrics",
-                get(|extension: Extension<Context>| async move { extension.0.encode() }),
-            );
-            let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), METRICS_PORT);
+            let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), METRICS_PORT);
             let listener = context
                 .bind(addr)
                 .await
                 .expect("Could not bind to metrics address");
+            let app = Router::new()
+                .route(
+                    "/metrics",
+                    get(|extension: Extension<Context>| async move { extension.0.encode() }),
+                )
+                .layer(Extension(context));
             serve(listener, app.into_make_service())
                 .await
                 .expect("Could not serve metrics");
