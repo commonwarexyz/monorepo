@@ -249,7 +249,7 @@ scrape_configs:
             r#"
   - job_name: 'binary-{}'
     static_configs:
-      - targets: ['{}:9100']
+      - targets: ['{}:9090']
 "#,
             ip, ip
         ));
