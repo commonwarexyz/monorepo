@@ -30,8 +30,8 @@ fn main() {
     // Parse arguments
     let matches = Command::new("runner")
         .about("flood the network with messages")
-        .arg(Arg::new("peers").required(true))
-        .arg(Arg::new("config").required(true))
+        .arg(Arg::new("peers").long("peers").required(true))
+        .arg(Arg::new("config").long("config").required(true))
         .get_matches();
 
     // Create logger
