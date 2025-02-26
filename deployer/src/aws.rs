@@ -3,8 +3,8 @@ pub use aws_config::Region;
 use aws_sdk_ec2::error::BuildError;
 use aws_sdk_ec2::primitives::Blob;
 use aws_sdk_ec2::types::{
-    BlockDeviceMapping, EbsBlockDevice, Filter, InstanceStateName, ResourceType, Tag,
-    TagSpecification, VpcPeeringConnectionStateReasonCode,
+    BlockDeviceMapping, EbsBlockDevice, Filter, InstanceStateName, ResourceType, SecurityGroup,
+    Tag, TagSpecification, VpcPeeringConnectionStateReasonCode,
 };
 pub use aws_sdk_ec2::types::{InstanceType, IpPermission, IpRange, UserIdGroupPair, VolumeType};
 use aws_sdk_ec2::{Client as Ec2Client, Error as Ec2Error};
@@ -615,7 +615,7 @@ pub async fn wait_for_instances_terminated(
 pub async fn find_security_groups_by_tag(
     ec2_client: &Ec2Client,
     tag: &str,
-) -> Result<Vec<String>, Ec2Error> {
+) -> Result<Vec<SecurityGroup>, Ec2Error> {
     let resp = ec2_client
         .describe_security_groups()
         .filters(Filter::builder().name("tag:deployer").values(tag).build())
@@ -625,7 +625,6 @@ pub async fn find_security_groups_by_tag(
         .security_groups
         .unwrap_or_default()
         .into_iter()
-        .map(|sg| sg.group_id.unwrap())
         .collect())
 }
 
@@ -821,4 +820,25 @@ pub async fn find_availability_zone(
         "No availability zone supports all instance types: {:?}",
         instance_types
     ))))
+}
+
+/// Waits until all network interfaces associated with a security group are deleted
+pub async fn wait_for_enis_deleted(ec2_client: &Ec2Client, sg_id: &str) -> Result<(), Ec2Error> {
+    loop {
+        let resp = ec2_client
+            .describe_network_interfaces()
+            .filters(Filter::builder().name("group-id").values(sg_id).build())
+            .send()
+            .await?;
+        let enis = resp.network_interfaces.unwrap_or_default();
+        if enis.is_empty() {
+            return Ok(()); // No ENIs remain, safe to delete the security group
+        }
+        println!(
+            "Waiting for {} ENIs to be deleted for security group {}",
+            enis.len(),
+            sg_id
+        );
+        sleep(Duration::from_secs(5)).await; // Wait 5 seconds before checking again
+    }
 }

@@ -33,10 +33,58 @@ pub async fn teardown(tag: &str, config_path: &str) -> Result<(), Box<dyn Error>
             println!("Terminated instances({}): {:?}", region, instance_ids);
         }
 
-        let sg_ids = find_security_groups_by_tag(&ec2_client, tag).await?;
-        for sg_id in sg_ids {
+        // If in the monitoring region, we need to revoke the ingress rule
+        let security_groups = find_security_groups_by_tag(&ec2_client, tag).await?;
+        if region == MONITORING_REGION && !security_groups.is_empty() {
+            // Find the monitoring security group (named `tag`)
+            let monitoring_sg = security_groups
+                .iter()
+                .find(|sg| sg.group_name() == Some(tag))
+                .expect("Monitoring security group not found")
+                .group_id()
+                .unwrap();
+
+            // Find the regular security group (named `{tag}-regular`)
+            let regular_sg = security_groups
+                .iter()
+                .find(|sg| sg.group_name() == Some(&format!("{}-regular", tag)))
+                .expect("Regular security group not found")
+                .group_id()
+                .unwrap();
+
+            // Revoke ingress rule from monitoring security group to regular security group
+            println!(
+                "Revoking ingress rule from monitoring security group({}) to regular security group({})",
+                monitoring_sg, regular_sg
+            );
+            let ip_permission = IpPermission::builder()
+                .ip_protocol("tcp")
+                .from_port(3100)
+                .to_port(3100)
+                .user_id_group_pairs(UserIdGroupPair::builder().group_id(regular_sg).build())
+                .build();
+            ec2_client
+                .revoke_security_group_ingress()
+                .group_id(monitoring_sg)
+                .ip_permissions(ip_permission)
+                .send()
+                .await?;
+            println!(
+                "Revoked ingress rule from monitoring security group({}) to regular security group({})",
+                monitoring_sg, regular_sg
+            );
+        }
+
+        let sgs = find_security_groups_by_tag(&ec2_client, tag).await?;
+        for sg in sgs {
+            let sg_id = sg.group_id().unwrap();
+            println!(
+                "Waiting for ENIs to detach from security group({}): {}",
+                region, sg_id
+            );
+            wait_for_enis_deleted(&ec2_client, sg_id).await?;
             println!("Deleting security group({}): {}", region, sg_id);
-            delete_security_group(&ec2_client, &sg_id).await?;
+            delete_security_group(&ec2_client, sg_id).await?;
             println!("Deleted security group({}): {}", region, sg_id);
         }
 

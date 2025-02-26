@@ -148,11 +148,9 @@ tar xvfz /home/ubuntu/prometheus.tar.gz -C /home/ubuntu
 sudo mv /home/ubuntu/prometheus-{}.linux-arm64 /opt/prometheus/prometheus-{}.linux-arm64
 sudo ln -s /opt/prometheus/prometheus-{}.linux-arm64/prometheus /opt/prometheus/prometheus
 sudo chmod +x /opt/prometheus/prometheus
-sudo dpkg -i /home/ubuntu/grafana.deb || echo "Grafana installation failed"
+sudo dpkg -i /home/ubuntu/grafana.deb
 sudo apt-get install -f -y
-if [ -f /etc/grafana/grafana.ini ]; then
-    sudo sed -i '/^\[auth.anonymous\]$/,/^\[/ {{ /^; *enabled = /s/.*/enabled = true/; /^; *org_role = /s/.*/org_role = Admin/ }}' /etc/grafana/grafana.ini
-fi
+sudo sed -i '/^\[auth.anonymous\]$/,/^\[/ {{ /^; *enabled = /s/.*/enabled = true/; /^; *org_role = /s/.*/org_role = Admin/ }}' /etc/grafana/grafana.ini
 sudo mkdir -p /etc/grafana/provisioning/datasources /etc/grafana/provisioning/dashboards /var/lib/grafana/dashboards
 sudo mv /home/ubuntu/prometheus.yml /opt/prometheus/prometheus.yml
 sudo mv /home/ubuntu/datasources.yml /etc/grafana/provisioning/datasources/datasources.yml
@@ -160,7 +158,7 @@ sudo mv /home/ubuntu/all.yml /etc/grafana/provisioning/dashboards/all.yml
 sudo mv /home/ubuntu/dashboard.json /var/lib/grafana/dashboards/dashboard.json
 sudo mv /home/ubuntu/prometheus.service /etc/systemd/system/prometheus.service
 sudo mv /home/ubuntu/loki.service /etc/systemd/system/loki.service
-if id "grafana" &>/dev/null; then sudo chown -R grafana:grafana /etc/grafana /var/lib/grafana; fi
+sudo chown -R grafana:grafana /etc/grafana /var/lib/grafana
 sudo systemctl daemon-reload
 sudo systemctl start prometheus
 sudo systemctl enable prometheus
