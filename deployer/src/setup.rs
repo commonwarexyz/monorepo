@@ -110,6 +110,19 @@ pub async fn setup(config_path: &str, deployer_ip: &str) -> Result<String, Box<d
     regions.insert(MONITORING_REGION.to_string());
     println!("Regions: {:?}", regions);
 
+    // Determine instance types by region
+    let mut instance_types_by_region: HashMap<String, HashSet<String>> = HashMap::new();
+    for instance in &config.instances {
+        instance_types_by_region
+            .entry(instance.region.clone())
+            .or_default()
+            .insert(instance.instance_type.clone());
+    }
+    instance_types_by_region
+        .entry(MONITORING_REGION.to_string())
+        .or_default()
+        .insert(config.monitoring.instance_type.clone());
+
     // Initialize resources for each region
     let mut vpc_cidrs = HashMap::new();
     let mut subnet_cidrs = HashMap::new();
@@ -119,6 +132,11 @@ pub async fn setup(config_path: &str, deployer_ip: &str) -> Result<String, Box<d
         let ec2_client = create_ec2_client(Region::new(region.clone())).await;
         ec2_clients.insert(region.clone(), ec2_client);
         println!("Created EC2 client for region: {}", region);
+
+        let instance_types: Vec<String> =
+            instance_types_by_region[region].iter().cloned().collect();
+        let az = find_availability_zone(&ec2_clients[region], &instance_types).await?;
+        println!("Selected availability zone {} for {}", az, region);
 
         let vpc_cidr = format!("10.{}.0.0/16", idx);
         vpc_cidrs.insert(region.clone(), vpc_cidr.clone());
@@ -139,6 +157,7 @@ pub async fn setup(config_path: &str, deployer_ip: &str) -> Result<String, Box<d
             &vpc_id,
             &route_table_id,
             &subnet_cidr,
+            &az,
             &tag,
         )
         .await?;

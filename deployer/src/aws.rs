@@ -9,6 +9,7 @@ use aws_sdk_ec2::types::{
 pub use aws_sdk_ec2::types::{InstanceType, IpPermission, IpRange, UserIdGroupPair, VolumeType};
 use aws_sdk_ec2::{Client as Ec2Client, Error as Ec2Error};
 use commonware_deployer::PortConfig;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tokio::time::sleep;
 
@@ -161,12 +162,14 @@ pub async fn create_subnet(
     vpc_id: &str,
     route_table_id: &str,
     subnet_cidr: &str,
+    availability_zone: &str,
     tag: &str,
 ) -> Result<String, Ec2Error> {
     let subnet_resp = client
         .create_subnet()
         .vpc_id(vpc_id)
         .cidr_block(subnet_cidr)
+        .availability_zone(availability_zone)
         .tag_specifications(
             TagSpecification::builder()
                 .resource_type(ResourceType::Subnet)
@@ -768,4 +771,48 @@ pub async fn find_vpcs_by_tag(ec2_client: &Ec2Client, tag: &str) -> Result<Vec<S
 pub async fn delete_vpc(ec2_client: &Ec2Client, vpc_id: &str) -> Result<(), Ec2Error> {
     ec2_client.delete_vpc().vpc_id(vpc_id).send().await?;
     Ok(())
+}
+
+pub async fn find_availability_zone(
+    client: &Ec2Client,
+    instance_types: &[String],
+) -> Result<String, Ec2Error> {
+    // Retrieve all instance type offerings for availability zones in the region
+    let offerings = client
+        .describe_instance_type_offerings()
+        .location_type("availability-zone".into())
+        .send()
+        .await?
+        .instance_type_offerings
+        .unwrap_or_default();
+
+    // Build a map from availability zone to the set of supported instance types
+    let mut az_to_instance_types: HashMap<String, HashSet<String>> = HashMap::new();
+    for offering in offerings {
+        if let (Some(location), Some(instance_type)) = (
+            offering.location,
+            offering.instance_type.map(|it| it.to_string()), // Convert enum to String if necessary
+        ) {
+            az_to_instance_types
+                .entry(location)
+                .or_default()
+                .insert(instance_type);
+        }
+    }
+
+    // Convert the required instance types to a HashSet for efficient subset checking
+    let required_instance_types: HashSet<String> = instance_types.iter().cloned().collect();
+
+    // Find an availability zone that supports all required instance types
+    for (az, supported_types) in az_to_instance_types {
+        if required_instance_types.is_subset(&supported_types) {
+            return Ok(az); // Return the first matching availability zone
+        }
+    }
+
+    // If no availability zone supports all instance types, return an error
+    Err(Ec2Error::from(BuildError::other(format!(
+        "No availability zone supports all instance types: {:?}",
+        instance_types
+    ))))
 }
