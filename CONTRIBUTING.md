@@ -1,6 +1,11 @@
 # Setting Expectations
 
-External contributors are encouraged to submit issues and pull requests to this repository. That being said, not all issues will be addressed nor pull requests merged (even if well-intentioned).
+External contributors are encouraged to submit issues and pull requests to this repository. That being said, not all issues will be addressed nor pull requests merged (even if well-intentioned or technically correct). Some types of pull requests that may be closed without a note include:
+
+- Low-effort grammatical or style fixes
+- Changes that come from accounts that appear to be:
+  - Farming or spamming contributions to blockchain repositories
+  - Fraudulent or interacting in a way that is primarily LLM-generated
 
 The Commonware Library provides reliable and high-performance primitives and contributions that do not advance these goals may not be accepted. This could include (but is not limited to) replacing code with external dependencies, implementing optional functionality, and/or introducing algorithms that substantially increase complexity to provide marginal performance improvements. On the other hand, adding more tests and benchmarks is almost always welcome!
 
