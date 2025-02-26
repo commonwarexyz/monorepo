@@ -148,9 +148,11 @@ pub async fn teardown(tag: &str, config_path: &str) -> Result<(), Box<dyn Error>
     // Delete temp directory
     let temp_dir = format!("deployer-{}", tag);
     let temp_dir = PathBuf::from("/tmp").join(temp_dir);
-    std::fs::remove_dir_all(&temp_dir)?;
-    println!("Deleted temp directory: {:?}", temp_dir);
+    if temp_dir.exists() {
+        std::fs::remove_dir_all(&temp_dir)?;
+        println!("Deleted temp directory: {:?}", temp_dir);
+    }
 
-    println!("Teardown complete for tag: {}", tag);
+    println!("Teardown complete: {}", tag);
     Ok(())
 }
