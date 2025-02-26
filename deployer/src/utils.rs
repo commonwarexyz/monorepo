@@ -31,7 +31,7 @@ pub async fn download_and_cache(
     let cache_key = hex(&hash(url.to_string().as_bytes()));
     let cache_path = PathBuf::from(cache_dir).join(cache_key);
     if !cache_path.exists() {
-        println!("File not in cache: {:?}", url);
+        println!("File not in cache: {}", url);
         download_file(url, &cache_path).await?;
     }
     std::fs::copy(cache_path, dest)?;

@@ -49,7 +49,7 @@ pub async fn setup(config_path: &str, deployer_ip: &str) -> Result<String, Box<d
 
     // Ensure cache directory exists
     std::fs::create_dir_all(CACHE_DIR)?;
-    println!("Cache directory: {}", CACHE_DIR);
+    println!("Artifact cache: {}", CACHE_DIR);
 
     // Download monitoring artifacts
     println!("Downloading artifacts...");
