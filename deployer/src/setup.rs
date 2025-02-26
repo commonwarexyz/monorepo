@@ -10,6 +10,9 @@ use std::path::PathBuf;
 use tokio::process::Command;
 use uuid::Uuid;
 
+/// Directory for caching downloaded artifacts
+const CACHE_DIR: &str = "/tmp/deployer-cache";
+
 /// Represents a deployed instance with its configuration and public IP
 #[derive(Clone)]
 pub struct Deployment {
@@ -42,7 +45,11 @@ pub async fn setup(config_path: &str, deployer_ip: &str) -> Result<String, Box<d
     let temp_dir = PathBuf::from("/tmp").join(temp_dir);
     std::fs::create_dir_all(&temp_dir)?;
     let temp_dir_path = temp_dir.to_str().unwrap();
-    println!("Temp directory: {:?}", temp_dir_path);
+    println!("Temp directory: {}", temp_dir_path);
+
+    // Ensure cache directory exists
+    std::fs::create_dir_all(CACHE_DIR)?;
+    println!("Cache directory: {}", CACHE_DIR);
 
     // Download monitoring artifacts
     println!("Downloading artifacts...");
@@ -68,13 +75,13 @@ pub async fn setup(config_path: &str, deployer_ip: &str) -> Result<String, Box<d
     let loki_zip = temp_dir.join("loki.zip");
     let promtail_zip = temp_dir.join("promtail.zip");
 
-    download_file(&prometheus_url, &prometheus_tar).await?;
+    download_and_cache(CACHE_DIR, &prometheus_url, &prometheus_tar).await?;
     println!("Downloaded Prometheus: {}", PROMETHEUS_VERSION);
-    download_file(&grafana_url, &grafana_deb).await?;
+    download_and_cache(CACHE_DIR, &grafana_url, &grafana_deb).await?;
     println!("Downloaded Grafana: {}", GRAFANA_VERSION);
-    download_file(&loki_url, &loki_zip).await?;
+    download_and_cache(CACHE_DIR, &loki_url, &loki_zip).await?;
     println!("Downloaded Loki: {}", LOKI_VERSION);
-    download_file(&promtail_url, &promtail_zip).await?;
+    download_and_cache(CACHE_DIR, &promtail_url, &promtail_zip).await?;
     println!("Downloaded Promtail: {}", PROMTAIL_VERSION);
 
     // Generate SSH key pair

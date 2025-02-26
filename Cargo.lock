@@ -942,6 +942,8 @@ dependencies = [
  "aws-config",
  "aws-sdk-ec2",
  "clap 2.34.0",
+ "commonware-cryptography",
+ "commonware-utils",
  "futures",
  "reqwest",
  "serde",

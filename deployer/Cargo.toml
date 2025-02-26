@@ -11,6 +11,8 @@ repository = "https://github.com/commonwarexyz/monorepo/tree/main/deployer"
 documentation = "https://docs.rs/commonware-deployer"
 
 [dependencies]
+commonware-cryptography = { workspace = true }
+commonware-utils = { workspace = true }
 aws-config = "1.5.16"
 aws-sdk-ec2 = "1.110.0"
 clap = "2.34"

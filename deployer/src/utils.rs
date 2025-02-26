@@ -1,5 +1,7 @@
+use commonware_cryptography::hash;
+use commonware_utils::hex;
 use std::error::Error;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tokio::process::Command;
 use tokio::time::{sleep, Duration};
 
@@ -13,10 +15,26 @@ pub const MAX_POLL_ATTEMPTS: usize = 30;
 pub const RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Downloads a file from a URL to a local destination
-pub async fn download_file(url: &str, dest: &Path) -> Result<(), Box<dyn Error>> {
+async fn download_file(url: &str, dest: &Path) -> Result<(), Box<dyn Error>> {
     let response = reqwest::get(url).await?;
     let bytes = response.bytes().await?;
     std::fs::write(dest, bytes)?;
+    Ok(())
+}
+
+/// Downloads a file from a URL if it does not exist in the cache directory
+pub async fn download_and_cache(
+    cache_dir: &str,
+    url: &str,
+    dest: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let cache_key = hex(&hash(url.to_string().as_bytes()));
+    let cache_path = PathBuf::from(cache_dir).join(cache_key);
+    if !cache_path.exists() {
+        println!("File not in cache: {:?}", url);
+        download_file(url, &cache_path).await?;
+    }
+    std::fs::copy(cache_path, dest)?;
     Ok(())
 }
 
