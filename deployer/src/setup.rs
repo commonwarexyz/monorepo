@@ -69,9 +69,13 @@ pub async fn setup(config_path: &str, deployer_ip: &str) -> Result<String, Box<d
     let promtail_zip = temp_dir.join("promtail.zip");
 
     download_file(&prometheus_url, &prometheus_tar).await?;
-    download_file(&loki_url, &loki_zip).await?;
-    download_file(&promtail_url, &promtail_zip).await?;
+    println!("Downloaded Prometheus: {}", PROMETHEUS_VERSION);
     download_file(&grafana_url, &grafana_deb).await?;
+    println!("Downloaded Grafana: {}", GRAFANA_VERSION);
+    download_file(&loki_url, &loki_zip).await?;
+    println!("Downloaded Loki: {}", LOKI_VERSION);
+    download_file(&promtail_url, &promtail_zip).await?;
+    println!("Downloaded Promtail: {}", PROMTAIL_VERSION);
 
     // Generate SSH key pair
     let key_name = format!("deployer-{}", tag);
