@@ -2,6 +2,7 @@ use super::{
     config::Config,
     fetcher::Fetcher,
     ingress::{Mailbox, Message},
+    metrics,
 };
 use crate::{
     p2p::{
@@ -69,6 +70,9 @@ pub struct Actor<
     /// Whether responses are sent with priority over other network messages
     priority_responses: bool,
 
+    /// Metrics for the peer actor
+    metrics: metrics::Metrics,
+
     /// Phantom data for networking types
     _s: PhantomData<NetS>,
     _r: PhantomData<NetR>,
@@ -91,6 +95,7 @@ impl<
     pub async fn new(context: E, cfg: Config<C, D, Key, Con, Pro>) -> (Self, Mailbox<Key>) {
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
         let requester = Requester::new(context.clone(), cfg.requester_config);
+        let metrics = metrics::Metrics::init(context.clone());
         let fetcher = Fetcher::new(
             context.clone(),
             requester,
@@ -108,6 +113,7 @@ impl<
                 fetcher,
                 serves: FuturesPool::default(),
                 priority_responses: cfg.priority_responses,
+                metrics,
                 _s: PhantomData,
                 _r: PhantomData,
             },
@@ -134,6 +140,15 @@ impl<
         self.fetcher.reconcile(self.coordinator.peers());
 
         loop {
+            // Update metrics
+            self.metrics
+                .fetch_pending
+                .set(self.fetcher.len_pending() as i64);
+            self.metrics
+                .fetch_active
+                .set(self.fetcher.len_active() as i64);
+            self.metrics.serve_in_flight.set(self.serves.len() as i64);
+
             // Update peer list if-and-only-if it might have changed.
             let peer_set_id = self.coordinator.peer_set_id();
             if self.last_peer_set_id != Some(peer_set_id) {
@@ -184,7 +199,7 @@ impl<
                 // Handle completed server requests
                 msg = self.serves.next_completed() => {
                     let (peer, id, result) = msg;
-                    Self::handle_serve(&mut sender, peer, id, result, self.priority_responses).await;
+                    self.handle_serve(&mut sender, peer, id, result, self.priority_responses).await;
                 },
 
                 // Handle network messages
@@ -230,6 +245,7 @@ impl<
 
     /// Handles the case where the application responds to a request from an external peer.
     async fn handle_serve(
+        &mut self,
         sender: &mut NetS,
         peer: C::PublicKey,
         id: u64,
@@ -249,11 +265,20 @@ impl<
             .send(Recipients::One(peer.clone()), msg, priority)
             .await;
 
-        // Log result, but do not handle errors
+        // Log result, update metrics, but do not handle errors
         match result {
-            Err(err) => error!(?err, ?peer, ?id, "serve send failed"),
-            Ok(to) if to.is_empty() => warn!(?peer, ?id, "serve send failed"),
-            Ok(_) => debug!(?peer, ?id, "serve sent"),
+            Err(err) => {
+                error!(?err, ?peer, ?id, "serve send failed");
+                self.metrics.serve_failure.inc();
+            }
+            Ok(to) if to.is_empty() => {
+                warn!(?peer, ?id, "serve send failed");
+                self.metrics.serve_failure.inc();
+            }
+            Ok(_) => {
+                debug!(?peer, ?id, "serve sent");
+                self.metrics.serve_success.inc();
+            }
         };
     }
 
@@ -294,10 +319,12 @@ impl<
         // The peer had the data, so we can deliver it to the consumer
         if self.consumer.deliver(key.clone(), response).await {
             // If the data is valid, the fetch is complete
+            self.metrics.fetch_success.inc();
             return;
         }
 
         // If the data is invalid, we need to block the peer and try again
+        self.metrics.fetch_failure.inc();
         self.fetcher.block(peer);
         self.fetcher.fetch(sender, key, false).await;
     }
@@ -318,6 +345,7 @@ impl<
         };
 
         // The peer did not have the data, so we need to try again
+        self.metrics.fetch_failure.inc();
         self.fetcher.fetch(sender, key, false).await;
     }
 }

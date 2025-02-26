@@ -219,4 +219,14 @@ impl<E: Clock + GClock + Rng, C: Scheme, Key: Array, NetS: Sender<PublicKey = C:
     pub fn block(&mut self, peer: C::PublicKey) {
         self.requester.block(peer);
     }
+
+    /// Returns the number of pending fetches.
+    pub fn len_pending(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// Returns the number of active fetches.
+    pub fn len_active(&self) -> usize {
+        self.active.len()
+    }
 }

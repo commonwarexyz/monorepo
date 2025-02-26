@@ -135,6 +135,16 @@ impl<I: Ord + Hash + Clone, P: Ord + Copy> PrioritySet<I, P> {
             .iter()
             .map(|entry| (&entry.item, &entry.priority))
     }
+
+    /// Returns the number of items in the set.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Returns `true` if the set is empty.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 }
 
 #[cfg(test)]
