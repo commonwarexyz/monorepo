@@ -1,7 +1,7 @@
 //! An MMR backed by a fixed-item-length journal.
 //!
-//! A [`crate::journal`] is used to store all unpruned MMR nodes, and a [`crate::metadata`] store is
-//! used to preserve each current peak in case they would otherwise have been be pruned.
+//! A [crate::journal] is used to store all unpruned MMR nodes, and a [crate::metadata] store is
+//! used to preserve each current peak digest in case they would otherwise have been be pruned.
 
 use crate::journal::{
     fixed::{Config as JConfig, Journal},
@@ -23,10 +23,13 @@ use tracing::{error, warn};
 /// Configuration for a journal-backed MMR.
 #[derive(Clone)]
 pub struct Config {
-    /// The prefix to use for the names of the `commonware-runtime::Storage` partitions used for the
-    /// MMR metadata and backing journal.  "_metadata" and "_journal" will be appended to this
-    /// prefix to form the names of the metadata and journal partitions, respectively.
-    pub partition_prefix: String,
+    /// The name of the `commonware-runtime::Storage` storage partition used for the journal storing
+    /// the MMR nodes.
+    pub journal_partition: String,
+
+    /// The name of the `commonware-runtime::Storage` storage partition used for the metadata
+    /// containing the MMR's current peaks.
+    pub metadata_partition: String,
 
     /// The maximum number of items to store in each blob in the backing journal.
     pub items_per_blob: u64,
@@ -71,19 +74,20 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Storage<H> for Mmr<B,
 impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
     /// Initialize a new `Mmr` instance.
     pub async fn init(context: E, cfg: Config) -> Result<Self, Error> {
-        let metadata_cfg = MConfig {
-            partition: format!("{}{}", cfg.partition_prefix, "_metadata"),
-        };
-        let metadata = Metadata::init(context.with_label("mmr_metadata"), metadata_cfg).await?;
-
         let journal_cfg = JConfig {
-            partition: format!("{}{}", cfg.partition_prefix, "_journal"),
+            partition: cfg.journal_partition,
             items_per_blob: cfg.items_per_blob,
         };
         let mut journal =
             Journal::<B, E, H::Digest>::init(context.with_label("mmr_journal"), journal_cfg)
                 .await?;
         let mut journal_size = journal.size().await?;
+
+        let metadata_cfg = MConfig {
+            partition: cfg.metadata_partition,
+        };
+        let metadata = Metadata::init(context.with_label("mmr_metadata"), metadata_cfg).await?;
+
         if journal_size == 0 {
             return Ok(Self {
                 mem_mmr: MemMmr::new(),
@@ -200,7 +204,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
         self.journal.sync().await?;
         assert_eq!(self.journal_size, self.journal.size().await?);
 
-        // Write latest peaks to metadata.
+        // Clear out old peaks, then write the latest peaks to metadata.
         self.metadata.clear();
         let peak_iterator = self.mem_mmr.peak_iterator();
         for (peak_pos, _) in peak_iterator {
@@ -256,6 +260,14 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
     /// Prune the maximum amount of nodes possible while still allowing nodes with position `pos` or
     /// newer to be provable, returning the position of the oldest retained node. The MMR is synced
     /// in the process.
+    ///
+    /// Note that the guarantee that nodes in position `pos` or newer are provable does not
+    /// necessarily hold after more elements are added to the MMR. This is because adding new nodes
+    /// may change the peaks, and provability assumes the original peaks (that existed at the time
+    /// of pruning) remain available.
+    ///
+    /// TODO: Consider persisting all historical peaks required to guarantee the stability of any
+    /// provability guarantee provided by any call to this function.
     pub async fn prune(&mut self, provable_pos: u64) -> Result<Option<u64>, Error> {
         if self.mem_mmr.size() == 0 {
             return Ok(None);
@@ -345,7 +357,8 @@ mod tests {
         let (executor, context, _) = Executor::default();
         executor.start(async move {
             let cfg = Config {
-                partition_prefix: "test_partition".into(),
+                journal_partition: "journal_partition".into(),
+                metadata_partition: "metadata_partition".into(),
                 items_per_blob: 7,
             };
             let mut mmr = Mmr::<_, _, Sha256>::init(context.clone(), cfg.clone())
@@ -369,10 +382,10 @@ mod tests {
         let (executor, context, _) = Executor::default();
         executor.start(async move {
             let cfg = Config {
-                partition_prefix: "test_partition".into(),
+                journal_partition: "journal_partition".into(),
+                metadata_partition: "metadata_partition".into(),
                 items_per_blob: 7,
             };
-
             // Build a test MMR with 255 leaves
             let mut mmr = Mmr::<_, _, Sha256>::init(context.clone(), cfg.clone())
                 .await
@@ -438,7 +451,8 @@ mod tests {
         let (executor, context, _) = Executor::default();
         executor.start(async move {
             let cfg = Config {
-                partition_prefix: "test_partition".into(),
+                journal_partition: "journal_partition".into(),
+                metadata_partition: "metadata_partition".into(),
                 items_per_blob: 7,
             };
             let mut mmr = Mmr::<_, _, Sha256>::init(context.clone(), cfg.clone())
@@ -463,7 +477,7 @@ mod tests {
             // The very last element we added (pos=495) resulted in new parents at positions 496 &
             // 497. Simulate a partial write by corrupting the last parent's checksum by truncating
             // the last blob by a single byte.
-            let partition = cfg.partition_prefix.clone() + "_journal";
+            let partition: String = "journal_partition".into();
             let blob = context
                 .open(&partition, &71u64.to_be_bytes())
                 .await
@@ -526,7 +540,8 @@ mod tests {
         let (executor, context, _) = Executor::default();
         executor.start(async move {
             let cfg = Config {
-                partition_prefix: "test_partition_pruned".into(),
+                journal_partition: "journal_partition".into(),
+                metadata_partition: "metadata_partition".into(),
                 items_per_blob: 7,
             };
 
@@ -536,11 +551,12 @@ mod tests {
             let mut pruned_mmr = Mmr::<_, _, Sha256>::init(context.clone(), cfg.clone())
                 .await
                 .unwrap();
-            let cfg2 = Config {
-                partition_prefix: "test_partition_unpruned".into(),
+            let cfg_unpruned = Config {
+                journal_partition: "unpruned_journal_partition".into(),
+                metadata_partition: "unpruned_metadata_partition".into(),
                 items_per_blob: 7,
             };
-            let mut mmr = Mmr::<_, _, Sha256>::init(context.clone(), cfg2)
+            let mut mmr = Mmr::<_, _, Sha256>::init(context.clone(), cfg_unpruned)
                 .await
                 .unwrap();
             let mut hasher = Sha256::new();
@@ -606,7 +622,8 @@ mod tests {
         let (executor, context, _) = Executor::default();
         executor.start(async move {
             let cfg = Config {
-                partition_prefix: "test_partition".into(),
+                journal_partition: "journal_partition".into(),
+                metadata_partition: "metadata_partition".into(),
                 items_per_blob: 7,
             };
 

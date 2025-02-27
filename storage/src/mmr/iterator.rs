@@ -129,7 +129,7 @@ pub(crate) fn oldest_provable_pos(peak_iterator: PeakIterator, oldest_retained_p
         let mut cur_node = peak_pos;
         while two_h > 1 {
             let left_pos = cur_node - two_h;
-            let right_pos = left_pos + two_h - 1;
+            let right_pos = cur_node - 1;
             if left_pos < oldest_retained_pos {
                 // found pruned left sibling
                 return right_pos + 1;
@@ -145,7 +145,7 @@ pub(crate) fn oldest_provable_pos(peak_iterator: PeakIterator, oldest_retained_p
 }
 
 /// Returns the position of the oldest node whose digest will be required to prove inclusion of
-/// `provable_pos`.
+/// `provable_pos`. The implementation assumes that the peak digests will remain available.
 ///
 /// Pruning this position will render the node with position `provable_pos` unprovable.
 pub(crate) fn oldest_required_proof_pos(peak_iterator: PeakIterator, provable_pos: u64) -> u64 {
@@ -246,7 +246,7 @@ mod tests {
     // boundaries appears in the verification crate.
     #[test]
     fn test_proof_boundaries() {
-        for oldest_retained in 0u64..19u64 {
+        for oldest_retained in 0u64..19 {
             let iter = PeakIterator::new(19);
             let oldest_provable = oldest_provable_pos(iter, oldest_retained);
             assert!(oldest_provable >= oldest_retained);
