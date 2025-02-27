@@ -67,7 +67,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             Some((ec2::CREATE_CMD, matches)) => {
                 let config_path = matches.get_one::<PathBuf>("config").unwrap();
                 if let Err(e) = ec2::create(config_path).await {
-                    error!(%e, "failed to create EC2 deployment");
+                    error!(error=?e, "failed to create EC2 deployment");
                 } else {
                     return Ok(());
                 }
@@ -75,7 +75,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             Some((ec2::DESTROY_CMD, matches)) => {
                 let config_path = matches.get_one::<PathBuf>("config").unwrap();
                 if let Err(e) = ec2::destroy(config_path).await {
-                    error!(%e, "failed to destroy EC2 deployment");
+                    error!(error=?e, "failed to destroy EC2 deployment");
                 } else {
                     return Ok(());
                 }

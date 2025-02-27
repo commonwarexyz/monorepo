@@ -63,6 +63,8 @@ pub async fn scp_file(
             .arg("StrictHostKeyChecking=no")
             .arg(local_path)
             .arg(format!("ubuntu@{}:{}", ip, remote_path))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .status()
             .await?;
         if status.success() {
@@ -83,6 +85,8 @@ pub async fn ssh_execute(key_file: &str, ip: &str, command: &str) -> Result<(), 
             .arg("StrictHostKeyChecking=no")
             .arg(format!("ubuntu@{}", ip))
             .arg(command)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .status()
             .await?;
         if status.success() {
