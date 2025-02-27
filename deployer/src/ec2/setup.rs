@@ -1,7 +1,4 @@
-use crate::aws::*;
-use crate::services::*;
-use crate::utils::*;
-use commonware_deployer::{Config, InstanceConfig, Peer, Peers};
+use crate::ec2::{aws::*, services::*, utils::*, Config, InstanceConfig, Peer, Peers};
 use futures::future::join_all;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::error::Error;
@@ -31,7 +28,10 @@ pub struct RegionResources {
 }
 
 /// Sets up EC2 instances, deploys files, and configures monitoring and logging
-pub async fn setup(config_path: &str, deployer_ip: &str) -> Result<String, Box<dyn Error>> {
+pub async fn setup(config_path: &str) -> Result<String, Box<dyn Error>> {
+    // Get public IP address of the deployer
+    let deployer_ip = get_public_ip().await?;
+
     // Load configuration from YAML file
     let config_file = File::open(config_path)?;
     let config: Config = serde_yaml::from_reader(config_file)?;
@@ -165,7 +165,7 @@ pub async fn setup(config_path: &str, deployer_ip: &str) -> Result<String, Box<d
 
         let monitoring_sg_id = if *region == MONITORING_REGION {
             let sg_id =
-                create_security_group_monitoring(&ec2_clients[region], &vpc_id, deployer_ip, &tag)
+                create_security_group_monitoring(&ec2_clients[region], &vpc_id, &deployer_ip, &tag)
                     .await?;
             println!("Created monitoring security group: {}", sg_id);
             Some(sg_id)
@@ -289,7 +289,7 @@ pub async fn setup(config_path: &str, deployer_ip: &str) -> Result<String, Box<d
         let regular_sg_id = create_security_group_regular(
             &ec2_clients[region],
             &resources.vpc_id,
-            deployer_ip,
+            &deployer_ip,
             &monitoring_ip,
             &tag,
             &config.ports,

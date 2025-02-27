@@ -1,7 +1,12 @@
 use serde::{Deserialize, Serialize};
 
-pub mod setup;
-pub mod teardown;
+mod aws;
+mod services;
+mod setup;
+pub use setup::setup;
+mod teardown;
+pub use teardown::teardown;
+mod utils;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Peer {

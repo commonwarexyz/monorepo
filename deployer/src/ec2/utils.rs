@@ -14,6 +14,17 @@ pub const MAX_POLL_ATTEMPTS: usize = 30;
 /// Interval between retries
 pub const RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
+/// Fetch the public IPv4 address of a machine
+pub async fn get_public_ip() -> Result<String, Box<dyn Error>> {
+    let result = reqwest::get("https://ipv4.icanhazip.com")
+        .await?
+        .text()
+        .await?
+        .trim()
+        .to_string();
+    Ok(result)
+}
+
 /// Downloads a file from a URL to a local destination
 async fn download_file(url: &str, dest: &Path) -> Result<(), Box<dyn Error>> {
     let response = reqwest::get(url).await?;

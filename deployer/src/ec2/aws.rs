@@ -1,3 +1,4 @@
+use crate::ec2::PortConfig;
 use aws_config::BehaviorVersion;
 pub use aws_config::Region;
 use aws_sdk_ec2::error::BuildError;
@@ -8,7 +9,6 @@ use aws_sdk_ec2::types::{
 };
 pub use aws_sdk_ec2::types::{InstanceType, IpPermission, IpRange, UserIdGroupPair, VolumeType};
 use aws_sdk_ec2::{Client as Ec2Client, Error as Ec2Error};
-use commonware_deployer::PortConfig;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tokio::time::sleep;

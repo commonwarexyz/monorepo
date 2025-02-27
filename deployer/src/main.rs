@@ -1,6 +1,5 @@
 use clap::{App, Arg, SubCommand};
 use commonware_utils::crate_version;
-use serde_yaml::with;
 use std::error::Error;
 
 mod ec2;
@@ -51,24 +50,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Handle ec2 subcommands
     if let Some(ec2_matches) = matches.subcommand_matches("ec2") {
-        // Fetch the deployer's public IP
-        let deployer_ip = reqwest::get("https://ipv4.icanhazip.com")
-            .await?
-            .text()
-            .await?
-            .trim()
-            .to_string();
-        println!("Deployer IP: {}", deployer_ip);
         match ec2_matches.subcommand() {
             ("setup", Some(sub_m)) => {
                 let config_path = sub_m.value_of("config").unwrap();
-                let tag = setup::setup(config_path, &deployer_ip).await?;
+                let tag = ec2::setup(config_path).await?;
                 println!("Deployment tag: {}", tag);
             }
             ("teardown", Some(sub_m)) => {
                 let tag = sub_m.value_of("tag").unwrap();
                 let config_path = sub_m.value_of("config").unwrap();
-                teardown::teardown(tag, config_path).await?;
+                ec2::teardown(tag, config_path).await?;
             }
             _ => println!("Invalid command. Use 'setup' or 'teardown'."),
         }

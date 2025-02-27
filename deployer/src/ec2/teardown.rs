@@ -1,5 +1,4 @@
-use crate::aws::*;
-use commonware_deployer::Config;
+use crate::ec2::{aws::*, Config};
 use std::collections::HashSet;
 use std::error::Error;
 use std::fs::File;
