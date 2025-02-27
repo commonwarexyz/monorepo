@@ -1,3 +1,5 @@
+//! TODO
+
 use clap::{App, Arg, SubCommand};
 use commonware_utils::crate_version;
 use std::error::Error;
