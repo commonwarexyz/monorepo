@@ -42,7 +42,7 @@ deployer ec2 create --config config.yaml
 
 ### Check Metrics
 
-TODO
+Visit `http://<monitoring-ip>:3000` (anonymous login is already enabled, so you don't need to enter a password)
 
 ### Teardown Infrastructure
 
