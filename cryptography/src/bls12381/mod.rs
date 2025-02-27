@@ -190,3 +190,6 @@ mod tests {
         verify_message(&threshold_pub, namespace, msg, &threshold_sig).unwrap();
     }
 }
+
+#[cfg(test)]
+mod wycheproof;
