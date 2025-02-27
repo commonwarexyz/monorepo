@@ -1,12 +1,16 @@
 use serde::{Deserialize, Serialize};
 
 mod aws;
+mod create;
 mod services;
-mod setup;
-pub use setup::setup;
-mod teardown;
-pub use teardown::teardown;
+pub use create::create;
+mod destroy;
+pub use destroy::destroy;
 mod utils;
+
+pub const CMD: &str = "ec2";
+pub const CREATE_CMD: &str = "create";
+pub const DESTROY_CMD: &str = "destroy";
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Peer {

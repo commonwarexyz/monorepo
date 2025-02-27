@@ -5,7 +5,7 @@ use std::fs::File;
 use std::path::PathBuf;
 
 /// Tears down all resources associated with the deployment tag
-pub async fn teardown(tag: &str, config_path: &str) -> Result<(), Box<dyn Error>> {
+pub async fn destroy(tag: &str, config_path: &str) -> Result<(), Box<dyn Error>> {
     println!("Deployment tag: {}", tag);
 
     // Load configuration

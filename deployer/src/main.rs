@@ -1,8 +1,11 @@
 use clap::{App, Arg, SubCommand};
 use commonware_utils::crate_version;
 use std::error::Error;
+use tracing::error;
 
 mod ec2;
+
+const VERBOSE_FLAG: &str = "verbose";
 
 /// Main entry point for the Commonware Deployer CLI
 #[tokio::main]
@@ -11,11 +14,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let matches = App::new("deployer")
         .version(crate_version())
         .about("TBD")
+        .arg(Arg::with_name(VERBOSE_FLAG).short("v").long(VERBOSE_FLAG))
         .subcommand(
-            SubCommand::with_name("ec2")
+            SubCommand::with_name(ec2::CMD)
                 .about("TBD")
                 .subcommand(
-                    SubCommand::with_name("setup")
+                    SubCommand::with_name(ec2::CREATE_CMD)
                         .about(
                             "Sets up EC2 instances and deploys files with monitoring and logging",
                         )
@@ -28,7 +32,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         ),
                 )
                 .subcommand(
-                    SubCommand::with_name("teardown")
+                    SubCommand::with_name(ec2::DESTROY_CMD)
                         .about("Deletes all deployed resources")
                         .arg(
                             Arg::with_name("tag")
@@ -48,23 +52,35 @@ async fn main() -> Result<(), Box<dyn Error>> {
         )
         .get_matches();
 
+    // Create logger
+    let level = if matches.is_present(VERBOSE_FLAG) {
+        tracing::Level::DEBUG
+    } else {
+        tracing::Level::INFO
+    };
+    tracing_subscriber::fmt().with_max_level(level).init();
+
     // Handle ec2 subcommands
-    if let Some(ec2_matches) = matches.subcommand_matches("ec2") {
+    if let Some(ec2_matches) = matches.subcommand_matches(ec2::CMD) {
         match ec2_matches.subcommand() {
-            ("setup", Some(sub_m)) => {
+            (ec2::CREATE_CMD, Some(sub_m)) => {
                 let config_path = sub_m.value_of("config").unwrap();
-                let tag = ec2::setup(config_path).await?;
+                let tag = ec2::create(config_path).await?;
                 println!("Deployment tag: {}", tag);
             }
-            ("teardown", Some(sub_m)) => {
+            (ec2::DESTROY_CMD, Some(sub_m)) => {
                 let tag = sub_m.value_of("tag").unwrap();
                 let config_path = sub_m.value_of("config").unwrap();
-                ec2::teardown(tag, config_path).await?;
+                ec2::destroy(tag, config_path).await?;
             }
-            _ => println!("Invalid command. Use 'setup' or 'teardown'."),
+            _ => error!(
+                "Invalid subcommand. Use {:?} or {:?}.",
+                ec2::CREATE_CMD,
+                ec2::DESTROY_CMD
+            ),
         }
     } else {
-        println!("Invalid command. Use 'ec2'.");
+        error!("Invalid subcommand. Use {:?}.", ec2::CMD);
     }
 
     Ok(())

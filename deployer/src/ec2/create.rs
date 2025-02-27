@@ -28,7 +28,7 @@ pub struct RegionResources {
 }
 
 /// Sets up EC2 instances, deploys files, and configures monitoring and logging
-pub async fn setup(config_path: &str) -> Result<String, Box<dyn Error>> {
+pub async fn create(config_path: &str) -> Result<String, Box<dyn Error>> {
     // Get public IP address of the deployer
     let deployer_ip = get_public_ip().await?;
 
