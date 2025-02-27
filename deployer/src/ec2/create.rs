@@ -673,7 +673,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Box<dyn Error>> {
     info!("updated monitoring security group");
     info!(
         monitoring = monitoring_ip.as_str(),
-        ips = ?all_regular_ips,
+        regular = ?all_regular_ips,
         "deployment complete"
     );
     Ok(())
