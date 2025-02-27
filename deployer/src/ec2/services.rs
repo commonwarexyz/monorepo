@@ -1,14 +1,14 @@
 /// Version of Prometheus to download and install
-pub const PROMETHEUS_VERSION: &str = "2.30.3";
-
-/// Version of Loki to download and install
-pub const LOKI_VERSION: &str = "2.9.2";
-
-/// Version of Grafana to download and install
-pub const GRAFANA_VERSION: &str = "10.0.3";
+pub const PROMETHEUS_VERSION: &str = "3.2.0";
 
 /// Version of Promtail to download and install
-pub const PROMTAIL_VERSION: &str = "2.9.2";
+pub const PROMTAIL_VERSION: &str = "3.4.2";
+
+/// Version of Loki to download and install
+pub const LOKI_VERSION: &str = "3.4.2";
+
+/// Version of Grafana to download and install
+pub const GRAFANA_VERSION: &str = "11.5.2";
 
 /// YAML configuration for Grafana datasources (Prometheus and Loki)
 pub const DATASOURCES_YML: &str = r#"
@@ -117,7 +117,7 @@ schema_config:
     - from: 2020-10-24
       store: tsdb
       object_store: filesystem
-      schema: v12
+      schema: v13
       index:
         prefix: index_
         period: 24h
@@ -127,8 +127,6 @@ storage_config:
     cache_location: /loki/index_cache
   filesystem:
     directory: /loki/chunks
-chunk_store_config:
-  max_look_back_period: 0s
 table_manager:
   retention_deletes_enabled: false
   retention_period: 0s

@@ -1,73 +1,96 @@
-mod aws;
-mod services;
-mod setup;
-mod teardown;
-mod utils;
+//! TODO
 
-use clap::{App, Arg, SubCommand};
-use std::error::Error;
+use clap::{Arg, ArgAction, Command};
+use commonware_utils::crate_version;
+use std::{error::Error, path::PathBuf};
+use tracing::error;
 
-/// Main entry point for the Commonware Deployer CLI
+mod ec2;
+
+/// Flag for verbose output
+const VERBOSE_FLAG: &str = "verbose";
+
+/// Entrypoint for the Commonware Deployer CLI
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    // Define CLI application structure
-    let matches = App::new("deployer")
-        .version("1.0")
-        .about("Deploys a binary and config to EC2 instances across AWS regions with monitoring and logging")
-        .subcommand(
-            SubCommand::with_name("setup")
-                .about("Sets up EC2 instances and deploys files with monitoring and logging")
-                .arg(
-                    Arg::with_name("config")
-                        .long("config")
-                        .takes_value(true)
-                        .required(true)
-                        .help("Path to YAML config file"),
-                ),
+    // Define application
+    let matches = Command::new("deployer")
+        .version(crate_version())
+        .about("TBD")
+        .arg(
+            Arg::new(VERBOSE_FLAG)
+                .short('v')
+                .long(VERBOSE_FLAG)
+                .action(ArgAction::SetTrue),
         )
         .subcommand(
-            SubCommand::with_name("teardown")
-                .about("Deletes all deployed resources")
-                .arg(
-                    Arg::with_name("tag")
-                        .long("tag")
-                        .takes_value(true)
-                        .required(true)
-                        .help("Deployment tag"),
+            Command::new(ec2::CMD)
+                .about("TBD")
+                .subcommand(
+                    Command::new(ec2::CREATE_CMD)
+                        .about(
+                            "Sets up EC2 instances and deploys files with monitoring and logging",
+                        )
+                        .arg(
+                            Arg::new("config")
+                                .long("config")
+                                .required(true)
+                                .help("Path to YAML config file")
+                                .value_parser(clap::value_parser!(PathBuf)),
+                        ),
                 )
-                .arg(
-                    Arg::with_name("config")
-                        .long("config")
-                        .takes_value(true)
-                        .required(true)
-                        .help("Path to YAML config file"),
+                .subcommand(
+                    Command::new(ec2::DESTROY_CMD)
+                        .about("Deletes all deployed resources")
+                        .arg(
+                            Arg::new("config")
+                                .long("config")
+                                .required(true)
+                                .help("Path to YAML config file")
+                                .value_parser(clap::value_parser!(PathBuf)),
+                        ),
                 ),
         )
         .get_matches();
 
-    // Fetch the deployer's public IP
-    let deployer_ip = reqwest::get("https://ipv4.icanhazip.com")
-        .await?
-        .text()
-        .await?
-        .trim()
-        .to_string();
-    println!("Deployer IP: {}", deployer_ip);
+    // Create logger
+    let level = if matches.get_flag(VERBOSE_FLAG) {
+        tracing::Level::DEBUG
+    } else {
+        tracing::Level::INFO
+    };
+    tracing_subscriber::fmt().with_max_level(level).init();
 
-    // Handle subcommands
-    match matches.subcommand() {
-        ("setup", Some(sub_m)) => {
-            let config_path = sub_m.value_of("config").unwrap();
-            let tag = setup::setup(config_path, &deployer_ip).await?;
-            println!("Deployment tag: {}", tag);
+    // Parse subcommands
+    if let Some(ec2_matches) = matches.subcommand_matches(ec2::CMD) {
+        match ec2_matches.subcommand() {
+            Some((ec2::CREATE_CMD, matches)) => {
+                let config_path = matches.get_one::<PathBuf>("config").unwrap();
+                if let Err(e) = ec2::create(config_path).await {
+                    error!(error=?e, "failed to create EC2 deployment");
+                } else {
+                    return Ok(());
+                }
+            }
+            Some((ec2::DESTROY_CMD, matches)) => {
+                let config_path = matches.get_one::<PathBuf>("config").unwrap();
+                if let Err(e) = ec2::destroy(config_path).await {
+                    error!(error=?e, "failed to destroy EC2 deployment");
+                } else {
+                    return Ok(());
+                }
+            }
+            Some((cmd, _)) => {
+                error!(cmd, "invalid subcommand");
+            }
+            None => {
+                error!("no subcommand provided");
+            }
         }
-        ("teardown", Some(sub_m)) => {
-            let tag = sub_m.value_of("tag").unwrap();
-            let config_path = sub_m.value_of("config").unwrap();
-            teardown::teardown(tag, config_path).await?;
-        }
-        _ => println!("Invalid command. Use 'setup' or 'teardown'."),
+    } else if let Some(cmd) = matches.subcommand_name() {
+        error!(cmd, "invalid subcommand");
+    } else {
+        error!("no subcommand provided");
     }
-
-    Ok(())
+    std::process::exit(1);
 }

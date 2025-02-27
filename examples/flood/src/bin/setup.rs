@@ -1,8 +1,10 @@
 use clap::{value_parser, Arg, Command};
 use commonware_cryptography::{Ed25519, Scheme};
-use commonware_deployer::InstanceConfig;
+use commonware_deployer::ec2;
 use commonware_flood::Config;
 use rand::{rngs::OsRng, seq::IteratorRandom};
+use tracing::info;
+use uuid::Uuid;
 
 const BINARY_NAME: &str = "flood";
 const PORT: u16 = 4545;
@@ -62,12 +64,19 @@ fn main() {
         )
         .get_matches();
 
+    // Create logger
+    tracing_subscriber::fmt().init();
+
+    // Generate UUID
+    let tag = Uuid::new_v4().to_string();
+    info!(tag, "generated deployment tag");
+
     // Generate peers
     let peers = *matches.get_one::<usize>("peers").unwrap();
     let bootstrappers = *matches.get_one::<usize>("bootstrappers").unwrap();
     assert!(
         bootstrappers <= peers,
-        "Bootstrappers must be less than peers"
+        "bootstrappers must be less than peers"
     );
     let peer_schemes = (0..peers)
         .map(|_| Ed25519::new(&mut OsRng))
@@ -104,13 +113,14 @@ fn main() {
             allowed_peers: allowed_peers.clone(),
             bootstrappers: bootstrappers.clone(),
             message_size: 1024,
+            backlog: 16_384,
         };
         peer_configs.push((peer_config_file.clone(), peer_config));
 
         // Create instance config
         let region_index = (0..regions.len()).choose(&mut OsRng).unwrap();
         let region = regions[region_index].clone();
-        let instance = InstanceConfig {
+        let instance = ec2::InstanceConfig {
             name: name.clone(),
             region,
             instance_type: instance_type.clone(),
@@ -123,15 +133,16 @@ fn main() {
     }
 
     // Generate root config file
-    let config = commonware_deployer::Config {
+    let config = ec2::Config {
+        tag,
         instances: instance_configs,
-        monitoring: commonware_deployer::MonitoringConfig {
+        monitoring: ec2::MonitoringConfig {
             instance_type: instance_type.clone(),
             storage_size,
             storage_class: storage_class.clone(),
             dashboard: "dashboard.json".to_string(),
         },
-        ports: vec![commonware_deployer::PortConfig {
+        ports: vec![ec2::PortConfig {
             protocol: "tcp".to_string(),
             port: PORT,
             cidr: "0.0.0.0/0".to_string(),
@@ -145,11 +156,10 @@ fn main() {
     let output = format!("{}/{}", current_dir, output);
     assert!(
         !std::path::Path::new(&output).exists(),
-        "Output directory already exists"
+        "output directory already exists"
     );
     std::fs::create_dir_all(output.clone()).unwrap();
     let dashboard = matches.get_one::<String>("dashboard").unwrap().clone();
-    println!("{}/{}", current_dir, dashboard);
     std::fs::copy(
         format!("{}/{}", current_dir, dashboard),
         format!("{}/dashboard.json", output),
@@ -161,6 +171,7 @@ fn main() {
         serde_yaml::to_writer(file, &peer_config).unwrap();
     }
     let path = format!("{}/config.yaml", output);
-    let file = std::fs::File::create(path).unwrap();
+    let file = std::fs::File::create(path.clone()).unwrap();
     serde_yaml::to_writer(file, &config).unwrap();
+    info!(path, "wrote configuration files");
 }

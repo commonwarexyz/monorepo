@@ -1,14 +1,11 @@
-use crate::aws::*;
-use crate::services::*;
-use crate::utils::*;
-use commonware_deployer::{Config, InstanceConfig, Peer, Peers};
+use crate::ec2::{aws::*, services::*, utils::*, Config, InstanceConfig, Peer, Peers};
 use futures::future::join_all;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::error::Error;
 use std::fs::File;
 use std::path::PathBuf;
 use tokio::process::Command;
-use uuid::Uuid;
+use tracing::info;
 
 /// Directory for caching downloaded artifacts
 const CACHE_DIR: &str = "/tmp/deployer-cache";
@@ -31,58 +28,66 @@ pub struct RegionResources {
 }
 
 /// Sets up EC2 instances, deploys files, and configures monitoring and logging
-pub async fn setup(config_path: &str, deployer_ip: &str) -> Result<String, Box<dyn Error>> {
+pub async fn create(config: &PathBuf) -> Result<(), Box<dyn Error>> {
     // Load configuration from YAML file
-    let config_file = File::open(config_path)?;
-    let config: Config = serde_yaml::from_reader(config_file)?;
+    let config: Config = {
+        let config_file = File::open(config)?;
+        serde_yaml::from_reader(config_file)?
+    };
+    let tag = &config.tag;
+    info!(tag = tag.as_str(), "loaded configuration");
 
-    // Generate a unique deployment tag
-    let tag = Uuid::new_v4().to_string();
-    println!("Deployment tag: {}", tag);
+    // Get public IP address of the deployer
+    let deployer_ip = get_public_ip().await?;
+    info!(ip = deployer_ip.as_str(), "recovered public IP");
 
     // Create a temporary directory for local files
     let temp_dir = format!("deployer-{}", tag);
     let temp_dir = PathBuf::from("/tmp").join(temp_dir);
-    std::fs::create_dir_all(&temp_dir)?;
     let temp_dir_path = temp_dir.to_str().unwrap();
-    println!("Temp directory: {}", temp_dir_path);
+    if temp_dir.exists() {
+        return Err(format!(
+            "temporary directory already exists: {}",
+            temp_dir_path
+        ))?;
+    }
+    std::fs::create_dir_all(&temp_dir)?;
+    info!(path = temp_dir_path, "created temporary directory");
 
     // Ensure cache directory exists
     std::fs::create_dir_all(CACHE_DIR)?;
-    println!("Artifact cache: {}", CACHE_DIR);
+    info!(cache_dir = CACHE_DIR, "created artifact cache");
 
     // Download monitoring artifacts
-    println!("Downloading artifacts...");
+    info!("downloading monitoring artifacts");
     let prometheus_url = format!(
         "https://github.com/prometheus/prometheus/releases/download/v{}/prometheus-{}.linux-arm64.tar.gz",
         PROMETHEUS_VERSION, PROMETHEUS_VERSION
     );
+    let prometheus_tar = temp_dir.join("prometheus.tar.gz");
+    download_and_cache(CACHE_DIR, &prometheus_url, &prometheus_tar).await?;
+    info!(version = PROMETHEUS_VERSION, "downloaded prometheus");
     let grafana_url = format!(
         "https://dl.grafana.com/oss/release/grafana_{}_arm64.deb",
         GRAFANA_VERSION
     );
+    let grafana_deb = temp_dir.join("grafana.deb");
+    download_and_cache(CACHE_DIR, &grafana_url, &grafana_deb).await?;
+    info!(version = GRAFANA_VERSION, "downloaded grafana");
     let loki_url = format!(
         "https://github.com/grafana/loki/releases/download/v{}/loki-linux-arm64.zip",
         LOKI_VERSION
     );
+    let loki_zip = temp_dir.join("loki.zip");
+    download_and_cache(CACHE_DIR, &loki_url, &loki_zip).await?;
+    info!(version = LOKI_VERSION, "downloaded loki");
     let promtail_url = format!(
         "https://github.com/grafana/loki/releases/download/v{}/promtail-linux-arm64.zip",
         PROMTAIL_VERSION
     );
-
-    let prometheus_tar = temp_dir.join("prometheus.tar.gz");
-    let grafana_deb = temp_dir.join("grafana.deb");
-    let loki_zip = temp_dir.join("loki.zip");
     let promtail_zip = temp_dir.join("promtail.zip");
-
-    download_and_cache(CACHE_DIR, &prometheus_url, &prometheus_tar).await?;
-    println!("Downloaded Prometheus: {}", PROMETHEUS_VERSION);
-    download_and_cache(CACHE_DIR, &grafana_url, &grafana_deb).await?;
-    println!("Downloaded Grafana: {}", GRAFANA_VERSION);
-    download_and_cache(CACHE_DIR, &loki_url, &loki_zip).await?;
-    println!("Downloaded Loki: {}", LOKI_VERSION);
     download_and_cache(CACHE_DIR, &promtail_url, &promtail_zip).await?;
-    println!("Downloaded Promtail: {}", PROMTAIL_VERSION);
+    info!(version = PROMTAIL_VERSION, "downloaded promtail");
 
     // Generate SSH key pair
     let key_name = format!("deployer-{}", tag);
@@ -100,7 +105,7 @@ pub async fn setup(config_path: &str, deployer_ip: &str) -> Result<String, Box<d
         .output()
         .await?;
     if !output.status.success() {
-        return Err(format!("Failed to generate SSH key: {:?}", output).into());
+        return Err(format!("failed to generate SSH key: {:?}", output).into());
     }
     let public_key = std::fs::read_to_string(&public_key_path)?;
     let private_key = private_key_path.to_str().unwrap();
@@ -108,7 +113,6 @@ pub async fn setup(config_path: &str, deployer_ip: &str) -> Result<String, Box<d
     // Determine unique regions
     let mut regions: BTreeSet<String> = config.instances.iter().map(|i| i.region.clone()).collect();
     regions.insert(MONITORING_REGION.to_string());
-    println!("Regions: {:?}", regions);
 
     // Determine instance types by region
     let mut instance_types_by_region: HashMap<String, HashSet<String>> = HashMap::new();
@@ -124,6 +128,7 @@ pub async fn setup(config_path: &str, deployer_ip: &str) -> Result<String, Box<d
         .insert(config.monitoring.instance_type.clone());
 
     // Initialize resources for each region
+    info!(?regions, "initializing resources");
     let mut vpc_cidrs = HashMap::new();
     let mut subnet_cidrs = HashMap::new();
     let mut ec2_clients = HashMap::new();
@@ -131,24 +136,42 @@ pub async fn setup(config_path: &str, deployer_ip: &str) -> Result<String, Box<d
     for (idx, region) in regions.iter().enumerate() {
         let ec2_client = create_ec2_client(Region::new(region.clone())).await;
         ec2_clients.insert(region.clone(), ec2_client);
-        println!("Created EC2 client for region: {}", region);
+        info!(region = region.as_str(), "created EC2 client");
 
         let instance_types: Vec<String> =
             instance_types_by_region[region].iter().cloned().collect();
         let az = find_availability_zone(&ec2_clients[region], &instance_types).await?;
-        println!("Selected availability zone {} for {}", az, region);
+        info!(
+            az = az.as_str(),
+            region = region.as_str(),
+            "selected availability zone"
+        );
 
         let vpc_cidr = format!("10.{}.0.0/16", idx);
         vpc_cidrs.insert(region.clone(), vpc_cidr.clone());
-        let vpc_id = create_vpc(&ec2_clients[region], &vpc_cidr, &tag).await?;
-        println!("Created VPC {} in region {}", vpc_id, region);
+        let vpc_id = create_vpc(&ec2_clients[region], &vpc_cidr, tag).await?;
+        info!(
+            vpc = vpc_id.as_str(),
+            region = region.as_str(),
+            "created VPC"
+        );
 
-        let igw_id = create_and_attach_igw(&ec2_clients[region], &vpc_id, &tag).await?;
-        println!("Created and attached IGW {} to VPC {}", igw_id, vpc_id);
+        let igw_id = create_and_attach_igw(&ec2_clients[region], &vpc_id, tag).await?;
+        info!(
+            igw = igw_id.as_str(),
+            vpc = vpc_id.as_str(),
+            region = region.as_str(),
+            "created and attached IGW"
+        );
 
         let route_table_id =
-            create_route_table(&ec2_clients[region], &vpc_id, &igw_id, &tag).await?;
-        println!("Created Route Table {} in VPC {}", route_table_id, vpc_id);
+            create_route_table(&ec2_clients[region], &vpc_id, &igw_id, tag).await?;
+        info!(
+            route_table = route_table_id.as_str(),
+            vpc = vpc_id.as_str(),
+            region = region.as_str(),
+            "created route table"
+        );
 
         let subnet_cidr = format!("10.{}.1.0/24", idx);
         subnet_cidrs.insert(region.clone(), subnet_cidr.clone());
@@ -158,24 +181,45 @@ pub async fn setup(config_path: &str, deployer_ip: &str) -> Result<String, Box<d
             &route_table_id,
             &subnet_cidr,
             &az,
-            &tag,
+            tag,
         )
         .await?;
-        println!("Created Subnet {} in VPC {}", subnet_id, vpc_id);
+        info!(
+            subnet = subnet_id.as_str(),
+            vpc = vpc_id.as_str(),
+            region = region.as_str(),
+            "created subnet"
+        );
 
         let monitoring_sg_id = if *region == MONITORING_REGION {
             let sg_id =
-                create_security_group_monitoring(&ec2_clients[region], &vpc_id, deployer_ip, &tag)
+                create_security_group_monitoring(&ec2_clients[region], &vpc_id, &deployer_ip, tag)
                     .await?;
-            println!("Created monitoring security group: {}", sg_id);
+            info!(
+                sg = sg_id.as_str(),
+                vpc = vpc_id.as_str(),
+                region = region.as_str(),
+                "created monitoring security group"
+            );
             Some(sg_id)
         } else {
             None
         };
 
         import_key_pair(&ec2_clients[region], &key_name, &public_key).await?;
-        println!("Imported key pair {} to region {}", key_name, region);
+        info!(
+            key = key_name.as_str(),
+            region = region.as_str(),
+            "imported key pair"
+        );
 
+        info!(
+            vpc = vpc_id.as_str(),
+            subnet = subnet_id.as_str(),
+            subnet_cidr = subnet_cidr.as_str(),
+            region = region.as_str(),
+            "initialized resources"
+        );
         region_resources.insert(
             region.clone(),
             RegionResources {
@@ -188,8 +232,10 @@ pub async fn setup(config_path: &str, deployer_ip: &str) -> Result<String, Box<d
             },
         );
     }
+    info!(?regions, "initialized resources");
 
     // Setup VPC peering connections
+    info!("initializing VPC peering connections");
     let monitoring_region = MONITORING_REGION.to_string();
     let monitoring_resources = region_resources.get(&monitoring_region).unwrap();
     let monitoring_vpc_id = &monitoring_resources.vpc_id;
@@ -206,20 +252,28 @@ pub async fn setup(config_path: &str, deployer_ip: &str) -> Result<String, Box<d
                 monitoring_vpc_id,
                 regular_vpc_id,
                 region,
-                &tag,
+                tag,
             )
             .await?;
-            println!(
-                "Created VPC peering connection {} from {} to {}",
-                peer_id, monitoring_vpc_id, regular_vpc_id
+            info!(
+                peer = peer_id.as_str(),
+                monitoring = monitoring_vpc_id.as_str(),
+                regular = regular_vpc_id.as_str(),
+                region = region.as_str(),
+                "created VPC peering connection"
             );
-
             wait_for_vpc_peering_connection(&ec2_clients[region], &peer_id).await?;
-            println!("VPC peering connection {} is active", peer_id);
-
+            info!(
+                peer = peer_id.as_str(),
+                region = region.as_str(),
+                "VPC peering connection is available"
+            );
             accept_vpc_peering_connection(&ec2_clients[region], &peer_id).await?;
-            println!("Accepted VPC peering connection {} in {}", peer_id, region);
-
+            info!(
+                peer = peer_id.as_str(),
+                region = region.as_str(),
+                "accepted VPC peering connection"
+            );
             add_route(
                 &ec2_clients[&monitoring_region],
                 &monitoring_resources.route_table_id,
@@ -234,14 +288,19 @@ pub async fn setup(config_path: &str, deployer_ip: &str) -> Result<String, Box<d
                 &peer_id,
             )
             .await?;
-            println!(
-                "Added routes for VPC peering connection {} between {} and {}",
-                peer_id, monitoring_vpc_id, regular_vpc_id
+            info!(
+                peer = peer_id.as_str(),
+                monitoring = monitoring_vpc_id.as_str(),
+                regular = regular_vpc_id.as_str(),
+                region = region.as_str(),
+                "added routes for VPC peering connection"
             );
         }
     }
+    info!("initialized VPC peering connections");
 
     // Launch monitoring instance
+    info!("launching monitoring instance");
     let monitoring_ip;
     let monitoring_private_ip;
     let monitoring_sg_id;
@@ -268,7 +327,7 @@ pub async fn setup(config_path: &str, deployer_ip: &str) -> Result<String, Box<d
             &monitoring_sg_id,
             1,
             "monitoring",
-            &tag,
+            tag,
         )
         .await?[0]
             .clone();
@@ -278,28 +337,33 @@ pub async fn setup(config_path: &str, deployer_ip: &str) -> Result<String, Box<d
                 .clone();
         monitoring_private_ip =
             get_private_ip(monitoring_ec2_client, &monitoring_instance_id).await?;
-        println!(
-            "Launched monitoring instance({:?}): {}",
-            monitoring_region, monitoring_instance_id
-        );
     }
+    info!(ip = monitoring_ip.as_str(), "launched monitoring instance");
 
     // Create regular security groups
+    info!("creating security groups");
     for (region, resources) in region_resources.iter_mut() {
         let regular_sg_id = create_security_group_regular(
             &ec2_clients[region],
             &resources.vpc_id,
-            deployer_ip,
+            &deployer_ip,
             &monitoring_ip,
-            &tag,
+            tag,
             &config.ports,
         )
         .await?;
-        println!("Created regular group({:?}): {}", region, regular_sg_id);
+        info!(
+            sg = regular_sg_id.as_str(),
+            vpc = resources.vpc_id.as_str(),
+            region = region.as_str(),
+            "created regular security group"
+        );
         resources.regular_sg_id = Some(regular_sg_id);
     }
+    info!("created security groups");
 
     // Launch regular instances
+    info!("launching regular instances");
     let mut launch_futures = Vec::new();
     for instance in &config.instances {
         let key_name = key_name.clone();
@@ -331,9 +395,10 @@ pub async fn setup(config_path: &str, deployer_ip: &str) -> Result<String, Box<d
                 .clone();
             let ip =
                 wait_for_instances_running(ec2_client, &[instance_id.clone()]).await?[0].clone();
-            println!(
-                "Launched instance({:?}): {}({})",
-                region, instance.name, instance_id
+            info!(
+                ip = ip.as_str(),
+                instance = instance.name.as_str(),
+                "launched instance"
             );
             Ok::<Deployment, Box<dyn Error>>(Deployment {
                 instance: instance.clone(),
@@ -342,11 +407,11 @@ pub async fn setup(config_path: &str, deployer_ip: &str) -> Result<String, Box<d
         };
         launch_futures.push(future);
     }
-
     let deployments: Vec<Deployment> = join_all(launch_futures)
         .await
         .into_iter()
         .collect::<Result<Vec<_>, _>>()?;
+    info!("launched regular instances");
 
     // Generate peers.yaml
     let peers = Peers {
@@ -374,6 +439,7 @@ pub async fn setup(config_path: &str, deployer_ip: &str) -> Result<String, Box<d
     std::fs::write(&binary_service_path, BINARY_SERVICE)?;
 
     // Configure monitoring instance
+    info!("configuring monitoring instance");
     let instances: Vec<(&str, &str)> = deployments
         .iter()
         .map(|d| (d.instance.name.as_str(), d.ip.as_str()))
@@ -387,7 +453,6 @@ pub async fn setup(config_path: &str, deployer_ip: &str) -> Result<String, Box<d
     std::fs::write(&all_yaml_path, ALL_YML)?;
     let loki_config_path = temp_dir.join("loki.yml");
     std::fs::write(&loki_config_path, LOKI_CONFIG)?;
-
     scp_file(
         private_key,
         prom_path.to_str().unwrap(),
@@ -467,9 +532,10 @@ pub async fn setup(config_path: &str, deployer_ip: &str) -> Result<String, Box<d
     poll_service_status(private_key, &monitoring_ip, "prometheus").await?;
     poll_service_status(private_key, &monitoring_ip, "loki").await?;
     poll_service_status(private_key, &monitoring_ip, "grafana-server").await?;
-    println!("Initialized monitoring host");
+    info!("configured monitoring instance");
 
     // Configure regular instances
+    info!("configuring regular instances");
     let mut start_futures = Vec::new();
     for deployment in &deployments {
         let temp_dir = temp_dir.clone();
@@ -533,7 +599,11 @@ pub async fn setup(config_path: &str, deployer_ip: &str) -> Result<String, Box<d
             poll_service_status(private_key, &ip, "promtail").await?;
             ssh_execute(private_key, &ip, INSTALL_BINARY_CMD).await?;
             poll_service_status(private_key, &ip, "binary").await?;
-            println!("Instance {} fully initialized at {}", instance.name, ip);
+            info!(
+                ip = ip.as_str(),
+                instance = instance.name.as_str(),
+                "configured instance"
+            );
             Ok::<String, Box<dyn Error>>(ip)
         };
         start_futures.push(future);
@@ -542,9 +612,10 @@ pub async fn setup(config_path: &str, deployer_ip: &str) -> Result<String, Box<d
         .await
         .into_iter()
         .collect::<Result<Vec<_>, _>>()?;
-    println!("All instances started");
+    info!("configured regular instances");
 
     // Update monitoring security group to restrict Loki port (3100)
+    info!("updating monitoring security group to allow traffic from regular instances");
     let monitoring_ec2_client = &ec2_clients[&monitoring_region];
     if regular_regions.contains(&monitoring_region) {
         let regular_sg_id = region_resources[&monitoring_region]
@@ -568,9 +639,11 @@ pub async fn setup(config_path: &str, deployer_ip: &str) -> Result<String, Box<d
             )
             .send()
             .await?;
-        println!(
-            "Updated monitoring security group to allow port 3100 from sg in same region: {}",
-            regular_sg_id
+        info!(
+            monitoring = monitoring_sg_id.as_str(),
+            regular = regular_sg_id.as_str(),
+            region = monitoring_region.as_str(),
+            "linked monitoring and regular security groups in monitoring region"
         );
     }
     for region in &regions {
@@ -589,14 +662,19 @@ pub async fn setup(config_path: &str, deployer_ip: &str) -> Result<String, Box<d
                 )
                 .send()
                 .await?;
-            println!(
-                "Updated monitoring security group to allow port 3100 from region: {}",
-                regular_cidr
+            info!(
+                monitoring = monitoring_sg_id.as_str(),
+                regular = regular_cidr.as_str(),
+                region = region.as_str(),
+                "opened monitoring part to traffic from regular VPC"
             );
         }
     }
-
-    println!("Monitoring instance IP: {}", monitoring_ip);
-    println!("Deployed to: {:?}", all_regular_ips);
-    Ok(tag)
+    info!("updated monitoring security group");
+    info!(
+        monitoring = monitoring_ip.as_str(),
+        regular = ?all_regular_ips,
+        "deployment complete"
+    );
+    Ok(())
 }

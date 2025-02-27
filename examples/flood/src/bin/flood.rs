@@ -4,7 +4,7 @@ use commonware_cryptography::{
     ed25519::{PrivateKey, PublicKey},
     Ed25519, Scheme,
 };
-use commonware_deployer::Peers;
+use commonware_deployer::ec2::Peers;
 use commonware_flood::Config;
 use commonware_p2p::{authenticated, Receiver, Recipients, Sender};
 use commonware_runtime::{
@@ -115,7 +115,7 @@ fn main() {
         let (mut flood_sender, mut flood_receiver) = network.register(
             0,
             Quota::per_second(NonZeroU32::new(u32::MAX).unwrap()),
-            256,
+            config.backlog,
             None,
         );
 
