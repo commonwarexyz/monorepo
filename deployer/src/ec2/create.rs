@@ -28,10 +28,10 @@ pub struct RegionResources {
 }
 
 /// Sets up EC2 instances, deploys files, and configures monitoring and logging
-pub async fn create(config_path: &str) -> Result<(), Box<dyn Error>> {
+pub async fn create(config: &PathBuf) -> Result<(), Box<dyn Error>> {
     // Load configuration from YAML file
     let config: Config = {
-        let config_file = File::open(config_path)?;
+        let config_file = File::open(config)?;
         serde_yaml::from_reader(config_file)?
     };
     let tag = &config.tag;

@@ -6,10 +6,10 @@ use std::path::PathBuf;
 use tracing::{debug, info, warn};
 
 /// Tears down all resources associated with the deployment tag
-pub async fn destroy(config_path: &str) -> Result<(), Box<dyn Error>> {
+pub async fn destroy(config: &PathBuf) -> Result<(), Box<dyn Error>> {
     // Load configuration
     let config: Config = {
-        let config_file = File::open(config_path)?;
+        let config_file = File::open(config)?;
         serde_yaml::from_reader(config_file)?
     };
     let tag = &config.tag;
