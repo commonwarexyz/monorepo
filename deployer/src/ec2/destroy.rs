@@ -41,7 +41,13 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Box<dyn Error>> {
 
         // If in the monitoring region, we need to revoke the ingress rule
         let security_groups = find_security_groups_by_tag(&ec2_client, tag).await?;
-        if region == MONITORING_REGION && !security_groups.is_empty() {
+        let has_monitoring_sg = security_groups
+            .iter()
+            .any(|sg| sg.group_name() == Some(tag));
+        let has_regular_sg = security_groups
+            .iter()
+            .any(|sg| sg.group_name() == Some(&format!("{}-regular", tag)));
+        if region == MONITORING_REGION && has_monitoring_sg && has_regular_sg {
             // Find the monitoring security group (named `tag`)
             let monitoring_sg = security_groups
                 .iter()
