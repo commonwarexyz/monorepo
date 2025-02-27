@@ -2,7 +2,7 @@
 
 use clap::{Arg, Command};
 use commonware_utils::crate_version;
-use std::error::Error;
+use std::{error::Error, path::PathBuf};
 use tracing::error;
 
 mod ec2;
@@ -30,7 +30,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             Arg::new("config")
                                 .long("config")
                                 .required(true)
-                                .help("Path to YAML config file"),
+                                .help("Path to YAML config file")
+                                .value_parser(clap::value_parser!(PathBuf)),
                         ),
                 )
                 .subcommand(
@@ -40,7 +41,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             Arg::new("config")
                                 .long("config")
                                 .required(true)
-                                .help("Path to YAML config file"),
+                                .help("Path to YAML config file")
+                                .value_parser(clap::value_parser!(PathBuf)),
                         ),
                 ),
         )
@@ -61,21 +63,29 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 let config_path = matches.get_one::<String>("config").unwrap();
                 if let Err(e) = ec2::create(config_path).await {
                     error!(%e, "failed to create EC2 deployment");
+                } else {
+                    return Ok(());
                 }
             }
             Some((ec2::DESTROY_CMD, matches)) => {
                 let config_path = matches.get_one::<String>("config").unwrap();
                 if let Err(e) = ec2::destroy(config_path).await {
                     error!(%e, "failed to destroy EC2 deployment");
+                } else {
+                    return Ok(());
                 }
             }
-            Some((cmd, _)) => error!(cmd, "invalid subcommand"),
-            None => error!("no subcommand provided"),
+            Some((cmd, _)) => {
+                error!(cmd, "invalid subcommand");
+            }
+            None => {
+                error!("no subcommand provided");
+            }
         }
     } else if let Some(cmd) = matches.subcommand_name() {
         error!(cmd, "invalid subcommand");
     } else {
         error!("no subcommand provided");
     }
-    Ok(())
+    std::process::exit(1);
 }
