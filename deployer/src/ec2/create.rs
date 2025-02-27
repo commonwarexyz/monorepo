@@ -5,6 +5,7 @@ use std::error::Error;
 use std::fs::File;
 use std::path::PathBuf;
 use tokio::process::Command;
+use tracing::{debug, info};
 
 /// Directory for caching downloaded artifacts
 const CACHE_DIR: &str = "/tmp/deployer-cache";
@@ -37,50 +38,49 @@ pub async fn create(config_path: &str) -> Result<(), Box<dyn Error>> {
 
     // Get public IP address of the deployer
     let deployer_ip = get_public_ip().await?;
+    info!(ip = deployer_ip.as_str(), "recovered public IP");
 
     // Create a temporary directory for local files
     let temp_dir = format!("deployer-{}", tag);
     let temp_dir = PathBuf::from("/tmp").join(temp_dir);
     std::fs::create_dir_all(&temp_dir)?;
     let temp_dir_path = temp_dir.to_str().unwrap();
-    println!("Temp directory: {}", temp_dir_path);
+    info!(path = temp_dir_path, "created temporary directory");
 
     // Ensure cache directory exists
     std::fs::create_dir_all(CACHE_DIR)?;
-    println!("Artifact cache: {}", CACHE_DIR);
+    info!(cache_dir = CACHE_DIR, "created artifact cache");
 
     // Download monitoring artifacts
-    println!("Downloading artifacts...");
+    info!("downloading monitoring artifacts");
     let prometheus_url = format!(
         "https://github.com/prometheus/prometheus/releases/download/v{}/prometheus-{}.linux-arm64.tar.gz",
         PROMETHEUS_VERSION, PROMETHEUS_VERSION
     );
+    let prometheus_tar = temp_dir.join("prometheus.tar.gz");
+    download_and_cache(CACHE_DIR, &prometheus_url, &prometheus_tar).await?;
+    debug!(version = PROMETHEUS_VERSION, "downloaded prometheus");
     let grafana_url = format!(
         "https://dl.grafana.com/oss/release/grafana_{}_arm64.deb",
         GRAFANA_VERSION
     );
+    let grafana_deb = temp_dir.join("grafana.deb");
+    download_and_cache(CACHE_DIR, &grafana_url, &grafana_deb).await?;
+    debug!(version = GRAFANA_VERSION, "downloaded grafana");
     let loki_url = format!(
         "https://github.com/grafana/loki/releases/download/v{}/loki-linux-arm64.zip",
         LOKI_VERSION
     );
+    let loki_zip = temp_dir.join("loki.zip");
+    download_and_cache(CACHE_DIR, &loki_url, &loki_zip).await?;
+    debug!(version = LOKI_VERSION, "downloaded loki");
     let promtail_url = format!(
         "https://github.com/grafana/loki/releases/download/v{}/promtail-linux-arm64.zip",
         PROMTAIL_VERSION
     );
-
-    let prometheus_tar = temp_dir.join("prometheus.tar.gz");
-    let grafana_deb = temp_dir.join("grafana.deb");
-    let loki_zip = temp_dir.join("loki.zip");
     let promtail_zip = temp_dir.join("promtail.zip");
-
-    download_and_cache(CACHE_DIR, &prometheus_url, &prometheus_tar).await?;
-    println!("Downloaded Prometheus: {}", PROMETHEUS_VERSION);
-    download_and_cache(CACHE_DIR, &grafana_url, &grafana_deb).await?;
-    println!("Downloaded Grafana: {}", GRAFANA_VERSION);
-    download_and_cache(CACHE_DIR, &loki_url, &loki_zip).await?;
-    println!("Downloaded Loki: {}", LOKI_VERSION);
     download_and_cache(CACHE_DIR, &promtail_url, &promtail_zip).await?;
-    println!("Downloaded Promtail: {}", PROMTAIL_VERSION);
+    debug!(version = PROMTAIL_VERSION, "downloaded promtail");
 
     // Generate SSH key pair
     let key_name = format!("deployer-{}", tag);
@@ -98,7 +98,7 @@ pub async fn create(config_path: &str) -> Result<(), Box<dyn Error>> {
         .output()
         .await?;
     if !output.status.success() {
-        return Err(format!("Failed to generate SSH key: {:?}", output).into());
+        return Err(format!("failed to generate SSH key: {:?}", output).into());
     }
     let public_key = std::fs::read_to_string(&public_key_path)?;
     let private_key = private_key_path.to_str().unwrap();
@@ -106,7 +106,7 @@ pub async fn create(config_path: &str) -> Result<(), Box<dyn Error>> {
     // Determine unique regions
     let mut regions: BTreeSet<String> = config.instances.iter().map(|i| i.region.clone()).collect();
     regions.insert(MONITORING_REGION.to_string());
-    println!("Regions: {:?}", regions);
+    info!(regions = ?regions, "found regions");
 
     // Determine instance types by region
     let mut instance_types_by_region: HashMap<String, HashSet<String>> = HashMap::new();
@@ -129,24 +129,42 @@ pub async fn create(config_path: &str) -> Result<(), Box<dyn Error>> {
     for (idx, region) in regions.iter().enumerate() {
         let ec2_client = create_ec2_client(Region::new(region.clone())).await;
         ec2_clients.insert(region.clone(), ec2_client);
-        println!("Created EC2 client for region: {}", region);
+        debug!(region = region.as_str(), "created EC2 client");
 
         let instance_types: Vec<String> =
             instance_types_by_region[region].iter().cloned().collect();
         let az = find_availability_zone(&ec2_clients[region], &instance_types).await?;
-        println!("Selected availability zone {} for {}", az, region);
+        debug!(
+            az = az.as_str(),
+            region = region.as_str(),
+            "selected availability zone"
+        );
 
         let vpc_cidr = format!("10.{}.0.0/16", idx);
         vpc_cidrs.insert(region.clone(), vpc_cidr.clone());
         let vpc_id = create_vpc(&ec2_clients[region], &vpc_cidr, tag).await?;
-        println!("Created VPC {} in region {}", vpc_id, region);
+        debug!(
+            vpc = vpc_id.as_str(),
+            region = region.as_str(),
+            "created VPC"
+        );
 
         let igw_id = create_and_attach_igw(&ec2_clients[region], &vpc_id, tag).await?;
-        println!("Created and attached IGW {} to VPC {}", igw_id, vpc_id);
+        debug!(
+            igw = igw_id.as_str(),
+            vpc = vpc_id.as_str(),
+            region = region.as_str(),
+            "created and attached IGW"
+        );
 
         let route_table_id =
             create_route_table(&ec2_clients[region], &vpc_id, &igw_id, tag).await?;
-        println!("Created Route Table {} in VPC {}", route_table_id, vpc_id);
+        debug!(
+            route_table = route_table_id.as_str(),
+            vpc = vpc_id.as_str(),
+            region = region.as_str(),
+            "created route table"
+        );
 
         let subnet_cidr = format!("10.{}.1.0/24", idx);
         subnet_cidrs.insert(region.clone(), subnet_cidr.clone());
@@ -159,21 +177,42 @@ pub async fn create(config_path: &str) -> Result<(), Box<dyn Error>> {
             tag,
         )
         .await?;
-        println!("Created Subnet {} in VPC {}", subnet_id, vpc_id);
+        debug!(
+            subnet = subnet_id.as_str(),
+            vpc = vpc_id.as_str(),
+            region = region.as_str(),
+            "created subnet"
+        );
 
         let monitoring_sg_id = if *region == MONITORING_REGION {
             let sg_id =
                 create_security_group_monitoring(&ec2_clients[region], &vpc_id, &deployer_ip, tag)
                     .await?;
-            println!("Created monitoring security group: {}", sg_id);
+            debug!(
+                sg = sg_id.as_str(),
+                vpc = vpc_id.as_str(),
+                region = region.as_str(),
+                "created monitoring security group"
+            );
             Some(sg_id)
         } else {
             None
         };
 
         import_key_pair(&ec2_clients[region], &key_name, &public_key).await?;
-        println!("Imported key pair {} to region {}", key_name, region);
+        debug!(
+            key = key_name.as_str(),
+            region = region.as_str(),
+            "imported key pair"
+        );
 
+        info!(
+            vpc = vpc_id.as_str(),
+            subnet = subnet_id.as_str(),
+            subnet_cidr = subnet_cidr.as_str(),
+            region = region.as_str(),
+            "initialized resources"
+        );
         region_resources.insert(
             region.clone(),
             RegionResources {

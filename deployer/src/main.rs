@@ -5,12 +5,13 @@ use tracing::error;
 
 mod ec2;
 
+/// Flag for verbose output
 const VERBOSE_FLAG: &str = "verbose";
 
-/// Main entry point for the Commonware Deployer CLI
+/// Entrypoint for the Commonware Deployer CLI
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    // Define CLI application structure
+    // Define application
     let matches = App::new("deployer")
         .version(crate_version())
         .about("TBD")
@@ -53,26 +54,25 @@ async fn main() -> Result<(), Box<dyn Error>> {
     };
     tracing_subscriber::fmt().with_max_level(level).init();
 
-    // Handle ec2 subcommands
+    // Parse subcommands
     if let Some(ec2_matches) = matches.subcommand_matches(ec2::CMD) {
         match ec2_matches.subcommand() {
             (ec2::CREATE_CMD, Some(sub_m)) => {
                 let config_path = sub_m.value_of("config").unwrap();
-                ec2::create(config_path).await?;
+                if let Err(e) = ec2::create(config_path).await {
+                    error!(%e, "failed to create EC2 deployment");
+                }
             }
             (ec2::DESTROY_CMD, Some(sub_m)) => {
                 let config_path = sub_m.value_of("config").unwrap();
-                ec2::destroy(config_path).await?;
+                if let Err(e) = ec2::destroy(config_path).await {
+                    error!(%e, "failed to destroy EC2 deployment");
+                }
             }
-            _ => error!(
-                "Invalid subcommand. Use {:?} or {:?}.",
-                ec2::CREATE_CMD,
-                ec2::DESTROY_CMD
-            ),
+            (cmd, _) => error!(cmd, "invalid subcommand"),
         }
     } else {
-        error!("Invalid subcommand. Use {:?}.", ec2::CMD);
+        error!(cmd = matches.subcommand().0, "invalid subcommand");
     }
-
     Ok(())
 }
