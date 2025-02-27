@@ -44,8 +44,14 @@ pub async fn create(config: &PathBuf) -> Result<(), Box<dyn Error>> {
     // Create a temporary directory for local files
     let temp_dir = format!("deployer-{}", tag);
     let temp_dir = PathBuf::from("/tmp").join(temp_dir);
-    std::fs::create_dir_all(&temp_dir)?;
     let temp_dir_path = temp_dir.to_str().unwrap();
+    if temp_dir.exists() {
+        return Err(format!(
+            "temporary directory already exists: {}",
+            temp_dir_path
+        ))?;
+    }
+    std::fs::create_dir_all(&temp_dir)?;
     info!(path = temp_dir_path, "created temporary directory");
 
     // Ensure cache directory exists
