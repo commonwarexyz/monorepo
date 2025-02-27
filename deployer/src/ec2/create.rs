@@ -262,13 +262,13 @@ pub async fn create(config: &PathBuf) -> Result<(), Box<dyn Error>> {
                 region = region.as_str(),
                 "created VPC peering connection"
             );
-            wait_for_vpc_peering_connection(&ec2_clients[&monitoring_region], &peer_id).await?;
+            wait_for_vpc_peering_connection(&ec2_clients[region], &peer_id).await?;
             info!(
                 peer = peer_id.as_str(),
                 region = region.as_str(),
-                "VPC peering connection is active"
+                "VPC peering connection is available"
             );
-            accept_vpc_peering_connection(&ec2_clients[&monitoring_region], &peer_id).await?;
+            accept_vpc_peering_connection(&ec2_clients[region], &peer_id).await?;
             info!(
                 peer = peer_id.as_str(),
                 region = region.as_str(),
