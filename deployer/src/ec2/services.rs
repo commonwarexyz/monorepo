@@ -117,7 +117,7 @@ schema_config:
     - from: 2020-10-24
       store: tsdb
       object_store: filesystem
-      schema: v12
+      schema: v13
       index:
         prefix: index_
         period: 24h
@@ -127,8 +127,6 @@ storage_config:
     cache_location: /loki/index_cache
   filesystem:
     directory: /loki/chunks
-chunk_store_config:
-  max_look_back_period: 0s
 table_manager:
   retention_deletes_enabled: false
   retention_period: 0s
