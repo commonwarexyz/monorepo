@@ -24,7 +24,8 @@ tokio = { version = "1.0", features = ["full"] }
 uuid = { version = "1.0", features = ["v4"] }
 
 [[bin]]
-name = "commonware-deployer"
+name = "deployer"
+path = "src/main.rs"
 bench = false
 
 [lib]
