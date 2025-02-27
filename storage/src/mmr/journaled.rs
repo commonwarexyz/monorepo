@@ -1,8 +1,7 @@
 //! An MMR backed by a fixed-item-length journal.
 //!
-//! A [commonware_storage::journal] is used to store all unpruned MMR nodes, and a
-//! [commonware_storage::metadata] store is used to preserve each current peak in case they would
-//! otherwise have been be pruned.
+//! A [`crate::journal`] is used to store all unpruned MMR nodes, and a [`crate::metadata`] store is
+//! used to preserve each current peak in case they would otherwise have been be pruned.
 
 use crate::journal::{
     fixed::{Config as JConfig, Journal},
@@ -192,16 +191,6 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
 
     /// Sync any new elements to disk.
     pub async fn sync(&mut self) -> Result<(), Error> {
-        // Write peaks to metadata without clearing out old ones to ensure we can recover to a
-        // previous valid state if the later writes to the journal fail.
-        let peak_iterator = self.mem_mmr.peak_iterator();
-        for (peak_pos, _) in peak_iterator {
-            let digest = self.mem_mmr.get_node(peak_pos).await?.unwrap();
-            self.metadata
-                .put(U64::new(peak_pos), Bytes::copy_from_slice(digest.as_ref()));
-        }
-        self.metadata.sync().await.map_err(Error::MetadataError)?;
-
         // Write the nodes cached in the memory-resident MMR to the journal.
         for i in self.journal_size..self.mem_mmr.size() {
             let node = self.mem_mmr.get_node(i).await?.unwrap();
@@ -210,6 +199,16 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
         self.journal_size = self.mem_mmr.size();
         self.journal.sync().await?;
         assert_eq!(self.journal_size, self.journal.size().await?);
+
+        // Write latest peaks to metadata.
+        self.metadata.clear();
+        let peak_iterator = self.mem_mmr.peak_iterator();
+        for (peak_pos, _) in peak_iterator {
+            let digest = self.mem_mmr.get_node(peak_pos).await?.unwrap();
+            self.metadata
+                .put(U64::new(peak_pos), Bytes::copy_from_slice(digest.as_ref()));
+        }
+        self.metadata.sync().await.map_err(Error::MetadataError)?;
 
         // Keep memory usage in check by pruning old nodes from the memory-resident MMR after
         // they've been written to disk.
@@ -222,15 +221,6 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
     pub async fn close(mut self) -> Result<(), Error> {
         self.sync().await?;
         self.journal.close().await?;
-
-        // Clear and repopulate peaks in metadata to purge any old ones that are no longer needed.
-        self.metadata.clear();
-        let peak_iterator = self.mem_mmr.peak_iterator();
-        for (peak_pos, _) in peak_iterator {
-            let digest = self.mem_mmr.get_node(peak_pos).await?.unwrap();
-            self.metadata
-                .put(U64::new(peak_pos), Bytes::copy_from_slice(digest.as_ref()));
-        }
         self.metadata.close().await.map_err(Error::MetadataError)
     }
 
