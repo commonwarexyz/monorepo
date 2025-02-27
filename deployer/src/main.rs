@@ -1,6 +1,6 @@
 //! TODO
 
-use clap::{App, Arg, SubCommand};
+use clap::{Arg, Command};
 use commonware_utils::crate_version;
 use std::error::Error;
 use tracing::error;
@@ -14,33 +14,31 @@ const VERBOSE_FLAG: &str = "verbose";
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     // Define application
-    let matches = App::new("deployer")
+    let matches = Command::new("deployer")
         .version(crate_version())
         .about("TBD")
-        .arg(Arg::with_name(VERBOSE_FLAG).short("v").long(VERBOSE_FLAG))
+        .arg(Arg::new(VERBOSE_FLAG).short('v').long(VERBOSE_FLAG))
         .subcommand(
-            SubCommand::with_name(ec2::CMD)
+            Command::new(ec2::CMD)
                 .about("TBD")
                 .subcommand(
-                    SubCommand::with_name(ec2::CREATE_CMD)
+                    Command::new(ec2::CREATE_CMD)
                         .about(
                             "Sets up EC2 instances and deploys files with monitoring and logging",
                         )
                         .arg(
-                            Arg::with_name("config")
+                            Arg::new("config")
                                 .long("config")
-                                .takes_value(true)
                                 .required(true)
                                 .help("Path to YAML config file"),
                         ),
                 )
                 .subcommand(
-                    SubCommand::with_name(ec2::DESTROY_CMD)
+                    Command::new(ec2::DESTROY_CMD)
                         .about("Deletes all deployed resources")
                         .arg(
-                            Arg::with_name("config")
+                            Arg::new("config")
                                 .long("config")
-                                .takes_value(true)
                                 .required(true)
                                 .help("Path to YAML config file"),
                         ),
@@ -49,7 +47,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .get_matches();
 
     // Create logger
-    let level = if matches.is_present(VERBOSE_FLAG) {
+    let level = if matches.get_flag(VERBOSE_FLAG) {
         tracing::Level::DEBUG
     } else {
         tracing::Level::INFO
@@ -59,22 +57,25 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Parse subcommands
     if let Some(ec2_matches) = matches.subcommand_matches(ec2::CMD) {
         match ec2_matches.subcommand() {
-            (ec2::CREATE_CMD, Some(sub_m)) => {
-                let config_path = sub_m.value_of("config").unwrap();
+            Some((ec2::CREATE_CMD, matches)) => {
+                let config_path = matches.get_one::<String>("config").unwrap();
                 if let Err(e) = ec2::create(config_path).await {
                     error!(%e, "failed to create EC2 deployment");
                 }
             }
-            (ec2::DESTROY_CMD, Some(sub_m)) => {
-                let config_path = sub_m.value_of("config").unwrap();
+            Some((ec2::DESTROY_CMD, matches)) => {
+                let config_path = matches.get_one::<String>("config").unwrap();
                 if let Err(e) = ec2::destroy(config_path).await {
                     error!(%e, "failed to destroy EC2 deployment");
                 }
             }
-            (cmd, _) => error!(cmd, "invalid subcommand"),
+            Some((cmd, _)) => error!(cmd, "invalid subcommand"),
+            None => error!("no subcommand provided"),
         }
+    } else if let Some(cmd) = matches.subcommand_name() {
+        error!(cmd, "invalid subcommand");
     } else {
-        error!(cmd = matches.subcommand().0, "invalid subcommand");
+        error!("no subcommand provided");
     }
     Ok(())
 }

@@ -1,14 +1,14 @@
 /// Version of Prometheus to download and install
-pub const PROMETHEUS_VERSION: &str = "2.30.3";
-
-/// Version of Loki to download and install
-pub const LOKI_VERSION: &str = "2.9.2";
-
-/// Version of Grafana to download and install
-pub const GRAFANA_VERSION: &str = "10.0.3";
+pub const PROMETHEUS_VERSION: &str = "3.2.0";
 
 /// Version of Promtail to download and install
-pub const PROMTAIL_VERSION: &str = "2.9.2";
+pub const PROMTAIL_VERSION: &str = "3.4.2";
+
+/// Version of Loki to download and install
+pub const LOKI_VERSION: &str = "3.4.2";
+
+/// Version of Grafana to download and install
+pub const GRAFANA_VERSION: &str = "11.5.2";
 
 /// YAML configuration for Grafana datasources (Prometheus and Loki)
 pub const DATASOURCES_YML: &str = r#"
