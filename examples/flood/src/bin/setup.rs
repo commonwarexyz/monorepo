@@ -3,6 +3,7 @@ use commonware_cryptography::{Ed25519, Scheme};
 use commonware_deployer::ec2;
 use commonware_flood::Config;
 use rand::{rngs::OsRng, seq::IteratorRandom};
+use tracing::info;
 use uuid::Uuid;
 
 const BINARY_NAME: &str = "flood";
@@ -63,15 +64,19 @@ fn main() {
         )
         .get_matches();
 
+    // Create logger
+    tracing_subscriber::fmt().with_max_level(level).init();
+
     // Generate UUID
     let tag = Uuid::new_v4().to_string();
+    info!(tag, "generated deployment tag");
 
     // Generate peers
     let peers = *matches.get_one::<usize>("peers").unwrap();
     let bootstrappers = *matches.get_one::<usize>("bootstrappers").unwrap();
     assert!(
         bootstrappers <= peers,
-        "Bootstrappers must be less than peers"
+        "bootstrappers must be less than peers"
     );
     let peer_schemes = (0..peers)
         .map(|_| Ed25519::new(&mut OsRng))
@@ -151,7 +156,7 @@ fn main() {
     let output = format!("{}/{}", current_dir, output);
     assert!(
         !std::path::Path::new(&output).exists(),
-        "Output directory already exists"
+        "output directory already exists"
     );
     std::fs::create_dir_all(output.clone()).unwrap();
     let dashboard = matches.get_one::<String>("dashboard").unwrap().clone();
@@ -168,4 +173,5 @@ fn main() {
     let path = format!("{}/config.yaml", output);
     let file = std::fs::File::create(path).unwrap();
     serde_yaml::to_writer(file, &config).unwrap();
+    info!(path, "wrote configuration files");
 }
