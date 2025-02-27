@@ -40,8 +40,6 @@ cd assets
 deployer ec2 create --config config.yaml
 ```
 
-_To get verbose output, add `-v` flag._
-
 ### Check Metrics
 
 TODO
