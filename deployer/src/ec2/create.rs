@@ -138,14 +138,14 @@ pub async fn create(config_path: &str) -> Result<(), Box<dyn Error>> {
 
         let vpc_cidr = format!("10.{}.0.0/16", idx);
         vpc_cidrs.insert(region.clone(), vpc_cidr.clone());
-        let vpc_id = create_vpc(&ec2_clients[region], &vpc_cidr, &tag).await?;
+        let vpc_id = create_vpc(&ec2_clients[region], &vpc_cidr, tag).await?;
         println!("Created VPC {} in region {}", vpc_id, region);
 
-        let igw_id = create_and_attach_igw(&ec2_clients[region], &vpc_id, &tag).await?;
+        let igw_id = create_and_attach_igw(&ec2_clients[region], &vpc_id, tag).await?;
         println!("Created and attached IGW {} to VPC {}", igw_id, vpc_id);
 
         let route_table_id =
-            create_route_table(&ec2_clients[region], &vpc_id, &igw_id, &tag).await?;
+            create_route_table(&ec2_clients[region], &vpc_id, &igw_id, tag).await?;
         println!("Created Route Table {} in VPC {}", route_table_id, vpc_id);
 
         let subnet_cidr = format!("10.{}.1.0/24", idx);
@@ -156,14 +156,14 @@ pub async fn create(config_path: &str) -> Result<(), Box<dyn Error>> {
             &route_table_id,
             &subnet_cidr,
             &az,
-            &tag,
+            tag,
         )
         .await?;
         println!("Created Subnet {} in VPC {}", subnet_id, vpc_id);
 
         let monitoring_sg_id = if *region == MONITORING_REGION {
             let sg_id =
-                create_security_group_monitoring(&ec2_clients[region], &vpc_id, &deployer_ip, &tag)
+                create_security_group_monitoring(&ec2_clients[region], &vpc_id, &deployer_ip, tag)
                     .await?;
             println!("Created monitoring security group: {}", sg_id);
             Some(sg_id)
@@ -204,7 +204,7 @@ pub async fn create(config_path: &str) -> Result<(), Box<dyn Error>> {
                 monitoring_vpc_id,
                 regular_vpc_id,
                 region,
-                &tag,
+                tag,
             )
             .await?;
             println!(
@@ -266,7 +266,7 @@ pub async fn create(config_path: &str) -> Result<(), Box<dyn Error>> {
             &monitoring_sg_id,
             1,
             "monitoring",
-            &tag,
+            tag,
         )
         .await?[0]
             .clone();
@@ -289,7 +289,7 @@ pub async fn create(config_path: &str) -> Result<(), Box<dyn Error>> {
             &resources.vpc_id,
             &deployer_ip,
             &monitoring_ip,
-            &tag,
+            tag,
             &config.ports,
         )
         .await?;
