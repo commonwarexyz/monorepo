@@ -1,4 +1,4 @@
-use crate::ec2::PortConfig;
+use crate::ec2::{utils::RETRY_INTERVAL, PortConfig};
 use aws_config::BehaviorVersion;
 pub use aws_config::Region;
 use aws_sdk_ec2::error::BuildError;
@@ -367,7 +367,7 @@ pub async fn wait_for_instances_running(
             .send()
             .await
         else {
-            sleep(Duration::from_secs(5)).await;
+            sleep(RETRY_INTERVAL).await;
             continue;
         };
 
@@ -382,7 +382,7 @@ pub async fn wait_for_instances_running(
                 .map(|i| i.public_ip_address.as_ref().unwrap().clone())
                 .collect());
         }
-        sleep(Duration::from_secs(5)).await;
+        sleep(RETRY_INTERVAL).await;
     }
 }
 
@@ -534,7 +534,7 @@ pub async fn wait_for_vpc_peering_deletion(
         } else {
             return Ok(());
         }
-        sleep(Duration::from_secs(5)).await;
+        sleep(RETRY_INTERVAL).await;
     }
 }
 
@@ -595,7 +595,7 @@ pub async fn wait_for_instances_terminated(
         }) {
             return Ok(());
         }
-        sleep(Duration::from_secs(5)).await;
+        sleep(RETRY_INTERVAL).await;
     }
 }
 
@@ -760,6 +760,7 @@ pub async fn delete_vpc(ec2_client: &Ec2Client, vpc_id: &str) -> Result<(), Ec2E
     Ok(())
 }
 
+/// Finds the availability zone that supports all required instance types
 pub async fn find_availability_zone(
     client: &Ec2Client,
     instance_types: &[String],
@@ -818,15 +819,9 @@ pub async fn wait_for_enis_deleted(ec2_client: &Ec2Client, sg_id: &str) -> Resul
             .filters(Filter::builder().name("group-id").values(sg_id).build())
             .send()
             .await?;
-        let enis = resp.network_interfaces.unwrap_or_default();
-        if enis.is_empty() {
-            return Ok(()); // No ENIs remain, safe to delete the security group
+        if resp.network_interfaces.unwrap_or_default().is_empty() {
+            return Ok(());
         }
-        println!(
-            "Waiting for {} ENIs to be deleted for security group {}",
-            enis.len(),
-            sg_id
-        );
-        sleep(Duration::from_secs(5)).await; // Wait 5 seconds before checking again
+        sleep(RETRY_INTERVAL).await;
     }
 }
