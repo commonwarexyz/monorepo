@@ -115,7 +115,7 @@ fn main() {
         let (mut flood_sender, mut flood_receiver) = network.register(
             0,
             Quota::per_second(NonZeroU32::new(u32::MAX).unwrap()),
-            256,
+            config.backlog,
             None,
         );
 

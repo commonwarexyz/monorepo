@@ -7,4 +7,5 @@ pub struct Config {
     pub allowed_peers: Vec<String>,
     pub bootstrappers: Vec<String>,
     pub message_size: usize,
+    pub backlog: usize,
 }

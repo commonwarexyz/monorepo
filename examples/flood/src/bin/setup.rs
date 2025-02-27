@@ -108,6 +108,7 @@ fn main() {
             allowed_peers: allowed_peers.clone(),
             bootstrappers: bootstrappers.clone(),
             message_size: 1024,
+            backlog: 16_384,
         };
         peer_configs.push((peer_config_file.clone(), peer_config));
 
@@ -154,7 +155,6 @@ fn main() {
     );
     std::fs::create_dir_all(output.clone()).unwrap();
     let dashboard = matches.get_one::<String>("dashboard").unwrap().clone();
-    println!("{}/{}", current_dir, dashboard);
     std::fs::copy(
         format!("{}/{}", current_dir, dashboard),
         format!("{}/dashboard.json", output),
