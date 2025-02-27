@@ -27,7 +27,8 @@ Emitted binary `flood` is placed in `assets`.
 _Done from deployer directory._
 
 ```bash
-cargo build --release && mv ../target/release/commonware-deployer ~/.cargo/bin/
+cd ../../deployer
+cargo build --release && mv ../target/release/deployer ~/.cargo/bin/
 ```
 
 ## Run
@@ -35,9 +36,11 @@ cargo build --release && mv ../target/release/commonware-deployer ~/.cargo/bin/
 ### Deploy Infrastructure
 
 ```bash
-cd assets;
-commonware-deployer setup --config config.yaml;
+cd assets
+deployer ec2 create --config config.yaml
 ```
+
+_To get verbose output, add `-v` flag._
 
 ### Check Metrics
 
@@ -46,5 +49,5 @@ TODO
 ### Teardown Infrastructure
 
 ```bash
-commonware-deployer teardown --config config.yaml --tag <tag>
+deployer ec2 destroy --config config.yaml
 ```

@@ -1,6 +1,6 @@
 //! TODO
 
-use clap::{Arg, Command};
+use clap::{Arg, ArgAction, Command};
 use commonware_utils::crate_version;
 use std::{error::Error, path::PathBuf};
 use tracing::error;
@@ -17,7 +17,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let matches = Command::new("deployer")
         .version(crate_version())
         .about("TBD")
-        .arg(Arg::new(VERBOSE_FLAG).short('v').long(VERBOSE_FLAG))
+        .arg(
+            Arg::new(VERBOSE_FLAG)
+                .short('v')
+                .long(VERBOSE_FLAG)
+                .action(ArgAction::SetTrue),
+        )
         .subcommand(
             Command::new(ec2::CMD)
                 .about("TBD")
