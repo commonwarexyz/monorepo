@@ -35,6 +35,7 @@ pub async fn create(config_path: &str) -> Result<(), Box<dyn Error>> {
         serde_yaml::from_reader(config_file)?
     };
     let tag = &config.tag;
+    info!(tag = tag.as_str(), "loaded configuration");
 
     // Get public IP address of the deployer
     let deployer_ip = get_public_ip().await?;
@@ -106,7 +107,6 @@ pub async fn create(config_path: &str) -> Result<(), Box<dyn Error>> {
     // Determine unique regions
     let mut regions: BTreeSet<String> = config.instances.iter().map(|i| i.region.clone()).collect();
     regions.insert(MONITORING_REGION.to_string());
-    info!(regions = ?regions, "found regions");
 
     // Determine instance types by region
     let mut instance_types_by_region: HashMap<String, HashSet<String>> = HashMap::new();
@@ -122,6 +122,7 @@ pub async fn create(config_path: &str) -> Result<(), Box<dyn Error>> {
         .insert(config.monitoring.instance_type.clone());
 
     // Initialize resources for each region
+    info!(?regions, "initializing resources");
     let mut vpc_cidrs = HashMap::new();
     let mut subnet_cidrs = HashMap::new();
     let mut ec2_clients = HashMap::new();
@@ -225,8 +226,10 @@ pub async fn create(config_path: &str) -> Result<(), Box<dyn Error>> {
             },
         );
     }
+    info!(?regions, "initialized resources");
 
     // Setup VPC peering connections
+    info!("initializing VPC peering connections");
     let monitoring_region = MONITORING_REGION.to_string();
     let monitoring_resources = region_resources.get(&monitoring_region).unwrap();
     let monitoring_vpc_id = &monitoring_resources.vpc_id;
@@ -246,17 +249,25 @@ pub async fn create(config_path: &str) -> Result<(), Box<dyn Error>> {
                 tag,
             )
             .await?;
-            println!(
-                "Created VPC peering connection {} from {} to {}",
-                peer_id, monitoring_vpc_id, regular_vpc_id
+            debug!(
+                peer = peer_id.as_str(),
+                monitoring = monitoring_vpc_id.as_str(),
+                regular = regular_vpc_id.as_str(),
+                region = region.as_str(),
+                "created VPC peering connection"
             );
-
-            wait_for_vpc_peering_connection(&ec2_clients[region], &peer_id).await?;
-            println!("VPC peering connection {} is active", peer_id);
-
-            accept_vpc_peering_connection(&ec2_clients[region], &peer_id).await?;
-            println!("Accepted VPC peering connection {} in {}", peer_id, region);
-
+            wait_for_vpc_peering_connection(&ec2_clients[&monitoring_region], &peer_id).await?;
+            debug!(
+                peer = peer_id.as_str(),
+                region = region.as_str(),
+                "VPC peering connection is active"
+            );
+            accept_vpc_peering_connection(&ec2_clients[&monitoring_region], &peer_id).await?;
+            debug!(
+                peer = peer_id.as_str(),
+                region = region.as_str(),
+                "accepted VPC peering connection"
+            );
             add_route(
                 &ec2_clients[&monitoring_region],
                 &monitoring_resources.route_table_id,
@@ -271,14 +282,19 @@ pub async fn create(config_path: &str) -> Result<(), Box<dyn Error>> {
                 &peer_id,
             )
             .await?;
-            println!(
-                "Added routes for VPC peering connection {} between {} and {}",
-                peer_id, monitoring_vpc_id, regular_vpc_id
+            debug!(
+                peer = peer_id.as_str(),
+                monitoring = monitoring_vpc_id.as_str(),
+                regular = regular_vpc_id.as_str(),
+                region = region.as_str(),
+                "added routes for VPC peering connection"
             );
         }
     }
+    info!("initialized VPC peering connections");
 
     // Launch monitoring instance
+    info!("launching monitoring instance");
     let monitoring_ip;
     let monitoring_private_ip;
     let monitoring_sg_id;
@@ -315,13 +331,11 @@ pub async fn create(config_path: &str) -> Result<(), Box<dyn Error>> {
                 .clone();
         monitoring_private_ip =
             get_private_ip(monitoring_ec2_client, &monitoring_instance_id).await?;
-        println!(
-            "Launched monitoring instance({:?}): {}",
-            monitoring_region, monitoring_instance_id
-        );
     }
+    info!(ip = monitoring_ip.as_str(), "launched monitoring instance");
 
     // Create regular security groups
+    info!("creating security groups");
     for (region, resources) in region_resources.iter_mut() {
         let regular_sg_id = create_security_group_regular(
             &ec2_clients[region],
@@ -332,11 +346,18 @@ pub async fn create(config_path: &str) -> Result<(), Box<dyn Error>> {
             &config.ports,
         )
         .await?;
-        println!("Created regular group({:?}): {}", region, regular_sg_id);
+        debug!(
+            sg = regular_sg_id.as_str(),
+            vpc = resources.vpc_id.as_str(),
+            region = region.as_str(),
+            "created regular security group"
+        );
         resources.regular_sg_id = Some(regular_sg_id);
     }
+    info!("created security groups");
 
     // Launch regular instances
+    info!("launching regular instances");
     let mut launch_futures = Vec::new();
     for instance in &config.instances {
         let key_name = key_name.clone();
@@ -368,9 +389,10 @@ pub async fn create(config_path: &str) -> Result<(), Box<dyn Error>> {
                 .clone();
             let ip =
                 wait_for_instances_running(ec2_client, &[instance_id.clone()]).await?[0].clone();
-            println!(
-                "Launched instance({:?}): {}({})",
-                region, instance.name, instance_id
+            debug!(
+                ip = ip.as_str(),
+                instance = instance.name.as_str(),
+                "launched instance"
             );
             Ok::<Deployment, Box<dyn Error>>(Deployment {
                 instance: instance.clone(),
@@ -379,11 +401,11 @@ pub async fn create(config_path: &str) -> Result<(), Box<dyn Error>> {
         };
         launch_futures.push(future);
     }
-
     let deployments: Vec<Deployment> = join_all(launch_futures)
         .await
         .into_iter()
         .collect::<Result<Vec<_>, _>>()?;
+    info!("launched regular instances");
 
     // Generate peers.yaml
     let peers = Peers {
@@ -411,6 +433,7 @@ pub async fn create(config_path: &str) -> Result<(), Box<dyn Error>> {
     std::fs::write(&binary_service_path, BINARY_SERVICE)?;
 
     // Configure monitoring instance
+    info!("configuring monitoring instance");
     let instances: Vec<(&str, &str)> = deployments
         .iter()
         .map(|d| (d.instance.name.as_str(), d.ip.as_str()))
@@ -424,7 +447,6 @@ pub async fn create(config_path: &str) -> Result<(), Box<dyn Error>> {
     std::fs::write(&all_yaml_path, ALL_YML)?;
     let loki_config_path = temp_dir.join("loki.yml");
     std::fs::write(&loki_config_path, LOKI_CONFIG)?;
-
     scp_file(
         private_key,
         prom_path.to_str().unwrap(),
@@ -504,9 +526,10 @@ pub async fn create(config_path: &str) -> Result<(), Box<dyn Error>> {
     poll_service_status(private_key, &monitoring_ip, "prometheus").await?;
     poll_service_status(private_key, &monitoring_ip, "loki").await?;
     poll_service_status(private_key, &monitoring_ip, "grafana-server").await?;
-    println!("Initialized monitoring host");
+    info!("configured monitoring instance");
 
     // Configure regular instances
+    info!("configuring regular instances");
     let mut start_futures = Vec::new();
     for deployment in &deployments {
         let temp_dir = temp_dir.clone();
@@ -570,7 +593,11 @@ pub async fn create(config_path: &str) -> Result<(), Box<dyn Error>> {
             poll_service_status(private_key, &ip, "promtail").await?;
             ssh_execute(private_key, &ip, INSTALL_BINARY_CMD).await?;
             poll_service_status(private_key, &ip, "binary").await?;
-            println!("Instance {} fully initialized at {}", instance.name, ip);
+            debug!(
+                ip = ip.as_str(),
+                instance = instance.name.as_str(),
+                "configured instance"
+            );
             Ok::<String, Box<dyn Error>>(ip)
         };
         start_futures.push(future);
@@ -579,9 +606,10 @@ pub async fn create(config_path: &str) -> Result<(), Box<dyn Error>> {
         .await
         .into_iter()
         .collect::<Result<Vec<_>, _>>()?;
-    println!("All instances started");
+    info!("configured regular instances");
 
     // Update monitoring security group to restrict Loki port (3100)
+    info!("updating monitoring security group to allow traffic from regular instances");
     let monitoring_ec2_client = &ec2_clients[&monitoring_region];
     if regular_regions.contains(&monitoring_region) {
         let regular_sg_id = region_resources[&monitoring_region]
@@ -605,9 +633,11 @@ pub async fn create(config_path: &str) -> Result<(), Box<dyn Error>> {
             )
             .send()
             .await?;
-        println!(
-            "Updated monitoring security group to allow port 3100 from sg in same region: {}",
-            regular_sg_id
+        debug!(
+            monitoring = monitoring_sg_id.as_str(),
+            regular = regular_sg_id.as_str(),
+            region = monitoring_region.as_str(),
+            "linked monitoring and regular security groups in monitoring region"
         );
     }
     for region in &regions {
@@ -626,14 +656,19 @@ pub async fn create(config_path: &str) -> Result<(), Box<dyn Error>> {
                 )
                 .send()
                 .await?;
-            println!(
-                "Updated monitoring security group to allow port 3100 from region: {}",
-                regular_cidr
+            debug!(
+                monitoring = monitoring_sg_id.as_str(),
+                regular = regular_cidr.as_str(),
+                region = region.as_str(),
+                "opened monitoring part to traffic from regular VPC"
             );
         }
     }
-
-    println!("Monitoring instance IP: {}", monitoring_ip);
-    println!("Deployed to: {:?}", all_regular_ips);
+    info!("updated monitoring security group");
+    info!(
+        monitoring = monitoring_ip.as_str(),
+        ips = ?all_regular_ips,
+        "deployment complete"
+    );
     Ok(())
 }
