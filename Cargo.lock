@@ -973,6 +973,7 @@ dependencies = [
  "serde_yaml",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

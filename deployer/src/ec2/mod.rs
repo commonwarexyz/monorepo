@@ -52,6 +52,7 @@ pub struct MonitoringConfig {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Config {
+    pub tag: String,
     pub instances: Vec<InstanceConfig>,
     pub monitoring: MonitoringConfig,
     pub ports: Vec<PortConfig>,

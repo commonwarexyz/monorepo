@@ -5,12 +5,13 @@ use std::fs::File;
 use std::path::PathBuf;
 
 /// Tears down all resources associated with the deployment tag
-pub async fn destroy(tag: &str, config_path: &str) -> Result<(), Box<dyn Error>> {
-    println!("Deployment tag: {}", tag);
-
+pub async fn destroy(config_path: &str) -> Result<(), Box<dyn Error>> {
     // Load configuration
-    let config_file = File::open(config_path)?;
-    let config: Config = serde_yaml::from_reader(config_file)?;
+    let config: Config = {
+        let config_file = File::open(config_path)?;
+        serde_yaml::from_reader(config_file)?
+    };
+    let tag = &config.tag;
 
     // Determine all regions involved
     let mut all_regions = HashSet::new();

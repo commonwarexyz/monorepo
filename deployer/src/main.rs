@@ -35,13 +35,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     SubCommand::with_name(ec2::DESTROY_CMD)
                         .about("Deletes all deployed resources")
                         .arg(
-                            Arg::with_name("tag")
-                                .long("tag")
-                                .takes_value(true)
-                                .required(true)
-                                .help("Deployment tag"),
-                        )
-                        .arg(
                             Arg::with_name("config")
                                 .long("config")
                                 .takes_value(true)
@@ -65,13 +58,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         match ec2_matches.subcommand() {
             (ec2::CREATE_CMD, Some(sub_m)) => {
                 let config_path = sub_m.value_of("config").unwrap();
-                let tag = ec2::create(config_path).await?;
-                println!("Deployment tag: {}", tag);
+                ec2::create(config_path).await?;
             }
             (ec2::DESTROY_CMD, Some(sub_m)) => {
-                let tag = sub_m.value_of("tag").unwrap();
                 let config_path = sub_m.value_of("config").unwrap();
-                ec2::destroy(tag, config_path).await?;
+                ec2::destroy(config_path).await?;
             }
             _ => error!(
                 "Invalid subcommand. Use {:?} or {:?}.",

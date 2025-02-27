@@ -5,7 +5,6 @@ use std::error::Error;
 use std::fs::File;
 use std::path::PathBuf;
 use tokio::process::Command;
-use uuid::Uuid;
 
 /// Directory for caching downloaded artifacts
 const CACHE_DIR: &str = "/tmp/deployer-cache";
@@ -28,17 +27,16 @@ pub struct RegionResources {
 }
 
 /// Sets up EC2 instances, deploys files, and configures monitoring and logging
-pub async fn create(config_path: &str) -> Result<String, Box<dyn Error>> {
+pub async fn create(config_path: &str) -> Result<(), Box<dyn Error>> {
+    // Load configuration from YAML file
+    let config: Config = {
+        let config_file = File::open(config_path)?;
+        serde_yaml::from_reader(config_file)?
+    };
+    let tag = &config.tag;
+
     // Get public IP address of the deployer
     let deployer_ip = get_public_ip().await?;
-
-    // Load configuration from YAML file
-    let config_file = File::open(config_path)?;
-    let config: Config = serde_yaml::from_reader(config_file)?;
-
-    // Generate a unique deployment tag
-    let tag = Uuid::new_v4().to_string();
-    println!("Deployment tag: {}", tag);
 
     // Create a temporary directory for local files
     let temp_dir = format!("deployer-{}", tag);
@@ -598,5 +596,5 @@ pub async fn create(config_path: &str) -> Result<String, Box<dyn Error>> {
 
     println!("Monitoring instance IP: {}", monitoring_ip);
     println!("Deployed to: {:?}", all_regular_ips);
-    Ok(tag)
+    Ok(())
 }

@@ -26,6 +26,7 @@ governor = { workspace = true }
 axum = { workspace = true }
 rand = { workspace = true }
 futures = { workspace = true }
+uuid = { version = "1.0", features = ["v4"] }
 
 [[bin]]
 name = "flood"

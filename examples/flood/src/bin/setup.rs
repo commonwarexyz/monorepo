@@ -3,6 +3,7 @@ use commonware_cryptography::{Ed25519, Scheme};
 use commonware_deployer::ec2;
 use commonware_flood::Config;
 use rand::{rngs::OsRng, seq::IteratorRandom};
+use uuid::Uuid;
 
 const BINARY_NAME: &str = "flood";
 const PORT: u16 = 4545;
@@ -61,6 +62,9 @@ fn main() {
                 .value_parser(value_parser!(String)),
         )
         .get_matches();
+
+    // Generate UUID
+    let tag = Uuid::new_v4().to_string();
 
     // Generate peers
     let peers = *matches.get_one::<usize>("peers").unwrap();
@@ -124,6 +128,7 @@ fn main() {
 
     // Generate root config file
     let config = ec2::Config {
+        tag,
         instances: instance_configs,
         monitoring: ec2::MonitoringConfig {
             instance_type: instance_type.clone(),
