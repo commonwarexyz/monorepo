@@ -65,7 +65,7 @@ fn main() {
         .get_matches();
 
     // Create logger
-    tracing_subscriber::fmt().with_max_level(level).init();
+    tracing_subscriber::fmt().init();
 
     // Generate UUID
     let tag = Uuid::new_v4().to_string();
@@ -171,7 +171,7 @@ fn main() {
         serde_yaml::to_writer(file, &peer_config).unwrap();
     }
     let path = format!("{}/config.yaml", output);
-    let file = std::fs::File::create(path).unwrap();
+    let file = std::fs::File::create(path.clone()).unwrap();
     serde_yaml::to_writer(file, &config).unwrap();
     info!(path, "wrote configuration files");
 }
