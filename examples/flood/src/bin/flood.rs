@@ -9,20 +9,25 @@ use commonware_flood::Config;
 use commonware_p2p::{authenticated, Receiver, Recipients, Sender};
 use commonware_runtime::{
     tokio::{Context, Executor},
-    Metrics, Network, Runner, Spawner,
+    Clock, Metrics, Network, Runner, Spawner,
 };
 use commonware_utils::{from_hex_formatted, union};
 use futures::future::try_join_all;
 use governor::Quota;
+use prometheus_client::metrics::gauge::Gauge;
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::NonZeroU32,
     str::FromStr,
+    sync::atomic::{AtomicI64, AtomicU64},
+    time::Duration,
 };
+use sysinfo::{Disks, System};
 use tracing::{error, info, Level};
 
+const SYSTEM_METRICS_REFRESH: Duration = Duration::from_secs(5);
 const FLOOD_NAMESPACE: &[u8] = b"_COMMONWARE_FLOOD";
 const METRICS_PORT: u16 = 9090;
 
@@ -104,6 +109,58 @@ fn main() {
 
     // Start runtime
     executor.start(async move {
+        // Start system metrics
+        context.with_label("system").spawn(|context| async move {
+            // Register metrics
+            let cpu_usage: Gauge<f64, AtomicU64> = Gauge::default();
+            context.register("cpu_usage", "CPU usage", cpu_usage.clone());
+            let memory_used: Gauge<i64, AtomicI64> = Gauge::default();
+            context.register("memory_used", "Memory used", memory_used.clone());
+            let memory_free: Gauge<i64, AtomicI64> = Gauge::default();
+            context.register("memory_free", "Memory free", memory_free.clone());
+            let swap_used: Gauge<i64, AtomicI64> = Gauge::default();
+            context.register("swap_used", "Swap used", swap_used.clone());
+            let swap_free: Gauge<i64, AtomicI64> = Gauge::default();
+            context.register("swap_free", "Swap free", swap_free.clone());
+            let disk_used: Gauge<i64, AtomicI64> = Gauge::default();
+            context.register("disk_used", "Disk used", disk_used.clone());
+            let disk_free: Gauge<i64, AtomicI64> = Gauge::default();
+            context.register("disk_free", "Disk free", disk_free.clone());
+
+            // Initialize system info
+            let mut sys = System::new_all();
+            let mut disks = Disks::new_with_refreshed_list();
+
+            // Check metrics every
+            loop {
+                // Refresh system info
+                sys.refresh_all();
+                disks.refresh(true);
+
+                // Update metrics
+                cpu_usage.set(sys.global_cpu_usage() as f64);
+                memory_used.set(sys.used_memory() as i64);
+                memory_free.set(sys.free_memory() as i64);
+                swap_used.set(sys.used_swap() as i64);
+                swap_free.set(sys.free_swap() as i64);
+
+                // Update disk metrics for root disk
+                for disk in disks.list() {
+                    if disk.mount_point() == std::path::Path::new("/") {
+                        let total = disk.total_space();
+                        let available = disk.available_space();
+                        let used = total.saturating_sub(available);
+                        disk_used.set(used as i64);
+                        disk_free.set(available as i64);
+                        break;
+                    }
+                }
+
+                // Wait to pull metrics again
+                context.sleep(SYSTEM_METRICS_REFRESH).await;
+            }
+        });
+
         // Start p2p
         let (mut network, mut oracle) =
             authenticated::Network::new(context.with_label("network"), p2p_cfg);
