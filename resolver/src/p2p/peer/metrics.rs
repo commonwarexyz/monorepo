@@ -20,6 +20,8 @@ pub struct Metrics {
     pub serve: status::Counter,
     /// Histogram of successful serves
     pub serve_duration: Histogram,
+    /// Histogram of successful fetches
+    pub fetch_duration: Histogram,
 }
 
 impl Metrics {
@@ -33,7 +35,8 @@ impl Metrics {
             fetch: status::Counter::default(),
             cancel: status::Counter::default(),
             serve: status::Counter::default(),
-            serve_duration: Histogram::new(Buckets::NETWORK.into_iter()),
+            serve_duration: Histogram::new(Buckets::LOCAL.into_iter()),
+            fetch_duration: Histogram::new(Buckets::NETWORK.into_iter()),
         };
         registry.register(
             "fetch_pending",
@@ -70,6 +73,11 @@ impl Metrics {
             "serve_duration",
             "Histogram of successful serves",
             metrics.serve_duration.clone(),
+        );
+        registry.register(
+            "fetch_duration",
+            "Histogram of successful fetches",
+            metrics.fetch_duration.clone(),
         );
         metrics
     }

@@ -28,7 +28,7 @@ use futures::{
 use governor::clock::Clock as GClock;
 use prost::Message as _;
 use rand::Rng;
-use std::{marker::PhantomData, time::SystemTime};
+use std::{collections::HashMap, marker::PhantomData, time::SystemTime};
 use tracing::{debug, error, warn};
 
 /// Represents a pending serve operation.
@@ -70,6 +70,9 @@ pub struct Actor<
 
     /// Manages outgoing fetch requests
     fetcher: Fetcher<E, C, Key, NetS>,
+
+    /// Track the start time of fetch operations
+    fetch_start: HashMap<Key, SystemTime>,
 
     /// Holds futures that resolve once the `Producer` has produced the data.
     /// Once the future is resolved, the data (or an error) is sent to the peer.
@@ -123,6 +126,7 @@ impl<
                 serves: FuturesPool::default(),
                 priority_responses: cfg.priority_responses,
                 metrics,
+                fetch_start: HashMap::new(),
                 _s: PhantomData,
                 _r: PhantomData,
             },
@@ -199,20 +203,23 @@ impl<
                             debug!(?key, "mailbox: fetch");
 
                             // Check if the fetch is already in progress
-                            if self.fetcher.contains(&key) {
+                            if self.fetch_start.contains_key(&key) {
                                 warn!(?key, "duplicate fetch");
                                 self.metrics.fetch.inc(Status::Dropped);
                                 continue;
                             }
 
-                            self.fetcher.fetch(&mut sender, key.clone(), true).await;
+                            // Record fetch start time
+                            self.fetch_start.insert(key.clone(), self.context.current());
+                            self.fetcher.fetch(&mut sender, key, true).await;
                         }
                         Message::Cancel { key } => {
                             debug!(?key, "mailbox: cancel");
                             let mut guard = self.metrics.cancel.guard(Status::Dropped);
                             if self.fetcher.cancel(&key) {
                                 guard.set(Status::Success);
-                                self.consumer.failed(key, ()).await;
+                                assert!(self.fetch_start.remove(&key).is_some());
+                                self.consumer.failed(key.clone(), ()).await;
                             }
                         }
                     }
@@ -356,9 +363,13 @@ impl<
         };
 
         // The peer had the data, so we can deliver it to the consumer
+        let end = self.context.current();
         if self.consumer.deliver(key.clone(), response).await {
-            // If the data is valid, the fetch is complete
+            // Record metrics
             self.metrics.fetch.inc(Status::Success);
+            let start = self.fetch_start.remove(&key).unwrap(); // must exist in the map
+            let duration = end.duration_since(start).unwrap_or_default();
+            self.metrics.fetch_duration.observe(duration.as_secs_f64());
             return;
         }
 
@@ -385,6 +396,7 @@ impl<
 
         // The peer did not have the data, so we need to try again
         self.metrics.fetch.inc(Status::Failure);
+        // Don't reset start time for retries, keep the original
         self.fetcher.fetch(sender, key, false).await;
     }
 }
