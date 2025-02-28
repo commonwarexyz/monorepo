@@ -54,11 +54,7 @@ impl Metrics {
             "Number of canceled fetches by status",
             metrics.cancel.clone(),
         );
-        registry.register(
-            "serve",
-            " Number of serves by status",
-            metrics.serve.clone(),
-        );
+        registry.register("serve", "Number of serves by status", metrics.serve.clone());
         metrics
     }
 }

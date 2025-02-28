@@ -9,12 +9,12 @@ use prometheus_client::{
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct Label {
     /// The value of the label.
-    value: Value,
+    status: Status,
 }
 
 /// Possible values for the status label.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
-pub enum Value {
+pub enum Status {
     /// Processed successfully.
     Success,
     /// Processing failed.
@@ -31,28 +31,28 @@ pub type Counter = Family<Label, DefaultCounter>;
 
 /// Trait providing convenience methods for `Counter`.
 pub trait CounterExt {
-    fn guard(&self, value: Value) -> CounterGuard;
-    fn inc(&self, value: Value);
+    fn guard(&self, status: Status) -> CounterGuard;
+    fn inc(&self, status: Status);
     fn inc_with_bool(&self, ok: bool);
 }
 
 impl CounterExt for Counter {
-    /// Create a new CounterGuard with a given value.
-    fn guard(&self, value: Value) -> CounterGuard {
+    /// Create a new CounterGuard with a given status.
+    fn guard(&self, status: Status) -> CounterGuard {
         CounterGuard {
             metric: self.clone(),
-            value,
+            status,
         }
     }
 
-    /// Increment the metric with a given value.
-    fn inc(&self, value: Value) {
-        self.get_or_create(&Label { value }).inc();
+    /// Increment the metric with a given status.
+    fn inc(&self, status: Status) {
+        self.get_or_create(&Label { status }).inc();
     }
 
     /// Increment the metric as success if true, else as failure.
     fn inc_with_bool(&self, ok: bool) {
-        self.inc(if ok { Value::Success } else { Value::Failure });
+        self.inc(if ok { Status::Success } else { Status::Failure });
     }
 }
 
@@ -64,19 +64,19 @@ pub struct CounterGuard {
     /// The metric to increment.
     metric: Counter,
 
-    /// The value at which the metric is set to be incremented.
-    value: Value,
+    /// The status at which the metric is set to be incremented.
+    status: Status,
 }
 
 impl CounterGuard {
-    /// Modify the value at which the metric will be incremented.
-    pub fn set(&mut self, value: Value) {
-        self.value = value;
+    /// Modify the status at which the metric will be incremented.
+    pub fn set(&mut self, status: Status) {
+        self.status = status;
     }
 }
 
 impl Drop for CounterGuard {
     fn drop(&mut self) {
-        self.metric.inc(self.value);
+        self.metric.inc(self.status);
     }
 }

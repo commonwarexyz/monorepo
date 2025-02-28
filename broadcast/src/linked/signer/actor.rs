@@ -17,7 +17,7 @@ use commonware_runtime::{Blob, Clock, Handle, Metrics, Spawner, Storage};
 use commonware_storage::journal::{self, variable::Journal};
 use commonware_utils::{
     futures::Pool as FuturesPool,
-    metrics::status::{CounterExt, Value as StatusValue},
+    metrics::status::{CounterExt, Status},
     Array,
 };
 use futures::{
@@ -301,7 +301,7 @@ impl<
                             break;
                         }
                     };
-                    let mut guard = self.metrics.nodes.guard(StatusValue::Invalid);
+                    let mut guard = self.metrics.nodes.guard(Status::Invalid);
                     let node = match parsed::Node::<C, D>::decode(&msg) {
                         Ok(node) => node,
                         Err(err) => {
@@ -324,7 +324,7 @@ impl<
 
                     // Process the new node
                     self.handle_node(&node).await;
-                    guard.set(StatusValue::Success);
+                    guard.set(Status::Success);
                 },
 
                 // Handle incoming acks
@@ -338,7 +338,7 @@ impl<
                             break;
                         }
                     };
-                    let mut guard = self.metrics.acks.guard(StatusValue::Invalid);
+                    let mut guard = self.metrics.acks.guard(Status::Invalid);
                     let ack = match parsed::Ack::decode(&msg) {
                         Ok(ack) => ack,
                         Err(err) => {
@@ -352,10 +352,10 @@ impl<
                     };
                     if let Err(err) = self.handle_ack(&ack).await {
                         warn!(?err, ?ack, "ack handle failed");
-                        guard.set(StatusValue::Failure);
+                        guard.set(Status::Failure);
                         continue;
                     }
-                    guard.set(StatusValue::Success);
+                    guard.set(Status::Success);
                 },
 
                 // Handle completed verification futures.
@@ -587,7 +587,7 @@ impl<
         result: oneshot::Sender<bool>,
         node_sender: &mut NetS,
     ) -> Result<(), Error> {
-        let mut guard = self.metrics.new_broadcast.guard(StatusValue::Dropped);
+        let mut guard = self.metrics.new_broadcast.guard(Status::Dropped);
         let me = self.crypto.public_key();
 
         // Get parent Chunk and threshold signature
@@ -635,13 +635,13 @@ impl<
         // Broadcast to network
         if let Err(err) = self.broadcast(&node, node_sender, self.epoch).await {
             let _ = result.send(false);
-            guard.set(StatusValue::Failure);
+            guard.set(Status::Failure);
             return Err(err);
         };
 
         // Return success
         let _ = result.send(true);
-        guard.set(StatusValue::Success);
+        guard.set(Status::Success);
         Ok(())
     }
 
@@ -652,7 +652,7 @@ impl<
     /// - this instance has a chunk to rebroadcast.
     /// - this instance has not yet collected the threshold signature for the chunk.
     async fn rebroadcast(&mut self, node_sender: &mut NetS) -> Result<(), Error> {
-        let mut guard = self.metrics.rebroadcast.guard(StatusValue::Dropped);
+        let mut guard = self.metrics.rebroadcast.guard(Status::Dropped);
 
         // Unset the rebroadcast deadline
         self.rebroadcast_deadline = None;
@@ -678,9 +678,9 @@ impl<
         }
 
         // Broadcast the message, which resets the rebroadcast deadline
-        guard.set(StatusValue::Failure);
+        guard.set(Status::Failure);
         self.broadcast(&tip, node_sender, self.epoch).await?;
-        guard.set(StatusValue::Success);
+        guard.set(Status::Success);
         Ok(())
     }
 

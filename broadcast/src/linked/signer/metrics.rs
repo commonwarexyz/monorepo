@@ -1,4 +1,4 @@
-use commonware_utils::{hex, metrics::status, Array};
+use commonware_utils::{metrics::status, Array};
 use prometheus_client::{
     encoding::EncodeLabelSet,
     metrics::{counter::Counter, family::Family, gauge::Gauge},
@@ -15,7 +15,7 @@ impl SequencerLabel {
     /// Create a new sequencer label from a public key
     pub fn from<A: Array>(sequencer: &A) -> Self {
         Self {
-            sequencer: hex(sequencer),
+            sequencer: sequencer.to_string(),
         }
     }
 }

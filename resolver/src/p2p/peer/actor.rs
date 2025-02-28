@@ -18,7 +18,7 @@ use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Metrics, Spawner};
 use commonware_utils::{
     futures::Pool as FuturesPool,
-    metrics::status::{CounterExt, Value as StatusValue},
+    metrics::status::{CounterExt, Status},
     Array,
 };
 use futures::{
@@ -194,7 +194,7 @@ impl<
                             // Check if the fetch is already in progress
                             if self.fetcher.contains(&key) {
                                 warn!(?key, "duplicate fetch");
-                                self.metrics.fetch.inc(StatusValue::Dropped);
+                                self.metrics.fetch.inc(Status::Dropped);
                                 continue;
                             }
 
@@ -202,9 +202,9 @@ impl<
                         }
                         Message::Cancel { key } => {
                             debug!(?key, "mailbox: cancel");
-                            let mut guard = self.metrics.cancel.guard(StatusValue::Dropped);
+                            let mut guard = self.metrics.cancel.guard(Status::Dropped);
                             if self.fetcher.cancel(&key) {
-                                guard.set(StatusValue::Success);
+                                guard.set(Status::Success);
                                 self.consumer.failed(key, ()).await;
                             }
                         }
@@ -214,7 +214,7 @@ impl<
                 // Handle completed server requests
                 msg = self.serves.next_completed() => {
                     let (peer, id, result) = msg;
-                    self.metrics.serve.inc_with_bool(result.is_ok());
+                    self.metrics.serve.inc(if result.is_ok() {Status::Success} else {Status::Failure});
                     self.handle_serve(&mut sender, peer, id, result, self.priority_responses).await;
                 },
 
@@ -245,7 +245,7 @@ impl<
                 _ = deadline_pending => {
                     let key = self.fetcher.pop_pending();
                     debug!(?key, "retrying");
-                    self.metrics.fetch.inc(StatusValue::Failure);
+                    self.metrics.fetch.inc(Status::Failure);
                     self.fetcher.fetch(&mut sender, key, false).await;
                 },
 
@@ -253,7 +253,7 @@ impl<
                 _ = deadline_active => {
                     if let Some(key) = self.fetcher.pop_active() {
                         debug!(?key, "requester timeout");
-                        self.metrics.fetch.inc(StatusValue::Failure);
+                        self.metrics.fetch.inc(Status::Failure);
                         self.fetcher.fetch(&mut sender, key, false).await;
                     }
                 },
@@ -296,7 +296,7 @@ impl<
         // Parse request
         let Ok(key) = Key::try_from(request.to_vec()) else {
             warn!(?peer, ?id, "peer invalid request");
-            self.metrics.serve.inc(StatusValue::Invalid);
+            self.metrics.serve.inc(Status::Invalid);
             return;
         };
 
@@ -329,13 +329,13 @@ impl<
         // The peer had the data, so we can deliver it to the consumer
         if self.consumer.deliver(key.clone(), response).await {
             // If the data is valid, the fetch is complete
-            self.metrics.fetch.inc(StatusValue::Success);
+            self.metrics.fetch.inc(Status::Success);
             return;
         }
 
         // If the data is invalid, we need to block the peer and try again
         self.fetcher.block(peer);
-        self.metrics.fetch.inc(StatusValue::Failure);
+        self.metrics.fetch.inc(Status::Failure);
         self.fetcher.fetch(sender, key, false).await;
     }
 
@@ -355,7 +355,7 @@ impl<
         };
 
         // The peer did not have the data, so we need to try again
-        self.metrics.fetch.inc(StatusValue::Failure);
+        self.metrics.fetch.inc(Status::Failure);
         self.fetcher.fetch(sender, key, false).await;
     }
 }
