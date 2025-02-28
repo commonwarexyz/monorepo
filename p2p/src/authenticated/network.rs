@@ -206,7 +206,7 @@ impl<
         );
         let mut dialer_task = dialer.start(self.tracker_mailbox, spawner_mailbox);
 
-        // Wait for first actor to exit
+        // Wait for the first actor to exit
         info!("network started");
         let err = select! {
             tracker = &mut tracker_task => {
