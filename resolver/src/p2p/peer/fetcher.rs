@@ -5,7 +5,7 @@ use commonware_p2p::{
     utils::requester::{Config, Requester, ID},
     Recipients, Sender,
 };
-use commonware_runtime::Clock;
+use commonware_runtime::{Clock, Metrics};
 use commonware_utils::{Array, PrioritySet};
 use governor::clock::Clock as GClock;
 use prost::Message;
@@ -35,7 +35,7 @@ enum SendError<S: Sender> {
 /// Both types of requests will be retried after a timeout if not resolved (i.e. a response or a
 /// cancelation). Upon retry, requests may either be placed in active or pending state again.
 pub struct Fetcher<
-    E: Clock + GClock + Rng,
+    E: Clock + GClock + Rng + Metrics,
     C: Scheme,
     Key: Array,
     NetS: Sender<PublicKey = C::PublicKey>,
@@ -62,8 +62,12 @@ pub struct Fetcher<
     _s: PhantomData<NetS>,
 }
 
-impl<E: Clock + GClock + Rng, C: Scheme, Key: Array, NetS: Sender<PublicKey = C::PublicKey>>
-    Fetcher<E, C, Key, NetS>
+impl<
+        E: Clock + GClock + Rng + Metrics,
+        C: Scheme,
+        Key: Array,
+        NetS: Sender<PublicKey = C::PublicKey>,
+    > Fetcher<E, C, Key, NetS>
 {
     /// Creates a new fetcher.
     pub fn new(
@@ -72,7 +76,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, Key: Array, NetS: Sender<PublicKey = C:
         retry_timeout: Duration,
         priority_requests: bool,
     ) -> Self {
-        let requester = Requester::new(context.clone(), requester_config);
+        let requester = Requester::new(context.with_label("requester"), requester_config);
         Self {
             context,
             requester,

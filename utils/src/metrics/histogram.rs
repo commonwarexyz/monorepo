@@ -1,16 +1,16 @@
 use prometheus_client::metrics::histogram::Histogram;
-use std::time::Instant;
+use std::time::SystemTime;
 
 /// Trait providing convenience methods for `Histogram`.
 pub trait HistogramExt {
-    fn guard(&self) -> HistogramGuard<'_>;
+    fn guard(&self, time: SystemTime) -> HistogramGuard<'_>;
 }
 
 impl HistogramExt for Histogram {
-    fn guard(&self) -> HistogramGuard<'_> {
+    fn guard(&self, time: SystemTime) -> HistogramGuard<'_> {
         HistogramGuard {
             histogram: self,
-            start: Instant::now(),
+            start: time,
             recorded: false,
         }
     }
@@ -20,7 +20,7 @@ impl HistogramExt for Histogram {
 ///
 /// The duration is recorded when the guard is dropped, unless canceled or manually recorded.
 pub struct HistogramGuard<'a> {
-    start: Instant,
+    start: SystemTime,
     histogram: &'a Histogram,
     recorded: bool,
 }
@@ -37,8 +37,10 @@ impl HistogramGuard<'_> {
     }
 
     /// Records the duration
+    ///
+    /// If the duration is negative (due to clock drift), it is recorded as zero.
     fn record(&mut self) {
-        let duration = self.start.elapsed().as_secs_f64();
+        let duration = self.start.elapsed().unwrap_or_default().as_secs_f64();
         self.histogram.observe(duration);
         self.recorded = true;
     }

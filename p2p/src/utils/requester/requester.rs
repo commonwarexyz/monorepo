@@ -1,11 +1,12 @@
-//! Make concurrent requests to peers limited by rate and prioritized by performance.
+//! Requester for sending rate-limited requests to peers.
 
+use super::{Config, PeerLabel};
 use commonware_cryptography::Scheme;
-use commonware_runtime::Clock;
+use commonware_runtime::{Clock, Metrics};
 use commonware_utils::{Array, PrioritySet};
 use either::Either;
 use governor::{
-    clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
+    clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore,
     RateLimiter,
 };
 use rand::{seq::SliceRandom, Rng};
@@ -21,30 +22,16 @@ use std::{
 /// an issue.
 pub type ID = u64;
 
-/// Configuration for `Requester`.
-pub struct Config<C: Scheme> {
-    /// Cryptographic primitives.
-    pub crypto: C,
-
-    /// Rate limit for requests per participant.
-    pub rate_limit: Quota,
-
-    /// Initial expected performance for new participants.
-    pub initial: Duration,
-
-    /// Timeout for requests.
-    pub timeout: Duration,
-}
-
 /// Send rate-limited requests to peers prioritized by performance.
 ///
 /// Requester attempts to saturate the bandwidth (inferred by rate limit)
 /// of the most performant peers (based on our latency observations). To encourage
 /// exploration, set the value of `initial` to less than the expected latency of
 /// performant peers and/or periodically set `shuffle` in `request`.
-pub struct Requester<E: Clock + GClock + Rng, C: Scheme> {
+pub struct Requester<E: Clock + GClock + Rng + Metrics, C: Scheme> {
     context: E,
     crypto: C,
+    metrics: super::Metrics,
     initial: Duration,
     timeout: Duration,
 
@@ -83,13 +70,15 @@ pub struct Request<P: Array> {
     start: SystemTime,
 }
 
-impl<E: Clock + GClock + Rng, C: Scheme> Requester<E, C> {
+impl<E: Clock + GClock + Rng + Metrics, C: Scheme> Requester<E, C> {
     /// Create a new requester.
     pub fn new(context: E, config: Config<C>) -> Self {
         let rate_limiter = RateLimiter::hashmap_with_clock(config.rate_limit, &context);
+        let metrics = super::Metrics::init(context.clone());
         Self {
             context,
             crypto: config.crypto,
+            metrics,
             initial: config.initial,
             timeout: config.timeout,
 
@@ -160,6 +149,8 @@ impl<E: Clock + GClock + Rng, C: Scheme> Requester<E, C> {
             self.requests.insert(id, (participant.clone(), now));
             let deadline = now.checked_add(self.timeout).expect("time overflowed");
             self.deadlines.put(id, deadline);
+
+            self.metrics.requests.inc();
             return Some((participant.clone(), id));
         }
         None
@@ -171,6 +162,10 @@ impl<E: Clock + GClock + Rng, C: Scheme> Requester<E, C> {
             return;
         };
         let next = past.saturating_add(elapsed.as_millis()) / 2;
+        self.metrics
+            .performance
+            .get_or_create(&PeerLabel::from(&participant))
+            .set(next as i64);
         self.participants.put(participant, next);
     }
 
@@ -216,12 +211,14 @@ impl<E: Clock + GClock + Rng, C: Scheme> Requester<E, C> {
 
         // Update performance
         self.update(request.participant, elapsed);
+        self.metrics.resolves.inc();
     }
 
     /// Timeout an outstanding request.
     pub fn timeout(&mut self, request: Request<C::PublicKey>) {
         // Update performance
         self.update(request.participant, self.timeout);
+        self.metrics.timeouts.inc();
     }
 
     /// Get the next outstanding ID and deadline.
