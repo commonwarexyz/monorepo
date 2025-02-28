@@ -113,15 +113,15 @@ pub(crate) fn nodes_needing_parents(peak_iterator: PeakIterator) -> Vec<u64> {
 }
 
 /// Returns the position of the oldest provable node in the represented MMR.
-pub(crate) fn oldest_provable_pos(peak_iterator: PeakIterator, oldest_remembered_pos: u64) -> u64 {
+pub(crate) fn oldest_provable_pos(peak_iterator: PeakIterator, oldest_retained_pos: u64) -> u64 {
     if peak_iterator.size == 0 {
         return 0;
     }
     for (peak_pos, height) in peak_iterator {
-        if peak_pos < oldest_remembered_pos {
+        if peak_pos < oldest_retained_pos {
             continue;
         }
-        // We have found the tree containing the oldest remembered node. Now we look for the
+        // We have found the tree containing the oldest retained node. Now we look for the
         // highest node in this tree whose left-sibling is pruned (if any). The provable nodes
         // are those that strictly follow this node. If no such node exists, then all existing
         // nodes are provable
@@ -129,25 +129,25 @@ pub(crate) fn oldest_provable_pos(peak_iterator: PeakIterator, oldest_remembered
         let mut cur_node = peak_pos;
         while two_h > 1 {
             let left_pos = cur_node - two_h;
-            let right_pos = left_pos + two_h - 1;
-            if left_pos < oldest_remembered_pos {
+            let right_pos = cur_node - 1;
+            if left_pos < oldest_retained_pos {
                 // found pruned left sibling
                 return right_pos + 1;
             }
             two_h >>= 1;
             cur_node = left_pos;
         }
-        return oldest_remembered_pos;
+        return oldest_retained_pos;
     }
-    // The oldest remembered node should always be at or equal to the last peak (aka the last node
+    // The oldest retained node should always be at or equal to the last peak (aka the last node
     // in the MMR), so if we get here, the MMR corresponding to the inputs is invalid.
     panic!("mmr invalid")
 }
 
 /// Returns the position of the oldest node whose digest will be required to prove inclusion of
-/// `provable_pos`.
+/// `provable_pos`. The implementation assumes that the peak digests will remain available.
 ///
-/// Forgetting this position will render the node with position `provable_pos` unprovable.
+/// Pruning this position will render the node with position `provable_pos` unprovable.
 pub(crate) fn oldest_required_proof_pos(peak_iterator: PeakIterator, provable_pos: u64) -> u64 {
     if peak_iterator.size == 0 {
         return 0;
@@ -173,7 +173,7 @@ pub(crate) fn oldest_required_proof_pos(peak_iterator: PeakIterator, provable_po
         }
         return provable_pos;
     }
-    // The oldest remembered node should always be at or equal to the last peak (aka the last node
+    // The oldest retained node should always be at or equal to the last peak (aka the last node
     // in the MMR), so if we get here, the MMR corresponding to the inputs is invalid.
     panic!("mmr invalid")
 }
@@ -246,13 +246,13 @@ mod tests {
     // boundaries appears in the verification crate.
     #[test]
     fn test_proof_boundaries() {
-        for oldest_remembered in 0u64..19u64 {
+        for oldest_retained in 0u64..19 {
             let iter = PeakIterator::new(19);
-            let oldest_provable = oldest_provable_pos(iter, oldest_remembered);
-            assert!(oldest_provable >= oldest_remembered);
+            let oldest_provable = oldest_provable_pos(iter, oldest_retained);
+            assert!(oldest_provable >= oldest_retained);
         }
 
-        for provable_pos in 0u64..19u64 {
+        for provable_pos in 0u64..19 {
             let iter = PeakIterator::new(19);
             let oldest_required = oldest_required_proof_pos(iter, provable_pos);
             assert!(oldest_required <= provable_pos);
