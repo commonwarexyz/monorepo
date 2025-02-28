@@ -109,8 +109,50 @@ fn main() {
 
     // Start runtime
     executor.start(async move {
-        // Start system metrics
-        context.with_label("system").spawn(|context| async move {
+        // Start p2p
+        let (mut network, mut oracle) =
+            authenticated::Network::new(context.with_label("network"), p2p_cfg);
+
+        // Provide authorized peers
+        oracle.register(0, peer_keys).await;
+
+        // Register flood channel
+        let (mut flood_sender, mut flood_receiver) = network.register(
+            0,
+            Quota::per_second(NonZeroU32::new(u32::MAX).unwrap()),
+            config.backlog,
+            None,
+        );
+
+        // Create network
+        let p2p = network.start();
+
+        // Create flood
+        let flood_sender = context
+            .with_label("flood_sender")
+            .spawn(move |_| async move {
+                let mut rng = StdRng::seed_from_u64(0);
+                loop {
+                    // Create message
+                    let mut msg = Vec::with_capacity(config.message_size);
+                    rng.fill_bytes(&mut msg);
+
+                    // Send to all peers
+                    if let Err(e) = flood_sender.send(Recipients::All, msg.into(), false).await {
+                        error!(?e, "could not send flood message");
+                    }
+                }
+            });
+        let flood_receiver = context.with_label("flood_receiver").spawn(|_| async move {
+            loop {
+                if let Err(e) = flood_receiver.recv().await {
+                    error!(?e, "could not receive flood message");
+                }
+            }
+        });
+
+        // Start system metrics collector
+        let system = context.with_label("system").spawn(|context| async move {
             // Register metrics
             let cpu_usage: Gauge<f64, AtomicU64> = Gauge::default();
             context.register("cpu_usage", "CPU usage", cpu_usage.clone());
@@ -161,21 +203,6 @@ fn main() {
             }
         });
 
-        // Start p2p
-        let (mut network, mut oracle) =
-            authenticated::Network::new(context.with_label("network"), p2p_cfg);
-
-        // Provide authorized peers
-        oracle.register(0, peer_keys).await;
-
-        // Register flood channel
-        let (mut flood_sender, mut flood_receiver) = network.register(
-            0,
-            Quota::per_second(NonZeroU32::new(u32::MAX).unwrap()),
-            config.backlog,
-            None,
-        );
-
         // Serve metrics
         let metrics = context.with_label("metrics").spawn(|context| async move {
             let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), METRICS_PORT);
@@ -194,35 +221,9 @@ fn main() {
                 .expect("Could not serve metrics");
         });
 
-        // Create network
-        let p2p = network.start();
-
-        // Create flood
-        let flood_sender = context
-            .with_label("flood_sender")
-            .spawn(move |_| async move {
-                let mut rng = StdRng::seed_from_u64(0);
-                loop {
-                    // Create message
-                    let mut msg = Vec::with_capacity(config.message_size);
-                    rng.fill_bytes(&mut msg);
-
-                    // Send to all peers
-                    if let Err(e) = flood_sender.send(Recipients::All, msg.into(), false).await {
-                        error!(?e, "could not send flood message");
-                    }
-                }
-            });
-        let flood_receiver = context.with_label("flood_receiver").spawn(|_| async move {
-            loop {
-                if let Err(e) = flood_receiver.recv().await {
-                    error!(?e, "could not receive flood message");
-                }
-            }
-        });
-
         // Wait for any task to error
-        if let Err(e) = try_join_all(vec![metrics, p2p, flood_sender, flood_receiver]).await {
+        if let Err(e) = try_join_all(vec![p2p, flood_sender, flood_receiver, system, metrics]).await
+        {
             error!(?e, "task failed");
         }
     });
