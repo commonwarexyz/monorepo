@@ -1,8 +1,15 @@
 # Setting Expectations
 
-External contributors are encouraged to submit issues and pull requests to this repository. That being said, not all issues will be addressed nor pull requests merged (even if well-intentioned).
+External contributors are encouraged to submit issues and pull requests to this repository. That being said, not all issues will be addressed nor will all correct pull requests be merged.
 
-The Commonware Library provides reliable and high-performance primitives and contributions that do not advance these goals may not be accepted. This could include (but is not limited to) replacing code with external dependencies, implementing optional functionality, and/or introducing algorithms that substantially increase complexity to provide marginal performance improvements. On the other hand, adding more tests and benchmarks is almost always welcome!
+The Commonware Library provides robust, high-performance primitives and contributions that do not directly advance this work will not be considered. This includes (but is not limited to):
+
+- Introducing an external dependency
+- Implementing optional functionality
+- Adding complex algorithms that provide marginal performance improvements
+- Refactoring for the sake of refactoring
+- Trivial changes from accounts farming contribution metrics (especially when aided by an LLM)
+- New primitives and/or dialects that are ecosystem-specific
 
 # Style
 
