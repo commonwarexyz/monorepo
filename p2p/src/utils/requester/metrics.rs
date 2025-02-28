@@ -30,12 +30,10 @@ pub struct Metrics {
     pub requests: Counter,
     /// Number of requests that timed out.
     pub timeouts: Counter,
-    /// Number of requests that were resolved.
-    pub resolves: Counter,
+    /// Number and duration of requests that were resolved.
+    pub resolves: Histogram,
     /// Performance of each peer
     pub performance: Family<PeerLabel, Gauge>,
-
-    pub dummy: Histogram,
 }
 
 impl Metrics {
@@ -44,9 +42,8 @@ impl Metrics {
         let metrics = Self {
             requests: Counter::default(),
             timeouts: Counter::default(),
-            resolves: Counter::default(),
+            resolves: Histogram::new(Buckets::NETWORK.into_iter()),
             performance: Family::default(),
-            dummy: Histogram::new(Buckets::NETWORK.into_iter()),
         };
         registry.register(
             "requests",
@@ -60,7 +57,7 @@ impl Metrics {
         );
         registry.register(
             "resolves",
-            "Number of requests that were resolved",
+            "Number and duration of requests that were resolved",
             metrics.resolves.clone(),
         );
         registry.register(
@@ -68,7 +65,6 @@ impl Metrics {
             "Performance of each peer",
             metrics.performance.clone(),
         );
-        registry.register("dummy", "Dummy histogram", metrics.dummy.clone());
         metrics
     }
 }
