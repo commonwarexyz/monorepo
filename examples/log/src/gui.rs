@@ -38,7 +38,7 @@ enum Event<I> {
     Tick,
 }
 
-/// Appends logs to provided vectors.
+/// Appends logs to the provided vectors.
 pub struct Writer {
     progress: Arc<Mutex<Vec<String>>>,
     logs: Arc<Mutex<Vec<String>>>,
