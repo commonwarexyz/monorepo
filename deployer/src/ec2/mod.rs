@@ -6,10 +6,19 @@ mod services;
 pub use create::create;
 mod destroy;
 pub use destroy::destroy;
+mod update;
+pub use update::update;
 mod utils;
+
+/// Name of the monitoring instance
+const MONITORING_NAME: &str = "monitoring";
+
+/// AWS region where monitoring instances are deployed
+const MONITORING_REGION: &str = "us-east-1";
 
 pub const CMD: &str = "ec2";
 pub const CREATE_CMD: &str = "create";
+pub const UPDATE_CMD: &str = "update";
 pub const DESTROY_CMD: &str = "destroy";
 
 #[derive(Serialize, Deserialize, Clone)]

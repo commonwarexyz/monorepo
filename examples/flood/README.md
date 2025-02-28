@@ -44,6 +44,17 @@ deployer ec2 create --config config.yaml
 
 Visit `http://<monitoring-ip>:3000` (anonymous login is already enabled, so you don't need to enter a password)
 
+### [Optional] Update Flood Binary
+
+```bash
+docker run -it -v ${PWD}/../..:/monorepo flood-builder
+```
+
+
+```bash
+deployer ec2 update --config config.yaml
+```
+
 ### Teardown Infrastructure
 
 ```bash

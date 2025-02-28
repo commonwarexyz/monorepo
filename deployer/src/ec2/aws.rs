@@ -13,9 +13,6 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tokio::time::sleep;
 
-/// AWS region where monitoring instances are deployed
-pub const MONITORING_REGION: &str = "us-east-1";
-
 /// Creates an EC2 client for the specified AWS region
 pub async fn create_ec2_client(region: Region) -> Ec2Client {
     let config = aws_config::defaults(BehaviorVersion::v2024_03_28())
