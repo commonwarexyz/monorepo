@@ -114,6 +114,8 @@ impl<E: Clock + GClock + Rng + Metrics, C: Scheme> Requester<E, C> {
     /// a request is made. This is typically used when a request to the preferred
     /// participant fails.
     pub fn request(&mut self, shuffle: bool) -> Option<(C::PublicKey, ID)> {
+        self.metrics.dummy.guard(&self.context);
+
         // Prepare participant iterator
         let participant_iter = if shuffle {
             let mut participants = self.participants.iter().collect::<Vec<_>>();

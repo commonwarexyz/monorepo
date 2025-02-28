@@ -1,9 +1,10 @@
 //! Metrics for the requester.
 
+use commonware_runtime::metrics::histogram::Buckets;
 use commonware_utils::Array;
 use prometheus_client::{
     encoding::EncodeLabelSet,
-    metrics::{counter::Counter, family::Family, gauge::Gauge},
+    metrics::{counter::Counter, family::Family, gauge::Gauge, histogram::Histogram},
 };
 
 /// Label for peer metrics.
@@ -23,7 +24,7 @@ impl PeerLabel {
 }
 
 /// Metrics for the requester.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Metrics {
     /// Number of requests made.
     pub requests: Counter,
@@ -33,12 +34,20 @@ pub struct Metrics {
     pub resolves: Counter,
     /// Performance of each peer
     pub performance: Family<PeerLabel, Gauge>,
+
+    pub dummy: Histogram,
 }
 
 impl Metrics {
     /// Create and return a new set of metrics, registered with the given registry.
     pub fn init<M: commonware_runtime::Metrics>(registry: M) -> Self {
-        let metrics = Self::default();
+        let metrics = Self {
+            requests: Counter::default(),
+            timeouts: Counter::default(),
+            resolves: Counter::default(),
+            performance: Family::default(),
+            dummy: Histogram::new(Buckets::NETWORK.into_iter()),
+        };
         registry.register(
             "requests",
             "Number of requests made",
@@ -59,6 +68,7 @@ impl Metrics {
             "Performance of each peer",
             metrics.performance.clone(),
         );
+        registry.register("dummy", "Dummy histogram", metrics.dummy.clone());
         metrics
     }
 }

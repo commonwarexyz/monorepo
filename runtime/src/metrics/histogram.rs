@@ -2,6 +2,12 @@ use crate::Clock;
 use prometheus_client::metrics::histogram::Histogram;
 use std::time::SystemTime;
 
+pub struct Buckets;
+
+impl Buckets {
+    pub const NETWORK: [f64; 10] = [0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0];
+}
+
 pub trait HistogramExt<C: Clock> {
     fn guard<'a>(&'a self, clock: &'a C) -> HistogramGuard<'a, C>;
 }
