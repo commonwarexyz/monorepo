@@ -28,8 +28,16 @@ use futures::{
 use governor::clock::Clock as GClock;
 use prost::Message as _;
 use rand::Rng;
-use std::marker::PhantomData;
+use std::{marker::PhantomData, time::SystemTime};
 use tracing::{debug, error, warn};
+
+/// Represents a pending serve operation.
+struct Serve<C: Scheme> {
+    start: SystemTime,
+    peer: C::PublicKey,
+    id: u64,
+    result: Result<Bytes, oneshot::Canceled>,
+}
 
 /// Manages incoming and outgoing P2P requests, coordinating fetch and serve operations.
 pub struct Actor<
@@ -67,7 +75,7 @@ pub struct Actor<
     /// Once the future is resolved, the data (or an error) is sent to the peer.
     /// Has unbounded size; the number of concurrent requests should be limited
     /// by the `Producer` which may drop requests.
-    serves: FuturesPool<(C::PublicKey, u64, Result<Bytes, oneshot::Canceled>)>,
+    serves: FuturesPool<Serve<C>>,
 
     /// Whether responses are sent with priority over other network messages
     priority_responses: bool,
@@ -211,9 +219,25 @@ impl<
                 },
 
                 // Handle completed server requests
-                msg = self.serves.next_completed() => {
-                    let (peer, id, result) = msg;
-                    self.metrics.serve.inc(if result.is_ok() {Status::Success} else {Status::Failure});
+                serve = self.serves.next_completed() => {
+                    let Serve { start, peer, id, result } = serve;
+
+                    // Metrics and logs
+                    match result {
+                        Ok(_) => {
+                            let duration = self.context.current().duration_since(start).unwrap_or_default();
+                            self.metrics
+                                .serve_duration
+                                .observe(duration.as_secs_f64());
+                            self.metrics.serve.inc(Status::Success);
+                        }
+                        Err(err) => {
+                            warn!(?err, ?peer, ?id, "serve failed");
+                            self.metrics.serve.inc(Status::Failure);
+                        }
+                    }
+
+                    // Send response to peer
                     self.handle_serve(&mut sender, peer, id, result, self.priority_responses).await;
                 },
 
@@ -302,10 +326,16 @@ impl<
         // Serve the request
         debug!(?peer, ?id, "peer request");
         let mut producer = self.producer.clone();
+        let start = self.context.current();
         self.serves.push(async move {
             let receiver = producer.produce(key).await;
             let result = receiver.await;
-            (peer, id, result)
+            Serve {
+                start,
+                peer,
+                id,
+                result,
+            }
         });
     }
 

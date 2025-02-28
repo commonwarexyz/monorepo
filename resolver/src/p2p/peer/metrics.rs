@@ -1,8 +1,8 @@
-use commonware_runtime::metrics::status;
-use prometheus_client::metrics::gauge::Gauge;
+use commonware_runtime::metrics::{histogram::Buckets, status};
+use prometheus_client::metrics::{gauge::Gauge, histogram::Histogram};
 
 /// Metrics for the peer actor.
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct Metrics {
     /// Current number of pending fetch requests
     pub fetch_pending: Gauge,
@@ -18,12 +18,23 @@ pub struct Metrics {
     pub cancel: status::Counter,
     /// Number of serves by status
     pub serve: status::Counter,
+    /// Histogram of successful serves
+    pub serve_duration: Histogram,
 }
 
 impl Metrics {
     /// Create and return a new set of metrics, registered with the given registry.
     pub fn init<M: commonware_runtime::Metrics>(registry: M) -> Self {
-        let metrics = Self::default();
+        let metrics = Self {
+            fetch_pending: Gauge::default(),
+            fetch_active: Gauge::default(),
+            serve_processing: Gauge::default(),
+            peers_blocked: Gauge::default(),
+            fetch: status::Counter::default(),
+            cancel: status::Counter::default(),
+            serve: status::Counter::default(),
+            serve_duration: Histogram::new(Buckets::NETWORK.into_iter()),
+        };
         registry.register(
             "fetch_pending",
             "Current number of pending fetch requests",
@@ -55,6 +66,11 @@ impl Metrics {
             metrics.cancel.clone(),
         );
         registry.register("serve", "Number of serves by status", metrics.serve.clone());
+        registry.register(
+            "serve_duration",
+            "Histogram of successful serves",
+            metrics.serve_duration.clone(),
+        );
         metrics
     }
 }
