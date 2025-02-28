@@ -1,4 +1,5 @@
-use commonware_utils::{metrics::status, Array};
+use commonware_runtime::metrics::status;
+use commonware_utils::Array;
 use prometheus_client::{
     encoding::EncodeLabelSet,
     metrics::{counter::Counter, family::Family, gauge::Gauge},

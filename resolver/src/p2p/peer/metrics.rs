@@ -1,4 +1,4 @@
-use commonware_utils::metrics::status;
+use commonware_runtime::metrics::status;
 use prometheus_client::metrics::gauge::Gauge;
 
 /// Metrics for the peer actor.

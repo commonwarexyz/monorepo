@@ -15,12 +15,11 @@ use bytes::Bytes;
 use commonware_cryptography::Scheme;
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Clock, Handle, Metrics, Spawner};
-use commonware_utils::{
-    futures::Pool as FuturesPool,
+use commonware_runtime::{
     metrics::status::{CounterExt, Status},
-    Array,
+    Clock, Handle, Metrics, Spawner,
 };
+use commonware_utils::{futures::Pool as FuturesPool, Array};
 use futures::{
     channel::{mpsc, oneshot},
     future::{self, Either},

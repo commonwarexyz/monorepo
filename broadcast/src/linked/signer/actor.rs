@@ -13,13 +13,12 @@ use commonware_cryptography::{
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Blob, Clock, Handle, Metrics, Spawner, Storage};
-use commonware_storage::journal::{self, variable::Journal};
-use commonware_utils::{
-    futures::Pool as FuturesPool,
+use commonware_runtime::{
     metrics::status::{CounterExt, Status},
-    Array,
+    Blob, Clock, Handle, Metrics, Spawner, Storage,
 };
+use commonware_storage::journal::{self, variable::Journal};
+use commonware_utils::{futures::Pool as FuturesPool, Array};
 use futures::{
     channel::{mpsc, oneshot},
     future::{self, Either},
