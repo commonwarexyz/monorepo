@@ -15,6 +15,12 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Box<dyn Error>> {
     let tag = &config.tag;
     info!(tag = tag.as_str(), "loaded configuration");
 
+    // Ensure deployment directory exists
+    let temp_dir = deployer_directory(tag);
+    if !temp_dir.exists() {
+        return Err("infrastructure deployment does not exist".into());
+    }
+
     // Ensure not already destroyed
     let destroyed_file = deployer_directory(tag).join(DESTROYED_FILE_NAME);
     if destroyed_file.exists() {
