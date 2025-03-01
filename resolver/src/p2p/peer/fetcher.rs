@@ -2,10 +2,10 @@ use crate::p2p::wire::{self, peer_msg::Payload};
 use bimap::BiHashMap;
 use commonware_cryptography::Scheme;
 use commonware_p2p::{
-    utils::requester::{Requester, ID},
+    utils::requester::{Config, Requester, ID},
     Recipients, Sender,
 };
-use commonware_runtime::Clock;
+use commonware_runtime::{Clock, Metrics};
 use commonware_utils::{Array, PrioritySet};
 use governor::clock::Clock as GClock;
 use prost::Message;
@@ -35,7 +35,7 @@ enum SendError<S: Sender> {
 /// Both types of requests will be retried after a timeout if not resolved (i.e. a response or a
 /// cancelation). Upon retry, requests may either be placed in active or pending state again.
 pub struct Fetcher<
-    E: Clock + GClock + Rng,
+    E: Clock + GClock + Rng + Metrics,
     C: Scheme,
     Key: Array,
     NetS: Sender<PublicKey = C::PublicKey>,
@@ -62,16 +62,21 @@ pub struct Fetcher<
     _s: PhantomData<NetS>,
 }
 
-impl<E: Clock + GClock + Rng, C: Scheme, Key: Array, NetS: Sender<PublicKey = C::PublicKey>>
-    Fetcher<E, C, Key, NetS>
+impl<
+        E: Clock + GClock + Rng + Metrics,
+        C: Scheme,
+        Key: Array,
+        NetS: Sender<PublicKey = C::PublicKey>,
+    > Fetcher<E, C, Key, NetS>
 {
     /// Creates a new fetcher.
     pub fn new(
         context: E,
-        requester: Requester<E, C>,
+        requester_config: Config<C>,
         retry_timeout: Duration,
         priority_requests: bool,
     ) -> Self {
+        let requester = Requester::new(context.with_label("requester"), requester_config);
         Self {
             context,
             requester,
@@ -87,12 +92,11 @@ impl<E: Clock + GClock + Rng, C: Scheme, Key: Array, NetS: Sender<PublicKey = C:
     ///
     /// If `is_new` is true, the fetch is treated as a new request.
     /// If false, the fetch is treated as a retry.
+    ///
+    /// Panics if the key is already being fetched.
     pub async fn fetch(&mut self, sender: &mut NetS, key: Key, is_new: bool) {
-        // Check if the fetch is already in progress
-        if self.active.contains_right(&key) || self.pending.contains(&key) {
-            warn!(?key, "duplicate fetch");
-            return;
-        }
+        // Panic if the key is already being fetched
+        assert!(!self.contains(&key));
 
         // Get peer to send request to
         let shuffle = !is_new;
@@ -210,6 +214,11 @@ impl<E: Clock + GClock + Rng, C: Scheme, Key: Array, NetS: Sender<PublicKey = C:
         self.active.remove_by_left(&id).map(|(_id, key)| key)
     }
 
+    /// Returns true if the fetch is in progress.
+    pub fn contains(&self, key: &Key) -> bool {
+        self.active.contains_right(key) || self.pending.contains(key)
+    }
+
     /// Reconciles the list of peers that can be used to fetch data.
     pub fn reconcile(&mut self, keep: &[C::PublicKey]) {
         self.requester.reconcile(keep);
@@ -218,5 +227,20 @@ impl<E: Clock + GClock + Rng, C: Scheme, Key: Array, NetS: Sender<PublicKey = C:
     /// Blocks a peer from being used to fetch data.
     pub fn block(&mut self, peer: C::PublicKey) {
         self.requester.block(peer);
+    }
+
+    /// Returns the number of pending fetches.
+    pub fn len_pending(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// Returns the number of active fetches.
+    pub fn len_active(&self) -> usize {
+        self.active.len()
+    }
+
+    /// Returns the number of blocked peers.
+    pub fn len_blocked(&self) -> usize {
+        self.requester.len_blocked()
     }
 }
