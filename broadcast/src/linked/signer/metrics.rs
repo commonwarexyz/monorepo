@@ -1,4 +1,4 @@
-use commonware_runtime::metrics::status;
+use commonware_runtime::telemetry::status;
 use commonware_utils::Array;
 use prometheus_client::{
     encoding::EncodeLabelSet,
@@ -56,10 +56,10 @@ impl Metrics {
             new_broadcast: status::Counter::default(),
             rebroadcast: status::Counter::default(),
             verify_duration: Histogram::new(
-                commonware_runtime::metrics::histogram::Buckets::LOCAL.into_iter(),
+                commonware_runtime::telemetry::histogram::Buckets::LOCAL.into_iter(),
             ),
             e2e_duration: Histogram::new(
-                commonware_runtime::metrics::histogram::Buckets::NETWORK.into_iter(),
+                commonware_runtime::telemetry::histogram::Buckets::NETWORK.into_iter(),
             ),
         };
         registry.register(

@@ -14,7 +14,7 @@ use commonware_cryptography::{
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{
-    metrics::{
+    telemetry::{
         histogram::HistogramExt,
         status::{CounterExt, Status},
     },

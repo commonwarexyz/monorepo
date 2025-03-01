@@ -1,4 +1,4 @@
-use commonware_runtime::metrics::{histogram::Buckets, status};
+use commonware_runtime::telemetry::{histogram::Buckets, status};
 use prometheus_client::metrics::{gauge::Gauge, histogram::Histogram};
 
 /// Metrics for the peer actor.

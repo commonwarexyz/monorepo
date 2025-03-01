@@ -1,6 +1,6 @@
 //! Metrics for the requester.
 
-use commonware_runtime::metrics::histogram::Buckets;
+use commonware_runtime::telemetry::histogram::Buckets;
 use commonware_utils::Array;
 use prometheus_client::{
     encoding::EncodeLabelSet,
