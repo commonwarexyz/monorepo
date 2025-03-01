@@ -1,4 +1,4 @@
-//! TODO
+//! Deploy cloud-based infrastructure.
 
 use clap::{Arg, ArgAction, Command};
 use commonware_utils::crate_version;
@@ -40,6 +40,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         ),
                 )
                 .subcommand(
+                    Command::new(ec2::UPDATE_CMD)
+                        .about("Updates the binary and configuration on all regular nodes")
+                        .arg(
+                            Arg::new("config")
+                                .long("config")
+                                .required(true)
+                                .help("Path to YAML config file")
+                                .value_parser(clap::value_parser!(PathBuf)),
+                        ),
+                )
+                .subcommand(
                     Command::new(ec2::DESTROY_CMD)
                         .about("Deletes all deployed resources")
                         .arg(
@@ -68,6 +79,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 let config_path = matches.get_one::<PathBuf>("config").unwrap();
                 if let Err(e) = ec2::create(config_path).await {
                     error!(error=?e, "failed to create EC2 deployment");
+                } else {
+                    return Ok(());
+                }
+            }
+            Some((ec2::UPDATE_CMD, matches)) => {
+                let config_path = matches.get_one::<PathBuf>("config").unwrap();
+                if let Err(e) = ec2::update(config_path).await {
+                    error!(error=?e, "failed to update EC2 deployment");
                 } else {
                     return Ok(());
                 }

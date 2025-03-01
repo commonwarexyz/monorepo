@@ -98,7 +98,7 @@ pub async fn ssh_execute(key_file: &str, ip: &str, command: &str) -> Result<(), 
 }
 
 /// Polls the status of a systemd service on a remote instance until active
-pub async fn poll_service_status(
+pub async fn poll_service_active(
     key_file: &str,
     ip: &str,
     service: &str,
@@ -119,4 +119,28 @@ pub async fn poll_service_status(
         sleep(RETRY_INTERVAL).await;
     }
     Err(format!("Service {} failed to become active on {}", service, ip).into())
+}
+
+/// Polls the status of a systemd service on a remote instance until it becomes inactive
+pub async fn poll_service_inactive(
+    key_file: &str,
+    ip: &str,
+    service: &str,
+) -> Result<(), Box<dyn Error>> {
+    for _ in 0..MAX_POLL_ATTEMPTS {
+        let output = Command::new("ssh")
+            .arg("-i")
+            .arg(key_file)
+            .arg("-o")
+            .arg("StrictHostKeyChecking=no")
+            .arg(format!("ubuntu@{}", ip))
+            .arg(format!("systemctl is-active {}", service))
+            .output()
+            .await?;
+        if String::from_utf8_lossy(&output.stdout).trim() == "inactive" {
+            return Ok(());
+        }
+        sleep(RETRY_INTERVAL).await;
+    }
+    Err(format!("Service {} failed to become inactive on {}", service, ip).into())
 }

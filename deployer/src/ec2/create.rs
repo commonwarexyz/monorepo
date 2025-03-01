@@ -1,5 +1,8 @@
-use crate::ec2::{aws::*, services::*, utils::*, Config, InstanceConfig, Peer, Peers};
-use futures::future::join_all;
+use crate::ec2::{
+    aws::*, deployer_directory, services::*, utils::*, Config, InstanceConfig, Peer, Peers,
+    CREATED_FILE_NAME, MONITORING_NAME, MONITORING_REGION,
+};
+use futures::future::try_join_all;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::error::Error;
 use std::fs::File;
@@ -37,22 +40,26 @@ pub async fn create(config: &PathBuf) -> Result<(), Box<dyn Error>> {
     let tag = &config.tag;
     info!(tag = tag.as_str(), "loaded configuration");
 
+    // Create a temporary directory for local files
+    let temp_dir = deployer_directory(tag);
+    if temp_dir.exists() {
+        return Err("creation already attempted".into());
+    }
+    std::fs::create_dir_all(&temp_dir)?;
+    info!(path = ?temp_dir, "created temporary directory");
+
+    // Ensure no instance is duplicated or named MONITORING_NAME
+    let mut instance_names = HashSet::new();
+    for instance in &config.instances {
+        if instance_names.contains(&instance.name) || instance.name == MONITORING_NAME {
+            return Err(format!("invalid instance name: {}", instance.name).into());
+        }
+        instance_names.insert(instance.name.clone());
+    }
+
     // Get public IP address of the deployer
     let deployer_ip = get_public_ip().await?;
     info!(ip = deployer_ip.as_str(), "recovered public IP");
-
-    // Create a temporary directory for local files
-    let temp_dir = format!("deployer-{}", tag);
-    let temp_dir = PathBuf::from("/tmp").join(temp_dir);
-    let temp_dir_path = temp_dir.to_str().unwrap();
-    if temp_dir.exists() {
-        return Err(format!(
-            "temporary directory already exists: {}",
-            temp_dir_path
-        ))?;
-    }
-    std::fs::create_dir_all(&temp_dir)?;
-    info!(path = temp_dir_path, "created temporary directory");
 
     // Ensure cache directory exists
     std::fs::create_dir_all(CACHE_DIR)?;
@@ -326,7 +333,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Box<dyn Error>> {
             &monitoring_resources.subnet_id,
             &monitoring_sg_id,
             1,
-            "monitoring",
+            MONITORING_NAME,
             tag,
         )
         .await?[0]
@@ -407,10 +414,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Box<dyn Error>> {
         };
         launch_futures.push(future);
     }
-    let deployments: Vec<Deployment> = join_all(launch_futures)
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()?;
+    let deployments: Vec<Deployment> = try_join_all(launch_futures).await?;
     info!("launched regular instances");
 
     // Generate peers.yaml
@@ -529,9 +533,9 @@ pub async fn create(config: &PathBuf) -> Result<(), Box<dyn Error>> {
         &install_monitoring_cmd(PROMETHEUS_VERSION),
     )
     .await?;
-    poll_service_status(private_key, &monitoring_ip, "prometheus").await?;
-    poll_service_status(private_key, &monitoring_ip, "loki").await?;
-    poll_service_status(private_key, &monitoring_ip, "grafana-server").await?;
+    poll_service_active(private_key, &monitoring_ip, "prometheus").await?;
+    poll_service_active(private_key, &monitoring_ip, "loki").await?;
+    poll_service_active(private_key, &monitoring_ip, "grafana-server").await?;
     info!("configured monitoring instance");
 
     // Configure regular instances
@@ -596,9 +600,9 @@ pub async fn create(config: &PathBuf) -> Result<(), Box<dyn Error>> {
             )
             .await?;
             ssh_execute(private_key, &ip, SETUP_PROMTAIL_CMD).await?;
-            poll_service_status(private_key, &ip, "promtail").await?;
+            poll_service_active(private_key, &ip, "promtail").await?;
             ssh_execute(private_key, &ip, INSTALL_BINARY_CMD).await?;
-            poll_service_status(private_key, &ip, "binary").await?;
+            poll_service_active(private_key, &ip, "binary").await?;
             info!(
                 ip = ip.as_str(),
                 instance = instance.name.as_str(),
@@ -608,10 +612,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Box<dyn Error>> {
         };
         start_futures.push(future);
     }
-    let all_regular_ips = join_all(start_futures)
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()?;
+    let all_regular_ips = try_join_all(start_futures).await?;
     info!("configured regular instances");
 
     // Update monitoring security group to restrict Loki port (3100)
@@ -671,6 +672,9 @@ pub async fn create(config: &PathBuf) -> Result<(), Box<dyn Error>> {
         }
     }
     info!("updated monitoring security group");
+
+    // Mark deployment as complete
+    File::create(temp_dir.join(CREATED_FILE_NAME))?;
     info!(
         monitoring = monitoring_ip.as_str(),
         regular = ?all_regular_ips,
