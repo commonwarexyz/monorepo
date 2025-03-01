@@ -33,7 +33,6 @@ pub type Counter = Family<Label, DefaultCounter>;
 pub trait CounterExt {
     fn guard(&self, status: Status) -> CounterGuard;
     fn inc(&self, status: Status);
-    fn inc_with_bool(&self, ok: bool);
 }
 
 impl CounterExt for Counter {
@@ -48,11 +47,6 @@ impl CounterExt for Counter {
     /// Increment the metric with a given status.
     fn inc(&self, status: Status) {
         self.get_or_create(&Label { status }).inc();
-    }
-
-    /// Increment the metric as success if true, else as failure.
-    fn inc_with_bool(&self, ok: bool) {
-        self.inc(if ok { Status::Success } else { Status::Failure });
     }
 }
 
