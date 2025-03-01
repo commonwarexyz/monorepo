@@ -83,4 +83,12 @@ pub enum Error {
     JournalError(#[from] crate::journal::Error),
     #[error("missing peak: {0}")]
     MissingPeak(u64),
+    #[error("no historical peaks found for provable_pos: {0}")]
+    NoHistoricalPeaks(u64),
+    #[error("element {0} is not provable with historical peaks from provable_pos: {1}")]
+    ElementNotProvable(u64, u64),
+    #[error("invalid digest")]
+    InvalidDigest,
+    #[error("not implemented: {0}")]
+    NotImplemented(&'static str),
 }

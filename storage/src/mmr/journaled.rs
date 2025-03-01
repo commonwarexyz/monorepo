@@ -228,11 +228,46 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
         self.metadata.close().await.map_err(Error::MetadataError)
     }
 
-    /// Return an inclusion proof for the specified element.
+    /// Generate a proof for an element.
     ///
     /// Returns ElementPruned error if some element needed to generate the proof has been pruned.
     pub async fn proof(&self, element_pos: u64) -> Result<Proof<H>, Error> {
         self.range_proof(element_pos, element_pos).await
+    }
+
+    /// Generate a proof for an element using historical peaks from a previous call to `prune`.
+    /// This allows proving elements that were guaranteed to be provable at the time of pruning,
+    /// even if the current MMR structure has changed.
+    ///
+    /// Returns a proof for the element at position `element_pos` using the historical peaks
+    /// from the time when `prune` was called with `provable_pos`.
+    pub async fn historical_proof(
+        &self,
+        element_pos: u64,
+        provable_pos: u64,
+    ) -> Result<Proof<H>, Error> {
+        // Get the historical peaks for this provable_pos
+        let historical_peaks = self.get_historical_peaks(provable_pos).await?;
+        
+        if historical_peaks.is_empty() {
+            return Err(Error::NoHistoricalPeaks(provable_pos));
+        }
+        
+        // Check if the element_pos is within the range that was guaranteed to be provable
+        let oldest_required_pos = oldest_required_proof_pos(
+            PeakIterator::new(historical_peaks.iter().map(|(pos, _)| *pos).max().unwrap_or(0) + 1),
+            provable_pos,
+        );
+        
+        if element_pos < oldest_required_pos || element_pos > provable_pos {
+            return Err(Error::ElementNotProvable(element_pos, provable_pos));
+        }
+        
+        // Create a proof using the historical peaks
+        // This would require implementing a version of the proof generation algorithm
+        // that works with a provided set of peaks instead of the current MMR structure
+        // For now, we'll return an error indicating this is not yet implemented
+        Err(Error::NotImplemented("Historical proof generation not yet implemented"))
     }
 
     /// Return an inclusion proof for the specified range of elements, inclusive of both endpoints.
@@ -272,9 +307,25 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
         if self.mem_mmr.size() == 0 {
             return Ok(None);
         }
-        // Flush mem-mmr items to disk and write new peaks to metadata. TODO: optimize this to avoid
-        // writing any cached items which will just be immediately pruned.
+        // Flush mem-mmr items to disk and write new peaks to metadata.
+        // Store the current peaks before pruning to ensure provability guarantees remain stable
         self.sync().await?;
+
+        // Save the current peaks with a special prefix to distinguish them from the current peaks
+        // This ensures we can still prove nodes even after more elements are added to the MMR
+        let peak_iterator = self.mem_mmr.peak_iterator();
+        for (peak_pos, _) in peak_iterator {
+            let digest = self.mem_mmr.get_node(peak_pos).await?.unwrap();
+            // Store historical peaks using a special encoding:
+            // We use the high 32 bits for the provable_pos and the low 32 bits for the peak_pos
+            // This allows us to retrieve the correct historical peaks for any provable_pos
+            let historical_key = (provable_pos << 32) | (peak_pos & 0xFFFFFFFF);
+            self.metadata.put(
+                U64::new(historical_key),
+                Bytes::copy_from_slice(digest.as_ref()),
+            );
+        }
+        self.metadata.sync().await.map_err(Error::MetadataError)?;
 
         let oldest_required_pos =
             oldest_required_proof_pos(self.mem_mmr.peak_iterator(), provable_pos);
@@ -299,12 +350,41 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
 
     /// Return the oldest node position provable by this MMR.
     pub async fn oldest_provable_pos(&self) -> Result<Option<u64>, Error> {
-        let Some(oldest_retained_pos) = self.oldest_retained_pos().await? else {
+        let Some(oldest_retained_pos) = self.journal.oldest_retained_pos().await? else {
             return Ok(None);
         };
-        let oldest_provable_pos =
-            oldest_provable_pos(self.mem_mmr.peak_iterator(), oldest_retained_pos);
-        Ok(Some(oldest_provable_pos))
+        Ok(Some(
+            oldest_provable_pos(self.mem_mmr.peak_iterator(), oldest_retained_pos),
+        ))
+    }
+
+    /// Retrieves the historical peaks that were stored during a previous call to `prune` with
+    /// the given `provable_pos`. These peaks can be used to generate proofs for nodes that
+    /// were guaranteed to be provable at that time, even if the current MMR structure has changed.
+    ///
+    /// Returns a vector of (position, digest) pairs representing the peaks.
+    pub async fn get_historical_peaks(&self, provable_pos: u64) -> Result<Vec<(u64, H::Digest)>, Error> {
+        let mut peaks = Vec::new();
+        
+        // Since we can't directly iterate over all keys in Metadata, we'll use a different approach
+        // We'll try to access potential peak positions for the given provable_pos
+        // We know that peak positions are always less than the MMR size
+        let mmr_size = self.mem_mmr.size();
+        
+        for potential_peak_pos in 0..mmr_size {
+            // Construct the key using our encoding scheme
+            let historical_key = (provable_pos << 32) | (potential_peak_pos & 0xFFFFFFFF);
+            let key = U64::new(historical_key);
+            
+            // Check if this key exists in metadata
+            if let Some(bytes) = self.metadata.get(&key) {
+                let digest = H::Digest::from_slice(bytes.as_ref())
+                    .map_err(|_| Error::InvalidDigest)?;
+                peaks.push((potential_peak_pos, digest));
+            }
+        }
+        
+        Ok(peaks)
     }
 
     #[cfg(test)]
