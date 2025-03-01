@@ -7,14 +7,18 @@ use std::time::SystemTime;
 pub struct Buckets;
 
 impl Buckets {
-    /// For roundtrip requests to a peer.
+    /// For simple roundtrip requests to a peer.
+    /// 
+    /// These requests are expected to happen over a wide-area network, but not require extended
+    /// calculation, retries, etc. Something like a ping/pong.
     pub const P2P: [f64; 12] = [
         0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0,
     ];
 
     /// For resolving items over a network.
     ///
-    /// These tasks might require multiple peers, hops, rounds, retries, etc.
+    /// These tasks might require multiple hops, rounds, retries, etc. Something like coming to
+    /// consensus or fetching a large amount of data from multiple peers.
     pub const NETWORK: [f64; 12] = [
         0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 300.0,
     ];
