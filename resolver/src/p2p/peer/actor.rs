@@ -16,7 +16,10 @@ use commonware_cryptography::Scheme;
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{
-    metrics::status::{CounterExt, Status},
+    metrics::{
+        histogram::HistogramExt,
+        status::{CounterExt, Status},
+    },
     Clock, Handle, Metrics, Spawner,
 };
 use commonware_utils::{futures::Pool as FuturesPool, Array};
@@ -232,10 +235,9 @@ impl<
                     // Metrics and logs
                     match result {
                         Ok(_) => {
-                            let duration = self.context.current().duration_since(start).unwrap_or_default();
                             self.metrics
                                 .serve_duration
-                                .observe(duration.as_secs_f64());
+                                .observe_between(start, self.context.current());
                             self.metrics.serve.inc(Status::Success);
                         }
                         Err(err) => {
@@ -368,8 +370,7 @@ impl<
             // Record metrics
             self.metrics.fetch.inc(Status::Success);
             let start = self.fetch_start.remove(&key).unwrap(); // must exist in the map
-            let duration = end.duration_since(start).unwrap_or_default();
-            self.metrics.fetch_duration.observe(duration.as_secs_f64());
+            self.metrics.fetch_duration.observe_between(start, end);
             return;
         }
 

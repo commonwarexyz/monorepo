@@ -29,18 +29,32 @@ impl Buckets {
     ];
 }
 
-pub trait HistogramExt<C: Clock> {
-    fn guard<'a>(&'a self, clock: &'a C) -> HistogramGuard<'a, C>;
+/// Extension trait for histograms.
+pub trait HistogramExt {
+    fn guard<'a, C: Clock>(&'a self, clock: &'a C) -> HistogramGuard<'a, C>;
+
+    /// Observe the duration between two points in time, in seconds.
+    ///
+    /// If the clock goes backwards, the duration is 0.
+    fn observe_between(&self, start: SystemTime, end: SystemTime);
 }
 
-impl<C: Clock> HistogramExt<C> for Histogram {
-    fn guard<'a>(&'a self, clock: &'a C) -> HistogramGuard<'a, C> {
+impl HistogramExt for Histogram {
+    fn guard<'a, C: Clock>(&'a self, clock: &'a C) -> HistogramGuard<'a, C> {
         HistogramGuard {
             histogram: self,
             clock,
             start: clock.current(),
             recorded: false,
         }
+    }
+
+    fn observe_between(&self, start: SystemTime, end: SystemTime) {
+        let duration = match end.duration_since(start) {
+            Ok(duration) => duration.as_secs_f64(),
+            Err(_) => 0.0, // Clock went backwards
+        };
+        self.observe(duration);
     }
 }
 
@@ -62,11 +76,8 @@ impl<C: Clock> HistogramGuard<'_, C> {
 
     fn record(&mut self) {
         if !self.recorded {
-            let duration = match self.clock.current().duration_since(self.start) {
-                Ok(duration) => duration.as_secs_f64(),
-                Err(_) => 0.0, // Clock went backwards
-            };
-            self.histogram.observe(duration);
+            self.histogram
+                .observe_between(self.start, self.clock.current());
             self.recorded = true;
         }
     }

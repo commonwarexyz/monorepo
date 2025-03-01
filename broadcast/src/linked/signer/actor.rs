@@ -14,7 +14,10 @@ use commonware_cryptography::{
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{
-    metrics::status::{CounterExt, Status},
+    metrics::{
+        histogram::HistogramExt,
+        status::{CounterExt, Status},
+    },
     Blob, Clock, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::{self, variable::Journal};
@@ -31,6 +34,14 @@ use std::{
 };
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
+
+/// Represents a pending verification request to the application.
+struct Verify<C: Scheme, D: Array> {
+    start: SystemTime,
+    context: Context<C::PublicKey>,
+    payload: D,
+    result: Result<bool, Error>,
+}
 
 /// The actor that implements the `Broadcaster` trait.
 pub struct Actor<
@@ -110,7 +121,7 @@ pub struct Actor<
     // Each future represents a verification request to the application
     // that will either timeout or resolve with a boolean.
     #[allow(clippy::type_complexity)]
-    pending_verifies: FuturesPool<(Context<C::PublicKey>, D, Result<bool, Error>)>,
+    pending_verifies: FuturesPool<Verify<C, D>>,
 
     // The maximum number of items in `pending_verifies`.
     verify_concurrent: usize,
@@ -158,6 +169,9 @@ pub struct Actor<
 
     // Metrics
     metrics: metrics::Metrics,
+
+    // The start time of my last broadcast_new
+    broadcast_start: Option<SystemTime>,
 }
 
 impl<
@@ -211,6 +225,7 @@ impl<
             ack_manager: AckManager::<D, C::PublicKey>::new(),
             epoch: 0,
             metrics,
+            broadcast_start: None,
         };
 
         (result, mailbox)
@@ -358,16 +373,23 @@ impl<
                 },
 
                 // Handle completed verification futures.
-                maybe_verified = self.pending_verifies.next_completed() => {
-                    let (context, digest, verify_result) = maybe_verified;
-                    self.metrics.verify.inc_with_bool(verify_result.is_ok());
-                    match verify_result {
-                        Err(err) => warn!(?err, ?context, ?digest, "verified returned error"),
-                        Ok(false) => warn!(?context, ?digest, "verified was false"),
+                verify = self.pending_verifies.next_completed() => {
+                    let Verify { start, context, payload, result } = verify;
+                    self.metrics.verify_duration.observe_between(start, self.context.current());
+                    match result {
+                        Err(err) => {
+                            warn!(?err, ?context, ?payload, "verified returned error");
+                            self.metrics.verify.inc(Status::Dropped);
+                        }
+                        Ok(false) => {
+                            warn!(?context, ?payload, "verified was false");
+                            self.metrics.verify.inc(Status::Failure);
+                        }
                         Ok(true) => {
-                            debug!(?context, ?digest, "verified");
-                            if let Err(err) = self.handle_app_verified(&context, &digest, &mut ack_sender).await {
-                                warn!(?err, ?context, ?digest, "verified handle failed");
+                            debug!(?context, ?payload, "verified");
+                            self.metrics.verify.inc(Status::Success);
+                            if let Err(err) = self.handle_app_verified(&context, &payload, &mut ack_sender).await {
+                                warn!(?err, ?context, ?payload, "verified handle failed");
                             }
                         },
                     }
@@ -423,7 +445,7 @@ impl<
             return Err(Error::AppVerifiedHeightMismatch);
         }
 
-        // Return early if the payload digest does not match
+        // Return early if the payload does not match
         if tip.chunk.payload != *payload {
             return Err(Error::AppVerifiedPayloadMismatch);
         }
@@ -495,6 +517,15 @@ impl<
             return;
         }
 
+        // If the threshold is for my sequencer, record the metric
+        if let Some(start) = self.broadcast_start {
+            if chunk.sequencer == self.crypto.public_key() {
+                self.metrics
+                    .e2e_duration
+                    .observe_between(start, self.context.current());
+            }
+        };
+
         // Emit the proof
         let context = Context {
             sequencer: chunk.sequencer.clone(),
@@ -565,10 +596,16 @@ impl<
         };
         let payload = node.chunk.payload.clone();
         let mut application = self.application.clone();
+        let start = self.context.current();
         self.pending_verifies.push(async move {
             let receiver = application.verify(context.clone(), payload.clone()).await;
             let result = receiver.await.map_err(Error::AppVerifyCanceled);
-            (context, payload, result)
+            Verify {
+                start,
+                context,
+                payload,
+                result,
+            }
         });
     }
 
@@ -630,6 +667,9 @@ impl<
         // Sync the journal to prevent ever broadcasting two conflicting chunks
         // at the same height, even if the node crashes and restarts
         self.journal_sync(&me, height).await;
+
+        // Record the start time of the broadcast
+        self.broadcast_start = Some(self.context.current());
 
         // Broadcast to network
         if let Err(err) = self.broadcast(&node, node_sender, self.epoch).await {

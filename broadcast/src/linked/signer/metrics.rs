@@ -2,7 +2,7 @@ use commonware_runtime::metrics::status;
 use commonware_utils::Array;
 use prometheus_client::{
     encoding::EncodeLabelSet,
-    metrics::{counter::Counter, family::Family, gauge::Gauge},
+    metrics::{counter::Counter, family::Family, gauge::Gauge, histogram::Histogram},
 };
 
 /// Label for sequencer height metrics
@@ -22,7 +22,7 @@ impl SequencerLabel {
 }
 
 /// Metrics for the broadcast/linked module.
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct Metrics {
     /// Height per sequencer
     pub sequencer_heights: Family<SequencerLabel, Gauge>,
@@ -38,12 +38,30 @@ pub struct Metrics {
     pub new_broadcast: status::Counter,
     /// Number of rebroadcast attempts by status
     pub rebroadcast: status::Counter,
+    /// Histogram of application verification durations
+    pub verify_duration: Histogram,
+    /// Histogram of time from new broadcast to threshold signature generation
+    pub e2e_duration: Histogram,
 }
 
 impl Metrics {
     /// Create and return a new set of metrics, registered with the given registry.
     pub fn init<M: commonware_runtime::Metrics>(registry: M) -> Self {
-        let metrics = Self::default();
+        let metrics = Self {
+            sequencer_heights: Family::default(),
+            acks: status::Counter::default(),
+            nodes: status::Counter::default(),
+            verify: status::Counter::default(),
+            threshold: Counter::default(),
+            new_broadcast: status::Counter::default(),
+            rebroadcast: status::Counter::default(),
+            verify_duration: Histogram::new(
+                commonware_runtime::metrics::histogram::Buckets::LOCAL.into_iter(),
+            ),
+            e2e_duration: Histogram::new(
+                commonware_runtime::metrics::histogram::Buckets::NETWORK.into_iter(),
+            ),
+        };
         registry.register(
             "sequencer_heights",
             "Height per sequencer tracked",
@@ -78,6 +96,16 @@ impl Metrics {
             "rebroadcast",
             "Number of rebroadcast attempts by status",
             metrics.rebroadcast.clone(),
+        );
+        registry.register(
+            "verify_duration",
+            "Histogram of application verification durations",
+            metrics.verify_duration.clone(),
+        );
+        registry.register(
+            "e2e_duration",
+            "Histogram of time from broadcast to threshold signature generation",
+            metrics.e2e_duration.clone(),
         );
         metrics
     }
