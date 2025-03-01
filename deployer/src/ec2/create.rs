@@ -1,6 +1,6 @@
 use crate::ec2::{
-    aws::*, services::*, utils::*, Config, InstanceConfig, Peer, Peers, MONITORING_NAME,
-    MONITORING_REGION,
+    aws::*, deployer_directory, services::*, utils::*, Config, InstanceConfig, Peer, Peers,
+    CREATED_FILE_NAME, MONITORING_NAME, MONITORING_REGION,
 };
 use futures::future::try_join_all;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -40,6 +40,14 @@ pub async fn create(config: &PathBuf) -> Result<(), Box<dyn Error>> {
     let tag = &config.tag;
     info!(tag = tag.as_str(), "loaded configuration");
 
+    // Create a temporary directory for local files
+    let temp_dir = deployer_directory(tag);
+    if temp_dir.exists() {
+        return Err("creation already attempted".into());
+    }
+    std::fs::create_dir_all(&temp_dir)?;
+    info!(path = ?temp_dir, "created temporary directory");
+
     // Ensure no instance is duplicated or named MONITORING_NAME
     let mut instance_names = HashSet::new();
     for instance in &config.instances {
@@ -52,19 +60,6 @@ pub async fn create(config: &PathBuf) -> Result<(), Box<dyn Error>> {
     // Get public IP address of the deployer
     let deployer_ip = get_public_ip().await?;
     info!(ip = deployer_ip.as_str(), "recovered public IP");
-
-    // Create a temporary directory for local files
-    let temp_dir = format!("deployer-{}", tag);
-    let temp_dir = PathBuf::from("/tmp").join(temp_dir);
-    let temp_dir_path = temp_dir.to_str().unwrap();
-    if temp_dir.exists() {
-        return Err(format!(
-            "temporary directory already exists: {}",
-            temp_dir_path
-        ))?;
-    }
-    std::fs::create_dir_all(&temp_dir)?;
-    info!(path = temp_dir_path, "created temporary directory");
 
     // Ensure cache directory exists
     std::fs::create_dir_all(CACHE_DIR)?;
@@ -677,6 +672,9 @@ pub async fn create(config: &PathBuf) -> Result<(), Box<dyn Error>> {
         }
     }
     info!("updated monitoring security group");
+
+    // Mark deployment as complete
+    File::create(temp_dir.join(CREATED_FILE_NAME))?;
     info!(
         monitoring = monitoring_ip.as_str(),
         regular = ?all_regular_ips,

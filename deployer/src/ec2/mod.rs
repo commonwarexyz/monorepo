@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
 mod aws;
@@ -16,10 +18,28 @@ const MONITORING_NAME: &str = "monitoring";
 /// AWS region where monitoring instances are deployed
 const MONITORING_REGION: &str = "us-east-1";
 
+/// Subcommand name
 pub const CMD: &str = "ec2";
+
+/// Create subcommand name
 pub const CREATE_CMD: &str = "create";
+
+/// Update subcommand name
 pub const UPDATE_CMD: &str = "update";
+
+/// Destroy subcommand name
 pub const DESTROY_CMD: &str = "destroy";
+
+/// File name that indicates the deployment completed
+const CREATED_FILE_NAME: &str = "created";
+
+/// File name that indicates the deployment was destroyed
+const DESTROYED_FILE_NAME: &str = "destroyed";
+
+/// Directory where deployer files are stored
+fn deployer_directory(tag: &str) -> PathBuf {
+    PathBuf::from(format!("/tmp/deployer-{}", tag))
+}
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Peer {

@@ -1,4 +1,7 @@
-use crate::ec2::{aws::*, utils::*, Config, InstanceConfig, MONITORING_NAME, MONITORING_REGION};
+use crate::ec2::{
+    aws::*, deployer_directory, utils::*, Config, InstanceConfig, CREATED_FILE_NAME,
+    DESTROYED_FILE_NAME, MONITORING_NAME, MONITORING_REGION,
+};
 use aws_sdk_ec2::types::Filter;
 use futures::future::try_join_all;
 use std::collections::HashMap;
@@ -17,10 +20,23 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Box<dyn Error>> {
     let tag = &config.tag;
     info!(tag = tag.as_str(), "loaded configuration");
 
+    // Ensure created file exists
+    let temp_dir = deployer_directory(tag);
+    let created_file = temp_dir.join(CREATED_FILE_NAME);
+    if !created_file.exists() {
+        return Err("infrastructure deployment is not complete".into());
+    }
+
+    // Ensure destroyed file does not exist
+    let destroyed_file = temp_dir.join(DESTROYED_FILE_NAME);
+    if destroyed_file.exists() {
+        return Err("infrastructure already destroyed".into());
+    }
+
     // Construct private key path (assumes it exists from create command)
-    let private_key_path = format!("/tmp/deployer-{}/id_rsa_{}", tag, tag);
-    if !PathBuf::from(&private_key_path).exists() {
-        return Err(format!("private key not found: {}", private_key_path).into());
+    let private_key_path = temp_dir.join(format!("id_rsa_{}", tag));
+    if !private_key_path.exists() {
+        return Err("private key not found".into());
     }
 
     // Create a map from instance name to InstanceConfig for lookup
@@ -73,12 +89,12 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Box<dyn Error>> {
     let mut futures = Vec::new();
     for (name, ip) in regular_instances {
         if let Some(instance_config) = instance_map.get(&name) {
-            let private_key = private_key_path.clone();
+            let private_key = private_key_path.to_str().unwrap();
             let binary_path = instance_config.binary.clone();
             let config_path = instance_config.config.clone();
             let ip = ip.clone();
             let future = async move {
-                update_instance(&private_key, &ip, &binary_path, &config_path).await?;
+                update_instance(private_key, &ip, &binary_path, &config_path).await?;
                 info!(name, "instance updated");
                 Ok::<(), Box<dyn Error>>(())
             };

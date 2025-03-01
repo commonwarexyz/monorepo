@@ -1,4 +1,4 @@
-use crate::ec2::{aws::*, Config, MONITORING_REGION};
+use crate::ec2::{aws::*, deployer_directory, Config, DESTROYED_FILE_NAME, MONITORING_REGION};
 use std::collections::HashSet;
 use std::error::Error;
 use std::fs::File;
@@ -14,6 +14,13 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Box<dyn Error>> {
     };
     let tag = &config.tag;
     info!(tag = tag.as_str(), "loaded configuration");
+
+    // Ensure not already destroyed
+    let destroyed_file = deployer_directory(tag).join(DESTROYED_FILE_NAME);
+    if destroyed_file.exists() {
+        warn!("infrastructure already destroyed");
+        return Ok(());
+    }
 
     // Determine all regions involved
     let mut all_regions = HashSet::new();
@@ -152,16 +159,10 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Box<dyn Error>> {
     }
     info!(regions = ?all_regions, "resources removed");
 
-    // Delete temp directory
-    let temp_dir = format!("deployer-{}", tag);
-    let temp_dir = PathBuf::from("/tmp").join(temp_dir);
-    if temp_dir.exists() {
-        std::fs::remove_dir_all(&temp_dir)?;
-        info!(
-            dir = temp_dir.to_str().unwrap(),
-            "removed temporary directory"
-        );
-    }
+    // Write destruction file
+    File::create(destroyed_file)?;
+
+    // We don't delete the temporary directory to prevent re-deployment of the same tag
     info!(tag = tag.as_str(), "destruction complete");
     Ok(())
 }
