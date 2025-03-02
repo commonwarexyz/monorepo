@@ -3,10 +3,10 @@
 //!
 //! # Terminology
 //!
-//! An MMR is a list of perfect binary trees of strictly decreasing height. The roots of these trees
-//! are called the "peaks" of the MMR. Each "element" stored in the MMR is represented by some leaf
-//! node in one of these perfect trees, storing a positioned hash of the element. Non-leaf nodes
-//! store a positioned hash of their children.
+//! An MMR is a list of perfect binary trees (aka "mountains") of strictly decreasing height. The
+//! roots of these trees are called the "peaks" of the MMR. Each "element" stored in the MMR is
+//! represented by some leaf node in one of these perfect trees, storing a positioned hash of the
+//! element. Non-leaf nodes store a positioned hash of their children.
 //!
 //! The "size" of an MMR is the total number of nodes summed over all trees.
 //!
