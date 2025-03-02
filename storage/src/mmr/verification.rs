@@ -12,13 +12,16 @@ use commonware_utils::{Array, SizedSerialize};
 use futures::future::try_join_all;
 use std::future::Future;
 
-/// Contains the information necessary for proving the inclusion of an element, or some range of
-/// elements, in the MMR from its root hash.
+/// Contains the information necessary for proving the inclusion of an element, or some range of elements, in the MMR
+/// from its root hash.
 ///
-/// The `hashes` vector contains: (1) the peak hashes other than those belonging to trees containing
-/// some elements within the range being proven, followed by: (2) the nodes in the remaining perfect
-/// trees necessary for reconstructing their peak hashes from the elements within the range. Both
-/// segments are ordered by decreasing height.
+/// The `hashes` vector contains:
+///
+/// 1: the hashes of each peak corresponding to a mountain containing no elements from the element range being proven
+/// in decreasing order of height, followed by:
+///
+/// 2: the nodes in the remaining mountains necessary for reconstructing their peak hashes from the elements within
+/// the range, ordered by the position of their parent.
 #[derive(Clone, Debug, Eq)]
 pub struct Proof<H: CHasher> {
     /// The total number of nodes in the MMR.
@@ -175,48 +178,47 @@ impl<H: CHasher> Proof<H> {
         Some(Self { size, hashes })
     }
 
-    /// Return an inclusion proof for the specified range of elements, inclusive of both endpoints.
-    ///
-    /// Returns ElementPruned error if some element needed to generate the proof has been pruned.
-    pub async fn range_proof<S: Storage<H>>(
-        mmr: &S,
+    /// Return the list of element positions required by the range proof for the specified range of
+    /// elements, inclusive of both endpoints.
+    pub fn elements_required_for_range_proof(
+        size: u64,
         start_element_pos: u64,
         end_element_pos: u64,
-    ) -> Result<Proof<H>, Error> {
-        let mut hashes: Vec<H::Digest> = Vec::new();
+    ) -> Vec<u64> {
+        let mut positions = Vec::<u64>::new();
+
+        // Find the mountains that contain no elements from the range. The peaks of these mountains
+        // are required to prove the range, so they are added to the result.
         let mut start_tree_with_element = (u64::MAX, 0);
         let mut end_tree_with_element = (u64::MAX, 0);
-
-        // Include peak hashes only for trees that have no elements from the range, and keep track
-        // of the starting and ending trees of those that do contain some.
-        let mut node_futures = Vec::new();
-        let mut peak_iterator = PeakIterator::new(mmr.size().await?);
+        let mut peak_iterator = PeakIterator::new(size);
         while let Some(item) = peak_iterator.next() {
             if start_tree_with_element.0 == u64::MAX && item.0 >= start_element_pos {
-                // found the first tree to contain an element in the range
+                // Found the first tree to contain an element in the range
                 start_tree_with_element = item;
                 if item.0 >= end_element_pos {
-                    // start and end tree are the same
+                    // Start and end tree are the same
                     end_tree_with_element = item;
                     continue;
                 }
                 for item in peak_iterator.by_ref() {
                     if item.0 >= end_element_pos {
-                        // found the last tree to contain an element in the range
+                        // Found the last tree to contain an element in the range
                         end_tree_with_element = item;
                         break;
                     }
                 }
             } else {
-                node_futures.push(mmr.get_node(item.0));
+                // Tree is outside the range, its peak is thus required.
+                positions.push(item.0);
             }
         }
         assert!(start_tree_with_element.0 != u64::MAX);
         assert!(end_tree_with_element.0 != u64::MAX);
 
-        // For the trees containing elements in the range, add left-sibling hashes of nodes along
-        // the leftmost path, and right-sibling hashes of nodes along the rightmost path, in
-        // decreasing order of the position of the parent node.
+        // Include the positions of any left-siblings of each node on the path from peak to
+        // leftmost-leaf, and right-siblings for the path from peak to rightmost-leaf. These are
+        // added in order of decreasing parent position.
         let left_path_iter = PathIterator::new(
             start_element_pos,
             start_tree_with_element.0,
@@ -245,7 +247,26 @@ impl<H: CHasher> Proof<H> {
                 siblings.sort_by(|a, b| b.0.cmp(&a.0));
             }
         }
-        node_futures.extend(siblings.iter().map(|(_, pos)| mmr.get_node(*pos)));
+        positions.extend(siblings.into_iter().map(|(_, pos)| pos));
+        positions
+    }
+
+    /// Return an inclusion proof for the specified range of elements, inclusive of both endpoints.
+    ///
+    /// Returns ElementPruned error if some element needed to generate the proof has been pruned.
+    pub async fn range_proof<S: Storage<H>>(
+        mmr: &S,
+        start_element_pos: u64,
+        end_element_pos: u64,
+    ) -> Result<Proof<H>, Error> {
+        let mut hashes: Vec<H::Digest> = Vec::new();
+        let positions = Self::elements_required_for_range_proof(
+            mmr.size().await?,
+            start_element_pos,
+            end_element_pos,
+        );
+
+        let node_futures = positions.into_iter().map(|pos| mmr.get_node(pos));
         let hash_results = try_join_all(node_futures).await?;
         for hash_result in hash_results {
             match hash_result {
