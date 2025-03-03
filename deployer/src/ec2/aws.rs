@@ -757,7 +757,46 @@ pub async fn delete_vpc(ec2_client: &Ec2Client, vpc_id: &str) -> Result<(), Ec2E
     Ok(())
 }
 
-/// Finds the availability zone that supports all required ARM-based instance types
+/// Enforces that all instance types are ARM64-based
+pub async fn assert_arm64_support(
+    client: &Ec2Client,
+    instance_types: &[String],
+) -> Result<(), Ec2Error> {
+    // Retrieve all instance types that support ARM64
+    let instances = client
+        .describe_instance_types()
+        .set_filters(Some(vec![
+            Filter::builder()
+                .name("processor-info.supported-architecture")
+                .values("arm64")
+                .build(),
+            Filter::builder()
+                .name("instance-type")
+                .set_values(Some(instance_types.to_vec()))
+                .build(),
+        ]))
+        .send()
+        .await?;
+
+    // Enforce that all are found
+    let supported_instance_types: HashSet<String> = instances
+        .instance_types
+        .unwrap_or_default()
+        .into_iter()
+        .map(|it| it.instance_type.unwrap().to_string())
+        .collect();
+    for instance_type in instance_types {
+        if !supported_instance_types.contains(instance_type) {
+            return Err(Ec2Error::from(BuildError::other(format!(
+                "instance type {} does not support ARM64",
+                instance_type
+            ))));
+        }
+    }
+    Ok(())
+}
+
+/// Finds the availability zone that supports all required instance types
 pub async fn find_availability_zone(
     client: &Ec2Client,
     instance_types: &[String],
@@ -766,16 +805,12 @@ pub async fn find_availability_zone(
     let offerings = client
         .describe_instance_type_offerings()
         .location_type("availability-zone".into())
-        .set_filters(Some(vec![
+        .filters(
             Filter::builder()
                 .name("instance-type")
                 .set_values(Some(instance_types.to_vec()))
                 .build(),
-            Filter::builder()
-                .name("processor-info.supported-architecture")
-                .values("arm64")
-                .build(),
-        ]))
+        )
         .send()
         .await?
         .instance_type_offerings
@@ -807,7 +842,7 @@ pub async fn find_availability_zone(
 
     // If no availability zone supports all instance types, return an error
     Err(Ec2Error::from(BuildError::other(format!(
-        "no availability zone supports all required ARM-based instance types: {:?}",
+        "no availability zone supports all required instance types: {:?}",
         instance_types
     ))))
 }

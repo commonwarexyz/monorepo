@@ -140,12 +140,17 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     let mut ec2_clients = HashMap::new();
     let mut region_resources = HashMap::new();
     for (idx, region) in regions.iter().enumerate() {
+        // Create client for region
         let ec2_client = create_ec2_client(Region::new(region.clone())).await;
         ec2_clients.insert(region.clone(), ec2_client);
         info!(region = region.as_str(), "created EC2 client");
 
+        // Assert all instance types are ARM-based
         let instance_types: Vec<String> =
             instance_types_by_region[region].iter().cloned().collect();
+        assert_arm64_support(&ec2_clients[region], &instance_types).await?;
+
+        // Find availability zone that supports all instance types
         let az = find_availability_zone(&ec2_clients[region], &instance_types).await?;
         info!(
             az = az.as_str(),
@@ -153,6 +158,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             "selected availability zone"
         );
 
+        // Create VPC, IGW, route table, subnet, security groups, and key pair
         let vpc_cidr = format!("10.{}.0.0/16", idx);
         vpc_cidrs.insert(region.clone(), vpc_cidr.clone());
         let vpc_id = create_vpc(&ec2_clients[region], &vpc_cidr, tag).await?;
@@ -161,7 +167,6 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             region = region.as_str(),
             "created VPC"
         );
-
         let igw_id = create_and_attach_igw(&ec2_clients[region], &vpc_id, tag).await?;
         info!(
             igw = igw_id.as_str(),
@@ -169,7 +174,6 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             region = region.as_str(),
             "created and attached IGW"
         );
-
         let route_table_id =
             create_route_table(&ec2_clients[region], &vpc_id, &igw_id, tag).await?;
         info!(
@@ -178,7 +182,6 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             region = region.as_str(),
             "created route table"
         );
-
         let subnet_cidr = format!("10.{}.1.0/24", idx);
         subnet_cidrs.insert(region.clone(), subnet_cidr.clone());
         let subnet_id = create_subnet(
@@ -197,6 +200,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             "created subnet"
         );
 
+        // Create monitoring security group in monitoring region
         let monitoring_sg_id = if *region == MONITORING_REGION {
             let sg_id =
                 create_security_group_monitoring(&ec2_clients[region], &vpc_id, &deployer_ip, tag)
@@ -212,6 +216,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             None
         };
 
+        // Import key pair
         import_key_pair(&ec2_clients[region], &key_name, &public_key).await?;
         info!(
             key = key_name.as_str(),
@@ -219,6 +224,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             "imported key pair"
         );
 
+        // Store resources for region
         info!(
             vpc = vpc_id.as_str(),
             subnet = subnet_id.as_str(),
