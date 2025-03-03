@@ -47,7 +47,7 @@ pub struct Handshake<C: Scheme> {
 impl<C: Scheme> Handshake<C> {
     pub fn verify<E: Clock>(
         context: &E,
-        crypto: &C,
+        _crypto: &C,
         namespace: &[u8],
         synchrony_bound: Duration,
         max_handshake_age: Duration,
@@ -60,16 +60,11 @@ impl<C: Scheme> Handshake<C> {
         let ephemeral_public_key = x25519::decode_public_key(&handshake.ephemeral_public_key)
             .map_err(|_| Error::InvalidEphemeralPublicKey)?;
 
-        // Verify that the signature is for us
-        //
-        // If we didn't verify this, it would be trivial for any peer to impersonate another peer (even though
-        // they would not be able to decrypt any messages from the shared secret). This would prevent us
-        // from making a legitimate connection to the intended peer.
-        let our_public_key = C::PublicKey::try_from(handshake.recipient_public_key)
+        // Verify that the recipient_public_key is valid
+        // But DON'T verify it's for us - that should be done separately by the caller
+        // as the check has different meanings for dialers vs listeners
+        let recipient_public_key = C::PublicKey::try_from(handshake.recipient_public_key)
             .map_err(|_| Error::InvalidChannelPublicKey)?;
-        if crypto.public_key() != our_public_key {
-            return Err(Error::HandshakeNotForUs);
-        }
 
         // Verify that the timestamp in the handshake is recent
         //
@@ -97,7 +92,7 @@ impl<C: Scheme> Handshake<C> {
             + handshake.ephemeral_public_key.len()
             + u64::SERIALIZED_LEN;
         let mut payload = Vec::with_capacity(payload_len);
-        payload.extend_from_slice(&our_public_key);
+        payload.extend_from_slice(&recipient_public_key);
         payload.extend_from_slice(&handshake.ephemeral_public_key);
         payload.put_u64(handshake.timestamp);
 
@@ -147,6 +142,16 @@ impl<Si: Sink, St: Stream, C: Scheme> IncomingHandshake<Si, St, C> {
                 result.map_err(|_| Error::RecvFailed)?
             },
         };
+
+        // Parse the handshake message
+        let handshake_msg = wire::Handshake::decode(msg.clone()).map_err(Error::UnableToDecode)?;
+
+        // Check if this handshake is actually intended for us
+        let recipient_public_key = C::PublicKey::try_from(handshake_msg.recipient_public_key)
+            .map_err(|_| Error::InvalidChannelPublicKey)?;
+        if crypto.public_key() != recipient_public_key {
+            return Err(Error::HandshakeNotForUs);
+        }
 
         // Verify handshake message from peer
         let handshake = Handshake::verify(
