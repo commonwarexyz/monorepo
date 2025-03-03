@@ -22,6 +22,7 @@ tokio = { workspace = true, features = ["full"] }
 uuid = { workspace = true, features = ["v4"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
 aws-config = "1.5.16"
 aws-sdk-ec2 = "1.110.0"
 

@@ -5,7 +5,7 @@
 ### Create Artifacts
 
 ```bash
-cargo run --bin setup -- --peers 2 --bootstrappers 1 --regions us-west-2,us-east-1 --instance-type t4g.small --storage-size 10 --storage-class gp2 --dashboard dashboard.json --output assets
+cargo run --bin setup -- --peers 3 --bootstrappers 1 --regions us-west-2,us-east-1,eu-west-1 --instance-type c7g.large --storage-size 10 --storage-class gp3 --dashboard dashboard.json --output assets
 ```
 
 ### Build Flood Binary
@@ -43,6 +43,17 @@ deployer ec2 create --config config.yaml
 ### Check Metrics
 
 Visit `http://<monitoring-ip>:3000` (anonymous login is already enabled, so you don't need to enter a password)
+
+### [Optional] Update Flood Binary
+
+```bash
+docker run -it -v ${PWD}/../..:/monorepo flood-builder
+```
+
+
+```bash
+deployer ec2 update --config config.yaml
+```
 
 ### Teardown Infrastructure
 

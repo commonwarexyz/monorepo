@@ -1,12 +1,13 @@
-use crate::ec2::{aws::*, Config};
+use crate::ec2::{
+    aws::*, deployer_directory, Config, Error, DESTROYED_FILE_NAME, MONITORING_REGION,
+};
 use std::collections::HashSet;
-use std::error::Error;
 use std::fs::File;
 use std::path::PathBuf;
 use tracing::{info, warn};
 
 /// Tears down all resources associated with the deployment tag
-pub async fn destroy(config: &PathBuf) -> Result<(), Box<dyn Error>> {
+pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
     // Load configuration
     let config: Config = {
         let config_file = File::open(config)?;
@@ -14,6 +15,19 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Box<dyn Error>> {
     };
     let tag = &config.tag;
     info!(tag = tag.as_str(), "loaded configuration");
+
+    // Ensure deployment directory exists
+    let temp_dir = deployer_directory(tag);
+    if !temp_dir.exists() {
+        return Err(Error::DeploymentDoesNotExist(tag.clone()));
+    }
+
+    // Ensure not already destroyed
+    let destroyed_file = deployer_directory(tag).join(DESTROYED_FILE_NAME);
+    if destroyed_file.exists() {
+        warn!("infrastructure already destroyed");
+        return Ok(());
+    }
 
     // Determine all regions involved
     let mut all_regions = HashSet::new();
@@ -44,10 +58,10 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Box<dyn Error>> {
         let has_monitoring_sg = security_groups
             .iter()
             .any(|sg| sg.group_name() == Some(tag));
-        let has_regular_sg = security_groups
+        let has_binary_sg = security_groups
             .iter()
-            .any(|sg| sg.group_name() == Some(&format!("{}-regular", tag)));
-        if region == MONITORING_REGION && has_monitoring_sg && has_regular_sg {
+            .any(|sg| sg.group_name() == Some(&format!("{}-binary", tag)));
+        if region == MONITORING_REGION && has_monitoring_sg && has_binary_sg {
             // Find the monitoring security group (named `tag`)
             let monitoring_sg = security_groups
                 .iter()
@@ -56,20 +70,20 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Box<dyn Error>> {
                 .group_id()
                 .unwrap();
 
-            // Find the regular security group (named `{tag}-regular`)
-            let regular_sg = security_groups
+            // Find the binary security group (named `{tag}-binary`)
+            let binary_sg = security_groups
                 .iter()
-                .find(|sg| sg.group_name() == Some(&format!("{}-regular", tag)))
+                .find(|sg| sg.group_name() == Some(&format!("{}-binary", tag)))
                 .expect("Regular security group not found")
                 .group_id()
                 .unwrap();
 
-            // Revoke ingress rule from monitoring security group to regular security group
+            // Revoke ingress rule from monitoring security group to binary security group
             let ip_permission = IpPermission::builder()
                 .ip_protocol("tcp")
                 .from_port(3100)
                 .to_port(3100)
-                .user_id_group_pairs(UserIdGroupPair::builder().group_id(regular_sg).build())
+                .user_id_group_pairs(UserIdGroupPair::builder().group_id(binary_sg).build())
                 .build();
             if let Err(e) = ec2_client
                 .revoke_security_group_ingress()
@@ -78,12 +92,12 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Box<dyn Error>> {
                 .send()
                 .await
             {
-                warn!(%e, "failed to revoke ingress rule between monitoring and regular security groups");
+                warn!(%e, "failed to revoke ingress rule between monitoring and binary security groups");
             } else {
                 info!(
                     monitoring_sg,
-                    regular_sg,
-                    "revoking ingress rule between monitoring and regular security groups"
+                    binary_sg,
+                    "revoking ingress rule between monitoring and binary security groups"
                 );
             }
         }
@@ -152,16 +166,10 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Box<dyn Error>> {
     }
     info!(regions = ?all_regions, "resources removed");
 
-    // Delete temp directory
-    let temp_dir = format!("deployer-{}", tag);
-    let temp_dir = PathBuf::from("/tmp").join(temp_dir);
-    if temp_dir.exists() {
-        std::fs::remove_dir_all(&temp_dir)?;
-        info!(
-            dir = temp_dir.to_str().unwrap(),
-            "removed temporary directory"
-        );
-    }
+    // Write destruction file
+    File::create(destroyed_file)?;
+
+    // We don't delete the temporary directory to prevent re-deployment of the same tag
     info!(tag = tag.as_str(), "destruction complete");
     Ok(())
 }
