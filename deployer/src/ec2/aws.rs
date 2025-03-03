@@ -762,33 +762,42 @@ pub async fn assert_arm64_support(
     client: &Ec2Client,
     instance_types: &[String],
 ) -> Result<(), Ec2Error> {
-    // Retrieve all instance types that support ARM64
-    let instances = client
-        .describe_instance_types()
-        .set_filters(Some(vec![
+    let mut next_token: Option<String> = None;
+    let mut supported_instance_types = HashSet::new();
+
+    // Loop through all pages of results
+    loop {
+        // Get the next page of instance types
+        let mut request = client.describe_instance_types().filters(
             Filter::builder()
                 .name("processor-info.supported-architecture")
                 .values("arm64")
                 .build(),
-            Filter::builder()
-                .name("instance-type")
-                .set_values(Some(instance_types.to_vec()))
-                .build(),
-        ]))
-        .send()
-        .await?;
+        );
+        if let Some(token) = next_token {
+            request = request.next_token(token);
+        }
+        let response = request.send().await?;
 
-    // Enforce that all are found
-    let supported_instance_types: HashSet<String> = instances
-        .instance_types
-        .unwrap_or_default()
-        .into_iter()
-        .map(|it| it.instance_type.unwrap().to_string())
-        .collect();
+        // Collect instance types from this page
+        for instance_type in response.instance_types.unwrap_or_default() {
+            if let Some(it) = instance_type.instance_type {
+                supported_instance_types.insert(it.to_string());
+            }
+        }
+
+        // Check if there’s another page
+        next_token = response.next_token;
+        if next_token.is_none() {
+            break;
+        }
+    }
+
+    // Validate all requested instance types
     for instance_type in instance_types {
         if !supported_instance_types.contains(instance_type) {
             return Err(Ec2Error::from(BuildError::other(format!(
-                "instance type {} does not support ARM64",
+                "instance type {} not ARM64-based",
                 instance_type
             ))));
         }
