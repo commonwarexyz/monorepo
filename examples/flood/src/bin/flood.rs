@@ -100,10 +100,12 @@ fn main() {
     let (executor, context) = tokio::Executor::init(cfg);
 
     // Configure network
-    let p2p_cfg = authenticated::Config::aggressive(
+    let dialable = format!("{}:{}", ip, config.port);
+    let dialable_socket = SocketAddr::from_str(&dialable).expect("Could not parse dialable socket");
+    let p2p_cfg = authenticated::Config::recommended(
         signer.clone(),
         &union(FLOOD_NAMESPACE, b"_P2P"),
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), config.port),
+        dialable_socket, // TODO: maybe change var name?
         bootstrappers,
         config.message_size,
     );
