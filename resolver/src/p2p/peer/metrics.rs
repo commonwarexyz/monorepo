@@ -30,7 +30,7 @@ pub struct Metrics<E: RuntimeMetrics + Clock> {
 impl<E: RuntimeMetrics + Clock> Metrics<E> {
     /// Create and return a new set of metrics, registered with the given context.
     pub fn init(context: E) -> Self {
-        let clock_arc = Arc::new(context.clone());
+        let clock = Arc::new(context.clone());
         let serve_duration = Histogram::new(histogram::Buckets::LOCAL.into_iter());
         let fetch_duration = Histogram::new(histogram::Buckets::NETWORK.into_iter());
         let metrics = Self {
@@ -41,8 +41,8 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
             fetch: status::Counter::default(),
             cancel: status::Counter::default(),
             serve: status::Counter::default(),
-            fetch_duration: histogram::Timed::new(fetch_duration.clone(), clock_arc.clone()),
-            serve_duration: histogram::Timed::new(serve_duration.clone(), clock_arc.clone()),
+            fetch_duration: histogram::Timed::new(fetch_duration.clone(), clock.clone()),
+            serve_duration: histogram::Timed::new(serve_duration.clone(), clock.clone()),
         };
         context.register(
             "fetch_pending",
