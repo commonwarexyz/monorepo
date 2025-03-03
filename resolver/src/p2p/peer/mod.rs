@@ -8,6 +8,7 @@ mod actor;
 mod config;
 mod fetcher;
 mod ingress;
+mod metrics;
 
 pub use actor::Actor;
 pub use config::Config;
