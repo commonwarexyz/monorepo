@@ -2,6 +2,7 @@ use super::{
     config::Config,
     fetcher::Fetcher,
     ingress::{Mailbox, Message},
+    metrics,
 };
 use crate::{
     p2p::{
@@ -13,9 +14,14 @@ use crate::{
 use bytes::Bytes;
 use commonware_cryptography::Scheme;
 use commonware_macros::select;
-use commonware_p2p::utils::requester::Requester;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Clock, Handle, Metrics, Spawner};
+use commonware_runtime::{
+    telemetry::{
+        histogram,
+        status::{CounterExt, Status},
+    },
+    Clock, Handle, Metrics, Spawner,
+};
 use commonware_utils::{futures::Pool as FuturesPool, Array};
 use futures::{
     channel::{mpsc, oneshot},
@@ -25,8 +31,16 @@ use futures::{
 use governor::clock::Clock as GClock;
 use prost::Message as _;
 use rand::Rng;
-use std::marker::PhantomData;
+use std::{collections::HashMap, marker::PhantomData};
 use tracing::{debug, error, warn};
+
+/// Represents a pending serve operation.
+struct Serve<E: Clock, C: Scheme> {
+    timer: histogram::Timer<E>,
+    peer: C::PublicKey,
+    id: u64,
+    result: Result<Bytes, oneshot::Canceled>,
+}
 
 /// Manages incoming and outgoing P2P requests, coordinating fetch and serve operations.
 pub struct Actor<
@@ -60,14 +74,20 @@ pub struct Actor<
     /// Manages outgoing fetch requests
     fetcher: Fetcher<E, C, Key, NetS>,
 
+    /// Track the start time of fetch operations
+    fetch_timers: HashMap<Key, histogram::Timer<E>>,
+
     /// Holds futures that resolve once the `Producer` has produced the data.
     /// Once the future is resolved, the data (or an error) is sent to the peer.
     /// Has unbounded size; the number of concurrent requests should be limited
     /// by the `Producer` which may drop requests.
-    serves: FuturesPool<(C::PublicKey, u64, Result<Bytes, oneshot::Canceled>)>,
+    serves: FuturesPool<Serve<E, C>>,
 
     /// Whether responses are sent with priority over other network messages
     priority_responses: bool,
+
+    /// Metrics for the peer actor
+    metrics: metrics::Metrics<E>,
 
     /// Phantom data for networking types
     _s: PhantomData<NetS>,
@@ -90,10 +110,10 @@ impl<
     /// Returns the actor and a mailbox to send messages to it.
     pub async fn new(context: E, cfg: Config<C, D, Key, Con, Pro>) -> (Self, Mailbox<Key>) {
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
-        let requester = Requester::new(context.clone(), cfg.requester_config);
+        let metrics = metrics::Metrics::init(context.clone());
         let fetcher = Fetcher::new(
             context.clone(),
-            requester,
+            cfg.requester_config,
             cfg.fetch_retry_timeout,
             cfg.priority_requests,
         );
@@ -108,6 +128,8 @@ impl<
                 fetcher,
                 serves: FuturesPool::default(),
                 priority_responses: cfg.priority_responses,
+                metrics,
+                fetch_timers: HashMap::new(),
                 _s: PhantomData,
                 _r: PhantomData,
             },
@@ -134,6 +156,18 @@ impl<
         self.fetcher.reconcile(self.coordinator.peers());
 
         loop {
+            // Update metrics
+            self.metrics
+                .fetch_pending
+                .set(self.fetcher.len_pending() as i64);
+            self.metrics
+                .fetch_active
+                .set(self.fetcher.len_active() as i64);
+            self.metrics
+                .peers_blocked
+                .set(self.fetcher.len_blocked() as i64);
+            self.metrics.serve_processing.set(self.serves.len() as i64);
+
             // Update peer list if-and-only-if it might have changed.
             let peer_set_id = self.coordinator.peer_set_id();
             if self.last_peer_set_id != Some(peer_set_id) {
@@ -170,21 +204,48 @@ impl<
                     match msg {
                         Message::Fetch { key } => {
                             debug!(?key, "mailbox: fetch");
-                            self.fetcher.fetch(&mut sender, key.clone(), true).await;
+
+                            // Check if the fetch is already in progress
+                            if self.fetch_timers.contains_key(&key) {
+                                warn!(?key, "duplicate fetch");
+                                self.metrics.fetch.inc(Status::Dropped);
+                                continue;
+                            }
+
+                            // Record fetch start time
+                            self.fetch_timers.insert(key.clone(), self.metrics.fetch_duration.timer());
+                            self.fetcher.fetch(&mut sender, key, true).await;
                         }
                         Message::Cancel { key } => {
                             debug!(?key, "mailbox: cancel");
+                            let mut guard = self.metrics.cancel.guard(Status::Dropped);
                             if self.fetcher.cancel(&key) {
-                                self.consumer.failed(key, ()).await;
+                                guard.set(Status::Success);
+                                self.fetch_timers.remove(&key).unwrap().cancel(); // must exist, don't record metric
+                                self.consumer.failed(key.clone(), ()).await;
                             }
                         }
                     }
                 },
 
                 // Handle completed server requests
-                msg = self.serves.next_completed() => {
-                    let (peer, id, result) = msg;
-                    Self::handle_serve(&mut sender, peer, id, result, self.priority_responses).await;
+                serve = self.serves.next_completed() => {
+                    let Serve { timer, peer, id, result } = serve;
+
+                    // Metrics and logs
+                    match result {
+                        Ok(_) => {
+                            self.metrics.serve.inc(Status::Success);
+                        }
+                        Err(err) => {
+                            warn!(?err, ?peer, ?id, "serve failed");
+                            timer.cancel();
+                            self.metrics.serve.inc(Status::Failure);
+                        }
+                    }
+
+                    // Send response to peer
+                    self.handle_serve(&mut sender, peer, id, result, self.priority_responses).await;
                 },
 
                 // Handle network messages
@@ -214,6 +275,7 @@ impl<
                 _ = deadline_pending => {
                     let key = self.fetcher.pop_pending();
                     debug!(?key, "retrying");
+                    self.metrics.fetch.inc(Status::Failure);
                     self.fetcher.fetch(&mut sender, key, false).await;
                 },
 
@@ -221,6 +283,7 @@ impl<
                 _ = deadline_active => {
                     if let Some(key) = self.fetcher.pop_active() {
                         debug!(?key, "requester timeout");
+                        self.metrics.fetch.inc(Status::Failure);
                         self.fetcher.fetch(&mut sender, key, false).await;
                     }
                 },
@@ -230,6 +293,7 @@ impl<
 
     /// Handles the case where the application responds to a request from an external peer.
     async fn handle_serve(
+        &mut self,
         sender: &mut NetS,
         peer: C::PublicKey,
         id: u64,
@@ -262,16 +326,23 @@ impl<
         // Parse request
         let Ok(key) = Key::try_from(request.to_vec()) else {
             warn!(?peer, ?id, "peer invalid request");
+            self.metrics.serve.inc(Status::Invalid);
             return;
         };
 
         // Serve the request
         debug!(?peer, ?id, "peer request");
         let mut producer = self.producer.clone();
+        let timer = self.metrics.serve_duration.timer();
         self.serves.push(async move {
             let receiver = producer.produce(key).await;
             let result = receiver.await;
-            (peer, id, result)
+            Serve {
+                timer,
+                peer,
+                id,
+                result,
+            }
         });
     }
 
@@ -293,12 +364,15 @@ impl<
 
         // The peer had the data, so we can deliver it to the consumer
         if self.consumer.deliver(key.clone(), response).await {
-            // If the data is valid, the fetch is complete
+            // Record metrics
+            self.metrics.fetch.inc(Status::Success);
+            self.fetch_timers.remove(&key).unwrap(); // must exist in the map, records metric on drop
             return;
         }
 
         // If the data is invalid, we need to block the peer and try again
         self.fetcher.block(peer);
+        self.metrics.fetch.inc(Status::Failure);
         self.fetcher.fetch(sender, key, false).await;
     }
 
@@ -318,6 +392,8 @@ impl<
         };
 
         // The peer did not have the data, so we need to try again
+        self.metrics.fetch.inc(Status::Failure);
+        // Don't reset start time for retries, keep the original
         self.fetcher.fetch(sender, key, false).await;
     }
 }

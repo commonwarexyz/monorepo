@@ -11,6 +11,7 @@ mod ack_manager;
 mod actor;
 mod config;
 mod ingress;
+mod metrics;
 mod tip_manager;
 
 pub use ack_manager::AckManager;
