@@ -7,13 +7,13 @@ use tokio::time::{sleep, Duration};
 use tracing::warn;
 
 /// Maximum number of SSH connection attempts before failing
-pub const MAX_SSH_ATTEMPTS: usize = 10;
+pub const MAX_SSH_ATTEMPTS: usize = 30;
 
 /// Maximum number of polling attempts for service status
 pub const MAX_POLL_ATTEMPTS: usize = 30;
 
 /// Interval between retries
-pub const RETRY_INTERVAL: Duration = Duration::from_secs(5);
+pub const RETRY_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Fetch the public IPv4 address of a machine
 pub async fn get_public_ip() -> Result<String, Error> {
