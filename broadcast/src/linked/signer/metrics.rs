@@ -1,4 +1,9 @@
-use commonware_runtime::telemetry::status;
+use std::sync::Arc;
+
+use commonware_runtime::{
+    telemetry::{histogram, status},
+    Clock, Metrics as RuntimeMetrics,
+};
 use commonware_utils::Array;
 use prometheus_client::{
     encoding::EncodeLabelSet,
@@ -22,8 +27,7 @@ impl SequencerLabel {
 }
 
 /// Metrics for the broadcast/linked module.
-#[derive(Debug)]
-pub struct Metrics {
+pub struct Metrics<E: RuntimeMetrics + Clock> {
     /// Height per sequencer
     pub sequencer_heights: Family<SequencerLabel, Gauge>,
     /// Number of acks processed by status
@@ -39,14 +43,18 @@ pub struct Metrics {
     /// Number of rebroadcast attempts by status
     pub rebroadcast: status::Counter,
     /// Histogram of application verification durations
-    pub verify_duration: Histogram,
+    pub verify_duration: histogram::Timed<E>,
     /// Histogram of time from new broadcast to threshold signature generation
-    pub e2e_duration: Histogram,
+    pub e2e_duration: histogram::Timed<E>,
 }
 
-impl Metrics {
-    /// Create and return a new set of metrics, registered with the given registry.
-    pub fn init<M: commonware_runtime::Metrics>(registry: M) -> Self {
+impl<E: RuntimeMetrics + Clock> Metrics<E> {
+    /// Create and return a new set of metrics, registered with the given context.
+    pub fn init(context: E) -> Self {
+        let clock = Arc::new(context.clone());
+        let verify_duration = Histogram::new(histogram::Buckets::LOCAL.into_iter());
+        let e2e_duration = Histogram::new(histogram::Buckets::NETWORK.into_iter());
+
         let metrics = Self {
             sequencer_heights: Family::default(),
             acks: status::Counter::default(),
@@ -55,57 +63,53 @@ impl Metrics {
             threshold: Counter::default(),
             new_broadcast: status::Counter::default(),
             rebroadcast: status::Counter::default(),
-            verify_duration: Histogram::new(
-                commonware_runtime::telemetry::histogram::Buckets::LOCAL.into_iter(),
-            ),
-            e2e_duration: Histogram::new(
-                commonware_runtime::telemetry::histogram::Buckets::NETWORK.into_iter(),
-            ),
+            verify_duration: histogram::Timed::new(verify_duration.clone(), Arc::clone(&clock)),
+            e2e_duration: histogram::Timed::new(e2e_duration.clone(), Arc::clone(&clock)),
         };
-        registry.register(
+        context.register(
             "sequencer_heights",
             "Height per sequencer tracked",
             metrics.sequencer_heights.clone(),
         );
-        registry.register(
+        context.register(
             "acks",
             "Number of acks processed by status",
             metrics.acks.clone(),
         );
-        registry.register(
+        context.register(
             "nodes",
             "Number of nodes processed by status",
             metrics.nodes.clone(),
         );
-        registry.register(
+        context.register(
             "verify",
             "Number of application verifications by status",
             metrics.verify.clone(),
         );
-        registry.register(
+        context.register(
             "threshold",
             "Number of threshold signatures produced",
             metrics.threshold.clone(),
         );
-        registry.register(
+        context.register(
             "new_broadcast",
             "Number of new broadcast attempts by status",
             metrics.new_broadcast.clone(),
         );
-        registry.register(
+        context.register(
             "rebroadcast",
             "Number of rebroadcast attempts by status",
             metrics.rebroadcast.clone(),
         );
-        registry.register(
+        context.register(
             "verify_duration",
             "Histogram of application verification durations",
-            metrics.verify_duration.clone(),
+            verify_duration,
         );
-        registry.register(
+        context.register(
             "e2e_duration",
             "Histogram of time from broadcast to threshold signature generation",
-            metrics.e2e_duration.clone(),
+            e2e_duration,
         );
         metrics
     }

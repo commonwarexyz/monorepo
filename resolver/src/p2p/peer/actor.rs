@@ -17,7 +17,7 @@ use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{
     telemetry::{
-        histogram::HistogramExt,
+        histogram,
         status::{CounterExt, Status},
     },
     Clock, Handle, Metrics, Spawner,
@@ -31,12 +31,12 @@ use futures::{
 use governor::clock::Clock as GClock;
 use prost::Message as _;
 use rand::Rng;
-use std::{collections::HashMap, marker::PhantomData, time::SystemTime};
+use std::{collections::HashMap, marker::PhantomData};
 use tracing::{debug, error, warn};
 
 /// Represents a pending serve operation.
-struct Serve<C: Scheme> {
-    start: SystemTime,
+struct Serve<E: Clock, C: Scheme> {
+    timer: histogram::Timer<E>,
     peer: C::PublicKey,
     id: u64,
     result: Result<Bytes, oneshot::Canceled>,
@@ -75,19 +75,19 @@ pub struct Actor<
     fetcher: Fetcher<E, C, Key, NetS>,
 
     /// Track the start time of fetch operations
-    fetch_start: HashMap<Key, SystemTime>,
+    fetch_timers: HashMap<Key, histogram::Timer<E>>,
 
     /// Holds futures that resolve once the `Producer` has produced the data.
     /// Once the future is resolved, the data (or an error) is sent to the peer.
     /// Has unbounded size; the number of concurrent requests should be limited
     /// by the `Producer` which may drop requests.
-    serves: FuturesPool<Serve<C>>,
+    serves: FuturesPool<Serve<E, C>>,
 
     /// Whether responses are sent with priority over other network messages
     priority_responses: bool,
 
     /// Metrics for the peer actor
-    metrics: metrics::Metrics,
+    metrics: metrics::Metrics<E>,
 
     /// Phantom data for networking types
     _s: PhantomData<NetS>,
@@ -129,7 +129,7 @@ impl<
                 serves: FuturesPool::default(),
                 priority_responses: cfg.priority_responses,
                 metrics,
-                fetch_start: HashMap::new(),
+                fetch_timers: HashMap::new(),
                 _s: PhantomData,
                 _r: PhantomData,
             },
@@ -206,14 +206,14 @@ impl<
                             debug!(?key, "mailbox: fetch");
 
                             // Check if the fetch is already in progress
-                            if self.fetch_start.contains_key(&key) {
+                            if self.fetch_timers.contains_key(&key) {
                                 warn!(?key, "duplicate fetch");
                                 self.metrics.fetch.inc(Status::Dropped);
                                 continue;
                             }
 
                             // Record fetch start time
-                            self.fetch_start.insert(key.clone(), self.context.current());
+                            self.fetch_timers.insert(key.clone(), self.metrics.fetch_duration.timer());
                             self.fetcher.fetch(&mut sender, key, true).await;
                         }
                         Message::Cancel { key } => {
@@ -221,7 +221,7 @@ impl<
                             let mut guard = self.metrics.cancel.guard(Status::Dropped);
                             if self.fetcher.cancel(&key) {
                                 guard.set(Status::Success);
-                                assert!(self.fetch_start.remove(&key).is_some());
+                                self.fetch_timers.remove(&key).unwrap().cancel(); // must exist, don't record metric
                                 self.consumer.failed(key.clone(), ()).await;
                             }
                         }
@@ -230,18 +230,16 @@ impl<
 
                 // Handle completed server requests
                 serve = self.serves.next_completed() => {
-                    let Serve { start, peer, id, result } = serve;
+                    let Serve { timer, peer, id, result } = serve;
 
                     // Metrics and logs
                     match result {
                         Ok(_) => {
-                            self.metrics
-                                .serve_duration
-                                .observe_between(start, self.context.current());
                             self.metrics.serve.inc(Status::Success);
                         }
                         Err(err) => {
                             warn!(?err, ?peer, ?id, "serve failed");
+                            timer.cancel();
                             self.metrics.serve.inc(Status::Failure);
                         }
                     }
@@ -335,12 +333,12 @@ impl<
         // Serve the request
         debug!(?peer, ?id, "peer request");
         let mut producer = self.producer.clone();
-        let start = self.context.current();
+        let timer = self.metrics.serve_duration.timer();
         self.serves.push(async move {
             let receiver = producer.produce(key).await;
             let result = receiver.await;
             Serve {
-                start,
+                timer,
                 peer,
                 id,
                 result,
@@ -365,12 +363,10 @@ impl<
         };
 
         // The peer had the data, so we can deliver it to the consumer
-        let end = self.context.current();
         if self.consumer.deliver(key.clone(), response).await {
             // Record metrics
             self.metrics.fetch.inc(Status::Success);
-            let start = self.fetch_start.remove(&key).unwrap(); // must exist in the map
-            self.metrics.fetch_duration.observe_between(start, end);
+            self.fetch_timers.remove(&key).unwrap(); // must exist in the map, records metric on drop
             return;
         }
 

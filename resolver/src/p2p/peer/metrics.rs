@@ -1,9 +1,12 @@
-use commonware_runtime::telemetry::{histogram::Buckets, status};
+use commonware_runtime::{
+    telemetry::{histogram, status},
+    Clock, Metrics as RuntimeMetrics,
+};
 use prometheus_client::metrics::{gauge::Gauge, histogram::Histogram};
+use std::sync::Arc;
 
 /// Metrics for the peer actor.
-#[derive(Debug)]
-pub struct Metrics {
+pub struct Metrics<E: RuntimeMetrics + Clock> {
     /// Current number of pending fetch requests
     pub fetch_pending: Gauge,
     /// Current number of active fetch requests
@@ -19,14 +22,17 @@ pub struct Metrics {
     /// Number of serves by status
     pub serve: status::Counter,
     /// Histogram of successful serves
-    pub serve_duration: Histogram,
+    pub serve_duration: histogram::Timed<E>,
     /// Histogram of successful fetches
-    pub fetch_duration: Histogram,
+    pub fetch_duration: histogram::Timed<E>,
 }
 
-impl Metrics {
-    /// Create and return a new set of metrics, registered with the given registry.
-    pub fn init<M: commonware_runtime::Metrics>(registry: M) -> Self {
+impl<E: RuntimeMetrics + Clock> Metrics<E> {
+    /// Create and return a new set of metrics, registered with the given context.
+    pub fn init(context: E) -> Self {
+        let clock = Arc::new(context.clone());
+        let serve_duration = Histogram::new(histogram::Buckets::LOCAL.into_iter());
+        let fetch_duration = Histogram::new(histogram::Buckets::NETWORK.into_iter());
         let metrics = Self {
             fetch_pending: Gauge::default(),
             fetch_active: Gauge::default(),
@@ -35,49 +41,49 @@ impl Metrics {
             fetch: status::Counter::default(),
             cancel: status::Counter::default(),
             serve: status::Counter::default(),
-            serve_duration: Histogram::new(Buckets::LOCAL.into_iter()),
-            fetch_duration: Histogram::new(Buckets::NETWORK.into_iter()),
+            fetch_duration: histogram::Timed::new(fetch_duration.clone(), Arc::clone(&clock)),
+            serve_duration: histogram::Timed::new(serve_duration.clone(), Arc::clone(&clock)),
         };
-        registry.register(
+        context.register(
             "fetch_pending",
             "Current number of pending fetch requests",
             metrics.fetch_pending.clone(),
         );
-        registry.register(
+        context.register(
             "fetch_active",
             "Current number of active fetch requests",
             metrics.fetch_active.clone(),
         );
-        registry.register(
+        context.register(
             "serve_processing",
             "Current number of serves currently processing",
             metrics.serve_processing.clone(),
         );
-        registry.register(
+        context.register(
             "peers_blocked",
             "Current number of blocked peers",
             metrics.peers_blocked.clone(),
         );
-        registry.register(
+        context.register(
             "fetch",
             "Number of fetches by status",
             metrics.fetch.clone(),
         );
-        registry.register(
+        context.register(
             "cancel",
             "Number of canceled fetches by status",
             metrics.cancel.clone(),
         );
-        registry.register("serve", "Number of serves by status", metrics.serve.clone());
-        registry.register(
+        context.register("serve", "Number of serves by status", metrics.serve.clone());
+        context.register(
             "serve_duration",
             "Histogram of successful serves",
-            metrics.serve_duration.clone(),
+            serve_duration,
         );
-        registry.register(
+        context.register(
             "fetch_duration",
             "Histogram of successful fetches",
-            metrics.fetch_duration.clone(),
+            fetch_duration,
         );
         metrics
     }

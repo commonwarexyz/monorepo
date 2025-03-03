@@ -1,5 +1,6 @@
+use crate::Clock;
 use prometheus_client::metrics::histogram::Histogram;
-use std::time::SystemTime;
+use std::{sync::Arc, time::SystemTime};
 
 /// Holds constants for bucket sizes for histograms.
 ///
@@ -39,5 +40,70 @@ impl HistogramExt for Histogram {
             Err(_) => 0.0, // Clock went backwards
         };
         self.observe(duration);
+    }
+}
+
+/// A wrapper around a histogram that includes a clock.
+pub struct Timed<C: Clock> {
+    /// The histogram to record durations in.
+    histogram: Histogram,
+
+    /// The clock to use for recording durations.
+    clock: Arc<C>,
+}
+
+impl<C: Clock> Timed<C> {
+    /// Create a new timed histogram.
+    pub fn new(histogram: Histogram, clock: Arc<C>) -> Self {
+        Self { histogram, clock }
+    }
+
+    /// Create a new timer that can record a duration from the current time.
+    pub fn timer(&self) -> Timer<C> {
+        let start = self.clock.current();
+        Timer {
+            histogram: self.histogram.clone(),
+            clock: Arc::clone(&self.clock), // Cheap Arc clone, not Clock clone
+            start,
+            canceled: false,
+        }
+    }
+}
+
+/// A timer that records a duration when dropped.
+pub struct Timer<C: Clock> {
+    /// The histogram to record durations in.
+    histogram: Histogram,
+
+    /// The clock to use for recording durations.
+    clock: Arc<C>,
+
+    /// The time at which the timer was started.
+    start: SystemTime,
+
+    /// Whether the timer was canceled.
+    canceled: bool,
+}
+
+impl<C: Clock> Timer<C> {
+    /// Record the duration and cancel the timer.
+    pub fn observe(&mut self) {
+        self.canceled = true;
+        let end = self.clock.current();
+        self.histogram.observe_between(self.start, end);
+    }
+
+    /// Cancel the timer, preventing the duration from being recorded when dropped.
+    pub fn cancel(mut self) {
+        self.canceled = true;
+    }
+}
+
+impl<C: Clock> Drop for Timer<C> {
+    fn drop(&mut self) {
+        if self.canceled {
+            return;
+        }
+        self.observe();
     }
 }

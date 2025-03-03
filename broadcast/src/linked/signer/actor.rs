@@ -15,7 +15,7 @@ use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{
     telemetry::{
-        histogram::HistogramExt,
+        histogram,
         status::{CounterExt, Status},
     },
     Blob, Clock, Handle, Metrics, Spawner, Storage,
@@ -36,8 +36,8 @@ use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
 /// Represents a pending verification request to the application.
-struct Verify<C: Scheme, D: Array> {
-    start: SystemTime,
+struct Verify<C: Scheme, D: Array, E: Clock> {
+    _timer: histogram::Timer<E>,
     context: Context<C::PublicKey>,
     payload: D,
     result: Result<bool, Error>,
@@ -121,7 +121,7 @@ pub struct Actor<
     // Each future represents a verification request to the application
     // that will either timeout or resolve with a boolean.
     #[allow(clippy::type_complexity)]
-    pending_verifies: FuturesPool<Verify<C, D>>,
+    pending_verifies: FuturesPool<Verify<C, D, E>>,
 
     // The maximum number of items in `pending_verifies`.
     verify_concurrent: usize,
@@ -168,10 +168,10 @@ pub struct Actor<
     ////////////////////////////////////////
 
     // Metrics
-    metrics: metrics::Metrics,
+    metrics: metrics::Metrics<E>,
 
-    // The start time of my last broadcast_new
-    broadcast_start: Option<SystemTime>,
+    // The timer of my last broadcast_new
+    broadcast_timer: Option<histogram::Timer<E>>,
 }
 
 impl<
@@ -225,7 +225,7 @@ impl<
             ack_manager: AckManager::<D, C::PublicKey>::new(),
             epoch: 0,
             metrics,
-            broadcast_start: None,
+            broadcast_timer: None,
         };
 
         (result, mailbox)
@@ -374,8 +374,7 @@ impl<
 
                 // Handle completed verification futures.
                 verify = self.pending_verifies.next_completed() => {
-                    let Verify { start, context, payload, result } = verify;
-                    self.metrics.verify_duration.observe_between(start, self.context.current());
+                    let Verify { _timer, context, payload, result } = verify;
                     match result {
                         Err(err) => {
                             warn!(?err, ?context, ?payload, "verified returned error");
@@ -518,13 +517,9 @@ impl<
         }
 
         // If the threshold is for my sequencer, record the metric
-        if let Some(start) = self.broadcast_start {
-            if chunk.sequencer == self.crypto.public_key() {
-                self.metrics
-                    .e2e_duration
-                    .observe_between(start, self.context.current());
-            }
-        };
+        if chunk.sequencer == self.crypto.public_key() {
+            self.broadcast_timer.take();
+        }
 
         // Emit the proof
         let context = Context {
@@ -596,12 +591,12 @@ impl<
         };
         let payload = node.chunk.payload.clone();
         let mut application = self.application.clone();
-        let start = self.context.current();
+        let timer = self.metrics.verify_duration.timer();
         self.pending_verifies.push(async move {
             let receiver = application.verify(context.clone(), payload.clone()).await;
             let result = receiver.await.map_err(Error::AppVerifyCanceled);
             Verify {
-                start,
+                _timer: timer,
                 context,
                 payload,
                 result,
@@ -669,7 +664,7 @@ impl<
         self.journal_sync(&me, height).await;
 
         // Record the start time of the broadcast
-        self.broadcast_start = Some(self.context.current());
+        self.broadcast_timer = Some(self.metrics.e2e_duration.timer());
 
         // Broadcast to network
         if let Err(err) = self.broadcast(&node, node_sender, self.epoch).await {
