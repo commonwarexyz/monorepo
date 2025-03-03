@@ -37,7 +37,7 @@ use tracing::{debug, error, info, warn};
 
 /// Represents a pending verification request to the application.
 struct Verify<C: Scheme, D: Array, E: Clock> {
-    _timer: histogram::Timer<E>,
+    timer: histogram::Timer<E>,
     context: Context<C::PublicKey>,
     payload: D,
     result: Result<bool, Error>,
@@ -374,7 +374,8 @@ impl<
 
                 // Handle completed verification futures.
                 verify = self.pending_verifies.next_completed() => {
-                    let Verify { _timer, context, payload, result } = verify;
+                    let Verify { timer, context, payload, result } = verify;
+                    drop(timer); // Record metric. Explicitly reference timer to avoid lint warning
                     match result {
                         Err(err) => {
                             warn!(?err, ?context, ?payload, "verified returned error");
@@ -596,7 +597,7 @@ impl<
             let receiver = application.verify(context.clone(), payload.clone()).await;
             let result = receiver.await.map_err(Error::AppVerifyCanceled);
             Verify {
-                _timer: timer,
+                timer,
                 context,
                 payload,
                 result,

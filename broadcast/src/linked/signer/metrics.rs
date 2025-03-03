@@ -51,7 +51,7 @@ pub struct Metrics<E: RuntimeMetrics + Clock> {
 impl<E: RuntimeMetrics + Clock> Metrics<E> {
     /// Create and return a new set of metrics, registered with the given context.
     pub fn init(context: E) -> Self {
-        let clock = Arc::new(context.clone());
+        let clock_arc = Arc::new(context.clone());
         let verify_duration = Histogram::new(histogram::Buckets::LOCAL.into_iter());
         let e2e_duration = Histogram::new(histogram::Buckets::NETWORK.into_iter());
 
@@ -63,8 +63,8 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
             threshold: Counter::default(),
             new_broadcast: status::Counter::default(),
             rebroadcast: status::Counter::default(),
-            verify_duration: histogram::Timed::new(verify_duration.clone(), Arc::clone(&clock)),
-            e2e_duration: histogram::Timed::new(e2e_duration.clone(), Arc::clone(&clock)),
+            verify_duration: histogram::Timed::new(verify_duration.clone(), clock_arc.clone()),
+            e2e_duration: histogram::Timed::new(e2e_duration.clone(), clock_arc.clone()),
         };
         context.register(
             "sequencer_heights",

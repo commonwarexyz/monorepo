@@ -63,7 +63,7 @@ impl<C: Clock> Timed<C> {
         let start = self.clock.current();
         Timer {
             histogram: self.histogram.clone(),
-            clock: Arc::clone(&self.clock), // Cheap Arc clone, not Clock clone
+            clock: self.clock.clone(), // Arc clone
             start,
             canceled: false,
         }
