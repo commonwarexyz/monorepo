@@ -757,7 +757,7 @@ pub async fn delete_vpc(ec2_client: &Ec2Client, vpc_id: &str) -> Result<(), Ec2E
     Ok(())
 }
 
-/// Finds the availability zone that supports all required instance types
+/// Finds the availability zone that supports all required ARM-based instance types
 pub async fn find_availability_zone(
     client: &Ec2Client,
     instance_types: &[String],
@@ -766,12 +766,16 @@ pub async fn find_availability_zone(
     let offerings = client
         .describe_instance_type_offerings()
         .location_type("availability-zone".into())
-        .set_filters(Some(
-            instance_types
-                .iter()
-                .map(|it| Filter::builder().name("instance-type").values(it).build())
-                .collect(),
-        ))
+        .set_filters(Some(vec![
+            Filter::builder()
+                .name("instance-type")
+                .set_values(Some(instance_types.to_vec()))
+                .build(),
+            Filter::builder()
+                .name("processor-info.supported-architecture")
+                .values("arm64")
+                .build(),
+        ]))
         .send()
         .await?
         .instance_type_offerings
@@ -803,7 +807,7 @@ pub async fn find_availability_zone(
 
     // If no availability zone supports all instance types, return an error
     Err(Ec2Error::from(BuildError::other(format!(
-        "No availability zone supports all instance types: {:?}",
+        "no availability zone supports all required ARM-based instance types: {:?}",
         instance_types
     ))))
 }
