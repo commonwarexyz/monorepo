@@ -105,7 +105,8 @@ fn main() {
     let mut p2p_cfg = authenticated::Config::recommended(
         signer.clone(),
         &union(FLOOD_NAMESPACE, b"_P2P"),
-        dialable_socket, // TODO: maybe change var name?
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), config.port),
+        dialable_socket,
         bootstrappers,
         config.message_size,
     );
