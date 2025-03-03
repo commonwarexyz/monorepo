@@ -9,7 +9,7 @@ use std::fs::File;
 use std::path::PathBuf;
 use tracing::{error, info};
 
-/// Updates the binary and configuration on all regular nodes
+/// Updates the binary and configuration on all binary nodes
 pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
     // Load config
     let config: Config = {
@@ -45,7 +45,7 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
         .map(|i| (i.name.clone(), i.clone()))
         .collect();
 
-    // Determine all regions (regular + monitoring)
+    // Determine all regions (binary + monitoring)
     let mut regions = config
         .instances
         .iter()
@@ -53,8 +53,8 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
         .collect::<std::collections::HashSet<_>>();
     regions.insert(MONITORING_REGION.to_string());
 
-    // Collect all regular instances across regions
-    let mut regular_instances = Vec::new();
+    // Collect all binary instances across regions
+    let mut binary_instances = Vec::new();
     for region in &regions {
         let ec2_client = create_ec2_client(Region::new(region.clone())).await;
         let resp = ec2_client
@@ -69,7 +69,7 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
                     if let Some(name_tag) = tags.iter().find(|t| t.key.as_deref() == Some("name")) {
                         if name_tag.value.as_deref() != Some(MONITORING_NAME) {
                             if let Some(public_ip) = &instance.public_ip_address {
-                                regular_instances
+                                binary_instances
                                     .push((name_tag.value.clone().unwrap(), public_ip.clone()));
                                 info!(
                                     region,
@@ -85,9 +85,9 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
         }
     }
 
-    // Update each regular instance concurrently
+    // Update each binary instance concurrently
     let mut futures = Vec::new();
-    for (name, ip) in regular_instances {
+    for (name, ip) in binary_instances {
         if let Some(instance_config) = instance_map.get(&name) {
             let private_key = private_key_path.to_str().unwrap();
             let binary_path = instance_config.binary.clone();

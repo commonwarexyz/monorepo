@@ -25,7 +25,7 @@ pub struct RegionResources {
     pub vpc_cidr: String,
     pub route_table_id: String,
     pub subnet_id: String,
-    pub regular_sg_id: Option<String>,
+    pub binary_sg_id: Option<String>,
     pub monitoring_sg_id: Option<String>,
 }
 
@@ -233,7 +233,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                 vpc_cidr: vpc_cidr.clone(),
                 route_table_id,
                 subnet_id,
-                regular_sg_id: None,
+                binary_sg_id: None,
                 monitoring_sg_id,
             },
         );
@@ -246,17 +246,17 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     let monitoring_resources = region_resources.get(&monitoring_region).unwrap();
     let monitoring_vpc_id = &monitoring_resources.vpc_id;
     let monitoring_cidr = &monitoring_resources.vpc_cidr;
-    let regular_regions: HashSet<String> =
+    let binary_regions: HashSet<String> =
         config.instances.iter().map(|i| i.region.clone()).collect();
     for region in &regions {
-        if region != &monitoring_region && regular_regions.contains(region) {
-            let regular_resources = region_resources.get(region).unwrap();
-            let regular_vpc_id = &regular_resources.vpc_id;
-            let regular_cidr = &regular_resources.vpc_cidr;
+        if region != &monitoring_region && binary_regions.contains(region) {
+            let binary_resources = region_resources.get(region).unwrap();
+            let binary_vpc_id = &binary_resources.vpc_id;
+            let binary_cidr = &binary_resources.vpc_cidr;
             let peer_id = create_vpc_peering_connection(
                 &ec2_clients[&monitoring_region],
                 monitoring_vpc_id,
-                regular_vpc_id,
+                binary_vpc_id,
                 region,
                 tag,
             )
@@ -264,7 +264,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             info!(
                 peer = peer_id.as_str(),
                 monitoring = monitoring_vpc_id.as_str(),
-                regular = regular_vpc_id.as_str(),
+                binary = binary_vpc_id.as_str(),
                 region = region.as_str(),
                 "created VPC peering connection"
             );
@@ -283,13 +283,13 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             add_route(
                 &ec2_clients[&monitoring_region],
                 &monitoring_resources.route_table_id,
-                regular_cidr,
+                binary_cidr,
                 &peer_id,
             )
             .await?;
             add_route(
                 &ec2_clients[region],
-                &regular_resources.route_table_id,
+                &binary_resources.route_table_id,
                 monitoring_cidr,
                 &peer_id,
             )
@@ -297,7 +297,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             info!(
                 peer = peer_id.as_str(),
                 monitoring = monitoring_vpc_id.as_str(),
-                regular = regular_vpc_id.as_str(),
+                binary = binary_vpc_id.as_str(),
                 region = region.as_str(),
                 "added routes for VPC peering connection"
             );
@@ -346,10 +346,10 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     }
     info!(ip = monitoring_ip.as_str(), "launched monitoring instance");
 
-    // Create regular security groups
+    // Create binary security groups
     info!("creating security groups");
     for (region, resources) in region_resources.iter_mut() {
-        let regular_sg_id = create_security_group_regular(
+        let binary_sg_id = create_security_group_binary(
             &ec2_clients[region],
             &resources.vpc_id,
             &deployer_ip,
@@ -359,17 +359,17 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         )
         .await?;
         info!(
-            sg = regular_sg_id.as_str(),
+            sg = binary_sg_id.as_str(),
             vpc = resources.vpc_id.as_str(),
             region = region.as_str(),
-            "created regular security group"
+            "created binary security group"
         );
-        resources.regular_sg_id = Some(regular_sg_id);
+        resources.binary_sg_id = Some(binary_sg_id);
     }
     info!("created security groups");
 
-    // Launch regular instances
-    info!("launching regular instances");
+    // Launch binary instances
+    info!("launching binary instances");
     let mut launch_futures = Vec::new();
     for instance in &config.instances {
         let key_name = key_name.clone();
@@ -381,7 +381,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             InstanceType::try_parse(&instance.instance_type).expect("Invalid instance type");
         let storage_class =
             VolumeType::try_parse(&instance.storage_class).expect("Invalid storage class");
-        let regular_sg_id = resources.regular_sg_id.as_ref().unwrap();
+        let binary_sg_id = resources.binary_sg_id.as_ref().unwrap();
         let tag = tag.clone();
         let future = async move {
             let instance_id = launch_instances(
@@ -392,7 +392,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                 storage_class,
                 &key_name,
                 &resources.subnet_id,
-                regular_sg_id,
+                binary_sg_id,
                 1,
                 &instance.name,
                 &tag,
@@ -414,7 +414,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         launch_futures.push(future);
     }
     let deployments: Vec<Deployment> = try_join_all(launch_futures).await?;
-    info!("launched regular instances");
+    info!("launched binary instances");
 
     // Generate peers.yaml
     let peers = Peers {
@@ -537,8 +537,8 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     poll_service_active(private_key, &monitoring_ip, "grafana-server").await?;
     info!("configured monitoring instance");
 
-    // Configure regular instances
-    info!("configuring regular instances");
+    // Configure binary instances
+    info!("configuring binary instances");
     let mut start_futures = Vec::new();
     for deployment in &deployments {
         let temp_dir = temp_dir.clone();
@@ -611,15 +611,15 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         };
         start_futures.push(future);
     }
-    let all_regular_ips = try_join_all(start_futures).await?;
-    info!("configured regular instances");
+    let all_binary_ips = try_join_all(start_futures).await?;
+    info!("configured binary instances");
 
     // Update monitoring security group to restrict Loki port (3100)
-    info!("updating monitoring security group to allow traffic from regular instances");
+    info!("updating monitoring security group to allow traffic from binary instances");
     let monitoring_ec2_client = &ec2_clients[&monitoring_region];
-    if regular_regions.contains(&monitoring_region) {
-        let regular_sg_id = region_resources[&monitoring_region]
-            .regular_sg_id
+    if binary_regions.contains(&monitoring_region) {
+        let binary_sg_id = region_resources[&monitoring_region]
+            .binary_sg_id
             .clone()
             .unwrap();
         monitoring_ec2_client
@@ -632,7 +632,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                     .to_port(3100)
                     .user_id_group_pairs(
                         UserIdGroupPair::builder()
-                            .group_id(regular_sg_id.clone())
+                            .group_id(binary_sg_id.clone())
                             .build(),
                     )
                     .build(),
@@ -642,14 +642,14 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             .map_err(|err| err.into_service_error())?;
         info!(
             monitoring = monitoring_sg_id.as_str(),
-            regular = regular_sg_id.as_str(),
+            binary = binary_sg_id.as_str(),
             region = monitoring_region.as_str(),
-            "linked monitoring and regular security groups in monitoring region"
+            "linked monitoring and binary security groups in monitoring region"
         );
     }
     for region in &regions {
-        if region != &monitoring_region && regular_regions.contains(region) {
-            let regular_cidr = &region_resources[region].vpc_cidr;
+        if region != &monitoring_region && binary_regions.contains(region) {
+            let binary_cidr = &region_resources[region].vpc_cidr;
             monitoring_ec2_client
                 .authorize_security_group_ingress()
                 .group_id(&monitoring_sg_id)
@@ -658,7 +658,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                         .ip_protocol("tcp")
                         .from_port(3100)
                         .to_port(3100)
-                        .ip_ranges(IpRange::builder().cidr_ip(regular_cidr).build())
+                        .ip_ranges(IpRange::builder().cidr_ip(binary_cidr).build())
                         .build(),
                 )
                 .send()
@@ -666,9 +666,9 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                 .map_err(|err| err.into_service_error())?;
             info!(
                 monitoring = monitoring_sg_id.as_str(),
-                regular = regular_cidr.as_str(),
+                binary = binary_cidr.as_str(),
                 region = region.as_str(),
-                "opened monitoring part to traffic from regular VPC"
+                "opened monitoring part to traffic from binary VPC"
             );
         }
     }
@@ -678,7 +678,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     File::create(temp_dir.join(CREATED_FILE_NAME))?;
     info!(
         monitoring = monitoring_ip.as_str(),
-        regular = ?all_regular_ips,
+        binary = ?all_binary_ips,
         "deployment complete"
     );
     Ok(())

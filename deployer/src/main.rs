@@ -41,7 +41,7 @@ async fn main() -> std::process::ExitCode {
                 )
                 .subcommand(
                     Command::new(ec2::UPDATE_CMD)
-                        .about("Updates the binary and configuration on all regular nodes")
+                        .about("Updates the binary and configuration on all binary nodes")
                         .arg(
                             Arg::new("config")
                                 .long("config")

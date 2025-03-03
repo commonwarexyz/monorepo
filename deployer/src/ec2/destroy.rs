@@ -58,10 +58,10 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
         let has_monitoring_sg = security_groups
             .iter()
             .any(|sg| sg.group_name() == Some(tag));
-        let has_regular_sg = security_groups
+        let has_binary_sg = security_groups
             .iter()
-            .any(|sg| sg.group_name() == Some(&format!("{}-regular", tag)));
-        if region == MONITORING_REGION && has_monitoring_sg && has_regular_sg {
+            .any(|sg| sg.group_name() == Some(&format!("{}-binary", tag)));
+        if region == MONITORING_REGION && has_monitoring_sg && has_binary_sg {
             // Find the monitoring security group (named `tag`)
             let monitoring_sg = security_groups
                 .iter()
@@ -70,20 +70,20 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
                 .group_id()
                 .unwrap();
 
-            // Find the regular security group (named `{tag}-regular`)
-            let regular_sg = security_groups
+            // Find the binary security group (named `{tag}-binary`)
+            let binary_sg = security_groups
                 .iter()
-                .find(|sg| sg.group_name() == Some(&format!("{}-regular", tag)))
+                .find(|sg| sg.group_name() == Some(&format!("{}-binary", tag)))
                 .expect("Regular security group not found")
                 .group_id()
                 .unwrap();
 
-            // Revoke ingress rule from monitoring security group to regular security group
+            // Revoke ingress rule from monitoring security group to binary security group
             let ip_permission = IpPermission::builder()
                 .ip_protocol("tcp")
                 .from_port(3100)
                 .to_port(3100)
-                .user_id_group_pairs(UserIdGroupPair::builder().group_id(regular_sg).build())
+                .user_id_group_pairs(UserIdGroupPair::builder().group_id(binary_sg).build())
                 .build();
             if let Err(e) = ec2_client
                 .revoke_security_group_ingress()
@@ -92,12 +92,12 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
                 .send()
                 .await
             {
-                warn!(%e, "failed to revoke ingress rule between monitoring and regular security groups");
+                warn!(%e, "failed to revoke ingress rule between monitoring and binary security groups");
             } else {
                 info!(
                     monitoring_sg,
-                    regular_sg,
-                    "revoking ingress rule between monitoring and regular security groups"
+                    binary_sg,
+                    "revoking ingress rule between monitoring and binary security groups"
                 );
             }
         }

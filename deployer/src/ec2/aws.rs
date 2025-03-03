@@ -226,8 +226,8 @@ pub async fn create_security_group_monitoring(
     Ok(sg_id)
 }
 
-/// Creates a security group for regular instances with access from deployer, monitoring, and custom ports
-pub async fn create_security_group_regular(
+/// Creates a security group for binary instances with access from deployer, monitoring, and custom ports
+pub async fn create_security_group_binary(
     client: &Ec2Client,
     vpc_id: &str,
     deployer_ip: &str,
@@ -237,8 +237,8 @@ pub async fn create_security_group_regular(
 ) -> Result<String, Ec2Error> {
     let sg_resp = client
         .create_security_group()
-        .group_name(format!("{}-regular", tag))
-        .description("Security group for regular instances")
+        .group_name(format!("{}-binary", tag))
+        .description("Security group for binary instances")
         .vpc_id(vpc_id)
         .tag_specifications(
             TagSpecification::builder()
