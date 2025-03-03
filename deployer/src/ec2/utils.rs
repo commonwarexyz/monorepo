@@ -99,7 +99,7 @@ pub async fn ssh_execute(key_file: &str, ip: &str, command: &str) -> Result<(), 
 /// Polls the status of a systemd service on a remote instance until active
 pub async fn poll_service_active(key_file: &str, ip: &str, service: &str) -> Result<(), Error> {
     for _ in 0..MAX_POLL_ATTEMPTS {
-        let status = Command::new("ssh")
+        let output = Command::new("ssh")
             .arg("-i")
             .arg(key_file)
             .arg("-o")
@@ -108,9 +108,10 @@ pub async fn poll_service_active(key_file: &str, ip: &str, service: &str) -> Res
             .arg(format!("systemctl is-active {}", service))
             .output()
             .await?;
-        if status.status.success() && String::from_utf8_lossy(&status.stdout).trim() == "active" {
+        if output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "active" {
             return Ok(());
         }
+        warn!(error = ?output.status, service, "active status check failed");
         sleep(RETRY_INTERVAL).await;
     }
     Err(Error::ServiceTimeout(ip.to_string(), service.to_string()))
@@ -131,6 +132,7 @@ pub async fn poll_service_inactive(key_file: &str, ip: &str, service: &str) -> R
         if String::from_utf8_lossy(&output.stdout).trim() == "inactive" {
             return Ok(());
         }
+        warn!(error = ?output.status, service, "inactive status check failed");
         sleep(RETRY_INTERVAL).await;
     }
     Err(Error::ServiceTimeout(ip.to_string(), service.to_string()))
