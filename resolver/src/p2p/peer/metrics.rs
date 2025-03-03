@@ -42,7 +42,7 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
             cancel: status::Counter::default(),
             serve: status::Counter::default(),
             fetch_duration: histogram::Timed::new(fetch_duration.clone(), clock.clone()),
-            serve_duration: histogram::Timed::new(serve_duration.clone(), clock.clone()),
+            serve_duration: histogram::Timed::new(serve_duration.clone(), clock),
         };
         context.register(
             "fetch_pending",

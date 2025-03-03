@@ -64,7 +64,7 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
             new_broadcast: status::Counter::default(),
             rebroadcast: status::Counter::default(),
             verify_duration: histogram::Timed::new(verify_duration.clone(), clock.clone()),
-            e2e_duration: histogram::Timed::new(e2e_duration.clone(), clock.clone()),
+            e2e_duration: histogram::Timed::new(e2e_duration.clone(), clock),
         };
         context.register(
             "sequencer_heights",
