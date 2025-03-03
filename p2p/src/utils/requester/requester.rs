@@ -150,7 +150,9 @@ impl<E: Clock + GClock + Rng + Metrics, C: Scheme> Requester<E, C> {
             let deadline = now.checked_add(self.timeout).expect("time overflowed");
             self.deadlines.put(id, deadline);
 
+            // Increment metric if-and-only-if request is successful
             self.metrics.requests.inc();
+
             return Some((participant.clone(), id));
         }
         None
