@@ -42,7 +42,7 @@ impl Metrics {
         let metrics = Self {
             requests: Counter::default(),
             timeouts: Counter::default(),
-            resolves: Histogram::new(Buckets::P2P.into_iter()),
+            resolves: Histogram::new(Buckets::NETWORK.into_iter()),
             performance: Family::default(),
         };
         registry.register(
