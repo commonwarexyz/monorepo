@@ -5,7 +5,7 @@ use aws_sdk_ec2::error::BuildError;
 use aws_sdk_ec2::primitives::Blob;
 use aws_sdk_ec2::types::{
     BlockDeviceMapping, EbsBlockDevice, Filter, InstanceStateName, ResourceType, SecurityGroup,
-    Tag, TagSpecification, VpcPeeringConnectionStateReasonCode,
+    SummaryStatus, Tag, TagSpecification, VpcPeeringConnectionStateReasonCode,
 };
 pub use aws_sdk_ec2::types::{InstanceType, IpPermission, IpRange, UserIdGroupPair, VolumeType};
 use aws_sdk_ec2::{Client as Ec2Client, Error as Ec2Error};
@@ -371,15 +371,41 @@ pub async fn wait_for_instances_running(
         // Confirm all are running
         let reservations = resp.reservations.unwrap();
         let instances = reservations[0].instances.as_ref().unwrap();
-        if instances.iter().all(|i| {
+        if !instances.iter().all(|i| {
             i.state.as_ref().unwrap().name.as_ref().unwrap() == &InstanceStateName::Running
         }) {
-            return Ok(instances
-                .iter()
-                .map(|i| i.public_ip_address.as_ref().unwrap().clone())
-                .collect());
+            sleep(RETRY_INTERVAL).await;
+            continue;
         }
-        sleep(RETRY_INTERVAL).await;
+
+        // Ask for instance status
+        let Ok(resp) = client
+            .describe_instance_status()
+            .set_instance_ids(Some(instance_ids.to_vec()))
+            .include_all_instances(true) // Include instances regardless of state
+            .send()
+            .await
+        else {
+            sleep(RETRY_INTERVAL).await;
+            continue;
+        };
+
+        // Confirm all are ready
+        let statuses = resp.instance_statuses.unwrap_or_default();
+        let all_ready = statuses.iter().all(|s| {
+            s.instance_state.as_ref().unwrap().name.as_ref().unwrap() == &InstanceStateName::Running
+                && s.system_status.as_ref().unwrap().status.as_ref().unwrap() == &SummaryStatus::Ok
+                && s.instance_status.as_ref().unwrap().status.as_ref().unwrap()
+                    == &SummaryStatus::Ok
+        });
+        if !all_ready {
+            sleep(RETRY_INTERVAL).await;
+            continue;
+        }
+        return Ok(instances
+            .iter()
+            .map(|i| i.public_ip_address.as_ref().unwrap().clone())
+            .collect());
     }
 }
 
