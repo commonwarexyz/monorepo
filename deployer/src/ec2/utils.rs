@@ -4,7 +4,7 @@ use commonware_utils::hex;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 use tokio::time::{sleep, Duration};
-use tracing::debug;
+use tracing::warn;
 
 /// Maximum number of SSH connection attempts before failing
 pub const MAX_SSH_ATTEMPTS: usize = 10;
@@ -67,7 +67,7 @@ pub async fn scp_file(
         if status.success() {
             return Ok(());
         }
-        debug!(error = ?status, "SCP failed");
+        warn!(error = ?status, "SCP failed");
         sleep(RETRY_INTERVAL).await;
     }
     Err(Error::ScpFailed)
@@ -90,7 +90,7 @@ pub async fn ssh_execute(key_file: &str, ip: &str, command: &str) -> Result<(), 
         if status.success() {
             return Ok(());
         }
-        debug!(error = ?status, "SSH failed");
+        warn!(error = ?status, "SSH failed");
         sleep(RETRY_INTERVAL).await;
     }
     Err(Error::SshFailed)
