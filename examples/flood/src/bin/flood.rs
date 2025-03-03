@@ -7,10 +7,7 @@ use commonware_cryptography::{
 use commonware_deployer::ec2::Peers;
 use commonware_flood::Config;
 use commonware_p2p::{authenticated, Receiver, Recipients, Sender};
-use commonware_runtime::{
-    tokio::{Context, Executor},
-    Clock, Metrics, Network, Runner, Spawner,
-};
+use commonware_runtime::{tokio, Clock, Metrics, Network, Runner, Spawner};
 use commonware_utils::{from_hex_formatted, union};
 use futures::future::try_join_all;
 use governor::Quota;
@@ -96,7 +93,11 @@ fn main() {
     }
 
     // Initialize runtime
-    let (executor, context) = Executor::default();
+    let cfg = tokio::Config {
+        tcp_nodelay: Some(true),
+        ..Default::default()
+    };
+    let (executor, context) = tokio::Executor::init(cfg);
 
     // Configure network
     let p2p_cfg = authenticated::Config::aggressive(
@@ -213,7 +214,7 @@ fn main() {
             let app = Router::new()
                 .route(
                     "/metrics",
-                    get(|extension: Extension<Context>| async move { extension.0.encode() }),
+                    get(|extension: Extension<tokio::Context>| async move { extension.0.encode() }),
                 )
                 .layer(Extension(context));
             serve(listener, app.into_make_service())
