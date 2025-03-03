@@ -102,13 +102,14 @@ fn main() {
     // Configure network
     let dialable = format!("{}:{}", ip, config.port);
     let dialable_socket = SocketAddr::from_str(&dialable).expect("Could not parse dialable socket");
-    let p2p_cfg = authenticated::Config::recommended(
+    let mut p2p_cfg = authenticated::Config::recommended(
         signer.clone(),
         &union(FLOOD_NAMESPACE, b"_P2P"),
         dialable_socket, // TODO: maybe change var name?
         bootstrappers,
         config.message_size,
     );
+    p2p_cfg.mailbox_size = 16_384;
 
     // Start runtime
     executor.start(async move {
