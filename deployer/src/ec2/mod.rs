@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::{net::IpAddr, path::PathBuf};
 use thiserror::Error;
 
 mod aws;
@@ -88,7 +88,7 @@ pub struct Peer {
     pub region: String,
 
     /// Public IP address of the peer
-    pub ip: String,
+    pub ip: IpAddr,
 }
 
 /// List of peers

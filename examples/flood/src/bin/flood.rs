@@ -48,7 +48,7 @@ fn main() {
     let peer_file = matches.get_one::<String>("peers").unwrap();
     let peers_file = std::fs::read_to_string(peer_file).expect("Could not read peers file");
     let peers: Peers = serde_yaml::from_str(&peers_file).expect("Could not parse peers file");
-    let peers: HashMap<PublicKey, String> = peers
+    let peers: HashMap<PublicKey, IpAddr> = peers
         .peers
         .into_iter()
         .map(|peer| {
@@ -67,13 +67,10 @@ fn main() {
     let key = PrivateKey::try_from(key).expect("Private key is invalid");
     let signer = <Ed25519 as Scheme>::from(key).expect("Could not create signer");
     let public_key = signer.public_key();
-    let ip = peers
-        .get(&public_key)
-        .expect("Could not find self in IPs")
-        .clone();
+    let ip = peers.get(&public_key).expect("Could not find self in IPs");
     info!(
         ?public_key,
-        ip,
+        ?ip,
         port = config.port,
         message_size = config.message_size,
         "loaded config"
@@ -100,13 +97,11 @@ fn main() {
     let (executor, context) = tokio::Executor::init(cfg);
 
     // Configure network
-    let dialable = format!("{}:{}", ip, config.port);
-    let dialable_socket = SocketAddr::from_str(&dialable).expect("Could not parse dialable socket");
     let mut p2p_cfg = authenticated::Config::recommended(
         signer.clone(),
         &union(FLOOD_NAMESPACE, b"_P2P"),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), config.port),
-        dialable_socket,
+        SocketAddr::new(*ip, config.port),
         bootstrappers,
         config.message_size,
     );

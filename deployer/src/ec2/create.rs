@@ -5,6 +5,7 @@ use crate::ec2::{
 use futures::future::try_join_all;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::File;
+use std::net::IpAddr;
 use std::path::PathBuf;
 use tokio::process::Command;
 use tracing::info;
@@ -429,7 +430,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             .map(|d| Peer {
                 name: d.instance.name.clone(),
                 region: d.instance.region.clone(),
-                ip: d.ip.clone(),
+                ip: d.ip.clone().parse::<IpAddr>().unwrap(),
             })
             .collect(),
     };
