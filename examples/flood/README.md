@@ -5,7 +5,7 @@
 ### Create Artifacts
 
 ```bash
-cargo run --bin setup -- --peers 2 --bootstrappers 1 --regions us-west-2,us-east-1 --instance-type t4g.small --storage-size 10 --storage-class gp2 --dashboard dashboard.json --output assets
+cargo run --bin setup -- --peers 3 --bootstrappers 1 --regions us-west-2,us-east-1,eu-west-1 --instance-type c7g.medium --storage-size 10 --storage-class gp3 --dashboard dashboard.json --output assets
 ```
 
 ### Build Flood Binary
