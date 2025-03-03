@@ -1,17 +1,16 @@
 use crate::ec2::{
-    aws::*, deployer_directory, utils::*, Config, InstanceConfig, CREATED_FILE_NAME,
+    aws::*, deployer_directory, utils::*, Config, Error, InstanceConfig, CREATED_FILE_NAME,
     DESTROYED_FILE_NAME, MONITORING_NAME, MONITORING_REGION,
 };
 use aws_sdk_ec2::types::Filter;
 use futures::future::try_join_all;
 use std::collections::HashMap;
-use std::error::Error;
 use std::fs::File;
 use std::path::PathBuf;
 use tracing::{error, info};
 
 /// Updates the binary and configuration on all regular nodes
-pub async fn update(config_path: &PathBuf) -> Result<(), Box<dyn Error>> {
+pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
     // Load config
     let config: Config = {
         let config_file = File::open(config_path)?;
@@ -24,19 +23,19 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Box<dyn Error>> {
     let temp_dir = deployer_directory(tag);
     let created_file = temp_dir.join(CREATED_FILE_NAME);
     if !created_file.exists() {
-        return Err("infrastructure deployment is not complete".into());
+        return Err(Error::DeploymentNotComplete(tag.clone()));
     }
 
     // Ensure destroyed file does not exist
     let destroyed_file = temp_dir.join(DESTROYED_FILE_NAME);
     if destroyed_file.exists() {
-        return Err("infrastructure already destroyed".into());
+        return Err(Error::DeploymentAlreadyDestroyed(tag.clone()));
     }
 
     // Construct private key path (assumes it exists from create command)
     let private_key_path = temp_dir.join(format!("id_rsa_{}", tag));
     if !private_key_path.exists() {
-        return Err("private key not found".into());
+        return Err(Error::PrivateKeyNotFound);
     }
 
     // Create a map from instance name to InstanceConfig for lookup
@@ -62,7 +61,8 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Box<dyn Error>> {
             .describe_instances()
             .filters(Filter::builder().name("tag:deployer").values(tag).build())
             .send()
-            .await?;
+            .await
+            .map_err(|err| err.into_service_error())?;
         for reservation in resp.reservations.unwrap_or_default() {
             for instance in reservation.instances.unwrap_or_default() {
                 if let Some(tags) = &instance.tags {
@@ -76,7 +76,7 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Box<dyn Error>> {
                                     name = name_tag.value.clone().unwrap(),
                                     ip = public_ip,
                                     "found instance"
-                                )
+                                );
                             }
                         }
                     }
@@ -96,7 +96,7 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Box<dyn Error>> {
             let future = async move {
                 update_instance(private_key, &ip, &binary_path, &config_path).await?;
                 info!(name, "instance updated");
-                Ok::<(), Box<dyn Error>>(())
+                Ok::<(), Error>(())
             };
             futures.push(future);
         } else {
@@ -116,7 +116,7 @@ async fn update_instance(
     ip: &str,
     binary_path: &str,
     config_path: &str,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), Error> {
     // Stop the binary service
     ssh_execute(private_key, ip, "sudo systemctl stop binary").await?;
 

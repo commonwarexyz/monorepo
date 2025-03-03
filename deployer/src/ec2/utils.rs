@@ -1,9 +1,10 @@
+use crate::ec2::Error;
 use commonware_cryptography::hash;
 use commonware_utils::hex;
-use std::error::Error;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 use tokio::time::{sleep, Duration};
+use tracing::debug;
 
 /// Maximum number of SSH connection attempts before failing
 pub const MAX_SSH_ATTEMPTS: usize = 10;
@@ -15,7 +16,7 @@ pub const MAX_POLL_ATTEMPTS: usize = 30;
 pub const RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Fetch the public IPv4 address of a machine
-pub async fn get_public_ip() -> Result<String, Box<dyn Error>> {
+pub async fn get_public_ip() -> Result<String, Error> {
     let result = reqwest::get("https://ipv4.icanhazip.com")
         .await?
         .text()
@@ -26,7 +27,7 @@ pub async fn get_public_ip() -> Result<String, Box<dyn Error>> {
 }
 
 /// Downloads a file from a URL to a local destination
-async fn download_file(url: &str, dest: &Path) -> Result<(), Box<dyn Error>> {
+async fn download_file(url: &str, dest: &Path) -> Result<(), Error> {
     let response = reqwest::get(url).await?;
     let bytes = response.bytes().await?;
     std::fs::write(dest, bytes)?;
@@ -34,11 +35,7 @@ async fn download_file(url: &str, dest: &Path) -> Result<(), Box<dyn Error>> {
 }
 
 /// Downloads a file from a URL if it does not exist in the cache directory
-pub async fn download_and_cache(
-    cache_dir: &str,
-    url: &str,
-    dest: &Path,
-) -> Result<(), Box<dyn Error>> {
+pub async fn download_and_cache(cache_dir: &str, url: &str, dest: &Path) -> Result<(), Error> {
     let cache_key = hex(&hash(url.to_string().as_bytes()));
     let cache_path = PathBuf::from(cache_dir).join(cache_key);
     if !cache_path.exists() {
@@ -54,7 +51,7 @@ pub async fn scp_file(
     local_path: &str,
     ip: &str,
     remote_path: &str,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), Error> {
     for _ in 0..MAX_SSH_ATTEMPTS {
         let status = Command::new("scp")
             .arg("-i")
@@ -70,13 +67,14 @@ pub async fn scp_file(
         if status.success() {
             return Ok(());
         }
+        debug!(error = ?status, "SCP failed");
         sleep(RETRY_INTERVAL).await;
     }
-    Err("SCP failed after maximum attempts".into())
+    Err(Error::ScpFailed)
 }
 
 /// Executes a command on a remote instance via SSH with retries
-pub async fn ssh_execute(key_file: &str, ip: &str, command: &str) -> Result<(), Box<dyn Error>> {
+pub async fn ssh_execute(key_file: &str, ip: &str, command: &str) -> Result<(), Error> {
     for _ in 0..MAX_SSH_ATTEMPTS {
         let status = Command::new("ssh")
             .arg("-i")
@@ -92,17 +90,14 @@ pub async fn ssh_execute(key_file: &str, ip: &str, command: &str) -> Result<(), 
         if status.success() {
             return Ok(());
         }
+        debug!(error = ?status, "SSH failed");
         sleep(RETRY_INTERVAL).await;
     }
-    Err("SSH failed after maximum attempts".into())
+    Err(Error::SshFailed)
 }
 
 /// Polls the status of a systemd service on a remote instance until active
-pub async fn poll_service_active(
-    key_file: &str,
-    ip: &str,
-    service: &str,
-) -> Result<(), Box<dyn Error>> {
+pub async fn poll_service_active(key_file: &str, ip: &str, service: &str) -> Result<(), Error> {
     for _ in 0..MAX_POLL_ATTEMPTS {
         let status = Command::new("ssh")
             .arg("-i")
@@ -118,15 +113,11 @@ pub async fn poll_service_active(
         }
         sleep(RETRY_INTERVAL).await;
     }
-    Err(format!("Service {} failed to become active on {}", service, ip).into())
+    Err(Error::ServiceTimeout(ip.to_string(), service.to_string()))
 }
 
 /// Polls the status of a systemd service on a remote instance until it becomes inactive
-pub async fn poll_service_inactive(
-    key_file: &str,
-    ip: &str,
-    service: &str,
-) -> Result<(), Box<dyn Error>> {
+pub async fn poll_service_inactive(key_file: &str, ip: &str, service: &str) -> Result<(), Error> {
     for _ in 0..MAX_POLL_ATTEMPTS {
         let output = Command::new("ssh")
             .arg("-i")
@@ -142,5 +133,5 @@ pub async fn poll_service_inactive(
         }
         sleep(RETRY_INTERVAL).await;
     }
-    Err(format!("Service {} failed to become inactive on {}", service, ip).into())
+    Err(Error::ServiceTimeout(ip.to_string(), service.to_string()))
 }

@@ -919,6 +919,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_yaml",
+ "thiserror",
  "tokio",
  "tracing",
  "tracing-subscriber",

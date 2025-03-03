@@ -1,10 +1,9 @@
 use crate::ec2::{
-    aws::*, deployer_directory, services::*, utils::*, Config, InstanceConfig, Peer, Peers,
+    aws::*, deployer_directory, services::*, utils::*, Config, Error, InstanceConfig, Peer, Peers,
     CREATED_FILE_NAME, MONITORING_NAME, MONITORING_REGION,
 };
 use futures::future::try_join_all;
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::error::Error;
 use std::fs::File;
 use std::path::PathBuf;
 use tokio::process::Command;
@@ -31,7 +30,7 @@ pub struct RegionResources {
 }
 
 /// Sets up EC2 instances, deploys files, and configures monitoring and logging
-pub async fn create(config: &PathBuf) -> Result<(), Box<dyn Error>> {
+pub async fn create(config: &PathBuf) -> Result<(), Error> {
     // Load configuration from YAML file
     let config: Config = {
         let config_file = File::open(config)?;
@@ -43,7 +42,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Box<dyn Error>> {
     // Create a temporary directory for local files
     let temp_dir = deployer_directory(tag);
     if temp_dir.exists() {
-        return Err("creation already attempted".into());
+        return Err(Error::CreationAttempted);
     }
     std::fs::create_dir_all(&temp_dir)?;
     info!(path = ?temp_dir, "created temporary directory");
@@ -52,7 +51,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Box<dyn Error>> {
     let mut instance_names = HashSet::new();
     for instance in &config.instances {
         if instance_names.contains(&instance.name) || instance.name == MONITORING_NAME {
-            return Err(format!("invalid instance name: {}", instance.name).into());
+            return Err(Error::InvalidInstanceName(instance.name.clone()));
         }
         instance_names.insert(instance.name.clone());
     }
@@ -112,7 +111,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Box<dyn Error>> {
         .output()
         .await?;
     if !output.status.success() {
-        return Err(format!("failed to generate SSH key: {:?}", output).into());
+        return Err(Error::KeygenFailed);
     }
     let public_key = std::fs::read_to_string(&public_key_path)?;
     let private_key = private_key_path.to_str().unwrap();
@@ -407,7 +406,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Box<dyn Error>> {
                 instance = instance.name.as_str(),
                 "launched instance"
             );
-            Ok::<Deployment, Box<dyn Error>>(Deployment {
+            Ok::<Deployment, Error>(Deployment {
                 instance: instance.clone(),
                 ip,
             })
@@ -608,7 +607,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Box<dyn Error>> {
                 instance = instance.name.as_str(),
                 "configured instance"
             );
-            Ok::<String, Box<dyn Error>>(ip)
+            Ok::<String, Error>(ip)
         };
         start_futures.push(future);
     }
@@ -639,7 +638,8 @@ pub async fn create(config: &PathBuf) -> Result<(), Box<dyn Error>> {
                     .build(),
             )
             .send()
-            .await?;
+            .await
+            .map_err(|err| err.into_service_error())?;
         info!(
             monitoring = monitoring_sg_id.as_str(),
             regular = regular_sg_id.as_str(),
@@ -662,7 +662,8 @@ pub async fn create(config: &PathBuf) -> Result<(), Box<dyn Error>> {
                         .build(),
                 )
                 .send()
-                .await?;
+                .await
+                .map_err(|err| err.into_service_error())?;
             info!(
                 monitoring = monitoring_sg_id.as_str(),
                 regular = regular_cidr.as_str(),

@@ -2,7 +2,7 @@
 
 use clap::{Arg, ArgAction, Command};
 use commonware_utils::crate_version;
-use std::{error::Error, path::PathBuf};
+use std::path::PathBuf;
 use tracing::error;
 
 mod ec2;
@@ -12,7 +12,7 @@ const VERBOSE_FLAG: &str = "verbose";
 
 /// Entrypoint for the Commonware Deployer CLI
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+async fn main() -> std::process::ExitCode {
     // Define application
     let matches = Command::new("deployer")
         .version(crate_version())
@@ -80,7 +80,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 if let Err(e) = ec2::create(config_path).await {
                     error!(error=?e, "failed to create EC2 deployment");
                 } else {
-                    return Ok(());
+                    return std::process::ExitCode::SUCCESS;
                 }
             }
             Some((ec2::UPDATE_CMD, matches)) => {
@@ -88,7 +88,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 if let Err(e) = ec2::update(config_path).await {
                     error!(error=?e, "failed to update EC2 deployment");
                 } else {
-                    return Ok(());
+                    return std::process::ExitCode::SUCCESS;
                 }
             }
             Some((ec2::DESTROY_CMD, matches)) => {
@@ -96,7 +96,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 if let Err(e) = ec2::destroy(config_path).await {
                     error!(error=?e, "failed to destroy EC2 deployment");
                 } else {
-                    return Ok(());
+                    return std::process::ExitCode::SUCCESS;
                 }
             }
             Some((cmd, _)) => {
@@ -111,5 +111,5 @@ async fn main() -> Result<(), Box<dyn Error>> {
     } else {
         error!("no subcommand provided");
     }
-    std::process::exit(1);
+    std::process::ExitCode::FAILURE
 }

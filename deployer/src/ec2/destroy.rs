@@ -1,12 +1,13 @@
-use crate::ec2::{aws::*, deployer_directory, Config, DESTROYED_FILE_NAME, MONITORING_REGION};
+use crate::ec2::{
+    aws::*, deployer_directory, Config, Error, DESTROYED_FILE_NAME, MONITORING_REGION,
+};
 use std::collections::HashSet;
-use std::error::Error;
 use std::fs::File;
 use std::path::PathBuf;
 use tracing::{info, warn};
 
 /// Tears down all resources associated with the deployment tag
-pub async fn destroy(config: &PathBuf) -> Result<(), Box<dyn Error>> {
+pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
     // Load configuration
     let config: Config = {
         let config_file = File::open(config)?;
@@ -18,7 +19,7 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Box<dyn Error>> {
     // Ensure deployment directory exists
     let temp_dir = deployer_directory(tag);
     if !temp_dir.exists() {
-        return Err("infrastructure deployment does not exist".into());
+        return Err(Error::DeploymentDoesNotExist(tag.clone()));
     }
 
     // Ensure not already destroyed
