@@ -35,6 +35,21 @@ _Sometimes, we opt to maintain software that is neither a primitive nor an examp
 * [docs](./docs): Access information about Commonware at https://commonware.xyz.
 * [macros](./macros/README.md): Augment the development of primitives with procedural macros.
 * [utils](./utils/README.md): Leverage common functionality across multiple primitives.
+* [contracts](./contracts/README.md): Smart contracts for on-chain verification and interaction.
+
+### Solidity Verifier
+
+The `SimplexVerifier` contract in `contracts/` provides on-chain verification capabilities for Simplex consensus proofs. It implements deserialization functions for various proof types used in the `consensus::simplex` module:
+
+- `deserializeNotarize`: Deserialize notarization proof
+- `deserializeNotarization`: Deserialize aggregated notarization proof
+- `deserializeFinalize`: Deserialize finalization proof
+- `deserializeFinalization`: Deserialize aggregated finalization proof
+- `deserializeConflictingNotarize`: Deserialize conflicting notarization proof
+- `deserializeConflictingFinalize`: Deserialize conflicting finalization proof
+- `deserializeNullifyFinalize`: Deserialize nullify finalization proof
+
+This allows restaking users to verify fraud proofs and uptime emissions from consensus directly on-chain. For more details, see the [contracts documentation](./contracts/README.md).
 
 ## Licensing
 

@@ -1,4 +1,20 @@
-*.swp
-*.DS_Store
-/target
-*.vscode
+# Foundry
+cache/
+out/
+broadcast/
+
+# Dependencies
+lib/
+
+# Env
+.env
+.env.*
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# Misc
+.DS_Store
+*.log
