@@ -134,6 +134,8 @@ fn main() {
                 let mut rng = StdRng::seed_from_u64(0);
                 let messages: Counter<u64, AtomicU64> = Counter::default();
                 context.register("messages", "Sent messages", messages.clone());
+                let data: Counter<u64, AtomicU64> = Counter::default();
+                context.register("data", "Sent data", data.clone());
                 loop {
                     // Create message
                     let mut msg = Vec::with_capacity(config.message_size);
@@ -146,20 +148,25 @@ fn main() {
                         error!(?e, "could not send flood message");
                     }
                     messages.inc();
+                    data.inc_by(config.message_size as u64);
                 }
             });
-        let flood_receiver = context
-            .with_label("flood_receiver")
-            .spawn(|context| async move {
-                let messages: Counter<u64, AtomicU64> = Counter::default();
-                context.register("messages", "Received messages", messages.clone());
-                loop {
-                    if let Err(e) = flood_receiver.recv().await {
-                        error!(?e, "could not receive flood message");
+        let flood_receiver =
+            context
+                .with_label("flood_receiver")
+                .spawn(move |context| async move {
+                    let messages: Counter<u64, AtomicU64> = Counter::default();
+                    context.register("messages", "Received messages", messages.clone());
+                    let data: Counter<u64, AtomicU64> = Counter::default();
+                    context.register("data", "Received data", data.clone());
+                    loop {
+                        if let Err(e) = flood_receiver.recv().await {
+                            error!(?e, "could not receive flood message");
+                        }
+                        messages.inc();
+                        data.inc_by(config.message_size as u64);
                     }
-                    messages.inc();
-                }
-            });
+                });
 
         // Start system metrics collector
         let system = context.with_label("system").spawn(|context| async move {
