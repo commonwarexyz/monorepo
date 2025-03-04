@@ -103,6 +103,7 @@ impl<C: Scheme> Config<C> {
         crypto: C,
         namespace: &[u8],
         listen: SocketAddr,
+        dialable: SocketAddr,
         bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
         max_message_size: usize,
     ) -> Self {
@@ -110,7 +111,7 @@ impl<C: Scheme> Config<C> {
             crypto,
             namespace: namespace.to_vec(),
             listen,
-            dialable: listen,
+            dialable,
             bootstrappers,
 
             allow_private_ips: false,
@@ -140,6 +141,7 @@ impl<C: Scheme> Config<C> {
         crypto: C,
         namespace: &[u8],
         listen: SocketAddr,
+        dialable: SocketAddr,
         bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
         max_message_size: usize,
     ) -> Self {
@@ -147,7 +149,7 @@ impl<C: Scheme> Config<C> {
             crypto,
             namespace: namespace.to_vec(),
             listen,
-            dialable: listen,
+            dialable,
             bootstrappers,
 
             allow_private_ips: true,

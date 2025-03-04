@@ -125,7 +125,8 @@
 //! let p2p_cfg = authenticated::Config::aggressive(
 //!     signer.clone(),
 //!     application_namespace,
-//!     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3000),
+//!     SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 3000),
+//!     SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 3000),
 //!     bootstrappers,
 //!     MAX_MESSAGE_SIZE,
 //! );

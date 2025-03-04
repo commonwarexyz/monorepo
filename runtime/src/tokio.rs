@@ -35,7 +35,7 @@ use rand::{rngs::OsRng, CryptoRng, RngCore};
 use std::{
     env,
     future::Future,
-    io::SeekFrom,
+    io::{self, SeekFrom},
     net::SocketAddr,
     path::PathBuf,
     sync::{Arc, Mutex},
@@ -522,6 +522,20 @@ impl crate::Listener<Sink, Stream> for Listener {
             },
             Stream { context, stream },
         ))
+    }
+}
+
+impl axum::serve::Listener for Listener {
+    type Io = TcpStream;
+    type Addr = SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        let (stream, addr) = self.listener.accept().await.unwrap();
+        (stream, addr)
+    }
+
+    fn local_addr(&self) -> io::Result<Self::Addr> {
+        self.listener.local_addr()
     }
 }
 
