@@ -53,21 +53,21 @@ pub async fn scp_file(
     remote_path: &str,
 ) -> Result<(), Error> {
     for _ in 0..MAX_SSH_ATTEMPTS {
-        let status = Command::new("scp")
+        let output = Command::new("scp")
             .arg("-i")
             .arg(key_file)
+            .arg("-o")
+            .arg("ServerAliveInterval=600")
             .arg("-o")
             .arg("StrictHostKeyChecking=no")
             .arg(local_path)
             .arg(format!("ubuntu@{}:{}", ip, remote_path))
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
+            .output()
             .await?;
-        if status.success() {
+        if output.status.success() {
             return Ok(());
         }
-        warn!(error = ?status, "SCP failed");
+        warn!(error = ?String::from_utf8_lossy(&output.stderr), "SCP failed");
         sleep(RETRY_INTERVAL).await;
     }
     Err(Error::ScpFailed)
@@ -76,21 +76,21 @@ pub async fn scp_file(
 /// Executes a command on a remote instance via SSH with retries
 pub async fn ssh_execute(key_file: &str, ip: &str, command: &str) -> Result<(), Error> {
     for _ in 0..MAX_SSH_ATTEMPTS {
-        let status = Command::new("ssh")
+        let output = Command::new("ssh")
             .arg("-i")
             .arg(key_file)
+            .arg("-o")
+            .arg("ServerAliveInterval=600")
             .arg("-o")
             .arg("StrictHostKeyChecking=no")
             .arg(format!("ubuntu@{}", ip))
             .arg(command)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
+            .output()
             .await?;
-        if status.success() {
+        if output.status.success() {
             return Ok(());
         }
-        warn!(error = ?status, "SSH failed");
+        warn!(error = ?String::from_utf8_lossy(&output.stderr), "SSH failed");
         sleep(RETRY_INTERVAL).await;
     }
     Err(Error::SshFailed)
@@ -103,6 +103,8 @@ pub async fn poll_service_active(key_file: &str, ip: &str, service: &str) -> Res
             .arg("-i")
             .arg(key_file)
             .arg("-o")
+            .arg("ServerAliveInterval=600")
+            .arg("-o")
             .arg("StrictHostKeyChecking=no")
             .arg(format!("ubuntu@{}", ip))
             .arg(format!("systemctl is-active {}", service))
@@ -111,7 +113,7 @@ pub async fn poll_service_active(key_file: &str, ip: &str, service: &str) -> Res
         if output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "active" {
             return Ok(());
         }
-        warn!(error = ?output.status, service, "active status check failed");
+        warn!(error = ?String::from_utf8_lossy(&output.stderr), service, "active status check failed");
         sleep(RETRY_INTERVAL).await;
     }
     Err(Error::ServiceTimeout(ip.to_string(), service.to_string()))
@@ -124,6 +126,8 @@ pub async fn poll_service_inactive(key_file: &str, ip: &str, service: &str) -> R
             .arg("-i")
             .arg(key_file)
             .arg("-o")
+            .arg("ServerAliveInterval=600")
+            .arg("-o")
             .arg("StrictHostKeyChecking=no")
             .arg(format!("ubuntu@{}", ip))
             .arg(format!("systemctl is-active {}", service))
@@ -132,7 +136,7 @@ pub async fn poll_service_inactive(key_file: &str, ip: &str, service: &str) -> R
         if String::from_utf8_lossy(&output.stdout).trim() == "inactive" {
             return Ok(());
         }
-        warn!(error = ?output.status, service, "inactive status check failed");
+        warn!(error = ?String::from_utf8_lossy(&output.stderr), service, "inactive status check failed");
         sleep(RETRY_INTERVAL).await;
     }
     Err(Error::ServiceTimeout(ip.to_string(), service.to_string()))
