@@ -1,10 +1,10 @@
 //! Deploy infrastructure across cloud providers.
 //!
-//! `commonware-deployer` is a library and CLI that automates the deployment of infrastructure across
-//! different cloud providers. `commonware-deployer` is frequently used to bridge the gap between
-//! local deployment (TODO).
+//! `commonware-deployer` automates the deployment of infrastructure across different cloud providers, closing the gap
+//! between local demo and long-lived deployment. `commonware-deployer` is both available as a CLI tool for standard
+//! operation and as a library for custom workflows.
 //!
-//! # Installation
+//! # CLI Installation
 //!
 //! ## Local
 //!
@@ -18,19 +18,24 @@
 //! cargo install commonware-deployer
 //! ```
 //!
-//! # Commands
+//! # CLI Commands
 //!
-//! ## `deployer ec2`
+//! _While the crate is named `commonware-deployer`, the CLI is named `deployer`._
 //!
-//! ### `deployer ec2 create`
+//! ## `ec2`
+//!
+//! Deploy a custom binary (and configuration) to any number of EC2 instances across multiple regions. Collect
+//! metrics and logs from all instances via a private network.
+//!
+//! ### `create`
 //!
 //! Deploy EC2 instances across multiple regions from a YAML configuration file.
 //!
-//! ### `deployer ec2 update`
+//! ### `update`
 //!
-//! Update binary and configuration files in-place on all instances (instead of redeploying).
+//! Update binaries (and configurations) in-place on all instances.
 //!
-//! ### `deployer ec2 destroy`
+//! ### `destroy`
 //!
 //! Destroy all resources associated with a given deployment.
 
