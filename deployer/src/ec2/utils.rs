@@ -119,3 +119,22 @@ pub async fn poll_service_inactive(key_file: &str, ip: &str, service: &str) -> R
     }
     Err(Error::ServiceTimeout(ip.to_string(), service.to_string()))
 }
+
+/// Enables BBR on a remote instance by copying and applying sysctl settings.
+pub async fn enable_bbr(key_file: &str, ip: &str, bbr_conf_local_path: &str) -> Result<(), Error> {
+    scp_file(
+        key_file,
+        bbr_conf_local_path,
+        ip,
+        "/home/ubuntu/99-bbr.conf",
+    )
+    .await?;
+    ssh_execute(
+        key_file,
+        ip,
+        "sudo mv /home/ubuntu/99-bbr.conf /etc/sysctl.d/99-bbr.conf",
+    )
+    .await?;
+    ssh_execute(key_file, ip, "sudo sysctl -p /etc/sysctl.d/99-bbr.conf").await?;
+    Ok(())
+}

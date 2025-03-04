@@ -413,6 +413,13 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     let binary_service_path = temp_dir.join("binary.service");
     std::fs::write(&binary_service_path, BINARY_SERVICE)?;
 
+    // Add BBR configuration file
+    let bbr_conf_path = temp_dir.join("99-bbr.conf");
+    std::fs::write(
+        &bbr_conf_path,
+        "net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr\n",
+    )?;
+
     // Configure monitoring instance
     info!("configuring monitoring instance");
     wait_for_instances_ready(&ec2_clients[&monitoring_region], &[monitoring_instance_id]).await?;
@@ -478,6 +485,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         "/home/ubuntu/loki.service",
     )
     .await?;
+    enable_bbr(private_key, &monitoring_ip, bbr_conf_path.to_str().unwrap()).await?;
     ssh_execute(
         private_key,
         &monitoring_ip,
@@ -499,6 +507,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         let ip = deployment.ip.clone();
         let monitoring_private_ip = monitoring_private_ip.clone();
         let peers_path = peers_path.clone();
+        let bbr_conf_path = bbr_conf_path.clone();
         let promtail_service_path = promtail_service_path.clone();
         let binary_service_path = binary_service_path.clone();
         let future = async move {
@@ -543,6 +552,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                 "/home/ubuntu/binary.service",
             )
             .await?;
+            enable_bbr(private_key, &ip, bbr_conf_path.to_str().unwrap()).await?;
             ssh_execute(private_key, &ip, &setup_promtail_cmd(PROMTAIL_VERSION)).await?;
             poll_service_active(private_key, &ip, "promtail").await?;
             ssh_execute(private_key, &ip, INSTALL_BINARY_CMD).await?;
