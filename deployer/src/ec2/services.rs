@@ -205,6 +205,7 @@ sudo mv /home/ubuntu/prometheus.yml /opt/prometheus/prometheus.yml
 sudo mv /home/ubuntu/datasources.yml /etc/grafana/provisioning/datasources/datasources.yml
 sudo mv /home/ubuntu/all.yml /etc/grafana/provisioning/dashboards/all.yml
 sudo mv /home/ubuntu/dashboard.json /var/lib/grafana/dashboards/dashboard.json
+sudo mkdir -p /etc/loki
 sudo mv /home/ubuntu/loki.yml /etc/loki/loki.yml
 sudo chown root:root /etc/loki/loki.yml
 
@@ -256,8 +257,8 @@ sudo apt-get install -y wget unzip
 
 # Download Promtail with retries
 for i in {{1..5}}; do
-wget -O /home/ubuntu/promtail.zip {} && break
-sleep 10
+  wget -O /home/ubuntu/promtail.zip {} && break
+  sleep 10
 done
 
 sudo mkdir -p /opt/promtail
