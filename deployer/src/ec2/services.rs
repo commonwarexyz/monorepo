@@ -46,6 +46,7 @@ After=network.target
 
 [Service]
 ExecStart=/opt/prometheus/prometheus --config.file=/opt/prometheus/prometheus.yml --storage.tsdb.path=/opt/prometheus/data
+TimeoutStopSec=60
 Restart=always
 User=ubuntu
 
@@ -61,6 +62,7 @@ After=network.target
 
 [Service]
 ExecStart=/opt/promtail/promtail -config.file=/etc/promtail/promtail.yml
+TimeoutStopSec=60
 Restart=always
 User=ubuntu
 
@@ -76,6 +78,7 @@ After=network.target
 
 [Service]
 ExecStart=/opt/loki/loki -config.file=/etc/loki/loki.yml
+TimeoutStopSec=60
 Restart=always
 User=ubuntu
 
@@ -91,6 +94,7 @@ After=network.target
 
 [Service]
 ExecStart=/home/ubuntu/binary --peers=/home/ubuntu/peers.yaml --config=/home/ubuntu/config.conf
+TimeoutStopSec=60
 Restart=always
 User=ubuntu
 StandardOutput=append:/var/log/binary.log
