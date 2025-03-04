@@ -1,20 +1,84 @@
 //! AWS EC2 deployer
 //!
-//! Deploy a custom binary (and configuration) to any number of EC2 instances across multiple regions. Collect metrics and logs
-//! from all instances via a private network.
+//! Deploy a custom binary (and configuration) to any number of EC2 instances across multiple regions. View metrics and logs
+//! from all instances with Grafana.
 //!
 //! # Features
 //!
-//! - **Automated Deployment**: Creates VPCs, subnets, security groups, and EC2 instances.
-//! - **Monitoring Setup**: Deploys Prometheus, Grafana, Loki, and Promtail for monitoring and logging.
-//! - **Multi-Region Support**: Deploys instances across multiple AWS regions with VPC peering.
-//! - **SSH Key Management**: Generates and imports SSH key pairs for secure instance access.
-//! - **Service Management**: Configures systemd services for the deployed binary and monitoring tools.
-//! - **Update and Destroy**: Provides commands to update binaries/configurations or destroy deployments.
+//! * Automated creation, update, and destruction of EC2 instances across multiple regions
+//! * Provide a unique name, instance type, region, binary, and configuration for each deployed instance
+//! * Collect metrics and logs from all deployed instances on a long-lived monitoring instance (accessible only to the deployer's IP)
 //!
 //! # Architecture
 //!
+//! ## Components
 //!
+//! ### Monitoring Instance
+//! * Deployed in `us-east-1` with a configurable ARM64 instance type (e.g., `t4g.small`) and storage (e.g., 10GB gp2).
+//! * Runs:
+//!     * **Prometheus**: Scrapes metrics from all instances at `:9090`, configured via `/opt/prometheus/prometheus.yml`.
+//!     * **Grafana**: Hosted at `:3000`, provisioned with Prometheus and Loki datasources and a custom dashboard.
+//!     * **Loki**: Listens at `:3100`, storing logs in `/loki/chunks` with a TSDB index at `/loki/index`.
+//! * Security:
+//!     * Allows deployer IP access (TCP 0-65535).
+//!     * Binary instance traffic to Loki (TCP 3100).
+//!
+//! ### Binary Instances
+//! * Deployed in user-specified regions with configurable ARM64 instance types and storage.
+//! * Run:
+//!     * **Custom Binary**: Executes with `--peers=/home/ubuntu/peers.yaml --config=/home/ubuntu/config.conf`, exposing metrics at `:9090` (assumed).
+//!     * **Promtail**: Forwards `/var/log/binary.log` to Loki on the monitoring instance.
+//! * Security:
+//!     * Deployer IP access (TCP 0-65535).
+//!     * Monitoring IP access to `:9090` for Prometheus scraping.
+//!         * User-defined ports from the configuration.
+//!
+//! ## Networking
+//!
+//! ### VPCs
+//!
+//! One per region with CIDR `10.<region-index>.0.0/16` (e.g., `10.0.0.0/16` for `us-east-1`).
+//!
+//! ### Subnets
+//!
+//! Single subnet per VPC (e.g., `10.<region-index>.1.0/24`), linked to a route table with an internet gateway.
+//!
+//! ### VPC Peering
+//!
+//! Connects the monitoring VPC to each binary VPC, with routes added to route tables for private communication.
+//!
+//! ### Security Groups
+//!
+//! Separate for monitoring (tag) and binary instances (`{tag}-binary`), dynamically configured for deployer and inter-instance traffic.
+//!
+//! # Workflow
+//!
+//! ## `ec2 create`
+//!
+//! 1. Validates configuration and generates an SSH key pair, stored in `/tmp/deployer-{tag}/id_rsa_{tag}`.
+//! 2. Creates VPCs, subnets, internet gateways, route tables, and security groups per region.
+//! 3. Establishes VPC peering between the monitoring region and binary regions.
+//! 4. Launches the monitoring instance, uploads service files, and installs Prometheus, Grafana, and Loki.
+//! 5. Launches binary instances, uploads binaries, configurations, and peers.yaml, and installs Promtail and the binary.
+//! 6. Configures BBR on all instances and updates the monitoring security group for Loki traffic.
+//! 7. Marks completion with `/tmp/deployer-{tag}/created`.
+//!
+//! ## `ec2 update`
+//!
+//! 1. Stops the `binary` service on each binary instance.
+//! 2. Uploads the latest binary and configuration from the YAML config.
+//! 3. Restarts the `binary` service, ensuring minimal downtime.
+//!
+//! ## `ec2 destroy`
+//!
+//! 1. Terminates all instances across regions.
+//! 2. Deletes security groups, subnets, route tables, VPC peering connections, internet gateways, key pairs, and VPCs in dependency order.
+//! 3. Marks destruction with `/tmp/deployer-{tag}/destroyed`, retaining the directory to prevent tag reuse.
+//!
+//! # Persistence
+//!
+//! * A temporary directory `/tmp/deployer-{tag}` stores the SSH private key, service files, and status files (`created`, `destroyed`).
+//! * The deployment state is tracked via these files, ensuring operations respect prior create/destroy actions.
 //!
 //! # Example Configuration
 //!
