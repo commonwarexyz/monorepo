@@ -45,11 +45,11 @@ cd assets
 deployer ec2 create --config config.yaml
 ```
 
-## Check Metrics
+## Monitor Performance on Grafana
 
-Visit `http://<monitoring-ip>:3000`
+Visit `http://<monitoring-ip>:3000/d/deeqpmgixrv9cd`
 
-_anonymous login is already enabled, so you don't need to enter a password_
+_`deeqpmgixrv9cd` is the dashboard UID in `dashboard.json`._
 
 ## [Optional] Update Flood Binary
 
@@ -75,11 +75,15 @@ deployer ec2 destroy --config config.yaml
 
 ### EC2 Throttling
 
+EC2 instances may throttle network traffic if a workload exceeds the allocation for a particular instance type. To check
+if an instance is throttled, SSH into the instance and run:
+
 ```bash
 ethtool -S ens5 | grep "allowance"
 ```
 
-If throttled, you'll see a non-zero value for some item:
+If throttled, you'll see a non-zero value for some "allowance" item:
+
 ```txt
 bw_in_allowance_exceeded: 0
 bw_out_allowance_exceeded: 14368

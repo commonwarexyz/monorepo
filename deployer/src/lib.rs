@@ -1,7 +1,7 @@
-//! Deploy infrastructure across cloud providers.
+//! TODO
 //!
 //! `commonware-deployer` automates the deployment of infrastructure across different cloud providers, closing the gap
-//! between local demo and long-lived deployment. `commonware-deployer` is both available as a CLI tool for standard
+//! between a local demo and remote deployment. `commonware-deployer` is both available as a CLI tool for standard
 //! operation and as a library for custom workflows.
 //!
 //! # CLI Installation
