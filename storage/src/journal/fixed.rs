@@ -48,14 +48,18 @@
 //! The `replay` method iterates over multiple blobs concurrently to support fast reading of all
 //! unpruned items into memory.
 
-use super::Error;
+use super::{Error, LruApprox};
 use bytes::BufMut;
 use commonware_runtime::{Blob, Error as RError, Metrics, Storage};
 use commonware_utils::{hex, Array, SizedSerialize};
 use futures::stream::{self, Stream, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
-use std::collections::BTreeMap;
-use std::marker::PhantomData;
+use std::{
+    cmp::min,
+    marker::PhantomData,
+    mem::replace,
+    sync::{Arc, Mutex},
+};
 use tracing::{debug, trace, warn};
 
 /// Configuration for `Journal` storage.
@@ -69,6 +73,9 @@ pub struct Config {
     /// Any unpruned historical blobs will contain exactly this number of items.
     /// Only the newest blob may contain fewer items.
     pub items_per_blob: u64,
+
+    /// The maximum number of blobs to keep open at once.
+    pub cache_capacity: usize,
 }
 
 /// Implementation of `Journal` storage.
@@ -76,16 +83,18 @@ pub struct Journal<B: Blob, E: Storage<B> + Metrics, A: Array> {
     context: E,
     cfg: Config,
 
-    // Blobs are stored in a BTreeMap to ensure they are always iterated in order of their indices.
-    // Invariants:
-    // - Indices are consecutive and without gaps.
-    // - There will always be at least one blob in the map.
-    // - The most recent blob will never be completely full, but it may be empty.
-    blobs: BTreeMap<u64, B>,
+    // The newest blob is always kept open. All other blobs are opened upon access if not already
+    // open, and may be closed by an LRU policy.
+    oldest_blob_index: u64,
+    newest_blob_index: u64,
+    newest_blob: B,
+    blob_cache: Arc<Mutex<LruApprox<u64, B>>>,
 
     tracked: Gauge,
     synced: Counter,
     pruned: Counter,
+    cache_misses: Counter,
+    cache_hits: Counter,
 
     _array: PhantomData<A>,
 }
@@ -94,58 +103,62 @@ impl<B: Blob, E: Storage<B> + Metrics, A: Array> Journal<B, E, A> {
     const CHUNK_SIZE: usize = u32::SERIALIZED_LEN + A::SERIALIZED_LEN;
     const CHUNK_SIZE_U64: u64 = Self::CHUNK_SIZE as u64;
 
-    /// Initialize a new `Journal` instance.
-    ///
-    /// All backing blobs are opened but not read during initialization. The `replay` method can be
-    /// used to iterate over all items in the `Journal`.
+    /// Initialize a new `Journal` instance, opening only the most recent blob.
     pub async fn init(context: E, cfg: Config) -> Result<Self, Error> {
-        // Iterate over blobs in partition
-        let mut blobs = BTreeMap::new();
-        let stored_blobs = match context.scan(&cfg.partition).await {
-            Ok(blobs) => blobs,
+        let blob_names = match context.scan(&cfg.partition).await {
+            Ok(blob_names) => blob_names,
             Err(RError::PartitionMissing(_)) => Vec::new(),
             Err(err) => return Err(Error::Runtime(err)),
         };
-        for name in stored_blobs {
-            let blob = context
-                .open(&cfg.partition, &name)
-                .await
-                .map_err(Error::Runtime)?;
+        let mut blob_names_u64: Vec<u64> = Vec::new();
+        for name in blob_names {
             let index = match name.try_into() {
                 Ok(index) => u64::from_be_bytes(index),
                 Err(nm) => return Err(Error::InvalidBlobName(hex(&nm))),
             };
-            debug!(blob = index, "loaded blob");
-            blobs.insert(index, blob);
+            blob_names_u64.push(index);
         }
-        if !blobs.is_empty() {
-            // Check that there are no gaps in the blob numbering, which would indicate missing data.
-            let mut it = blobs.keys();
-            let mut previous_index = *it.next().unwrap();
-            for index in it {
-                if *index != previous_index + 1 {
-                    return Err(Error::MissingBlob(previous_index + 1));
+        blob_names_u64.sort();
+
+        let (mut newest_blob_index, mut newest_blob) = match blob_names_u64.last() {
+            Some(last) => {
+                // Check that there are no gaps in the blob numbering, which would indicate missing data.
+                let mut it = blob_names_u64.iter();
+                let mut prev = it.next().unwrap();
+                for nm in it {
+                    if *nm != prev + 1 {
+                        return Err(Error::MissingBlob(prev + 1));
+                    }
+                    prev = nm;
                 }
-                previous_index = *index;
+                debug!("blobs found: {}", blob_names_u64.len());
+                (
+                    *last,
+                    context.open(&cfg.partition, &last.to_be_bytes()).await?,
+                )
             }
-        } else {
-            debug!("no blobs found");
-            let blob = context.open(&cfg.partition, &0u64.to_be_bytes()).await?;
-            blobs.insert(0, blob);
-        }
+            None => {
+                debug!("no blobs found");
+                (
+                    0u64,
+                    context.open(&cfg.partition, &0u64.to_be_bytes()).await?,
+                )
+            }
+        };
 
         // Initialize metrics
         let tracked = Gauge::default();
         let synced = Counter::default();
         let pruned = Counter::default();
+        let cache_misses = Counter::default();
+        let cache_hits = Counter::default();
         context.register("tracked", "Number of blobs", tracked.clone());
         context.register("synced", "Number of syncs", synced.clone());
         context.register("pruned", "Number of blobs pruned", pruned.clone());
-        tracked.set(blobs.len() as i64);
+        tracked.set(1i64);
 
         // truncate the last blob if it's not the expected length, which might happen from unclean
         // shutdown.
-        let (newest_blob_index, newest_blob) = blobs.last_key_value().unwrap();
         let mut blob_len: u64 = newest_blob.len().await?;
         if blob_len % Self::CHUNK_SIZE_U64 != 0 {
             warn!(
@@ -167,18 +180,24 @@ impl<B: Blob, E: Storage<B> + Metrics, A: Array> Journal<B, E, A> {
             let next_blob = context
                 .open(&cfg.partition, &next_blob_index.to_be_bytes())
                 .await?;
-            blobs.insert(next_blob_index, next_blob);
-            tracked.inc();
+            newest_blob.close().await?;
+            newest_blob_index = next_blob_index;
+            newest_blob = next_blob;
         }
 
+        let blob_cache = LruApprox::new(cfg.cache_capacity, min(3, cfg.cache_capacity));
         Ok(Self {
             context,
             cfg,
-            blobs,
             tracked,
             synced,
             pruned,
-
+            cache_misses,
+            cache_hits,
+            oldest_blob_index: *blob_names_u64.first().unwrap_or(&newest_blob_index),
+            newest_blob_index,
+            newest_blob,
+            blob_cache: Arc::new(Mutex::new(blob_cache)),
             _array: PhantomData,
         })
     }
@@ -186,56 +205,104 @@ impl<B: Blob, E: Storage<B> + Metrics, A: Array> Journal<B, E, A> {
     /// Sync any pending updates to disk.
     pub async fn sync(&mut self) -> Result<(), Error> {
         self.synced.inc();
-        let newest_blob = self.newest_blob();
-        debug!("syncing blob {}", newest_blob.0);
-        self.newest_blob().1.sync().await.map_err(Error::Runtime)
+        debug!("syncing blob {}", self.newest_blob_index);
+        self.newest_blob.sync().await.map_err(Error::Runtime)
     }
 
     /// Return the total number of items in the journal, irrespective of pruning. The next value
     /// appended to the journal will be at this position.
     pub async fn size(&self) -> Result<u64, Error> {
-        let newest_blob = self.newest_blob();
-        let blob_len = newest_blob.1.len().await?;
+        let blob_len = self.newest_blob.len().await?;
         assert_eq!(blob_len % Self::CHUNK_SIZE_U64, 0);
         let items_in_blob = blob_len / Self::CHUNK_SIZE_U64;
-        Ok(items_in_blob + self.cfg.items_per_blob * newest_blob.0)
+        Ok(items_in_blob + self.cfg.items_per_blob * self.newest_blob_index)
+    }
+
+    /// Hands ownership of the given blob to the LRU cache, evicting an existing blob if necessary.
+    async fn cache_blob(&self, blob: B, blob_index: u64) -> Result<(), Error> {
+        let ejected = { self.blob_cache.lock().unwrap().put(blob_index, blob) };
+        if let Some(blob) = ejected {
+            self.tracked.dec();
+            // TODO: There is a race condition where other readers may exist for this blob and we
+            // end up closing it underneath them. The actual closing of ejected blobs should
+            // probably take place in a &mut self method.
+            blob.close().await?;
+        };
+        Ok(())
     }
 
     /// Append a new item to the journal. Return the item's position in the journal, or error if the
     /// operation fails.
     pub async fn append(&mut self, item: A) -> Result<u64, Error> {
-        let newest_blob = self.newest_blob();
-        let mut blob_len = newest_blob.1.len().await?;
+        let mut blob_len = self.newest_blob.len().await?;
         // There should always be room to append an item in the newest blob
-        assert!(blob_len < self.cfg.items_per_blob * Self::CHUNK_SIZE_U64);
+        assert!(blob_len < self.cfg.items_per_blob * Self::CHUNK_SIZE_U64,);
         assert_eq!(blob_len % Self::CHUNK_SIZE_U64, 0);
-
         let mut buf: Vec<u8> = Vec::with_capacity(Self::CHUNK_SIZE);
         let checksum = crc32fast::hash(&item);
         buf.extend_from_slice(&item);
         buf.put_u32(checksum);
 
-        let item_pos = (blob_len / Self::CHUNK_SIZE_U64) + self.cfg.items_per_blob * newest_blob.0;
-        newest_blob.1.write_at(&buf, blob_len).await?;
-        trace!(blob = newest_blob.0, pos = item_pos, "appended item");
+        let item_pos =
+            (blob_len / Self::CHUNK_SIZE_U64) + self.cfg.items_per_blob * self.newest_blob_index;
+        self.newest_blob.write_at(&buf, blob_len).await?;
+        trace!(
+            blob = self.newest_blob_index,
+            pos = item_pos,
+            "appended item"
+        );
         blob_len += Self::CHUNK_SIZE_U64;
 
         if blob_len == self.cfg.items_per_blob * Self::CHUNK_SIZE_U64 {
             // Newest blob is now full so we need to create a new empty one to fulfill the invariant
             // that the newest blob always has room for a new element.
-            let next_blob_index = newest_blob.0 + 1;
+            let next_blob_index = self.newest_blob_index + 1;
             // Always sync the previous blob before creating a new one
-            newest_blob.1.sync().await?;
+            self.newest_blob.sync().await?;
             debug!("creating next blob {}", next_blob_index);
             let next_blob = self
                 .context
                 .open(&self.cfg.partition, &next_blob_index.to_be_bytes())
                 .await?;
-            assert!(self.blobs.insert(next_blob_index, next_blob).is_none());
             self.tracked.inc();
+            let prev_newest = replace(&mut self.newest_blob, next_blob);
+            // Put the previous newest blob into the cache
+            self.cache_blob(prev_newest, self.newest_blob_index).await?;
+            self.newest_blob_index = next_blob_index;
         }
 
         Ok(item_pos)
+    }
+
+    /// Remove the specified blob both from the cache (if present) and from storage.
+    async fn remove_blob(&mut self, blob_index: &u64) -> Result<(), Error> {
+        let blob: Option<B> = {
+            let mut cache = self.blob_cache.lock().unwrap();
+            cache.remove(blob_index)
+        };
+        if let Some(blob) = blob {
+            blob.close().await?;
+            self.tracked.dec();
+        };
+        self.context
+            .remove(&self.cfg.partition, Some(&blob_index.to_be_bytes()))
+            .await?;
+        Ok(())
+    }
+
+    /// Get the specified blob, either from the cache (and removing it from the cache in the process) or from storage.
+    async fn get_blob(&mut self, blob_index: &u64) -> Result<B, Error> {
+        let blob = {
+            let mut cache = self.blob_cache.lock().unwrap();
+            cache.remove(blob_index)
+        };
+        if let Some(blob) = blob {
+            return Ok(blob);
+        }
+        Ok(self
+            .context
+            .open(&self.cfg.partition, &blob_index.to_be_bytes())
+            .await?)
     }
 
     /// Rewind the journal to the given `journal_size`.
@@ -249,33 +316,42 @@ impl<B: Blob, E: Storage<B> + Metrics, A: Array> Journal<B, E, A> {
             std::cmp::Ordering::Less => {}
         }
         let rewind_to_blob_index = journal_size / self.cfg.items_per_blob;
-        if rewind_to_blob_index < self.oldest_blob().0 {
+        if rewind_to_blob_index < self.oldest_blob_index {
             return Err(Error::InvalidRewind(journal_size));
         }
         let rewind_to_offset = (journal_size % self.cfg.items_per_blob) * Self::CHUNK_SIZE_U64;
-        let mut current_blob_index = self.newest_blob().0;
 
-        // Remove blobs until we reach the rewind point.
+        if rewind_to_blob_index == self.newest_blob_index {
+            self.newest_blob.truncate(rewind_to_offset).await?;
+            return Ok(());
+        }
+
+        // Remove blobs (other than the newest) until we reach the rewind point.
+        let mut current_blob_index = self.newest_blob_index - 1;
         while current_blob_index > rewind_to_blob_index {
-            let blob = match self.blobs.remove(&current_blob_index) {
-                Some(blob) => blob,
-                None => return Err(Error::MissingBlob(current_blob_index)),
-            };
-            blob.close().await?;
-            self.context
-                .remove(&self.cfg.partition, Some(&current_blob_index.to_be_bytes()))
-                .await?;
+            self.remove_blob(&current_blob_index).await?;
             debug!(blob = current_blob_index, "unwound over blob");
-            self.tracked.dec();
             current_blob_index -= 1;
         }
 
-        // Truncate the rewind blob to the correct offset.
-        let rewind_blob = match self.blobs.get_mut(&rewind_to_blob_index) {
-            Some(blob) => blob,
-            None => return Err(Error::MissingBlob(rewind_to_blob_index)),
-        };
-        rewind_blob.truncate(rewind_to_offset).await?;
+        let blob = self.get_blob(&rewind_to_blob_index).await?;
+        blob.truncate(rewind_to_offset).await?;
+
+        // Update newest blob and its index, removing the previous newest blob.
+        let old_newest = replace(&mut self.newest_blob, blob);
+        old_newest.close().await?;
+        self.context
+            .remove(
+                &self.cfg.partition,
+                Some(&self.newest_blob_index.to_be_bytes()),
+            )
+            .await?;
+        self.tracked.dec();
+        debug!(
+            blob = self.newest_blob_index,
+            "unwound over previous newest blob"
+        );
+        self.newest_blob_index = rewind_to_blob_index;
 
         Ok(())
     }
@@ -284,33 +360,63 @@ impl<B: Blob, E: Storage<B> + Metrics, A: Array> Journal<B, E, A> {
     ///
     /// Note that this value could be older than the `min_item_pos` last passed to prune.
     pub async fn oldest_retained_pos(&self) -> Result<Option<u64>, Error> {
-        if self.oldest_blob().1.len().await? == 0 {
+        if self.oldest_blob_index == self.newest_blob_index && self.newest_blob.len().await? == 0 {
             return Ok(None);
         }
         // The oldest retained item is the first item in the oldest blob.
-        Ok(Some(self.oldest_blob().0 * self.cfg.items_per_blob))
+        Ok(Some(self.oldest_blob_index * self.cfg.items_per_blob))
+    }
+
+    /// Read a single chunk from the blob with the given index at the given offset.
+    async fn read_from_blob_at(&self, blob_index: &u64, offset: u64) -> Result<Vec<u8>, Error> {
+        let mut buf = vec![0u8; Self::CHUNK_SIZE];
+        if *blob_index == self.newest_blob_index {
+            self.newest_blob.read_at(&mut buf, offset).await?;
+            return Ok(buf);
+        }
+
+        let mut blob: Option<B> = None;
+        {
+            let mut cache = self.blob_cache.lock().unwrap();
+            if let Some(blob_ref) = cache.get(blob_index) {
+                blob = Some(blob_ref.clone());
+                self.cache_hits.inc();
+            } else {
+                self.cache_misses.inc();
+            }
+        }
+        if let Some(blob) = blob {
+            blob.read_at(&mut buf, offset).await?;
+            return Ok(buf);
+        };
+
+        let new_blob = self
+            .context
+            .open(&self.cfg.partition, &blob_index.to_be_bytes())
+            .await?;
+        self.tracked.inc();
+        new_blob.read_at(&mut buf, offset).await?;
+        self.cache_blob(new_blob, *blob_index).await?;
+
+        Ok(buf)
     }
 
     /// Read the item at the given position in the journal.
     pub async fn read(&self, item_pos: u64) -> Result<A, Error> {
         let blob_index = item_pos / self.cfg.items_per_blob;
-
-        let blob = match self.blobs.get(&blob_index) {
-            Some(blob) => blob,
-            None => {
-                let newest_blob = self.newest_blob();
-                if blob_index > newest_blob.0 {
-                    return Err(Error::InvalidItem(item_pos));
-                }
-                assert!(blob_index < self.oldest_blob().0);
-                return Err(Error::ItemPruned(item_pos));
-            }
-        };
-
         let item_index = item_pos % self.cfg.items_per_blob;
-        let offset = item_index * Self::CHUNK_SIZE_U64;
-        let mut buf = vec![0u8; Self::CHUNK_SIZE];
-        blob.read_at(&mut buf, offset).await?;
+
+        if blob_index > self.newest_blob_index {
+            return Err(Error::InvalidItem(item_pos));
+        }
+        if blob_index < self.oldest_blob_index {
+            return Err(Error::ItemPruned(item_pos));
+        }
+
+        let buf = self
+            .read_from_blob_at(&blob_index, item_index * Self::CHUNK_SIZE_U64)
+            .await?;
+
         Self::verify_integrity(&buf)
     }
 
@@ -339,12 +445,21 @@ impl<B: Blob, E: Storage<B> + Metrics, A: Array> Journal<B, E, A> {
         &mut self,
         concurrency: usize,
     ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + '_, Error> {
+        // Flush all data to disk so we can use fresh blob FDs for the replay
+        // and avoid the complexity of dealing with existing ones.
+        self.sync().await?;
+
         // Collect all blobs to replay
-        let mut blobs = Vec::with_capacity(self.blobs.len());
-        let newest_blob_index = self.newest_blob().0;
-        for (index, blob) in self.blobs.iter() {
+        let mut blobs = Vec::with_capacity(
+            self.newest_blob_index as usize + 1 - self.oldest_blob_index as usize,
+        );
+        for index in self.oldest_blob_index..self.newest_blob_index + 1 {
+            let blob = self
+                .context
+                .open(&self.cfg.partition, &index.to_be_bytes())
+                .await?;
             let blob_len = {
-                if *index == newest_blob_index {
+                if index == self.newest_blob_index {
                     blob.len().await?
                 } else {
                     self.cfg.items_per_blob * Self::CHUNK_SIZE_U64
@@ -375,7 +490,7 @@ impl<B: Blob, E: Storage<B> + Metrics, A: Array> Journal<B, E, A> {
                             Ok(_) => match Self::verify_integrity(&buf) {
                                 Ok(item) => Some((
                                     Ok((
-                                        items_per_blob * *index + offset / Self::CHUNK_SIZE_U64,
+                                        items_per_blob * index + offset / Self::CHUNK_SIZE_U64,
                                         item,
                                     )),
                                     (index, blob, next_offset),
@@ -391,58 +506,41 @@ impl<B: Blob, E: Storage<B> + Metrics, A: Array> Journal<B, E, A> {
             .flatten())
     }
 
-    /// Return the blob containing the most recent items and its index.
-    fn newest_blob(&self) -> (u64, &B) {
-        if let Some((index, blob)) = self.blobs.last_key_value() {
-            return (*index, blob);
-        }
-        panic!("no blobs found");
-    }
-
-    /// Return the blob containing the oldest retained items and its index.
-    fn oldest_blob(&self) -> (u64, &B) {
-        if let Some((index, blob)) = self.blobs.first_key_value() {
-            return (*index, blob);
-        }
-        panic!("no blobs found");
-    }
-
     /// Allow the journal to prune items older than `min_item_pos`. The journal may not prune all
     /// such items in order to preserve blob boundaries, but the amount of such items will always
     /// be less than the configured number of items per blob.
     pub async fn prune(&mut self, min_item_pos: u64) -> Result<(), Error> {
-        let oldest_blob = self.oldest_blob().0;
         let mut new_oldest_blob = min_item_pos / self.cfg.items_per_blob;
-        if new_oldest_blob <= oldest_blob {
+        if new_oldest_blob <= self.oldest_blob_index {
             // nothing to prune
             return Ok(());
         }
         // Make sure we never prune the most recent blob
-        let newest_blob = self.newest_blob();
-        if new_oldest_blob > newest_blob.0 {
-            new_oldest_blob = newest_blob.0
+        if new_oldest_blob > self.newest_blob_index {
+            new_oldest_blob = self.newest_blob_index
         }
 
-        for index in oldest_blob..new_oldest_blob {
-            let blob = self.blobs.remove(&index).unwrap();
-            // Close the blob and remove it from storage
-            blob.close().await?;
-            self.context
-                .remove(&self.cfg.partition, Some(&index.to_be_bytes()))
-                .await?;
+        // Remove each pruned blob from the cache and from storage
+        for index in self.oldest_blob_index..new_oldest_blob {
+            self.remove_blob(&index).await?;
             debug!(blob = index, "pruned blob");
             self.pruned.inc();
-            self.tracked.dec();
         }
+        self.oldest_blob_index = new_oldest_blob;
 
         Ok(())
     }
 
     /// Close the journal
     pub async fn close(self) -> Result<(), Error> {
-        for (i, blob) in self.blobs.into_iter() {
+        self.newest_blob.close().await?;
+        let cache = Arc::into_inner(self.blob_cache)
+            .unwrap()
+            .into_inner()
+            .unwrap();
+        for (index, blob) in cache.into_iter() {
             blob.close().await?;
-            debug!(blob = i, "closed blob");
+            debug!(blob = index, "closed blob");
         }
         Ok(())
     }
@@ -472,6 +570,7 @@ mod tests {
             let cfg = Config {
                 partition: "test_partition".into(),
                 items_per_blob: 2,
+                cache_capacity: 100,
             };
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
@@ -494,6 +593,7 @@ mod tests {
             let cfg = Config {
                 partition: "test_partition".into(),
                 items_per_blob: 2,
+                cache_capacity: 100,
             };
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
@@ -563,8 +663,8 @@ mod tests {
 
             // Check no-op pruning
             journal.prune(0).await.expect("no-op pruning failed");
-            assert_eq!(journal.oldest_blob().0, 1);
-            assert_eq!(journal.newest_blob().0, 5);
+            assert_eq!(journal.oldest_blob_index, 1);
+            assert_eq!(journal.newest_blob_index, 5);
             assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(2));
 
             // Prune first 3 blobs (6 items)
@@ -574,8 +674,8 @@ mod tests {
                 .expect("failed to prune journal 2");
             assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(6));
             let buffer = context.encode();
-            assert_eq!(journal.oldest_blob().0, 3);
-            assert_eq!(journal.newest_blob().0, 5);
+            assert_eq!(journal.oldest_blob_index, 3);
+            assert_eq!(journal.newest_blob_index, 5);
             assert!(buffer.contains("tracked 3"));
             assert!(buffer.contains("pruned_total 3"));
 
@@ -587,8 +687,8 @@ mod tests {
             let buffer = context.encode();
             let size = journal.size().await.unwrap();
             assert_eq!(size, 10);
-            assert_eq!(journal.oldest_blob().0, 5);
-            assert_eq!(journal.newest_blob().0, 5);
+            assert_eq!(journal.oldest_blob_index, 5);
+            assert_eq!(journal.newest_blob_index, 5);
             assert!(buffer.contains("tracked 1"));
             assert!(buffer.contains("pruned_total 5"));
             // Since the size of the journal is currently a multiple of items_per_blob, the newest blob
@@ -623,6 +723,7 @@ mod tests {
             let cfg = Config {
                 partition: "test_partition".into(),
                 items_per_blob: ITEMS_PER_BLOB,
+                cache_capacity: 100,
             };
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
@@ -783,6 +884,7 @@ mod tests {
             let cfg = Config {
                 partition: "test_partition".into(),
                 items_per_blob: 3,
+                cache_capacity: 100,
             };
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
@@ -843,6 +945,7 @@ mod tests {
             let cfg = Config {
                 partition: "test_partition".into(),
                 items_per_blob: 10,
+                cache_capacity: 100,
             };
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
@@ -893,6 +996,7 @@ mod tests {
             let cfg = Config {
                 partition: "test_partition".into(),
                 items_per_blob: 2,
+                cache_capacity: 100,
             };
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
@@ -929,7 +1033,7 @@ mod tests {
             assert!(matches!(journal.rewind(4).await, Ok(())));
             assert_eq!(journal.size().await.unwrap(), 4);
             let buffer = context.encode();
-            assert!(buffer.contains("tracked 3"));
+            assert!(buffer.contains("tracked 3"), "{}", buffer);
 
             // rewind back to empty and ensure all blobs are rewound over
             assert!(matches!(journal.rewind(0).await, Ok(())));
@@ -959,6 +1063,7 @@ mod tests {
             let cfg = Config {
                 partition: "test_partition_2".into(),
                 items_per_blob: 3,
+                cache_capacity: 100,
             };
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
@@ -994,7 +1099,6 @@ mod tests {
                 Err(Error::InvalidRewind(299))
             ));
             // Rewinding to the prune point should work.
-            // always remain in the journal.
             assert!(matches!(journal.rewind(300).await, Ok(())));
             assert_eq!(journal.size().await.unwrap(), 300);
             assert_eq!(journal.oldest_retained_pos().await.unwrap(), None);
