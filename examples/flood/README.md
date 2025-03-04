@@ -8,57 +8,64 @@ random messages.
 
 ## Setup
 
+_To run this example, you must first install [Rust](https://www.rust-lang.org/tools/install) and [Docker](https://www.docker.com/get-started/)._
+
 ### Install `commonware-deployer`
 
 ```bash
 cargo install commonware-deployer
 ```
 
-### Create Artifacts
+### Create Deployer Artifacts
 
 ```bash
-cargo run --bin setup -- --peers 3 --bootstrappers 1 --regions us-west-2,us-east-1,eu-west-1 --instance-type c7g.large --storage-size 10 --storage-class gp3 --message-size 1024 --message-backlog 1024 --mailbox-size 1024 --dashboard dashboard.json --output assets
+cargo run --bin setup -- --peers 3 --bootstrappers 1 --regions us-west-2,us-east-1,eu-west-1 --instance-type c7g.medium --storage-size 10 --storage-class gp3 --message-size 1024 --message-backlog 1024 --mailbox-size 16384 --dashboard dashboard.json --output assets
 ```
 
 ### Build Flood Binary
 
-_TODO: Docker pre-requisite._
+#### Build Cross-Platform Compiler
 
 ```bash
 docker build -t flood-builder .
 ```
 
+#### Compile Binary for ARM64
+
 ```bash
 docker run -it -v ${PWD}/../..:/monorepo flood-builder
 ```
 
-Emitted binary `flood` is placed in `assets`.
+_Emitted binary `flood` is placed in `assets`._
 
-## Run
-
-### Deploy Infrastructure
+### Deploy Flood Binary
 
 ```bash
 cd assets
 deployer ec2 create --config config.yaml
 ```
 
-### Check Metrics
+## Check Metrics
 
-Visit `http://<monitoring-ip>:3000` (anonymous login is already enabled, so you don't need to enter a password)
+Visit `http://<monitoring-ip>:3000`
 
-### [Optional] Update Flood Binary
+_anonymous login is already enabled, so you don't need to enter a password_
+
+## [Optional] Update Flood Binary
+
+### Re-Compile Binary for ARM64
 
 ```bash
 docker run -it -v ${PWD}/../..:/monorepo flood-builder
 ```
 
+### Restart Flood Binary on EC2 Instances
 
 ```bash
 deployer ec2 update --config config.yaml
 ```
 
-### Teardown Infrastructure
+## Destroy Infrastructure
 
 ```bash
 deployer ec2 destroy --config config.yaml
