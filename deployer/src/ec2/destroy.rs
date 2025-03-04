@@ -1,3 +1,5 @@
+//! `destroy` subcommand for `ec2`
+
 use crate::ec2::{
     aws::*, deployer_directory, Config, Error, DESTROYED_FILE_NAME, MONITORING_REGION,
 };

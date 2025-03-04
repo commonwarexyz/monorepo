@@ -1,3 +1,5 @@
+//! Service configuration for Prometheus, Loki, Grafana, Promtail, and a caller-provided binary
+
 /// Version of Prometheus to download and install
 pub const PROMETHEUS_VERSION: &str = "3.2.0";
 

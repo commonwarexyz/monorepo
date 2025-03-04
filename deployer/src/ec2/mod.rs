@@ -1,3 +1,51 @@
+//! AWS EC2 deployer
+//!
+//! Deploy a custom binary (and configuration) to any number of EC2 instances across multiple regions. Collect metrics and logs
+//! from all instances via a private network.
+//!
+//! # Features
+//!
+//! - **Automated Deployment**: Creates VPCs, subnets, security groups, and EC2 instances.
+//! - **Monitoring Setup**: Deploys Prometheus, Grafana, Loki, and Promtail for monitoring and logging.
+//! - **Multi-Region Support**: Deploys instances across multiple AWS regions with VPC peering.
+//! - **SSH Key Management**: Generates and imports SSH key pairs for secure instance access.
+//! - **Service Management**: Configures systemd services for the deployed binary and monitoring tools.
+//! - **Update and Destroy**: Provides commands to update binaries/configurations or destroy deployments.
+//!
+//! # Architecture
+//!
+//!
+//!
+//! # Example Configuration
+//!
+//! ```yaml
+//! tag: ffa638a0-991c-442c-8ec4-aa4e418213a5
+//! monitoring:
+//!   instance_type: t4g.small
+//!   storage_size: 10
+//!   storage_class: gp2
+//!   dashboard: /path/to/dashboard.json
+//! instances:
+//!   - name: node1
+//!     region: us-east-1
+//!     instance_type: t4g.small
+//!     storage_size: 10
+//!     storage_class: gp2
+//!     binary: /path/to/binary
+//!     config: /path/to/config.conf
+//!   - name: node2
+//!     region: us-west-2
+//!     instance_type: t4g.small
+//!     storage_size: 10
+//!     storage_class: gp2
+//!     binary: /path/to/binary2
+//!     config: /path/to/config2.conf
+//! ports:
+//!   - protocol: tcp
+//!     port: 4545
+//!     cidr: 0.0.0.0/0
+//! ```
+
 use serde::{Deserialize, Serialize};
 use std::{net::IpAddr, path::PathBuf};
 use thiserror::Error;
