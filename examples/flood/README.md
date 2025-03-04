@@ -2,6 +2,12 @@
 
 ## Setup
 
+### Install `commonware-deployer`
+
+```bash
+cargo install commonware-deployer
+```
+
 ### Create Artifacts
 
 ```bash
@@ -21,15 +27,6 @@ docker run -it -v ${PWD}/../..:/monorepo flood-builder
 ```
 
 Emitted binary `flood` is placed in `assets`.
-
-### Build Deployer Binary
-
-_Done from deployer directory._
-
-```bash
-cd ../../deployer
-cargo build --release && mv ../target/release/deployer ~/.cargo/bin/
-```
 
 ## Run
 

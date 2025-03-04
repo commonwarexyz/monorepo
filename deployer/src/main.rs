@@ -1,11 +1,15 @@
-//! Deploy cloud-based infrastructure.
+//! Commonware Deployer CLI
 
 use clap::{Arg, ArgAction, Command};
-use commonware_utils::crate_version;
 use std::path::PathBuf;
 use tracing::error;
 
 mod ec2;
+
+/// Returns the version of the crate.
+pub fn crate_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
 
 /// Flag for verbose output
 const VERBOSE_FLAG: &str = "verbose";

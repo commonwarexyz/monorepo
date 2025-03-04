@@ -2,15 +2,15 @@ use serde::{Deserialize, Serialize};
 use std::{net::IpAddr, path::PathBuf};
 use thiserror::Error;
 
-mod aws;
+pub mod aws;
 mod create;
-mod services;
+pub mod services;
 pub use create::create;
 mod destroy;
 pub use destroy::destroy;
 mod update;
 pub use update::update;
-mod utils;
+pub mod utils;
 
 /// Name of the monitoring instance
 const MONITORING_NAME: &str = "monitoring";

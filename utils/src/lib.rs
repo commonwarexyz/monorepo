@@ -10,11 +10,6 @@ mod priority_set;
 pub use priority_set::PrioritySet;
 pub mod futures;
 
-/// Returns the version of the crate.
-pub fn crate_version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
-}
-
 /// Converts bytes to a hexadecimal string.
 pub fn hex(bytes: &[u8]) -> String {
     let mut hex = String::new();
