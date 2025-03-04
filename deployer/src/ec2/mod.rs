@@ -11,9 +11,10 @@
 //!
 //! # Architecture
 //!
-//! ## Components
+//! ## Instances
 //!
-//! ### Monitoring Instance
+//! ### Monitoring
+//!
 //! * Deployed in `us-east-1` with a configurable ARM64 instance type (e.g., `t4g.small`) and storage (e.g., 10GB gp2).
 //! * Runs:
 //!     * **Prometheus**: Scrapes metrics from all instances at `:9090`, configured via `/opt/prometheus/prometheus.yml`.
@@ -23,7 +24,8 @@
 //!     * Allows deployer IP access (TCP 0-65535).
 //!     * Binary instance traffic to Loki (TCP 3100).
 //!
-//! ### Binary Instances
+//! ### Binary
+//!
 //! * Deployed in user-specified regions with configurable ARM64 instance types and storage.
 //! * Run:
 //!     * **Custom Binary**: Executes with `--peers=/home/ubuntu/peers.yaml --config=/home/ubuntu/config.conf`, exposing metrics at `:9090` (assumed).
