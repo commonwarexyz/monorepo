@@ -17,6 +17,7 @@ const CACHE_DIR: &str = "/tmp/deployer-cache";
 #[derive(Clone)]
 pub struct Deployment {
     pub instance: InstanceConfig,
+    pub id: String,
     pub ip: String,
 }
 
@@ -314,6 +315,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
 
     // Launch monitoring instance
     info!("launching monitoring instance");
+    let monitoring_instance_id;
     let monitoring_ip;
     let monitoring_private_ip;
     let monitoring_sg_id;
@@ -329,7 +331,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             .as_ref()
             .unwrap()
             .clone();
-        let monitoring_instance_id = launch_instances(
+        monitoring_instance_id = launch_instances(
             monitoring_ec2_client,
             &ami_id,
             monitoring_instance_type,
@@ -415,6 +417,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             );
             Ok::<Deployment, Error>(Deployment {
                 instance: instance.clone(),
+                id: instance_id,
                 ip,
             })
         };
@@ -450,6 +453,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
 
     // Configure monitoring instance
     info!("configuring monitoring instance");
+    wait_for_instances_ready(&ec2_clients[&monitoring_region], &[monitoring_instance_id]).await?;
     let instances: Vec<(&str, &str)> = deployments
         .iter()
         .map(|d| (d.instance.name.as_str(), d.ip.as_str()))
@@ -550,6 +554,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     for deployment in &deployments {
         let temp_dir = temp_dir.clone();
         let instance = deployment.instance.clone();
+        wait_for_instances_ready(&ec2_clients[&instance.region], &[deployment.id.clone()]).await?;
         let ip = deployment.ip.clone();
         let monitoring_private_ip = monitoring_private_ip.clone();
         let peers_path = peers_path.clone();
