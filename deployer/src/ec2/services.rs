@@ -179,7 +179,7 @@ sudo systemctl enable grafana-server
     )
 }
 
-/// Command to install the binary on regular instances
+/// Command to install the binary on binary instances
 pub const INSTALL_BINARY_CMD: &str = r#"
 chmod +x /home/ubuntu/binary
 sudo touch /var/log/binary.log && sudo chown ubuntu:ubuntu /var/log/binary.log
@@ -189,7 +189,7 @@ sudo systemctl start binary
 sudo systemctl enable binary
 "#;
 
-/// Command to set up Promtail on regular instances
+/// Command to set up Promtail on binary instances
 pub const SETUP_PROMTAIL_CMD: &str = r#"
 sudo apt-get update -y
 sudo apt-get install -y unzip

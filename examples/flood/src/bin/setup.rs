@@ -98,12 +98,16 @@ fn main() {
         .unwrap()
         .cloned()
         .collect::<Vec<_>>();
+    assert!(
+        regions.len() <= peers,
+        "must be at least one peer per specified region"
+    );
     let instance_type = matches.get_one::<String>("instance_type").unwrap();
     let storage_size = *matches.get_one::<i32>("storage_size").unwrap();
     let storage_class = matches.get_one::<String>("storage_class").unwrap();
     let mut instance_configs = Vec::new();
     let mut peer_configs = Vec::new();
-    for scheme in peer_schemes {
+    for (index, scheme) in peer_schemes.iter().enumerate() {
         // Create peer config
         let name = scheme.public_key().to_string();
         let peer_config_file = format!("{}.yaml", name);
@@ -118,7 +122,7 @@ fn main() {
         peer_configs.push((peer_config_file.clone(), peer_config));
 
         // Create instance config
-        let region_index = (0..regions.len()).choose(&mut OsRng).unwrap();
+        let region_index = index % regions.len();
         let region = regions[region_index].clone();
         let instance = ec2::InstanceConfig {
             name: name.clone(),

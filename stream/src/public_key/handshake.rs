@@ -68,7 +68,7 @@ impl<C: Scheme> Handshake<C> {
         let our_public_key = C::PublicKey::try_from(handshake.recipient_public_key)
             .map_err(|_| Error::InvalidChannelPublicKey)?;
         if crypto.public_key() != our_public_key {
-            return Err(Error::HandshakeNotForUs);
+            return Err(Error::HandshakeNotForUs(our_public_key.to_string()));
         }
 
         // Verify that the timestamp in the handshake is recent
@@ -347,7 +347,7 @@ mod tests {
             .await;
 
             // Assert that the result is an error
-            assert!(matches!(result, Err(Error::HandshakeNotForUs)));
+            assert!(matches!(result, Err(Error::HandshakeNotForUs(_))));
         });
     }
 

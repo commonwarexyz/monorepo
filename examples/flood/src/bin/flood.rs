@@ -7,22 +7,24 @@ use commonware_cryptography::{
 use commonware_deployer::ec2::Peers;
 use commonware_flood::Config;
 use commonware_p2p::{authenticated, Receiver, Recipients, Sender};
-use commonware_runtime::{
-    tokio::{Context, Executor},
-    Metrics, Network, Runner, Spawner,
-};
+use commonware_runtime::{tokio, Clock, Metrics, Network, Runner, Spawner};
 use commonware_utils::{from_hex_formatted, union};
 use futures::future::try_join_all;
 use governor::Quota;
+use prometheus_client::metrics::gauge::Gauge;
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::NonZeroU32,
     str::FromStr,
+    sync::atomic::{AtomicI64, AtomicU64},
+    time::Duration,
 };
+use sysinfo::{Disks, System};
 use tracing::{error, info, Level};
 
+const SYSTEM_METRICS_REFRESH: Duration = Duration::from_secs(5);
 const FLOOD_NAMESPACE: &[u8] = b"_COMMONWARE_FLOOD";
 const METRICS_PORT: u16 = 9090;
 
@@ -46,7 +48,7 @@ fn main() {
     let peer_file = matches.get_one::<String>("peers").unwrap();
     let peers_file = std::fs::read_to_string(peer_file).expect("Could not read peers file");
     let peers: Peers = serde_yaml::from_str(&peers_file).expect("Could not parse peers file");
-    let peers: HashMap<PublicKey, String> = peers
+    let peers: HashMap<PublicKey, IpAddr> = peers
         .peers
         .into_iter()
         .map(|peer| {
@@ -65,13 +67,10 @@ fn main() {
     let key = PrivateKey::try_from(key).expect("Private key is invalid");
     let signer = <Ed25519 as Scheme>::from(key).expect("Could not create signer");
     let public_key = signer.public_key();
-    let ip = peers
-        .get(&public_key)
-        .expect("Could not find self in IPs")
-        .clone();
+    let ip = peers.get(&public_key).expect("Could not find self in IPs");
     info!(
         ?public_key,
-        ip,
+        ?ip,
         port = config.port,
         message_size = config.message_size,
         "loaded config"
@@ -91,16 +90,22 @@ fn main() {
     }
 
     // Initialize runtime
-    let (executor, context) = Executor::default();
+    let cfg = tokio::Config {
+        tcp_nodelay: Some(true),
+        ..Default::default()
+    };
+    let (executor, context) = tokio::Executor::init(cfg);
 
     // Configure network
-    let p2p_cfg = authenticated::Config::aggressive(
+    let mut p2p_cfg = authenticated::Config::aggressive(
         signer.clone(),
         &union(FLOOD_NAMESPACE, b"_P2P"),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), config.port),
+        SocketAddr::new(*ip, config.port),
         bootstrappers,
         config.message_size,
     );
+    p2p_cfg.mailbox_size = 16_384;
 
     // Start runtime
     executor.start(async move {
@@ -118,24 +123,6 @@ fn main() {
             config.backlog,
             None,
         );
-
-        // Serve metrics
-        let metrics = context.with_label("metrics").spawn(|context| async move {
-            let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), METRICS_PORT);
-            let listener = context
-                .bind(addr)
-                .await
-                .expect("Could not bind to metrics address");
-            let app = Router::new()
-                .route(
-                    "/metrics",
-                    get(|extension: Extension<Context>| async move { extension.0.encode() }),
-                )
-                .layer(Extension(context));
-            serve(listener, app.into_make_service())
-                .await
-                .expect("Could not serve metrics");
-        });
 
         // Create network
         let p2p = network.start();
@@ -164,8 +151,79 @@ fn main() {
             }
         });
 
+        // Start system metrics collector
+        let system = context.with_label("system").spawn(|context| async move {
+            // Register metrics
+            let cpu_usage: Gauge<f64, AtomicU64> = Gauge::default();
+            context.register("cpu_usage", "CPU usage", cpu_usage.clone());
+            let memory_used: Gauge<i64, AtomicI64> = Gauge::default();
+            context.register("memory_used", "Memory used", memory_used.clone());
+            let memory_free: Gauge<i64, AtomicI64> = Gauge::default();
+            context.register("memory_free", "Memory free", memory_free.clone());
+            let swap_used: Gauge<i64, AtomicI64> = Gauge::default();
+            context.register("swap_used", "Swap used", swap_used.clone());
+            let swap_free: Gauge<i64, AtomicI64> = Gauge::default();
+            context.register("swap_free", "Swap free", swap_free.clone());
+            let disk_used: Gauge<i64, AtomicI64> = Gauge::default();
+            context.register("disk_used", "Disk used", disk_used.clone());
+            let disk_free: Gauge<i64, AtomicI64> = Gauge::default();
+            context.register("disk_free", "Disk free", disk_free.clone());
+
+            // Initialize system info
+            let mut sys = System::new_all();
+            let mut disks = Disks::new_with_refreshed_list();
+
+            // Check metrics every
+            loop {
+                // Refresh system info
+                sys.refresh_all();
+                disks.refresh(true);
+
+                // Update metrics
+                cpu_usage.set(sys.global_cpu_usage() as f64);
+                memory_used.set(sys.used_memory() as i64);
+                memory_free.set(sys.free_memory() as i64);
+                swap_used.set(sys.used_swap() as i64);
+                swap_free.set(sys.free_swap() as i64);
+
+                // Update disk metrics for root disk
+                for disk in disks.list() {
+                    if disk.mount_point() == std::path::Path::new("/") {
+                        let total = disk.total_space();
+                        let available = disk.available_space();
+                        let used = total.saturating_sub(available);
+                        disk_used.set(used as i64);
+                        disk_free.set(available as i64);
+                        break;
+                    }
+                }
+
+                // Wait to pull metrics again
+                context.sleep(SYSTEM_METRICS_REFRESH).await;
+            }
+        });
+
+        // Serve metrics
+        let metrics = context.with_label("metrics").spawn(|context| async move {
+            let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), METRICS_PORT);
+            let listener = context
+                .bind(addr)
+                .await
+                .expect("Could not bind to metrics address");
+            let app = Router::new()
+                .route(
+                    "/metrics",
+                    get(|extension: Extension<tokio::Context>| async move { extension.0.encode() }),
+                )
+                .layer(Extension(context));
+            serve(listener, app.into_make_service())
+                .await
+                .expect("Could not serve metrics");
+        });
+
         // Wait for any task to error
-        if let Err(e) = try_join_all(vec![metrics, p2p, flood_sender, flood_receiver]).await {
+        if let Err(e) = try_join_all(vec![p2p, flood_sender, flood_receiver, system, metrics]).await
+        {
             error!(?e, "task failed");
         }
     });

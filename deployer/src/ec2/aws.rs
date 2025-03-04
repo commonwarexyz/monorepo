@@ -5,16 +5,13 @@ use aws_sdk_ec2::error::BuildError;
 use aws_sdk_ec2::primitives::Blob;
 use aws_sdk_ec2::types::{
     BlockDeviceMapping, EbsBlockDevice, Filter, InstanceStateName, ResourceType, SecurityGroup,
-    Tag, TagSpecification, VpcPeeringConnectionStateReasonCode,
+    SummaryStatus, Tag, TagSpecification, VpcPeeringConnectionStateReasonCode,
 };
 pub use aws_sdk_ec2::types::{InstanceType, IpPermission, IpRange, UserIdGroupPair, VolumeType};
 use aws_sdk_ec2::{Client as Ec2Client, Error as Ec2Error};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tokio::time::sleep;
-
-/// AWS region where monitoring instances are deployed
-pub const MONITORING_REGION: &str = "us-east-1";
 
 /// Creates an EC2 client for the specified AWS region
 pub async fn create_ec2_client(region: Region) -> Ec2Client {
@@ -229,8 +226,8 @@ pub async fn create_security_group_monitoring(
     Ok(sg_id)
 }
 
-/// Creates a security group for regular instances with access from deployer, monitoring, and custom ports
-pub async fn create_security_group_regular(
+/// Creates a security group for binary instances with access from deployer, monitoring, and custom ports
+pub async fn create_security_group_binary(
     client: &Ec2Client,
     vpc_id: &str,
     deployer_ip: &str,
@@ -240,8 +237,8 @@ pub async fn create_security_group_regular(
 ) -> Result<String, Ec2Error> {
     let sg_resp = client
         .create_security_group()
-        .group_name(format!("{}-regular", tag))
-        .description("Security group for regular instances")
+        .group_name(format!("{}-binary", tag))
+        .description("Security group for binary instances")
         .vpc_id(vpc_id)
         .tag_specifications(
             TagSpecification::builder()
@@ -374,15 +371,41 @@ pub async fn wait_for_instances_running(
         // Confirm all are running
         let reservations = resp.reservations.unwrap();
         let instances = reservations[0].instances.as_ref().unwrap();
-        if instances.iter().all(|i| {
+        if !instances.iter().all(|i| {
             i.state.as_ref().unwrap().name.as_ref().unwrap() == &InstanceStateName::Running
         }) {
-            return Ok(instances
-                .iter()
-                .map(|i| i.public_ip_address.as_ref().unwrap().clone())
-                .collect());
+            sleep(RETRY_INTERVAL).await;
+            continue;
         }
-        sleep(RETRY_INTERVAL).await;
+
+        // Ask for instance status
+        let Ok(resp) = client
+            .describe_instance_status()
+            .set_instance_ids(Some(instance_ids.to_vec()))
+            .include_all_instances(true) // Include instances regardless of state
+            .send()
+            .await
+        else {
+            sleep(RETRY_INTERVAL).await;
+            continue;
+        };
+
+        // Confirm all are ready
+        let statuses = resp.instance_statuses.unwrap_or_default();
+        let all_ready = statuses.iter().all(|s| {
+            s.instance_state.as_ref().unwrap().name.as_ref().unwrap() == &InstanceStateName::Running
+                && s.system_status.as_ref().unwrap().status.as_ref().unwrap() == &SummaryStatus::Ok
+                && s.instance_status.as_ref().unwrap().status.as_ref().unwrap()
+                    == &SummaryStatus::Ok
+        });
+        if !all_ready {
+            sleep(RETRY_INTERVAL).await;
+            continue;
+        }
+        return Ok(instances
+            .iter()
+            .map(|i| i.public_ip_address.as_ref().unwrap().clone())
+            .collect());
     }
 }
 
@@ -760,6 +783,54 @@ pub async fn delete_vpc(ec2_client: &Ec2Client, vpc_id: &str) -> Result<(), Ec2E
     Ok(())
 }
 
+/// Enforces that all instance types are ARM64-based
+pub async fn assert_arm64_support(
+    client: &Ec2Client,
+    instance_types: &[String],
+) -> Result<(), Ec2Error> {
+    let mut next_token: Option<String> = None;
+    let mut supported_instance_types = HashSet::new();
+
+    // Loop through all pages of results
+    loop {
+        // Get the next page of instance types
+        let mut request = client.describe_instance_types().filters(
+            Filter::builder()
+                .name("processor-info.supported-architecture")
+                .values("arm64")
+                .build(),
+        );
+        if let Some(token) = next_token {
+            request = request.next_token(token);
+        }
+        let response = request.send().await?;
+
+        // Collect instance types from this page
+        for instance_type in response.instance_types.unwrap_or_default() {
+            if let Some(it) = instance_type.instance_type {
+                supported_instance_types.insert(it.to_string());
+            }
+        }
+
+        // Check if there’s another page
+        next_token = response.next_token;
+        if next_token.is_none() {
+            break;
+        }
+    }
+
+    // Validate all requested instance types
+    for instance_type in instance_types {
+        if !supported_instance_types.contains(instance_type) {
+            return Err(Ec2Error::from(BuildError::other(format!(
+                "instance type {} not ARM64-based",
+                instance_type
+            ))));
+        }
+    }
+    Ok(())
+}
+
 /// Finds the availability zone that supports all required instance types
 pub async fn find_availability_zone(
     client: &Ec2Client,
@@ -769,12 +840,12 @@ pub async fn find_availability_zone(
     let offerings = client
         .describe_instance_type_offerings()
         .location_type("availability-zone".into())
-        .set_filters(Some(
-            instance_types
-                .iter()
-                .map(|it| Filter::builder().name("instance-type").values(it).build())
-                .collect(),
-        ))
+        .filters(
+            Filter::builder()
+                .name("instance-type")
+                .set_values(Some(instance_types.to_vec()))
+                .build(),
+        )
         .send()
         .await?
         .instance_type_offerings
@@ -806,7 +877,7 @@ pub async fn find_availability_zone(
 
     // If no availability zone supports all instance types, return an error
     Err(Ec2Error::from(BuildError::other(format!(
-        "No availability zone supports all instance types: {:?}",
+        "no availability zone supports all required instance types: {:?}",
         instance_types
     ))))
 }
