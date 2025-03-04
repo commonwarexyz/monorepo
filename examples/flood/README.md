@@ -1,5 +1,11 @@
 # commonware-flood
 
+[![Crates.io](https://img.shields.io/crates/v/commonware-flood.svg)](https://crates.io/crates/commonware-flood)
+[![Docs.rs](https://docs.rs/commonware-flood/badge.svg)](https://docs.rs/commonware-flood)
+
+Flood peers [deployed to AWS EC2](https://docs.rs/commonware-deployer/latest/commonware_deployer/ec2/index.html) with
+random messages.
+
 ## Setup
 
 ### Install `commonware-deployer`
