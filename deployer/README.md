@@ -8,19 +8,3 @@ Deploy infrastructure across cloud providers.
 ## Status
 
 `commonware-deployer` is **ALPHA** software and is not yet recommended for production use. Developers should expect breaking changes and occasional instability.
-
-## Installation
-
-### Local
-
-```bash
-cargo install --path . --force
-deployer --help
-```
-
-### Crates.io
-
-```bash
-cargo install commonware-deployer
-deployer --help
-```
