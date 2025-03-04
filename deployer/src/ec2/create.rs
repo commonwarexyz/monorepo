@@ -415,10 +415,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
 
     // Add BBR configuration file
     let bbr_conf_path = temp_dir.join("99-bbr.conf");
-    std::fs::write(
-        &bbr_conf_path,
-        "net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr\n",
-    )?;
+    std::fs::write(&bbr_conf_path, BBR_CONF)?;
 
     // Configure monitoring instance
     info!("configuring monitoring instance");
