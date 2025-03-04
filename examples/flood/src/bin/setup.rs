@@ -51,6 +51,24 @@ fn main() {
                 .value_parser(value_parser!(String)),
         )
         .arg(
+            Arg::new("message-size")
+                .long("message-size")
+                .required(true)
+                .value_parser(value_parser!(usize)),
+        )
+        .arg(
+            Arg::new("message-backlog")
+                .long("message-backlog")
+                .required(true)
+                .value_parser(value_parser!(usize)),
+        )
+        .arg(
+            Arg::new("mailbox-size")
+                .long("mailbox-size")
+                .required(true)
+                .value_parser(value_parser!(usize)),
+        )
+        .arg(
             Arg::new("dashboard")
                 .long("dashboard")
                 .required(true)
@@ -105,6 +123,9 @@ fn main() {
     let instance_type = matches.get_one::<String>("instance_type").unwrap();
     let storage_size = *matches.get_one::<i32>("storage_size").unwrap();
     let storage_class = matches.get_one::<String>("storage_class").unwrap();
+    let message_size = *matches.get_one::<usize>("message-size").unwrap();
+    let message_backlog = *matches.get_one::<usize>("message-backlog").unwrap();
+    let mailbox_size = *matches.get_one::<usize>("mailbox-size").unwrap();
     let mut instance_configs = Vec::new();
     let mut peer_configs = Vec::new();
     for (index, scheme) in peer_schemes.iter().enumerate() {
@@ -116,8 +137,9 @@ fn main() {
             port: PORT,
             allowed_peers: allowed_peers.clone(),
             bootstrappers: bootstrappers.clone(),
-            message_size: 1024,
-            backlog: 16_384,
+            message_size,
+            message_backlog,
+            mailbox_size,
         };
         peer_configs.push((peer_config_file.clone(), peer_config));
 

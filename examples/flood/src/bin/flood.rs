@@ -101,7 +101,7 @@ fn main() {
         bootstrappers,
         config.message_size,
     );
-    p2p_cfg.mailbox_size = 16_384;
+    p2p_cfg.mailbox_size = config.mailbox_size;
 
     // Start runtime
     executor.start(async move {
@@ -116,7 +116,7 @@ fn main() {
         let (mut flood_sender, mut flood_receiver) = network.register(
             0,
             Quota::per_second(NonZeroU32::new(u32::MAX).unwrap()),
-            config.backlog,
+            config.message_backlog,
             None,
         );
 
