@@ -22,9 +22,9 @@
 //!               |    - Prometheus                   |
 //!               |    - Grafana                      |
 //!               |    - Loki                         |
-//!               |  - SG:                            |
-//!               |    - All: deployer IP             |
-//!               |    - 3100: binary IPs             |
+//!               |  - Security Group                 |
+//!               |    - All: Deployer IP             |
+//!               |    - 3100: Binary VPCs            |
 //!               +-----------------------------------+
 //!                     ^                       ^
 //!           (Metrics & Logs)              (Metrics & Logs)
@@ -35,10 +35,10 @@
 //! |  - Binary Instance           |  |  - Binary Instance           |
 //! |    - Binary A                |  |    - Binary B                |
 //! |    - Promtail                |  |    - Promtail                |
-//! |  - SG:                       |  |  - SG:                       |
-//! |    - All: deployer IP        |  |    - All: deployer IP        |
-//! |    - 9090: monitoring IP     |  |    - 9090: monitoring IP     |
-//! |    - 80: 0.0.0.0/0           |  |    - 8765: 12.3.7.9/32       |
+//! |  - Security Group            |  |  - Security Group            |
+//! |    - All: Deployer IP        |  |    - All: Deployer IP        |
+//! |    - 9090: Monitoring IP     |  |    - 9090: Monitoring IP     |
+//! |    - 8012: 0.0.0.0/0         |  |    - 8765: 12.3.7.9/32       |
 //! +------------------------------+  +------------------------------+
 //! ```
 //!
