@@ -60,3 +60,20 @@ deployer ec2 update --config config.yaml
 ```bash
 deployer ec2 destroy --config config.yaml
 ```
+
+## Debugging
+
+### EC2 Throttling
+
+```bash
+ethtool -S ens5 | grep "allowance"
+```
+
+If throttled, you'll see a non-zero value for some item:
+```txt
+bw_in_allowance_exceeded: 0
+bw_out_allowance_exceeded: 14368
+pps_allowance_exceeded: 0
+conntrack_allowance_exceeded: 0
+linklocal_allowance_exceeded: 0
+```

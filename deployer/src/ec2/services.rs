@@ -326,3 +326,6 @@ scrape_configs:
     }
     config
 }
+
+/// Configuration for BBR sysctl settings
+pub const BBR_CONF: &str = "net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr\n";
