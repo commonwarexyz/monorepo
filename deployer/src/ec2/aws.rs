@@ -377,7 +377,18 @@ pub async fn wait_for_instances_running(
             sleep(RETRY_INTERVAL).await;
             continue;
         }
+        return Ok(instances
+            .iter()
+            .map(|i| i.public_ip_address.as_ref().unwrap().clone())
+            .collect());
+    }
+}
 
+pub async fn wait_for_instances_ready(
+    client: &Ec2Client,
+    instance_ids: &[String],
+) -> Result<(), Ec2Error> {
+    loop {
         // Ask for instance status
         let Ok(resp) = client
             .describe_instance_status()
@@ -402,10 +413,7 @@ pub async fn wait_for_instances_running(
             sleep(RETRY_INTERVAL).await;
             continue;
         }
-        return Ok(instances
-            .iter()
-            .map(|i| i.public_ip_address.as_ref().unwrap().clone())
-            .collect());
+        return Ok(());
     }
 }
 

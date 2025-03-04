@@ -138,35 +138,85 @@ ingester:
 "#;
 
 /// Command to install monitoring services (Prometheus, Loki, Grafana) on the monitoring instance
-pub fn install_monitoring_cmd(prometheus_version: &str) -> String {
+pub fn install_monitoring_cmd(
+    prometheus_version: &str,
+    grafana_version: &str,
+    loki_version: &str,
+) -> String {
+    let prometheus_url = format!(
+    "https://github.com/prometheus/prometheus/releases/download/v{}/prometheus-{}.linux-arm64.tar.gz",
+    prometheus_version, prometheus_version
+);
+    let grafana_url = format!(
+        "https://dl.grafana.com/oss/release/grafana_{}_arm64.deb",
+        grafana_version
+    );
+    let loki_url = format!(
+        "https://github.com/grafana/loki/releases/download/v{}/loki-linux-arm64.zip",
+        loki_version
+    );
     format!(
         r#"
 sudo apt-get update -y
 sudo apt-get install -y wget curl unzip adduser libfontconfig1
-sudo mkdir -p /opt/loki /loki/index /loki/index_cache /loki/chunks /loki/compactor /loki/wal
-sudo chown -R ubuntu:ubuntu /loki
-unzip -o /home/ubuntu/loki.zip -d /home/ubuntu
-sudo mv /home/ubuntu/loki-linux-arm64 /opt/loki/loki
-sudo mkdir -p /etc/loki
-sudo mv /home/ubuntu/loki.yml /etc/loki/loki.yml
-sudo chown root:root /etc/loki/loki.yml
+
+# Download Prometheus with retries
+for i in {{1..5}}; do
+  wget -O /home/ubuntu/prometheus.tar.gz {} && break
+  sleep 10
+done
+
+# Download Grafana with retries
+for i in {{1..5}}; do
+  wget -O /home/ubuntu/grafana.deb {} && break
+  sleep 10
+done
+
+# Download Loki with retries
+for i in {{1..5}}; do
+  wget -O /home/ubuntu/loki.zip {} && break
+  sleep 10
+done
+
+# Install Prometheus
 sudo mkdir -p /opt/prometheus /opt/prometheus/data
 sudo chown -R ubuntu:ubuntu /opt/prometheus
 tar xvfz /home/ubuntu/prometheus.tar.gz -C /home/ubuntu
 sudo mv /home/ubuntu/prometheus-{}.linux-arm64 /opt/prometheus/prometheus-{}.linux-arm64
 sudo ln -s /opt/prometheus/prometheus-{}.linux-arm64/prometheus /opt/prometheus/prometheus
 sudo chmod +x /opt/prometheus/prometheus
+
+# Install Grafana
 sudo dpkg -i /home/ubuntu/grafana.deb
 sudo apt-get install -f -y
+
+# Install Loki
+sudo mkdir -p /opt/loki /loki/index /loki/index_cache /loki/chunks /loki/compactor /loki/wal
+sudo chown -R ubuntu:ubuntu /loki
+unzip -o /home/ubuntu/loki.zip -d /home/ubuntu
+sudo mv /home/ubuntu/loki-linux-arm64 /opt/loki/loki
+
+# Configure Grafana
 sudo sed -i '/^\[auth.anonymous\]$/,/^\[/ {{ /^; *enabled = /s/.*/enabled = true/; /^; *org_role = /s/.*/org_role = Admin/ }}' /etc/grafana/grafana.ini
 sudo mkdir -p /etc/grafana/provisioning/datasources /etc/grafana/provisioning/dashboards /var/lib/grafana/dashboards
+
+# Move configuration files (assuming they are uploaded via SCP)
 sudo mv /home/ubuntu/prometheus.yml /opt/prometheus/prometheus.yml
 sudo mv /home/ubuntu/datasources.yml /etc/grafana/provisioning/datasources/datasources.yml
 sudo mv /home/ubuntu/all.yml /etc/grafana/provisioning/dashboards/all.yml
 sudo mv /home/ubuntu/dashboard.json /var/lib/grafana/dashboards/dashboard.json
+sudo mkdir -p /etc/loki
+sudo mv /home/ubuntu/loki.yml /etc/loki/loki.yml
+sudo chown root:root /etc/loki/loki.yml
+
+# Move service files
 sudo mv /home/ubuntu/prometheus.service /etc/systemd/system/prometheus.service
 sudo mv /home/ubuntu/loki.service /etc/systemd/system/loki.service
+
+# Set ownership
 sudo chown -R grafana:grafana /etc/grafana /var/lib/grafana
+
+# Start services
 sudo systemctl daemon-reload
 sudo systemctl start prometheus
 sudo systemctl enable prometheus
@@ -175,7 +225,12 @@ sudo systemctl enable loki
 sudo systemctl start grafana-server
 sudo systemctl enable grafana-server
 "#,
-        prometheus_version, prometheus_version, prometheus_version
+        prometheus_url,
+        grafana_url,
+        loki_url,
+        prometheus_version,
+        prometheus_version,
+        prometheus_version
     )
 }
 
@@ -190,9 +245,22 @@ sudo systemctl enable binary
 "#;
 
 /// Command to set up Promtail on binary instances
-pub const SETUP_PROMTAIL_CMD: &str = r#"
+pub fn setup_promtail_cmd(promtail_version: &str) -> String {
+    let promtail_url = format!(
+        "https://github.com/grafana/loki/releases/download/v{}/promtail-linux-arm64.zip",
+        promtail_version
+    );
+    format!(
+        r#"
 sudo apt-get update -y
-sudo apt-get install -y unzip
+sudo apt-get install -y wget unzip
+
+# Download Promtail with retries
+for i in {{1..5}}; do
+  wget -O /home/ubuntu/promtail.zip {} && break
+  sleep 10
+done
+
 sudo mkdir -p /opt/promtail
 unzip /home/ubuntu/promtail.zip -d /home/ubuntu
 sudo mv /home/ubuntu/promtail-linux-arm64 /opt/promtail/promtail
@@ -204,7 +272,10 @@ sudo chown root:root /etc/promtail/promtail.yml
 sudo systemctl daemon-reload
 sudo systemctl start promtail
 sudo systemctl enable promtail
-"#;
+"#,
+        promtail_url
+    )
+}
 
 /// Generates Promtail configuration with the monitoring instance's private IP and instance name
 pub fn promtail_config(monitoring_private_ip: &str, instance_name: &str) -> String {

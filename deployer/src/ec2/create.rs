@@ -10,13 +10,11 @@ use std::path::PathBuf;
 use tokio::process::Command;
 use tracing::info;
 
-/// Directory for caching downloaded artifacts
-const CACHE_DIR: &str = "/tmp/deployer-cache";
-
 /// Represents a deployed instance with its configuration and public IP
 #[derive(Clone)]
 pub struct Deployment {
     pub instance: InstanceConfig,
+    pub id: String,
     pub ip: String,
 }
 
@@ -60,41 +58,6 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     // Get public IP address of the deployer
     let deployer_ip = get_public_ip().await?;
     info!(ip = deployer_ip.as_str(), "recovered public IP");
-
-    // Ensure cache directory exists
-    std::fs::create_dir_all(CACHE_DIR)?;
-    info!(cache_dir = CACHE_DIR, "created artifact cache");
-
-    // Download monitoring artifacts
-    info!("downloading monitoring artifacts");
-    let prometheus_url = format!(
-        "https://github.com/prometheus/prometheus/releases/download/v{}/prometheus-{}.linux-arm64.tar.gz",
-        PROMETHEUS_VERSION, PROMETHEUS_VERSION
-    );
-    let prometheus_tar = temp_dir.join("prometheus.tar.gz");
-    download_and_cache(CACHE_DIR, &prometheus_url, &prometheus_tar).await?;
-    info!(version = PROMETHEUS_VERSION, "downloaded prometheus");
-    let grafana_url = format!(
-        "https://dl.grafana.com/oss/release/grafana_{}_arm64.deb",
-        GRAFANA_VERSION
-    );
-    let grafana_deb = temp_dir.join("grafana.deb");
-    download_and_cache(CACHE_DIR, &grafana_url, &grafana_deb).await?;
-    info!(version = GRAFANA_VERSION, "downloaded grafana");
-    let loki_url = format!(
-        "https://github.com/grafana/loki/releases/download/v{}/loki-linux-arm64.zip",
-        LOKI_VERSION
-    );
-    let loki_zip = temp_dir.join("loki.zip");
-    download_and_cache(CACHE_DIR, &loki_url, &loki_zip).await?;
-    info!(version = LOKI_VERSION, "downloaded loki");
-    let promtail_url = format!(
-        "https://github.com/grafana/loki/releases/download/v{}/promtail-linux-arm64.zip",
-        PROMTAIL_VERSION
-    );
-    let promtail_zip = temp_dir.join("promtail.zip");
-    download_and_cache(CACHE_DIR, &promtail_url, &promtail_zip).await?;
-    info!(version = PROMTAIL_VERSION, "downloaded promtail");
 
     // Generate SSH key pair
     let key_name = format!("deployer-{}", tag);
@@ -314,6 +277,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
 
     // Launch monitoring instance
     info!("launching monitoring instance");
+    let monitoring_instance_id;
     let monitoring_ip;
     let monitoring_private_ip;
     let monitoring_sg_id;
@@ -329,7 +293,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             .as_ref()
             .unwrap()
             .clone();
-        let monitoring_instance_id = launch_instances(
+        monitoring_instance_id = launch_instances(
             monitoring_ec2_client,
             &ami_id,
             monitoring_instance_type,
@@ -415,6 +379,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             );
             Ok::<Deployment, Error>(Deployment {
                 instance: instance.clone(),
+                id: instance_id,
                 ip,
             })
         };
@@ -450,6 +415,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
 
     // Configure monitoring instance
     info!("configuring monitoring instance");
+    wait_for_instances_ready(&ec2_clients[&monitoring_region], &[monitoring_instance_id]).await?;
     let instances: Vec<(&str, &str)> = deployments
         .iter()
         .map(|d| (d.instance.name.as_str(), d.ip.as_str()))
@@ -500,27 +466,6 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     .await?;
     scp_file(
         private_key,
-        prometheus_tar.to_str().unwrap(),
-        &monitoring_ip,
-        "/home/ubuntu/prometheus.tar.gz",
-    )
-    .await?;
-    scp_file(
-        private_key,
-        grafana_deb.to_str().unwrap(),
-        &monitoring_ip,
-        "/home/ubuntu/grafana.deb",
-    )
-    .await?;
-    scp_file(
-        private_key,
-        loki_zip.to_str().unwrap(),
-        &monitoring_ip,
-        "/home/ubuntu/loki.zip",
-    )
-    .await?;
-    scp_file(
-        private_key,
         prometheus_service_path.to_str().unwrap(),
         &monitoring_ip,
         "/home/ubuntu/prometheus.service",
@@ -536,7 +481,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     ssh_execute(
         private_key,
         &monitoring_ip,
-        &install_monitoring_cmd(PROMETHEUS_VERSION),
+        &install_monitoring_cmd(PROMETHEUS_VERSION, GRAFANA_VERSION, LOKI_VERSION),
     )
     .await?;
     poll_service_active(private_key, &monitoring_ip, "prometheus").await?;
@@ -550,10 +495,10 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     for deployment in &deployments {
         let temp_dir = temp_dir.clone();
         let instance = deployment.instance.clone();
+        wait_for_instances_ready(&ec2_clients[&instance.region], &[deployment.id.clone()]).await?;
         let ip = deployment.ip.clone();
         let monitoring_private_ip = monitoring_private_ip.clone();
         let peers_path = peers_path.clone();
-        let promtail_zip = promtail_zip.clone();
         let promtail_service_path = promtail_service_path.clone();
         let binary_service_path = binary_service_path.clone();
         let future = async move {
@@ -570,13 +515,6 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                 peers_path.to_str().unwrap(),
                 &ip,
                 "/home/ubuntu/peers.yaml",
-            )
-            .await?;
-            scp_file(
-                private_key,
-                promtail_zip.to_str().unwrap(),
-                &ip,
-                "/home/ubuntu/promtail.zip",
             )
             .await?;
             let promtail_config_path = temp_dir.join(format!("promtail_{}.yml", instance.name));
@@ -605,7 +543,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                 "/home/ubuntu/binary.service",
             )
             .await?;
-            ssh_execute(private_key, &ip, SETUP_PROMTAIL_CMD).await?;
+            ssh_execute(private_key, &ip, &setup_promtail_cmd(PROMTAIL_VERSION)).await?;
             poll_service_active(private_key, &ip, "promtail").await?;
             ssh_execute(private_key, &ip, INSTALL_BINARY_CMD).await?;
             poll_service_active(private_key, &ip, "binary").await?;
