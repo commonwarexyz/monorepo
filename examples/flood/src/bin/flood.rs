@@ -90,11 +90,7 @@ fn main() {
     }
 
     // Initialize runtime
-    let cfg = tokio::Config {
-        tcp_nodelay: Some(true),
-        ..Default::default()
-    };
-    let (executor, context) = tokio::Executor::init(cfg);
+    let (executor, context) = tokio::Executor::default();
 
     // Configure network
     let mut p2p_cfg = authenticated::Config::aggressive(
