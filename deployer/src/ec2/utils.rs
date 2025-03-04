@@ -1,7 +1,4 @@
 use crate::ec2::Error;
-use commonware_cryptography::hash;
-use commonware_utils::hex;
-use std::path::{Path, PathBuf};
 use tokio::process::Command;
 use tokio::time::{sleep, Duration};
 use tracing::warn;
@@ -24,25 +21,6 @@ pub async fn get_public_ip() -> Result<String, Error> {
         .trim()
         .to_string();
     Ok(result)
-}
-
-/// Downloads a file from a URL to a local destination
-async fn download_file(url: &str, dest: &Path) -> Result<(), Error> {
-    let response = reqwest::get(url).await?;
-    let bytes = response.bytes().await?;
-    std::fs::write(dest, bytes)?;
-    Ok(())
-}
-
-/// Downloads a file from a URL if it does not exist in the cache directory
-pub async fn download_and_cache(cache_dir: &str, url: &str, dest: &Path) -> Result<(), Error> {
-    let cache_key = hex(&hash(url.to_string().as_bytes()));
-    let cache_path = PathBuf::from(cache_dir).join(cache_key);
-    if !cache_path.exists() {
-        download_file(url, &cache_path).await?;
-    }
-    std::fs::copy(cache_path, dest)?;
-    Ok(())
 }
 
 /// Copies a local file to a remote instance via SCP with retries
