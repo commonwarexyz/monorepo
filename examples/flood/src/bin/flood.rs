@@ -11,8 +11,8 @@ use commonware_runtime::{tokio, Clock, Metrics, Network, Runner, Spawner};
 use commonware_utils::{from_hex_formatted, union};
 use futures::future::try_join_all;
 use governor::Quota;
-use prometheus_client::metrics::gauge::Gauge;
-use rand::{rngs::StdRng, RngCore, SeedableRng};
+use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
+use rand::{rngs::StdRng, Rng, RngCore, SeedableRng};
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -90,11 +90,7 @@ fn main() {
     }
 
     // Initialize runtime
-    let cfg = tokio::Config {
-        tcp_nodelay: Some(true),
-        ..Default::default()
-    };
-    let (executor, context) = tokio::Executor::init(cfg);
+    let (executor, context) = tokio::Executor::default();
 
     // Configure network
     let mut p2p_cfg = authenticated::Config::aggressive(
@@ -114,7 +110,7 @@ fn main() {
             authenticated::Network::new(context.with_label("network"), p2p_cfg);
 
         // Provide authorized peers
-        oracle.register(0, peer_keys).await;
+        oracle.register(0, peer_keys.clone()).await;
 
         // Register flood channel
         let (mut flood_sender, mut flood_receiver) = network.register(
@@ -130,26 +126,37 @@ fn main() {
         // Create flood
         let flood_sender = context
             .with_label("flood_sender")
-            .spawn(move |_| async move {
+            .spawn(move |context| async move {
                 let mut rng = StdRng::seed_from_u64(0);
+                let messages: Counter<u64, AtomicU64> = Counter::default();
+                context.register("messages", "Sent messages", messages.clone());
                 loop {
                     // Create message
-                    let mut msg = Vec::with_capacity(config.message_size);
+                    let mut msg = vec![0; config.message_size];
                     rng.fill_bytes(&mut msg);
 
                     // Send to all peers
-                    if let Err(e) = flood_sender.send(Recipients::All, msg.into(), false).await {
+                    let recipient_index = rng.gen_range(0..peer_keys.len());
+                    let recipient = Recipients::One(peer_keys[recipient_index].clone());
+                    if let Err(e) = flood_sender.send(recipient, msg.into(), false).await {
                         error!(?e, "could not send flood message");
                     }
+                    messages.inc();
                 }
             });
-        let flood_receiver = context.with_label("flood_receiver").spawn(|_| async move {
-            loop {
-                if let Err(e) = flood_receiver.recv().await {
-                    error!(?e, "could not receive flood message");
-                }
-            }
-        });
+        let flood_receiver =
+            context
+                .with_label("flood_receiver")
+                .spawn(move |context| async move {
+                    let messages: Counter<u64, AtomicU64> = Counter::default();
+                    context.register("messages", "Received messages", messages.clone());
+                    loop {
+                        if let Err(e) = flood_receiver.recv().await {
+                            error!(?e, "could not receive flood message");
+                        }
+                        messages.inc();
+                    }
+                });
 
         // Start system metrics collector
         let system = context.with_label("system").spawn(|context| async move {
