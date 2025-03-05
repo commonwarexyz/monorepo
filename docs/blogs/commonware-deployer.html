@@ -98,7 +98,7 @@
             <li><b>Automated Provisioning</b>: Spins up EC2 instances in multiple regions, sets up VPCs, internet gateways, route tables, subnets, security groups, SSH keys, and connects everything together with VPC peering.</li>
             <li><b>Code Deployment</b>: Uploads custom binaries and configs (specified uniquely for each instance), installs everything as a systemd service, and starts everything up. Pushes updates in-place.</li>
             <li><b>Configured Monitoring</b>: Launches a dedicated monitoring instance (running Prometheus, Grafana, and Loki) configured to ingest data from all deployed instances.</li>
-            <li><b>1-Command Cleanup</b>: <i>deployer</i> destroys everything when you're done, protecting your from surprise charges from that box you forgot to shutdown.</li>
+            <li><b>1-Command Cleanup</b>: Destroys everything when you're done, protecting your from surprise charges from that box you forgot to shutdown.</li>
         </ul>
         <div class="image-container">
             <img src="../imgs/deployer-architecture.png" alt="Deployment of custom binaries across multiple AWS regions">
