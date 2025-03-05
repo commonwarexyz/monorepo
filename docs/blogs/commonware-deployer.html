@@ -80,8 +80,9 @@
             <div class="date">March 5, 2025</div>
         </div>
         <p>You've built a peer-to-peer (p2p) demo that hums along on your local machine. Peers connect, messages flow, and for a moment, you're basking in localhost bliss. Then comes the inevitable question: how do you migrate this from your laptop to the cloud?</p>
-        <p>Enter <a href="https://docs.rs/commonware-deployer">deployer</a>, a CLI and library that bridges the gap between localhost and remote host. Roll custom binaries and configurations to instances in multiple regions, configure networking policies that allow peers to talk to each other, automatically collect metrics and logs, and clean up when you're done. Spend more time coding, not tweaking CIDR blocks.</p>
-        <h2>From Localhost to the Cloud: The Manual Way</h2>
+        <p>Enter <a href="https://docs.rs/commonware-deployer">deployer</a>, a CLI and library that bridges the gap between localhost and remote host. Roll custom binaries and configurations to instances in multiple regions, configure networking policies that allow peers to talk to each other, automatically collect metrics and logs, and clean up when you're done.</p>
+        <p>Spend your time coding, not tweaking CIDR blocks.</p>
+        <h2>From Localhost to the Cloud</h2>
         <p>Deploying a p2p application isn't as straightforward as spinning up a web server. You'll need to reckon with:</p>
         <ul>
             <li><b>Networking</b>: How do your nodes discover each other across regions?</li>
@@ -97,7 +98,7 @@
             <li><b>Automated Provisioning</b>: Spins up EC2 instances in multiple regions, sets up VPCs, internet gateways, route tables, subnets, security groups, SSH keys, and connects everything together with VPC peering.</li>
             <li><b>Code Deployment</b>: Uploads custom binaries and configs (specified uniquely for each instance), installs everything as a systemd service, and starts everything up. Pushes updates in-place.</li>
             <li><b>Configured Monitoring</b>: Launches a dedicated monitoring instance (running Prometheus, Grafana, and Loki) configured to ingest data from all deployed instances.</li>
-            <li><b>1-Command Cleanup</b>: <i>deployer</i> destroys everything when you're done, protecting your from surprise charges from that box you forgot to shutdown.</li>
+            <li><b>1-Command Cleanup</b>: Destroys everything when you're done, protecting you from surprise charges from that box you forgot to shutdown.</li>
         </ul>
         <div class="image-container">
             <img src="../imgs/deployer-architecture.png" alt="Deployment of custom binaries across multiple AWS regions">
@@ -115,7 +116,7 @@
         </ol>
         <p><i>Step through the full walkthrough in the <flood> <a href="https://github.com/commonwarexyz/monorepo/blob/main/examples/flood/README.md">README</a>.</i></p>
         <div class="image-container">
-            <img src="../imgs/flood-grafana.png" alt="Automatically deployed Grafana dashboard for <i>flood</i>">
+            <img src="../imgs/flood-grafana.png" alt="Automatically deployed Grafana dashboard for flood">
             <div class="image-caption">Figure 2: Automatically deployed Grafana dashboard for <i>flood</i></div>
         </div>
         <p>A local demo is a proof of concept; <i>deployer::ec2</i> makes it a proving ground.</p>
