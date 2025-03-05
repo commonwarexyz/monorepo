@@ -21,8 +21,8 @@ pub enum Error {
     InvalidChannelPublicKey,
     #[error("invalid peer public key")]
     InvalidPeerPublicKey,
-    #[error("handshake not for us: {0}")]
-    HandshakeNotForUs(String),
+    #[error("handshake not for us")]
+    HandshakeNotForUs,
     #[error("handshake timeout")]
     HandshakeTimeout,
     #[error("missing signature")]

@@ -47,9 +47,9 @@ deployer ec2 create --config config.yaml
 
 ## Monitor Performance on Grafana
 
-Visit `http://<monitoring-ip>:3000/d/deeqpmgixrv9cd`
+Visit `http://<monitoring-ip>:3000/d/flood`
 
-_`deeqpmgixrv9cd` is the dashboard UID in `dashboard.json`._
+_This dashboard is only accessible from the IP used to deploy the infrastructure._
 
 ## [Optional] Update Flood Binary
 
