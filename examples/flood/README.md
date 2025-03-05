@@ -75,7 +75,7 @@ deployer ec2 destroy --config config.yaml
 
 ### Missing AWS Credentials
 
-If `commonware-deployer` can't detect your AWS credentials, you'll see a "Request has expired" error:
+If `commonware-deployer` can't detect your AWS credentials, you'll see a "Request has expired." error:
 
 ```
 2025-03-05T01:36:47.550105Z  INFO deployer::ec2::create: created EC2 client region="eu-west-1"
