@@ -14,8 +14,9 @@ pub const MAX_POLL_ATTEMPTS: usize = 30;
 /// Interval between retries
 pub const RETRY_INTERVAL: Duration = Duration::from_secs(10);
 
-/// Fetch the public IPv4 address of a machine
+/// Fetch the current machine's public IPv4 address
 pub async fn get_public_ip() -> Result<String, Error> {
+    // icanhazip.com is maintained by Cloudflare as of 6/6/2021 (https://major.io/p/a-new-future-for-icanhazip/)
     let result = reqwest::get("https://ipv4.icanhazip.com")
         .await?
         .text()
