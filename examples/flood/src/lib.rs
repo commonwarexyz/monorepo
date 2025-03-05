@@ -1,4 +1,4 @@
-//! Flood peers deployed to AWS EC2 with random messages.
+//! Spam peers deployed to AWS EC2 with random messages.
 //!
 //! # Setup
 //!
@@ -45,7 +45,7 @@
 //!
 //! _This dashboard is only accessible from the IP used to deploy the infrastructure._
 //!
-//! ## [Optional] Update Flood Binary
+//! ## (Optional) Update Flood Binary
 //!
 //! ## Re-Compile Binary for ARM64
 //!
