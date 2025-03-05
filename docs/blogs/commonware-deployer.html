@@ -104,12 +104,12 @@
             <img src="../imgs/deployer-architecture.png" alt="Deployment of custom binaries across multiple AWS regions">
             <div class="image-caption">Figure 1: Deployment of custom binaries across multiple AWS regions</div>
         </div>
-        <h2>Try it Out: Flood</h2>
-        <p>To demonstrate how to use <i>deployer</i>, we build a <a href="https://docs.rs/commonware-p2p/latest/commonware_p2p/authenticated/index.html">p2p::authenticated</a> benchmarking tool called <a href="https://docs.rs/commonware-flood">flood</a>. Flood does one thing: spam peers with as many random messages as possible.</p>
-        <p>Flood leverages <i>deployer</i> to turn a local stress test into a global one. Here's how it works:</p>
+        <h2>Try it Out: flood</h2>
+        <p>To demonstrate how to use <i>deployer</i>, we build a <a href="https://docs.rs/commonware-p2p/latest/commonware_p2p/authenticated/index.html">p2p::authenticated</a> benchmarking tool called <a href="https://docs.rs/commonware-flood">flood</a>. <i>flood</i> has one goal: spam peers with as many random messages as possible.</p>
+        <p><i>flood</i> leverages <i>deployer</i> to turn a local stress test into a global one. Here's how it works:</p>
         <ol>
             <li><b>Setup</b>: The setup binary (included in the <i>flood</i> crate) generates a config.yaml file along with peer-specific configs and a peers.yaml file. You specify the number of peers, bootstrappers, regions, and performance parameters like message size and message backlog.</li>
-            <li><b>Compile</b> Flood uses Docker to compile the flood binary for ARM64 (deployer uses Graviton EC2 instances).</li>
+            <li><b>Compile</b> <i>flood</i> uses Docker to compile the flood binary for ARM64 (deployer uses Graviton EC2 instances).</li>
             <li><b>Deploy</b> Run <i>deployer ec2 create</i> to launch the flood network. Deployer spins up instances across regions, wires them together, and starts the flood binary on each peer.</li>
             <li><b>Monitor</b> Check the Grafana dashboard at <i>http://monitoring-ip:3000/d/flood</i> to see message throughput, latency, and instance health.</li>
             <li><b>Tweak</b> Want to test a new message size? Update the config, run <i>deployer ec2 update</i>, and watch the floodgates open.</li>
@@ -117,9 +117,10 @@
         </ol>
         <p>Check out the full walkthrough in the <a href="https://github.com/commonwarexyz/monorepo/blob/main/examples/flood/README.md">README</a>.</p>
         <div class="image-container">
-            <img src="../imgs/flood-grafana.png" alt="Automatically deployed Grafana dashboard for Flood">
-            <div class="image-caption">Figure 2: Automatically deployed Grafana dashboard for Flood</div>
+            <img src="../imgs/flood-grafana.png" alt="Automatically deployed Grafana dashboard for <i>flood</i>">
+            <div class="image-caption">Figure 2: Automatically deployed Grafana dashboard for <i>flood</i></div>
         </div>
+        <h2>TBD</h2>
         <p>A local demo is a proof of concept; <i>deployer::ec2</i> makes it a proving ground.</p>
     </div>
 
