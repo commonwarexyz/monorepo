@@ -94,12 +94,12 @@
         <h2>Introducing Deployer</h2>
         <p><i>deployer</i> is your one-stop shop for deploying p2p applications to the cloud. It's both a CLI for quick wins and a Rust library when you need to get fancy. Think of it like a high-level abstraction over infrastructure APIs with sane defaults and observability built-in.</p>
         <p>The first <i>deployer</i> dialect, <a href="https://docs.rs/commonware-deployer/latest/commonware_deployer/ec2/index.html">deployer::ec2</a>, is focused on reproducible benchmarking. Here's what it does (orchestrated via a single YAML config):</p>
-        <ol>
+        <ul>
             <li><b>Automated Provisioning</b>: Spins up EC2 instances in multiple regions, sets up VPCs, internet gateways, route tables, subnets, security groups, SSH keys, and connects everything together with VPC peering.</li>
             <li><b>Code Deployment</b>: Uploads your binaries and configs (specified uniquely for each instance), installs everything as a systemd service, and starts everything up. Push tweaks without redeploying.</li>
             <li><b>Configured Monitoring</b>: Launches a dedicated monitoring instance (with Prometheus, Grafana, and Loki) configured to pull data from all deployed instances.</li>
             <li><b>1-Command Cleanup</b>: <i>deployer</i> destroys everything when you're done, leaving no trace or surprise charges.</li>
-        </ol>
+        </ul>
         <div class="image-container">
             <img src="../imgs/deployer-architecture.png" alt="Deployment of custom binaries across multiple AWS regions">
             <div class="image-caption">Figure 1: Deployment of custom binaries across multiple AWS regions</div>
@@ -108,12 +108,12 @@
         <p>To demonstrate how to use <i>deployer</i>, we build a <a href="https://docs.rs/commonware-p2p/latest/commonware_p2p/authenticated/index.html">p2p::authenticated</a> benchmarking tool called <a href="https://docs.rs/commonware-flood">flood</a>. Flood does one thing: spam peers with as many random messages as possible.</p>
         <p>Flood leverages <i>deployer</i> to turn a local stress test into a global one. Here's how it works:</p>
         <ol>
-            <li><b>Setup</b>: The setup binary (included in the `flood` crate) generates a config.yaml file along with peer-specific configs and a peers.yaml file. You specify the number of peers, bootstrappers, regions, and performance parameters like message size and message backlog.</li>
+            <li><b>Setup</b>: The setup binary (included in the <i>flood</i> crate) generates a config.yaml file along with peer-specific configs and a peers.yaml file. You specify the number of peers, bootstrappers, regions, and performance parameters like message size and message backlog.</li>
             <li><b>Compile</b> Flood uses Docker to compile the flood binary for ARM64 (deployer uses Graviton EC2 instances).</li>
-            <li><b>Deploy</b> Run `deployer ec2 create` to launch the flood network. Deployer spins up instances across regions, wires them together, and starts the flood binary on each peer.</li>
-            <li><b>Monitor</b> Check the Grafana dashboard at `http://monitoring-ip:3000/d/flood` to see message throughput, latency, and instance health.</li>
-            <li><b>Tweak</b> Want to test a new message size? Update the config, run `deployer ec2 update`, and watch the floodgates open.</li>
-            <li><b>Cleanup</b> When you're done, `deployer ec2 destroy` wipes the network clean.</li>
+            <li><b>Deploy</b> Run <i>deployer ec2 create</i> to launch the flood network. Deployer spins up instances across regions, wires them together, and starts the flood binary on each peer.</li>
+            <li><b>Monitor</b> Check the Grafana dashboard at <i>http://monitoring-ip:3000/d/flood</i> to see message throughput, latency, and instance health.</li>
+            <li><b>Tweak</b> Want to test a new message size? Update the config, run <i>deployer ec2 update</i>, and watch the floodgates open.</li>
+            <li><b>Cleanup</b> When you're done, <i>deployer ec2 destroy</i> wipes the network clean.</li>
         </ol>
         <p>Check out the full walkthrough in the <a href="https://github.com/commonwarexyz/monorepo/blob/main/examples/flood/README.md">README</a>.</p>
         <div class="image-container">
