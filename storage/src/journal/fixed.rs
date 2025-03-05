@@ -223,9 +223,6 @@ impl<B: Blob, E: Storage<B> + Metrics, A: Array> Journal<B, E, A> {
         let ejected = { self.blob_cache.lock().unwrap().put(blob_index, blob) };
         if let Some(blob) = ejected {
             self.tracked.dec();
-            // TODO: There is a race condition where other readers may exist for this blob and we
-            // end up closing it underneath them. The actual closing of ejected blobs should
-            // probably take place in a &mut self method.
             blob.close().await?;
         };
         Ok(())
@@ -387,6 +384,7 @@ impl<B: Blob, E: Storage<B> + Metrics, A: Array> Journal<B, E, A> {
         }
         if let Some(blob) = blob {
             blob.read_at(&mut buf, offset).await?;
+            self.blob_cache.lock().unwrap().release(blob_index);
             return Ok(buf);
         };
 

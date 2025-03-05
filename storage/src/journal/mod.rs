@@ -6,8 +6,10 @@
 //! complex construction that prescribes some meaning to items in the log.
 
 use std::collections::{HashMap, VecDeque};
+use std::fmt::Display;
 use std::iter::IntoIterator;
 use thiserror::Error;
+use tracing::{debug, warn};
 
 pub mod fixed;
 pub mod variable;
@@ -41,8 +43,15 @@ pub enum Error {
     InvalidRewind(u64),
 }
 
+struct MapValue<V> {
+    value: V,
+    // The number of unreleased references to this value. If non-zero, the value will not be ejected
+    // from the cache.
+    rc: u32,
+}
+
 pub(crate) struct LruApprox<K, V> {
-    map: HashMap<K, V>,
+    map: HashMap<K, MapValue<V>>,
     queue: VecDeque<K>,
     capacity: usize,
     oldest_to_check: usize,
@@ -62,7 +71,7 @@ pub(crate) struct LruApprox<K, V> {
 /// maintain the capacity limit, the front-most item is removed.
 impl<K, V> LruApprox<K, V>
 where
-    K: std::hash::Hash + Eq + Clone,
+    K: std::hash::Hash + Eq + Clone + Display,
 {
     pub fn new(capacity: usize, oldest_to_check: usize) -> Self {
         assert!(capacity > 0);
@@ -76,7 +85,8 @@ where
     }
 
     /// Get the value associated with `key` if it exists. The implementation is mutable because it
-    /// may update internal structures that provide the LRU capability.
+    /// may update internal structures that provide the LRU capability. The user must call
+    /// release() on the key when done with any returned item to allow it to be ejected.
     pub fn get(&mut self, key: &K) -> Option<&V> {
         let maplen = self.map.len();
         let value = self.map.get_mut(key)?;
@@ -90,52 +100,91 @@ where
                 break;
             }
         }
-        assert!(self.queue.len() >= maplen);
+        assert!(self.queue.len() == maplen);
+        value.rc += 1;
 
-        Some(value)
+        Some(&value.value)
     }
 
-    /// Put the value associated with `key` into the cache, returning:
-    ///   1. the old value if the key is already associated with some value in the cache, or
-    ///   2. the value of any ejected item if the cache was at capacity, or
-    ///   3. None otherwise.
+    pub fn release(&mut self, key: &K) {
+        let value = self.map.get_mut(key);
+        if value.is_none() {
+            panic!("released key {} not found in cache", key);
+        }
+        let value = value.unwrap();
+        assert!(value.rc > 0);
+        value.rc -= 1;
+    }
+
+    /// Attempt to put the value associated with `key` into the cache. Possible outcomes are:
+    ///   1. Success: the cache has spare capacity, None is returned.
+    ///   2. Success: the cache was at capacity but an entry could be ejected to make room. The
+    ///      ejected value is returned.
+    ///   3. Failure: the key is already associated with some value in the cache, the provided value
+    ///      is returned.
+    ///   4. Failure: the cache is at capacity and there is no value to eject, the provided value is
+    ///      returned.
     pub fn put(&mut self, key: K, value: V) -> Option<V> {
-        let mut result = self.map.insert(key.clone(), value);
+        let mut result = self.map.insert(key.clone(), MapValue { value, rc: 0 });
         if result.is_some() {
-            // This key was already in the cache and we replaced its old value. We now update its
-            // state to "recently used", and return the old value.
-            self.get(&key);
-            return result;
+            // Outcome #3: `key` was already in the cache, re-insert the previous value and return
+            // the provided one.
+            warn!(key = %key, "key already in cache");
+            return Some(self.map.insert(key, result.unwrap()).unwrap().value);
         }
-        if self.queue.len() >= self.capacity {
-            // The cache is at capacity, so eject (our approximation of) the least recently used
-            // item.
-            let eject_me = self.queue.pop_front().unwrap();
-            result = self.map.remove(&eject_me);
+
+        if self.queue.len() < self.capacity {
+            // Outcome #1
+            self.queue.push_back(key);
+            return None;
         }
+        assert_eq!(self.queue.len(), self.capacity);
+
+        // The cache is at capacity, so eject (our approximation of) the least recently used
+        // item if possible.
+        let eject_me = self.queue.pop_front().unwrap();
+        let v = self.map.get(&eject_me).unwrap();
+        if v.rc > 0 {
+            // Outcome #4: the item we selected for ejection is still in use. Put it back in the
+            // queue and return the provided value back to the caller. We put it back in the
+            // "recently used" section to avoid attempting (and potentially failing) to eject it
+            // again.
+            debug!(key = %key, rc = v.rc, "cannot eject in-use value from cache");
+            self.queue.push_back(eject_me);
+            return Some(self.map.insert(key, result.unwrap()).unwrap().value);
+        }
+
+        // Outcome #2: We can safely ejected an old cache value.
+        result = self.map.remove(&eject_me);
 
         self.queue.push_back(key);
-        assert!(self.queue.len() >= self.map.len());
+        assert!(self.queue.len() == self.map.len());
 
-        result
+        result.map(|mv| mv.value)
     }
 
+    /// Remove the specified value from the cache and return it if present.
+    ///
+    /// Note that this operation is linear in the capacity of the cache.
     pub fn remove(&mut self, key: &K) -> Option<V> {
-        // Note that we do not remove the key from the queue since that would require an O(n) seek.
-        // We instead simply let it "expire" organically through LRU ejection after removing it only
-        // from the map.
-        self.map.remove(key)
+        let v = self.map.remove(key).map(|mv| {
+            assert_eq!(mv.rc, 0);
+            mv.value
+        });
+        if v.is_some() {
+            // O(n) removal of the key from the queue.
+            let pos = self.queue.iter().position(|x| x == key).unwrap();
+            self.queue.remove(pos);
+        }
+        v
     }
-}
-
-impl<K, V> IntoIterator for LruApprox<K, V> {
-    type Item = (K, V);
-    type IntoIter =
-        std::iter::Map<std::collections::hash_map::IntoIter<K, V>, fn((K, V)) -> (K, V)>;
 
     /// Creates a consuming iterator over all elements in the cache in arbitrary order. The cache
     /// cannot be used after this.
-    fn into_iter(self) -> Self::IntoIter {
-        self.map.into_iter().map(|kv| (kv.0, kv.1))
+    fn into_iter(self) -> impl Iterator<Item = (K, V)> {
+        self.map.into_iter().map(|kv| {
+            assert_eq!(kv.1.rc, 0);
+            (kv.0, kv.1.value)
+        })
     }
 }
