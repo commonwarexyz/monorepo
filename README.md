@@ -13,6 +13,7 @@ _Primitives are designed for deployment in adversarial environments. If you find
 * [broadcast](./broadcast/README.md): Disseminate data over a wide-area network.
 * [consensus](./consensus/README.md): Order opaque messages in a Byzantine environment.
 * [cryptography](./cryptography/README.md): Generate keys, sign arbitrary messages, and deterministically verify signatures.
+* [deployer](./deployer/README.md): Deploy infrastructure across cloud providers.
 * [p2p](./p2p/README.md): Communicate with authenticated peers over encrypted connections.
 * [resolver](./resolver/README.md): Resolve data identified by a fixed-length key.
 * [runtime](./runtime/README.md): Execute asynchronous tasks with a configurable scheduler.
@@ -25,6 +26,7 @@ _Examples may include insecure code (i.e. deriving keypairs from an integer argu
 
 * [bridge](./examples/bridge/README.md): Send succinct consensus certificates between two networks.
 * [chat](./examples/chat/README.md): Send encrypted messages to a group of friends.
+* [flood](./examples/flood/README.md): Spam peers deployed to AWS EC2 with random messages.
 * [log](./examples/log/README.md): Commit to a secret log and agree to its hash.
 * [vrf](./examples/vrf/README.md): Generate bias-resistant randomness with untrusted contributors.
 
