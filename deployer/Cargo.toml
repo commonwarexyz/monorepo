@@ -11,8 +11,6 @@ repository = "https://github.com/commonwarexyz/monorepo/tree/main/deployer"
 documentation = "https://docs.rs/commonware-deployer"
 
 [dependencies]
-commonware-cryptography = { workspace = true }
-commonware-utils = { workspace = true }
 clap = { workspace = true }
 futures = { workspace = true }
 reqwest = { workspace = true }
