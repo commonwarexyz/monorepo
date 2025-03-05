@@ -12,15 +12,15 @@ package wire;
 // require the server to send a message to a peer before authorizing that
 // it should connect to them.
 message Handshake {
-  bytes recipient_public_key = 1;
-  bytes ephemeral_public_key = 2;
-  uint64 timestamp = 3;
-  Signature signature = 4;
+    bytes recipient_public_key = 1;
+    bytes ephemeral_public_key = 2;
+    uint64 timestamp = 3;
+    Signature signature = 4;
 }
 
 // Signature is an arbitrary public key and signature over
 // either a Handshake or Peer message.
 message Signature {
-  bytes public_key = 1;
-  bytes signature = 2;
+    bytes public_key = 1;
+    bytes signature = 2;
 }
