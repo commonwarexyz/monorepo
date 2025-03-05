@@ -1,4 +1,4 @@
-//! TODO
+//! Deploy infrastructure across cloud providers.
 //!
 //! `commonware-deployer` automates the deployment of infrastructure across different cloud providers, closing the gap
 //! between a local demo and remote deployment. `commonware-deployer` is both available as a CLI tool for standard
