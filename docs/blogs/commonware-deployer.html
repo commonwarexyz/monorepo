@@ -93,7 +93,7 @@
         <p>You could spend weeks configuring VPC peering, wrestling with IAM roles, and praying that your Grafana dashboard actually shows something useful. Or, you could use <a href="https://docs.rs/commonware-deployer">deployer</a>.</p>
         <h2>Introducing Deployer</h2>
         <p><i>deployer</i> is your one-stop shop for deploying p2p applications to the cloud. It's both a CLI for quick wins and a Rust library when you need to get fancy. Think of it like a high-level abstraction over infrastructure APIs with sane defaults and observability built-in.</p>
-        <p>The first <i>deployer</i> dialect, <a href="https://docs.rs/commonware-deployer/latest/commonware_deployer/ec2/index.html">deployer::ec2</a>, is focused on reproducible benchmarking. Here's what it does (via a single YAML config):</p>
+        <p>The first <i>deployer</i> dialect, <a href="https://docs.rs/commonware-deployer/latest/commonware_deployer/ec2/index.html">deployer::ec2</a>, is focused on reproducible benchmarking. Here's what it does (orchestrated via a single YAML config):</p>
         <ol>
             <li><b>Automated Provisioning</b>: Spins up EC2 instances in multiple regions, sets up VPCs, internet gateways, route tables, subnets, security groups, SSH keys, and connects everything together with VPC peering.</li>
             <li><b>Code Deployment</b>: Uploads your binaries and configs (specified uniquely for each instance), installs everything as a systemd service, and starts everything up. Push tweaks without redeploying.</li>
