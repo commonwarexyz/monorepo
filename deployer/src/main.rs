@@ -1,11 +1,15 @@
-//! Deploy cloud-based infrastructure.
+//! Commonware Deployer CLI
 
 use clap::{Arg, ArgAction, Command};
-use commonware_utils::crate_version;
 use std::path::PathBuf;
 use tracing::error;
 
 mod ec2;
+
+/// Returns the version of the crate.
+pub fn crate_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
 
 /// Flag for verbose output
 const VERBOSE_FLAG: &str = "verbose";
@@ -25,12 +29,10 @@ async fn main() -> std::process::ExitCode {
         )
         .subcommand(
             Command::new(ec2::CMD)
-                .about("TBD")
+                .about("Deploy a custom binary (and configuration) to any number of EC2 instances across multiple regions. Collect metrics and logs from all instances via a private network.")
                 .subcommand(
                     Command::new(ec2::CREATE_CMD)
-                        .about(
-                            "Sets up EC2 instances and deploys files with monitoring and logging",
-                        )
+                        .about("Deploy EC2 instances across multiple regions from a YAML configuration file.")
                         .arg(
                             Arg::new("config")
                                 .long("config")
@@ -41,7 +43,7 @@ async fn main() -> std::process::ExitCode {
                 )
                 .subcommand(
                     Command::new(ec2::UPDATE_CMD)
-                        .about("Updates the binary and configuration on all binary nodes")
+                        .about("Update binaries (and configurations) in-place on all instances.")
                         .arg(
                             Arg::new("config")
                                 .long("config")
@@ -52,7 +54,7 @@ async fn main() -> std::process::ExitCode {
                 )
                 .subcommand(
                     Command::new(ec2::DESTROY_CMD)
-                        .about("Deletes all deployed resources")
+                        .about("Destroy all resources associated with a given deployment.")
                         .arg(
                             Arg::new("config")
                                 .long("config")

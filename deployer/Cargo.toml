@@ -2,9 +2,9 @@
 name = "commonware-deployer"
 edition = "2021"
 publish = true
-version = "0.0.2"
+version = "0.0.1"
 license = "MIT OR Apache-2.0"
-description = "TBD"
+description = "Deploy infrastructure across cloud providers."
 readme = "README.md"
 homepage = "https://commonware.xyz"
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/deployer"

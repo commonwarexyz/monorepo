@@ -1,3 +1,5 @@
+//! Utility functions for interacting with EC2 instances
+
 use crate::ec2::Error;
 use tokio::process::Command;
 use tokio::time::{sleep, Duration};

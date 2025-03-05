@@ -1,3 +1,5 @@
+//! `update` subcommand for `ec2`
+
 use crate::ec2::{
     aws::*, deployer_directory, utils::*, Config, Error, InstanceConfig, CREATED_FILE_NAME,
     DESTROYED_FILE_NAME, MONITORING_NAME, MONITORING_REGION,

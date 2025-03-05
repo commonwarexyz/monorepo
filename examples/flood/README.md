@@ -1,61 +1,71 @@
 # commonware-flood
 
+[![Crates.io](https://img.shields.io/crates/v/commonware-flood.svg)](https://crates.io/crates/commonware-flood)
+[![Docs.rs](https://docs.rs/commonware-flood/badge.svg)](https://docs.rs/commonware-flood)
+
+Flood peers [deployed to AWS EC2](https://docs.rs/commonware-deployer/latest/commonware_deployer/ec2/index.html) with
+random messages.
+
 ## Setup
 
-### Create Artifacts
+_To run this example, you must first install [Rust](https://www.rust-lang.org/tools/install) and [Docker](https://www.docker.com/get-started/)._
+
+### Install `commonware-deployer`
 
 ```bash
-cargo run --bin setup -- --peers 3 --bootstrappers 1 --regions us-west-2,us-east-1,eu-west-1 --instance-type c7g.large --storage-size 10 --storage-class gp3 --message-size 1024 --message-backlog 1024 --mailbox-size 1024 --dashboard dashboard.json --output assets
+cargo install commonware-deployer
+```
+
+### Create Deployer Artifacts
+
+```bash
+cargo run --bin setup -- --peers 3 --bootstrappers 1 --regions us-west-2,us-east-1,eu-west-1 --instance-type c7g.medium --storage-size 10 --storage-class gp3 --message-size 1024 --message-backlog 1024 --mailbox-size 16384 --dashboard dashboard.json --output assets
 ```
 
 ### Build Flood Binary
 
-_TODO: Docker pre-requisite._
+#### Build Cross-Platform Compiler
 
 ```bash
 docker build -t flood-builder .
 ```
 
+#### Compile Binary for ARM64
+
 ```bash
 docker run -it -v ${PWD}/../..:/monorepo flood-builder
 ```
 
-Emitted binary `flood` is placed in `assets`.
+_Emitted binary `flood` is placed in `assets`._
 
-### Build Deployer Binary
-
-_Done from deployer directory._
-
-```bash
-cd ../../deployer
-cargo build --release && mv ../target/release/deployer ~/.cargo/bin/
-```
-
-## Run
-
-### Deploy Infrastructure
+### Deploy Flood Binary
 
 ```bash
 cd assets
 deployer ec2 create --config config.yaml
 ```
 
-### Check Metrics
+## Monitor Performance on Grafana
 
-Visit `http://<monitoring-ip>:3000` (anonymous login is already enabled, so you don't need to enter a password)
+Visit `http://<monitoring-ip>:3000/d/deeqpmgixrv9cd`
 
-### [Optional] Update Flood Binary
+_`deeqpmgixrv9cd` is the dashboard UID in `dashboard.json`._
+
+## [Optional] Update Flood Binary
+
+### Re-Compile Binary for ARM64
 
 ```bash
 docker run -it -v ${PWD}/../..:/monorepo flood-builder
 ```
 
+### Restart Flood Binary on EC2 Instances
 
 ```bash
 deployer ec2 update --config config.yaml
 ```
 
-### Teardown Infrastructure
+## Destroy Infrastructure
 
 ```bash
 deployer ec2 destroy --config config.yaml
@@ -65,11 +75,15 @@ deployer ec2 destroy --config config.yaml
 
 ### EC2 Throttling
 
+EC2 instances may throttle network traffic if a workload exceeds the allocation for a particular instance type. To check
+if an instance is throttled, SSH into the instance and run:
+
 ```bash
 ethtool -S ens5 | grep "allowance"
 ```
 
-If throttled, you'll see a non-zero value for some item:
+If throttled, you'll see a non-zero value for some "allowance" item:
+
 ```txt
 bw_in_allowance_exceeded: 0
 bw_out_allowance_exceeded: 14368

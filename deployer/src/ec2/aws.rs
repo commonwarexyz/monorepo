@@ -1,3 +1,5 @@
+//! AWS EC2 SDK function wrappers
+
 use crate::ec2::{utils::RETRY_INTERVAL, PortConfig};
 use aws_config::BehaviorVersion;
 pub use aws_config::Region;
