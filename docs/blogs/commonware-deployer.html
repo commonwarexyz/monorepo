@@ -80,7 +80,8 @@
             <div class="date">March 5, 2025</div>
         </div>
         <p>You've built a peer-to-peer (p2p) demo that hums along on your local machine. Peers connect, messages flow, and for a moment, you're basking in localhost bliss. Then comes the inevitable question: how do you migrate this from your laptop to the cloud?</p>
-        <p>Enter <a href="https://docs.rs/commonware-deployer">deployer</a>, a CLI and library designed to bridge the gap between localhost and monitored, multi-region infrastructure. It's not just about spinning up a handful of servers—it's about rolling custom binaries and configurations to instances in multiple regions, configuring networking policies to allow peers to talk to each other and push metrics to a built-in monitoring stack, and cleaning up when you're done. `deployer` takes care of infrastructure, so you can focus on coding.</p>
+        <p>Enter <a href="https://docs.rs/commonware-deployer">deployer</a>, a CLI and library designed to bridge the gap between localhost and monitored, multi-region infrastructure. It's not just about spinning up a handful of servers—it's about rolling custom binaries and configurations to instances in multiple regions, configuring networking policies to allow peers to talk to each other and to push metrics to a private monitoring stack, and cleaning up when you're done.</p>
+        <p><i>deployer</i> takes care of infrastructure, so you can focus on coding.</p>
         <h2>From Localhost to the Cloud: The Manual Way</h2>
         <p>Deploying a p2p application isn't like spinning up a web server. You'll need to reckon with:</p>
         <ul>
@@ -96,7 +97,7 @@
             <li><b>Automated Provisioning</b>: Spins up EC2 instances in multiple regions, sets up VPCs, internet gateways, route tables, subnets, security groups, SSH keys, and connects everything together with VPC peering.</li>
             <li><b>Code Deployment</b>: Uploads your binaries and configs (specified uniquely for each instance), installs everything as a systemd service, and starts everything up. Push tweaks without redeploying.</li>
             <li><b>Configured Monitoring</b>: Launches a dedicated monitoring instance (with Prometheus, Grafana, and Loki) configured to pull data from all deployed instances.</li>
-            <li><b>1-Command Cleanup</b>: `deployer` destroys everything when you're done, leaving no trace or surprise charges.</li>
+            <li><b>1-Command Cleanup</b>: <i>deployer</i> destroys everything when you're done, leaving no trace or surprise charges.</li>
         </ol>
         <div class="image-container">
             <img src="../imgs/deployer-architecture.png" alt="Deployment of custom binaries across multiple AWS regions">
@@ -104,7 +105,7 @@
         </div>
         <h2>Try it Out: Flood</h2>
         <p>To demonstrate how to use <i>deployer</i>, we build a <a href="https://docs.rs/commonware-p2p/latest/commonware_p2p/authenticated/index.html">p2p::authenticated</a> benchmarking tool called <a href="https://docs.rs/commonware-flood">flood</a>. Flood does one thing: spam peers with as many random messages as possible.</p>
-        <p>Flood leverages `deployer` to turn a local stress test into a global one. Here's how it works:</p>
+        <p>Flood leverages <i>deployer</i> to turn a local stress test into a global one. Here's how it works:</p>
         <ol>
             <li><b>Setup</b>: The setup binary (included in the `flood` crate) generates a config.yaml file along with peer-specific configs and a peers.yaml file. You specify the number of peers, bootstrappers, regions, and performance parameters like message size and message backlog.</li>
             <li><b>Compile</b> Flood uses Docker to compile the flood binary for ARM64 (deployer uses Graviton EC2 instances).</li>
