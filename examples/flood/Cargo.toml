@@ -1,0 +1,40 @@
+[package]
+name = "commonware-flood"
+edition = "2021"
+publish = true
+version = "0.0.1"
+license = "MIT OR Apache-2.0"
+description = "Flood peers deployed to AWS EC2 with random messages."
+readme = "README.md"
+homepage = "https://commonware.xyz"
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/flood"
+documentation = "https://docs.rs/commonware-flood"
+
+[dependencies]
+commonware-cryptography = { workspace = true }
+commonware-runtime = { workspace = true }
+commonware-p2p = { workspace = true }
+commonware-deployer = { workspace = true }
+commonware-utils = { workspace = true }
+clap = { workspace = true }
+prometheus-client = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["fmt", "json"] }
+serde = { workspace = true, features = ["derive"] }
+serde_yaml = { workspace = true }
+governor = { workspace = true }
+axum = { workspace = true }
+rand = { workspace = true }
+futures = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+sysinfo = "0.33.1"
+
+[[bin]]
+name = "flood"
+path = "src/bin/flood.rs"
+bench = false
+
+[[bin]]
+name = "setup"
+path = "src/bin/setup.rs"
+bench = false

@@ -1,0 +1,33 @@
+[package]
+name = "commonware-deployer"
+edition = "2021"
+publish = true
+version = "0.0.1"
+license = "MIT OR Apache-2.0"
+description = "Deploy infrastructure across cloud providers."
+readme = "README.md"
+homepage = "https://commonware.xyz"
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/deployer"
+documentation = "https://docs.rs/commonware-deployer"
+
+[dependencies]
+clap = { workspace = true }
+futures = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_yaml = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+uuid = { workspace = true, features = ["v4"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
+aws-config = "1.5.16"
+aws-sdk-ec2 = "1.110.0"
+
+[[bin]]
+name = "deployer"
+path = "src/main.rs"
+bench = false
+
+[lib]
+bench = false

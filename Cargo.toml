@@ -3,6 +3,7 @@ members = [
     "broadcast",
     "consensus",
     "cryptography",
+    "deployer",
     "macros",
     "p2p",
     "resolver",
@@ -11,6 +12,7 @@ members = [
     "utils",
     "examples/bridge",
     "examples/chat",
+    "examples/flood",
     "examples/log",
     "examples/vrf",
 ]
@@ -20,6 +22,7 @@ resolver = "2"
 commonware-broadcast = { version = "0.0.4", path = "broadcast" }
 commonware-consensus = { version = "0.0.11", path = "consensus" }
 commonware-cryptography = { version = "0.0.22", path = "cryptography" }
+commonware-deployer = { version = "0.0.1", path = "deployer" }
 commonware-macros = { version = "0.0.13", path = "macros" }
 commonware-p2p = { version = "0.0.33", path = "p2p" }
 commonware-resolver = { version = "0.0.2", path = "resolver" }
@@ -49,7 +52,12 @@ ratatui = "0.27.0"
 crossterm = "0.28.1"
 serde_json = "1.0.122"
 cfg-if = "1.0.0"
+axum = "0.8.1"
 bimap = "0.6.3"
+reqwest = "0.12.12"
+uuid = "1.15.1"
+serde = "1.0.218"
+serde_yaml = "0.9.34"
 
 [profile.bench]
 # Because we enable overflow checks in "release," we should benchmark with them.
