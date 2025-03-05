@@ -31,7 +31,7 @@ const METRICS_PORT: u16 = 9090;
 fn main() {
     // Parse arguments
     let matches = Command::new("runner")
-        .about("flood the network with messages")
+        .about("Spam peers with random messages.")
         .arg(Arg::new("peers").long("peers").required(true))
         .arg(Arg::new("config").long("config").required(true))
         .get_matches();
