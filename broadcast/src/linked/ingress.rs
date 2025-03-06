@@ -14,7 +14,7 @@ pub enum Message<D: Array> {
     },
 }
 
-/// Ingress mailbox for the `Actor`.
+/// Ingress mailbox for the `Engine`.
 #[derive(Clone)]
 pub struct Mailbox<D: Array> {
     sender: mpsc::Sender<Message<D>>,

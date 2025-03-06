@@ -6,7 +6,7 @@ use commonware_cryptography::Scheme;
 use commonware_utils::Array;
 use std::time::Duration;
 
-/// Configuration when creating an `Actor`.
+/// Configuration for the [`super::Engine`].
 pub struct Config<
     C: Scheme,
     D: Array,
@@ -14,11 +14,11 @@ pub struct Config<
     Z: Collector<Digest = D>,
     S: ThresholdCoordinator<Index = Epoch>,
 > {
-    /// The cryptographic scheme used if the actor is a sequencer.
+    /// The cryptographic scheme used if the engine is a sequencer.
     pub crypto: C,
 
     /// Manages the set of sequencers and signers.
-    /// Also manages the cryptographic partial share if the actor is a signer.
+    /// Also manages the cryptographic partial share if the engine is a signer.
     pub coordinator: S,
 
     /// Verifies chunks.

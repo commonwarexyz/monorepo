@@ -52,16 +52,6 @@ impl<C: Scheme, D: Array> TipManager<C, D> {
     pub fn get(&self, sequencer: &C::PublicKey) -> Option<parsed::Node<C, D>> {
         self.tips.get(sequencer).cloned()
     }
-
-    /// Returns the number of tips in the manager.
-    pub fn len(&self) -> usize {
-        self.tips.len()
-    }
-
-    /// Returns true if the manager is empty.
-    pub fn is_empty(&self) -> bool {
-        self.tips.is_empty()
-    }
 }
 
 #[cfg(test)]
