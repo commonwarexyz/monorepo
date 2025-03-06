@@ -107,7 +107,7 @@ impl<
     /// Creates a new `Actor` with the given configuration.
     ///
     /// Returns the actor and a mailbox to send messages to it.
-    pub async fn new(context: E, cfg: Config<P, D, Key, Con, Pro>) -> (Self, Mailbox<Key>) {
+    pub fn new(context: E, cfg: Config<P, D, Key, Con, Pro>) -> (Self, Mailbox<Key>) {
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
         let metrics = metrics::Metrics::init(context.clone());
         let fetcher = Fetcher::new(
