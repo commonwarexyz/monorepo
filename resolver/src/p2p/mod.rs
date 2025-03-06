@@ -184,8 +184,7 @@ mod tests {
                 priority_requests: false,
                 priority_responses: false,
             },
-        )
-        .await;
+        );
         engine.start(connection);
 
         mailbox
