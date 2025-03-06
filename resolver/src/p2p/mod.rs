@@ -73,7 +73,7 @@ pub trait Coordinator: Clone + Send + Sync + 'static {
 mod tests {
     use super::{
         mocks::{Consumer, Coordinator, CoordinatorMsg, Event, Key, Producer},
-        peer,
+        Config, Engine, Mailbox,
     };
     use crate::Resolver;
     use bytes::Bytes;
@@ -158,16 +158,16 @@ mod tests {
         connection: (Sender<PublicKey>, Receiver<PublicKey>),
         consumer: Consumer<Key, Bytes>,
         producer: Producer<Key, Bytes>,
-    ) -> peer::Mailbox<Key> {
-        let (actor, mailbox) = peer::Actor::new(
+    ) -> Mailbox<Key> {
+        let (engine, mailbox) = Engine::new(
             context.with_label(&format!("actor_{}", scheme.public_key())),
-            peer::Config {
+            Config {
                 coordinator: coordinator.clone(),
                 consumer,
                 producer,
                 mailbox_size: MAILBOX_SIZE,
                 requester_config: commonware_p2p::utils::requester::Config {
-                    me: scheme.public_key(),
+                    public_key: scheme.public_key(),
                     rate_limit: governor::Quota::per_second(
                         std::num::NonZeroU32::new(RATE_LIMIT).unwrap(),
                     ),
@@ -180,8 +180,7 @@ mod tests {
             },
         )
         .await;
-        actor.start(connection);
-
+        engine.start(connection);
         mailbox
     }
 

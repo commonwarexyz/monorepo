@@ -140,7 +140,7 @@ impl<
     pub fn new(context: E, cfg: Config<C, S>) -> (Self, Mailbox) {
         // Initialize requester
         let config = requester::Config {
-            me: cfg.crypto.public_key(),
+            public_key: cfg.crypto.public_key(),
             rate_limit: cfg.fetch_rate_per_peer,
             initial: cfg.fetch_timeout / 2,
             timeout: cfg.fetch_timeout,
