@@ -147,7 +147,6 @@ pub(crate) fn leaf_pos_to_num(leaf_pos: u64) -> u64 {
 /// Returns the position of the leaf with number `leaf_num` in an MMR.
 ///
 /// This computation is O(log2(n)) in `leaf_num`.
-#[allow(dead_code)] // TODO: remove this when we start using it
 pub(crate) fn leaf_num_to_pos(leaf_num: u64) -> u64 {
     if leaf_num == 0 {
         return 0;
