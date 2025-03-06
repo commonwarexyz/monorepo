@@ -13,7 +13,7 @@
 //! ## Create Deployer Artifacts
 //!
 //! ```bash
-//! cargo run --bin setup -- --peers 3 --bootstrappers 1 --regions us-west-2,us-east-1,eu-west-1 --instance-type c7g.medium --storage-size 10 --storage-class gp3 --message-size 1024 --message-backlog 1024 --mailbox-size 16384 --dashboard dashboard.json --output assets
+//! cargo run --bin setup -- --peers 3 --bootstrappers 1 --regions us-west-2,us-east-1,eu-west-1 --instance-type c7g.4xlarge --storage-size 10 --storage-class gp3 --worker-threads 16 --message-size 1024 --message-backlog 1024 --mailbox-size 16384 --dashboard dashboard.json --output assets
 //! ```
 //!
 //! ## Build Flood Binary
@@ -104,6 +104,7 @@ pub struct Config {
     pub port: u16,
     pub allowed_peers: Vec<String>,
     pub bootstrappers: Vec<String>,
+    pub worker_threads: usize,
     pub message_size: usize,
     pub message_backlog: usize,
     pub mailbox_size: usize,

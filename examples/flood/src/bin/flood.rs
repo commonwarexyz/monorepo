@@ -90,7 +90,11 @@ fn main() {
     }
 
     // Initialize runtime
-    let (executor, context) = tokio::Executor::default();
+    let cfg = tokio::Config {
+        threads: config.worker_threads,
+        ..Default::default()
+    };
+    let (executor, context) = tokio::Executor::init(cfg);
 
     // Configure network
     let mut p2p_cfg = authenticated::Config::aggressive(
