@@ -6,7 +6,7 @@ use commonware_cryptography::Scheme;
 use commonware_utils::Array;
 use std::time::Duration;
 
-/// Configuration for the [`super::Engine`].
+/// Configuration for the [`Engine`](super::Engine).
 pub struct Config<
     C: Scheme,
     D: Array,

@@ -21,7 +21,7 @@
 //!
 //! # Design
 //!
-//! The core of the module is the `Engine`. It is responsible for:
+//! The core of the module is the [`Engine`]. It is responsible for:
 //! - Broadcasting nodes (if a sequencer)
 //! - Signing chunks (if a validator)
 //! - Tracking the latest chunk in each sequencer’s chain
@@ -57,14 +57,14 @@ mod wire {
 #[cfg(test)]
 pub mod mocks;
 
-/// Used as the [`crate::Coordinator::Index`] type.
+/// Used as the [`Index`](crate::Coordinator::Index) type.
 /// Defines the current set of sequencers and signers.
 ///
 /// This is not a single "View" in the sense of a consensus protocol, but rather a continuous
 /// sequence of views in-which the set of sequencers and signers is constant.
 pub type Epoch = u64;
 
-/// Used as the [`crate::Application::Context`] type
+/// Used as the [`Application::Context`](crate::Application::Context) type.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct Context<P: Array> {
     /// Sequencer's public key.

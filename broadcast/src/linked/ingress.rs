@@ -14,7 +14,7 @@ pub enum Message<D: Array> {
     },
 }
 
-/// Ingress mailbox for the `Engine`.
+/// Ingress mailbox for [`Engine`](super::Engine).
 #[derive(Clone)]
 pub struct Mailbox<D: Array> {
     sender: mpsc::Sender<Message<D>>,
