@@ -124,7 +124,7 @@ pub struct Actor<
     max_fetch_count: usize,
     max_fetch_size: usize,
     fetch_concurrent: usize,
-    requester: requester::Requester<E, C>,
+    requester: requester::Requester<E, C::PublicKey>,
 
     unfulfilled: Gauge,
     outstanding: Gauge,
@@ -141,7 +141,7 @@ impl<
     pub fn new(context: E, cfg: Config<C, S>) -> (Self, Mailbox) {
         // Initialize requester
         let config = requester::Config {
-            crypto: cfg.crypto.clone(),
+            public_key: cfg.crypto.public_key(),
             rate_limit: cfg.fetch_rate_per_peer,
             initial: cfg.fetch_timeout / 2,
             timeout: cfg.fetch_timeout,

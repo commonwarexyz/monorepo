@@ -12,7 +12,6 @@ use crate::{
     Consumer,
 };
 use bytes::Bytes;
-use commonware_cryptography::Scheme;
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{
@@ -35,23 +34,23 @@ use std::{collections::HashMap, marker::PhantomData};
 use tracing::{debug, error, warn};
 
 /// Represents a pending serve operation.
-struct Serve<E: Clock, C: Scheme> {
+struct Serve<E: Clock, P: Array> {
     timer: histogram::Timer<E>,
-    peer: C::PublicKey,
+    peer: P,
     id: u64,
     result: Result<Bytes, oneshot::Canceled>,
 }
 
 /// Manages incoming and outgoing P2P requests, coordinating fetch and serve operations.
-pub struct Actor<
+pub struct Engine<
     E: Clock + GClock + Spawner + Rng + Metrics,
-    C: Scheme,
-    D: Coordinator<PublicKey = C::PublicKey>,
+    P: Array,
+    D: Coordinator<PublicKey = P>,
     Key: Array,
     Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
     Pro: Producer<Key = Key>,
-    NetS: Sender<PublicKey = C::PublicKey>,
-    NetR: Receiver<PublicKey = C::PublicKey>,
+    NetS: Sender<PublicKey = P>,
+    NetR: Receiver<PublicKey = P>,
 > {
     /// Context used to spawn tasks, manage time, etc.
     context: E,
@@ -72,7 +71,7 @@ pub struct Actor<
     mailbox: mpsc::Receiver<Message<Key>>,
 
     /// Manages outgoing fetch requests
-    fetcher: Fetcher<E, C, Key, NetS>,
+    fetcher: Fetcher<E, P, Key, NetS>,
 
     /// Track the start time of fetch operations
     fetch_timers: HashMap<Key, histogram::Timer<E>>,
@@ -81,7 +80,7 @@ pub struct Actor<
     /// Once the future is resolved, the data (or an error) is sent to the peer.
     /// Has unbounded size; the number of concurrent requests should be limited
     /// by the `Producer` which may drop requests.
-    serves: FuturesPool<Serve<E, C>>,
+    serves: FuturesPool<Serve<E, P>>,
 
     /// Whether responses are sent with priority over other network messages
     priority_responses: bool,
@@ -96,19 +95,19 @@ pub struct Actor<
 
 impl<
         E: Clock + GClock + Spawner + Rng + Metrics,
-        C: Scheme,
-        D: Coordinator<PublicKey = C::PublicKey>,
+        P: Array,
+        D: Coordinator<PublicKey = P>,
         Key: Array,
         Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
         Pro: Producer<Key = Key>,
-        NetS: Sender<PublicKey = C::PublicKey>,
-        NetR: Receiver<PublicKey = C::PublicKey>,
-    > Actor<E, C, D, Key, Con, Pro, NetS, NetR>
+        NetS: Sender<PublicKey = P>,
+        NetR: Receiver<PublicKey = P>,
+    > Engine<E, P, D, Key, Con, Pro, NetS, NetR>
 {
     /// Creates a new `Actor` with the given configuration.
     ///
     /// Returns the actor and a mailbox to send messages to it.
-    pub async fn new(context: E, cfg: Config<C, D, Key, Con, Pro>) -> (Self, Mailbox<Key>) {
+    pub async fn new(context: E, cfg: Config<P, D, Key, Con, Pro>) -> (Self, Mailbox<Key>) {
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
         let metrics = metrics::Metrics::init(context.clone());
         let fetcher = Fetcher::new(
@@ -295,7 +294,7 @@ impl<
     async fn handle_serve(
         &mut self,
         sender: &mut NetS,
-        peer: C::PublicKey,
+        peer: P,
         id: u64,
         response: Result<Bytes, oneshot::Canceled>,
         priority: bool,
@@ -322,7 +321,7 @@ impl<
     }
 
     /// Handle a network request from a peer.
-    async fn handle_network_request(&mut self, peer: C::PublicKey, id: u64, request: Bytes) {
+    async fn handle_network_request(&mut self, peer: P, id: u64, request: Bytes) {
         // Parse request
         let Ok(key) = Key::try_from(request.to_vec()) else {
             warn!(?peer, ?id, "peer invalid request");
@@ -350,7 +349,7 @@ impl<
     async fn handle_network_response(
         &mut self,
         sender: &mut NetS,
-        peer: C::PublicKey,
+        peer: P,
         id: u64,
         response: Bytes,
     ) {
@@ -377,12 +376,7 @@ impl<
     }
 
     /// Handle a network response from a peer that did not have the data.
-    async fn handle_network_response_empty(
-        &mut self,
-        sender: &mut NetS,
-        peer: C::PublicKey,
-        id: u64,
-    ) {
+    async fn handle_network_response_empty(&mut self, sender: &mut NetS, peer: P, id: u64) {
         warn!(?peer, ?id, "peer response: error");
 
         // Get the key associated with the response, if any
