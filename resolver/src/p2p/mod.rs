@@ -36,7 +36,8 @@ use std::future::Future;
 #[cfg(test)]
 pub mod mocks;
 
-pub mod peer;
+mod peer;
+pub use peer::{Actor as Engine, Config, Mailbox, Message};
 mod wire {
     include!(concat!(env!("OUT_DIR"), "/wire.rs"));
 }
