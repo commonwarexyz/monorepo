@@ -4,9 +4,9 @@ use governor::Quota;
 use std::time::Duration;
 
 /// Configuration for the requester.
-pub struct Config<C: Array> {
+pub struct Config<P: Array> {
     /// Cryptographic primitives.
-    pub public_key: C,
+    pub public_key: P,
 
     /// Rate limit for requests per participant.
     pub rate_limit: Quota,

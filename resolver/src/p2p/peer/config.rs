@@ -9,8 +9,8 @@ use std::time::Duration;
 
 /// Configuration for the peer actor.
 pub struct Config<
-    C: Array,
-    D: Coordinator<PublicKey = C>,
+    P: Array,
+    D: Coordinator<PublicKey = P>,
     Key: Array,
     Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
     Pro: Producer<Key = Key>,
@@ -28,7 +28,7 @@ pub struct Config<
     pub mailbox_size: usize,
 
     /// Configuration for the requester
-    pub requester_config: requester::Config<C>,
+    pub requester_config: requester::Config<P>,
 
     /// How long fetches remain in the pending queue before being retried
     pub fetch_retry_timeout: Duration,

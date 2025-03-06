@@ -27,26 +27,26 @@ pub type ID = u64;
 /// of the most performant peers (based on our latency observations). To encourage
 /// exploration, set the value of `initial` to less than the expected latency of
 /// performant peers and/or periodically set `shuffle` in `request`.
-pub struct Requester<E: Clock + GClock + Rng + Metrics, C: Array> {
+pub struct Requester<E: Clock + GClock + Rng + Metrics, P: Array> {
     context: E,
-    public_key: C,
+    public_key: P,
     metrics: super::Metrics,
     initial: Duration,
     timeout: Duration,
 
     // Participants to exclude from requests
-    excluded: HashSet<C>,
+    excluded: HashSet<P>,
 
     // Rate limiter for participants
     #[allow(clippy::type_complexity)]
-    rate_limiter: RateLimiter<C, HashMapStateStore<C>, E, NoOpMiddleware<E::Instant>>,
+    rate_limiter: RateLimiter<P, HashMapStateStore<P>, E, NoOpMiddleware<E::Instant>>,
     // Participants and their performance (lower is better)
-    participants: PrioritySet<C, u128>,
+    participants: PrioritySet<P, u128>,
 
     // Next ID to use for a request
     id: ID,
     // Outstanding requests (ID -> (participant, start time))
-    requests: HashMap<ID, (C, SystemTime)>,
+    requests: HashMap<ID, (P, SystemTime)>,
     // Deadlines for outstanding requests (ID -> deadline)
     deadlines: PrioritySet<ID, SystemTime>,
 }
@@ -68,9 +68,9 @@ pub struct Request<P: Array> {
     start: SystemTime,
 }
 
-impl<E: Clock + GClock + Rng + Metrics, C: Array> Requester<E, C> {
+impl<E: Clock + GClock + Rng + Metrics, P: Array> Requester<E, P> {
     /// Create a new requester.
-    pub fn new(context: E, config: Config<C>) -> Self {
+    pub fn new(context: E, config: Config<P>) -> Self {
         let rate_limiter = RateLimiter::hashmap_with_clock(config.rate_limit, &context);
         let metrics = super::Metrics::init(context.clone());
         Self {
@@ -92,7 +92,7 @@ impl<E: Clock + GClock + Rng + Metrics, C: Array> Requester<E, C> {
     }
 
     /// Indicate which participants can be sent requests.
-    pub fn reconcile(&mut self, participants: &[C]) {
+    pub fn reconcile(&mut self, participants: &[P]) {
         self.participants
             .reconcile(participants, self.initial.as_millis());
         self.rate_limiter.shrink_to_fit();
@@ -102,7 +102,7 @@ impl<E: Clock + GClock + Rng + Metrics, C: Array> Requester<E, C> {
     ///
     /// Participants added to this list will never be removed (even if dropped
     /// during `reconcile`, in case they are re-added later).
-    pub fn block(&mut self, participant: C) {
+    pub fn block(&mut self, participant: P) {
         self.excluded.insert(participant);
     }
 
@@ -111,7 +111,7 @@ impl<E: Clock + GClock + Rng + Metrics, C: Array> Requester<E, C> {
     /// If `shuffle` is true, the order of participants is shuffled before
     /// a request is made. This is typically used when a request to the preferred
     /// participant fails.
-    pub fn request(&mut self, shuffle: bool) -> Option<(C, ID)> {
+    pub fn request(&mut self, shuffle: bool) -> Option<(P, ID)> {
         // Prepare participant iterator
         let participant_iter = if shuffle {
             let mut participants = self.participants.iter().collect::<Vec<_>>();
@@ -157,7 +157,7 @@ impl<E: Clock + GClock + Rng + Metrics, C: Array> Requester<E, C> {
     }
 
     /// Calculate a participant's new priority using exponential moving average.
-    fn update(&mut self, participant: C, elapsed: Duration) {
+    fn update(&mut self, participant: P, elapsed: Duration) {
         let Some(past) = self.participants.get(&participant) else {
             return;
         };
@@ -170,7 +170,7 @@ impl<E: Clock + GClock + Rng + Metrics, C: Array> Requester<E, C> {
     }
 
     /// Drop an outstanding request regardless of who it was intended for.
-    pub fn cancel(&mut self, id: ID) -> Option<Request<C>> {
+    pub fn cancel(&mut self, id: ID) -> Option<Request<P>> {
         let (participant, start) = self.requests.remove(&id)?;
         self.deadlines.remove(&id);
         Some(Request {
@@ -185,7 +185,7 @@ impl<E: Clock + GClock + Rng + Metrics, C: Array> Requester<E, C> {
     ///
     /// If the request was outstanding, a `Request` is returned that can
     /// either be resolved or timed out.
-    pub fn handle(&mut self, participant: &C, id: ID) -> Option<Request<C>> {
+    pub fn handle(&mut self, participant: &P, id: ID) -> Option<Request<P>> {
         // Confirm ID exists and is for the participant
         let (expected, _) = self.requests.get(&id)?;
         if expected != participant {
@@ -197,7 +197,7 @@ impl<E: Clock + GClock + Rng + Metrics, C: Array> Requester<E, C> {
     }
 
     /// Resolve an outstanding request.
-    pub fn resolve(&mut self, request: Request<C>) {
+    pub fn resolve(&mut self, request: Request<P>) {
         // Get elapsed time
         //
         // If we can't compute the elapsed time for some reason (i.e. current time does
@@ -215,7 +215,7 @@ impl<E: Clock + GClock + Rng + Metrics, C: Array> Requester<E, C> {
     }
 
     /// Timeout an outstanding request.
-    pub fn timeout(&mut self, request: Request<C>) {
+    pub fn timeout(&mut self, request: Request<P>) {
         // Update performance
         self.update(request.participant, self.timeout);
         self.metrics.timeouts.inc();

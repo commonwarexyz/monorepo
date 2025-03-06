@@ -32,17 +32,17 @@ enum SendError<S: Sender> {
 /// - Pending: Not successfully sent to a peer. Waiting to be retried by timeout.
 ///
 /// Both types of requests will be retried after a timeout if not resolved (i.e. a response or a
-/// cancelation). Upon retry, requests may either be placed in active or pending state again.
+/// cancellation). Upon retry, requests may either be placed in active or pending state again.
 pub struct Fetcher<
     E: Clock + GClock + Rng + Metrics,
-    C: Array,
+    P: Array,
     Key: Array,
-    NetS: Sender<PublicKey = C>,
+    NetS: Sender<PublicKey = P>,
 > {
     context: E,
 
     /// Helps find peers to fetch from and tracks which peers are assigned to which request ids.
-    requester: Requester<E, C>,
+    requester: Requester<E, P>,
 
     /// Manages active requests. If a fetch is sent to a peer, it is added to this map.
     active: BiHashMap<ID, Key>,
@@ -61,13 +61,13 @@ pub struct Fetcher<
     _s: PhantomData<NetS>,
 }
 
-impl<E: Clock + GClock + Rng + Metrics, C: Array, Key: Array, NetS: Sender<PublicKey = C>>
-    Fetcher<E, C, Key, NetS>
+impl<E: Clock + GClock + Rng + Metrics, P: Array, Key: Array, NetS: Sender<PublicKey = P>>
+    Fetcher<E, P, Key, NetS>
 {
     /// Creates a new fetcher.
     pub fn new(
         context: E,
-        requester_config: Config<C>,
+        requester_config: Config<P>,
         retry_timeout: Duration,
         priority_requests: bool,
     ) -> Self {
@@ -194,7 +194,7 @@ impl<E: Clock + GClock + Rng + Metrics, C: Array, Key: Array, NetS: Sender<Publi
     ///
     /// Returns the key that was fetched if the response was valid.
     /// Returns None if the response was invalid or not needed.
-    pub fn pop_by_id(&mut self, id: ID, peer: &C, has_response: bool) -> Option<Key> {
+    pub fn pop_by_id(&mut self, id: ID, peer: &P, has_response: bool) -> Option<Key> {
         // Pop the request from requester if the peer was assigned to this id, otherwise return none
         let request = self.requester.handle(peer, id)?;
 
@@ -215,12 +215,12 @@ impl<E: Clock + GClock + Rng + Metrics, C: Array, Key: Array, NetS: Sender<Publi
     }
 
     /// Reconciles the list of peers that can be used to fetch data.
-    pub fn reconcile(&mut self, keep: &[C]) {
+    pub fn reconcile(&mut self, keep: &[P]) {
         self.requester.reconcile(keep);
     }
 
     /// Blocks a peer from being used to fetch data.
-    pub fn block(&mut self, peer: C) {
+    pub fn block(&mut self, peer: P) {
         self.requester.block(peer);
     }
 
