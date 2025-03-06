@@ -51,6 +51,12 @@ fn main() {
                 .value_parser(value_parser!(String)),
         )
         .arg(
+            Arg::new("worker-threads")
+                .long("worker-threads")
+                .required(true)
+                .value_parser(value_parser!(usize)),
+        )
+        .arg(
             Arg::new("message-size")
                 .long("message-size")
                 .required(true)
@@ -123,6 +129,7 @@ fn main() {
     let instance_type = matches.get_one::<String>("instance_type").unwrap();
     let storage_size = *matches.get_one::<i32>("storage_size").unwrap();
     let storage_class = matches.get_one::<String>("storage_class").unwrap();
+    let worker_threads = *matches.get_one::<usize>("worker-threads").unwrap();
     let message_size = *matches.get_one::<usize>("message-size").unwrap();
     let message_backlog = *matches.get_one::<usize>("message-backlog").unwrap();
     let mailbox_size = *matches.get_one::<usize>("mailbox-size").unwrap();
@@ -137,6 +144,7 @@ fn main() {
             port: PORT,
             allowed_peers: allowed_peers.clone(),
             bootstrappers: bootstrappers.clone(),
+            worker_threads,
             message_size,
             message_backlog,
             mailbox_size,
