@@ -42,7 +42,7 @@ struct Serve<E: Clock, P: Array> {
 }
 
 /// Manages incoming and outgoing P2P requests, coordinating fetch and serve operations.
-pub struct Actor<
+pub struct Engine<
     E: Clock + GClock + Spawner + Rng + Metrics,
     P: Array,
     D: Coordinator<PublicKey = P>,
@@ -102,7 +102,7 @@ impl<
         Pro: Producer<Key = Key>,
         NetS: Sender<PublicKey = P>,
         NetR: Receiver<PublicKey = P>,
-    > Actor<E, P, D, Key, Con, Pro, NetS, NetR>
+    > Engine<E, P, D, Key, Con, Pro, NetS, NetR>
 {
     /// Creates a new `Actor` with the given configuration.
     ///
