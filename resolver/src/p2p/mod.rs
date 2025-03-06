@@ -166,7 +166,7 @@ mod tests {
                 producer,
                 mailbox_size: MAILBOX_SIZE,
                 requester_config: commonware_p2p::utils::requester::Config {
-                    crypto: scheme,
+                    me: scheme.public_key(),
                     rate_limit: governor::Quota::per_second(
                         std::num::NonZeroU32::new(RATE_LIMIT).unwrap(),
                     ),

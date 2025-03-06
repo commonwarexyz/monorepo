@@ -1,7 +1,6 @@
 //! Requester for sending rate-limited requests to peers.
 
 use super::{Config, PeerLabel};
-use commonware_cryptography::Scheme;
 use commonware_runtime::{Clock, Metrics};
 use commonware_utils::{Array, PrioritySet};
 use either::Either;
@@ -28,27 +27,26 @@ pub type ID = u64;
 /// of the most performant peers (based on our latency observations). To encourage
 /// exploration, set the value of `initial` to less than the expected latency of
 /// performant peers and/or periodically set `shuffle` in `request`.
-pub struct Requester<E: Clock + GClock + Rng + Metrics, C: Scheme> {
+pub struct Requester<E: Clock + GClock + Rng + Metrics, C: Array> {
     context: E,
-    crypto: C,
+    me: C,
     metrics: super::Metrics,
     initial: Duration,
     timeout: Duration,
 
     // Participants to exclude from requests
-    excluded: HashSet<C::PublicKey>,
+    excluded: HashSet<C>,
 
     // Rate limiter for participants
     #[allow(clippy::type_complexity)]
-    rate_limiter:
-        RateLimiter<C::PublicKey, HashMapStateStore<C::PublicKey>, E, NoOpMiddleware<E::Instant>>,
+    rate_limiter: RateLimiter<C, HashMapStateStore<C>, E, NoOpMiddleware<E::Instant>>,
     // Participants and their performance (lower is better)
-    participants: PrioritySet<C::PublicKey, u128>,
+    participants: PrioritySet<C, u128>,
 
     // Next ID to use for a request
     id: ID,
     // Outstanding requests (ID -> (participant, start time))
-    requests: HashMap<ID, (C::PublicKey, SystemTime)>,
+    requests: HashMap<ID, (C, SystemTime)>,
     // Deadlines for outstanding requests (ID -> deadline)
     deadlines: PrioritySet<ID, SystemTime>,
 }
@@ -70,14 +68,14 @@ pub struct Request<P: Array> {
     start: SystemTime,
 }
 
-impl<E: Clock + GClock + Rng + Metrics, C: Scheme> Requester<E, C> {
+impl<E: Clock + GClock + Rng + Metrics, C: Array> Requester<E, C> {
     /// Create a new requester.
     pub fn new(context: E, config: Config<C>) -> Self {
         let rate_limiter = RateLimiter::hashmap_with_clock(config.rate_limit, &context);
         let metrics = super::Metrics::init(context.clone());
         Self {
             context,
-            crypto: config.crypto,
+            me: config.me,
             metrics,
             initial: config.initial,
             timeout: config.timeout,
@@ -94,7 +92,7 @@ impl<E: Clock + GClock + Rng + Metrics, C: Scheme> Requester<E, C> {
     }
 
     /// Indicate which participants can be sent requests.
-    pub fn reconcile(&mut self, participants: &[C::PublicKey]) {
+    pub fn reconcile(&mut self, participants: &[C]) {
         self.participants
             .reconcile(participants, self.initial.as_millis());
         self.rate_limiter.shrink_to_fit();
@@ -104,7 +102,7 @@ impl<E: Clock + GClock + Rng + Metrics, C: Scheme> Requester<E, C> {
     ///
     /// Participants added to this list will never be removed (even if dropped
     /// during `reconcile`, in case they are re-added later).
-    pub fn block(&mut self, participant: C::PublicKey) {
+    pub fn block(&mut self, participant: C) {
         self.excluded.insert(participant);
     }
 
@@ -113,7 +111,7 @@ impl<E: Clock + GClock + Rng + Metrics, C: Scheme> Requester<E, C> {
     /// If `shuffle` is true, the order of participants is shuffled before
     /// a request is made. This is typically used when a request to the preferred
     /// participant fails.
-    pub fn request(&mut self, shuffle: bool) -> Option<(C::PublicKey, ID)> {
+    pub fn request(&mut self, shuffle: bool) -> Option<(C, ID)> {
         // Prepare participant iterator
         let participant_iter = if shuffle {
             let mut participants = self.participants.iter().collect::<Vec<_>>();
@@ -126,7 +124,7 @@ impl<E: Clock + GClock + Rng + Metrics, C: Scheme> Requester<E, C> {
         // Look for a participant that can handle request
         for (participant, _) in participant_iter {
             // Check if me
-            if *participant == self.crypto.public_key() {
+            if *participant == self.me {
                 continue;
             }
 
@@ -159,7 +157,7 @@ impl<E: Clock + GClock + Rng + Metrics, C: Scheme> Requester<E, C> {
     }
 
     /// Calculate a participant's new priority using exponential moving average.
-    fn update(&mut self, participant: C::PublicKey, elapsed: Duration) {
+    fn update(&mut self, participant: C, elapsed: Duration) {
         let Some(past) = self.participants.get(&participant) else {
             return;
         };
@@ -172,7 +170,7 @@ impl<E: Clock + GClock + Rng + Metrics, C: Scheme> Requester<E, C> {
     }
 
     /// Drop an outstanding request regardless of who it was intended for.
-    pub fn cancel(&mut self, id: ID) -> Option<Request<C::PublicKey>> {
+    pub fn cancel(&mut self, id: ID) -> Option<Request<C>> {
         let (participant, start) = self.requests.remove(&id)?;
         self.deadlines.remove(&id);
         Some(Request {
@@ -187,7 +185,7 @@ impl<E: Clock + GClock + Rng + Metrics, C: Scheme> Requester<E, C> {
     ///
     /// If the request was outstanding, a `Request` is returned that can
     /// either be resolved or timed out.
-    pub fn handle(&mut self, participant: &C::PublicKey, id: ID) -> Option<Request<C::PublicKey>> {
+    pub fn handle(&mut self, participant: &C, id: ID) -> Option<Request<C>> {
         // Confirm ID exists and is for the participant
         let (expected, _) = self.requests.get(&id)?;
         if expected != participant {
@@ -199,7 +197,7 @@ impl<E: Clock + GClock + Rng + Metrics, C: Scheme> Requester<E, C> {
     }
 
     /// Resolve an outstanding request.
-    pub fn resolve(&mut self, request: Request<C::PublicKey>) {
+    pub fn resolve(&mut self, request: Request<C>) {
         // Get elapsed time
         //
         // If we can't compute the elapsed time for some reason (i.e. current time does
@@ -217,7 +215,7 @@ impl<E: Clock + GClock + Rng + Metrics, C: Scheme> Requester<E, C> {
     }
 
     /// Timeout an outstanding request.
-    pub fn timeout(&mut self, request: Request<C::PublicKey>) {
+    pub fn timeout(&mut self, request: Request<C>) {
         // Update performance
         self.update(request.participant, self.timeout);
         self.metrics.timeouts.inc();
@@ -244,7 +242,7 @@ impl<E: Clock + GClock + Rng + Metrics, C: Scheme> Requester<E, C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::Ed25519;
+    use commonware_cryptography::{Ed25519, Scheme};
     use commonware_runtime::deterministic::Executor;
     use commonware_runtime::Runner;
     use governor::Quota;
@@ -261,7 +259,7 @@ mod tests {
             let me = scheme.public_key();
             let timeout = Duration::from_secs(5);
             let config = Config {
-                crypto: scheme,
+                me: scheme.public_key(),
                 rate_limit: Quota::per_second(NonZeroU32::new(1).unwrap()),
                 initial: Duration::from_millis(100),
                 timeout,
@@ -369,7 +367,7 @@ mod tests {
             let me = scheme.public_key();
             let timeout = Duration::from_secs(5);
             let config = Config {
-                crypto: scheme,
+                me: scheme.public_key(),
                 rate_limit: Quota::per_second(NonZeroU32::new(1).unwrap()),
                 initial: Duration::from_millis(100),
                 timeout,

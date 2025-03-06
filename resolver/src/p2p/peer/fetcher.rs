@@ -1,6 +1,5 @@
 use crate::p2p::wire::{self, peer_msg::Payload};
 use bimap::BiHashMap;
-use commonware_cryptography::Scheme;
 use commonware_p2p::{
     utils::requester::{Config, Requester, ID},
     Recipients, Sender,
@@ -36,9 +35,9 @@ enum SendError<S: Sender> {
 /// cancelation). Upon retry, requests may either be placed in active or pending state again.
 pub struct Fetcher<
     E: Clock + GClock + Rng + Metrics,
-    C: Scheme,
+    C: Array,
     Key: Array,
-    NetS: Sender<PublicKey = C::PublicKey>,
+    NetS: Sender<PublicKey = C>,
 > {
     context: E,
 
@@ -62,12 +61,8 @@ pub struct Fetcher<
     _s: PhantomData<NetS>,
 }
 
-impl<
-        E: Clock + GClock + Rng + Metrics,
-        C: Scheme,
-        Key: Array,
-        NetS: Sender<PublicKey = C::PublicKey>,
-    > Fetcher<E, C, Key, NetS>
+impl<E: Clock + GClock + Rng + Metrics, C: Array, Key: Array, NetS: Sender<PublicKey = C>>
+    Fetcher<E, C, Key, NetS>
 {
     /// Creates a new fetcher.
     pub fn new(
@@ -199,7 +194,7 @@ impl<
     ///
     /// Returns the key that was fetched if the response was valid.
     /// Returns None if the response was invalid or not needed.
-    pub fn pop_by_id(&mut self, id: ID, peer: &C::PublicKey, has_response: bool) -> Option<Key> {
+    pub fn pop_by_id(&mut self, id: ID, peer: &C, has_response: bool) -> Option<Key> {
         // Pop the request from requester if the peer was assigned to this id, otherwise return none
         let request = self.requester.handle(peer, id)?;
 
@@ -220,12 +215,12 @@ impl<
     }
 
     /// Reconciles the list of peers that can be used to fetch data.
-    pub fn reconcile(&mut self, keep: &[C::PublicKey]) {
+    pub fn reconcile(&mut self, keep: &[C]) {
         self.requester.reconcile(keep);
     }
 
     /// Blocks a peer from being used to fetch data.
-    pub fn block(&mut self, peer: C::PublicKey) {
+    pub fn block(&mut self, peer: C) {
         self.requester.block(peer);
     }
 

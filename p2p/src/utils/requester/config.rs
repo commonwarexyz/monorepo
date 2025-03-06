@@ -1,13 +1,12 @@
 //! Configuration for `Requester`.
-
-use commonware_cryptography::Scheme;
+use commonware_utils::Array;
 use governor::Quota;
 use std::time::Duration;
 
 /// Configuration for the requester.
-pub struct Config<C: Scheme> {
+pub struct Config<C: Array> {
     /// Cryptographic primitives.
-    pub crypto: C,
+    pub me: C,
 
     /// Rate limit for requests per participant.
     pub rate_limit: Quota,
