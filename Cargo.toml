@@ -19,29 +19,29 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
-commonware-broadcast = { version = "0.0.5", path = "broadcast" }
-commonware-consensus = { version = "0.0.12", path = "consensus" }
-commonware-cryptography = { version = "0.0.23", path = "cryptography" }
-commonware-deployer = { version = "0.0.2", path = "deployer" }
-commonware-macros = { version = "0.0.14", path = "macros" }
-commonware-p2p = { version = "0.0.34", path = "p2p" }
-commonware-resolver = { version = "0.0.3", path = "resolver" }
-commonware-runtime = { version = "0.0.20", path = "runtime" }
-commonware-storage = { version = "0.0.15", path = "storage" }
-commonware-stream = { version = "0.0.12", path = "stream" }
-commonware-utils = { version = "0.0.15", path = "utils" }
-thiserror = "1.0.63"
+commonware-broadcast = { version = "0.0.6", path = "broadcast" }
+commonware-consensus = { version = "0.0.13", path = "consensus" }
+commonware-cryptography = { version = "0.0.24", path = "cryptography" }
+commonware-deployer = { version = "0.0.3", path = "deployer" }
+commonware-macros = { version = "0.0.15", path = "macros" }
+commonware-p2p = { version = "0.0.35", path = "p2p" }
+commonware-resolver = { version = "0.0.4", path = "resolver" }
+commonware-runtime = { version = "0.0.21", path = "runtime" }
+commonware-storage = { version = "0.0.16", path = "storage" }
+commonware-stream = { version = "0.0.13", path = "stream" }
+commonware-utils = { version = "0.0.16", path = "utils" }
+thiserror = "2.0.12"
 bytes = "1.7.1"
 sha2 = "0.10.8"
 rand = "0.8.5"
 rand_distr = "0.4.3"
-futures = "0.3.30"
-futures-util = "0.3.30"
-tokio = "1.40.0"
-tracing = "0.1.40"
-tracing-subscriber = "0.3.18"
-prost = "0.13.2"
-prost-build = "0.13.2"
+futures = "0.3.31"
+futures-util = "0.3.31"
+tokio = "1.43.0"
+tracing = "0.1.41"
+tracing-subscriber = "0.3.19"
+prost = "0.13.5"
+prost-build = "0.13.5"
 governor = "0.6.3"
 prometheus-client = "0.22.3"
 clap = "4.5.18"
