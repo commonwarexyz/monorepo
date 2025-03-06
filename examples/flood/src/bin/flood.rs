@@ -127,6 +127,12 @@ fn main() {
         // Create network
         let p2p = network.start();
 
+        // Remove self from valid recipients
+        let valid_recipients: Vec<PublicKey> = peer_keys
+            .into_iter()
+            .filter(|key| *key != public_key)
+            .collect();
+
         // Create flood
         let flood_sender = context
             .with_label("flood_sender")
@@ -140,8 +146,8 @@ fn main() {
                     rng.fill_bytes(&mut msg);
 
                     // Send to all peers
-                    let recipient_index = rng.gen_range(0..peer_keys.len());
-                    let recipient = Recipients::One(peer_keys[recipient_index].clone());
+                    let recipient_index = rng.gen_range(0..valid_recipients.len());
+                    let recipient = Recipients::One(valid_recipients[recipient_index].clone());
                     if let Err(e) = flood_sender.send(recipient, msg.into(), false).await {
                         error!(?e, "could not send flood message");
                     }
