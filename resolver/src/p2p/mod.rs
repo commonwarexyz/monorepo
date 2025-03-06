@@ -33,9 +33,6 @@ use commonware_utils::Array;
 use futures::channel::oneshot;
 use std::future::Future;
 
-#[cfg(test)]
-pub mod mocks;
-
 mod config;
 pub use config::Config;
 mod engine;
@@ -47,6 +44,9 @@ mod metrics;
 mod wire {
     include!(concat!(env!("OUT_DIR"), "/wire.rs"));
 }
+
+#[cfg(test)]
+pub mod mocks;
 
 /// Serves data requested by the network.
 pub trait Producer: Clone + Send + 'static {
