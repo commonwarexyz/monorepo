@@ -128,10 +128,9 @@ fn main() {
         let p2p = network.start();
 
         // Create flood
-        let valid_recipients = peer_keys
+        let valid_recipients: Vec<PublicKey> = peer_keys
             .into_iter()
-            .filter(|key| key != public_key)
-            .cloned()
+            .filter(|key| *key != public_key)
             .collect();
         let flood_sender = context
             .with_label("flood_sender")
