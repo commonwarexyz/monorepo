@@ -66,6 +66,7 @@
 use commonware_utils::array;
 use thiserror::Error;
 
+pub mod bitmap_mmr;
 mod hasher;
 mod iterator;
 pub mod journaled;
