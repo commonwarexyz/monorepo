@@ -1,4 +1,5 @@
 //! Configuration for `Requester`.
+
 use commonware_utils::Array;
 use governor::Quota;
 use std::time::Duration;
