@@ -97,7 +97,7 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
             let ip = ip.clone();
             let future = async move {
                 update_instance(private_key, &ip, &binary_path, &config_path).await?;
-                info!(name, "instance updated");
+                info!(name, ip, "updated instance");
                 Ok::<(), Error>(())
             };
             futures.push(future);
@@ -137,7 +137,5 @@ async fn update_instance(
 
     // Verify the service is active (optional but recommended for reliability)
     poll_service_active(private_key, ip, "binary").await?;
-
-    info!(ip, "successfully updated instance");
     Ok(())
 }
