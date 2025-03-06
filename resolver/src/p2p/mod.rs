@@ -181,6 +181,7 @@ mod tests {
         )
         .await;
         engine.start(connection);
+
         mailbox
     }
 
