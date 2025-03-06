@@ -127,11 +127,13 @@ fn main() {
         // Create network
         let p2p = network.start();
 
-        // Create flood
+        // Remove self from valid recipients
         let valid_recipients: Vec<PublicKey> = peer_keys
             .into_iter()
             .filter(|key| *key != public_key)
             .collect();
+
+        // Create flood
         let flood_sender = context
             .with_label("flood_sender")
             .spawn(move |context| async move {
