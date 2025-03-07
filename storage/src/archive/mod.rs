@@ -166,8 +166,6 @@ pub enum Error {
     DuplicateIndex,
     #[error("already pruned to: {0}")]
     AlreadyPrunedTo(u64),
-    #[error("invalid key length")]
-    InvalidKeyLength,
     #[error("record too large")]
     RecordTooLarge,
     #[error("compression failed")]
@@ -195,14 +193,6 @@ pub struct Config<T: Translator> {
     ///
     /// This value is `index & section_mask`.
     pub section_mask: u64,
-
-    /// Length of each key in bytes.
-    ///
-    /// `Archive` assumes that all keys are of the same length. This
-    /// trick is used to store data more efficiently on disk and to substantially
-    /// reduce the number of IO during initialization. If a key is provided that
-    /// is not of the correct length, an error will be returned.
-    pub key_len: u32,
 
     /// Logic to transform keys into their index representation.
     ///
