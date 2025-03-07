@@ -118,7 +118,7 @@ impl<H: CHasher> Mmr<H> {
 
     /// Returns the requested node, assuming it is either a peak or known to exist within the
     /// currently retained node set.
-    fn get_node_unchecked(&self, pos: u64) -> &H::Digest {
+    pub(crate) fn get_node_unchecked(&self, pos: u64) -> &H::Digest {
         if pos >= self.oldest_retained_pos {
             &self.nodes[self.pos_to_index(pos)]
         } else {
