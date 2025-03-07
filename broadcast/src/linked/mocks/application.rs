@@ -1,7 +1,4 @@
-use crate::{
-    linked::{signer, Context},
-    Application as A, Broadcaster,
-};
+use crate::{linked::Context, Application as A, Broadcaster};
 use commonware_utils::Array;
 use futures::{
     channel::{mpsc, oneshot},
@@ -53,11 +50,11 @@ impl<D: Array, P: Array> Application<D, P> {
         (Application { mailbox: receiver }, Mailbox { sender })
     }
 
-    pub async fn run(mut self, mut signer: signer::Mailbox<D>) {
+    pub async fn run(mut self, mut engine: impl Broadcaster<Digest = D>) {
         while let Some(msg) = self.mailbox.next().await {
             match msg {
                 Message::Broadcast(payload) => {
-                    let receiver = signer.broadcast(payload).await;
+                    let receiver = engine.broadcast(payload).await;
                     let result = receiver.await;
                     match result {
                         Ok(true) => {}

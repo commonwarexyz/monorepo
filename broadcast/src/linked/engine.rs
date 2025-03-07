@@ -1,3 +1,12 @@
+//! Engine for the broadcast module.
+//!
+//! It is responsible for:
+//! - Broadcasting nodes (if a sequencer)
+//! - Signing chunks (if a validator)
+//! - Tracking the latest chunk in each sequencer’s chain
+//! - Recovering threshold signatures from partial signatures for each chunk
+//! - Notifying other actors of new chunks and threshold signatures
+
 use super::{metrics, AckManager, Config, Mailbox, Message, TipManager};
 use crate::{
     linked::{namespace, parsed, prover::Prover, serializer, Context, Epoch},
@@ -43,8 +52,8 @@ struct Verify<C: Scheme, D: Array, E: Clock> {
     result: Result<bool, Error>,
 }
 
-/// The actor that implements the `Broadcaster` trait.
-pub struct Actor<
+/// Instance of the `linked` broadcast engine.
+pub struct Engine<
     B: Blob,
     E: Clock + Spawner + Storage<B> + Metrics,
     C: Scheme,
@@ -189,10 +198,10 @@ impl<
         >,
         NetS: Sender<PublicKey = C::PublicKey>,
         NetR: Receiver<PublicKey = C::PublicKey>,
-    > Actor<B, E, C, D, A, Z, S, NetS, NetR>
+    > Engine<B, E, C, D, A, Z, S, NetS, NetR>
 {
-    /// Creates a new actor with the given context and configuration.
-    /// Returns the actor and a mailbox for sending messages to the actor.
+    /// Creates a new engine with the given context and configuration.
+    /// Returns the engine and a mailbox for sending messages to the engine.
     pub fn new(context: E, cfg: Config<C, D, A, Z, S>) -> (Self, Mailbox<D>) {
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::new(mailbox_sender);
@@ -231,9 +240,9 @@ impl<
         (result, mailbox)
     }
 
-    /// Runs the actor until the context is stopped.
+    /// Runs the engine until the context is stopped.
     ///
-    /// The actor will handle:
+    /// The engine will handle:
     /// - Timeouts
     ///   - Refreshing the Epoch
     ///   - Rebroadcasting Nodes
@@ -1044,7 +1053,7 @@ impl<
     }
 }
 
-/// Errors that can occur when running the actor.
+/// Errors that can occur when running the engine.
 #[derive(Error, Debug)]
 enum Error {
     // Application Verification Errors

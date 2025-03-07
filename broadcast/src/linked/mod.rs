@@ -21,7 +21,7 @@
 //!
 //! # Design
 //!
-//! The core of the module is the `signer` actor. It is responsible for:
+//! The core of the module is the [`Engine`]. It is responsible for:
 //! - Broadcasting nodes (if a sequencer)
 //! - Signing chunks (if a validator)
 //! - Tracking the latest chunk in each sequencer’s chain
@@ -35,28 +35,36 @@
 
 use commonware_utils::Array;
 
+mod ack_manager;
+use ack_manager::AckManager;
+mod config;
+pub use config::Config;
+mod engine;
+pub use engine::Engine;
+mod ingress;
+use ingress::{Mailbox, Message};
+mod metrics;
 mod namespace;
 mod parsed;
+mod prover;
+pub use prover::Prover;
 mod serializer;
-
-#[cfg(test)]
-pub mod mocks;
-
+mod tip_manager;
+use tip_manager::TipManager;
 mod wire {
     include!(concat!(env!("OUT_DIR"), "/wire.rs"));
 }
+#[cfg(test)]
+pub mod mocks;
 
-pub mod prover;
-pub mod signer;
-
-/// `Epoch` is used as the `Index` type for the `Coordinator` trait.
+/// Used as the [`Index`](crate::Coordinator::Index) type.
 /// Defines the current set of sequencers and signers.
 ///
 /// This is not a single "View" in the sense of a consensus protocol, but rather a continuous
 /// sequence of views in-which the set of sequencers and signers is constant.
 pub type Epoch = u64;
 
-/// `Context` is used as the `Context` type for the `Application` and `Collector` traits.
+/// Used as the [`Application::Context`](crate::Application::Context) type.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct Context<P: Array> {
     /// Sequencer's public key.
@@ -68,7 +76,7 @@ pub struct Context<P: Array> {
 
 #[cfg(test)]
 mod tests {
-    use super::{mocks, signer};
+    use super::{mocks, Config, Engine};
     use bytes::Bytes;
     use commonware_cryptography::{
         bls12381::{
@@ -222,9 +230,9 @@ mod tests {
             context.with_label("collector").spawn(|_| collector.run());
             collectors.insert(validator.clone(), collector_mailbox);
 
-            let (signer, signer_mailbox) = signer::Actor::new(
-                context.with_label("signer"),
-                signer::Config {
+            let (engine, mailbox) = Engine::new(
+                context.with_label("engine"),
+                Config {
                     crypto: scheme.clone(),
                     application: app_mailbox.clone(),
                     collector: collectors.get(validator).unwrap().clone(),
@@ -242,9 +250,9 @@ mod tests {
                 },
             );
 
-            context.with_label("app").spawn(|_| app.run(signer_mailbox));
+            context.with_label("app").spawn(|_| app.run(mailbox));
             let ((a1, a2), (b1, b2)) = registrations.remove(validator).unwrap();
-            signer.start((a1, a2), (b1, b2));
+            engine.start((a1, a2), (b1, b2));
         }
     }
 
