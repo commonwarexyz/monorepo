@@ -221,13 +221,20 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_runtime::Metrics;
     use commonware_runtime::{deterministic::Executor, Blob, Runner, Storage};
+    use commonware_utils::array::FixedBytes;
     use rand::Rng;
     use std::collections::BTreeMap;
     use translator::{FourCap, TwoCap};
 
     const DEFAULT_SECTION_MASK: u64 = 0xffff_ffff_ffff_0000u64;
 
-    // TODO: add a key type with 32 bytes that can be manually set
+    fn test_key(key: &str) -> FixedBytes<64> {
+        let mut buf = [0u8; 64];
+        let key = key.as_bytes();
+        assert!(key.len() <= buf.len());
+        buf[..key.len()].copy_from_slice(key);
+        FixedBytes::try_from(&buf[..]).unwrap()
+    }
 
     fn test_archive_put_get(compression: Option<u8>) {
         // Initialize the deterministic context
@@ -256,7 +263,7 @@ mod tests {
                 .expect("Failed to initialize archive");
 
             let index = 1u64;
-            let key = ;
+            let key = test_key("testkey");
             let data = Bytes::from("testdata");
 
             // Has the key
@@ -266,14 +273,14 @@ mod tests {
                 .expect("Failed to check key");
             assert!(!has);
             let has = archive
-                .has(Identifier::Key(key))
+                .has(Identifier::Key(&key))
                 .await
                 .expect("Failed to check key");
             assert!(!has);
 
             // Put the key-data pair
             archive
-                .put(index, key, data.clone())
+                .put(index, key.clone(), data.clone())
                 .await
                 .expect("Failed to put data");
 
@@ -284,7 +291,7 @@ mod tests {
                 .expect("Failed to check key");
             assert!(has);
             let has = archive
-                .has(Identifier::Key(key))
+                .has(Identifier::Key(&key))
                 .await
                 .expect("Failed to check key");
             assert!(has);
@@ -297,7 +304,7 @@ mod tests {
                 .expect("Data not found");
             assert_eq!(retrieved, data);
             let retrieved = archive
-                .get(Identifier::Key(key))
+                .get(Identifier::Key(&key))
                 .await
                 .expect("Failed to get data")
                 .expect("Data not found");
@@ -351,7 +358,6 @@ mod tests {
 
             // Initialize the archive
             let cfg = Config {
-                key_len: 7,
                 translator: FourCap,
                 pending_writes: 10,
                 replay_concurrency: 4,
