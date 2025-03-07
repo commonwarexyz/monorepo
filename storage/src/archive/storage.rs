@@ -63,7 +63,6 @@ pub struct Archive<T: Translator, K: Array, B: Blob, E: Storage<B> + Metrics> {
 
 impl<T: Translator, K: Array, B: Blob, E: Storage<B> + Metrics> Archive<T, K, B, E> {
     const PREFIX_LEN: u32 = (u64::SERIALIZED_LEN + K::SERIALIZED_LEN + u32::SERIALIZED_LEN) as u32;
-    const KEY_LEN: u32 = K::SERIALIZED_LEN as u32;
 
     /// Initialize a new `Archive` instance.
     ///
@@ -88,7 +87,7 @@ impl<T: Translator, K: Array, B: Blob, E: Storage<B> + Metrics> Archive<T, K, B,
             while let Some(result) = stream.next().await {
                 // Extract key from record
                 let (_, offset, len, data) = result?;
-                let (index, key) = Self::parse_prefix(Self::KEY_LEN, data)?;
+                let (index, key) = Self::parse_prefix(data)?;
 
                 // Store index
                 indices.insert(index, Location { offset, len });
@@ -166,14 +165,13 @@ impl<T: Translator, K: Array, B: Blob, E: Storage<B> + Metrics> Archive<T, K, B,
         })
     }
 
-    fn parse_prefix(key_len: u32, mut data: Bytes) -> Result<(u64, Bytes), Error> {
-        let key_len = key_len as usize;
-        if data.remaining() != 8 + key_len + 4 {
+    fn parse_prefix(mut data: Bytes) -> Result<(u64, Bytes), Error> {
+        if data.remaining() != Self::PREFIX_LEN as usize {
             return Err(Error::RecordCorrupted);
         }
-        let found = crc32fast::hash(&data[..key_len + 8]);
+        let found = crc32fast::hash(&data[..K::SERIALIZED_LEN + u64::SERIALIZED_LEN]);
         let index = data.get_u64();
-        let key = data.copy_to_bytes(key_len);
+        let key = data.copy_to_bytes(K::SERIALIZED_LEN);
         let expected = data.get_u32();
         if found != expected {
             return Err(Error::RecordCorrupted);
@@ -181,9 +179,8 @@ impl<T: Translator, K: Array, B: Blob, E: Storage<B> + Metrics> Archive<T, K, B,
         Ok((index, key))
     }
 
-    fn parse_item(key_len: u32, mut data: Bytes) -> Result<(Bytes, Bytes), Error> {
-        let key_len = key_len as usize;
-        if data.remaining() < 8 + key_len + 4 {
+    fn parse_item(mut data: Bytes) -> Result<(Bytes, Bytes), Error> {
+        if data.remaining() < Self::PREFIX_LEN as usize {
             return Err(Error::RecordCorrupted);
         }
 
@@ -191,7 +188,7 @@ impl<T: Translator, K: Array, B: Blob, E: Storage<B> + Metrics> Archive<T, K, B,
         data.get_u64();
 
         // Read key from data
-        let key = data.copy_to_bytes(key_len);
+        let key = data.copy_to_bytes(K::SERIALIZED_LEN);
 
         // We don't need to compute checksum here as the underlying journal
         // already performs this check for us.
@@ -377,7 +374,7 @@ impl<T: Translator, K: Array, B: Blob, E: Storage<B> + Metrics> Archive<T, K, B,
             .ok_or(Error::RecordCorrupted)?;
 
         // Get key from item
-        let (_, value) = Self::parse_item(Self::KEY_LEN, item)?;
+        let (_, value) = Self::parse_item(item)?;
 
         // If compression is enabled, decompress the data before returning.
         if self.cfg.compression.is_some() {
@@ -416,7 +413,7 @@ impl<T: Translator, K: Array, B: Blob, E: Storage<B> + Metrics> Archive<T, K, B,
                     .ok_or(Error::RecordCorrupted)?;
 
                 // Get key from item
-                let (disk_key, value) = Self::parse_item(Self::KEY_LEN, item)?;
+                let (disk_key, value) = Self::parse_item(item)?;
                 if disk_key.as_ref() == key.as_ref() {
                     // If compression is enabled, decompress the data before returning.
                     if self.cfg.compression.is_some() {
@@ -469,12 +466,12 @@ impl<T: Translator, K: Array, B: Blob, E: Storage<B> + Metrics> Archive<T, K, B,
                     .ok_or(Error::RecordCorrupted)?;
                 let item = self
                     .journal
-                    .get_prefix(section, location.offset, 8 + self.cfg.key_len + 4)
+                    .get_prefix(section, location.offset, Self::PREFIX_LEN)
                     .await?
                     .ok_or(Error::RecordCorrupted)?;
 
                 // Get key from item
-                let (_, item_key) = Self::parse_prefix(self.cfg.key_len, item)?;
+                let (_, item_key) = Self::parse_prefix(item)?;
                 if key == item_key {
                     return Ok(true);
                 }
