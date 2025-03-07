@@ -118,6 +118,7 @@
 //!
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, deterministic::Executor};
+//! use commonware_cryptography::hash;
 //! use commonware_storage::archive::{Archive, Config, translator::FourCap};
 //! use commonware_storage::journal::{Error, variable::{Config as JConfig, Journal}};
 //!
@@ -131,7 +132,6 @@
 //!
 //!     // Create an archive
 //!     let cfg = Config {
-//!         key_len: 8,
 //!         translator: FourCap,
 //!         section_mask: 0xffff_ffff_ffff_0000u64,
 //!         pending_writes: 10,
@@ -141,7 +141,7 @@
 //!     let mut archive = Archive::init(context, journal, cfg).await.unwrap();
 //!
 //!     // Put a key
-//!     archive.put(1, b"test-key", "data".into()).await.unwrap();
+//!     archive.put(1, hash(b"data"), "data".into()).await.unwrap();
 //!
 //!     // Close the archive (also closes the journal)
 //!     archive.close().await.unwrap();
