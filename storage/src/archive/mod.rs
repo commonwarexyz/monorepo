@@ -218,21 +218,16 @@ mod tests {
     use crate::journal::variable::{Config as JConfig, Journal};
     use crate::journal::Error as JournalError;
     use bytes::Bytes;
-    use commonware_cryptography::hash;
-    use commonware_cryptography::sha256::Digest;
     use commonware_macros::test_traced;
     use commonware_runtime::Metrics;
     use commonware_runtime::{deterministic::Executor, Blob, Runner, Storage};
-    use commonware_utils::SizedSerialize;
     use rand::Rng;
     use std::collections::BTreeMap;
     use translator::{FourCap, TwoCap};
 
     const DEFAULT_SECTION_MASK: u64 = 0xffff_ffff_ffff_0000u64;
 
-    fn test_digest(item: u64) -> Digest {
-        hash(&item.to_be_bytes())
-    }
+    // TODO: add a key type with 32 bytes that can be manually set
 
     fn test_archive_put_get(compression: Option<u8>) {
         // Initialize the deterministic context
@@ -261,7 +256,7 @@ mod tests {
                 .expect("Failed to initialize archive");
 
             let index = 1u64;
-            let key = test_digest(1);
+            let key = ;
             let data = Bytes::from("testdata");
 
             // Has the key
@@ -271,14 +266,14 @@ mod tests {
                 .expect("Failed to check key");
             assert!(!has);
             let has = archive
-                .has(Identifier::Key(&key))
+                .has(Identifier::Key(key))
                 .await
                 .expect("Failed to check key");
             assert!(!has);
 
             // Put the key-data pair
             archive
-                .put(index, key.clone(), data.clone())
+                .put(index, key, data.clone())
                 .await
                 .expect("Failed to put data");
 
@@ -289,7 +284,7 @@ mod tests {
                 .expect("Failed to check key");
             assert!(has);
             let has = archive
-                .has(Identifier::Key(&key))
+                .has(Identifier::Key(key))
                 .await
                 .expect("Failed to check key");
             assert!(has);
@@ -302,7 +297,7 @@ mod tests {
                 .expect("Data not found");
             assert_eq!(retrieved, data);
             let retrieved = archive
-                .get(Identifier::Key(&key))
+                .get(Identifier::Key(key))
                 .await
                 .expect("Failed to get data")
                 .expect("Data not found");
@@ -356,6 +351,7 @@ mod tests {
 
             // Initialize the archive
             let cfg = Config {
+                key_len: 7,
                 translator: FourCap,
                 pending_writes: 10,
                 replay_concurrency: 4,
@@ -368,10 +364,10 @@ mod tests {
 
             // Put the key-data pair
             let index = 1u64;
-            let key = test_digest(1);
+            let key = b"testkey";
             let data = Bytes::from("testdata");
             archive
-                .put(index, key.clone(), data.clone())
+                .put(index, key, data.clone())
                 .await
                 .expect("Failed to put data");
 
@@ -388,6 +384,7 @@ mod tests {
             .await
             .expect("Failed to initialize journal");
             let cfg = Config {
+                key_len: 7,
                 translator: FourCap,
                 pending_writes: 10,
                 replay_concurrency: 4,
@@ -406,11 +403,63 @@ mod tests {
                 .expect("Data not found");
             assert_ne!(retrieved, data);
             let retrieved = archive
-                .get(Identifier::Key(&key))
+                .get(Identifier::Key(key))
                 .await
                 .expect("Failed to get data")
                 .expect("Data not found");
             assert_ne!(retrieved, data);
+        });
+    }
+
+    #[test_traced]
+    fn test_archive_invalid_key_length() {
+        // Initialize the deterministic context
+        let (executor, context, _) = Executor::default();
+        executor.start(async move {
+            // Initialize an empty journal
+            let journal = Journal::init(
+                context.clone(),
+                JConfig {
+                    partition: "test_partition".into(),
+                },
+            )
+            .await
+            .expect("Failed to initialize journal");
+
+            // Initialize the archive
+            let cfg = Config {
+                key_len: 8,
+                translator: FourCap,
+                pending_writes: 10,
+                replay_concurrency: 4,
+                compression: None,
+                section_mask: DEFAULT_SECTION_MASK,
+            };
+            let mut archive = Archive::init(context.clone(), journal, cfg.clone())
+                .await
+                .expect("Failed to initialize archive");
+
+            let index = 1u64;
+            let key = b"invalidkey";
+            let data = Bytes::from("invaliddata");
+
+            // Put the key-data pair
+            let result = archive.put(index, key, data).await;
+            assert!(matches!(result, Err(Error::InvalidKeyLength)));
+
+            // Get the data back
+            let result = archive.get(Identifier::Key(key)).await;
+            assert!(matches!(result, Err(Error::InvalidKeyLength)));
+
+            // Has the key
+            let result = archive.has(Identifier::Key(key)).await;
+            assert!(matches!(result, Err(Error::InvalidKeyLength)));
+
+            // Check metrics
+            let buffer = context.encode();
+            assert!(buffer.contains("items_tracked 0"));
+            assert!(buffer.contains("unnecessary_reads_total 0"));
+            assert!(buffer.contains("gets_total 0"));
         });
     }
 
@@ -431,6 +480,7 @@ mod tests {
 
             // Initialize the archive
             let cfg = Config {
+                key_len: 7,
                 translator: FourCap,
                 pending_writes: 10,
                 replay_concurrency: 4,
@@ -442,12 +492,12 @@ mod tests {
                 .expect("Failed to initialize archive");
 
             let index = 1u64;
-            let key = test_digest(1);
+            let key = b"testkey";
             let data = Bytes::from("testdata");
 
             // Put the key-data pair
             archive
-                .put(index, key.clone(), data.clone())
+                .put(index, key, data.clone())
                 .await
                 .expect("Failed to put data");
 
@@ -460,7 +510,7 @@ mod tests {
                 .open("test_partition", &section.to_be_bytes())
                 .await
                 .unwrap();
-            let value_location = 4 + 8 + Digest::SERIALIZED_LEN as u64 + 4;
+            let value_location = 4 + 8 + cfg.key_len as u64 + 4;
             blob.write_at(b"testdaty", value_location).await.unwrap();
             blob.close().await.unwrap();
 
@@ -477,6 +527,7 @@ mod tests {
                 context,
                 journal,
                 Config {
+                    key_len: 7,
                     translator: FourCap,
                     pending_writes: 10,
                     replay_concurrency: 4,
@@ -488,7 +539,7 @@ mod tests {
             .expect("Failed to initialize archive");
 
             // Attempt to get the key
-            let result = archive.get(Identifier::Key(&key)).await;
+            let result = archive.get(Identifier::Key(key)).await;
             assert!(matches!(
                 result,
                 Err(Error::Journal(JournalError::ChecksumMismatch(_, _)))
@@ -513,6 +564,7 @@ mod tests {
 
             // Initialize the archive
             let cfg = Config {
+                key_len: 9,
                 translator: FourCap,
                 pending_writes: 10,
                 replay_concurrency: 4,
@@ -524,18 +576,18 @@ mod tests {
                 .expect("Failed to initialize archive");
 
             let index = 1u64;
-            let key = test_digest(1);
+            let key = b"duplicate";
             let data1 = Bytes::from("data1");
             let data2 = Bytes::from("data2");
 
             // Put the key-data pair
             archive
-                .put(index, key.clone(), data1.clone())
+                .put(index, key, data1.clone())
                 .await
                 .expect("Failed to put data");
 
             // Put the key-data pair again
-            let result = archive.put(index, key.clone(), data2.clone()).await;
+            let result = archive.put(index, key, data2.clone()).await;
             assert!(matches!(result, Err(Error::DuplicateIndex)));
 
             // Get the data back
@@ -546,7 +598,7 @@ mod tests {
                 .expect("Data not found");
             assert_eq!(retrieved, data1);
             let retrieved = archive
-                .get(Identifier::Key(&key))
+                .get(Identifier::Key(key))
                 .await
                 .expect("Failed to get data")
                 .expect("Data not found");
@@ -577,6 +629,7 @@ mod tests {
 
             // Initialize the archive
             let cfg = Config {
+                key_len: 11,
                 translator: FourCap,
                 pending_writes: 10,
                 replay_concurrency: 4,
@@ -596,9 +649,9 @@ mod tests {
             assert!(retrieved.is_none());
 
             // Attempt to get a key that doesn't exist
-            let key = test_digest(1);
+            let key = b"nonexistent";
             let retrieved = archive
-                .get(Identifier::Key(&key))
+                .get(Identifier::Key(key))
                 .await
                 .expect("Failed to get data");
             assert!(retrieved.is_none());
@@ -628,6 +681,7 @@ mod tests {
 
             // Initialize the archive
             let cfg = Config {
+                key_len: 5,
                 translator: FourCap,
                 pending_writes: 10,
                 replay_concurrency: 4,
@@ -639,27 +693,27 @@ mod tests {
                 .expect("Failed to initialize archive");
 
             let index1 = 1u64;
-            let key1 = test_digest(1);
+            let key1 = b"keys1";
             let data1 = Bytes::from("data1");
             let index2 = 2u64;
-            let key2 = test_digest(2);
+            let key2 = b"keys2";
             let data2 = Bytes::from("data2");
 
             // Put the key-data pair
             archive
-                .put(index1, key1.clone(), data1.clone())
+                .put(index1, key1, data1.clone())
                 .await
                 .expect("Failed to put data");
 
             // Put the key-data pair
             archive
-                .put(index2, key2.clone(), data2.clone())
+                .put(index2, key2, data2.clone())
                 .await
                 .expect("Failed to put data");
 
             // Get the data back
             let retrieved = archive
-                .get(Identifier::Key(&key1))
+                .get(Identifier::Key(key1))
                 .await
                 .expect("Failed to get data")
                 .expect("Data not found");
@@ -667,7 +721,7 @@ mod tests {
 
             // Get the data back
             let retrieved = archive
-                .get(Identifier::Key(&key2))
+                .get(Identifier::Key(key2))
                 .await
                 .expect("Failed to get data")
                 .expect("Data not found");
