@@ -189,16 +189,16 @@ pub trait Translator: Clone {
 /// Configuration for `Archive` storage.
 #[derive(Clone)]
 pub struct Config<T: Translator> {
-    /// Mask to apply to indices to determine section.
-    ///
-    /// This value is `index & section_mask`.
-    pub section_mask: u64,
-
     /// Logic to transform keys into their index representation.
     ///
     /// `Archive` assumes that all internal keys are spread uniformly across the key space.
     /// If that is not the case, lookups may be O(n) instead of O(1).
     pub translator: T,
+
+    /// Mask to apply to indices to determine section.
+    ///
+    /// This value is `index & section_mask`.
+    pub section_mask: u64,
 
     /// The number of writes to buffer in a section before forcing a sync in the journal.
     ///
