@@ -83,4 +83,6 @@ pub enum Error {
     JournalError(#[from] crate::journal::Error),
     #[error("missing peak: {0}")]
     MissingPeak(u64),
+    #[error("MMR is empty")]
+    Empty,
 }
