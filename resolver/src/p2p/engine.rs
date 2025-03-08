@@ -377,7 +377,7 @@ impl<
 
     /// Handle a network response from a peer that did not have the data.
     async fn handle_network_response_empty(&mut self, sender: &mut NetS, peer: P, id: u64) {
-        warn!(?peer, ?id, "peer response: error");
+        warn!(?peer, ?id, "peer response: empty");
 
         // Get the key associated with the response, if any
         let Some(key) = self.fetcher.pop_by_id(id, &peer, false) else {
