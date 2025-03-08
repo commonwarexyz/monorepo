@@ -259,7 +259,7 @@ impl<T: Translator, K: Array, B: Blob, E: Storage<B> + Metrics> Archive<T, K, B,
 
     /// Store an item in `Archive`. Both indices and keys are assumed to both be globally unique.
     ///
-    /// If the index already exists, an error is returned. If the same key is stored multiple times
+    /// If the index already exists, put does nothing and returns. If the same key is stored multiple times
     /// at different indices (not recommended), any value associated with the key may be returned.
     pub async fn put(&mut self, index: u64, key: K, data: Bytes) -> Result<(), Error> {
         // Check last pruned
@@ -270,7 +270,7 @@ impl<T: Translator, K: Array, B: Blob, E: Storage<B> + Metrics> Archive<T, K, B,
 
         // Check for existing index
         if self.indices.contains_key(&index) {
-            return Err(Error::DuplicateIndex);
+            return Ok(());
         }
 
         // If compression is enabled, compress the data before storing it.
