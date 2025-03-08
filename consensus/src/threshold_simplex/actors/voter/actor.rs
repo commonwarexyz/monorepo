@@ -2332,13 +2332,26 @@ impl<
         let mut shutdown = self.context.stopped();
 
         // Process messages
+        let mut pending_set = None;
         let mut pending_propose_context = None;
         let mut pending_propose = None;
         let mut pending_verify_context = None;
         let mut pending_verify = None;
         loop {
+            // Reset pending set if we have moved to a new view
+            if let Some(view) = pending_set {
+                if view != self.view {
+                    pending_set = None;
+                    pending_propose_context = None;
+                    pending_propose = None;
+                    pending_verify_context = None;
+                    pending_verify = None;
+                }
+            }
+
             // Attempt to propose a container
             if let Some((context, new_propose)) = self.propose(&mut backfiller).await {
+                pending_set = Some(self.view);
                 pending_propose_context = Some(context);
                 pending_propose = Some(new_propose);
             }
@@ -2349,6 +2362,7 @@ impl<
 
             // Attempt to verify current view
             if let Some((context, new_verify)) = self.peer_proposal().await {
+                pending_set = Some(self.view);
                 pending_verify_context = Some(context);
                 pending_verify = Some(new_verify);
             }
