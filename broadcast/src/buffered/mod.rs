@@ -27,7 +27,7 @@ pub mod mocks;
 pub trait Broadcaster: Clone + Send + 'static {
     type Blob: Clone + Send + 'static;
 
-    fn relay(&mut self, blob: Self::Blob) -> impl Future<Output = ()> + Send;
+    fn broadcast(&mut self, blob: Self::Blob) -> impl Future<Output = ()> + Send;
 }
 
 pub trait Digestible<D: Array>: Clone + Send + Sync + 'static {
