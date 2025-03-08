@@ -3,6 +3,8 @@
 use commonware_codec::Codec;
 use std::future::Future;
 
+pub mod buffered;
+
 /// Broadcaster is the interface responsible for attempting replication of messages across a network.
 pub trait Broadcaster: Clone + Send + 'static {
     /// Blob is the type of data that can be broadcasted.
