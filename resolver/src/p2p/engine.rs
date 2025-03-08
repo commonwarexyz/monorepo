@@ -31,7 +31,7 @@ use governor::clock::Clock as GClock;
 use prost::Message as _;
 use rand::Rng;
 use std::{collections::HashMap, marker::PhantomData};
-use tracing::{debug, error, warn};
+use tracing::{debug, error, trace, warn};
 
 /// Represents a pending serve operation.
 struct Serve<E: Clock, P: Array> {
@@ -202,11 +202,11 @@ impl<
                     };
                     match msg {
                         Message::Fetch { key } => {
-                            debug!(?key, "mailbox: fetch");
+                            trace!(?key, "mailbox: fetch");
 
                             // Check if the fetch is already in progress
                             if self.fetch_timers.contains_key(&key) {
-                                warn!(?key, "duplicate fetch");
+                                trace!(?key, "duplicate fetch");
                                 self.metrics.fetch.inc(Status::Dropped);
                                 continue;
                             }
@@ -216,7 +216,7 @@ impl<
                             self.fetcher.fetch(&mut sender, key, true).await;
                         }
                         Message::Cancel { key } => {
-                            debug!(?key, "mailbox: cancel");
+                            trace!(?key, "mailbox: cancel");
                             let mut guard = self.metrics.cancel.guard(Status::Dropped);
                             if self.fetcher.cancel(&key) {
                                 guard.set(Status::Success);
@@ -237,7 +237,7 @@ impl<
                             self.metrics.serve.inc(Status::Success);
                         }
                         Err(err) => {
-                            warn!(?err, ?peer, ?id, "serve failed");
+                            debug!(?err, ?peer, ?id, "serve failed");
                             timer.cancel();
                             self.metrics.serve.inc(Status::Failure);
                         }
@@ -259,7 +259,7 @@ impl<
                     let msg = match wire::PeerMsg::decode(msg) {
                         Ok(msg) => msg,
                         Err(err) => {
-                            warn!(?err, ?peer, "decode failed");
+                            trace!(?err, ?peer, "decode failed");
                             continue;
                         }
                     };
@@ -316,7 +316,7 @@ impl<
         match result {
             Err(err) => error!(?err, ?peer, ?id, "serve send failed"),
             Ok(to) if to.is_empty() => warn!(?peer, ?id, "serve send failed"),
-            Ok(_) => debug!(?peer, ?id, "serve sent"),
+            Ok(_) => trace!(?peer, ?id, "serve sent"),
         };
     }
 
@@ -324,13 +324,13 @@ impl<
     async fn handle_network_request(&mut self, peer: P, id: u64, request: Bytes) {
         // Parse request
         let Ok(key) = Key::try_from(request.to_vec()) else {
-            warn!(?peer, ?id, "peer invalid request");
+            trace!(?peer, ?id, "peer invalid request");
             self.metrics.serve.inc(Status::Invalid);
             return;
         };
 
         // Serve the request
-        debug!(?peer, ?id, "peer request");
+        trace!(?peer, ?id, "peer request");
         let mut producer = self.producer.clone();
         let timer = self.metrics.serve_duration.timer();
         self.serves.push(async move {
@@ -353,7 +353,7 @@ impl<
         id: u64,
         response: Bytes,
     ) {
-        debug!(?peer, ?id, "peer response: data");
+        trace!(?peer, ?id, "peer response: data");
 
         // Get the key associated with the response, if any
         let Some(key) = self.fetcher.pop_by_id(id, &peer, true) else {
@@ -377,7 +377,7 @@ impl<
 
     /// Handle a network response from a peer that did not have the data.
     async fn handle_network_response_empty(&mut self, sender: &mut NetS, peer: P, id: u64) {
-        warn!(?peer, ?id, "peer response: empty");
+        trace!(?peer, ?id, "peer response: empty");
 
         // Get the key associated with the response, if any
         let Some(key) = self.fetcher.pop_by_id(id, &peer, false) else {
