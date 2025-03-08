@@ -162,8 +162,6 @@ pub enum Error {
     Journal(#[from] crate::journal::Error),
     #[error("record corrupted")]
     RecordCorrupted,
-    #[error("duplicate index")]
-    DuplicateIndex,
     #[error("already pruned to: {0}")]
     AlreadyPrunedTo(u64),
     #[error("record too large")]
@@ -537,8 +535,10 @@ mod tests {
                 .expect("Failed to put data");
 
             // Put the key-data pair again
-            let result = archive.put(index, key.clone(), data2.clone()).await;
-            assert!(matches!(result, Err(Error::DuplicateIndex)));
+            archive
+                .put(index, key.clone(), data2.clone())
+                .await
+                .expect("Duplicate put should not fail");
 
             // Get the data back
             let retrieved = archive
