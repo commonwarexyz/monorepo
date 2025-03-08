@@ -7,18 +7,20 @@
 //! - Recovering threshold signatures from partial signatures for each chunk
 //! - Notifying other actors of new chunks and threshold signatures
 
-use super::{metrics, Config, Digestible, Mailbox, Message, Serializable};
+use super::{metrics, Config, Digestible, Mailbox, Message, Responders, Serializable};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Metrics, Spawner};
 use commonware_utils::Array;
 use futures::{
     channel::{mpsc, oneshot},
+    future::Either,
     StreamExt,
 };
 use std::{
     collections::{HashMap, VecDeque},
     marker::PhantomData,
+    time::SystemTime,
 };
 use tracing::{debug, error, warn};
 
@@ -52,12 +54,11 @@ pub struct Engine<
     ////////////////////////////////////////
     // Messaging
     ////////////////////////////////////////
-
-    // The mailbox for receiving messages (primarily from the application).
+    /// The mailbox for receiving messages.
     mailbox_receiver: mpsc::Receiver<Message<D, B>>,
 
-    /// Requests from the application to retrieve blobs by digest.
-    waiters: HashMap<D, Vec<oneshot::Sender<B>>>,
+    /// Pending requests from the application.
+    responders: Responders<D, B>,
 
     ////////////////////////////////////////
     // State
@@ -71,8 +72,7 @@ pub struct Engine<
     ////////////////////////////////////////
     // Metrics
     ////////////////////////////////////////
-
-    // Metrics
+    /// Metrics
     metrics: metrics::Metrics,
 }
 
@@ -99,7 +99,7 @@ impl<
             priority: cfg.priority,
             cache_per_sender_size: cfg.cache_per_sender_size,
             mailbox_receiver,
-            waiters: HashMap::new(),
+            responders: Responders::new(),
             cache: HashMap::new(),
             items: HashMap::new(),
             metrics,
@@ -118,6 +118,12 @@ impl<
         let mut shutdown = self.context.stopped();
 
         loop {
+            // Create the deadline future for responses
+            let deadline = match self.responders.next_deadline() {
+                Some(deadline) => Either::Left(self.context.sleep_until(deadline)),
+                None => Either::Right(futures::future::pending()),
+            };
+
             select! {
                 // Handle shutdown signal
                 _ = &mut shutdown => {
@@ -139,9 +145,9 @@ impl<
                             debug!("broadcast");
                             self.handle_broadcast(&mut net_sender, blob).await;
                         }
-                        Message::Retrieve{ digest, responder } => {
+                        Message::Retrieve{ digest, responder, deadline } => {
                             debug!("retrieve");
-                            self.handle_retrieve(digest, responder).await;
+                            self.handle_retrieve(digest, responder, deadline).await;
                         }
                     }
                 },
@@ -174,6 +180,12 @@ impl<
 
                     self.handle_network(peer, blob).await;
                 },
+
+                // Handle deadlines
+                _ = deadline => {
+                    debug!("deadline");
+                    self.responders.pop_deadline();
+                },
             }
         }
     }
@@ -202,7 +214,12 @@ impl<
     ///
     /// If the blob is already in the cache, the responder is immediately sent the blob.
     /// Otherwise, the responder is stored in the waiters list.
-    async fn handle_retrieve(&mut self, digest: D, responder: oneshot::Sender<B>) {
+    async fn handle_retrieve(
+        &mut self,
+        digest: D,
+        responder: oneshot::Sender<B>,
+        deadline: SystemTime,
+    ) {
         // Check if the blob is already in the cache
         if let Some(blob) = self.items.get(&digest) {
             let _ = responder.send(blob.clone());
@@ -210,8 +227,7 @@ impl<
         }
 
         // Store the responder
-        let waiters = self.waiters.entry(digest.clone()).or_default();
-        waiters.push(responder);
+        self.responders.add(digest.clone(), responder, deadline);
     }
 
     /// Handles a blob that was received from a peer.
@@ -237,10 +253,8 @@ impl<
         }
 
         // Send the blob to the waiters, if any, ignoring errors (as the receiver may have dropped)
-        if let Some(waiters) = self.waiters.remove(&digest) {
-            for responder in waiters {
-                let _ = responder.send(blob.clone());
-            }
+        for responder in self.responders.take(&digest) {
+            let _ = responder.send(blob.clone());
         }
 
         // Store the blob in the cache
