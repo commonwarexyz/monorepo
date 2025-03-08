@@ -12,8 +12,14 @@ use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Metrics, Spawner};
 use commonware_utils::Array;
-use futures::{channel::mpsc, StreamExt};
-use std::{collections::HashMap, marker::PhantomData};
+use futures::{
+    channel::{mpsc, oneshot},
+    StreamExt,
+};
+use std::{
+    collections::{HashMap, VecDeque},
+    marker::PhantomData,
+};
 use tracing::{debug, error, warn};
 
 /// Instance of the `linked` broadcast engine.
@@ -29,7 +35,7 @@ pub struct Engine<
     // Interfaces
     ////////////////////////////////////////
     context: E,
-    _phantom: PhantomData<(B, D, NetS, NetR)>,
+    _phantom: PhantomData<(NetS, NetR)>,
 
     ////////////////////////////////////////
     // Configuration
@@ -48,13 +54,16 @@ pub struct Engine<
     ////////////////////////////////////////
 
     // The mailbox for receiving messages (primarily from the application).
-    mailbox_receiver: mpsc::Receiver<Message<B>>,
+    mailbox_receiver: mpsc::Receiver<Message<D, B>>,
+
+    /// Requests from the application to retrieve blobs by digest.
+    waiters: HashMap<D, Vec<oneshot::Sender<B>>>,
 
     ////////////////////////////////////////
     // State
     ////////////////////////////////////////
     /// A LRUCache of the latest received messages from each sequencer.
-    cache: HashMap<P, Vec<D>>,
+    cache: HashMap<P, VecDeque<D>>,
 
     /// A cache of the blobs by digest.
     items: HashMap<D, B>,
@@ -90,6 +99,7 @@ impl<
             priority: cfg.priority,
             cache_per_sender_size: cfg.cache_per_sender_size,
             mailbox_receiver,
+            waiters: HashMap::new(),
             cache: HashMap::new(),
             items: HashMap::new(),
             metrics,
@@ -104,7 +114,7 @@ impl<
 
     /// Inner run loop called by `start`.
     async fn run(mut self, network: (NetS, NetR)) {
-        let (mut sender, mut receiver) = network;
+        let (mut net_sender, mut net_receiver) = network;
         let mut shutdown = self.context.stopped();
 
         loop {
@@ -114,8 +124,30 @@ impl<
                     debug!("shutdown");
                 },
 
+                // Handle mailbox messages
+                mail = self.mailbox_receiver.next() => {
+                    debug!("mailbox");
+
+                    // Error handling
+                    let Some(msg) = mail else {
+                        error!("mailbox receiver failed");
+                        break;
+                    };
+
+                    match msg {
+                        Message::Broadcast{ blob } => {
+                            debug!("broadcast");
+                            self.handle_broadcast(&mut net_sender, blob).await;
+                        }
+                        Message::Retrieve{ digest, responder } => {
+                            debug!("retrieve");
+                            self.handle_retrieve(digest, responder).await;
+                        }
+                    }
+                },
+
                 // Handle incoming messages
-                msg = receiver.recv() => {
+                msg = net_receiver.recv() => {
                     debug!("receiver");
                     // Error handling
                     let (peer, msg) = match msg {
@@ -142,20 +174,6 @@ impl<
 
                     self.handle_network(peer, blob).await;
                 },
-
-                // Handle mailbox messages
-                mail = self.mailbox_receiver.next() => {
-                    let Some(msg) = mail else {
-                        error!("mailbox receiver failed");
-                        break;
-                    };
-                    match msg {
-                        Message::Broadcast{ blob } => {
-                            debug!("broadcast");
-                            self.handle_broadcast(&mut sender, blob).await;
-                        }
-                    }
-                }
             }
         }
     }
@@ -165,16 +183,35 @@ impl<
     ////////////////////////////////////////
 
     /// Handles a broadcast request from the application.
-    async fn handle_broadcast(&mut self, sender: &mut NetS, blob: B) {
+    async fn handle_broadcast(&mut self, net_sender: &mut NetS, blob: B) {
         // Store the blob, continue even if it was already stored
         let _ = self.insert_blob(self.public_key.clone(), blob.clone());
 
         // Broadcast the blob to the network
         let bytes = blob.serialize();
         let recipients = Recipients::All;
-        if let Err(err) = sender.send(recipients, bytes.into(), self.priority).await {
+        if let Err(err) = net_sender
+            .send(recipients, bytes.into(), self.priority)
+            .await
+        {
             warn!(?err, "failed to send message");
         }
+    }
+
+    /// Handles a retrieve request from the application.
+    ///
+    /// If the blob is already in the cache, the responder is immediately sent the blob.
+    /// Otherwise, the responder is stored in the waiters list.
+    async fn handle_retrieve(&mut self, digest: D, responder: oneshot::Sender<B>) {
+        // Check if the blob is already in the cache
+        if let Some(blob) = self.items.get(&digest) {
+            let _ = responder.send(blob.clone());
+            return;
+        }
+
+        // Store the responder
+        let waiters = self.waiters.entry(digest.clone()).or_default();
+        waiters.push(responder);
     }
 
     /// Handles a blob that was received from a peer.
@@ -193,18 +230,30 @@ impl<
     /// Returns `true` if the blob was inserted, `false` if it was already present.
     fn insert_blob(&mut self, peer: P, blob: B) -> bool {
         let digest = blob.digest();
+
+        // Check if the blob is already in the cache
         if self.items.contains_key(&digest) {
             return false;
         }
-        self.items.insert(digest.clone(), blob);
+
+        // Send the blob to the waiters, if any, ignoring errors (as the receiver may have dropped)
+        if let Some(waiters) = self.waiters.remove(&digest) {
+            for responder in waiters {
+                let _ = responder.send(blob.clone());
+            }
+        }
 
         // Store the blob in the cache
-        let cache = self.cache.entry(peer).or_default();
-        cache.push(digest);
+        self.items.insert(digest.clone(), blob);
+        let cache = self
+            .cache
+            .entry(peer)
+            .or_insert_with(|| VecDeque::with_capacity(self.cache_per_sender_size + 1));
+        cache.push_back(digest);
 
-        // Prune the cache
+        // Evict the oldest blob if the cache is full
         if cache.len() > self.cache_per_sender_size {
-            let deleted = cache.remove(0);
+            let deleted = cache.pop_front().expect("missing cache");
             self.items.remove(&deleted).expect("missing item");
         }
 
