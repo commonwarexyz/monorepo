@@ -2,7 +2,7 @@
 name = "commonware-deployer"
 edition = "2021"
 publish = true
-version = "0.0.3"
+version = "0.0.4"
 license = "MIT OR Apache-2.0"
 description = "Deploy infrastructure across cloud providers."
 readme = "README.md"

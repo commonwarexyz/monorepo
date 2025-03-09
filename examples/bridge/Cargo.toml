@@ -2,7 +2,7 @@
 name = "commonware-bridge"
 edition = "2021"
 publish = true
-version = "0.0.10"
+version = "0.0.11"
 license = "MIT OR Apache-2.0"
 description = "Send succinct consensus certificates between two networks."
 readme = "README.md"
