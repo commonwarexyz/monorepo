@@ -1,5 +1,6 @@
 //! Mock implementations for testing.
 
-pub mod application;
-pub mod collector;
+mod automaton;
+pub use automaton::Automaton;
+pub mod comitter;
 pub mod coordinator;

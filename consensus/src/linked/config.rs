@@ -1,8 +1,11 @@
 use crate::{
     linked::{Context, Epoch},
-    Application, Collector, ThresholdCoordinator,
+    Automaton, Committer, Coordinator, Relay,
 };
-use commonware_cryptography::Scheme;
+use commonware_cryptography::{
+    bls12381::primitives::{group, poly},
+    Scheme,
+};
 use commonware_utils::Array;
 use std::time::Duration;
 
@@ -10,9 +13,16 @@ use std::time::Duration;
 pub struct Config<
     C: Scheme,
     D: Array,
-    A: Application<Context = Context<C::PublicKey>, Digest = D>,
-    Z: Collector<Digest = D>,
-    S: ThresholdCoordinator<Index = Epoch>,
+    A: Automaton<Context = Context<C::PublicKey>, Digest = D>,
+    R: Relay<Digest = D>,
+    Z: Committer<Digest = D>,
+    S: Coordinator<
+        Index = Epoch,
+        Seed = group::Signature,
+        Share = group::Share,
+        Identity = poly::Public,
+        PublicKey = C::PublicKey,
+    >,
 > {
     /// The cryptographic scheme used if the engine is a sequencer.
     pub crypto: C,
@@ -21,21 +31,27 @@ pub struct Config<
     /// Also manages the cryptographic partial share if the engine is a signer.
     pub coordinator: S,
 
-    /// Verifies chunks.
-    pub application: A,
+    /// Proposes and verifies digests.
+    pub automaton: A,
+
+    /// Broadcasts the raw payload.
+    pub relay: R,
 
     /// Notified when a chunk receives a threshold of acks.
     pub collector: Z,
 
-    /// The maximum size of the mailbox backlog.
-    pub mailbox_size: usize,
-
-    /// The maximum number of concurrent pending requests to the application.
-    pub verify_concurrent: usize,
-
     /// The application namespace used to sign over different types of messages.
     /// Used to prevent replay attacks on other applications.
     pub namespace: Vec<u8>,
+
+    /// Whether proposals are sent as priority.
+    pub priority_proposals: bool,
+
+    /// Whether acks are sent as priority.
+    pub priority_acks: bool,
+
+    /// The maximum number of concurrent pending requests to the application.
+    pub verify_concurrent: usize,
 
     /// How often the epoch is refreshed.
     pub refresh_epoch_timeout: Duration,
