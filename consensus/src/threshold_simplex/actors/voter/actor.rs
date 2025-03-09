@@ -2226,14 +2226,22 @@ impl<
                         let proposal = notarization.proposal.as_ref().unwrap().clone();
                         let payload = D::try_from(&proposal.payload).unwrap();
                         self.handle_notarization(Parsed {
-                            message: notarization,
-                            digest: payload,
+                            message: notarization.clone(),
+                            digest: payload.clone(),
                         })
                         .await;
 
                         // Update round info
                         let round = self.views.get_mut(&proposal.view).expect("missing round");
                         round.broadcast_notarization = true;
+
+                        // Replay to committer
+                        let proof = Prover::<D>::serialize_threshold(
+                            &proposal,
+                            &notarization.proposal_signature,
+                            &notarization.seed_signature,
+                        );
+                        self.committer.prepared(proof, payload).await;
                     }
                     wire::voter::Payload::Nullify(nullify) => {
                         // Handle nullify
@@ -2303,14 +2311,22 @@ impl<
                         let view = proposal.view;
                         let payload = D::try_from(&proposal.payload).unwrap();
                         self.handle_finalization(Parsed {
-                            message: finalization,
-                            digest: payload,
+                            message: finalization.clone(),
+                            digest: payload.clone(),
                         })
                         .await;
 
                         // Update round info
                         let round = self.views.get_mut(&view).expect("missing round");
                         round.broadcast_finalization = true;
+
+                        // Replay to committer
+                        let proof = Prover::<D>::serialize_threshold(
+                            proposal,
+                            &finalization.proposal_signature,
+                            &finalization.seed_signature,
+                        );
+                        self.committer.finalized(proof, payload).await;
                     }
                 }
             }
