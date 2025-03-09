@@ -1,11 +1,14 @@
 //! Utilities for working with futures.
 
 use futures::{
-    future::{self, BoxFuture},
+    future,
     stream::{FuturesUnordered, SelectNextSome},
     StreamExt,
 };
-use std::future::Future;
+use std::{future::Future, pin::Pin};
+
+/// A future type that can be used in `Pool`.
+type PooledFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
 /// An unordered pool of futures.
 ///
@@ -14,7 +17,7 @@ use std::future::Future;
 /// **Note:** This pool is not thread-safe and should not be used across threads without external
 /// synchronization.
 pub struct Pool<T> {
-    pool: FuturesUnordered<BoxFuture<'static, T>>,
+    pool: FuturesUnordered<PooledFuture<T>>,
 }
 
 impl<T: Send> Default for Pool<T> {
@@ -49,7 +52,7 @@ impl<T: Send> Pool<T> {
     /// Returns a futures that resolves to the next future in the pool that resolves.
     ///
     /// If the pool is empty, the future will never resolve.
-    pub fn next_completed(&mut self) -> SelectNextSome<FuturesUnordered<BoxFuture<'static, T>>> {
+    pub fn next_completed(&mut self) -> SelectNextSome<FuturesUnordered<PooledFuture<T>>> {
         self.pool.select_next_some()
     }
 
@@ -62,7 +65,7 @@ impl<T: Send> Pool<T> {
     }
 
     /// Creates a dummy future that never resolves.
-    fn create_dummy_future() -> BoxFuture<'static, T> {
+    fn create_dummy_future() -> PooledFuture<T> {
         Box::pin(async { future::pending::<T>().await })
     }
 }

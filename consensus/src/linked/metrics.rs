@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use commonware_runtime::{
     telemetry::{histogram, status},
     Clock, Metrics as RuntimeMetrics,
@@ -9,6 +7,7 @@ use prometheus_client::{
     encoding::EncodeLabelSet,
     metrics::{counter::Counter, family::Family, gauge::Gauge, histogram::Histogram},
 };
+use std::sync::Arc;
 
 /// Label for sequencer height metrics
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
