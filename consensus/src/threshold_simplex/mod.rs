@@ -522,8 +522,6 @@ mod tests {
                 // Ensure exceptions within allowed
                 assert!(exceptions <= max_exceptions);
             }
-
-            println!("{}", context.encode());
         });
     }
 
