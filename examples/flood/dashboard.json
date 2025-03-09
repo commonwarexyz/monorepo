@@ -1247,11 +1247,16 @@
         "list": [
             {
                 "allowCustomValue": false,
-                "current": {},
+                "current": {
+                    "text": "All",
+                    "value": [
+                        "$__all"
+                    ]
+                },
                 "definition": "label_values(job)",
                 "description": "",
                 "hide": 1,
-                "includeAll": false,
+                "includeAll": true,
                 "multi": true,
                 "name": "Job",
                 "options": [],
@@ -1261,7 +1266,7 @@
                     "refId": "PrometheusVariableQueryEditor-VariableQuery"
                 },
                 "refresh": 2,
-                "regex": "",
+                "regex": "^(?!.*prometheus).*$",
                 "type": "query"
             }
         ]
