@@ -534,7 +534,12 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             let promtail_config_path = temp_dir.join(format!("promtail_{}.yml", instance.name));
             std::fs::write(
                 &promtail_config_path,
-                promtail_config(&monitoring_private_ip, &instance.name),
+                promtail_config(
+                    &monitoring_private_ip,
+                    &instance.name,
+                    ip.as_str(),
+                    instance.region.as_str(),
+                ),
             )?;
             scp_file(
                 private_key,
