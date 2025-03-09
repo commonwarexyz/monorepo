@@ -91,8 +91,16 @@ pub async fn poll_service_active(key_file: &str, ip: &str, service: &str) -> Res
             .arg(format!("systemctl is-active {}", service))
             .output()
             .await?;
-        if output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "active" {
-            return Ok(());
+        if output.status.success() {
+            let parsed = String::from_utf8_lossy(&output.stdout);
+            let parsed = parsed.trim();
+            if parsed == "active" {
+                return Ok(());
+            }
+            if parsed == "failed" {
+                warn!(service, "service failed to start");
+                return Ok(());
+            }
         }
         warn!(error = ?String::from_utf8_lossy(&output.stderr), service, "active status check failed");
         sleep(RETRY_INTERVAL).await;
@@ -114,10 +122,16 @@ pub async fn poll_service_inactive(key_file: &str, ip: &str, service: &str) -> R
             .arg(format!("systemctl is-active {}", service))
             .output()
             .await?;
-        let parsed = String::from_utf8_lossy(&output.stdout);
-        let parsed = parsed.trim();
-        if parsed == "inactive" || parsed == "failed" {
-            return Ok(());
+        if output.status.success() {
+            let parsed = String::from_utf8_lossy(&output.stdout);
+            let parsed = parsed.trim();
+            if parsed == "inactive" {
+                return Ok(());
+            }
+            if parsed == "failed" {
+                warn!(service, "service was never active");
+                return Ok(());
+            }
         }
         warn!(error = ?String::from_utf8_lossy(&output.stderr), service, "inactive status check failed");
         sleep(RETRY_INTERVAL).await;
