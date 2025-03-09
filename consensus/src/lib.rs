@@ -29,8 +29,8 @@ cfg_if::cfg_if! {
 
         /// Histogram buckets for measuring consensus latency.
         const LATENCY: [f64; 20] = [
-            0.050, 0.100, 0.150, 0.200, 0.250, 0.300, 0.350, 0.400, 0.450, 0.500, 0.600, 0.700, 0.800,
-            0.900, 1.0, 1.25, 1.5, 1.75, 2.0, 3.0,
+            0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.6, 0.7, 0.8,
+            0.9, 1.0, 1.25, 1.5, 1.75, 2.0, 3.0,
         ];
 
         /// Parsed is a wrapper around a message that has a parsable digest.
