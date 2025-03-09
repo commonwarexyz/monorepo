@@ -18,18 +18,21 @@ members = [
 ]
 resolver = "2"
 
+[workspace.package]
+version = "0.0.40"
+
 [workspace.dependencies]
-commonware-broadcast = { version = "0.0.40", path = "broadcast" }
-commonware-consensus = { version = "0.0.40", path = "consensus" }
-commonware-cryptography = { version = "0.0.40", path = "cryptography" }
-commonware-deployer = { version = "0.0.40", path = "deployer" }
-commonware-macros = { version = "0.0.40", path = "macros" }
-commonware-p2p = { version = "0.0.40", path = "p2p" }
-commonware-resolver = { version = "0.0.40", path = "resolver" }
-commonware-runtime = { version = "0.0.40", path = "runtime" }
-commonware-storage = { version = "0.0.40", path = "storage" }
-commonware-stream = { version = "0.0.40", path = "stream" }
-commonware-utils = { version = "0.0.40", path = "utils" }
+commonware-broadcast = { path = "broadcast" }
+commonware-consensus = { path = "consensus" }
+commonware-cryptography = { path = "cryptography" }
+commonware-deployer = { path = "deployer" }
+commonware-macros = { path = "macros" }
+commonware-p2p = { path = "p2p" }
+commonware-resolver = { path = "resolver" }
+commonware-runtime = { path = "runtime" }
+commonware-storage = { path = "storage" }
+commonware-stream = { path = "stream" }
+commonware-utils = { path = "utils" }
 thiserror = "2.0.12"
 bytes = "1.7.1"
 sha2 = "0.10.8"
