@@ -56,7 +56,7 @@ pub struct Config<
     /// How often the epoch is refreshed.
     pub refresh_epoch_timeout: Duration,
 
-    /// How often the chunk is rebroadcast to all signers if no threshold is reached.
+    /// How often a proposal is rebroadcast to all signers if no threshold is reached.
     pub rebroadcast_timeout: Duration,
 
     /// A tuple representing the epochs to keep in memory.

@@ -1,7 +1,7 @@
-//! Engine for the broadcast module.
+//! Engine for the linked module.
 //!
 //! It is responsible for:
-//! - Broadcasting nodes (if a sequencer)
+//! - Proposing nodes (if a sequencer)
 //! - Signing chunks (if a validator)
 //! - Tracking the latest chunk in each sequencer’s chain
 //! - Recovering threshold signatures from partial signatures for each chunk
@@ -51,7 +51,7 @@ struct Verify<C: Scheme, D: Array, E: Clock> {
     result: Result<bool, Error>,
 }
 
-/// Instance of the `linked` broadcast engine.
+/// Instance of the `linked` engine.
 pub struct Engine<
     B: Blob,
     E: Clock + Spawner + Storage<B> + Metrics,
@@ -188,8 +188,8 @@ pub struct Engine<
     // Metrics
     metrics: metrics::Metrics<E>,
 
-    // The timer of my last broadcast_new
-    broadcast_timer: Option<histogram::Timer<E>>,
+    // The timer of my last new proposal
+    propose_timer: Option<histogram::Timer<E>>,
 }
 
 impl<
@@ -243,7 +243,7 @@ impl<
             priority_acks: cfg.priority_acks,
             _phantom: PhantomData,
             metrics,
-            broadcast_timer: None,
+            propose_timer: None,
         }
     }
 
@@ -253,7 +253,7 @@ impl<
     /// - Requesting and processing proposals from the application
     /// - Timeouts
     ///   - Refreshing the Epoch
-    ///   - Rebroadcasting Nodes
+    ///   - Rebroadcasting Proposals
     /// - Messages from the network:
     ///   - Nodes
     ///   - Acks
@@ -267,21 +267,29 @@ impl<
         let (mut ack_sender, mut ack_receiver) = ack_network;
         let mut shutdown = self.context.stopped();
 
+        // Tracks if there is an outstanding proposal request to the automaton.
+        let mut pending: Option<(Context<C::PublicKey>, oneshot::Receiver<D>)> = None;
+
         // Before starting on the main loop, initialize my own sequencer journal
         // and attempt to rebroadcast if necessary.
         self.refresh_epoch();
         self.journal_prepare(&self.crypto.public_key()).await;
         if let Err(err) = self.rebroadcast(&mut node_sender).await {
-            // Rebroadcasting my return a non-critical error, so log the error and continue.
+            // Rebroadcasting may return a non-critical error, so log the error and continue.
             info!(?err, "initial rebroadcast failed");
         }
-
-        // Track if there is an outstanding proposal request to the automaton.
-        let mut pending_propose: Option<(Context<C::PublicKey>, oneshot::Receiver<D>)> = None;
 
         loop {
             // Enter the epoch
             self.refresh_epoch();
+
+            // Request a new proposal if necessary
+            if pending.is_none() {
+                if let Some(context) = self.should_propose() {
+                    let receiver = self.automaton.propose(context.clone()).await;
+                    pending = Some((context, receiver));
+                }
+            }
 
             // Create deadline futures.
             // If the deadline is None, the future will never resolve.
@@ -293,37 +301,7 @@ impl<
                 Some(deadline) => Either::Left(self.context.sleep_until(deadline)),
                 None => Either::Right(future::pending()),
             };
-
-            // Set the proposal context if necessary
-            let me = self.crypto.public_key();
-            let mut proposal_context: Option<Context<C::PublicKey>> = None;
-            if pending_propose.is_none() && self.coordinator.is_sequencer(self.epoch, &me).is_some()
-            {
-                // Check my existing tip
-                proposal_context = match self.tip_manager.get(&me) {
-                    // Genesis proposal
-                    None => Some(Context {
-                        sequencer: me,
-                        height: 0,
-                    }),
-
-                    // Propose the next height if-and-only-if the threshold exists
-                    Some(tip) => self
-                        .ack_manager
-                        .get_threshold(&me, tip.chunk.height)
-                        .map(|_| Context {
-                            sequencer: me,
-                            height: tip.chunk.height.checked_add(1).unwrap(),
-                        }),
-                }
-            }
-
-            // Propose a new chunk if necessary
-            if let Some(context) = proposal_context.take() {
-                let receiver = self.automaton.propose(context.clone()).await;
-                pending_propose = Some((context, receiver));
-            };
-            let propose_wait = match &mut pending_propose {
+            let propose = match &mut pending {
                 Some((_context, receiver)) => Either::Left(receiver),
                 None => Either::Right(futures::future::pending()),
             };
@@ -356,11 +334,11 @@ impl<
                 },
 
                 // Propose a new chunk
-                receiver = propose_wait => {
-                    debug!("broadcast");
+                receiver = propose => {
+                    debug!("propose");
 
                     // Clear the pending proposal
-                    let (context, _) = pending_propose.take().unwrap();
+                    let (context, _) = pending.take().unwrap();
 
                     // Error handling for dropped proposals
                     let Ok(payload) = receiver else {
@@ -368,9 +346,9 @@ impl<
                         continue;
                     };
 
-                    // Broadcast the message
-                    if let Err(err) = self.broadcast_new(context.clone(), payload, &mut node_sender).await {
-                        warn!(?err, ?context, "broadcast new failed");
+                    // Propose the chunk
+                    if let Err(err) = self.propose(context.clone(), payload, &mut node_sender).await {
+                        warn!(?err, ?context, "propose new failed");
                         continue;
                     }
                 },
@@ -571,7 +549,7 @@ impl<
 
         // If the threshold is for my sequencer, record metric
         if chunk.sequencer == self.crypto.public_key() {
-            self.broadcast_timer.take();
+            self.propose_timer.take();
         }
 
         // Emit the proof
@@ -656,20 +634,45 @@ impl<
     }
 
     ////////////////////////////////////////
-    // Broadcasting
+    // Proposing
     ////////////////////////////////////////
 
-    /// Broadcast a message to the network.
+    /// Returns a `Context` if the engine should request a proposal from the automaton.
+    ///
+    /// Should only be called if the engine is not already waiting for a proposal.
+    fn should_propose(&self) -> Option<Context<C::PublicKey>> {
+        let me = self.crypto.public_key();
+
+        // Return `None` if I am not a sequencer in the current epoch
+        self.coordinator.is_sequencer(self.epoch, &me)?;
+
+        // Return the next context unless my current tip has no threshold signature
+        match self.tip_manager.get(&me) {
+            None => Some(Context {
+                sequencer: me,
+                height: 0,
+            }),
+            Some(tip) => self
+                .ack_manager
+                .get_threshold(&me, tip.chunk.height)
+                .map(|_| Context {
+                    sequencer: me,
+                    height: tip.chunk.height.checked_add(1).unwrap(),
+                }),
+        }
+    }
+
+    /// Propose a new chunk to the network.
     ///
     /// The result is returned to the caller via the provided channel.
-    /// The broadcast is only successful if the parent Chunk and threshold signature are known.
-    async fn broadcast_new(
+    /// The proposal is only successful if the parent Chunk and threshold signature are known.
+    async fn propose(
         &mut self,
         context: Context<C::PublicKey>,
         payload: D,
         node_sender: &mut NetS,
     ) -> Result<(), Error> {
-        let mut guard = self.metrics.new_broadcast.guard(Status::Dropped);
+        let mut guard = self.metrics.propose.guard(Status::Dropped);
         let me = self.crypto.public_key();
 
         // Error-check context sequencer
@@ -724,12 +727,12 @@ impl<
         // Deal with the chunk as if it were received over the network
         self.handle_node(&node).await;
 
-        // Sync the journal to prevent ever broadcasting two conflicting chunks
+        // Sync the journal to prevent ever proposing two conflicting chunks
         // at the same height, even if the node crashes and restarts
         self.journal_sync(&me, height).await;
 
-        // Record the start time of the broadcast
-        self.broadcast_timer = Some(self.metrics.e2e_duration.timer());
+        // Record the start time of the proposal
+        self.propose_timer = Some(self.metrics.e2e_duration.timer());
 
         // Broadcast to network
         if let Err(err) = self.broadcast(&node, node_sender, self.epoch).await {
@@ -771,7 +774,7 @@ impl<
             .get_threshold(&me, tip.chunk.height)
             .is_some()
         {
-            return Err(Error::AlreadyBroadcast);
+            return Err(Error::AlreadyThresholded);
         }
 
         // Broadcast the message, which resets the rebroadcast deadline
@@ -1129,8 +1132,8 @@ enum Error {
     UnableToSendMessage,
 
     // Broadcast errors
-    #[error("Already broadcast")]
-    AlreadyBroadcast,
+    #[error("Already thresholded")]
+    AlreadyThresholded,
     #[error("I am not a sequencer in epoch {0}")]
     IAmNotASequencer(u64),
     #[error("Nothing to rebroadcast")]
