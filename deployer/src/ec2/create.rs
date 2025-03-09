@@ -422,9 +422,15 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     // Configure monitoring instance
     info!("configuring monitoring instance");
     wait_for_instances_ready(&ec2_clients[&monitoring_region], &[monitoring_instance_id]).await?;
-    let instances: Vec<(&str, &str)> = deployments
+    let instances: Vec<(&str, &str, &str)> = deployments
         .iter()
-        .map(|d| (d.instance.name.as_str(), d.ip.as_str()))
+        .map(|d| {
+            (
+                d.instance.name.as_str(),
+                d.ip.as_str(),
+                d.instance.region.as_str(),
+            )
+        })
         .collect();
     let prom_config = generate_prometheus_config(&instances);
     let prom_path = temp_dir.join("prometheus.yml");
