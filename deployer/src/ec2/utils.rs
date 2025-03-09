@@ -114,7 +114,9 @@ pub async fn poll_service_inactive(key_file: &str, ip: &str, service: &str) -> R
             .arg(format!("systemctl is-active {}", service))
             .output()
             .await?;
-        if String::from_utf8_lossy(&output.stdout).trim() == "inactive" {
+        let parsed = String::from_utf8_lossy(&output.stdout);
+        let parsed = parsed.trim();
+        if parsed == "inactive" || parsed == "failed" {
             return Ok(());
         }
         warn!(error = ?String::from_utf8_lossy(&output.stderr), service, "inactive status check failed");
