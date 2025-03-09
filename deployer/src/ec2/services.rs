@@ -309,7 +309,7 @@ scrape_configs:
 }
 
 /// Generates Prometheus configuration with scrape targets for all instance IPs
-pub fn generate_prometheus_config(instances: &[(&str, &str)]) -> String {
+pub fn generate_prometheus_config(instances: &[(&str, &str, &str)]) -> String {
     let mut config = String::from(
         r#"
 global:
@@ -320,14 +320,16 @@ scrape_configs:
       - targets: ['localhost:9090']
 "#,
     );
-    for (name, ip) in instances {
+    for (name, ip, region) in instances {
         config.push_str(&format!(
             r#"
   - job_name: '{}'
     static_configs:
       - targets: ['{}:9090']
+        labels:
+          region: '{}'
 "#,
-            name, ip
+            name, ip, region
         ));
     }
     config
