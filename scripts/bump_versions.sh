@@ -56,3 +56,4 @@ find . -name "Cargo.toml" | while read -r cargo_file; do
     echo "Updated ${cargo_file}"
   fi
 done
+
