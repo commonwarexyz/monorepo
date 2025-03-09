@@ -12,7 +12,7 @@ use crate::{
         wire, Context, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE, NOTARIZE,
         NULLIFY_AND_FINALIZE,
     },
-    Automaton, Committer, Parsed, Relay, ThresholdSupervisor,
+    Automaton, Committer, Parsed, Relay, ThresholdSupervisor, LATENCY,
 };
 use commonware_cryptography::{
     bls12381::primitives::{
@@ -26,9 +26,7 @@ use commonware_cryptography::{
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{
-    telemetry::histogram::Buckets, Blob, Clock, Handle, Metrics, Spawner, Storage,
-};
+use commonware_runtime::{Blob, Clock, Handle, Metrics, Spawner, Storage};
 use commonware_storage::journal::variable::Journal;
 use commonware_utils::{quorum, Array};
 use futures::{
@@ -724,8 +722,8 @@ impl<
         let tracked_views = Gauge::<i64, AtomicI64>::default();
         let received_messages = Family::<metrics::PeerMessage, Counter>::default();
         let broadcast_messages = Family::<metrics::Message, Counter>::default();
-        let notarization_latency = Histogram::new(Buckets::NETWORK.into_iter());
-        let finalization_latency = Histogram::new(Buckets::NETWORK.into_iter());
+        let notarization_latency = Histogram::new(LATENCY.into_iter());
+        let finalization_latency = Histogram::new(LATENCY.into_iter());
         context.register("current_view", "current view", current_view.clone());
         context.register("tracked_views", "tracked views", tracked_views.clone());
         context.register(
