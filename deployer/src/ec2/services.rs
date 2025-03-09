@@ -284,7 +284,12 @@ sudo systemctl enable promtail
 }
 
 /// Generates Promtail configuration with the monitoring instance's private IP and instance name
-pub fn promtail_config(monitoring_private_ip: &str, instance_name: &str) -> String {
+pub fn promtail_config(
+    monitoring_private_ip: &str,
+    instance_name: &str,
+    ip: &str,
+    region: &str,
+) -> String {
     format!(
         r#"
 server:
@@ -302,9 +307,11 @@ scrape_configs:
         labels:
           job: binary
           instance: {}
+          ip: {}
+          region: {}
           __path__: /var/log/binary.log
       "#,
-        monitoring_private_ip, instance_name
+        monitoring_private_ip, instance_name, ip, region
     )
 }
 
