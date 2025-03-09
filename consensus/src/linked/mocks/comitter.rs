@@ -1,4 +1,5 @@
-use crate::{linked::prover::Prover, Collector as Z, Proof};
+use super::super::prover::Prover;
+use crate::{Committer as Z, Proof};
 use commonware_cryptography::{bls12381::primitives::group, Scheme};
 use commonware_utils::Array;
 use futures::{
@@ -117,11 +118,15 @@ pub struct Mailbox<C: Scheme, D: Array> {
 
 impl<C: Scheme, D: Array> Z for Mailbox<C, D> {
     type Digest = D;
-    async fn acknowledged(&mut self, proof: Proof, payload: Self::Digest) {
+    async fn finalized(&mut self, proof: Proof, payload: Self::Digest) {
         self.sender
             .send(Message::Acknowledged(proof, payload))
             .await
             .expect("Failed to send acknowledged");
+    }
+
+    async fn prepared(&mut self, _proof: Proof, _payload: Self::Digest) {
+        unimplemented!()
     }
 }
 

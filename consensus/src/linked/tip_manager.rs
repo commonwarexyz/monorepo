@@ -1,4 +1,4 @@
-use crate::linked::parsed;
+use super::parsed;
 use commonware_cryptography::Scheme;
 use commonware_utils::Array;
 use std::collections::{hash_map::Entry, HashMap};
@@ -56,8 +56,7 @@ impl<C: Scheme, D: Array> TipManager<C, D> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::linked::parsed;
+    use super::{super::parsed, *};
     use bytes::Bytes;
     use commonware_cryptography::{
         ed25519::{self, Ed25519, PublicKey, Signature},
