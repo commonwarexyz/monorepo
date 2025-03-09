@@ -2,7 +2,7 @@
 name = "commonware-utils"
 edition = "2021"
 publish = true
-version = "0.0.17"
+version = "0.0.40"
 license = "MIT OR Apache-2.0"
 description = "Leverage common functionality across multiple primitives."
 readme = "README.md"
