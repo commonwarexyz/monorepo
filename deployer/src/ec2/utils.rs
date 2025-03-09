@@ -97,8 +97,8 @@ pub async fn poll_service_active(key_file: &str, ip: &str, service: &str) -> Res
             if parsed == "active" {
                 return Ok(());
             }
-            if parsed == "failed" {
-                warn!(service, "service failed to start");
+            if service == "binary" && parsed == "failed" {
+                warn!(service, "service failed to start (check logs and update)");
                 return Ok(());
             }
         }
@@ -128,7 +128,7 @@ pub async fn poll_service_inactive(key_file: &str, ip: &str, service: &str) -> R
             if parsed == "inactive" {
                 return Ok(());
             }
-            if parsed == "failed" {
+            if service == "binary" && parsed == "failed" {
                 warn!(service, "service was never active");
                 return Ok(());
             }
