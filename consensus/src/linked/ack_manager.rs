@@ -1,4 +1,4 @@
-use crate::linked::{parsed, Epoch};
+use super::{parsed, Epoch};
 use commonware_cryptography::bls12381::primitives::{group, ops, poly::PartialSignature};
 use commonware_utils::Array;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -142,8 +142,10 @@ impl<D: Array, P: Array> AckManager<D, P> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::linked::{namespace, parsed, serializer};
+    use super::{
+        super::{namespace, parsed, serializer},
+        *,
+    };
     use commonware_cryptography::{bls12381::dkg::ops::generate_shares, ed25519, sha256};
     use commonware_runtime::deterministic::Executor;
     use commonware_utils::SizedSerialize;

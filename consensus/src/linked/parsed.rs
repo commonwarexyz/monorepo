@@ -1,6 +1,6 @@
 //! Parsed wrappers around wire types.
 
-use crate::linked::{wire, Epoch};
+use super::{wire, Epoch};
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{Element, Signature as ThresholdSignature},

@@ -7,11 +7,10 @@
 //! - Recovering threshold signatures from partial signatures for each chunk
 //! - Notifying other actors of new chunks and threshold signatures
 
-use super::{metrics, AckManager, Config, Mailbox, Message, TipManager};
-use crate::{
-    linked::{namespace, parsed, prover::Prover, serializer, Context, Epoch},
-    Application, Collector, ThresholdCoordinator,
+use super::{
+    metrics, namespace, parsed, serializer, AckManager, Config, Context, Epoch, Prover, TipManager,
 };
+use crate::{Automaton, Committer, Coordinator, Relay};
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{self},
@@ -32,7 +31,7 @@ use commonware_runtime::{
 use commonware_storage::journal::{self, variable::Journal};
 use commonware_utils::futures::Pool as FuturesPool;
 use futures::{
-    channel::{mpsc, oneshot},
+    channel::oneshot,
     future::{self, Either},
     pin_mut, StreamExt,
 };
@@ -44,8 +43,8 @@ use std::{
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
-/// Represents a pending verification request to the application.
-struct Verify<C: Scheme, D: Digest, E: Clock> {
+/// Represents a pending verification request to the automaton.
+struct Verify<C: Scheme, D: Array, E: Clock> {
     timer: histogram::Timer<E>,
     context: Context<C::PublicKey>,
     payload: D,
@@ -57,11 +56,13 @@ pub struct Engine<
     B: Blob,
     E: Clock + Spawner + Storage<B> + Metrics,
     C: Scheme,
-    D: Digest,
-    A: Application<Context = Context<C::PublicKey>, Digest = D> + Clone,
-    Z: Collector<Digest = D>,
-    S: ThresholdCoordinator<
+    D: Array,
+    A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
+    R: Relay<Digest = D>,
+    Z: Committer<Digest = D>,
+    S: Coordinator<
         Index = Epoch,
+        Seed = group::Signature,
         Share = group::Share,
         Identity = poly::Public,
         PublicKey = C::PublicKey,
@@ -74,11 +75,10 @@ pub struct Engine<
     ////////////////////////////////////////
     context: E,
     crypto: C,
+    automaton: A,
+    relay: R,
     coordinator: S,
-    application: A,
     collector: Z,
-    _sender: PhantomData<NetS>,
-    _receiver: PhantomData<NetR>,
 
     ////////////////////////////////////////
     // Namespace Constants
@@ -129,14 +129,10 @@ pub struct Engine<
     // A stream of futures.
     // Each future represents a verification request to the application
     // that will either timeout or resolve with a boolean.
-    #[allow(clippy::type_complexity)]
     pending_verifies: FuturesPool<Verify<C, D, E>>,
 
     // The maximum number of items in `pending_verifies`.
     verify_concurrent: usize,
-
-    // The mailbox for receiving messages (primarily from the application).
-    mailbox_receiver: mpsc::Receiver<Message<D>>,
 
     ////////////////////////////////////////
     // Storage
@@ -173,6 +169,19 @@ pub struct Engine<
     epoch: Epoch,
 
     ////////////////////////////////////////
+    // Network
+    ////////////////////////////////////////
+
+    // Whether to send proposals as priority messages.
+    priority_proposals: bool,
+
+    // Whether to send acks as priority messages.
+    priority_acks: bool,
+
+    // The network sender and receiver types.
+    _phantom: PhantomData<(NetS, NetR)>,
+
+    ////////////////////////////////////////
     // Metrics
     ////////////////////////////////////////
 
@@ -187,34 +196,32 @@ impl<
         B: Blob,
         E: Clock + Spawner + Storage<B> + Metrics,
         C: Scheme,
-        D: Digest,
-        A: Application<Context = Context<C::PublicKey>, Digest = D> + Clone,
-        Z: Collector<Digest = D>,
-        S: ThresholdCoordinator<
+        D: Array,
+        A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
+        R: Relay<Digest = D>,
+        Z: Committer<Digest = D>,
+        S: Coordinator<
             Index = Epoch,
+            Seed = group::Signature,
             Share = group::Share,
             Identity = poly::Public,
             PublicKey = C::PublicKey,
         >,
         NetS: Sender<PublicKey = C::PublicKey>,
         NetR: Receiver<PublicKey = C::PublicKey>,
-    > Engine<B, E, C, D, A, Z, S, NetS, NetR>
+    > Engine<B, E, C, D, A, R, Z, S, NetS, NetR>
 {
     /// Creates a new engine with the given context and configuration.
-    /// Returns the engine and a mailbox for sending messages to the engine.
-    pub fn new(context: E, cfg: Config<C, D, A, Z, S>) -> (Self, Mailbox<D>) {
-        let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
-        let mailbox = Mailbox::new(mailbox_sender);
+    pub fn new(context: E, cfg: Config<C, D, A, R, Z, S>) -> Self {
         let metrics = metrics::Metrics::init(context.clone());
 
-        let result = Self {
+        Self {
             context,
             crypto: cfg.crypto,
-            _sender: PhantomData,
-            _receiver: PhantomData,
-            coordinator: cfg.coordinator,
-            application: cfg.application,
+            automaton: cfg.automaton,
+            relay: cfg.relay,
             collector: cfg.collector,
+            coordinator: cfg.coordinator,
             chunk_namespace: namespace::chunk(&cfg.namespace),
             ack_namespace: namespace::ack(&cfg.namespace),
             refresh_epoch_timeout: cfg.refresh_epoch_timeout,
@@ -225,7 +232,6 @@ impl<
             height_bound: cfg.height_bound,
             pending_verifies: FuturesPool::default(),
             verify_concurrent: cfg.verify_concurrent,
-            mailbox_receiver,
             journal_heights_per_section: cfg.journal_heights_per_section,
             journal_replay_concurrency: cfg.journal_replay_concurrency,
             journal_name_prefix: cfg.journal_name_prefix,
@@ -233,22 +239,21 @@ impl<
             tip_manager: TipManager::<C, D>::new(),
             ack_manager: AckManager::<D, C::PublicKey>::new(),
             epoch: 0,
+            priority_proposals: cfg.priority_proposals,
+            priority_acks: cfg.priority_acks,
+            _phantom: PhantomData,
             metrics,
             broadcast_timer: None,
-        };
-
-        (result, mailbox)
+        }
     }
 
     /// Runs the engine until the context is stopped.
     ///
     /// The engine will handle:
+    /// - Requesting and processing proposals from the application
     /// - Timeouts
     ///   - Refreshing the Epoch
     ///   - Rebroadcasting Nodes
-    /// - Mailbox messages from the application:
-    ///   - Broadcast requests
-    ///   - Ack requests
     /// - Messages from the network:
     ///   - Nodes
     ///   - Acks
@@ -271,6 +276,9 @@ impl<
             info!(?err, "initial rebroadcast failed");
         }
 
+        // Track if there is an outstanding proposal request to the automaton.
+        let mut pending_propose: Option<(Context<C::PublicKey>, oneshot::Receiver<D>)> = None;
+
         loop {
             // Enter the epoch
             self.refresh_epoch();
@@ -284,6 +292,40 @@ impl<
             let rebroadcast = match self.rebroadcast_deadline {
                 Some(deadline) => Either::Left(self.context.sleep_until(deadline)),
                 None => Either::Right(future::pending()),
+            };
+
+            // Set the proposal context if necessary
+            let me = self.crypto.public_key();
+            let mut proposal_context: Option<Context<C::PublicKey>> = None;
+            if pending_propose.is_none() && self.coordinator.is_sequencer(self.epoch, &me).is_some()
+            {
+                // Check my existing tip
+                proposal_context = match self.tip_manager.get(&me) {
+                    // Genesis proposal
+                    None => Some(Context {
+                        sequencer: me,
+                        height: 0,
+                    }),
+
+                    // Propose the next height if-and-only-if the threshold exists
+                    Some(tip) => self
+                        .ack_manager
+                        .get_threshold(&me, tip.chunk.height)
+                        .map(|_| Context {
+                            sequencer: me,
+                            height: tip.chunk.height.checked_add(1).unwrap(),
+                        }),
+                }
+            }
+
+            // Propose a new chunk if necessary
+            if let Some(context) = proposal_context.take() {
+                let receiver = self.automaton.propose(context.clone()).await;
+                pending_propose = Some((context, receiver));
+            };
+            let propose_wait = match &mut pending_propose {
+                Some((_context, receiver)) => Either::Left(receiver),
+                None => Either::Right(futures::future::pending()),
             };
 
             select! {
@@ -309,6 +351,26 @@ impl<
                     debug!("rebroadcast");
                     if let Err(err) = self.rebroadcast(&mut node_sender).await {
                         info!(?err, "rebroadcast failed");
+                        continue;
+                    }
+                },
+
+                // Propose a new chunk
+                receiver = propose_wait => {
+                    debug!("broadcast");
+
+                    // Clear the pending proposal
+                    let (context, _) = pending_propose.take().unwrap();
+
+                    // Error handling for dropped proposals
+                    let Ok(payload) = receiver else {
+                        warn!(?context, "automaton dropped proposal");
+                        continue;
+                    };
+
+                    // Broadcast the message
+                    if let Err(err) = self.broadcast_new(context.clone(), payload, &mut node_sender).await {
+                        warn!(?err, ?context, "broadcast new failed");
                         continue;
                     }
                 },
@@ -403,29 +465,6 @@ impl<
                         },
                     }
                 },
-
-                // Handle mailbox messages
-                mail = self.mailbox_receiver.next() => {
-                    let Some(msg) = mail else {
-                        error!("mailbox receiver failed");
-                        break;
-                    };
-                    match msg {
-                        Message::Broadcast{ payload, result } => {
-                            debug!("broadcast");
-                            if self.coordinator.is_sequencer(self.epoch, &self.crypto.public_key()).is_none() {
-                                warn!(epoch=?self.epoch, ?payload, "not a sequencer");
-                                continue;
-                            }
-
-                            // Broadcast the message
-                            if let Err(err) = self.broadcast_new(payload, result, &mut node_sender).await {
-                                warn!(?err, "broadcast new failed");
-                                continue;
-                            }
-                        }
-                    }
-                }
             }
         }
     }
@@ -434,9 +473,9 @@ impl<
     // Handling
     ////////////////////////////////////////
 
-    /// Handles a verified message from the application.
+    /// Handles a verified message from the automaton.
     ///
-    /// This is called when the application has verified a payload.
+    /// This is called when the automaton has verified a payload.
     /// The chunk will be signed if it matches the current tip.
     async fn handle_app_verified(
         &mut self,
@@ -476,13 +515,13 @@ impl<
         // The recipients are all the signers in the epoch and the sequencer.
         // The sequencer may or may not be a signer.
         let recipients = {
-            let Some(signers) = self.coordinator.signers(self.epoch) else {
+            let Some(signers) = self.coordinator.participants(self.epoch) else {
                 return Err(Error::UnknownSigners(self.epoch));
             };
             let mut recipients = signers.clone();
             if self
                 .coordinator
-                .is_signer(self.epoch, &tip.chunk.sequencer)
+                .is_participant(self.epoch, &tip.chunk.sequencer)
                 .is_none()
             {
                 recipients.push(tip.chunk.sequencer.clone());
@@ -497,7 +536,11 @@ impl<
             partial,
         };
         ack_sender
-            .send(Recipients::Some(recipients), ack.encode().into(), false)
+            .send(
+                Recipients::Some(recipients),
+                ack.encode().into(),
+                self.priority_acks,
+            )
             .await
             .map_err(|_| Error::UnableToSendMessage)?;
 
@@ -526,7 +569,7 @@ impl<
             return;
         }
 
-        // If the threshold is for my sequencer, record the metric
+        // If the threshold is for my sequencer, record metric
         if chunk.sequencer == self.crypto.public_key() {
             self.broadcast_timer.take();
         }
@@ -538,7 +581,7 @@ impl<
         };
         let proof =
             Prover::<C, D>::serialize_threshold(&context, &chunk.payload, epoch, &threshold);
-        self.collector.acknowledged(proof, chunk.payload).await;
+        self.collector.finalized(proof, chunk.payload.clone()).await;
     }
 
     /// Handles an ack
@@ -563,7 +606,7 @@ impl<
     }
 
     /// Handles a valid `Node` message, storing it as the tip.
-    /// Alerts the application of the new node.
+    /// Alerts the automaton of the new node.
     /// Also appends the `Node` to the journal if it's new.
     async fn handle_node(&mut self, node: &parsed::Node<C, D>) {
         // Store the tip
@@ -578,7 +621,7 @@ impl<
                 .set(node.chunk.height as i64);
 
             // Append to journal if the `Node` is new, making sure to sync the journal
-            // to prevent sending two conflicting chunks to the application, even if
+            // to prevent sending two conflicting chunks to the automaton, even if
             // the node crashes and restarts.
             self.journal_append(node).await;
             self.journal_sync(&node.chunk.sequencer, node.chunk.height)
@@ -592,16 +635,16 @@ impl<
             return;
         }
 
-        // Verify the chunk with the application
+        // Verify the chunk with the automaton
         let context = Context {
             sequencer: node.chunk.sequencer.clone(),
             height: node.chunk.height,
         };
-        let payload = node.chunk.payload;
-        let mut application = self.application.clone();
+        let payload = node.chunk.payload.clone();
+        let mut automaton = self.automaton.clone();
         let timer = self.metrics.verify_duration.timer();
         self.pending_verifies.push(async move {
-            let receiver = application.verify(context.clone(), payload).await;
+            let receiver = automaton.verify(context.clone(), payload.clone()).await;
             let result = receiver.await.map_err(Error::AppVerifyCanceled);
             Verify {
                 timer,
@@ -622,12 +665,22 @@ impl<
     /// The broadcast is only successful if the parent Chunk and threshold signature are known.
     async fn broadcast_new(
         &mut self,
+        context: Context<C::PublicKey>,
         payload: D,
-        result: oneshot::Sender<bool>,
         node_sender: &mut NetS,
     ) -> Result<(), Error> {
         let mut guard = self.metrics.new_broadcast.guard(Status::Dropped);
         let me = self.crypto.public_key();
+
+        // Error-check context sequencer
+        if context.sequencer != me {
+            return Err(Error::ContextSequencer);
+        }
+
+        // Error-check that I am a sequencer in the current epoch
+        if self.coordinator.is_sequencer(self.epoch, &me).is_none() {
+            return Err(Error::IAmNotASequencer(self.epoch));
+        }
 
         // Get parent Chunk and threshold signature
         let mut height = 0;
@@ -636,8 +689,7 @@ impl<
             // Get threshold, or, if it doesn't exist, return an error
             let Some((epoch, threshold)) = self.ack_manager.get_threshold(&me, tip.chunk.height)
             else {
-                let _ = result.send(false);
-                return Err(Error::NoThresholdForTip(tip.chunk.height));
+                return Err(Error::MissingThreshold);
             };
 
             // Update height and parent
@@ -647,6 +699,11 @@ impl<
                 threshold,
                 epoch,
             });
+        }
+
+        // Error-check context height
+        if context.height != height {
+            return Err(Error::ContextHeight);
         }
 
         // Construct new node
@@ -676,13 +733,11 @@ impl<
 
         // Broadcast to network
         if let Err(err) = self.broadcast(&node, node_sender, self.epoch).await {
-            let _ = result.send(false);
             guard.set(Status::Failure);
             return Err(err);
         };
 
         // Return success
-        let _ = result.send(true);
         guard.set(Status::Success);
         Ok(())
     }
@@ -733,15 +788,20 @@ impl<
         node_sender: &mut NetS,
         epoch: Epoch,
     ) -> Result<(), Error> {
-        // Send the node to all signers
-        let Some(signers) = self.coordinator.signers(epoch) else {
+        // Get the signers for the epoch
+        let Some(signers) = self.coordinator.participants(epoch) else {
             return Err(Error::UnknownSigners(epoch));
         };
+
+        // Tell the relay to broadcast the full data
+        self.relay.broadcast(node.chunk.payload.clone()).await;
+
+        // Send the node to all signers
         node_sender
             .send(
                 Recipients::Some(signers.clone()),
                 node.encode().into(),
-                false,
+                self.priority_proposals,
             )
             .await
             .map_err(|_| Error::BroadcastFailed)?;
@@ -838,7 +898,7 @@ impl<
         self.validate_chunk(&ack.chunk, ack.epoch)?;
 
         // Validate sender
-        let Some(signer_index) = self.coordinator.is_signer(ack.epoch, sender) else {
+        let Some(signer_index) = self.coordinator.is_participant(ack.epoch, sender) else {
             return Err(Error::UnknownSigner(ack.epoch, sender.to_string()));
         };
         if signer_index != ack.partial.index {
@@ -1077,8 +1137,12 @@ enum Error {
     NothingToRebroadcast,
     #[error("Broadcast failed")]
     BroadcastFailed,
-    #[error("No threshold for tip")]
-    NoThresholdForTip(u64),
+    #[error("Missing threshold")]
+    MissingThreshold,
+    #[error("Invalid context sequencer")]
+    ContextSequencer,
+    #[error("Invalid context height")]
+    ContextHeight,
 
     // Proto Malformed Errors
     #[error("Genesis chunk must not have a parent")]

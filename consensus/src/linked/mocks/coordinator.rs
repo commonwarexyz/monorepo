@@ -1,6 +1,7 @@
-use crate::{linked::Epoch, Coordinator as S, ThresholdCoordinator as T};
+use super::super::Epoch;
+use crate::{Coordinator as S, Supervisor, ThresholdSupervisor};
 use commonware_cryptography::bls12381::primitives::{
-    group::{Public, Share},
+    group::{self, Public, Share},
     poly::Poly,
 };
 use commonware_utils::Array;
@@ -40,20 +41,48 @@ impl<P: Array> Coordinator<P> {
     }
 }
 
-impl<P: Array> S for Coordinator<P> {
+impl<P: Array> Supervisor for Coordinator<P> {
     type Index = Epoch;
     type PublicKey = P;
 
-    fn index(&self) -> Self::Index {
-        self.view
+    fn leader(&self, _: Self::Index) -> Option<Self::PublicKey> {
+        unimplemented!()
     }
 
-    fn signers(&self, _: Self::Index) -> Option<&Vec<Self::PublicKey>> {
+    async fn report(&self, _: crate::Activity, _: crate::Proof) {
+        unimplemented!()
+    }
+
+    fn participants(&self, _: Self::Index) -> Option<&Vec<Self::PublicKey>> {
         Some(&self.signers)
     }
 
-    fn is_signer(&self, _: Self::Index, candidate: &Self::PublicKey) -> Option<u32> {
+    fn is_participant(&self, _: Self::Index, candidate: &Self::PublicKey) -> Option<u32> {
         self.signers_map.get(candidate).cloned()
+    }
+}
+
+impl<P: Array> ThresholdSupervisor for Coordinator<P> {
+    type Identity = Poly<Public>;
+    type Share = Share;
+    type Seed = group::Signature;
+
+    fn leader(&self, _: Self::Index, _: Self::Seed) -> Option<Self::PublicKey> {
+        unimplemented!()
+    }
+
+    fn identity(&self, _: Self::Index) -> Option<&Self::Identity> {
+        Some(&self.identity)
+    }
+
+    fn share(&self, _: Self::Index) -> Option<&Self::Share> {
+        Some(&self.share)
+    }
+}
+
+impl<P: Array> S for Coordinator<P> {
+    fn index(&self) -> Self::Index {
+        self.view
     }
 
     fn sequencers(&self, _: Self::Index) -> Option<&Vec<Self::PublicKey>> {
@@ -62,18 +91,5 @@ impl<P: Array> S for Coordinator<P> {
 
     fn is_sequencer(&self, _: Self::Index, candidate: &Self::PublicKey) -> Option<u32> {
         self.signers_map.get(candidate).cloned()
-    }
-}
-
-impl<P: Array> T for Coordinator<P> {
-    type Identity = Poly<Public>;
-    type Share = Share;
-
-    fn identity(&self, _: Self::Index) -> Option<&Self::Identity> {
-        Some(&self.identity)
-    }
-
-    fn share(&self, _: Self::Index) -> Option<&Self::Share> {
-        Some(&self.share)
     }
 }
