@@ -20,7 +20,7 @@ async fn main() -> std::process::ExitCode {
     // Define application
     let matches = Command::new("deployer")
         .version(crate_version())
-        .about("TBD")
+        .about("Deploy infrastructure across cloud providers.")
         .arg(
             Arg::new(VERBOSE_FLAG)
                 .short('v')
