@@ -78,10 +78,10 @@ struct Round<C: Scheme, D: Array, S: Supervisor<Index = View>> {
 }
 
 impl<C: Scheme, D: Array, S: Supervisor<Index = View, PublicKey = C::PublicKey>> Round<C, D, S> {
-    pub fn new(start: SystemTime, supervisor: S, view: View) -> Self {
+    pub fn new(current: SystemTime, supervisor: S, view: View) -> Self {
         let leader = supervisor.leader(view).expect("unable to compute leader");
         Self {
-            start,
+            start: current,
             supervisor,
 
             view,

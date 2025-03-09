@@ -105,9 +105,9 @@ impl<
         >,
     > Round<C, D, S>
 {
-    pub fn new(start: SystemTime, supervisor: S, view: View) -> Self {
+    pub fn new(current: SystemTime, supervisor: S, view: View) -> Self {
         Self {
-            start,
+            start: current,
             supervisor,
 
             view,
