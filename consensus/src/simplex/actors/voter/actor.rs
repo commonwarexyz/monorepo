@@ -12,7 +12,7 @@ use crate::{
         wire, Context, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE, NOTARIZE,
         NULLIFY_AND_FINALIZE,
     },
-    Automaton, Committer, Parsed, Relay, Supervisor,
+    Automaton, Committer, Parsed, Relay, Supervisor, LATENCY,
 };
 use commonware_cryptography::{sha256::hash, sha256::Digest as Sha256Digest, Scheme};
 use commonware_macros::select;
@@ -25,7 +25,9 @@ use futures::{
     future::Either,
     pin_mut, StreamExt,
 };
-use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
+use prometheus_client::metrics::{
+    counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
+};
 use prost::Message as _;
 use rand::Rng;
 use std::sync::atomic::AtomicI64;
@@ -43,6 +45,7 @@ type Finalizable<'a, D> = Option<(wire::Proposal, &'a HashMap<u32, Parsed<wire::
 const GENESIS_VIEW: View = 0;
 
 struct Round<C: Scheme, D: Array, S: Supervisor<Index = View>> {
+    start: SystemTime,
     supervisor: S,
 
     view: View,
@@ -75,9 +78,10 @@ struct Round<C: Scheme, D: Array, S: Supervisor<Index = View>> {
 }
 
 impl<C: Scheme, D: Array, S: Supervisor<Index = View, PublicKey = C::PublicKey>> Round<C, D, S> {
-    pub fn new(supervisor: S, view: View) -> Self {
+    pub fn new(current: SystemTime, supervisor: S, view: View) -> Self {
         let leader = supervisor.leader(view).expect("unable to compute leader");
         Self {
+            start: current,
             supervisor,
 
             view,
@@ -494,6 +498,8 @@ pub struct Actor<
     tracked_views: Gauge,
     received_messages: Family<metrics::PeerMessage, Counter>,
     broadcast_messages: Family<metrics::Message, Counter>,
+    notarization_latency: Histogram,
+    finalization_latency: Histogram,
 }
 
 impl<
@@ -522,6 +528,8 @@ impl<
         let tracked_views = Gauge::<i64, AtomicI64>::default();
         let received_messages = Family::<metrics::PeerMessage, Counter>::default();
         let broadcast_messages = Family::<metrics::Message, Counter>::default();
+        let notarization_latency = Histogram::new(LATENCY.into_iter());
+        let finalization_latency = Histogram::new(LATENCY.into_iter());
         context.register("current_view", "current view", current_view.clone());
         context.register("tracked_views", "tracked views", tracked_views.clone());
         context.register(
@@ -533,6 +541,16 @@ impl<
             "broadcast_messages",
             "broadcast messages",
             broadcast_messages.clone(),
+        );
+        context.register(
+            "notarization_latency",
+            "notarization latency",
+            notarization_latency.clone(),
+        );
+        context.register(
+            "finalization_latency",
+            "finalization latency",
+            finalization_latency.clone(),
         );
 
         // Initialize store
@@ -572,6 +590,8 @@ impl<
                 tracked_views,
                 received_messages,
                 broadcast_messages,
+                notarization_latency,
+                finalization_latency,
             },
             mailbox,
         )
@@ -865,7 +885,7 @@ impl<
         let round = self
             .views
             .entry(view)
-            .or_insert_with(|| Round::new(self.supervisor.clone(), view));
+            .or_insert_with(|| Round::new(self.context.current(), self.supervisor.clone(), view));
 
         // Handle nullify
         let nullify_bytes = wire::Voter {
@@ -1047,6 +1067,15 @@ impl<
         true
     }
 
+    fn since_view_start(&self, view: u64) -> Option<(bool, f64)> {
+        let round = self.views.get(&view)?;
+        let leader = &round.leader;
+        let Ok(elapsed) = self.context.current().duration_since(round.start) else {
+            return None;
+        };
+        Some((*leader == self.crypto.public_key(), elapsed.as_secs_f64()))
+    }
+
     fn enter_view(&mut self, view: u64) {
         // Ensure view is valid
         if view <= self.view {
@@ -1062,7 +1091,7 @@ impl<
         let round = self
             .views
             .entry(view)
-            .or_insert_with(|| Round::new(self.supervisor.clone(), view));
+            .or_insert_with(|| Round::new(self.context.current(), self.supervisor.clone(), view));
         round.leader_deadline = Some(self.context.current() + self.leader_timeout);
         round.advance_deadline = Some(self.context.current() + self.notarization_timeout);
         self.view = view;
@@ -1215,7 +1244,7 @@ impl<
         let round = self
             .views
             .entry(view)
-            .or_insert_with(|| Round::new(self.supervisor.clone(), view));
+            .or_insert_with(|| Round::new(self.context.current(), self.supervisor.clone(), view));
 
         // Handle notarize
         let notarize_bytes = wire::Voter {
@@ -1280,7 +1309,7 @@ impl<
         let round = self
             .views
             .entry(view)
-            .or_insert_with(|| Round::new(self.supervisor.clone(), view));
+            .or_insert_with(|| Round::new(self.context.current(), self.supervisor.clone(), view));
         let validators = self.supervisor.participants(view).unwrap();
         for signature in &notarization.message.signatures {
             let notarize = wire::Notarize {
@@ -1367,10 +1396,13 @@ impl<
 
     async fn handle_nullification(&mut self, nullification: wire::Nullification) {
         // Add signatures to view (needed to broadcast notarization if we get proposal)
-        let round = self
-            .views
-            .entry(nullification.view)
-            .or_insert_with(|| Round::new(self.supervisor.clone(), nullification.view));
+        let round = self.views.entry(nullification.view).or_insert_with(|| {
+            Round::new(
+                self.context.current(),
+                self.supervisor.clone(),
+                nullification.view,
+            )
+        });
         let validators = self.supervisor.participants(nullification.view).unwrap();
         for signature in &nullification.signatures {
             let nullify = wire::Nullify {
@@ -1468,7 +1500,7 @@ impl<
         let round = self
             .views
             .entry(view)
-            .or_insert_with(|| Round::new(self.supervisor.clone(), view));
+            .or_insert_with(|| Round::new(self.context.current(), self.supervisor.clone(), view));
 
         // Handle finalize
         let finalize_bytes = wire::Voter {
@@ -1533,7 +1565,7 @@ impl<
         let round = self
             .views
             .entry(view)
-            .or_insert_with(|| Round::new(self.supervisor.clone(), view));
+            .or_insert_with(|| Round::new(self.context.current(), self.supervisor.clone(), view));
         let validators = self.supervisor.participants(view).unwrap();
         for signature in finalization.message.signatures.iter() {
             let finalize = wire::Finalize {
@@ -1832,6 +1864,13 @@ impl<
 
         // Attempt to notarization
         if let Some(notarization) = self.construct_notarization(view, false) {
+            // Record latency if we are the leader (only way to get unbiased observation)
+            if let Some((leader, elapsed)) = self.since_view_start(view) {
+                if leader {
+                    self.notarization_latency.observe(elapsed);
+                }
+            }
+
             // Update backfiller
             backfiller.notarized(notarization.message.clone()).await;
 
@@ -1983,6 +2022,13 @@ impl<
 
         // Attempt to finalization
         if let Some(finalization) = self.construct_finalization(view, false) {
+            // Record latency if we are the leader (only way to get unbiased observation)
+            if let Some((leader, elapsed)) = self.since_view_start(view) {
+                if leader {
+                    self.finalization_latency.observe(elapsed);
+                }
+            }
+
             // Update backfiller
             backfiller.finalized(view).await;
 
