@@ -1309,10 +1309,10 @@ impl<
     fn since_view_start(&self, view: u64) -> Option<(bool, f64)> {
         let round = self.views.get(&view)?;
         let leader = round.leader.as_ref()?;
-        Some((
-            *leader == self.crypto.public_key(),
-            round.start.elapsed().unwrap().as_secs_f64(),
-        ))
+        let Ok(elapsed) = self.context.current().duration_since(round.start) else {
+            return None;
+        };
+        Some((*leader == self.crypto.public_key(), elapsed.as_secs_f64()))
     }
 
     fn enter_view(&mut self, view: u64, seed: group::Signature) {
