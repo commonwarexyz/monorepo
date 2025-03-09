@@ -5,6 +5,7 @@ use commonware_utils::Array;
 use futures::channel::oneshot;
 use std::future::Future;
 
+pub mod buffered;
 pub mod linked;
 
 /// Proof is a blob that attests to some data.
