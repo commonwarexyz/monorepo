@@ -6,8 +6,8 @@
 //! expect breaking changes and occasional instability.
 
 use bytes::Bytes;
-use commonware_utils::Array;
 
+pub mod linked;
 pub mod simplex;
 pub mod threshold_simplex;
 
@@ -24,6 +24,7 @@ pub type Proof = Bytes;
 
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
+        use commonware_utils::Array;
         use futures::channel::oneshot;
         use std::future::Future;
 

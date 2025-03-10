@@ -1,4 +1,4 @@
-use crate::linked::parsed;
+use super::parsed;
 use commonware_cryptography::Scheme;
 use commonware_utils::Array;
 use std::collections::{hash_map::Entry, HashMap};
@@ -10,7 +10,7 @@ pub struct TipManager<C: Scheme, D: Array> {
     // The chunk must have the threshold signature of its parent.
     // Existence of the chunk implies:
     // - The existence of the sequencer's entire chunk chain (from height zero)
-    // - That the chunk has been acked by this signer.
+    // - That the chunk has been acked by this validator.
     tips: HashMap<C::PublicKey, parsed::Node<C, D>>,
 }
 
@@ -56,8 +56,7 @@ impl<C: Scheme, D: Array> TipManager<C, D> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::linked::parsed;
+    use super::{super::parsed, *};
     use bytes::Bytes;
     use commonware_cryptography::{
         ed25519::{self, Ed25519, PublicKey, Signature},
