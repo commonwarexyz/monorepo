@@ -117,34 +117,19 @@ function setExternalLinksToOpenInNewTab() {
 function insertFooter() {
     const currentYear = new Date().getFullYear();
 
-    // Handle normal footer
-    const footerPlaceholder = document.getElementById('footer-placeholder');
-    if (footerPlaceholder) {
-        const footerHTML = `
+    const footerHTML = `
         <div class="footer">
             <div class="socials">
+                <a href="/hiring.html">Hiring</a>
                 <a href="/benchmarks.html">Benchmarks</a>
                 <a href="https://github.com/commonwarexyz/monorepo">GitHub</a>
-                <a href="https://github.com/commonwarexyz/monorepo/discussions">Discussions</a>
                 <a href="https://x.com/commonwarexyz">X</a>
                 <a href="https://podcasts.apple.com/us/podcast/how-things-work/id1794554748">Podcast</a>
             </div>
             &copy; ${currentYear} Commonware, Inc. All rights reserved.
         </div>
         `
-        footerPlaceholder.innerHTML = footerHTML;
-    }
-
-    // Handle limited footer
-    const footerLimitedPlaceholder = document.getElementById('footer-limited-placeholder');
-    if (footerLimitedPlaceholder) {
-        const footerLimitedHTML = `
-        <div class="footer">
-            &copy; ${currentYear} Commonware, Inc. All rights reserved.
-        </div>
-        `
-        footerLimitedPlaceholder.innerHTML = footerLimitedHTML;
-    }
+    document.getElementById('footer-placeholder').innerHTML = footerHTML;
 }
 
 // Load the logo when the DOM content is loaded
