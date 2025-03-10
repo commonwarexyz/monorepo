@@ -116,19 +116,35 @@ function setExternalLinksToOpenInNewTab() {
 
 function insertFooter() {
     const currentYear = new Date().getFullYear();
-    const footerHTML = `
-    <div class="footer">
-        <div class="socials">
-            <a href="/benchmarks.html">Benchmarks</a>
-            <a href="https://github.com/commonwarexyz/monorepo">GitHub</a>
-            <a href="https://github.com/commonwarexyz/monorepo/discussions">Discussions</a>
-            <a href="https://x.com/commonwarexyz">X</a>
-            <a href="https://podcasts.apple.com/us/podcast/how-things-work/id1794554748">Podcast</a>
+
+    // Handle normal footer
+    const footerPlaceholder = document.getElementById('footer-placeholder');
+    if (footerPlaceholder) {
+        const footerHTML = `
+        <div class="footer">
+            <div class="socials">
+                <a href="/benchmarks.html">Benchmarks</a>
+                <a href="https://github.com/commonwarexyz/monorepo">GitHub</a>
+                <a href="https://github.com/commonwarexyz/monorepo/discussions">Discussions</a>
+                <a href="https://x.com/commonwarexyz">X</a>
+                <a href="https://podcasts.apple.com/us/podcast/how-things-work/id1794554748">Podcast</a>
+            </div>
+            &copy; ${currentYear} Commonware, Inc. All rights reserved.
         </div>
-        &copy; ${currentYear} Commonware, Inc. All rights reserved.
-    </div>
-    `
-    document.getElementById('footer-placeholder').innerHTML = footerHTML;
+        `
+        footerPlaceholder.innerHTML = footerHTML;
+    }
+
+    // Handle limited footer
+    const footerLimitedPlaceholder = document.getElementById('footer-limited-placeholder');
+    if (footerLimitedPlaceholder) {
+        const footerLimitedHTML = `
+        <div class="footer">
+            &copy; ${currentYear} Commonware, Inc. All rights reserved.
+        </div>
+        `
+        footerLimitedPlaceholder.innerHTML = footerLimitedHTML;
+    }
 }
 
 // Load the logo when the DOM content is loaded
