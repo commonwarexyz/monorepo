@@ -847,20 +847,10 @@ name = "commonware-broadcast"
 version = "0.0.7"
 dependencies = [
  "bytes",
- "commonware-cryptography",
- "commonware-macros",
- "commonware-p2p",
- "commonware-runtime",
- "commonware-storage",
  "commonware-utils",
  "futures",
- "prometheus-client",
  "prost",
- "prost-build",
- "rand",
  "thiserror 2.0.12",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

@@ -35,23 +35,29 @@
 
 use commonware_utils::Array;
 
-mod ack_manager;
-use ack_manager::AckManager;
-mod config;
-pub use config::Config;
-mod engine;
-pub use engine::Engine;
-mod metrics;
 mod namespace;
 mod parsed;
 mod prover;
 pub use prover::Prover;
 mod serializer;
-mod tip_manager;
-use tip_manager::TipManager;
 mod wire {
     include!(concat!(env!("OUT_DIR"), "/wire.rs"));
 }
+
+cfg_if::cfg_if! {
+    if #[cfg(not(target_arch = "wasm32"))] {
+        mod ack_manager;
+        use ack_manager::AckManager;
+        mod config;
+        pub use config::Config;
+        mod engine;
+        pub use engine::Engine;
+        mod metrics;
+        mod tip_manager;
+        use tip_manager::TipManager;
+    }
+}
+
 #[cfg(test)]
 pub mod mocks;
 
