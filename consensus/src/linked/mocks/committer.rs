@@ -19,7 +19,7 @@ enum Message<C: Scheme, D: Array> {
     Get(C::PublicKey, u64, oneshot::Sender<Option<D>>),
 }
 
-pub struct Collector<C: Scheme, D: Array> {
+pub struct Committer<C: Scheme, D: Array> {
     mailbox: mpsc::Receiver<Message<C, D>>,
 
     // Application namespace
@@ -38,11 +38,11 @@ pub struct Collector<C: Scheme, D: Array> {
     highest: HashMap<C::PublicKey, u64>,
 }
 
-impl<C: Scheme, D: Array> Collector<C, D> {
+impl<C: Scheme, D: Array> Committer<C, D> {
     pub fn new(namespace: &[u8], public: group::Public) -> (Self, Mailbox<C, D>) {
         let (sender, receiver) = mpsc::channel(1024);
         (
-            Collector {
+            Committer {
                 mailbox: receiver,
                 namespace: namespace.to_vec(),
                 public,
@@ -69,7 +69,7 @@ impl<C: Scheme, D: Array> Collector<C, D> {
                         }
                     };
 
-                    // Update the collector
+                    // Update the committer
                     let digests = self.digests.entry(context.sequencer.clone()).or_default();
                     digests.insert(context.height, payload);
 

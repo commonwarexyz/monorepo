@@ -70,7 +70,7 @@ impl<D: Array, P: Array> AckManager<D, P> {
             Evidence::Threshold(_) => None,
             Evidence::Partials(p) => {
                 if !p.shares.insert(ack.partial.index) {
-                    // Signer already existed
+                    // Validator already signed
                     return None;
                 }
 

@@ -10,7 +10,7 @@ pub struct TipManager<C: Scheme, D: Array> {
     // The chunk must have the threshold signature of its parent.
     // Existence of the chunk implies:
     // - The existence of the sequencer's entire chunk chain (from height zero)
-    // - That the chunk has been acked by this signer.
+    // - That the chunk has been acked by this validator.
     tips: HashMap<C::PublicKey, parsed::Node<C, D>>,
 }
 
