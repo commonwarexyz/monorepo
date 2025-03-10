@@ -1,6 +1,6 @@
 //! Generate and verify proofs of broadcast.
 //!
-//! The proofs contain threshold signatures of signers that have seen and validated a chunk.
+//! The proofs contain threshold signatures of validators that have seen and validated a chunk.
 
 use super::{namespace, parsed, serializer, Context, Epoch};
 use crate::Proof;
