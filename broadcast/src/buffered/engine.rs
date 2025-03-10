@@ -7,20 +7,22 @@
 //! - Recovering threshold signatures from partial signatures for each chunk
 //! - Notifying other actors of new chunks and threshold signatures
 
-use super::{metrics, Config, Digestible, Mailbox, Message, Responders, Serializable};
+use super::{metrics, Config, Digestible, Mailbox, Message, Serializable};
+use crate::buffered::metrics::SequencerLabel;
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Clock, Handle, Metrics, Spawner};
+use commonware_runtime::{
+    telemetry::status::{CounterExt, Status},
+    Clock, Handle, Metrics, Spawner,
+};
 use commonware_utils::Array;
 use futures::{
     channel::{mpsc, oneshot},
-    future::Either,
     StreamExt,
 };
 use std::{
     collections::{HashMap, VecDeque},
     marker::PhantomData,
-    time::SystemTime,
 };
 use tracing::{debug, error, warn};
 
@@ -58,7 +60,7 @@ pub struct Engine<
     mailbox_receiver: mpsc::Receiver<Message<D, B>>,
 
     /// Pending requests from the application.
-    responders: Responders<D, B>,
+    waiters: HashMap<D, Vec<oneshot::Sender<B>>>,
 
     ////////////////////////////////////////
     // State
@@ -99,7 +101,7 @@ impl<
             priority: cfg.priority,
             cache_per_sender_size: cfg.cache_per_sender_size,
             mailbox_receiver,
-            responders: Responders::new(),
+            waiters: HashMap::new(),
             cache: HashMap::new(),
             items: HashMap::new(),
             metrics,
@@ -108,6 +110,7 @@ impl<
         (result, mailbox)
     }
 
+    /// Starts the engine with the given network.
     pub fn start(mut self, network: (NetS, NetR)) -> Handle<()> {
         self.context.spawn_ref()(self.run(network))
     }
@@ -118,11 +121,8 @@ impl<
         let mut shutdown = self.context.stopped();
 
         loop {
-            // Create the deadline future for responses
-            let deadline = match self.responders.next_deadline() {
-                Some(deadline) => Either::Left(self.context.sleep_until(deadline)),
-                None => Either::Right(futures::future::pending()),
-            };
+            // Cleanup waiters
+            self.cleanup_waiters();
 
             select! {
                 // Handle shutdown signal
@@ -145,9 +145,9 @@ impl<
                             debug!("broadcast");
                             self.handle_broadcast(&mut net_sender, blob).await;
                         }
-                        Message::Retrieve{ digest, responder, deadline } => {
+                        Message::Retrieve{ digest, responder } => {
                             debug!("retrieve");
-                            self.handle_retrieve(digest, responder, deadline).await;
+                            self.handle_retrieve(digest, responder).await;
                         }
                     }
                 },
@@ -165,26 +165,19 @@ impl<
                     };
 
                     // Metrics
-                    self.metrics.broadcast
-                    .get_or_create(&metrics::SequencerLabel::from(&peer))
-                    .inc();
+                    self.metrics.peer.get_or_create(&SequencerLabel::from(&peer)).inc();
 
                     // Decode the message
                     let blob = match B::deserialize(&msg) {
                         Ok(blob) => blob,
                         Err(err) => {
                             warn!(?err, ?peer, "failed to decode message");
+                            self.metrics.receive.inc(Status::Invalid);
                             continue;
                         }
                     };
 
                     self.handle_network(peer, blob).await;
-                },
-
-                // Handle deadlines
-                _ = deadline => {
-                    debug!("deadline");
-                    self.responders.pop_deadline();
                 },
             }
         }
@@ -214,27 +207,26 @@ impl<
     ///
     /// If the blob is already in the cache, the responder is immediately sent the blob.
     /// Otherwise, the responder is stored in the waiters list.
-    async fn handle_retrieve(
-        &mut self,
-        digest: D,
-        responder: oneshot::Sender<B>,
-        deadline: SystemTime,
-    ) {
+    async fn handle_retrieve(&mut self, digest: D, responder: oneshot::Sender<B>) {
         // Check if the blob is already in the cache
         if let Some(blob) = self.items.get(&digest) {
-            let _ = responder.send(blob.clone());
+            self.respond(responder, blob.clone());
             return;
         }
 
         // Store the responder
-        self.responders.add(digest.clone(), responder, deadline);
+        self.waiters.entry(digest).or_default().push(responder);
     }
 
     /// Handles a blob that was received from a peer.
     async fn handle_network(&mut self, peer: P, blob: B) {
         if !self.insert_blob(peer.clone(), blob) {
             warn!(?peer, "blob already stored");
+            self.metrics.receive.inc(Status::Dropped);
+            return;
         }
+
+        self.metrics.receive.inc(Status::Success);
     }
 
     ////////////////////////////////////////
@@ -253,8 +245,10 @@ impl<
         }
 
         // Send the blob to the waiters, if any, ignoring errors (as the receiver may have dropped)
-        for responder in self.responders.take(&digest) {
-            let _ = responder.send(blob.clone());
+        if let Some(responders) = self.waiters.remove(&digest) {
+            for responder in responders {
+                self.respond(responder, blob.clone());
+            }
         }
 
         // Store the blob in the cache
@@ -272,5 +266,31 @@ impl<
         }
 
         true
+    }
+
+    /// Remove all waiters that have dropped receivers.
+    fn cleanup_waiters(&mut self) {
+        self.waiters.retain(|_, waiters| {
+            let initial_len = waiters.len();
+            waiters.retain(|waiter| !waiter.is_canceled());
+            let dropped_count = initial_len - waiters.len();
+
+            // Increment metrics for each dropped waiter
+            for _ in 0..dropped_count {
+                self.metrics.retrieve.inc(Status::Dropped);
+            }
+
+            !waiters.is_empty()
+        });
+    }
+
+    /// Respond to a waiter with a blob.
+    /// Increments the appropriate metric based on the result.
+    fn respond(&mut self, responder: oneshot::Sender<B>, blob: B) {
+        let result = responder.send(blob);
+        self.metrics.retrieve.inc(match result {
+            Ok(_) => Status::Success,
+            Err(_) => Status::Dropped,
+        });
     }
 }

@@ -24,10 +24,12 @@ impl SequencerLabel {
 /// Metrics for the broadcast/linked module.
 #[derive(Default)]
 pub struct Metrics {
-    /// Number of broadcasts received per sequencer
-    pub broadcast: Family<SequencerLabel, Counter>,
-    /// Number of application verifications by status
-    pub verify: status::Counter,
+    /// Number of broadcasts received by peer
+    pub peer: Family<SequencerLabel, Counter>,
+    /// Number of received messages by status
+    pub receive: status::Counter,
+    /// Number of retrieves by status
+    pub retrieve: status::Counter,
 }
 
 impl Metrics {
@@ -35,14 +37,19 @@ impl Metrics {
     pub fn init<E: RuntimeMetrics>(context: E) -> Self {
         let metrics = Metrics::default();
         context.register(
-            "broadcast",
-            "Number of broadcasts received per sequencer",
-            metrics.broadcast.clone(),
+            "peer",
+            "Number of broadcasts received by peer",
+            metrics.peer.clone(),
         );
         context.register(
-            "verify",
-            "Number of application verifications by status",
-            metrics.verify.clone(),
+            "receive",
+            "Number of received messages by status",
+            metrics.receive.clone(),
+        );
+        context.register(
+            "retrieve",
+            "Number of retrieves by status",
+            metrics.retrieve.clone(),
         );
         metrics
     }

@@ -2,7 +2,7 @@ use commonware_utils::Array;
 
 /// Configuration for the [`Engine`](super::Engine).
 pub struct Config<P: Array> {
-    /// The cryptographic scheme used if the engine is a sequencer.
+    /// The public key of the participant.
     pub public_key: P,
 
     /// The maximum size of the mailbox backlog.

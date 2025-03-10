@@ -9,9 +9,8 @@
 //! - Notifying other actors of new broadcasts
 //! - Serving cached broadcasts on-demand
 
-use std::future::Future;
-
 use commonware_utils::Array;
+use std::future::Future;
 
 mod config;
 pub use config::Config;
@@ -20,8 +19,6 @@ pub use engine::Engine;
 mod ingress;
 use ingress::{Mailbox, Message};
 mod metrics;
-mod responders;
-use responders::Responders;
 
 #[cfg(test)]
 pub mod mocks;
