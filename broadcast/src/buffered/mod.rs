@@ -1,0 +1,44 @@
+//! Best-effort broadcast to a network.
+//!
+//! # Design
+//!
+//! The core of the module is the [`Engine`]. It is responsible for:
+//! - Serializing and deserializing messages
+//! - Performing best-effort broadcast to all participants in the network
+//! - Accepting and caching broadcasts from other participants
+//! - Notifying other actors of new broadcasts
+//! - Serving cached broadcasts on-demand
+
+use commonware_utils::Array;
+use std::future::Future;
+
+mod config;
+pub use config::Config;
+mod engine;
+pub use engine::Engine;
+mod ingress;
+use ingress::{Mailbox, Message};
+mod metrics;
+
+#[cfg(test)]
+pub mod mocks;
+
+pub trait Broadcaster: Clone + Send + 'static {
+    type Blob: Clone + Send + 'static;
+
+    fn broadcast(&mut self, blob: Self::Blob) -> impl Future<Output = ()> + Send;
+}
+
+pub trait Digestible<D: Array>: Clone + Send + Sync + 'static {
+    fn digest(&self) -> D;
+}
+
+pub trait Serializable: Sized + Clone + Send + Sync + 'static {
+    fn serialize(&self) -> Vec<u8>;
+    fn deserialize(bytes: &[u8]) -> Result<Self, Error>;
+}
+
+#[derive(Debug)]
+pub enum Error {
+    DeserializationError,
+}
