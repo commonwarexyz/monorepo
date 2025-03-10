@@ -65,10 +65,9 @@ pub struct Engine<
     Su: Supervisor<Index = Epoch, PublicKey = C::PublicKey>,
     TSu: ThresholdSupervisor<
         Index = Epoch,
-        Seed = group::Signature,
+        PublicKey = C::PublicKey,
         Share = group::Share,
         Identity = poly::Public,
-        PublicKey = C::PublicKey,
     >,
     NetS: Sender<PublicKey = C::PublicKey>,
     NetR: Receiver<PublicKey = C::PublicKey>,
@@ -209,10 +208,9 @@ impl<
         Su: Supervisor<Index = Epoch, PublicKey = C::PublicKey>,
         TSu: ThresholdSupervisor<
             Index = Epoch,
-            Seed = group::Signature,
+            PublicKey = C::PublicKey,
             Share = group::Share,
             Identity = poly::Public,
-            PublicKey = C::PublicKey,
         >,
         NetS: Sender<PublicKey = C::PublicKey>,
         NetR: Receiver<PublicKey = C::PublicKey>,

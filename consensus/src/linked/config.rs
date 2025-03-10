@@ -1,9 +1,6 @@
 use super::{Context, Epoch, Epocher};
 use crate::{Automaton, Committer, Relay, Supervisor, ThresholdSupervisor};
-use commonware_cryptography::{
-    bls12381::primitives::{group, poly},
-    Scheme,
-};
+use commonware_cryptography::Scheme;
 use commonware_utils::Array;
 use std::time::Duration;
 
@@ -16,13 +13,7 @@ pub struct Config<
     Z: Committer<Digest = D>,
     Ep: Epocher,
     Su: Supervisor<Index = Epoch, PublicKey = C::PublicKey>,
-    TSu: ThresholdSupervisor<
-        Index = Epoch,
-        Seed = group::Signature,
-        Share = group::Share,
-        Identity = poly::Public,
-        PublicKey = C::PublicKey,
-    >,
+    TSu: ThresholdSupervisor<Index = Epoch, PublicKey = C::PublicKey>,
 > {
     /// The cryptographic scheme used if the engine is a sequencer.
     pub crypto: C,
