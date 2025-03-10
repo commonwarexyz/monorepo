@@ -1,0 +1,78 @@
+:root {
+    --colorAppBackground: white;
+    --fontFamily: 'Consolas', monospace;
+    --widthMaxJobBoard: 800px;
+    --colorPrimary900: blue;
+    --colorPrimary600: lightblue;
+    --borderRadiusContainer: 0;
+    --borderRadiusControl: 0;
+    --borderRadiusButton: 0;
+}
+
+/* Apply base styles to the body */
+body {
+    background-color: var(--colorAppBackground);
+    color: black;
+    font-family: var(--fontFamily);
+    margin: 0;
+    padding: 0;
+}
+
+/* Typography styles matching your site */
+h1 {
+    font-size: 1.5em;
+    margin-bottom: 10px;
+}
+
+h2 {
+    font-size: 1.2em;
+    margin-bottom: 8px;
+}
+
+h3 {
+    font-size: 1em;
+    font-weight: bold;
+    margin-bottom: 6.6px;
+}
+
+p {
+    line-height: 1.2;
+    margin-bottom: 5px;
+}
+
+a {
+    color: blue;
+    text-decoration: underline;
+}
+
+.ashby-job-board-heading {
+    font-size: 1.5em;
+    margin-bottom: 10px;
+}
+
+.ashby-job-posting-brief-title {
+    font-size: 1em;
+    font-weight: bold;
+    margin-bottom: 6.6px;
+}
+
+.ashby-application-form-submit-button {
+    background-color: var(--colorPrimary900);
+    color: white;
+    font-family: var(--fontFamily);
+    border: none;
+}
+
+.ashby-job-posting-brief {
+    margin-bottom: 10px;
+}
+
+.ashby-job-board-heading,
+.ashby-job-posting-brief-list,
+.ashby-job-posting-brief,
+.ashby-job-posting-brief-details,
+.ashby-job-board-filter,
+.ashby-department-heading,
+.ashby-job-posting-brief-department-heading {
+    text-align: left !important;
+}
