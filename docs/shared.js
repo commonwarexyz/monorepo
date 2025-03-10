@@ -116,19 +116,18 @@ function setExternalLinksToOpenInNewTab() {
 
 function insertFooter() {
     const currentYear = new Date().getFullYear();
-
     const footerHTML = `
-        <div class="footer">
-            <div class="socials">
-                <a href="/hiring.html">Hiring</a>
-                <a href="/benchmarks.html">Benchmarks</a>
-                <a href="https://github.com/commonwarexyz/monorepo">GitHub</a>
-                <a href="https://x.com/commonwarexyz">X</a>
-                <a href="https://podcasts.apple.com/us/podcast/how-things-work/id1794554748">Podcast</a>
-            </div>
-            &copy; ${currentYear} Commonware, Inc. All rights reserved.
+    <div class="footer">
+        <div class="socials">
+            <a href="/hiring.html">Hiring</a>
+            <a href="/benchmarks.html">Benchmarks</a>
+            <a href="https://github.com/commonwarexyz/monorepo">GitHub</a>
+            <a href="https://x.com/commonwarexyz">X</a>
+            <a href="https://podcasts.apple.com/us/podcast/how-things-work/id1794554748">Podcast</a>
         </div>
-        `
+        &copy; ${currentYear} Commonware, Inc. All rights reserved.
+    </div>
+    `;
     document.getElementById('footer-placeholder').innerHTML = footerHTML;
 }
 
