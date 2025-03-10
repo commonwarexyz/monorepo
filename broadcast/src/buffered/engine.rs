@@ -24,7 +24,7 @@ use std::{
     collections::{HashMap, VecDeque},
     marker::PhantomData,
 };
-use tracing::{debug, error, warn};
+use tracing::{debug, error, trace, warn};
 
 /// Instance of the `linked` broadcast engine.
 pub struct Engine<
@@ -51,7 +51,7 @@ pub struct Engine<
     priority: bool,
 
     /// Number of messages to cache per sender
-    cache_per_sender_size: usize,
+    per_sender_cache_size: usize,
 
     ////////////////////////////////////////
     // Messaging
@@ -99,7 +99,7 @@ impl<
             _phantom: PhantomData,
             public_key: cfg.public_key,
             priority: cfg.priority,
-            cache_per_sender_size: cfg.cache_per_sender_size,
+            per_sender_cache_size: cfg.per_sender_cache_size,
             mailbox_receiver,
             waiters: HashMap::new(),
             cache: HashMap::new(),
@@ -132,21 +132,17 @@ impl<
 
                 // Handle mailbox messages
                 mail = self.mailbox_receiver.next() => {
-                    debug!("mailbox");
-
-                    // Error handling
                     let Some(msg) = mail else {
                         error!("mailbox receiver failed");
                         break;
                     };
-
                     match msg {
                         Message::Broadcast{ blob } => {
-                            debug!("broadcast");
+                            trace!("broadcast");
                             self.handle_broadcast(&mut net_sender, blob).await;
                         }
                         Message::Retrieve{ digest, responder } => {
-                            debug!("retrieve");
+                            trace!("retrieve");
                             self.handle_retrieve(digest, responder).await;
                         }
                     }
@@ -154,7 +150,7 @@ impl<
 
                 // Handle incoming messages
                 msg = net_receiver.recv() => {
-                    debug!("receiver");
+                    trace!("receiver");
                     // Error handling
                     let (peer, msg) = match msg {
                         Ok(r) => r,
@@ -256,11 +252,11 @@ impl<
         let cache = self
             .cache
             .entry(peer)
-            .or_insert_with(|| VecDeque::with_capacity(self.cache_per_sender_size + 1));
+            .or_insert_with(|| VecDeque::with_capacity(self.per_sender_cache_size + 1));
         cache.push_back(digest);
 
         // Evict the oldest blob if the cache is full
-        if cache.len() > self.cache_per_sender_size {
+        if cache.len() > self.per_sender_cache_size {
             let deleted = cache.pop_front().expect("missing cache");
             self.items.remove(&deleted).expect("missing item");
         }
