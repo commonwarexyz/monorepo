@@ -1,5 +1,3 @@
-use std::time::SystemTime;
-
 use super::{Broadcaster, Digestible};
 use commonware_utils::Array;
 use futures::{
@@ -15,11 +13,10 @@ pub enum Message<D, B> {
     /// Request to retrieve a blob by digest.
     ///
     /// The responder will be sent the blob if it is available.
-    /// If the blob is not available, the responder may wait until the deadline.
+    /// The request can be canceled by dropping the responder.
     Retrieve {
         digest: D,
         responder: oneshot::Sender<B>,
-        deadline: SystemTime,
     },
 }
 
@@ -37,13 +34,12 @@ impl<D: Array, B: Digestible<D>> Mailbox<D, B> {
 
 impl<D: Array, B: Digestible<D>> Mailbox<D, B> {
     /// Retrieve a blob by digest.
-    pub async fn retrieve(&mut self, digest: D, deadline: SystemTime) -> oneshot::Receiver<B> {
+    pub async fn retrieve(&mut self, digest: D) -> oneshot::Receiver<B> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Message::Retrieve {
                 digest,
                 responder: sender,
-                deadline,
             })
             .await
             .expect("mailbox closed");
