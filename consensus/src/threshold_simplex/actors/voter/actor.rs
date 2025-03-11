@@ -224,7 +224,7 @@ impl<
         // Store the notarize
         if self
             .notaries
-            .insert(public_key_index, proposal_digest.clone())
+            .insert(public_key_index, proposal_digest)
             .is_some()
         {
             return false;
@@ -346,7 +346,7 @@ impl<
         // Store the finalize
         if self
             .finalizers
-            .insert(public_key_index, proposal_digest.clone())
+            .insert(public_key_index, proposal_digest)
             .is_some()
         {
             return false;
@@ -1266,7 +1266,7 @@ impl<
             parent: (proposal.message.parent, parent_payload),
         };
         let payload = proposal.digest.clone();
-        let round_proposal = Some((proposal_digest.clone(), proposal));
+        let round_proposal = Some((*proposal_digest, proposal));
         let round = self.views.get_mut(&context.view).unwrap();
         round.proposal = round_proposal;
         Some((
@@ -2014,9 +2014,7 @@ impl<
                 &notarization.message.proposal_signature,
                 &notarization.message.seed_signature,
             );
-            self.committer
-                .prepared(proof, notarization.digest.clone())
-                .await;
+            self.committer.prepared(proof, notarization.digest).await;
 
             // Broadcast the notarization
             let msg = wire::Voter {

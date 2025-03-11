@@ -184,7 +184,7 @@ impl<C: Scheme, D: Array, S: Supervisor<Index = View, PublicKey = C::PublicKey>>
         // Store the notarize
         if self
             .notaries
-            .insert(public_key_index, proposal_digest.clone())
+            .insert(public_key_index, proposal_digest)
             .is_some()
         {
             return false;
@@ -387,7 +387,7 @@ impl<C: Scheme, D: Array, S: Supervisor<Index = View, PublicKey = C::PublicKey>>
         // Store the finalize
         if self
             .finalizers
-            .insert(public_key_index, proposal_digest.clone())
+            .insert(public_key_index, proposal_digest)
             .is_some()
         {
             return false;
@@ -1029,7 +1029,7 @@ impl<
             parent: (proposal.message.parent, parent_payload),
         };
         let payload = proposal.digest.clone();
-        let round_proposal = Some((proposal_digest.clone(), proposal));
+        let round_proposal = Some((*proposal_digest, proposal));
         let round = self.views.get_mut(&context.view).unwrap();
         round.proposal = round_proposal;
         Some((

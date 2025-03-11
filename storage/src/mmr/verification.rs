@@ -59,13 +59,7 @@ impl<H: CHasher> Proof<H> {
         element_pos: u64,
         root_hash: &H::Digest,
     ) -> bool {
-        self.verify_range_inclusion(
-            hasher,
-            &[element.clone()],
-            element_pos,
-            element_pos,
-            root_hash,
-        )
+        self.verify_range_inclusion(hasher, &[*element], element_pos, element_pos, root_hash)
     }
 
     /// Return true if `proof` proves that the `elements` appear consecutively between positions
@@ -105,7 +99,7 @@ impl<H: CHasher> Proof<H> {
                 }
             } else if let Some(hash) = proof_hashes_iter.next() {
                 proof_hashes_used += 1;
-                peak_hashes.push(hash.clone());
+                peak_hashes.push(*hash);
             } else {
                 return false;
             }
@@ -339,13 +333,13 @@ fn peak_hash_from_range<'a, H: CHasher>(
 
     if left_hash.is_none() {
         match sibling_hashes.next() {
-            Some(hash) => left_hash = Some(hash.clone()),
+            Some(hash) => left_hash = Some(*hash),
             None => return Err(()),
         }
     }
     if right_hash.is_none() {
         match sibling_hashes.next() {
-            Some(hash) => right_hash = Some(hash.clone()),
+            Some(hash) => right_hash = Some(*hash),
             None => return Err(()),
         }
     }

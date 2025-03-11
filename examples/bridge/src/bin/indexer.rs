@@ -147,7 +147,7 @@ fn main() {
                         let digest = hasher.finalize();
 
                         // Store block
-                        network.insert(digest.clone(), incoming.data);
+                        network.insert(digest, incoming.data);
                         let _ = response.send(true);
                         info!(
                             network = hex(&incoming.network),

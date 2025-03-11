@@ -87,7 +87,7 @@ impl Hasher for Sha256 {
 }
 
 /// Digest of a SHA-256 hashing operation.
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[repr(transparent)]
 pub struct Digest([u8; DIGEST_LENGTH]);
 

@@ -399,7 +399,7 @@ mod tests {
                             digest, payload
                         );
                     }
-                    if let Some(previous) = finalized.insert(view, digest.clone()) {
+                    if let Some(previous) = finalized.insert(view, digest) {
                         if previous != digest {
                             panic!(
                                 "finalization mismatch at {:?} previous: {:?}, current: {:?}",
@@ -628,7 +628,7 @@ mod tests {
                                 // Store notarized
                                 {
                                     let mut notarized = notarized.lock().unwrap();
-                                    if let Some(previous) = notarized.insert(view, digest.clone())
+                                    if let Some(previous) = notarized.insert(view, digest)
                                     {
                                         if previous != digest {
                                             panic!(
@@ -656,7 +656,7 @@ mod tests {
                                 // Store finalized
                                 {
                                     let mut finalized = finalized.lock().unwrap();
-                                    if let Some(previous) = finalized.insert(view, digest.clone()) {
+                                    if let Some(previous) = finalized.insert(view, digest) {
                                         if previous != digest {
                                             panic!(
                                                 "finalization mismatch at {:?} previous: {:?}, current: {:?}",
@@ -967,7 +967,7 @@ mod tests {
                             digest, payload
                         );
                     }
-                    if let Some(previous) = finalized.insert(view, digest.clone()) {
+                    if let Some(previous) = finalized.insert(view, digest) {
                         if previous != digest {
                             panic!(
                                 "finalization mismatch at {:?} previous: {:?}, current: {:?}",
@@ -1117,7 +1117,7 @@ mod tests {
                             digest, payload
                         );
                     }
-                    if let Some(previous) = finalized.insert(view, digest.clone()) {
+                    if let Some(previous) = finalized.insert(view, digest) {
                         if previous != digest {
                             panic!(
                                 "finalization mismatch at {:?} previous: {:?}, current: {:?}",
@@ -1300,7 +1300,7 @@ mod tests {
                             digest, payload
                         );
                     }
-                    if let Some(previous) = finalized.insert(view, digest.clone()) {
+                    if let Some(previous) = finalized.insert(view, digest) {
                         if previous != digest {
                             panic!(
                                 "finalization mismatch at {:?} previous: {:?}, current: {:?}",
@@ -1488,7 +1488,7 @@ mod tests {
                             digest, payload
                         );
                     }
-                    if let Some(previous) = finalized.insert(view, digest.clone()) {
+                    if let Some(previous) = finalized.insert(view, digest) {
                         if previous != digest {
                             panic!(
                                 "finalization mismatch at {:?} previous: {:?}, current: {:?}",
@@ -1635,7 +1635,7 @@ mod tests {
                             digest, payload
                         );
                     }
-                    if let Some(previous) = finalized.insert(view, digest.clone()) {
+                    if let Some(previous) = finalized.insert(view, digest) {
                         if previous != digest {
                             panic!(
                                 "finalization mismatch at {:?} previous: {:?}, current: {:?}",
@@ -1703,7 +1703,7 @@ mod tests {
                             digest, payload
                         );
                     }
-                    if let Some(previous) = finalized.insert(view, digest.clone()) {
+                    if let Some(previous) = finalized.insert(view, digest) {
                         if previous != digest {
                             panic!(
                                 "finalization mismatch at {:?} previous: {:?}, current: {:?}",
@@ -1856,7 +1856,7 @@ mod tests {
                             digest, payload
                         );
                     }
-                    if let Some(previous) = finalized.insert(view, digest.clone()) {
+                    if let Some(previous) = finalized.insert(view, digest) {
                         if previous != digest {
                             panic!(
                                 "finalization mismatch at {:?} previous: {:?}, current: {:?}",
@@ -2043,7 +2043,7 @@ mod tests {
                             digest, payload
                         );
                     }
-                    if let Some(previous) = finalized.insert(view, digest.clone()) {
+                    if let Some(previous) = finalized.insert(view, digest) {
                         if previous != digest {
                             panic!(
                                 "finalization mismatch at {:?} previous: {:?}, current: {:?}",
@@ -2224,7 +2224,7 @@ mod tests {
                             digest, payload
                         );
                     }
-                    if let Some(previous) = finalized.insert(view, digest.clone()) {
+                    if let Some(previous) = finalized.insert(view, digest) {
                         if previous != digest {
                             panic!(
                                 "finalization mismatch at {:?} previous: {:?}, current: {:?}",

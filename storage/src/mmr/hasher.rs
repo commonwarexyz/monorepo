@@ -156,7 +156,7 @@ mod tests {
             "root hash of empty MMR should be non-zero"
         );
 
-        let vec = [hash1.clone(), hash2.clone(), hash3.clone(), hash4.clone()];
+        let vec = [hash1, hash2, hash3, hash4];
         let out = mmr_hasher.root_hash(10, vec.iter());
         assert_ne!(out, test_digest::<H>(0), "root hash should be non-zero");
         assert_ne!(out, empty_out, "root hash should differ from empty MMR");
@@ -167,14 +167,14 @@ mod tests {
         out2 = mmr_hasher.root_hash(11, vec.iter());
         assert_ne!(out, out2, "root hash should change with different position");
 
-        let vec2 = [hash1.clone(), hash2.clone(), hash4.clone(), hash3.clone()];
+        let vec2 = [hash1, hash2, hash4, hash3];
         out2 = mmr_hasher.root_hash(10, vec2.iter());
         assert_ne!(
             out, out2,
             "root hash should change with different hash order"
         );
 
-        let vec3 = [hash1.clone(), hash2.clone(), hash3.clone()];
+        let vec3 = [hash1, hash2, hash3];
         out2 = mmr_hasher.root_hash(10, vec3.iter());
         assert_ne!(
             out, out2,
