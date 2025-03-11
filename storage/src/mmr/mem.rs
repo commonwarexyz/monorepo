@@ -46,12 +46,12 @@ impl<H: CHasher> Storage<H> for Mmr<H> {
     async fn get_node(&self, position: u64) -> Result<Option<H::Digest>, Error> {
         if position < self.oldest_retained_pos {
             match self.old_peaks.get(&position) {
-                Some(node) => Ok(Some(node.clone())),
+                Some(node) => Ok(Some(*node)),
                 None => Ok(None),
             }
         } else {
             match self.nodes.get(self.pos_to_index(position)) {
-                Some(node) => Ok(Some(node.clone())),
+                Some(node) => Ok(Some(*node)),
                 None => Ok(None),
             }
         }
@@ -85,7 +85,7 @@ impl<H: CHasher> Mmr<H> {
         for (peak, _) in s.peak_iterator() {
             if peak < s.oldest_retained_pos {
                 let given_peak = given_peak_iter.next().unwrap();
-                assert!(s.old_peaks.insert(peak, given_peak.clone()).is_none());
+                assert!(s.old_peaks.insert(peak, *given_peak).is_none());
             }
         }
         assert!(given_peak_iter.next().is_none());
@@ -141,14 +141,14 @@ impl<H: CHasher> Mmr<H> {
         // Insert the element into the MMR as a leaf.
         let mut h = Hasher::new(hasher);
         let mut hash = h.leaf_hash(element_pos, element);
-        self.nodes.push(hash.clone());
+        self.nodes.push(hash);
 
         // Compute the new parent nodes if any, and insert them into the MMR.
         for sibling_pos in peaks.into_iter().rev() {
             let parent_pos = self.index_to_pos(self.nodes.len());
             let sibling_hash = self.get_node_unchecked(sibling_pos);
             hash = h.node_hash(parent_pos, sibling_hash, &hash);
-            self.nodes.push(hash.clone());
+            self.nodes.push(hash);
         }
         element_pos
     }
@@ -238,7 +238,7 @@ impl<H: CHasher> Mmr<H> {
             if peak.0 < pos && peak.0 >= self.oldest_retained_pos {
                 assert!(self
                     .old_peaks
-                    .insert(peak.0, self.nodes[self.pos_to_index(peak.0)].clone())
+                    .insert(peak.0, self.nodes[self.pos_to_index(peak.0)])
                     .is_none());
             }
         }
@@ -370,7 +370,7 @@ mod tests {
             // verify root hash
             let mut hasher = Sha256::default();
             let root_hash = mmr.root(&mut hasher);
-            let peak_hashes = [hash14, hash17, mmr.nodes[18].clone()];
+            let peak_hashes = [hash14, hash17, mmr.nodes[18]];
             let expected_root_hash = mmr_hasher.root_hash(19, peak_hashes.iter());
             assert_eq!(root_hash, expected_root_hash, "incorrect root hash");
 
@@ -407,7 +407,7 @@ mod tests {
             let mut old_peaks = Vec::new();
             mmr.peak_iterator().for_each(|peak| {
                 if peak.0 < mmr.oldest_retained_pos().unwrap() {
-                    old_peaks.push(mmr.get_node_unchecked(peak.0).clone());
+                    old_peaks.push(*mmr.get_node_unchecked(peak.0));
                 }
             });
             let mmr_copy = Mmr::<Sha256>::init(

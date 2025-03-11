@@ -478,8 +478,8 @@ mod tests {
         let payload1 = sha256::hash(b"payload1");
         let payload2 = sha256::hash(b"payload2");
 
-        let chunk1 = helpers::create_chunk(&sequencer, height, payload1.clone());
-        let chunk2 = helpers::create_chunk(&sequencer, height, payload2.clone());
+        let chunk1 = helpers::create_chunk(&sequencer, height, payload1);
+        let chunk2 = helpers::create_chunk(&sequencer, height, payload2);
 
         let submissions = [
             (0, &chunk1),
@@ -493,7 +493,7 @@ mod tests {
         for (i, chunk) in submissions.iter() {
             let ack = helpers::create_ack(&shares[*i], chunk, epoch);
             if let Some(threshold) = acks.add_ack(&ack, quorum) {
-                thresholds.push((chunk.payload.clone(), threshold));
+                thresholds.push((chunk.payload, threshold));
             }
         }
         assert!(!thresholds.is_empty());

@@ -153,7 +153,7 @@ impl<H: Hasher> Tree<H> {
 
     /// Returns the root of the tree.
     pub fn root(&self) -> H::Digest {
-        self.levels.last().unwrap().first().unwrap().clone()
+        *self.levels.last().unwrap().first().unwrap()
     }
 
     /// Generates a Merkle proof for the leaf at `position`.
@@ -175,13 +175,13 @@ impl<H: Hasher> Tree<H> {
             }
             let sibling_index = if index % 2 == 0 { index + 1 } else { index - 1 };
             let sibling = if sibling_index < level.len() {
-                level[sibling_index].clone()
+                level[sibling_index]
             } else {
                 // If no right child exists, use a duplicate of the current node.
                 //
                 // This doesn't affect the robustness of the proof (allow a non-existent position
                 // to be proven or enable multiple proofs to be generated from a single leaf).
-                level[index].clone()
+                level[index]
             };
             siblings.push(sibling);
             index /= 2;
@@ -644,7 +644,7 @@ mod tests {
         let mut proof = tree.proof(0).unwrap();
 
         // Tamper with proof
-        proof.siblings.push(element.clone());
+        proof.siblings.push(*element);
 
         // Fail verification with an empty proof.
         let mut hasher = Sha256::default();

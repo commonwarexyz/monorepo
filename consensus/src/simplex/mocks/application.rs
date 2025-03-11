@@ -215,8 +215,8 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: Array> Application<E, H, P> {
         let payload = Bytes::from(GENESIS_BYTES);
         self.hasher.update(&payload);
         let digest = self.hasher.finalize();
-        self.verified.insert(digest.clone());
-        self.finalized_views.insert(digest.clone());
+        self.verified.insert(digest);
+        self.finalized_views.insert(digest);
         digest
     }
 
@@ -239,10 +239,10 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: Array> Application<E, H, P> {
         let digest = self.hasher.finalize();
 
         // Mark verified
-        self.verified.insert(digest.clone());
+        self.verified.insert(digest);
 
         // Store pending payload
-        self.pending.insert(digest.clone(), payload.into());
+        self.pending.insert(digest, payload.into());
         digest
     }
 
@@ -291,7 +291,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: Array> Application<E, H, P> {
     }
 
     async fn notarized(&mut self, proof: Proof, payload: H::Digest) {
-        if !self.notarized_views.insert(payload.clone()) {
+        if !self.notarized_views.insert(payload) {
             self.panic("view already notarized");
         }
         let _ = self
@@ -304,7 +304,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: Array> Application<E, H, P> {
     }
 
     async fn finalized(&mut self, proof: Proof, payload: H::Digest) {
-        if !self.finalized_views.insert(payload.clone()) {
+        if !self.finalized_views.insert(payload) {
             self.panic("view already finalized");
         }
         let _ = self
@@ -352,7 +352,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: Array> Application<E, H, P> {
                                 let _ = response.send(verified);
                             } else {
                                 waiters
-                                    .entry(payload.clone())
+                                    .entry(payload)
                                     .or_default()
                                     .push((context, response));
                                 continue;
@@ -372,12 +372,12 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: Array> Application<E, H, P> {
                 broadcast = self.broadcast.next() => {
                     // Record digest for future use
                     let (digest, contents) = broadcast.expect("broadcast closed");
-                    seen.insert(digest.clone(), contents.clone());
+                    seen.insert(digest, contents.clone());
 
                     // Check if we have a waiter
                     if let Some(waiters) = waiters.remove(&digest) {
                         for (context, sender) in waiters {
-                            let verified = self.verify(context, digest.clone(), contents.clone()).await;
+                            let verified = self.verify(context, digest, contents.clone()).await;
                             sender.send(verified).expect("Failed to send verification");
                         }
                     }
