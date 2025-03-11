@@ -186,7 +186,7 @@ mod tests {
                 let mut all_received = true;
                 for peer in peers.iter() {
                     let mut mailbox = mailboxes.get(peer).unwrap().clone();
-                    let receiver = mailbox.retrieve(digest.clone()).await;
+                    let receiver = mailbox.retrieve(digest).await;
                     let has = select! {
                         _ = context.sleep(A_JIFFY) => {false},
                         r = receiver => { r.is_ok() },
@@ -246,11 +246,11 @@ mod tests {
             let digest = message.digest();
             let mut mailbox1 = mailboxes.get(&peers[0]).unwrap().clone();
             let mut mailbox2 = mailboxes.get(&peers[1]).unwrap().clone();
-            let receiver = mailbox1.retrieve(digest.clone()).await;
+            let receiver = mailbox1.retrieve(digest).await;
 
             // Create two other requests which are dropped
-            let dummy1 = mailbox1.retrieve(digest.clone()).await;
-            let dummy2 = mailbox2.retrieve(digest.clone()).await;
+            let dummy1 = mailbox1.retrieve(digest).await;
+            let dummy2 = mailbox2.retrieve(digest).await;
             drop(dummy1);
             drop(dummy2);
 
