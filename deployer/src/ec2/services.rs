@@ -138,8 +138,8 @@ storage_config:
   filesystem:
     directory: /loki/chunks
 table_manager:
-  retention_deletes_enabled: false
-  retention_period: 0s
+  retention_deletes_enabled: true
+  retention_period: 4h
 compactor:
   working_directory: /loki/compactor
 ingester:
