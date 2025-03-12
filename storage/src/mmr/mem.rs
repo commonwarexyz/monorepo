@@ -304,6 +304,37 @@ impl<H: CHasher> Mmr<H> {
         self.oldest_retained_pos = pos;
     }
 
+    // A lightweight cloning operation that "clones" only the fully pruned state of this MMR. The output is exactly the
+    // same as the result of mmr.prune_all(), only you get a copy without mutating the original.
+    //
+    // Overhead is Log_2(n) in the number of elements even if the original MMR is fully unpruned.
+    pub fn clone_pruned(&self) -> Self {
+        if self.nodes.is_empty() {
+            return Self::new();
+        }
+
+        let index = self.nodes.len() - 1;
+        let pos = self.index_to_pos(index);
+
+        // Create the "old_peaks" of the MMR in the fully pruned state.
+        let mut cloned_old_peaks = self.old_peaks.clone();
+        for peak in self.peak_iterator() {
+            if peak.0 < pos && peak.0 >= self.oldest_retained_pos {
+                assert!(cloned_old_peaks
+                    .insert(peak.0, self.nodes[self.pos_to_index(peak.0)])
+                    .is_none());
+            }
+        }
+        let mut peak_digests: Vec<_> = cloned_old_peaks.into_iter().collect();
+        // Peak Digests must be in highest (oldest position) to lowest order.
+        peak_digests.sort_by_key(|(pos, _)| *pos);
+        let peak_digests = peak_digests.into_iter().map(|(_, digest)| digest).collect();
+
+        let cloned_nodes = vec![self.nodes[index]];
+
+        Self::init(cloned_nodes, pos, peak_digests)
+    }
+
     /// Return the oldest node position provable by this MMR.
     pub fn oldest_provable_pos(&self) -> Option<u64> {
         if self.size() == 0 {
@@ -347,6 +378,9 @@ mod tests {
                 mmr.root(&mut hasher),
                 Hasher::new(&mut hasher).root_hash(0, [].iter())
             );
+
+            let clone = mmr.clone_pruned();
+            assert_eq!(clone.size(), 0);
         });
     }
 
@@ -474,6 +508,17 @@ mod tests {
             );
             assert_eq!(mmr_copy.size(), 19);
             assert_eq!(mmr_copy.oldest_retained_pos(), mmr.oldest_retained_pos());
+            assert_eq!(mmr_copy.root(&mut hasher), root_hash);
+
+            // Test that clone_pruned produces a valid copy of the MMR as if it had been cloned
+            // after being fully pruned.
+            mmr.prune_to_pos(17); // prune up to the second peak
+            let clone = mmr.clone_pruned();
+            assert!(mmr.oldest_retained_pos() < clone.oldest_retained_pos());
+            mmr.prune_all();
+            assert_eq!(mmr.oldest_retained_pos(), clone.oldest_retained_pos());
+            assert_eq!(mmr.size(), clone.size());
+            assert_eq!(mmr.root(&mut hasher), clone.root(&mut hasher));
         });
     }
 
