@@ -886,7 +886,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-codec"
-version = "0.0.2"
+version = "0.0.40"
 dependencies = [
  "bytes",
  "paste",

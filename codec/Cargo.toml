@@ -2,9 +2,9 @@
 name = "commonware-codec"
 edition = "2021"
 publish = true
-version = "0.0.2"
+version = "0.0.40"
 license = "MIT OR Apache-2.0"
-description = "Modern, safe byte encoding for messages."
+description = "Serialize structured data."
 readme = "README.md"
 homepage = "https://commonware.xyz"
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/codec"

@@ -45,7 +45,7 @@ impl ReadBuffer {
 
     /// Ensures the buffer has at least `size` bytes remaining
     #[inline]
-    pub fn ensure_size(&self, size: usize) -> Result<(), Error> {
+    pub fn at_least(&self, size: usize) -> Result<(), Error> {
         if self.remaining() < size {
             return Err(Error::EndOfBuffer);
         }
@@ -58,83 +58,83 @@ impl ReadBuffer {
         self.inner.advance(cnt);
     }
 
-    /// Returns a slice of the remaining bytes in the buffer
-    #[inline]
-    pub fn as_slice(&self) -> &[u8] {
-        self.inner.chunk()
-    }
-
-    /// Returns a slice of the specified size from the buffer without advancing
-    #[inline]
-    pub fn chunk(&self) -> &[u8] {
-        self.inner.chunk()
-    }
-
     // Implement methods from Buf trait with safety checks
     #[inline]
     pub fn get_u16(&mut self) -> Result<u16, Error> {
-        self.ensure_size(2)?;
+        self.at_least(2)?;
         Ok(self.inner.get_u16())
     }
 
     #[inline]
     pub fn get_u32(&mut self) -> Result<u32, Error> {
-        self.ensure_size(4)?;
+        self.at_least(4)?;
         Ok(self.inner.get_u32())
     }
 
     #[inline]
     pub fn get_u64(&mut self) -> Result<u64, Error> {
-        self.ensure_size(8)?;
+        self.at_least(8)?;
         Ok(self.inner.get_u64())
     }
 
     #[inline]
+    pub fn get_u128(&mut self) -> Result<u128, Error> {
+        self.at_least(16)?;
+        Ok(self.inner.get_u128())
+    }
+
+    #[inline]
     pub fn get_i8(&mut self) -> Result<i8, Error> {
-        self.ensure_size(1)?;
+        self.at_least(1)?;
         Ok(self.inner.get_i8())
     }
 
     #[inline]
     pub fn get_i16(&mut self) -> Result<i16, Error> {
-        self.ensure_size(2)?;
+        self.at_least(2)?;
         Ok(self.inner.get_i16())
     }
 
     #[inline]
     pub fn get_i32(&mut self) -> Result<i32, Error> {
-        self.ensure_size(4)?;
+        self.at_least(4)?;
         Ok(self.inner.get_i32())
     }
 
     #[inline]
     pub fn get_i64(&mut self) -> Result<i64, Error> {
-        self.ensure_size(8)?;
+        self.at_least(8)?;
         Ok(self.inner.get_i64())
     }
 
     #[inline]
+    pub fn get_i128(&mut self) -> Result<i128, Error> {
+        self.at_least(16)?;
+        Ok(self.inner.get_i128())
+    }
+
+    #[inline]
     pub fn get_f32(&mut self) -> Result<f32, Error> {
-        self.ensure_size(4)?;
+        self.at_least(4)?;
         Ok(self.inner.get_f32())
     }
 
     #[inline]
     pub fn get_f64(&mut self) -> Result<f64, Error> {
-        self.ensure_size(8)?;
+        self.at_least(8)?;
         Ok(self.inner.get_f64())
     }
 
     #[inline]
     pub fn copy_to_slice(&mut self, dst: &mut [u8]) -> Result<(), Error> {
-        self.ensure_size(dst.len())?;
+        self.at_least(dst.len())?;
         self.inner.copy_to_slice(dst);
         Ok(())
     }
 
     #[inline]
     pub fn split_to(&mut self, size: usize) -> Result<Bytes, Error> {
-        self.ensure_size(size)?;
+        self.at_least(size)?;
         Ok(self.inner.split_to(size))
     }
 
@@ -221,6 +221,11 @@ impl WriteBuffer {
     }
 
     #[inline]
+    pub fn put_u128(&mut self, v: u128) {
+        self.inner.put_u128(v);
+    }
+
+    #[inline]
     pub fn put_i8(&mut self, v: i8) {
         self.inner.put_i8(v);
     }
@@ -238,6 +243,11 @@ impl WriteBuffer {
     #[inline]
     pub fn put_i64(&mut self, v: i64) {
         self.inner.put_i64(v);
+    }
+
+    #[inline]
+    pub fn put_i128(&mut self, v: i128) {
+        self.inner.put_i128(v);
     }
 
     #[inline]

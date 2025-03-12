@@ -1,4 +1,4 @@
-//! Modern, safe byte encoding for messages.
+//! Serialize structured data.
 //!
 //! This crate provides a binary serialization framework with strong safety guarantees,
 //! better performance, and a more ergonomic API.

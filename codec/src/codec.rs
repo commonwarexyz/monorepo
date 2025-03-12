@@ -72,6 +72,9 @@ pub trait Reader {
     /// Reads a u64 value
     fn read_u64(&mut self) -> Result<u64, Error>;
 
+    /// Reads a u128 value
+    fn read_u128(&mut self) -> Result<u128, Error>;
+
     /// Reads a i8 value
     fn read_i8(&mut self) -> Result<i8, Error>;
 
@@ -83,6 +86,9 @@ pub trait Reader {
 
     /// Reads a i64 value
     fn read_i64(&mut self) -> Result<i64, Error>;
+
+    /// Reads a i128 value
+    fn read_i128(&mut self) -> Result<i128, Error>;
 
     /// Reads a f32 value
     fn read_f32(&mut self) -> Result<f32, Error>;
@@ -139,6 +145,9 @@ pub trait Writer {
     /// Writes a u64 value
     fn write_u64(&mut self, value: u64);
 
+    /// Writes a u128 value
+    fn write_u128(&mut self, value: u128);
+
     /// Writes a i8 value
     fn write_i8(&mut self, value: i8);
 
@@ -150,6 +159,9 @@ pub trait Writer {
 
     /// Writes a i64 value
     fn write_i64(&mut self, value: i64);
+
+    /// Writes a i128 value
+    fn write_i128(&mut self, value: i128);
 
     /// Writes a f32 value
     fn write_f32(&mut self, value: f32);
@@ -198,6 +210,10 @@ impl Reader for ReadBuffer {
         self.get_u64()
     }
 
+    fn read_u128(&mut self) -> Result<u128, Error> {
+        self.get_u128()
+    }
+
     fn read_i8(&mut self) -> Result<i8, Error> {
         self.get_i8()
     }
@@ -212,6 +228,10 @@ impl Reader for ReadBuffer {
 
     fn read_i64(&mut self) -> Result<i64, Error> {
         self.get_i64()
+    }
+
+    fn read_i128(&mut self) -> Result<i128, Error> {
+        self.get_i128()
     }
 
     fn read_f32(&mut self) -> Result<f32, Error> {
@@ -321,6 +341,10 @@ impl Writer for WriteBuffer {
         self.put_u64(value)
     }
 
+    fn write_u128(&mut self, value: u128) {
+        self.put_u128(value)
+    }
+
     fn write_i8(&mut self, value: i8) {
         self.put_i8(value)
     }
@@ -335,6 +359,10 @@ impl Writer for WriteBuffer {
 
     fn write_i64(&mut self, value: i64) {
         self.put_i64(value)
+    }
+
+    fn write_i128(&mut self, value: i128) {
+        self.put_i128(value)
     }
 
     fn write_f32(&mut self, value: f32) {
