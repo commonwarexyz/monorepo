@@ -51,6 +51,7 @@ ExecStart=/opt/prometheus/prometheus --config.file=/opt/prometheus/prometheus.ym
 TimeoutStopSec=60
 Restart=always
 User=ubuntu
+LimitNOFILE=infinity
 
 [Install]
 WantedBy=multi-user.target
@@ -67,6 +68,7 @@ ExecStart=/opt/promtail/promtail -config.file=/etc/promtail/promtail.yml
 TimeoutStopSec=60
 Restart=always
 User=ubuntu
+LimitNOFILE=infinity
 
 [Install]
 WantedBy=multi-user.target
@@ -83,6 +85,7 @@ ExecStart=/opt/loki/loki -config.file=/etc/loki/loki.yml
 TimeoutStopSec=60
 Restart=always
 User=ubuntu
+LimitNOFILE=infinity
 
 [Install]
 WantedBy=multi-user.target
@@ -99,6 +102,7 @@ ExecStart=/home/ubuntu/binary --peers=/home/ubuntu/peers.yaml --config=/home/ubu
 TimeoutStopSec=60
 Restart=always
 User=ubuntu
+LimitNOFILE=infinity
 StandardOutput=append:/var/log/binary.log
 StandardError=append:/var/log/binary.log
 
