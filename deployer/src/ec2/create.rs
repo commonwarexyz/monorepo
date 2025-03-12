@@ -419,6 +419,10 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     let bbr_conf_path = temp_dir.join("99-bbr.conf");
     std::fs::write(&bbr_conf_path, BBR_CONF)?;
 
+    // Write logrotate configuration file
+    let logrotate_conf_path = temp_dir.join("logrotate.conf");
+    std::fs::write(&logrotate_conf_path, LOGROTATE_CONF)?;
+
     // Configure monitoring instance
     info!("configuring monitoring instance");
     wait_for_instances_ready(&ec2_clients[&monitoring_region], &[monitoring_instance_id]).await?;
@@ -512,6 +516,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         let ip = deployment.ip.clone();
         let monitoring_private_ip = monitoring_private_ip.clone();
         let peers_path = peers_path.clone();
+        let logrotate_conf_path = logrotate_conf_path.clone();
         let bbr_conf_path = bbr_conf_path.clone();
         let promtail_service_path = promtail_service_path.clone();
         let binary_service_path = binary_service_path.clone();
@@ -560,6 +565,13 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                 binary_service_path.to_str().unwrap(),
                 &ip,
                 "/home/ubuntu/binary.service",
+            )
+            .await?;
+            scp_file(
+                private_key,
+                logrotate_conf_path.to_str().unwrap(),
+                &ip,
+                "/home/ubuntu/logrotate.conf",
             )
             .await?;
             enable_bbr(private_key, &ip, bbr_conf_path.to_str().unwrap()).await?;
