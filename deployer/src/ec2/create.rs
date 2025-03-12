@@ -415,13 +415,13 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     let binary_service_path = temp_dir.join("binary.service");
     std::fs::write(&binary_service_path, BINARY_SERVICE)?;
 
-    // Add BBR configuration file
-    let bbr_conf_path = temp_dir.join("99-bbr.conf");
-    std::fs::write(&bbr_conf_path, BBR_CONF)?;
-
     // Write logrotate configuration file
     let logrotate_conf_path = temp_dir.join("logrotate.conf");
     std::fs::write(&logrotate_conf_path, LOGROTATE_CONF)?;
+
+    // Add BBR configuration file
+    let bbr_conf_path = temp_dir.join("99-bbr.conf");
+    std::fs::write(&bbr_conf_path, BBR_CONF)?;
 
     // Configure monitoring instance
     info!("configuring monitoring instance");
