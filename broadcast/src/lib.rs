@@ -1,6 +1,7 @@
 //! Disseminate data over a wide-area network.
 
 use bytes::Bytes;
+use commonware_cryptography::Digest;
 use commonware_utils::Array;
 use futures::channel::oneshot;
 use std::future::Future;
@@ -13,7 +14,7 @@ pub type Proof = Bytes;
 /// Broadcaster is the interface responsible for replication of messages across a network.
 pub trait Broadcaster: Clone + Send + 'static {
     /// Digest is an arbitrary hash digest.
-    type Digest: Array;
+    type Digest: Digest;
 
     /// Attempt to broadcast a digest to the network.
     ///
@@ -50,7 +51,7 @@ pub trait Application: Clone + Send + 'static {
 /// Collector is the interface responsible for handling notifications of broadcasted payloads.
 pub trait Collector: Clone + Send + 'static {
     /// Digest is an arbitrary hash digest.
-    type Digest: Array;
+    type Digest: Digest;
 
     /// Emit that a payload has been successfully broadcasted.
     /// This is used to acknowledge that the payload has been "received" by the network,

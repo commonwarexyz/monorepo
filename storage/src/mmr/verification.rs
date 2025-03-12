@@ -7,7 +7,7 @@ use crate::mmr::{
     Error,
 };
 use bytes::{Buf, BufMut};
-use commonware_cryptography::Hasher as CHasher;
+use commonware_cryptography::{Digest, Hasher as CHasher};
 use commonware_utils::{Array, SizedSerialize};
 use futures::future::try_join_all;
 use std::future::Future;
@@ -32,15 +32,12 @@ pub struct Proof<H: CHasher> {
 }
 
 /// A trait that allows generic generation of an MMR inclusion proof.
-pub trait Storage<H: CHasher> {
+pub trait Storage<D: Digest> {
     /// Return the number of elements in the MMR.
     fn size(&self) -> impl Future<Output = Result<u64, Error>>;
 
     /// Return the specified node of the MMR if it exists & hasn't been pruned.
-    fn get_node(
-        &self,
-        position: u64,
-    ) -> impl Future<Output = Result<Option<H::Digest>, Error>> + Send;
+    fn get_node(&self, position: u64) -> impl Future<Output = Result<Option<D>, Error>> + Send;
 }
 
 impl<H: CHasher> PartialEq for Proof<H> {
@@ -248,7 +245,7 @@ impl<H: CHasher> Proof<H> {
     /// Return an inclusion proof for the specified range of elements, inclusive of both endpoints.
     ///
     /// Returns ElementPruned error if some element needed to generate the proof has been pruned.
-    pub async fn range_proof<S: Storage<H>>(
+    pub async fn range_proof<S: Storage<H::Digest>>(
         mmr: &S,
         start_element_pos: u64,
         end_element_pos: u64,

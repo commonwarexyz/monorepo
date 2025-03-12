@@ -2,6 +2,7 @@ use commonware_consensus::{
     threshold_simplex::{Context, View},
     Automaton as Au, Committer as Co, Proof, Relay as Re,
 };
+use commonware_cryptography::Digest;
 use commonware_utils::Array;
 use futures::{
     channel::{mpsc, oneshot},
@@ -32,17 +33,17 @@ pub enum Message<D: Array> {
 
 /// Mailbox for the application.
 #[derive(Clone)]
-pub struct Mailbox<D: Array> {
+pub struct Mailbox<D: Digest> {
     sender: mpsc::Sender<Message<D>>,
 }
 
-impl<D: Array> Mailbox<D> {
+impl<D: Digest> Mailbox<D> {
     pub(super) fn new(sender: mpsc::Sender<Message<D>>) -> Self {
         Self { sender }
     }
 }
 
-impl<D: Array> Au for Mailbox<D> {
+impl<D: Digest> Au for Mailbox<D> {
     type Digest = D;
     type Context = Context<Self::Digest>;
 
@@ -85,7 +86,7 @@ impl<D: Array> Au for Mailbox<D> {
     }
 }
 
-impl<D: Array> Re for Mailbox<D> {
+impl<D: Digest> Re for Mailbox<D> {
     type Digest = D;
 
     async fn broadcast(&mut self, _: Self::Digest) {
@@ -96,7 +97,7 @@ impl<D: Array> Re for Mailbox<D> {
     }
 }
 
-impl<D: Array> Co for Mailbox<D> {
+impl<D: Digest> Co for Mailbox<D> {
     type Digest = D;
 
     async fn prepared(&mut self, proof: Proof, payload: Self::Digest) {

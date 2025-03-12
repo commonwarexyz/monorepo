@@ -51,7 +51,7 @@ pub struct Mmr<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> {
     metadata: Metadata<B, E, U64>,
 }
 
-impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Storage<H> for Mmr<B, E, H> {
+impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Storage<H::Digest> for Mmr<B, E, H> {
     async fn size(&self) -> Result<u64, Error> {
         Ok(self.mem_mmr.size())
     }

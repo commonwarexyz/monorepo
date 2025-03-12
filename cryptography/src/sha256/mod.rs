@@ -166,6 +166,8 @@ impl Display for Digest {
     }
 }
 
+impl crate::Digest for Digest {}
+
 #[cfg(test)]
 mod tests {
     use super::*;

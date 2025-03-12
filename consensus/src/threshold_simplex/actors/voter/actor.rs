@@ -22,13 +22,13 @@ use commonware_cryptography::{
     },
     hash,
     sha256::Digest as Sha256Digest,
-    Scheme,
+    Digest, Scheme,
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Blob, Clock, Handle, Metrics, Spawner, Storage};
 use commonware_storage::journal::variable::Journal;
-use commonware_utils::{quorum, Array};
+use commonware_utils::quorum;
 use futures::{
     channel::{mpsc, oneshot},
     future::Either,
@@ -50,7 +50,7 @@ const GENESIS_VIEW: View = 0;
 
 struct Round<
     C: Scheme,
-    D: Array,
+    D: Digest,
     S: ThresholdSupervisor<
         Seed = group::Signature,
         Index = View,
@@ -96,7 +96,7 @@ struct Round<
 
 impl<
         C: Scheme,
-        D: Array,
+        D: Digest,
         S: ThresholdSupervisor<
             Seed = group::Signature,
             Index = View,
@@ -373,7 +373,7 @@ impl<
         let proposal = notarization.message.proposal.as_ref().unwrap().clone();
         self.add_verified_proposal(Parsed {
             message: proposal,
-            digest: notarization.digest.clone(),
+            digest: notarization.digest,
         });
 
         // Store the notarization
@@ -410,7 +410,7 @@ impl<
         let proposal = finalization.message.proposal.as_ref().unwrap().clone();
         self.add_verified_proposal(Parsed {
             message: proposal,
-            digest: finalization.digest.clone(),
+            digest: finalization.digest,
         });
 
         // Store the finalization
@@ -479,7 +479,7 @@ impl<
             self.broadcast_notarization = true;
             return Some(Parsed {
                 message: notarization,
-                digest: notarize.digest.clone(),
+                digest: notarize.digest,
             });
         }
         None
@@ -608,7 +608,7 @@ impl<
             self.broadcast_finalization = true;
             return Some(Parsed {
                 message: finalization,
-                digest: finalize.digest.clone(),
+                digest: finalize.digest,
             });
         }
         None
@@ -642,7 +642,7 @@ pub struct Actor<
     B: Blob,
     E: Clock + Rng + Spawner + Storage<B> + Metrics,
     C: Scheme,
-    D: Array,
+    D: Digest,
     A: Automaton<Digest = D, Context = Context<D>>,
     R: Relay,
     F: Committer<Digest = D>,
@@ -694,7 +694,7 @@ impl<
         B: Blob,
         E: Clock + Rng + Spawner + Storage<B> + Metrics,
         C: Scheme,
-        D: Array,
+        D: Digest,
         A: Automaton<Digest = D, Context = Context<D>>,
         R: Relay<Digest = D>,
         F: Committer<Digest = D>,
@@ -839,13 +839,13 @@ impl<
         let mut cursor = self.view - 1; // self.view always at least 1
         loop {
             if cursor == 0 {
-                return Ok((GENESIS_VIEW, self.genesis.as_ref().unwrap().clone()));
+                return Ok((GENESIS_VIEW, *self.genesis.as_ref().unwrap()));
             }
 
             // If have notarization, return
             let parent = self.is_notarized(cursor);
             if let Some(parent) = parent {
-                return Ok((cursor, parent.clone()));
+                return Ok((cursor, *parent));
             }
 
             // If have finalization, return
@@ -853,7 +853,7 @@ impl<
             // We never want to build on some view less than finalized and this prevents that
             let parent = self.is_finalized(cursor);
             if let Some(parent) = parent {
-                return Ok((cursor, parent.clone()));
+                return Ok((cursor, *parent));
             }
 
             // If have nullification, continue
@@ -1211,7 +1211,7 @@ impl<
                 proposal_digest,
                 Parsed {
                     message: proposal.clone(),
-                    digest: notarize.digest.clone(),
+                    digest: notarize.digest,
                 },
             )
         };
@@ -1227,7 +1227,7 @@ impl<
             if cursor == proposal.message.parent {
                 // Check if first block
                 if proposal.message.parent == GENESIS_VIEW {
-                    break self.genesis.as_ref().unwrap().clone();
+                    break self.genesis.as_ref().unwrap();
                 }
 
                 // Check notarization exists
@@ -1240,7 +1240,7 @@ impl<
                 };
 
                 // Peer proposal references a valid parent
-                break parent_proposal.clone();
+                break parent_proposal;
             }
 
             // Check nullification exists in gap
@@ -1263,9 +1263,9 @@ impl<
         );
         let context = Context {
             view: proposal.message.view,
-            parent: (proposal.message.parent, parent_payload),
+            parent: (proposal.message.parent, *parent_payload),
         };
-        let payload = proposal.digest.clone();
+        let payload = proposal.digest;
         let round_proposal = Some((*proposal_digest, proposal));
         let round = self.views.get_mut(&context.view).unwrap();
         round.proposal = round_proposal;
@@ -1848,7 +1848,7 @@ impl<
                 proposal_signature,
                 seed_signature,
             },
-            digest: proposal.digest.clone(),
+            digest: proposal.digest,
         })
     }
 
@@ -1927,7 +1927,7 @@ impl<
                 proposal: Some(proposal.message.clone()),
                 proposal_signature,
             },
-            digest: proposal.digest.clone(),
+            digest: proposal.digest,
         })
     }
 
@@ -2243,7 +2243,7 @@ impl<
                             public_key_index,
                             Parsed {
                                 message: notarize,
-                                digest: payload.clone(),
+                                digest: payload,
                             },
                         )
                         .await;
@@ -2467,7 +2467,7 @@ impl<
                         proposal_digest,
                         Parsed{
                             message: proposal.clone(),
-                            digest: proposed.clone(),
+                            digest: proposed,
                         },
                     ).await {
                         warn!(view = context.view, "failed to record our container");
