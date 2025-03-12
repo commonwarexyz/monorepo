@@ -1,0 +1,16 @@
+[package]
+name = "commonware-codec"
+edition = "2021"
+publish = true
+version = "0.0.2"
+license = "MIT OR Apache-2.0"
+description = "Modern, safe byte encoding for messages."
+readme = "README.md"
+homepage = "https://commonware.xyz"
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/codec"
+documentation = "https://docs.rs/commonware-codec"
+
+[dependencies]
+thiserror = { workspace = true }
+bytes = { workspace = true }
+paste = { workspace = true }

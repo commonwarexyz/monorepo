@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "broadcast",
+    "codec",
     "consensus",
     "cryptography",
     "deployer",
@@ -20,6 +21,7 @@ resolver = "2"
 
 [workspace.dependencies]
 commonware-broadcast = { version = "0.0.40", path = "broadcast" }
+commonware-codec = { version = "0.0.2", path = "codec" }
 commonware-consensus = { version = "0.0.40", path = "consensus" }
 commonware-cryptography = { version = "0.0.40", path = "cryptography" }
 commonware-deployer = { version = "0.0.40", path = "deployer" }
@@ -40,6 +42,7 @@ futures-util = "0.3.31"
 tokio = "1.43.0"
 tracing = "0.1.41"
 tracing-subscriber = "0.3.19"
+paste = "1.0.15"
 prost = "0.13.5"
 prost-build = "0.13.5"
 governor = "0.6.3"
