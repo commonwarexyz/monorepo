@@ -1,15 +1,15 @@
 //! Parsed wrappers around wire types.
 
 use crate::linked::{wire, Epoch};
+use commonware_codec::{Codec, Error as CodecError, Reader, SizedCodec, Writer};
 use commonware_cryptography::{
     bls12381::primitives::{
-        group::{Element, Signature as ThresholdSignature},
-        poly::PartialSignature,
+        group::Signature as ThresholdSignature,
+        poly::{PartialSignature, PARTIAL_SIGNATURE_LENGTH},
     },
     Scheme,
 };
 use commonware_utils::Array;
-use prost::Message;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -61,6 +61,33 @@ impl<D: Array, P: Array> Chunk<D, P> {
     }
 }
 
+impl<D: Array, P: Array> Codec for Chunk<D, P> {
+    fn len_encoded(&self) -> usize {
+        Self::LEN_CODEC
+    }
+
+    fn write(&self, writer: &mut impl Writer) {
+        writer.write_fixed(&self.sequencer);
+        writer.write(&self.height);
+        writer.write_fixed(&self.payload);
+    }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
+        let sequencer = reader.read()?;
+        let height = reader.read()?;
+        let payload = reader.read()?;
+        Ok(Self {
+            sequencer,
+            height,
+            payload,
+        })
+    }
+}
+
+impl<D: Array, P: Array> SizedCodec for Chunk<D, P> {
+    const LEN_CODEC: usize = P::SERIALIZED_LEN + 8 + D::SERIALIZED_LEN;
+}
+
 /// Parsed version of a `Parent`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Parent<D: Array> {
@@ -69,25 +96,31 @@ pub struct Parent<D: Array> {
     pub threshold: ThresholdSignature,
 }
 
-impl<D: Array> Parent<D> {
-    /// Returns a `Parent` from a `wire::Parent`.
-    pub fn from_wire(parent: wire::Parent) -> Result<Self, Error> {
-        Ok(Self {
-            payload: D::try_from(parent.payload).map_err(|_| Error::InvalidPayload)?,
-            epoch: parent.epoch,
-            threshold: ThresholdSignature::deserialize(&parent.threshold)
-                .ok_or(Error::InvalidThreshold)?,
-        })
+impl<D: Array> Codec for Parent<D> {
+    fn len_encoded(&self) -> usize {
+        Self::LEN_CODEC
     }
 
-    /// Returns a `wire::Parent` from a `Parent`.
-    pub fn to_wire(&self) -> wire::Parent {
-        wire::Parent {
-            payload: self.payload.to_vec(),
-            epoch: self.epoch,
-            threshold: self.threshold.serialize(),
-        }
+    fn write(&self, writer: &mut impl Writer) {
+        writer.write_fixed(&self.payload);
+        writer.write(&self.epoch);
+        writer.write(&self.threshold);
     }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
+        let payload = reader.read()?;
+        let epoch = reader.read()?;
+        let threshold = reader.read()?;
+        Ok(Self {
+            payload,
+            epoch,
+            threshold,
+        })
+    }
+}
+
+impl<D: Array> SizedCodec for Parent<D> {
+    const LEN_CODEC: usize = D::SERIALIZED_LEN + Epoch::LEN_CODEC + ThresholdSignature::LEN_CODEC;
 }
 
 /// Parsed version of a `Node`.
@@ -130,6 +163,31 @@ impl<C: Scheme, D: Array> Node<C, D> {
     }
 }
 
+impl<C: Scheme, D: Array> Codec for Node<C, D> {
+    fn len_encoded(&self) -> usize {
+        Chunk::<D, C::PublicKey>::LEN_CODEC
+            + self.signature.len_encoded()
+            + self.parent.len_encoded()
+    }
+
+    fn write(&self, writer: &mut impl Writer) {
+        writer.write(&self.chunk);
+        writer.write(&self.signature);
+        writer.write(&self.parent);
+    }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
+        let chunk = reader.read()?;
+        let signature = reader.read()?;
+        let parent = reader.read()?;
+        Ok(Self {
+            chunk,
+            signature,
+            parent,
+        })
+    }
+}
+
 impl<C: Scheme, D: Array> std::fmt::Debug for Node<C, D> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Node")
@@ -156,27 +214,29 @@ pub struct Ack<D: Array, P: Array> {
     pub partial: PartialSignature,
 }
 
-impl<D: Array, P: Array> Ack<D, P> {
-    /// Decode an `Ack` from bytes.
-    pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
-        let ack = wire::Ack::decode(bytes).map_err(Error::Decode)?;
-        let chunk = ack.chunk.ok_or(Error::MissingChunk)?;
+impl<D: Array, P: Array> Codec for Ack<D, P> {
+    fn len_encoded(&self) -> usize {
+        Self::LEN_CODEC
+    }
 
+    fn encode(&self, writer: &mut impl Writer) {
+        writer.write(&self.chunk);
+        writer.write(&self.epoch);
+        writer.write_fixed(&self.partial.serialize());
+    }
+
+    fn decode(reader: &mut impl Reader) -> Result<Self, CodecError> {
+        let chunk = reader.read()?;
+        let epoch = reader.read()?;
+        let partial: [u8; PARTIAL_SIGNATURE_LENGTH] = reader.read_fixed()?;
         Ok(Self {
-            chunk: Chunk::from_wire(chunk)?,
-            epoch: ack.epoch,
-            partial: PartialSignature::deserialize(ack.partial.as_ref())
-                .ok_or(Error::InvalidPartial)?,
+            chunk,
+            epoch,
+            partial: PartialSignature::deserialize(&partial).unwrap(),
         })
     }
+}
 
-    /// Encode an `Ack` to bytes.
-    pub fn encode(&self) -> Vec<u8> {
-        wire::Ack {
-            chunk: Some(Chunk::to_wire(&self.chunk)),
-            epoch: self.epoch,
-            partial: self.partial.serialize(),
-        }
-        .encode_to_vec()
-    }
+impl<D: Array, P: Array> SizedCodec for Ack<D, P> {
+    const LEN_CODEC: usize = Chunk::<D, P>::LEN_CODEC + 8 + PARTIAL_SIGNATURE_LENGTH;
 }

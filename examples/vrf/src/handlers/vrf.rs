@@ -1,8 +1,9 @@
 use crate::handlers::wire;
+use commonware_codec::Codec;
 use commonware_cryptography::bls12381::{
     dkg::player::Output,
     primitives::{
-        group::{self, Element},
+        group::{self},
         ops,
         poly::PartialSignature,
     },
@@ -121,10 +122,10 @@ impl<E: Clock + Spawner, P: Array> Vrf<E, P> {
                                 );
                                 continue;
                             }
-                            let signature = match PartialSignature::deserialize(&msg.signature) {
-                                Some(signature) => signature,
-                                None => {
-                                    warn!(round, dealer, "received invalid signature");
+                            let signature = match PartialSignature::decode(msg.signature) {
+                                Ok(signature) => signature,
+                                Err(err) => {
+                                    warn!(round, dealer, ?err, "received invalid signature");
                                     continue;
                                 }
                             };
@@ -183,7 +184,7 @@ impl<E: Clock + Spawner, P: Array> Vrf<E, P> {
                 .await
             {
                 Some(signature) => {
-                    let signature = signature.serialize();
+                    let signature = signature.encode();
                     info!(round, signature = hex(&signature), "generated signature");
                 }
                 None => {

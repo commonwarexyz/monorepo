@@ -2,11 +2,12 @@ use crate::handlers::{
     utils::{payload, public_hex, ACK_NAMESPACE},
     wire,
 };
+use commonware_codec::Codec;
 use commonware_cryptography::{
     bls12381::{
         dkg,
         primitives::{
-            group::{self, Element},
+            group::{self},
             poly,
         },
     },
@@ -69,8 +70,8 @@ impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
         // Send round start message to contributors
         let mut group = None;
         if let Some(previous) = &previous {
-            group = Some(previous.serialize());
-            let public = poly::public(previous).serialize();
+            group = Some(previous.encode());
+            let public = poly::public(previous).encode();
             info!(round, public = hex(&public), "starting reshare");
         } else {
             info!(round, "starting key generation");
@@ -125,9 +126,9 @@ impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
                             };
 
                             // Parse commitment
-                            let commitment = match poly::Public::deserialize(&msg.commitment, self.t) {
-                                Some(commitment) => commitment,
-                                None => {
+                            let commitment = match poly::Public::decode(msg.commitment) {
+                                Ok(commitment) => commitment,
+                                Err(_) => {
                                     arbiter.disqualify(sender);
                                     continue;
                                 }
@@ -160,9 +161,9 @@ impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
                             // Parse reveals
                             let mut reveals = Vec::new();
                             for reveal in &msg.reveals {
-                                let share = match group::Share::deserialize(reveal) {
-                                    Some(share) => share,
-                                    None => {
+                                let share = match group::Share::decode(reveal) {
+                                    Ok(share) => share,
+                                    Err(_) => {
                                         disqualify = true;
                                         break;
                                     }
@@ -234,7 +235,7 @@ impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
         // Broadcast commitments
         let mut commitments = HashMap::new();
         for (dealer_idx, commitment) in output.commitments {
-            commitments.insert(dealer_idx, commitment.serialize());
+            commitments.insert(dealer_idx, commitment.encode());
         }
         let mut reveals = HashMap::new();
         for (dealer_idx, shares) in output.reveals {
@@ -242,7 +243,7 @@ impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
                 reveals
                     .entry(share.index)
                     .or_insert_with(HashMap::new)
-                    .insert(dealer_idx, share.serialize());
+                    .insert(dealer_idx, share.encode());
             }
         }
         for (player_idx, player) in self.contributors.iter().enumerate() {

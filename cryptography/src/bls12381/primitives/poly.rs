@@ -10,7 +10,7 @@ use crate::bls12381::primitives::{
     group::{self, Element, Scalar},
     Error,
 };
-use bytes::BufMut;
+use commonware_codec::{Codec, Error as CodecError, Reader, SizedCodec, Writer};
 use commonware_utils::SizedSerialize;
 use rand::{rngs::OsRng, RngCore};
 use std::collections::BTreeMap;
@@ -38,22 +38,25 @@ pub struct Eval<C: Element> {
     pub value: C,
 }
 
-impl<C: Element> Eval<C> {
-    /// Canonically serializes the evaluation.
-    pub fn serialize(&self) -> Vec<u8> {
-        let value_serialized = self.value.serialize();
-        let mut bytes = Vec::with_capacity(u32::SERIALIZED_LEN + value_serialized.len());
-        bytes.put_u32(self.index);
-        bytes.extend_from_slice(&value_serialized);
-        bytes
+impl<C: Element> Codec for Eval<C> {
+    fn len_encoded(&self) -> usize {
+        Self::LEN_CODEC
     }
 
-    /// Deserializes a canonically encoded evaluation.
-    pub fn deserialize(bytes: &[u8]) -> Option<Self> {
-        let index = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-        let value = C::deserialize(&bytes[u32::SERIALIZED_LEN..])?;
-        Some(Self { index, value })
+    fn write(&self, writer: &mut impl Writer) {
+        writer.write_u32(self.index);
+        writer.write(&self.value);
     }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
+        let index = reader.read_u32()?;
+        let value = reader.read()?;
+        Ok(Self { index, value })
+    }
+}
+
+impl<C: Element> SizedCodec for Eval<C> {
+    const LEN_CODEC: usize = u32::LEN_CODEC + C::LEN_CODEC;
 }
 
 /// A polynomial that is using a scalar for the variable x and a generic
@@ -160,32 +163,6 @@ impl<C: Element> Poly<C> {
         self.0.iter_mut().zip(&other.0).for_each(|(a, b)| a.add(b))
     }
 
-    /// Canonically serializes the polynomial.
-    pub fn serialize(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        for c in &self.0 {
-            bytes.extend_from_slice(&c.serialize());
-        }
-        bytes
-    }
-
-    /// Deserializes a canonically encoded polynomial.
-    pub fn deserialize(bytes: &[u8], expected: u32) -> Option<Self> {
-        let expected = expected as usize;
-        let mut coeffs = Vec::with_capacity(expected);
-        for chunk in bytes.chunks_exact(C::size()) {
-            if coeffs.len() >= expected {
-                return None;
-            }
-            let c = C::deserialize(chunk)?;
-            coeffs.push(c);
-        }
-        if coeffs.len() != expected {
-            return None;
-        }
-        Some(Self(coeffs))
-    }
-
     /// Evaluates the polynomial at the specified value.
     pub fn evaluate(&self, i: u32) -> Eval<C> {
         // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/a714310be76620e10e8797d6637df64011926430/crates/threshold-bls/src/poly.rs#L111-L129
@@ -264,6 +241,21 @@ impl<C: Element> Poly<C> {
             acc.add(&yi);
         }
         Ok(acc)
+    }
+}
+
+impl<C: Element> Codec for Poly<C> {
+    fn len_encoded(&self) -> usize {
+        self.0.len() * C::LEN_CODEC
+    }
+
+    fn write(&self, writer: &mut impl Writer) {
+        writer.write(self);
+    }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
+        let v = reader.read_vec()?;
+        Ok(Self(v))
     }
 }
 

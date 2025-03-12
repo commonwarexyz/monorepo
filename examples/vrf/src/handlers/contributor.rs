@@ -2,6 +2,7 @@ use crate::handlers::{
     utils::{payload, public_hex, ACK_NAMESPACE},
     wire,
 };
+use commonware_codec::Codec;
 use commonware_cryptography::{
     bls12381::{
         dkg::{player::Output, Dealer, Player},
@@ -110,9 +111,9 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
                         }
                     };
                     if let Some(group) = msg.group {
-                        let result = poly::Public::deserialize(&group, self.t);
-                        if result.is_none() {
-                            warn!("received invalid group polynomial");
+                        let result = poly::Public::decode(group);
+                        if let Err(err) = &result {
+                            warn!(?err, "received invalid group polynomial");
                             continue;
                         }
                         break (Some(result.unwrap()), round);
@@ -324,7 +325,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
                                     },
                                     Some(wire::dkg::Payload::Share(msg)) => {
                                         // Deserialize commitment
-                                        let commitment = match poly::Public::deserialize(&msg.commitment, self.t) {
+                                        let commitment = match poly::Public::from_bytes(&msg.commitment, self.t) {
                                             Some(commitment) => commitment,
                                             None => {
                                                 warn!(round, "received invalid commitment");
@@ -333,10 +334,10 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
                                         };
 
                                         // Deserialize share
-                                        let share = match group::Share::deserialize(&msg.share) {
-                                            Some(share) => share,
-                                            None => {
-                                                warn!(round, "received invalid share");
+                                        let share = match group::Share::from_bytes(msg.share) {
+                                            Ok(share) => share,
+                                            Err(err) => {
+                                                warn!(round, ?err, "received invalid share");
                                                 continue;
                                             }
                                         };
@@ -466,7 +467,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
                     );
                     let mut commitments = HashMap::new();
                     for (idx, commitment) in msg.commitments {
-                        let commitment = match poly::Public::deserialize(&commitment, self.t) {
+                        let commitment = match poly::Public::from_bytes(commitment, self.t) {
                             Some(commitment) => commitment,
                             None => {
                                 warn!(round, "received invalid commitment");
@@ -480,7 +481,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
                     }
                     let mut reveals = HashMap::new();
                     for (idx, share) in msg.reveals {
-                        let share = match group::Share::deserialize(&share) {
+                        let share = match group::Share::from_bytes(share) {
                             Some(share) => share,
                             None => {
                                 warn!(round, "received invalid share");

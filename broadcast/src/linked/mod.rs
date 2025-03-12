@@ -48,7 +48,6 @@ mod namespace;
 mod parsed;
 mod prover;
 pub use prover::Prover;
-mod serializer;
 mod tip_manager;
 use tip_manager::TipManager;
 mod wire {

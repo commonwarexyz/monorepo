@@ -4,6 +4,8 @@ use prost::{encode_length_delimiter, length_delimiter_len};
 
 pub mod array;
 pub use array::Array;
+mod digestible;
+pub use digestible::Digestible;
 mod time;
 pub use time::SystemTimeExt;
 mod priority_set;
@@ -97,6 +99,10 @@ pub trait SizedSerialize {
     const SERIALIZED_LEN: usize;
 }
 
+impl SizedSerialize for bool {
+    const SERIALIZED_LEN: usize = 1;
+}
+
 impl SizedSerialize for u8 {
     const SERIALIZED_LEN: usize = 1;
 }
@@ -115,6 +121,38 @@ impl SizedSerialize for u64 {
 
 impl SizedSerialize for u128 {
     const SERIALIZED_LEN: usize = 16;
+}
+
+impl SizedSerialize for i8 {
+    const SERIALIZED_LEN: usize = 1;
+}
+
+impl SizedSerialize for i16 {
+    const SERIALIZED_LEN: usize = 2;
+}
+
+impl SizedSerialize for i32 {
+    const SERIALIZED_LEN: usize = 4;
+}
+
+impl SizedSerialize for i64 {
+    const SERIALIZED_LEN: usize = 8;
+}
+
+impl SizedSerialize for i128 {
+    const SERIALIZED_LEN: usize = 16;
+}
+
+impl SizedSerialize for f32 {
+    const SERIALIZED_LEN: usize = 4;
+}
+
+impl SizedSerialize for f64 {
+    const SERIALIZED_LEN: usize = 8;
+}
+
+impl<T: SizedSerialize, const N: usize> SizedSerialize for [T; N] {
+    const SERIALIZED_LEN: usize = N * T::SERIALIZED_LEN;
 }
 
 #[cfg(test)]

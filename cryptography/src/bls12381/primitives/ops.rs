@@ -12,6 +12,7 @@ use super::{
     poly::{self, Eval, PartialSignature},
     Error,
 };
+use commonware_codec::Codec;
 use commonware_utils::union_unique;
 use rand::RngCore;
 use rayon::{prelude::*, ThreadPoolBuilder};
@@ -55,7 +56,7 @@ pub fn sign_proof_of_possession(private: &group::Private) -> group::Signature {
     public.mul(private);
 
     // Sign the public key
-    sign(private, PROOF_OF_POSSESSION, public.serialize().as_slice())
+    sign(private, PROOF_OF_POSSESSION, public.encode().as_slice())
 }
 
 /// Verifies a proof of possession for the provided public key.
@@ -66,7 +67,7 @@ pub fn verify_proof_of_possession(
     verify(
         public,
         PROOF_OF_POSSESSION,
-        public.serialize().as_slice(),
+        public.encode().as_slice(),
         signature,
     )
 }
@@ -120,7 +121,7 @@ pub fn partial_sign_proof_of_possession(
     let sig = sign(
         &private.private,
         PROOF_OF_POSSESSION,
-        threshold_public.serialize().as_slice(),
+        threshold_public.encode().as_slice(),
     );
     Eval {
         value: sig,
@@ -142,7 +143,7 @@ pub fn partial_verify_proof_of_possession(
     verify(
         &public.value,
         PROOF_OF_POSSESSION,
-        threshold_public.serialize().as_slice(),
+        threshold_public.encode().as_slice(),
         &partial.value,
     )
 }
@@ -302,6 +303,7 @@ mod tests {
     use super::*;
     use crate::bls12381::dkg::ops::generate_shares;
     use blst::BLST_ERROR;
+    use commonware_codec::Codec;
     use group::{G1, G1_MESSAGE, G1_PROOF_OF_POSSESSION};
     use rand::prelude::*;
 
@@ -309,12 +311,12 @@ mod tests {
     fn test_encoding() {
         // Encode private/public key
         let (private, public) = keypair(&mut thread_rng());
-        let (private_bytes, public_bytes) = (private.serialize(), public.serialize());
+        let (private_bytes, public_bytes) = (private.encode(), public.encode());
 
         // Decode private/public key
         let (private_decoded, public_decoded) = (
-            group::Private::deserialize(&private_bytes).unwrap(),
-            group::Public::deserialize(&public_bytes).unwrap(),
+            group::Private::from_bytes(&private_bytes).unwrap(),
+            group::Public::from_bytes(&public_bytes).unwrap(),
         );
 
         // Ensure equal
@@ -326,7 +328,7 @@ mod tests {
         let blst_public_decoded =
             blst::min_pk::PublicKey::from_bytes(public_bytes.as_slice()).unwrap();
         blst_public_decoded.validate().unwrap();
-        let blst_public_encoded = blst_public_decoded.compress().to_vec();
+        let blst_public_encoded = blst_public_decoded.compress().encode();
         assert_eq!(public_bytes, blst_public_encoded.as_slice());
     }
 
@@ -335,10 +337,9 @@ mod tests {
         public: &group::Public,
         signature: &group::Signature,
     ) -> Result<(), BLST_ERROR> {
-        let msg = public.serialize();
-        let public = blst::min_pk::PublicKey::from_bytes(public.serialize().as_slice()).unwrap();
-        let signature =
-            blst::min_pk::Signature::from_bytes(signature.serialize().as_slice()).unwrap();
+        let msg = public.encode();
+        let public = blst::min_pk::PublicKey::from_bytes(public.encode().as_slice()).unwrap();
+        let signature = blst::min_pk::Signature::from_bytes(signature.encode().as_slice()).unwrap();
         match signature.verify(true, &msg, PROOF_OF_POSSESSION, &[], &public, true) {
             BLST_ERROR::BLST_SUCCESS => Ok(()),
             e => Err(e),
@@ -389,7 +390,7 @@ mod tests {
         let private = group::Private::rand(&mut thread_rng());
         let mut public = group::G2::one();
         public.mul(&private);
-        let public_compressed = public.serialize();
+        let public_compressed = public.encode();
 
         // Generate PoP
         let mut pop = G1::zero();
@@ -398,7 +399,7 @@ mod tests {
 
         // Verify PoP using blst
         let public = blst::min_sig::PublicKey::from_bytes(&public_compressed).unwrap();
-        let signature = blst::min_sig::Signature::from_bytes(pop.serialize().as_slice()).unwrap();
+        let signature = blst::min_sig::Signature::from_bytes(pop.encode().as_slice()).unwrap();
         let result = match signature.verify(
             true,
             &public_compressed,
@@ -419,9 +420,8 @@ mod tests {
         msg: &[u8],
         signature: &group::Signature,
     ) -> Result<(), BLST_ERROR> {
-        let public = blst::min_pk::PublicKey::from_bytes(public.serialize().as_slice()).unwrap();
-        let signature =
-            blst::min_pk::Signature::from_bytes(signature.serialize().as_slice()).unwrap();
+        let public = blst::min_pk::PublicKey::from_bytes(public.encode().as_slice()).unwrap();
+        let signature = blst::min_pk::Signature::from_bytes(signature.encode().as_slice()).unwrap();
         match signature.verify(true, msg, MESSAGE, &[], &public, true) {
             BLST_ERROR::BLST_SUCCESS => Ok(()),
             e => Err(e),
@@ -495,9 +495,9 @@ mod tests {
         signature.mul(&private);
 
         // Verify signature using blst
-        let public = blst::min_sig::PublicKey::from_bytes(public.serialize().as_slice()).unwrap();
+        let public = blst::min_sig::PublicKey::from_bytes(public.encode().as_slice()).unwrap();
         let signature =
-            blst::min_sig::Signature::from_bytes(signature.serialize().as_slice()).unwrap();
+            blst::min_sig::Signature::from_bytes(signature.encode().as_slice()).unwrap();
         let result = match signature.verify(true, &payload, G1_MESSAGE, &[], &public, true) {
             BLST_ERROR::BLST_SUCCESS => Ok(()),
             e => Err(e),
@@ -512,11 +512,10 @@ mod tests {
     ) -> Result<(), BLST_ERROR> {
         let public = public
             .iter()
-            .map(|pk| blst::min_pk::PublicKey::from_bytes(pk.serialize().as_slice()).unwrap())
+            .map(|pk| blst::min_pk::PublicKey::from_bytes(pk.encode().as_slice()).unwrap())
             .collect::<Vec<_>>();
         let public = public.iter().collect::<Vec<_>>();
-        let signature =
-            blst::min_pk::Signature::from_bytes(signature.serialize().as_slice()).unwrap();
+        let signature = blst::min_pk::Signature::from_bytes(signature.encode().as_slice()).unwrap();
         match signature.fast_aggregate_verify(true, message, MESSAGE, &public) {
             BLST_ERROR::BLST_SUCCESS => Ok(()),
             e => Err(e),
@@ -610,10 +609,9 @@ mod tests {
         msgs: &[&[u8]],
         signature: &group::Signature,
     ) -> Result<(), BLST_ERROR> {
-        let public = blst::min_pk::PublicKey::from_bytes(public.serialize().as_slice()).unwrap();
+        let public = blst::min_pk::PublicKey::from_bytes(public.encode().as_slice()).unwrap();
         let pks = vec![&public; msgs.len()];
-        let signature =
-            blst::min_pk::Signature::from_bytes(signature.serialize().as_slice()).unwrap();
+        let signature = blst::min_pk::Signature::from_bytes(signature.encode().as_slice()).unwrap();
         match signature.aggregate_verify(true, msgs, MESSAGE, &pks, true) {
             BLST_ERROR::BLST_SUCCESS => Ok(()),
             e => Err(e),

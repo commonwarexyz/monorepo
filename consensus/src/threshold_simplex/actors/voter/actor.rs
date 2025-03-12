@@ -14,6 +14,7 @@ use crate::{
     },
     Automaton, Committer, Parsed, Relay, ThresholdSupervisor, LATENCY,
 };
+use commonware_codec::Codec;
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{self, Element},
@@ -458,17 +459,17 @@ impl<
             let mut notarization = Vec::new();
             let mut seed = Vec::new();
             for notarize in notarizes.values() {
-                let eval = Eval::deserialize(&notarize.message.proposal_signature).unwrap();
+                let eval = Eval::decode(notarize.message.proposal_signature).unwrap();
                 notarization.push(eval);
-                let eval = Eval::deserialize(&notarize.message.seed_signature).unwrap();
+                let eval = Eval::decode(notarize.message.seed_signature).unwrap();
                 seed.push(eval);
             }
             let proposal_signature = ops::threshold_signature_recover(threshold, notarization)
                 .unwrap()
-                .serialize();
+                .encode();
             let seed_signature = ops::threshold_signature_recover(threshold, seed)
                 .unwrap()
-                .serialize();
+                .encode();
 
             // Construct notarization
             let notarization = wire::Notarization {
@@ -507,17 +508,17 @@ impl<
         let mut nullification = Vec::new();
         let mut seed = Vec::new();
         for nullify in self.nullifies.values() {
-            let eval = Eval::deserialize(&nullify.view_signature).unwrap();
+            let eval = Eval::decode(nullify.view_signature).unwrap();
             nullification.push(eval);
-            let eval = Eval::deserialize(&nullify.seed_signature).unwrap();
+            let eval = Eval::decode(nullify.seed_signature).unwrap();
             seed.push(eval);
         }
         let view_signature = ops::threshold_signature_recover(threshold, nullification)
             .unwrap()
-            .serialize();
+            .encode();
         let seed_signature = ops::threshold_signature_recover(threshold, seed)
             .unwrap()
-            .serialize();
+            .encode();
 
         // Construct nullification
         let nullification = wire::Nullification {
@@ -591,12 +592,12 @@ impl<
             // Recover threshold signature
             let mut finalization = Vec::new();
             for finalize in finalizes.values() {
-                let eval = Eval::deserialize(&finalize.message.proposal_signature).unwrap();
+                let eval = Eval::decode(finalize.message.proposal_signature).unwrap();
                 finalization.push(eval);
             }
             let proposal_signature = ops::threshold_signature_recover(threshold, finalization)
                 .unwrap()
-                .serialize();
+                .encode();
 
             // Construct finalization
             let finalization = wire::Finalization {
@@ -1003,10 +1004,10 @@ impl<
         let share = self.supervisor.share(self.view).unwrap();
         let message = nullify_message(self.view);
         let view_signature =
-            ops::partial_sign_message(share, Some(&self.nullify_namespace), &message).serialize();
+            ops::partial_sign_message(share, Some(&self.nullify_namespace), &message).encode();
         let message = seed_message(self.view);
         let seed_signature =
-            ops::partial_sign_message(share, Some(&self.seed_namespace), &message).serialize();
+            ops::partial_sign_message(share, Some(&self.seed_namespace), &message).encode();
         let null = wire::Nullify {
             view: self.view,
             view_signature,
@@ -1052,7 +1053,7 @@ impl<
         };
 
         // Verify signature
-        let Some(signature) = Eval::deserialize(&nullify.view_signature) else {
+        let Ok(signature) = Eval::decode(nullify.view_signature) else {
             debug!(
                 public_key_index,
                 "partial signature is not formatted correctly"
@@ -1080,7 +1081,7 @@ impl<
         }
 
         // Verify seed
-        let Some(seed) = Eval::deserialize(&nullify.seed_signature) else {
+        let Ok(seed) = Eval::decode(nullify.seed_signature) else {
             return;
         };
         if seed.index != public_key_index {
@@ -1444,7 +1445,7 @@ impl<
         };
 
         // Verify signature
-        let Some(signature) = Eval::deserialize(&notarize.proposal_signature) else {
+        let Some(signature) = Eval::decode(notarize.proposal_signature) else {
             return;
         };
         if signature.index != public_key_index {
@@ -1463,7 +1464,7 @@ impl<
         }
 
         // Verify seed
-        let Some(seed) = Eval::deserialize(&notarize.seed_signature) else {
+        let Some(seed) = Eval::decode(notarize.seed_signature) else {
             return;
         };
         if seed.index != public_key_index {
@@ -1577,7 +1578,7 @@ impl<
         }
         .encode_to_vec()
         .into();
-        let seed = group::Signature::deserialize(&notarization.message.seed_signature).unwrap();
+        let seed = group::Signature::decode(notarization.message.seed_signature).unwrap();
         if round.add_verified_notarization(notarization) && self.journal.is_some() {
             self.journal
                 .as_mut()
@@ -1636,7 +1637,7 @@ impl<
         }
         .encode_to_vec()
         .into();
-        let seed = group::Signature::deserialize(&nullification.seed_signature).unwrap();
+        let seed = group::Signature::decode(nullification.seed_signature).unwrap();
         if round.add_verified_nullification(nullification) && self.journal.is_some() {
             self.journal
                 .as_mut()
@@ -1675,7 +1676,7 @@ impl<
         };
 
         // Verify signature
-        let Some(signature) = Eval::deserialize(&finalize.proposal_signature) else {
+        let Some(signature) = Eval::decode(finalize.proposal_signature) else {
             return;
         };
         if signature.index != public_key_index {
@@ -1794,7 +1795,7 @@ impl<
         }
         .encode_to_vec()
         .into();
-        let seed = group::Signature::deserialize(&finalization.message.seed_signature).unwrap();
+        let seed = group::Signature::decode(finalization.message.seed_signature).unwrap();
         if round.add_verified_finalization(finalization) && self.journal.is_some() {
             self.journal
                 .as_mut()
@@ -1837,10 +1838,10 @@ impl<
             &proposal.digest,
         );
         let proposal_signature =
-            ops::partial_sign_message(share, Some(&self.notarize_namespace), &message).serialize();
+            ops::partial_sign_message(share, Some(&self.notarize_namespace), &message).encode();
         let message = seed_message(view);
         let seed_signature =
-            ops::partial_sign_message(share, Some(&self.seed_namespace), &message).serialize();
+            ops::partial_sign_message(share, Some(&self.seed_namespace), &message).encode();
         round.broadcast_notarize = true;
         Some(Parsed {
             message: wire::Notarize {
@@ -1920,7 +1921,7 @@ impl<
             &proposal.digest,
         );
         let proposal_signature =
-            ops::partial_sign_message(share, Some(&self.finalize_namespace), &message).serialize();
+            ops::partial_sign_message(share, Some(&self.finalize_namespace), &message).encode();
         round.broadcast_finalize = true;
         Some(Parsed {
             message: wire::Finalize {
@@ -2230,7 +2231,7 @@ impl<
                         let proposal = notarize.proposal.as_ref().unwrap().clone();
                         let payload = D::try_from(&proposal.payload).unwrap();
                         let signature: Eval<group::Signature> =
-                            Eval::deserialize(&notarize.proposal_signature).unwrap();
+                            Eval::decode(notarize.proposal_signature).unwrap();
                         let public_key_index = signature.index;
                         let public_key = self
                             .supervisor
@@ -2283,7 +2284,7 @@ impl<
                         // Handle nullify
                         let view = nullify.view;
                         let signature: Eval<group::Signature> =
-                            Eval::deserialize(&nullify.view_signature).unwrap();
+                            Eval::decode(nullify.view_signature).unwrap();
                         let public_key_index = signature.index;
                         let public_key = self
                             .supervisor
@@ -2315,7 +2316,7 @@ impl<
                         let view = proposal.view;
                         let payload = D::try_from(&proposal.payload).unwrap();
                         let signature: Eval<group::Signature> =
-                            Eval::deserialize(&finalize.proposal_signature).unwrap();
+                            Eval::decode(finalize.proposal_signature).unwrap();
                         let public_key_index = signature.index;
                         let public_key = self
                             .supervisor
@@ -2461,7 +2462,7 @@ impl<
                     let proposal = wire::Proposal {
                         view: context.view,
                         parent: context.parent.0,
-                        payload: proposed.to_vec(),
+                        payload: proposed.encode(),
                     };
                     if !self.our_proposal(
                         proposal_digest,

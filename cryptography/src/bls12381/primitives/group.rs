@@ -20,6 +20,7 @@ use blst::{
     blst_p2_uncompress, blst_scalar, blst_scalar_from_bendian, blst_scalar_from_fr, blst_sk_check,
     Pairing, BLS12_381_G1, BLS12_381_G2, BLS12_381_NEG_G1, BLST_ERROR,
 };
+use commonware_codec::{Codec, Error as CodecError, Reader, SizedCodec, Writer};
 use commonware_utils::SizedSerialize;
 use rand::RngCore;
 use std::ptr;
@@ -31,7 +32,7 @@ use zeroize::Zeroize;
 pub type DST = &'static [u8];
 
 /// An element of a group.
-pub trait Element: Clone + Eq + PartialEq + Send + Sync {
+pub trait Element: SizedCodec + Clone + Eq + PartialEq + Send + Sync {
     /// Returns the additive identity.
     fn zero() -> Self;
 
@@ -43,18 +44,6 @@ pub trait Element: Clone + Eq + PartialEq + Send + Sync {
 
     /// Multiplies self in-place.
     fn mul(&mut self, rhs: &Scalar);
-
-    /// Canonically serializes the element.
-    fn serialize(&self) -> Vec<u8>;
-
-    /// Serialized size of the element.
-    fn size() -> usize;
-
-    /// Deserializes an untrusted, canonically-encoded element.
-    ///
-    /// This function performs any validation necessary to ensure the decoded
-    /// element is valid (like an infinity or group check).
-    fn deserialize(bytes: &[u8]) -> Option<Self>;
 }
 
 /// An element of a group that supports message hashing.
@@ -192,24 +181,27 @@ impl Share {
         public.mul(&self.private);
         public
     }
+}
 
-    /// Canonically serializes the share.
-    pub fn serialize(&self) -> Vec<u8> {
-        let mut bytes = [0u8; u32::SERIALIZED_LEN + SCALAR_LENGTH];
-        bytes[..u32::SERIALIZED_LEN].copy_from_slice(&self.index.to_be_bytes());
-        bytes[u32::SERIALIZED_LEN..].copy_from_slice(&self.private.serialize());
-        bytes.to_vec()
+impl Codec for Share {
+    fn len_encoded(&self) -> usize {
+        Self::LEN_CODEC
     }
 
-    /// Deserializes a canonically encoded share.
-    pub fn deserialize(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() != u32::SERIALIZED_LEN + SCALAR_LENGTH {
-            return None;
-        }
-        let index = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-        let private = Private::deserialize(&bytes[u32::SERIALIZED_LEN..])?;
-        Some(Self { index, private })
+    fn write(&self, writer: &mut impl Writer) {
+        writer.write_u32(self.index);
+        writer.write(&self.private);
     }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
+        let index = reader.read_u32()?;
+        let private = Private::read(reader)?;
+        Ok(Self { index, private })
+    }
+}
+
+impl SizedCodec for Share {
+    const LEN_CODEC: usize = u32::SERIALIZED_LEN + SCALAR_LENGTH;
 }
 
 impl Scalar {
@@ -284,21 +276,25 @@ impl Element for Scalar {
             blst_fr_mul(&mut self.0, &self.0, &rhs.0);
         }
     }
+}
 
-    fn serialize(&self) -> Vec<u8> {
-        let mut bytes = [0u8; SCALAR_LENGTH];
+impl Codec for Scalar {
+    fn len_encoded(&self) -> usize {
+        Self::LEN_CODEC
+    }
+
+    fn write(&self, writer: &mut impl Writer) {
+        let mut bytes = [0u8; Self::LEN_CODEC];
         unsafe {
             let mut scalar = blst_scalar::default();
             blst_scalar_from_fr(&mut scalar, &self.0);
             blst_bendian_from_scalar(bytes.as_mut_ptr(), &scalar);
         }
-        bytes.to_vec()
+        writer.write_fixed(&bytes);
     }
 
-    fn deserialize(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() != SCALAR_LENGTH {
-            return None;
-        }
+    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
+        let bytes: [u8; Self::LEN_CODEC] = reader.read_fixed()?;
         let mut ret = blst_fr::default();
         unsafe {
             let mut scalar = blst_scalar::default();
@@ -313,16 +309,19 @@ impl Element for Scalar {
             // * https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-03#section-2.3
             // * https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-04#section-2.3
             if !blst_sk_check(&scalar) {
-                return None;
+                return Err(CodecError::InvalidData(
+                    "decode scalar".to_string(),
+                    "invalid scalar".to_string(),
+                ));
             }
             blst_fr_from_scalar(&mut ret, &scalar);
         }
-        Some(Self(ret))
+        Ok(Self(ret))
     }
+}
 
-    fn size() -> usize {
-        SCALAR_LENGTH
-    }
+impl SizedCodec for Scalar {
+    const LEN_CODEC: usize = SCALAR_LENGTH;
 }
 
 impl Element for G1 {
@@ -351,43 +350,56 @@ impl Element for G1 {
             blst_p1_mult(&mut self.0, &self.0, scalar.b.as_ptr(), bits(&scalar));
         }
     }
+}
 
-    fn serialize(&self) -> Vec<u8> {
-        let mut bytes = [0u8; G1_ELEMENT_BYTE_LENGTH];
+impl Codec for G1 {
+    fn len_encoded(&self) -> usize {
+        Self::LEN_CODEC
+    }
+
+    fn write(&self, writer: &mut impl Writer) {
+        let mut bytes = [0u8; Self::LEN_CODEC];
         unsafe {
             blst_p1_compress(bytes.as_mut_ptr(), &self.0);
         }
-        bytes.to_vec()
+        writer.write_fixed(&bytes);
     }
 
-    fn deserialize(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() != G1_ELEMENT_BYTE_LENGTH {
-            return None;
-        }
+    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
+        let bytes = reader.read_n_bytes(Self::LEN_CODEC)?;
         let mut ret = blst_p1::default();
         unsafe {
             let mut affine = blst_p1_affine::default();
             if blst_p1_uncompress(&mut affine, bytes.as_ptr()) != BLST_ERROR::BLST_SUCCESS {
-                return None;
+                return Err(CodecError::InvalidData(
+                    "decode G1".to_string(),
+                    "invalid compressed point".to_string(),
+                ));
             }
             blst_p1_from_affine(&mut ret, &affine);
 
             // Verify that deserialized element isn't infinite
             if blst_p1_is_inf(&ret) {
-                return None;
+                return Err(CodecError::InvalidData(
+                    "decode G1".to_string(),
+                    "infinite point".to_string(),
+                ));
             }
 
             // Verify that the deserialized element is in G1
             if !blst_p1_in_g1(&ret) {
-                return None;
+                return Err(CodecError::InvalidData(
+                    "decode G1".to_string(),
+                    "invalid point".to_string(),
+                ));
             }
         }
-        Some(Self(ret))
+        Ok(Self(ret))
     }
+}
 
-    fn size() -> usize {
-        G1_ELEMENT_BYTE_LENGTH
-    }
+impl SizedCodec for G1 {
+    const LEN_CODEC: usize = G1_ELEMENT_BYTE_LENGTH;
 }
 
 impl Point for G1 {
@@ -432,43 +444,56 @@ impl Element for G2 {
             blst_p2_mult(&mut self.0, &self.0, scalar.b.as_ptr(), bits(&scalar));
         }
     }
+}
 
-    fn serialize(&self) -> Vec<u8> {
-        let mut bytes = [0u8; G2_ELEMENT_BYTE_LENGTH];
+impl Codec for G2 {
+    fn len_encoded(&self) -> usize {
+        Self::LEN_CODEC
+    }
+
+    fn write(&self, writer: &mut impl Writer) {
+        let mut bytes = [0u8; Self::LEN_CODEC];
         unsafe {
             blst_p2_compress(bytes.as_mut_ptr(), &self.0);
         }
-        bytes.to_vec()
+        writer.write_fixed(&bytes);
     }
 
-    fn deserialize(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() != G2_ELEMENT_BYTE_LENGTH {
-            return None;
-        }
+    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
+        let bytes = reader.read_n_bytes(Self::LEN_CODEC)?;
         let mut ret = blst_p2::default();
         unsafe {
             let mut affine = blst_p2_affine::default();
             if blst_p2_uncompress(&mut affine, bytes.as_ptr()) != BLST_ERROR::BLST_SUCCESS {
-                return None;
+                return Err(CodecError::InvalidData(
+                    "decode G2".to_string(),
+                    "invalid compressed point".to_string(),
+                ));
             }
             blst_p2_from_affine(&mut ret, &affine);
 
             // Verify that deserialized element isn't infinite
             if blst_p2_is_inf(&ret) {
-                return None;
+                return Err(CodecError::InvalidData(
+                    "decode G2".to_string(),
+                    "infinite point".to_string(),
+                ));
             }
 
             // Verify that the deserialized element is in G2
             if !blst_p2_in_g2(&ret) {
-                return None;
+                return Err(CodecError::InvalidData(
+                    "decode G2".to_string(),
+                    "invalid point".to_string(),
+                ));
             }
         }
-        Some(Self(ret))
+        Ok(Self(ret))
     }
+}
 
-    fn size() -> usize {
-        G2_ELEMENT_BYTE_LENGTH
-    }
+impl SizedCodec for G2 {
+    const LEN_CODEC: usize = G2_ELEMENT_BYTE_LENGTH;
 }
 
 impl Point for G2 {
@@ -486,7 +511,6 @@ impl Point for G2 {
         }
     }
 }
-
 /// Verifies that `e(pk,hm)` is equal to `e(G1::one(),sig)` using a single product check with
 /// a negated G1 generator (`e(pk,hm) * e(-G1::one(),sig) == 1`).
 pub(super) fn equal(pk: &G1, sig: &G2, hm: &G2) -> bool {

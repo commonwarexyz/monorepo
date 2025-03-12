@@ -3,9 +3,10 @@ use super::{
     wire, View,
 };
 use crate::ThresholdSupervisor;
+use commonware_codec::Codec;
 use commonware_cryptography::bls12381::primitives::{
     self,
-    group::{self, Element},
+    group::{self},
     poly,
 };
 use commonware_utils::Array;
@@ -47,9 +48,12 @@ pub fn verify_notarization<
     let public_key = poly::public(polynomial);
 
     // Parse signature
-    let Some(signature) = group::Signature::deserialize(&notarization.proposal_signature) else {
-        debug!(reason = "invalid signature", "dropping notarization");
-        return false;
+    let signature = match group::Signature::decode(notarization.proposal_signature) {
+        Ok(signature) => signature,
+        Err(err) => {
+            debug!(reason = "invalid signature", ?err, "dropping notarization");
+            return false;
+        }
     };
 
     // Verify threshold notarization
@@ -69,9 +73,16 @@ pub fn verify_notarization<
 
     // Verify seed
     let seed = seed_message(proposal.view);
-    let Some(signature) = group::Signature::deserialize(&notarization.seed_signature) else {
-        debug!(reason = "invalid seed signature", "dropping notarization");
-        return false;
+    let signature = match group::Signature::decode(notarization.seed_signature) {
+        Ok(signature) => signature,
+        Err(err) => {
+            debug!(
+                reason = "invalid seed signature",
+                ?err,
+                "dropping notarization"
+            );
+            return false;
+        }
     };
     if primitives::ops::verify_message(&public_key, Some(seed_namespace), &seed, &signature)
         .is_err()
@@ -101,7 +112,7 @@ pub fn verify_nullification<S: ThresholdSupervisor<Index = View, Identity = poly
     let public_key = poly::public(polynomial);
 
     // Parse signature
-    let Some(signature) = group::Signature::deserialize(&nullification.view_signature) else {
+    let Ok(signature) = group::Signature::decode(nullification.view_signature) else {
         debug!(reason = "invalid signature", "dropping nullification");
         return false;
     };
@@ -123,7 +134,7 @@ pub fn verify_nullification<S: ThresholdSupervisor<Index = View, Identity = poly
 
     // Verify seed
     let seed = seed_message(nullification.view);
-    let Some(signature) = group::Signature::deserialize(&nullification.seed_signature) else {
+    let Ok(signature) = group::Signature::decode(nullification.seed_signature) else {
         debug!(reason = "invalid seed signature", "dropping nullification");
         return false;
     };
@@ -173,7 +184,7 @@ pub fn verify_finalization<
     let public_key = poly::public(polynomial);
 
     // Parse signature
-    let Some(signature) = group::Signature::deserialize(&finalization.proposal_signature) else {
+    let Ok(signature) = group::Signature::decode(finalization.proposal_signature) else {
         debug!(reason = "invalid signature", "dropping finalization");
         return false;
     };
@@ -195,7 +206,7 @@ pub fn verify_finalization<
 
     // Verify seed
     let seed = seed_message(proposal.view);
-    let Some(signature) = group::Signature::deserialize(&finalization.seed_signature) else {
+    let Ok(signature) = group::Signature::decode(&finalization.seed_signature) else {
         debug!(reason = "invalid seed signature", "dropping finalization");
         return false;
     };

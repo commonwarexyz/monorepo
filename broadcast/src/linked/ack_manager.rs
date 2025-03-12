@@ -144,9 +144,9 @@ impl<D: Array, P: Array> AckManager<D, P> {
 mod tests {
     use super::*;
     use crate::linked::{namespace, parsed, serializer};
+    use commonware_codec::SizedCodec;
     use commonware_cryptography::{bls12381::dkg::ops::generate_shares, ed25519, sha256};
     use commonware_runtime::deterministic::Executor;
-    use commonware_utils::SizedSerialize;
 
     /// Aggregated helper functions to reduce duplication in tests.
     mod helpers {

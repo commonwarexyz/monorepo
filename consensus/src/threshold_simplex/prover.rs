@@ -7,8 +7,9 @@ use super::{
 };
 use crate::Proof;
 use bytes::{Buf, BufMut};
+use commonware_codec::Codec;
 use commonware_cryptography::bls12381::primitives::{
-    group::{self, Element},
+    group::{self},
     ops,
     poly::{self, Eval},
 };
@@ -109,7 +110,7 @@ impl<D: Digest> Prover<D> {
         let parent = proof.get_u64();
         let payload = D::read_from(&mut proof).ok()?;
         let signature = proof.copy_to_bytes(poly::PARTIAL_SIGNATURE_LENGTH);
-        let signature = poly::Eval::deserialize(&signature)?;
+        let signature = poly::Eval::decode(&signature).ok()?;
 
         // Create callback
         let proposal_message = proposal_message(view, parent, &payload);
@@ -171,7 +172,7 @@ impl<D: Digest> Prover<D> {
         let payload = D::read_from(&mut proof).ok()?;
         let message = proposal_message(view, parent, &payload);
         let signature = proof.copy_to_bytes(group::SIGNATURE_LENGTH);
-        let signature = group::Signature::deserialize(&signature)?;
+        let signature = group::Signature::decode(signature).ok()?;
         if ops::verify_message(&self.public, Some(namespace), &message, &signature).is_err() {
             return None;
         }
@@ -179,7 +180,7 @@ impl<D: Digest> Prover<D> {
         // Verify seed
         let message = seed_message(view);
         let seed = proof.copy_to_bytes(group::SIGNATURE_LENGTH);
-        let seed = group::Signature::deserialize(&seed)?;
+        let seed = group::Signature::decode(seed).ok()?;
         if ops::verify_message(&self.public, Some(&self.seed_namespace), &message, &seed).is_err() {
             return None;
         }
@@ -265,11 +266,11 @@ impl<D: Digest> Prover<D> {
         let parent_1 = proof.get_u64();
         let payload_1 = D::read_from(&mut proof).ok()?;
         let signature_1 = proof.copy_to_bytes(poly::PARTIAL_SIGNATURE_LENGTH);
-        let signature_1 = Eval::deserialize(&signature_1)?;
+        let signature_1 = Eval::decode(signature_1).ok()?;
         let parent_2 = proof.get_u64();
         let payload_2 = D::read_from(&mut proof).ok()?;
         let signature_2 = proof.copy_to_bytes(poly::PARTIAL_SIGNATURE_LENGTH);
-        let signature_2 = Eval::deserialize(&signature_2)?;
+        let signature_2 = Eval::decode(signature_2).ok()?;
         if signature_1.index != signature_2.index {
             return None;
         }
@@ -398,9 +399,9 @@ impl<D: Digest> Prover<D> {
         let parent = proof.get_u64();
         let payload = D::read_from(&mut proof).ok()?;
         let signature_finalize = proof.copy_to_bytes(poly::PARTIAL_SIGNATURE_LENGTH);
-        let signature_finalize = Eval::deserialize(&signature_finalize)?;
+        let signature_finalize = Eval::decode(signature_finalize).ok()?;
         let signature_null = proof.copy_to_bytes(poly::PARTIAL_SIGNATURE_LENGTH);
-        let signature_null = Eval::deserialize(&signature_null)?;
+        let signature_null = Eval::decode(signature_null).ok()?;
         if signature_finalize.index != signature_null.index {
             return None;
         }
@@ -477,7 +478,7 @@ mod tests {
             Some(&prover.seed_namespace),
             &proposal_message(1, 0, &payload),
         )
-        .serialize();
+        .to_vec();
 
         // Create a proof with a length that would cause overflow
         let mut proof = Vec::new();
@@ -504,7 +505,7 @@ mod tests {
             Some(&prover.seed_namespace),
             &proposal_message(1, 1, &payload),
         )
-        .serialize();
+        .to_vec();
 
         // Create a proof with a length that would cause overflow
         let mut proof = Vec::new();
@@ -531,7 +532,7 @@ mod tests {
             Some(&prover.seed_namespace),
             &proposal_message(1, 0, &payload),
         )
-        .serialize();
+        .to_vec();
 
         // Shorten signature
         let signature = signature[0..group::SIGNATURE_LENGTH - 1].to_vec();
@@ -559,7 +560,7 @@ mod tests {
             Some(&prover.seed_namespace),
             &proposal_message(1, 0, &payload),
         )
-        .serialize();
+        .to_vec();
 
         // Extend signature
         let signature = [signature, vec![0; 1]].concat();
@@ -589,9 +590,9 @@ mod tests {
             Some(&prover.notarize_namespace),
             &proposal_message(1, 0, &payload),
         )
-        .serialize();
+        .to_vec();
         let seed_signature =
-            sign_message(&private, Some(&prover.seed_namespace), &seed_message(1)).serialize();
+            sign_message(&private, Some(&prover.seed_namespace), &seed_message(1)).to_vec();
 
         // Create a proof with a length that would cause overflow
         let mut proof = Vec::new();
@@ -619,9 +620,9 @@ mod tests {
             Some(&prover.notarize_namespace),
             &proposal_message(1, 0, &payload),
         )
-        .serialize();
+        .to_vec();
         let seed_signature =
-            sign_message(&private, Some(&prover.seed_namespace), &seed_message(2)).serialize();
+            sign_message(&private, Some(&prover.seed_namespace), &seed_message(2)).to_vec();
 
         // Create a proof with a length that would cause overflow
         let mut proof = Vec::new();
@@ -649,9 +650,9 @@ mod tests {
             Some(&prover.notarize_namespace),
             &proposal_message(1, 0, &payload),
         )
-        .serialize();
+        .to_vec();
         let seed_signature =
-            sign_message(&private, Some(&prover.seed_namespace), &seed_message(1)).serialize();
+            sign_message(&private, Some(&prover.seed_namespace), &seed_message(1)).to_vec();
 
         // Shorten seed signature
         let seed_signature = seed_signature[0..group::SIGNATURE_LENGTH - 1].to_vec();
@@ -682,9 +683,9 @@ mod tests {
             Some(&prover.notarize_namespace),
             &proposal_message(1, 0, &payload),
         )
-        .serialize();
+        .to_vec();
         let seed_signature =
-            sign_message(&private, Some(&prover.seed_namespace), &seed_message(1)).serialize();
+            sign_message(&private, Some(&prover.seed_namespace), &seed_message(1)).to_vec();
 
         // Extend seed signature
         let seed_signature = [seed_signature, vec![0; 1]].concat();

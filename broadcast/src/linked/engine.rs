@@ -9,9 +9,10 @@
 
 use super::{metrics, AckManager, Config, Mailbox, Message, TipManager};
 use crate::{
-    linked::{namespace, parsed, prover::Prover, serializer, Context, Epoch},
+    linked::{namespace, parsed, prover::Prover, Context, Epoch},
     Application, Collector, ThresholdCoordinator,
 };
+use commonware_codec::Codec;
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{self},
@@ -362,7 +363,7 @@ impl<
                         }
                     };
                     let mut guard = self.metrics.acks.guard(Status::Invalid);
-                    let ack = match parsed::Ack::decode(&msg) {
+                    let ack = match parsed::Ack::decode(msg) {
                         Ok(ack) => ack,
                         Err(err) => {
                             warn!(?err, ?sender, "ack decode failed");
@@ -466,7 +467,7 @@ impl<
         let partial = ops::partial_sign_message(
             share,
             Some(&self.ack_namespace),
-            &serializer::ack(&tip.chunk, self.epoch),
+            (&tip.chunk, self.epoch).encode(),
         );
 
         // Sync the journal to prevent ever acking two conflicting chunks at
@@ -657,7 +658,7 @@ impl<
         };
         let signature = self
             .crypto
-            .sign(Some(&self.chunk_namespace), &serializer::chunk(&chunk));
+            .sign(Some(&self.chunk_namespace), &chunk.encode());
         let node = parsed::Node::<C, D> {
             chunk,
             signature,

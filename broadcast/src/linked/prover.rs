@@ -2,12 +2,12 @@
 //!
 //! The proofs contain threshold signatures of signers that have seen and validated a chunk.
 
-use super::{namespace, parsed, serializer, Context, Epoch};
+use super::{namespace, parsed, Context, Epoch};
 use crate::Proof;
 use bytes::{Buf, BufMut};
 use commonware_cryptography::{
     bls12381::primitives::{
-        group::{self, Element},
+        group::{self},
         ops,
     },
     Scheme,

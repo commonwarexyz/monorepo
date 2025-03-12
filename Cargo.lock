@@ -847,6 +847,7 @@ name = "commonware-broadcast"
 version = "0.0.40"
 dependencies = [
  "bytes",
+ "commonware-codec",
  "commonware-cryptography",
  "commonware-macros",
  "commonware-p2p",
@@ -899,6 +900,7 @@ version = "0.0.40"
 dependencies = [
  "bytes",
  "cfg-if",
+ "commonware-codec",
  "commonware-cryptography",
  "commonware-macros",
  "commonware-p2p",
@@ -923,6 +925,7 @@ version = "0.0.40"
 dependencies = [
  "blst",
  "bytes",
+ "commonware-codec",
  "commonware-utils",
  "criterion",
  "ed25519-consensus",
@@ -1089,6 +1092,7 @@ name = "commonware-storage"
 version = "0.0.40"
 dependencies = [
  "bytes",
+ "commonware-codec",
  "commonware-cryptography",
  "commonware-macros",
  "commonware-runtime",
@@ -1143,6 +1147,7 @@ version = "0.0.40"
 dependencies = [
  "bytes",
  "clap",
+ "commonware-codec",
  "commonware-cryptography",
  "commonware-macros",
  "commonware-p2p",
