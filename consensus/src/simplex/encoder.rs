@@ -1,13 +1,13 @@
 use super::View;
 use bytes::BufMut;
-use commonware_utils::{union, Array, SizedSerialize};
+use commonware_utils::{union, Array};
 
 pub const NOTARIZE_SUFFIX: &[u8] = b"_NOTARIZE";
 pub const NULLIFY_SUFFIX: &[u8] = b"_NULLIFY";
 pub const FINALIZE_SUFFIX: &[u8] = b"_FINALIZE";
 
 pub fn proposal_message<D: Array>(view: View, parent: View, payload: &D) -> Vec<u8> {
-    let mut msg = Vec::with_capacity(u64::SERIALIZED_LEN + u64::SERIALIZED_LEN + D::SERIALIZED_LEN);
+    let mut msg = Vec::with_capacity(u64::LEN_CODEC + u64::LEN_CODEC + D::LEN_CODEC);
     msg.put_u64(view);
     msg.put_u64(parent);
     msg.extend_from_slice(payload);

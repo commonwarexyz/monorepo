@@ -64,7 +64,6 @@ mod tests {
         sha256::{self, Digest},
     };
     use commonware_utils::Array;
-    use commonware_utils::SizedSerialize;
     use rand::SeedableRng;
 
     /// Helper functions for TipManager tests.
@@ -78,7 +77,7 @@ mod tests {
             payload: &str,
         ) -> parsed::Node<Ed25519, Digest> {
             let signature = {
-                let mut data = Bytes::from(vec![3u8; Signature::SERIALIZED_LEN]);
+                let mut data = Bytes::from(vec![3u8; Signature::LEN_CODEC]);
                 Signature::read_from(&mut data).unwrap()
             };
             parsed::Node::<Ed25519, Digest> {

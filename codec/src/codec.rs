@@ -9,14 +9,14 @@ use bytes::Bytes;
 
 /// Trait for types that can be encoded to and decoded from bytes
 pub trait Codec: Sized {
+    /// Returns the encoded length of this value.
+    fn len_encoded(&self) -> usize;
+
     /// Encodes this value to a writer.
     fn write(&self, writer: &mut impl Writer);
 
     /// Decodes a value from a reader.
     fn read(reader: &mut impl Reader) -> Result<Self, Error>;
-
-    /// Returns the encoded length of this value.
-    fn len_encoded(&self) -> usize;
 
     /// Encodes a value to bytes.
     fn encode(&self) -> Vec<u8> {

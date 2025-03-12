@@ -15,6 +15,7 @@ use crate::mmr::{
     Error,
 };
 use bytes::Bytes;
+use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Blob, Clock, Metrics, Storage as RStorage};
 use commonware_utils::array::U64;
@@ -144,7 +145,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
                     }
                 }
             }
-            let digest = H::Digest::try_from(bytes.unwrap().as_ref());
+            let digest = H::Digest::decode(bytes.unwrap().as_ref());
             if let Ok(digest) = digest {
                 bootstrap_peaks.push(digest);
             } else {

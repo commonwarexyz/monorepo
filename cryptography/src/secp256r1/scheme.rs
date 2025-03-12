@@ -1,5 +1,6 @@
-use crate::{Array, Error, Scheme};
-use commonware_utils::{hex, union_unique, SizedSerialize};
+use crate::{Error, Scheme};
+use commonware_codec::{Codec, Error as CodecError, Reader, SizedCodec, Writer};
+use commonware_utils::{hex, union_unique};
 use p256::{
     ecdsa::{
         signature::{Signer, Verifier},
@@ -87,12 +88,25 @@ pub struct PrivateKey {
     key: SigningKey,
 }
 
-impl Array for PrivateKey {
-    type Error = Error;
+impl Codec for PrivateKey {
+    fn len_encoded(&self) -> usize {
+        Self::LEN_CODEC
+    }
+
+    fn write(&self, writer: &mut impl Writer) {
+        writer.write(&self.raw);
+    }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
+        let raw = reader.read_fixed()?;
+        let key = SigningKey::from_slice(&raw)
+            .map_err(|_| CodecError::InvalidData("secp256r1".into(), "PrivateKey".into()))?;
+        Ok(Self { raw, key })
+    }
 }
 
-impl SizedSerialize for PrivateKey {
-    const SERIALIZED_LEN: usize = PRIVATE_KEY_LENGTH;
+impl SizedCodec for PrivateKey {
+    const LEN_CODEC: usize = PRIVATE_KEY_LENGTH;
 }
 
 impl Hash for PrivateKey {
@@ -177,12 +191,25 @@ pub struct PublicKey {
     key: VerifyingKey,
 }
 
-impl Array for PublicKey {
-    type Error = Error;
+impl Codec for PublicKey {
+    fn len_encoded(&self) -> usize {
+        Self::LEN_CODEC
+    }
+
+    fn write(&self, writer: &mut impl Writer) {
+        writer.write(&self.raw);
+    }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
+        let raw = reader.read_fixed()?;
+        let key = VerifyingKey::from_sec1_bytes(&raw)
+            .map_err(|_| CodecError::InvalidData("secp256r1".into(), "PublicKey".into()))?;
+        Ok(Self { raw, key })
+    }
 }
 
-impl SizedSerialize for PublicKey {
-    const SERIALIZED_LEN: usize = PUBLIC_KEY_LENGTH;
+impl SizedCodec for PublicKey {
+    const LEN_CODEC: usize = PUBLIC_KEY_LENGTH;
 }
 
 impl Hash for PublicKey {
@@ -256,12 +283,31 @@ pub struct Signature {
     signature: p256::ecdsa::Signature,
 }
 
-impl Array for Signature {
-    type Error = Error;
+impl Codec for Signature {
+    fn len_encoded(&self) -> usize {
+        Self::LEN_CODEC
+    }
+
+    fn write(&self, writer: &mut impl Writer) {
+        writer.write(&self.raw);
+    }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
+        let raw = reader.read_fixed()?;
+        let signature = p256::ecdsa::Signature::from_slice(&raw)
+            .map_err(|_| CodecError::InvalidData("secp256r1".into(), "Signature".into()))?;
+        if signature.s().is_high().into() {
+            return Err(CodecError::InvalidData(
+                "secp256r1".into(),
+                "Signature".into(),
+            ));
+        }
+        Ok(Self { raw, signature })
+    }
 }
 
-impl SizedSerialize for Signature {
-    const SERIALIZED_LEN: usize = SIGNATURE_LENGTH;
+impl SizedCodec for Signature {
+    const LEN_CODEC: usize = SIGNATURE_LENGTH;
 }
 
 impl Hash for Signature {

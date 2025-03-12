@@ -23,8 +23,9 @@ use super::primitives::{
     group::{self, Element, Scalar},
     ops,
 };
-use crate::{Array, Error, Scheme};
-use commonware_utils::{hex, SizedSerialize};
+use crate::{Error, Scheme};
+use commonware_codec::{Codec, Error as CodecError, Reader, SizedCodec, Writer};
+use commonware_utils::hex;
 use rand::{CryptoRng, Rng};
 use std::{
     fmt::{Debug, Display},
@@ -91,12 +92,27 @@ pub struct PrivateKey {
     key: group::Private,
 }
 
-impl Array for PrivateKey {
-    type Error = Error;
+impl Codec for PrivateKey {
+    fn len_encoded(&self) -> usize {
+        Self::LEN_CODEC
+    }
+
+    fn write(&self, writer: &mut impl Writer) {
+        writer.write(&self.raw);
+    }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
+        let raw = reader.read_fixed()?;
+        let key = Scalar::deserialize(&raw).ok_or(CodecError::InvalidData(
+            "bls12381".into(),
+            "PrivateKey".into(),
+        ))?;
+        Ok(Self { key, raw })
+    }
 }
 
-impl SizedSerialize for PrivateKey {
-    const SERIALIZED_LEN: usize = group::PRIVATE_KEY_LENGTH;
+impl SizedCodec for PrivateKey {
+    const LEN_CODEC: usize = group::PRIVATE_KEY_LENGTH;
 }
 
 impl Hash for PrivateKey {
@@ -181,12 +197,27 @@ pub struct PublicKey {
     key: group::Public,
 }
 
-impl Array for PublicKey {
-    type Error = Error;
+impl Codec for PublicKey {
+    fn len_encoded(&self) -> usize {
+        Self::LEN_CODEC
+    }
+
+    fn write(&self, writer: &mut impl Writer) {
+        writer.write(&self.raw);
+    }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
+        let raw = reader.read_fixed()?;
+        let key = group::Public::deserialize(&raw).ok_or(CodecError::InvalidData(
+            "bls12381".into(),
+            "PublicKey".into(),
+        ))?;
+        Ok(Self { key, raw })
+    }
 }
 
-impl SizedSerialize for PublicKey {
-    const SERIALIZED_LEN: usize = group::PUBLIC_KEY_LENGTH;
+impl SizedCodec for PublicKey {
+    const LEN_CODEC: usize = group::PUBLIC_KEY_LENGTH;
 }
 
 impl Hash for PublicKey {
@@ -271,12 +302,27 @@ pub struct Signature {
     signature: group::Signature,
 }
 
-impl Array for Signature {
-    type Error = Error;
+impl Codec for Signature {
+    fn len_encoded(&self) -> usize {
+        Self::LEN_CODEC
+    }
+
+    fn write(&self, writer: &mut impl Writer) {
+        writer.write(&self.raw);
+    }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
+        let raw = reader.read_fixed()?;
+        let signature = group::Signature::deserialize(&raw).ok_or(CodecError::InvalidData(
+            "bls12381".into(),
+            "Signature".into(),
+        ))?;
+        Ok(Self { raw, signature })
+    }
 }
 
-impl SizedSerialize for Signature {
-    const SERIALIZED_LEN: usize = group::SIGNATURE_LENGTH;
+impl SizedCodec for Signature {
+    const LEN_CODEC: usize = group::SIGNATURE_LENGTH;
 }
 
 impl Hash for Signature {

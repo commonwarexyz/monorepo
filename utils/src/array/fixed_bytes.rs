@@ -1,9 +1,10 @@
-use crate::{hex, Array, SizedSerialize};
+use crate::hex;
+use commonware_codec::{Codec, Error as CodecError, Reader, SizedCodec, Writer};
 use std::{
     cmp::{Ord, PartialOrd},
     fmt::{Debug, Display},
     hash::Hash,
-    ops::Deref,
+    ops::{Deref, DerefMut},
 };
 use thiserror::Error;
 
@@ -15,7 +16,7 @@ pub enum Error {
 }
 
 /// An `Array` implementation for fixed-length byte arrays.
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 #[repr(transparent)]
 pub struct FixedBytes<const N: usize>([u8; N]);
 
@@ -26,12 +27,34 @@ impl<const N: usize> FixedBytes<N> {
     }
 }
 
-impl<const N: usize> Array for FixedBytes<N> {
-    type Error = Error;
+impl<const N: usize> DerefMut for FixedBytes<N> {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        &mut self.0
+    }
 }
 
-impl<const N: usize> SizedSerialize for FixedBytes<N> {
-    const SERIALIZED_LEN: usize = N;
+impl<const N: usize> Default for FixedBytes<N> {
+    fn default() -> Self {
+        Self([0; N])
+    }
+}
+
+impl<const N: usize> Codec for FixedBytes<N> {
+    fn len_encoded(&self) -> usize {
+        N
+    }
+
+    fn write(&self, writer: &mut impl Writer) {
+        writer.write(&self.0);
+    }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
+        reader.read().map(Self)
+    }
+}
+
+impl<const N: usize> SizedCodec for FixedBytes<N> {
+    const LEN_CODEC: usize = N;
 }
 
 impl<const N: usize> TryFrom<&[u8]> for FixedBytes<N> {

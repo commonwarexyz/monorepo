@@ -1,4 +1,4 @@
-use commonware_utils::{Array, SizedSerialize};
+use commonware_utils::Array;
 use std::{fmt, ops::Deref};
 use thiserror::Error;
 
@@ -47,14 +47,6 @@ impl TryFrom<Vec<u8>> for Key {
     fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
         Self::try_from(value.as_slice())
     }
-}
-
-impl SizedSerialize for Key {
-    const SERIALIZED_LEN: usize = 1;
-}
-
-impl Array for Key {
-    type Error = Error;
 }
 
 /// Error type for the Array trait

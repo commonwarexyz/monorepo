@@ -12,7 +12,7 @@ use commonware_cryptography::{
     },
     Scheme,
 };
-use commonware_utils::{Array, SizedSerialize};
+use commonware_utils::Array;
 use std::marker::PhantomData;
 
 /// Encode and decode proofs of broadcast.
@@ -29,10 +29,10 @@ pub struct Prover<C: Scheme, D: Array> {
 
 impl<C: Scheme, D: Array> Prover<C, D> {
     /// The length of a serialized proof.
-    const PROOF_LEN: usize = C::PublicKey::SERIALIZED_LEN
-        + u64::SERIALIZED_LEN
-        + D::SERIALIZED_LEN
-        + u64::SERIALIZED_LEN
+    const PROOF_LEN: usize = C::PublicKey::LEN_CODEC
+        + u64::LEN_CODEC
+        + D::LEN_CODEC
+        + u64::LEN_CODEC
         + group::SIGNATURE_LENGTH;
 
     /// Create a new prover with the given signing `namespace`.

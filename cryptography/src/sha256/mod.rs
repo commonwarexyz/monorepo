@@ -20,21 +20,18 @@
 //! println!("digest: {:?}", digest);
 //! ```
 
-use crate::{Array, Error, Hasher};
-use commonware_utils::{hex, SizedSerialize};
+use crate::Hasher;
+use commonware_utils::array::FixedBytes;
 use rand::{CryptoRng, Rng};
 use sha2::{Digest as _, Sha256 as ISha256};
-use std::{
-    fmt::{Debug, Display},
-    ops::Deref,
-};
+use std::fmt::Debug;
 
 const DIGEST_LENGTH: usize = 32;
+pub type Digest = FixedBytes<DIGEST_LENGTH>;
 
 /// Generate a SHA-256 digest from a message.
 pub fn hash(message: &[u8]) -> Digest {
-    let array: [u8; DIGEST_LENGTH] = ISha256::digest(message).into();
-    Digest::from(array)
+    FixedBytes::new(ISha256::digest(message).try_into().unwrap())
 }
 
 /// SHA-256 hasher.
@@ -71,8 +68,7 @@ impl Hasher for Sha256 {
 
     fn finalize(&mut self) -> Self::Digest {
         let finalized = self.hasher.finalize_reset();
-        let array: [u8; DIGEST_LENGTH] = finalized.into();
-        Self::Digest::from(array)
+        FixedBytes::new(finalized.into())
     }
 
     fn reset(&mut self) {
@@ -80,89 +76,9 @@ impl Hasher for Sha256 {
     }
 
     fn random<R: Rng + CryptoRng>(rng: &mut R) -> Self::Digest {
-        let mut digest = [0u8; DIGEST_LENGTH];
+        let mut digest = FixedBytes::<DIGEST_LENGTH>::default();
         rng.fill_bytes(&mut digest);
-        Self::Digest::from(digest)
-    }
-}
-
-/// Digest of a SHA-256 hashing operation.
-#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
-#[repr(transparent)]
-pub struct Digest([u8; DIGEST_LENGTH]);
-
-impl Array for Digest {
-    type Error = Error;
-}
-
-impl SizedSerialize for Digest {
-    const SERIALIZED_LEN: usize = DIGEST_LENGTH;
-}
-
-impl From<[u8; DIGEST_LENGTH]> for Digest {
-    fn from(value: [u8; DIGEST_LENGTH]) -> Self {
-        Self(value)
-    }
-}
-
-impl TryFrom<&[u8]> for Digest {
-    type Error = Error;
-    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        if value.len() != DIGEST_LENGTH {
-            return Err(Error::InvalidDigestLength);
-        }
-        let array: [u8; DIGEST_LENGTH] =
-            value.try_into().map_err(|_| Error::InvalidDigestLength)?;
-        Ok(Self(array))
-    }
-}
-
-impl TryFrom<&Vec<u8>> for Digest {
-    type Error = Error;
-    fn try_from(value: &Vec<u8>) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_slice())
-    }
-}
-
-impl TryFrom<Vec<u8>> for Digest {
-    type Error = Error;
-    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
-        if value.len() != DIGEST_LENGTH {
-            return Err(Error::InvalidDigestLength);
-        }
-
-        // If the length is correct, we can safely convert the vector into a boxed slice without
-        // any copies.
-        let boxed_slice = value.into_boxed_slice();
-        let boxed_array: Box<[u8; DIGEST_LENGTH]> = boxed_slice
-            .try_into()
-            .map_err(|_| Error::InvalidDigestLength)?;
-        Ok(Self(*boxed_array))
-    }
-}
-
-impl AsRef<[u8]> for Digest {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl Deref for Digest {
-    type Target = [u8];
-    fn deref(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl Debug for Digest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", hex(&self.0))
-    }
-}
-
-impl Display for Digest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", hex(&self.0))
+        digest
     }
 }
 
@@ -199,6 +115,6 @@ mod tests {
 
     #[test]
     fn test_sha256_len() {
-        assert_eq!(Digest::SERIALIZED_LEN, DIGEST_LENGTH);
+        assert_eq!(Digest::LEN_CODEC, DIGEST_LENGTH);
     }
 }

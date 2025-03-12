@@ -6,13 +6,14 @@ use super::{
 };
 use crate::{Channel, Message, Recipients};
 use bytes::Bytes;
+use commonware_codec::SizedCodec;
 use commonware_macros::select;
 use commonware_runtime::{
     deterministic::{Listener, Sink, Stream},
     Clock, Handle, Listener as _, Metrics, Network as RNetwork, Spawner,
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
-use commonware_utils::{Array, SizedSerialize};
+use commonware_utils::Array;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
@@ -583,7 +584,7 @@ impl<P: Array> Peer<P> {
                                     return;
                                 }
                             };
-                            let Ok(dialer) = P::try_from(dialer.as_ref()) else {
+                            let Ok(dialer) = P::decode(dialer) else {
                                 error!("received public key is invalid");
                                 return;
                             };
@@ -591,9 +592,9 @@ impl<P: Array> Peer<P> {
                             // Continually receive messages from the dialer and send them to the inbox
                             while let Ok(data) = recv_frame(&mut stream, max_size).await {
                                 let channel = Channel::from_be_bytes(
-                                    data[..Channel::SERIALIZED_LEN].try_into().unwrap(),
+                                    data[..Channel::LEN_CODEC].try_into().unwrap(),
                                 );
-                                let message = data.slice(Channel::SERIALIZED_LEN..);
+                                let message = data.slice(Channel::LEN_CODEC..);
                                 if let Err(err) = inbox_sender
                                     .send((channel, (dialer.clone(), message)))
                                     .await
@@ -670,7 +671,7 @@ impl Link {
                 // For any item placed in the inbox, send it to the sink
                 while let Some((channel, message)) = outbox.next().await {
                     let mut data =
-                        bytes::BytesMut::with_capacity(Channel::SERIALIZED_LEN + message.len());
+                        bytes::BytesMut::with_capacity(Channel::LEN_CODEC + message.len());
                     data.extend_from_slice(&channel.to_be_bytes());
                     data.extend_from_slice(&message);
                     let data = data.freeze();

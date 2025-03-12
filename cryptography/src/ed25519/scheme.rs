@@ -1,5 +1,6 @@
-use crate::{Array, BatchScheme, Error, Scheme};
-use commonware_utils::{hex, union_unique, SizedSerialize};
+use crate::{BatchScheme, Error, Scheme};
+use commonware_codec::{Codec, Error as CodecError, Reader, SizedCodec, Writer};
+use commonware_utils::{hex, union_unique};
 use ed25519_consensus::{self, VerificationKey};
 use rand::{CryptoRng, Rng, RngCore};
 use std::borrow::Cow;
@@ -117,12 +118,24 @@ pub struct PrivateKey {
     key: ed25519_consensus::SigningKey,
 }
 
-impl Array for PrivateKey {
-    type Error = Error;
+impl Codec for PrivateKey {
+    fn len_encoded(&self) -> usize {
+        Self::LEN_CODEC
+    }
+
+    fn write(&self, writer: &mut impl Writer) {
+        writer.write(&self.raw);
+    }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
+        let raw = reader.read()?;
+        let key = ed25519_consensus::SigningKey::from(raw);
+        Ok(Self { key, raw })
+    }
 }
 
-impl SizedSerialize for PrivateKey {
-    const SERIALIZED_LEN: usize = PRIVATE_KEY_LENGTH;
+impl SizedCodec for PrivateKey {
+    const LEN_CODEC: usize = PRIVATE_KEY_LENGTH;
 }
 
 impl Eq for PrivateKey {}
@@ -215,12 +228,25 @@ pub struct PublicKey {
     key: ed25519_consensus::VerificationKey,
 }
 
-impl Array for PublicKey {
-    type Error = Error;
+impl Codec for PublicKey {
+    fn len_encoded(&self) -> usize {
+        Self::LEN_CODEC
+    }
+
+    fn write(&self, writer: &mut impl Writer) {
+        writer.write(&self.raw);
+    }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
+        let raw = reader.read_fixed()?;
+        let key = ed25519_consensus::VerificationKey::try_from(raw)
+            .map_err(|_| CodecError::InvalidData("ed25519".into(), "PublicKey".into()))?;
+        Ok(Self { raw, key })
+    }
 }
 
-impl SizedSerialize for PublicKey {
-    const SERIALIZED_LEN: usize = PUBLIC_KEY_LENGTH;
+impl SizedCodec for PublicKey {
+    const LEN_CODEC: usize = PUBLIC_KEY_LENGTH;
 }
 
 impl AsRef<[u8]> for PublicKey {
@@ -287,12 +313,24 @@ pub struct Signature {
     signature: ed25519_consensus::Signature,
 }
 
-impl Array for Signature {
-    type Error = Error;
+impl Codec for Signature {
+    fn len_encoded(&self) -> usize {
+        Self::LEN_CODEC
+    }
+
+    fn write(&self, writer: &mut impl Writer) {
+        writer.write(&self.raw);
+    }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
+        let raw = reader.read()?;
+        let signature = ed25519_consensus::Signature::from(raw);
+        Ok(Self { raw, signature })
+    }
 }
 
-impl SizedSerialize for Signature {
-    const SERIALIZED_LEN: usize = SIGNATURE_LENGTH;
+impl SizedCodec for Signature {
+    const LEN_CODEC: usize = SIGNATURE_LENGTH;
 }
 
 impl Hash for Signature {
