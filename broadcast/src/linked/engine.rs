@@ -18,7 +18,7 @@ use commonware_cryptography::{
         ops,
         poly::{self},
     },
-    Scheme,
+    Digest, Scheme,
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
@@ -30,7 +30,7 @@ use commonware_runtime::{
     Blob, Clock, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::{self, variable::Journal};
-use commonware_utils::{futures::Pool as FuturesPool, Array};
+use commonware_utils::futures::Pool as FuturesPool;
 use futures::{
     channel::{mpsc, oneshot},
     future::{self, Either},
@@ -45,7 +45,7 @@ use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
 /// Represents a pending verification request to the application.
-struct Verify<C: Scheme, D: Array, E: Clock> {
+struct Verify<C: Scheme, D: Digest, E: Clock> {
     timer: histogram::Timer<E>,
     context: Context<C::PublicKey>,
     payload: D,
@@ -57,7 +57,7 @@ pub struct Engine<
     B: Blob,
     E: Clock + Spawner + Storage<B> + Metrics,
     C: Scheme,
-    D: Array,
+    D: Digest,
     A: Application<Context = Context<C::PublicKey>, Digest = D> + Clone,
     Z: Collector<Digest = D>,
     S: ThresholdCoordinator<
@@ -187,7 +187,7 @@ impl<
         B: Blob,
         E: Clock + Spawner + Storage<B> + Metrics,
         C: Scheme,
-        D: Array,
+        D: Digest,
         A: Application<Context = Context<C::PublicKey>, Digest = D> + Clone,
         Z: Collector<Digest = D>,
         S: ThresholdCoordinator<
@@ -538,9 +538,7 @@ impl<
         };
         let proof =
             Prover::<C, D>::serialize_threshold(&context, &chunk.payload, epoch, &threshold);
-        self.collector
-            .acknowledged(proof, chunk.payload.clone())
-            .await;
+        self.collector.acknowledged(proof, chunk.payload).await;
     }
 
     /// Handles an ack
@@ -599,11 +597,11 @@ impl<
             sequencer: node.chunk.sequencer.clone(),
             height: node.chunk.height,
         };
-        let payload = node.chunk.payload.clone();
+        let payload = node.chunk.payload;
         let mut application = self.application.clone();
         let timer = self.metrics.verify_duration.timer();
         self.pending_verifies.push(async move {
-            let receiver = application.verify(context.clone(), payload.clone()).await;
+            let receiver = application.verify(context.clone(), payload).await;
             let result = receiver.await.map_err(Error::AppVerifyCanceled);
             Verify {
                 timer,
@@ -808,7 +806,7 @@ impl<
         let parent_chunk = parsed::Chunk {
             sequencer: sender.clone(),
             height: node.chunk.height.checked_sub(1).unwrap(),
-            payload: parent.payload.clone(),
+            payload: parent.payload,
         };
 
         // Verify parent threshold signature

@@ -1,7 +1,7 @@
 use super::relay::Relay;
 use crate::{threshold_simplex::Context, Automaton as Au, Committer as Co, Proof, Relay as Re};
 use bytes::{Buf, BufMut, Bytes};
-use commonware_cryptography::Hasher;
+use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Spawner};
 use commonware_utils::{Array, SizedSerialize};
@@ -17,7 +17,7 @@ use std::{
     time::Duration,
 };
 
-pub enum Message<D: Array> {
+pub enum Message<D: Digest> {
     Genesis {
         response: oneshot::Sender<D>,
     },
@@ -44,17 +44,17 @@ pub enum Message<D: Array> {
 }
 
 #[derive(Clone)]
-pub struct Mailbox<D: Array> {
+pub struct Mailbox<D: Digest> {
     sender: mpsc::Sender<Message<D>>,
 }
 
-impl<D: Array> Mailbox<D> {
+impl<D: Digest> Mailbox<D> {
     pub(super) fn new(sender: mpsc::Sender<Message<D>>) -> Self {
         Self { sender }
     }
 }
 
-impl<D: Array> Au for Mailbox<D> {
+impl<D: Digest> Au for Mailbox<D> {
     type Digest = D;
     type Context = Context<D>;
 
@@ -94,7 +94,7 @@ impl<D: Array> Au for Mailbox<D> {
     }
 }
 
-impl<D: Array> Re for Mailbox<D> {
+impl<D: Digest> Re for Mailbox<D> {
     type Digest = D;
 
     async fn broadcast(&mut self, payload: Self::Digest) {
@@ -105,7 +105,7 @@ impl<D: Array> Re for Mailbox<D> {
     }
 }
 
-impl<D: Array> Co for Mailbox<D> {
+impl<D: Digest> Co for Mailbox<D> {
     type Digest = D;
 
     async fn prepared(&mut self, proof: Proof, payload: Self::Digest) {

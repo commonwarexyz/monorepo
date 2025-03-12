@@ -1,4 +1,5 @@
 use crate::{linked::Context, Application as A, Broadcaster};
+use commonware_cryptography::Digest;
 use commonware_utils::Array;
 use futures::{
     channel::{mpsc, oneshot},
@@ -6,23 +7,23 @@ use futures::{
 };
 use tracing::error;
 
-enum Message<D: Array, P: Array> {
+enum Message<D: Digest, P: Array> {
     Broadcast(D),
     Verify(Context<P>, D, oneshot::Sender<bool>),
 }
 
 #[derive(Clone)]
-pub struct Mailbox<D: Array, P: Array> {
+pub struct Mailbox<D: Digest, P: Array> {
     sender: mpsc::Sender<Message<D, P>>,
 }
 
-impl<D: Array, P: Array> Mailbox<D, P> {
+impl<D: Digest, P: Array> Mailbox<D, P> {
     pub async fn broadcast(&mut self, payload: D) {
         let _ = self.sender.send(Message::Broadcast(payload)).await;
     }
 }
 
-impl<D: Array, P: Array> A for Mailbox<D, P> {
+impl<D: Digest, P: Array> A for Mailbox<D, P> {
     type Context = Context<P>;
     type Digest = D;
 
@@ -40,11 +41,11 @@ impl<D: Array, P: Array> A for Mailbox<D, P> {
     }
 }
 
-pub struct Application<D: Array, P: Array> {
+pub struct Application<D: Digest, P: Array> {
     mailbox: mpsc::Receiver<Message<D, P>>,
 }
 
-impl<D: Array, P: Array> Application<D, P> {
+impl<D: Digest, P: Array> Application<D, P> {
     pub fn new() -> (Self, Mailbox<D, P>) {
         let (sender, receiver) = mpsc::channel(1024);
         (Application { mailbox: receiver }, Mailbox { sender })

@@ -38,7 +38,7 @@ impl<H: CHasher> Default for Mmr<H> {
     }
 }
 
-impl<H: CHasher> Storage<H> for Mmr<H> {
+impl<H: CHasher> Storage<H::Digest> for Mmr<H> {
     async fn size(&self) -> Result<u64, Error> {
         Ok(self.size())
     }
@@ -204,7 +204,7 @@ impl<H: CHasher> Mmr<H> {
         if start_element_pos < self.oldest_retained_pos {
             return Err(ElementPruned);
         }
-        Proof::<H>::range_proof::<Mmr<H>>(self, start_element_pos, end_element_pos).await
+        Proof::<H>::range_proof(self, start_element_pos, end_element_pos).await
     }
 
     /// Prune all but the very last node.

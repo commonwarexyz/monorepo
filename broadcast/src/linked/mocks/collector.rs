@@ -1,6 +1,5 @@
 use crate::{linked::prover::Prover, Collector as Z, Proof};
-use commonware_cryptography::{bls12381::primitives::group, Scheme};
-use commonware_utils::Array;
+use commonware_cryptography::{bls12381::primitives::group, Digest, Scheme};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
@@ -11,14 +10,14 @@ use std::{
 };
 use tracing::error;
 
-enum Message<C: Scheme, D: Array> {
+enum Message<C: Scheme, D: Digest> {
     Acknowledged(Proof, D),
     GetTip(C::PublicKey, oneshot::Sender<Option<u64>>),
     GetContiguousTip(C::PublicKey, oneshot::Sender<Option<u64>>),
     Get(C::PublicKey, u64, oneshot::Sender<Option<D>>),
 }
 
-pub struct Collector<C: Scheme, D: Array> {
+pub struct Collector<C: Scheme, D: Digest> {
     mailbox: mpsc::Receiver<Message<C, D>>,
 
     // Application namespace
@@ -37,7 +36,7 @@ pub struct Collector<C: Scheme, D: Array> {
     highest: HashMap<C::PublicKey, u64>,
 }
 
-impl<C: Scheme, D: Array> Collector<C, D> {
+impl<C: Scheme, D: Digest> Collector<C, D> {
     pub fn new(namespace: &[u8], public: group::Public) -> (Self, Mailbox<C, D>) {
         let (sender, receiver) = mpsc::channel(1024);
         (
@@ -111,11 +110,11 @@ impl<C: Scheme, D: Array> Collector<C, D> {
 }
 
 #[derive(Clone)]
-pub struct Mailbox<C: Scheme, D: Array> {
+pub struct Mailbox<C: Scheme, D: Digest> {
     sender: mpsc::Sender<Message<C, D>>,
 }
 
-impl<C: Scheme, D: Array> Z for Mailbox<C, D> {
+impl<C: Scheme, D: Digest> Z for Mailbox<C, D> {
     type Digest = D;
     async fn acknowledged(&mut self, proof: Proof, payload: Self::Digest) {
         self.sender
@@ -125,7 +124,7 @@ impl<C: Scheme, D: Array> Z for Mailbox<C, D> {
     }
 }
 
-impl<C: Scheme, D: Array> Mailbox<C, D> {
+impl<C: Scheme, D: Digest> Mailbox<C, D> {
     pub async fn get_tip(&mut self, sequencer: C::PublicKey) -> Option<u64> {
         let (sender, receiver) = oneshot::channel();
         self.sender

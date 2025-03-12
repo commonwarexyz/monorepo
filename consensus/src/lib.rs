@@ -6,6 +6,7 @@
 //! expect breaking changes and occasional instability.
 
 use bytes::Bytes;
+use commonware_cryptography::Digest;
 use commonware_utils::Array;
 
 pub mod simplex;
@@ -35,7 +36,7 @@ cfg_if::cfg_if! {
 
         /// Parsed is a wrapper around a message that has a parsable digest.
         #[derive(Clone)]
-        struct Parsed<Message, Digest: Array> {
+        struct Parsed<Message, Digest> {
             /// Raw message that has some field that can be parsed into a digest.
             pub message: Message,
 
@@ -52,7 +53,7 @@ cfg_if::cfg_if! {
             type Context;
 
             /// Hash of an arbitrary payload.
-            type Digest: Array;
+            type Digest: Digest;
 
             /// Payload used to initialize the consensus engine.
             fn genesis(&mut self) -> impl Future<Output = Self::Digest> + Send;
@@ -84,7 +85,7 @@ cfg_if::cfg_if! {
         /// to the relay to efficiently broadcast the full payload to other participants.
         pub trait Relay: Clone + Send + 'static {
             /// Hash of an arbitrary payload.
-            type Digest: Array;
+            type Digest: Digest;
 
             /// Called once consensus begins working towards a proposal provided by `Automaton` (i.e.
             /// it isn't dropped).
@@ -97,7 +98,7 @@ cfg_if::cfg_if! {
         /// Committer is the interface responsible for handling notifications of payload status.
         pub trait Committer: Clone + Send + 'static {
             /// Hash of an arbitrary payload.
-            type Digest: Array;
+            type Digest: Digest;
 
             /// Event that a payload has made some progress towards finalization but is not yet finalized.
             ///

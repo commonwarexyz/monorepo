@@ -12,7 +12,8 @@ use commonware_cryptography::bls12381::primitives::{
     ops,
     poly::{self, Eval},
 };
-use commonware_utils::{Array, SizedSerialize};
+use commonware_cryptography::Digest;
+use commonware_utils::SizedSerialize;
 use std::marker::PhantomData;
 
 type Callback = Box<dyn Fn(&poly::Poly<group::Public>) -> Option<u32>>;
@@ -41,7 +42,7 @@ impl Verifier {
 /// We don't use protobuf for proof encoding because we expect external parties
 /// to decode proofs in constrained environments where protobuf may not be implemented.
 #[derive(Clone)]
-pub struct Prover<D: Array> {
+pub struct Prover<D: Digest> {
     public: group::Public,
 
     seed_namespace: Vec<u8>,
@@ -56,7 +57,7 @@ pub struct Prover<D: Array> {
 /// over pre-aggregated data (where the public key of each index can be derived from the group
 /// polynomial). This can be very useful for distributing rewards without including all partial signatures
 /// in a block.
-impl<D: Array> Prover<D> {
+impl<D: Digest> Prover<D> {
     /// Create a new prover with the given signing `namespace`.
     pub fn new(public: group::Public, namespace: &[u8]) -> Self {
         Self {

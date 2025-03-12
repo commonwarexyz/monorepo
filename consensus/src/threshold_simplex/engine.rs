@@ -6,13 +6,12 @@ use super::{
 use crate::{Automaton, Committer, Relay, ThresholdSupervisor};
 use commonware_cryptography::{
     bls12381::primitives::{group, poly},
-    Scheme,
+    Digest, Scheme,
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Sender};
 use commonware_runtime::{Blob, Clock, Handle, Metrics, Spawner, Storage};
 use commonware_storage::journal::variable::Journal;
-use commonware_utils::Array;
 use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
 use tracing::debug;
@@ -22,7 +21,7 @@ pub struct Engine<
     B: Blob,
     E: Clock + GClock + Rng + CryptoRng + Spawner + Storage<B> + Metrics,
     C: Scheme,
-    D: Array,
+    D: Digest,
     A: Automaton<Context = Context<D>, Digest = D>,
     R: Relay<Digest = D>,
     F: Committer<Digest = D>,
@@ -46,7 +45,7 @@ impl<
         B: Blob,
         E: Clock + GClock + Rng + CryptoRng + Spawner + Storage<B> + Metrics,
         C: Scheme,
-        D: Array,
+        D: Digest,
         A: Automaton<Context = Context<D>, Digest = D>,
         R: Relay<Digest = D>,
         F: Committer<Digest = D>,
