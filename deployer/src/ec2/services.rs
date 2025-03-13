@@ -138,8 +138,8 @@ storage_config:
   filesystem:
     directory: /loki/chunks
 table_manager:
-  retention_deletes_enabled: false
-  retention_period: 0s
+  retention_deletes_enabled: true
+  retention_period: 4h
 compactor:
   working_directory: /loki/compactor
 ingester:
@@ -249,6 +249,11 @@ pub const INSTALL_BINARY_CMD: &str = r#"
 chmod +x /home/ubuntu/binary
 sudo touch /var/log/binary.log && sudo chown ubuntu:ubuntu /var/log/binary.log
 sudo mv /home/ubuntu/binary.service /etc/systemd/system/binary.service
+sudo apt-get update -y
+sudo apt-get install -y logrotate
+sudo mv /home/ubuntu/logrotate.conf /etc/logrotate.d/binary
+sudo chown root:root /etc/logrotate.d/binary
+echo "0 * * * * /usr/sbin/logrotate /etc/logrotate.d/binary" | crontab -
 sudo systemctl daemon-reload
 sudo systemctl start binary
 sudo systemctl enable binary
@@ -345,6 +350,16 @@ scrape_configs:
     }
     config
 }
+
+/// Logrotate configuration for binary logs
+pub const LOGROTATE_CONF: &str = r#"
+/var/log/binary.log {
+    rotate 0
+    copytruncate
+    missingok
+    notifempty
+}
+"#;
 
 /// Configuration for BBR sysctl settings
 pub const BBR_CONF: &str = "net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr\n";
