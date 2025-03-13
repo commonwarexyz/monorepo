@@ -33,32 +33,29 @@ pub fn decode_varint(buf: &mut impl Buf) -> Result<u64, Error> {
     let mut result = 0u64;
     let mut shift = 0;
 
+    // Loop over all the bytes.
     loop {
+        // Read the next byte.
         if !buf.has_remaining() {
             return Err(Error::EndOfBuffer);
         }
-
         let byte = buf.get_u8();
-        if shift > 63 && byte > 1 {
+
+        // If we have read more than 9 bytes, the next byte must be 0 or 1.
+        if shift >= (9 * 7) && byte > 1 {
             return Err(Error::InvalidVarint);
         }
 
+        // Write the 7 bits of data to the result.
         result |= ((byte & 0x7F) as u64) << shift;
 
+        // If the continuation bit is not set, return.
         if byte & 0x80 == 0 {
             return Ok(result);
         }
 
+        // Each byte has 7 bits of data.
         shift += 7;
-
-        if shift > 63 {
-            // We've read 9 bytes but still have the continuation bit set,
-            // which would push our value beyond the range of u64
-            if buf.has_remaining() && buf.get_u8() & 0x80 != 0 {
-                return Err(Error::InvalidVarint);
-            }
-            return Ok(result);
-        }
     }
 }
 
@@ -78,41 +75,30 @@ pub fn varint_size(value: u64) -> usize {
     }
 }
 
-/// Encodes a unsigned 32-bit integer as a varint (more efficient than u64 version)
-pub fn encode_varint_u32(value: u32, buf: &mut impl BufMut) {
-    if value < 0x80 {
-        // Fast path for small values
-        buf.put_u8(value as u8);
-        return;
-    }
+/// Converts a signed integer to an unsigned integer using ZigZag encoding
+fn to_u64(value: i64) -> u64 {
+    ((value << 1) ^ (value >> 63)) as u64
+}
 
-    let mut val = value;
-    while val >= 0x80 {
-        buf.put_u8((val as u8) | 0x80);
-        val >>= 7;
-    }
-    buf.put_u8(val as u8);
+/// Converts an unsigned integer to a signed integer using ZigZag encoding
+fn to_i64(value: u64) -> i64 {
+    ((value >> 1) as i64) ^ (-((value & 1) as i64))
 }
 
 /// Encodes a signed 64-bit integer as a varint using ZigZag encoding
-pub fn encode_varint_i64(value: i64, buf: &mut impl BufMut) {
-    // Convert to ZigZag encoding
-    let zigzag = ((value << 1) ^ (value >> 63)) as u64;
-    encode_varint(zigzag, buf);
+pub fn encode_svarint(value: i64, buf: &mut impl BufMut) {
+    encode_varint(to_u64(value), buf);
 }
 
 /// Decodes a signed 64-bit integer from a varint using ZigZag encoding
-pub fn decode_varint_i64(buf: &mut impl Buf) -> Result<i64, Error> {
+pub fn decode_svarint(buf: &mut impl Buf) -> Result<i64, Error> {
     let zigzag = decode_varint(buf)?;
-    // Convert from ZigZag encoding
-    Ok(((zigzag >> 1) as i64) ^ (-((zigzag & 1) as i64)))
+    Ok(to_i64(zigzag))
 }
 
-/// Encodes a signed 32-bit integer as a varint using ZigZag encoding
-pub fn encode_varint_i32(value: i32, buf: &mut impl BufMut) {
-    // Convert to ZigZag encoding
-    let zigzag = ((value << 1) ^ (value >> 31)) as u32;
-    encode_varint_u32(zigzag, buf);
+/// Calculates the number of bytes needed to encode a signed integer as a varint
+pub fn svarint_size(value: i64) -> usize {
+    varint_size(to_u64(value))
 }
 
 #[cfg(test)]
@@ -183,10 +169,10 @@ mod tests {
 
         for &value in &test_cases {
             let mut buf = Vec::new();
-            encode_varint_i64(value, &mut buf);
+            encode_svarint(value, &mut buf);
 
             let mut read_buf = &buf[..];
-            let decoded = decode_varint_i64(&mut read_buf).unwrap();
+            let decoded = decode_svarint(&mut read_buf).unwrap();
 
             assert_eq!(decoded, value, "Failed for value: {}", value);
             assert_eq!(
