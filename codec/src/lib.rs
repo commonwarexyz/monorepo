@@ -10,7 +10,7 @@
 //! # Example
 //!
 //! ```
-//! use commonware_codec::{Codec};
+//! use commonware_codec::{Codec, Reader, Writer, Error};
 //!
 //! // Define a custom struct
 //! #[derive(Debug, Clone, PartialEq)]
@@ -24,9 +24,9 @@
 //! impl Codec for Point {
 //!     fn write(&self, writer: &mut impl Writer) {
 //!         // Basic types can be written by inferring the type
-//!         writer.write(self.xy);
-//!         writer.write(self.z);
-//!         writer.write(self.metadata);
+//!         writer.write(&self.xy);
+//!         writer.write(&self.z);
+//!         writer.write(&self.metadata);
 //!     }
 //!
 //!     fn read(reader: &mut impl Reader) -> Result<Self, Error> {
@@ -35,6 +35,10 @@
 //!         let z = reader.read()?;
 //!         let metadata = reader.read()?;
 //!         Ok(Self { xy, z, metadata })
+//!     }
+//! 
+//!     fn len_encoded(&self) -> usize {
+//!       self.xy.len_encoded() + self.z.len_encoded() + self.metadata.len_encoded()
 //!     }
 //! }
 //! ```
