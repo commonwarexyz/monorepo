@@ -151,10 +151,12 @@ pub mod aws;
 mod create;
 pub mod services;
 pub use create::create;
-mod destroy;
-pub use destroy::destroy;
 mod update;
 pub use update::update;
+mod refresh;
+pub use refresh::refresh;
+mod destroy;
+pub use destroy::destroy;
 pub mod utils;
 
 /// Name of the monitoring instance
@@ -171,6 +173,9 @@ pub const CREATE_CMD: &str = "create";
 
 /// Update subcommand name
 pub const UPDATE_CMD: &str = "update";
+
+/// Refresh subcommand name
+pub const REFRESH_CMD: &str = "refresh";
 
 /// Destroy subcommand name
 pub const DESTROY_CMD: &str = "destroy";
