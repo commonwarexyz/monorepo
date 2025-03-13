@@ -22,6 +22,11 @@ jobs:
       continue-on-error: true
       env:
         CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    - name: Publish codec
+      run: cargo publish --manifest-path codec/Cargo.toml
+      continue-on-error: true
+      env:
+        CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     - name: Publish utils
       run: cargo publish --manifest-path utils/Cargo.toml
       continue-on-error: true
