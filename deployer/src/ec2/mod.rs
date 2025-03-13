@@ -104,7 +104,8 @@
 //!
 //! ## `ec2 refresh`
 //!
-//! 1.
+//! 1. Obtains the deployer's current public IP address.
+//! 2. For each security group in the deployment, adds an ingress rule for the deployer's IP (if it doesn't already exist).
 //!
 //! ## `ec2 destroy`
 //!
