@@ -130,7 +130,7 @@ schema_config:
       schema: v13
       index:
         prefix: index_
-        period: 24h
+        period: 12h
 storage_config:
   tsdb_shipper:
     active_index_directory: /loki/index
@@ -139,7 +139,7 @@ storage_config:
     directory: /loki/chunks
 table_manager:
   retention_deletes_enabled: true
-  retention_period: 4h
+  retention_period: 12h
 compactor:
   working_directory: /loki/compactor
 ingester:
