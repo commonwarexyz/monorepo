@@ -487,6 +487,7 @@ pub struct Actor<
     notarization_timeout: Duration,
     nullify_retry: Duration,
     activity_timeout: View,
+    skip_timeout: View,
 
     mailbox_receiver: mpsc::Receiver<Message<D>>,
 
@@ -496,6 +497,7 @@ pub struct Actor<
 
     current_view: Gauge,
     tracked_views: Gauge,
+    skipped_views: Counter,
     received_messages: Family<metrics::PeerMessage, Counter>,
     broadcast_messages: Family<metrics::Message, Counter>,
     notarization_latency: Histogram,
@@ -526,12 +528,14 @@ impl<
         // Initialize metrics
         let current_view = Gauge::<i64, AtomicI64>::default();
         let tracked_views = Gauge::<i64, AtomicI64>::default();
+        let skipped_views = Counter::default();
         let received_messages = Family::<metrics::PeerMessage, Counter>::default();
         let broadcast_messages = Family::<metrics::Message, Counter>::default();
         let notarization_latency = Histogram::new(LATENCY.into_iter());
         let finalization_latency = Histogram::new(LATENCY.into_iter());
         context.register("current_view", "current view", current_view.clone());
         context.register("tracked_views", "tracked views", tracked_views.clone());
+        context.register("skipped_views", "skipped views", skipped_views.clone());
         context.register(
             "received_messages",
             "received messages",
@@ -579,6 +583,7 @@ impl<
                 nullify_retry: cfg.nullify_retry,
 
                 activity_timeout: cfg.activity_timeout,
+                skip_timeout: cfg.skip_timeout,
 
                 mailbox_receiver,
 
@@ -588,6 +593,7 @@ impl<
 
                 current_view,
                 tracked_views,
+                skipped_views,
                 received_messages,
                 broadcast_messages,
                 notarization_latency,
@@ -1097,14 +1103,14 @@ impl<
         self.view = view;
         info!(view, "entered view");
 
-        // Check if we should fast exit this view
+        // Check if we should skip this view
         let leader = round.leader.clone();
-        if view < self.activity_timeout || leader == self.crypto.public_key() {
-            // Don't fast exit the view
+        if view < self.skip_timeout || leader == self.crypto.public_key() {
+            // Don't skip the view
             return;
         }
         let mut next = view - 1;
-        while next > view - self.activity_timeout {
+        while next > view - self.skip_timeout {
             let leader_index = match self.supervisor.is_participant(next, &leader) {
                 Some(index) => index,
                 None => {
@@ -1129,6 +1135,7 @@ impl<
 
         // Reduce leader deadline to now
         debug!(view, ?leader, "skipping leader timeout due to inactivity");
+        self.skipped_views.inc();
         self.views.get_mut(&view).unwrap().leader_deadline = Some(self.context.current());
     }
 

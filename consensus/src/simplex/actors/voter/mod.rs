@@ -30,5 +30,6 @@ pub struct Config<
     pub notarization_timeout: Duration,
     pub nullify_retry: Duration,
     pub activity_timeout: View,
+    pub skip_timeout: View,
     pub replay_concurrency: usize,
 }
