@@ -52,8 +52,15 @@ pub struct Config<
     pub nullify_retry: Duration,
 
     /// Number of views behind finalized tip to track
-    /// activity derived from validator messages.
+    /// and persist activity derived from validator messages.
     pub activity_timeout: View,
+
+    /// Move to nullify immediately if the selected leader has been inactive
+    /// for this many views.
+    ///
+    /// This number should be less than or equal to `activity_timeout` (how
+    /// many views we are tracking).
+    pub skip_timeout: View,
 
     /// Timeout to wait for a peer to respond to a request.
     pub fetch_timeout: Duration,
@@ -103,6 +110,14 @@ impl<
         assert!(
             self.activity_timeout > 0,
             "activity timeout must be greater than zero"
+        );
+        assert!(
+            self.skip_timeout > 0,
+            "skip timeout must be greater than zero"
+        );
+        assert!(
+            self.skip_timeout <= self.activity_timeout,
+            "skip timeout must be less than or equal to activity timeout"
         );
         assert!(
             self.fetch_timeout > Duration::default(),

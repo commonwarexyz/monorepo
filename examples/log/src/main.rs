@@ -228,6 +228,7 @@ fn main() {
                 nullify_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
                 activity_timeout: 10,
+                skip_timeout: 5,
                 max_fetch_count: 32,
                 max_fetch_size: 1024 * 512,
                 fetch_concurrent: 2,

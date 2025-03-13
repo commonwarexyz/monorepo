@@ -65,6 +65,7 @@ impl<
                 notarization_timeout: cfg.notarization_timeout,
                 nullify_retry: cfg.nullify_retry,
                 activity_timeout: cfg.activity_timeout,
+                skip_timeout: cfg.skip_timeout,
                 replay_concurrency: cfg.replay_concurrency,
             },
         );

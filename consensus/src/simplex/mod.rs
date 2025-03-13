@@ -285,6 +285,7 @@ mod tests {
         let max_exceptions = 4;
         let required_containers = 100;
         let activity_timeout = 10;
+        let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
         let (executor, context, _) = Executor::timed(Duration::from_secs(30));
         executor.start(async move {
@@ -372,6 +373,7 @@ mod tests {
                     nullify_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
+                    skip_timeout,
                     max_fetch_count: 1,
                     max_fetch_size: 1024 * 512,
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
@@ -493,6 +495,7 @@ mod tests {
         let n = 5;
         let required_containers = 100;
         let activity_timeout = 10;
+        let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
 
         // Random restarts every x seconds
@@ -596,6 +599,7 @@ mod tests {
                         nullify_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
+skip_timeout,
                         max_fetch_count: 1,
                         max_fetch_size: 1024 * 512,
                         fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
@@ -708,6 +712,7 @@ mod tests {
         let n = 4;
         let required_containers = 100;
         let activity_timeout = 10;
+        let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
         let (executor, context, _) = Executor::timed(Duration::from_secs(360));
         executor.start(async move {
@@ -806,6 +811,7 @@ mod tests {
                     nullify_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
+                    skip_timeout,
                     max_fetch_count: 1, // force many fetches
                     max_fetch_size: 1024 * 1024,
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
@@ -940,6 +946,7 @@ mod tests {
                     nullify_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
+                    skip_timeout,
                     max_fetch_count: 1,
                     max_fetch_size: 1024 * 512,
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
@@ -992,6 +999,7 @@ mod tests {
         let n = 5;
         let required_containers = 100;
         let activity_timeout = 10;
+        let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
         let (executor, context, _) = Executor::timed(Duration::from_secs(30));
         executor.start(async move {
@@ -1090,6 +1098,7 @@ mod tests {
                     nullify_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
+                    skip_timeout,
                     max_fetch_count: 1,
                     max_fetch_size: 1024 * 512,
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
@@ -1175,6 +1184,7 @@ mod tests {
         let n = 5;
         let required_containers = 50;
         let activity_timeout = 10;
+        let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
         let (executor, context, _) = Executor::timed(Duration::from_secs(30));
         executor.start(async move {
@@ -1273,6 +1283,7 @@ mod tests {
                     nullify_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
+                    skip_timeout,
                     max_fetch_count: 1,
                     max_fetch_size: 1024 * 512,
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
@@ -1358,6 +1369,7 @@ mod tests {
         let n = 5;
         let required_containers = 100;
         let activity_timeout = 10;
+        let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
         let (executor, context, _) = Executor::timed(Duration::from_secs(120));
         executor.start(async move {
@@ -1445,6 +1457,7 @@ mod tests {
                     nullify_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
+                    skip_timeout,
                     max_fetch_count: 1,
                     max_fetch_size: 1024 * 512,
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
@@ -1523,6 +1536,7 @@ mod tests {
         let n = 10;
         let required_containers = 50;
         let activity_timeout = 10;
+        let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
         let (executor, context, _) = Executor::timed(Duration::from_secs(900));
         executor.start(async move {
@@ -1607,6 +1621,7 @@ mod tests {
                     nullify_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
+                    skip_timeout,
                     max_fetch_count: 1,
                     max_fetch_size: 1024 * 512,
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
@@ -1737,6 +1752,7 @@ mod tests {
         let n = 5;
         let required_containers = 50;
         let activity_timeout = 10;
+        let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config {
             seed,
@@ -1829,6 +1845,7 @@ mod tests {
                     nullify_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
+                    skip_timeout,
                     max_fetch_count: 1,
                     max_fetch_size: 1024 * 512,
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
@@ -1913,6 +1930,7 @@ mod tests {
         let n = 4;
         let required_containers = 50;
         let activity_timeout = 10;
+        let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
         let (executor, context, _) = Executor::timed(Duration::from_secs(30));
         executor.start(async move {
@@ -2015,6 +2033,7 @@ mod tests {
                         nullify_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
+                        skip_timeout,
                         max_fetch_count: 1,
                         max_fetch_size: 1024 * 512,
                         fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
@@ -2097,6 +2116,7 @@ mod tests {
         let n = 4;
         let required_containers = 50;
         let activity_timeout = 10;
+        let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
         let (executor, context, _) = Executor::timed(Duration::from_secs(30));
         executor.start(async move {
@@ -2196,6 +2216,7 @@ mod tests {
                         nullify_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
+                        skip_timeout,
                         max_fetch_count: 1,
                         max_fetch_size: 1024 * 512,
                         fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
