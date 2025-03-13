@@ -1,4 +1,8 @@
-//! Buffer implementation with advanced safety features
+//! Buffer implementation of codec types.
+//!
+//! Numeric types are encoded in big-endian byte order.
+//!
+//! Prefixes varints for length-encoded data.
 
 use crate::{error::Error, varint};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -159,12 +163,6 @@ impl WriteBuffer {
         }
     }
 
-    /// Returns the remaining capacity of the buffer
-    #[inline]
-    pub fn remaining(&self) -> usize {
-        self.inner.remaining()
-    }
-
     /// Writes a varint-encoded unsigned integer
     #[inline]
     pub fn write_varint(&mut self, value: u64) {
@@ -175,6 +173,17 @@ impl WriteBuffer {
     #[inline]
     pub fn len(&self) -> usize {
         self.inner.len()
+    }
+
+    /// Returns the total capacity of the buffer
+    #[inline]
+    pub fn capacity(&self) -> usize {
+        self.inner.capacity()
+    }
+
+    #[inline]
+    pub fn remaining_mut(&mut self) -> usize {
+        self.inner.remaining_mut()
     }
 
     /// Checks if the buffer is empty
@@ -275,5 +284,37 @@ impl From<WriteBuffer> for Bytes {
 impl AsRef<[u8]> for WriteBuffer {
     fn as_ref(&self) -> &[u8] {
         &self.inner
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Reader;
+    use bytes::Bytes;
+
+    #[test]
+    fn test_read_buffer_split() {
+        let mut buffer = ReadBuffer::new(Bytes::from_static(&[0x01, 0x02, 0x03]));
+        let split = buffer.split_to(2).unwrap();
+        assert_eq!(split, Bytes::from_static(&[0x01, 0x02]));
+        assert_eq!(buffer.remaining(), 1);
+        assert_eq!(buffer.read_n_bytes(1).unwrap(), Bytes::from_static(&[0x03]));
+    }
+
+    #[test]
+    fn test_write_buffer_append() {
+        let mut writer = WriteBuffer::new(4);
+        writer.put_u32(0x01020304);
+        let frozen = writer.freeze();
+        assert_eq!(frozen, Bytes::from_static(&[0x01, 0x02, 0x03, 0x04]));
+    }
+
+    #[test]
+    fn test_buffer_remaining() {
+        let mut buffer = ReadBuffer::new(Bytes::from_static(&[0x01, 0x02, 0x03]));
+        assert_eq!(buffer.remaining(), 3);
+        let _ = buffer.read_n_bytes(2).unwrap();
+        assert_eq!(buffer.remaining(), 1);
     }
 }

@@ -19,9 +19,10 @@ pub trait Codec: Sized {
 
     /// Encodes a value to bytes.
     fn encode(&self) -> Vec<u8> {
-        let mut buffer = WriteBuffer::new(self.len_encoded());
+        let len = self.len_encoded();
+        let mut buffer = WriteBuffer::new(len);
         self.write(&mut buffer);
-        assert!(buffer.remaining() == 0);
+        assert!(buffer.len() == len);
         buffer.into()
     }
 
@@ -395,5 +396,91 @@ impl Writer for WriteBuffer {
         for value in values {
             self.write(value);
         }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::buffer::{ReadBuffer, WriteBuffer};
+    use crate::error::Error;
+    use bytes::Bytes;
+
+    #[test]
+    fn test_insufficient_buffer() {
+        let mut reader = ReadBuffer::new(Bytes::from_static(&[0x01, 0x02]));
+        assert!(matches!(u32::read(&mut reader), Err(Error::EndOfBuffer)));
+    }
+
+    #[test]
+    fn test_extra_data() {
+        let encoded = Bytes::from_static(&[0x01, 0x02]);
+        assert!(matches!(u8::decode(encoded), Err(Error::ExtraData(1))));
+    }
+
+    #[test]
+    fn test_invalid_bool() {
+        let encoded = Bytes::from_static(&[0x02]);
+        assert!(matches!(bool::decode(encoded), Err(Error::InvalidBool)));
+    }
+
+    #[test]
+    fn test_invalid_varint() {
+        let encoded = Bytes::from_static(&[
+            0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
+        ]);
+        assert!(matches!(
+            ReadBuffer::new(encoded).read_varint(),
+            Err(Error::InvalidVarint)
+        ));
+    }
+
+    #[test]
+    fn test_length_limit_exceeded() {
+        let mut writer = WriteBuffer::new(10);
+        writer.write_bytes(&[1, 2, 3, 4, 5, 6]);
+        let mut reader = ReadBuffer::new(writer.freeze());
+        assert!(matches!(
+            reader.read_bytes_lte(5),
+            Err(Error::LengthExceeded(6, 5))
+        ));
+    }
+    #[test]
+    fn test_bytes_lte_success() {
+        let mut writer = WriteBuffer::new(10);
+        writer.write_bytes(&[1, 2, 3]);
+        let mut reader = ReadBuffer::new(writer.freeze());
+        let result = reader.read_bytes_lte(5).unwrap();
+        assert_eq!(result, Bytes::from_static(&[1, 2, 3]));
+    }
+
+    #[test]
+    fn test_bytes_lte_exceeded() {
+        let mut writer = WriteBuffer::new(10);
+        writer.write_bytes(&[1, 2, 3, 4, 5, 6]);
+        let mut reader = ReadBuffer::new(writer.freeze());
+        assert!(matches!(
+            reader.read_bytes_lte(5),
+            Err(Error::LengthExceeded(6, 5))
+        ));
+    }
+
+    #[test]
+    fn test_vec_lte_success() {
+        let mut writer = WriteBuffer::new(10);
+        writer.write_vec(&[1u8, 2u8]);
+        let mut reader = ReadBuffer::new(writer.freeze());
+        let result = reader.read_vec_lte::<u8>(3).unwrap();
+        assert_eq!(result, vec![1u8, 2u8]);
+    }
+
+    #[test]
+    fn test_vec_lte_exceeded() {
+        let mut writer = WriteBuffer::new(10);
+        writer.write_vec(&[1u8, 2u8, 3u8]);
+        let mut reader = ReadBuffer::new(writer.freeze());
+        assert!(matches!(
+            reader.read_vec_lte::<u8>(2),
+            Err(Error::LengthExceeded(3, 2))
+        ));
     }
 }

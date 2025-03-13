@@ -118,6 +118,8 @@ pub fn encode_varint_i32(value: i32, buf: &mut impl BufMut) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::Error;
+    use bytes::Bytes;
 
     #[test]
     fn test_varint_encoding() {
@@ -194,5 +196,37 @@ mod tests {
                 value
             );
         }
+    }
+
+    #[test]
+    fn test_varint_small_values() {
+        let values = [0u64, 1u64, 127u64];
+        for value in values {
+            let mut buf = Vec::new();
+            encode_varint(value, &mut buf);
+            let mut read_buf = Bytes::from(buf);
+            let decoded = decode_varint(&mut read_buf).unwrap();
+            assert_eq!(decoded, value);
+            assert_eq!(read_buf.len(), 0);
+        }
+    }
+
+    #[test]
+    fn test_varint_multi_byte() {
+        let values = [128u64, 300u64, u64::MAX];
+        for value in values {
+            let mut buf = Vec::new();
+            encode_varint(value, &mut buf);
+            let mut read_buf = Bytes::from(buf);
+            let decoded = decode_varint(&mut read_buf).unwrap();
+            assert_eq!(decoded, value);
+            assert_eq!(read_buf.len(), 0);
+        }
+    }
+
+    #[test]
+    fn test_varint_insufficient_buffer() {
+        let mut buf = Bytes::from_static(&[0x80]); // Incomplete varint
+        assert!(matches!(decode_varint(&mut buf), Err(Error::EndOfBuffer)));
     }
 }

@@ -1,11 +1,20 @@
 //! Serialize structured data.
 //!
-//! This crate provides a binary serialization framework with strong safety guarantees,
-//! better performance, and a more ergonomic API.
+//! # Overview
 //!
-//! # Endianness
+//! A binary serialization library designed to efficiently and safely:
+//! - Serialize structured data into a binary format
+//! - Deserialize untrusted binary input into structured data
 //!
-//! All multi-byte values are encoded in network byte order (big-endian).
+//! # Supported Types
+//!
+//! Natively supports:
+//! - Primitives: `u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`, `i64`, `f32`, `f64`, `bool`
+//! - Collections: `Vec<T>`, `Option<T>`, tuples, and fixed-size arrays like `[u8; N]`
+//! - Recursive serialization of nested structs and enums via trait implementations
+//!
+//! User-defined types can be serialized and deserialized by implementing the `Codec` trait.
+//! For types with a constant encoded size, optionally implement the `SizedCodec` trait.
 //!
 //! # Example
 //!
