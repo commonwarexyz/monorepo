@@ -171,12 +171,6 @@ impl WriteBuffer {
         varint::encode_varint(value, &mut self.inner);
     }
 
-    /// Reserves capacity for additional bytes
-    #[inline]
-    pub fn reserve(&mut self, additional: usize) {
-        self.inner.reserve(additional);
-    }
-
     /// Returns the current length of the buffer
     #[inline]
     pub fn len(&self) -> usize {

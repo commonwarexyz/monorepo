@@ -62,7 +62,7 @@ impl Codec for Bytes {
 
     #[inline]
     fn read(reader: &mut impl Reader) -> Result<Self, Error> {
-        reader.read_var_bytes()
+        reader.read_bytes()
     }
 }
 

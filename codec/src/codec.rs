@@ -3,7 +3,6 @@
 use crate::{
     buffer::{ReadBuffer, WriteBuffer},
     error::Error,
-    varint,
 };
 use bytes::Bytes;
 
@@ -100,19 +99,16 @@ pub trait Reader {
     fn read_varint(&mut self) -> Result<u64, Error>;
 
     /// Reads bytes with a length prefix
-    fn read_var_bytes(&mut self) -> Result<Bytes, Error>;
+    fn read_bytes(&mut self) -> Result<Bytes, Error>;
 
     /// Reads bytes with a length prefix, with a limit on the number of bytes.
     /// Returns an error if the length exceeds the max.
-    fn read_lte_n_bytes(&mut self, max: usize) -> Result<Bytes, Error>;
+    fn read_bytes_lte(&mut self, max: usize) -> Result<Bytes, Error>;
 
-    /// Reads a given number of bytes
+    /// Reads a fixed number of bytes
     fn read_n_bytes(&mut self, n: usize) -> Result<Bytes, Error>;
 
-    /// Reads a byte vector with a length prefix
-    fn read_vec_bytes(&mut self) -> Result<Vec<u8>, Error>;
-
-    /// Reads a fixed-size byte array
+    /// Reads a fixed number of bytes into a fixed-size byte array
     fn read_fixed<const N: usize>(&mut self) -> Result<[u8; N], Error>;
 
     /// Reads a boolean value
@@ -125,7 +121,7 @@ pub trait Reader {
     fn read_vec<T: Codec>(&mut self) -> Result<Vec<T>, Error>;
 
     /// Reads a vector with a length prefix, with a limit on the number of elements
-    fn read_vec_bounded<T: Codec>(&mut self, limit: usize) -> Result<Vec<T>, Error>;
+    fn read_vec_lte<T: Codec>(&mut self, max: usize) -> Result<Vec<T>, Error>;
 }
 
 /// Trait for codec write operations
@@ -246,7 +242,7 @@ impl Reader for ReadBuffer {
         self.read_varint()
     }
 
-    fn read_var_bytes(&mut self) -> Result<Bytes, Error> {
+    fn read_bytes(&mut self) -> Result<Bytes, Error> {
         let len = self.read_varint()? as usize;
         self.read_n_bytes(len)
     }
@@ -256,19 +252,12 @@ impl Reader for ReadBuffer {
         Ok(bytes)
     }
 
-    fn read_lte_n_bytes(&mut self, max: usize) -> Result<Bytes, Error> {
+    fn read_bytes_lte(&mut self, max: usize) -> Result<Bytes, Error> {
         let len = self.read_varint()? as usize;
         if len > max {
             return Err(Error::LengthExceeded(len, max));
         }
         self.read_n_bytes(len)
-    }
-
-    fn read_vec_bytes(&mut self) -> Result<Vec<u8>, Error> {
-        let len = self.read_varint()? as usize;
-        let mut bytes = vec![0u8; len];
-        self.copy_to_slice(&mut bytes)?;
-        Ok(bytes)
     }
 
     fn read_fixed<const N: usize>(&mut self) -> Result<[u8; N], Error> {
@@ -304,11 +293,11 @@ impl Reader for ReadBuffer {
         Ok(items)
     }
 
-    fn read_vec_bounded<T: Codec>(&mut self, limit: usize) -> Result<Vec<T>, Error> {
+    fn read_vec_lte<T: Codec>(&mut self, max: usize) -> Result<Vec<T>, Error> {
         let len = self.read_varint()? as usize;
 
-        if len > limit {
-            return Err(Error::LengthExceeded(len, limit));
+        if len > max {
+            return Err(Error::LengthExceeded(len, max));
         }
 
         let mut items = Vec::with_capacity(len);
@@ -378,10 +367,8 @@ impl Writer for WriteBuffer {
     }
 
     fn write_bytes(&mut self, bytes: &[u8]) {
-        let len = bytes.len();
-        self.reserve(varint::varint_size(len as u64) + len);
-        self.write_varint(len as u64);
-        self.put_slice(bytes);
+        self.write_varint(bytes.len() as u64);
+        self.write_fixed(bytes);
     }
 
     fn write_fixed(&mut self, bytes: &[u8]) {
@@ -405,9 +392,7 @@ impl Writer for WriteBuffer {
     }
 
     fn write_vec<T: Codec>(&mut self, values: &[T]) {
-        let len = values.len().min(u64::MAX as usize) as u64;
-        self.write_varint(len);
-
+        self.write_varint(values.len() as u64);
         for value in values {
             self.write(value);
         }

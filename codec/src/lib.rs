@@ -36,7 +36,7 @@
 //!         let metadata = reader.read()?;
 //!         Ok(Self { xy, z, metadata })
 //!     }
-//! 
+//!
 //!     fn len_encoded(&self) -> usize {
 //!       self.xy.len_encoded() + self.z.len_encoded() + self.metadata.len_encoded()
 //!     }
