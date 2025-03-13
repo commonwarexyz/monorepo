@@ -189,7 +189,6 @@ pub trait Hasher: Clone + Send + Sync + 'static {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_utils::SizedSerialize;
     use rand::rngs::OsRng;
 
     fn test_validate<C: Scheme>() {
@@ -331,8 +330,8 @@ mod tests {
 
     #[test]
     fn test_ed25519_len() {
-        assert_eq!(<Ed25519 as Scheme>::PublicKey::SERIALIZED_LEN, 32);
-        assert_eq!(<Ed25519 as Scheme>::Signature::SERIALIZED_LEN, 64);
+        assert_eq!(<Ed25519 as Scheme>::PublicKey::LEN_CODEC, 32);
+        assert_eq!(<Ed25519 as Scheme>::Signature::LEN_CODEC, 64);
     }
 
     #[test]
@@ -382,8 +381,8 @@ mod tests {
 
     #[test]
     fn test_bls12381_len() {
-        assert_eq!(<Bls12381 as Scheme>::PublicKey::SERIALIZED_LEN, 48);
-        assert_eq!(<Bls12381 as Scheme>::Signature::SERIALIZED_LEN, 96);
+        assert_eq!(<Bls12381 as Scheme>::PublicKey::LEN_CODEC, 48);
+        assert_eq!(<Bls12381 as Scheme>::Signature::LEN_CODEC, 96);
     }
 
     #[test]
@@ -433,8 +432,8 @@ mod tests {
 
     #[test]
     fn test_secp256r1_len() {
-        assert_eq!(<Secp256r1 as Scheme>::PublicKey::SERIALIZED_LEN, 33);
-        assert_eq!(<Secp256r1 as Scheme>::Signature::SERIALIZED_LEN, 64);
+        assert_eq!(<Secp256r1 as Scheme>::PublicKey::LEN_CODEC, 33);
+        assert_eq!(<Secp256r1 as Scheme>::Signature::LEN_CODEC, 64);
     }
 
     fn test_hasher_multiple_runs<H: Hasher>() {
@@ -443,7 +442,7 @@ mod tests {
         hasher.update(b"hello world");
         let digest = hasher.finalize();
         assert!(H::Digest::try_from(digest.as_ref()).is_ok());
-        assert_eq!(digest.as_ref().len(), H::Digest::SERIALIZED_LEN);
+        assert_eq!(digest.as_ref().len(), H::Digest::LEN_CODEC);
 
         // Reuse hasher without reset
         hasher.update(b"hello world");

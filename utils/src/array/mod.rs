@@ -1,5 +1,4 @@
-use crate::SizedSerialize;
-use bytes::Buf;
+use commonware_codec::SizedCodec;
 use std::{
     cmp::{Ord, PartialOrd},
     error::Error as StdError,
@@ -44,30 +43,27 @@ pub trait Array:
     + Display
     + AsRef<[u8]>
     + Deref<Target = [u8]>
-    + for<'a> TryFrom<&'a [u8], Error = <Self as Array>::Error>
-    + for<'a> TryFrom<&'a Vec<u8>, Error = <Self as Array>::Error>
-    + TryFrom<Vec<u8>, Error = <Self as Array>::Error>
-    + SizedSerialize
+    + SizedCodec
 {
-    /// Errors returned when parsing an invalid byte sequence.
-    type Error: StdError + Send + Sync + 'static;
+}
 
-    /// Attempts to read an array from the provided buffer.
-    fn read_from<B: Buf>(buf: &mut B) -> Result<Self, Error<<Self as Array>::Error>> {
-        let len = Self::SERIALIZED_LEN;
-        if buf.remaining() < len {
-            return Err(Error::InsufficientBytes);
-        }
-
-        let chunk = buf.chunk();
-        if chunk.len() >= len {
-            let array = Self::try_from(&chunk[..len]).map_err(Error::Other)?;
-            buf.advance(len);
-            return Ok(array);
-        }
-
-        let mut temp = vec![0u8; len];
-        buf.copy_to_slice(&mut temp);
-        Self::try_from(temp).map_err(Error::Other)
-    }
+/// To prevent the need for constant implementation of `Array` for all types,
+/// we can implement `Array` for types that implement the necessary traits.
+impl<
+        T: Clone
+            + Send
+            + Sync
+            + 'static
+            + Eq
+            + PartialEq
+            + Ord
+            + PartialOrd
+            + Debug
+            + Hash
+            + Display
+            + AsRef<[u8]>
+            + Deref<Target = [u8]>
+            + SizedCodec,
+    > Array for T
+{
 }

@@ -1,10 +1,11 @@
 use super::{wire, x25519};
 use crate::{utils::codec::recv_frame, Error};
 use bytes::{BufMut, Bytes};
+use commonware_codec::{Codec, SizedCodec};
 use commonware_cryptography::Scheme;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Sink, Spawner, Stream};
-use commonware_utils::{SizedSerialize, SystemTimeExt};
+use commonware_utils::SystemTimeExt;
 use prost::Message;
 use std::time::{Duration, SystemTime};
 
@@ -17,8 +18,7 @@ pub fn create_handshake<C: Scheme>(
 ) -> Result<Bytes, Error> {
     // Sign their public key
     let ephemeral_public_key_bytes = ephemeral_public_key.as_bytes();
-    let payload_len =
-        C::PublicKey::SERIALIZED_LEN + ephemeral_public_key_bytes.len() + u64::SERIALIZED_LEN;
+    let payload_len = C::PublicKey::LEN_CODEC + ephemeral_public_key_bytes.len() + u64::LEN_CODEC;
     let mut payload = Vec::with_capacity(payload_len);
     payload.extend_from_slice(&recipient_public_key);
     payload.extend_from_slice(ephemeral_public_key_bytes);
@@ -27,12 +27,12 @@ pub fn create_handshake<C: Scheme>(
 
     // Send handshake
     Ok(wire::Handshake {
-        recipient_public_key: recipient_public_key.to_vec(),
+        recipient_public_key: recipient_public_key.encode(),
         ephemeral_public_key: x25519::encode_public_key(ephemeral_public_key).to_vec(),
         timestamp,
         signature: Some(wire::Signature {
-            public_key: crypto.public_key().to_vec(),
-            signature: signature.to_vec(),
+            public_key: crypto.public_key().encode(),
+            signature: signature.encode(),
         }),
     }
     .encode_to_vec()
@@ -65,7 +65,7 @@ impl<C: Scheme> Handshake<C> {
         // If we didn't verify this, it would be trivial for any peer to impersonate another peer (even though
         // they would not be able to decrypt any messages from the shared secret). This would prevent us
         // from making a legitimate connection to the intended peer.
-        let our_public_key = C::PublicKey::try_from(handshake.recipient_public_key)
+        let our_public_key = C::PublicKey::decode(handshake.recipient_public_key)
             .map_err(|_| Error::InvalidChannelPublicKey)?;
         if crypto.public_key() != our_public_key {
             return Err(Error::HandshakeNotForUs);
@@ -89,13 +89,12 @@ impl<C: Scheme> Handshake<C> {
 
         // Get signature from peer
         let signature = handshake.signature.ok_or(Error::MissingSignature)?;
-        let public_key: C::PublicKey = C::PublicKey::try_from(signature.public_key)
-            .map_err(|_| Error::InvalidPeerPublicKey)?;
+        let public_key: C::PublicKey =
+            C::PublicKey::decode(signature.public_key).map_err(|_| Error::InvalidPeerPublicKey)?;
 
         // Construct signing payload (ephemeral public key + my public key + timestamp)
-        let payload_len = C::PublicKey::SERIALIZED_LEN
-            + handshake.ephemeral_public_key.len()
-            + u64::SERIALIZED_LEN;
+        let payload_len =
+            C::PublicKey::LEN_CODEC + handshake.ephemeral_public_key.len() + u64::LEN_CODEC;
         let mut payload = Vec::with_capacity(payload_len);
         payload.extend_from_slice(&our_public_key);
         payload.extend_from_slice(&handshake.ephemeral_public_key);
@@ -103,7 +102,7 @@ impl<C: Scheme> Handshake<C> {
 
         // Verify signature
         let signature =
-            C::Signature::try_from(signature.signature).map_err(|_| Error::InvalidSignature)?;
+            C::Signature::decode(signature.signature).map_err(|_| Error::InvalidSignature)?;
         if !C::verify(Some(namespace), &payload, &public_key, &signature) {
             return Err(Error::InvalidSignature);
         }

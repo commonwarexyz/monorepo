@@ -5,6 +5,7 @@ pub use super::{
 };
 use crate::authenticated::{ip, metrics, wire};
 use bitvec::prelude::*;
+use commonware_codec::Codec;
 use commonware_cryptography::Scheme;
 use commonware_runtime::{Clock, Handle, Metrics, Spawner};
 use commonware_utils::{union, Array, SystemTimeExt};
@@ -411,15 +412,15 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
             let signature = peer.signature.as_ref().ok_or(Error::PeerUnsigned)?;
 
             // Check if public key is well-formatted and if peer is us
-            let public_key = C::PublicKey::try_from(&signature.public_key)
-                .map_err(|_| Error::InvalidPublicKey)?;
+            let public_key =
+                C::PublicKey::decode(signature.public_key).map_err(|_| Error::InvalidPublicKey)?;
             if public_key == self.crypto.public_key() {
                 return Err(Error::ReceivedSelf);
             }
 
             // If any signature is invalid, disconnect from the peer
-            let signature = C::Signature::try_from(&signature.signature)
-                .map_err(|_| Error::InvalidSignature)?;
+            let signature =
+                C::Signature::decode(signature.signature).map_err(|_| Error::InvalidSignature)?;
             let payload = wire_peer_payload(&peer);
             if !C::verify(Some(&self.ip_namespace), &payload, &public_key, &signature) {
                 return Err(Error::InvalidSignature);

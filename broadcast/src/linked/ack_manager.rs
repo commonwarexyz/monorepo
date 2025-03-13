@@ -146,7 +146,6 @@ mod tests {
     use crate::linked::{namespace, parsed, serializer};
     use commonware_cryptography::{bls12381::dkg::ops::generate_shares, ed25519, sha256};
     use commonware_runtime::deterministic::Executor;
-    use commonware_utils::SizedSerialize;
 
     /// Aggregated helper functions to reduce duplication in tests.
     mod helpers {
@@ -162,7 +161,7 @@ mod tests {
 
         /// Generate a fixed public key for testing.
         pub fn gen_public_key(val: u8) -> ed25519::PublicKey {
-            ed25519::PublicKey::try_from(&[val; ed25519::PublicKey::SERIALIZED_LEN][..]).unwrap()
+            ed25519::PublicKey::try_from(&[val; ed25519::PublicKey::LEN_CODEC][..]).unwrap()
         }
 
         /// Create a chunk with the given sequencer, height, and payload.

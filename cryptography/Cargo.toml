@@ -11,6 +11,7 @@ repository = "https://github.com/commonwarexyz/monorepo/tree/main/cryptography"
 documentation = "https://docs.rs/commonware-cryptography"
 
 [dependencies]
+commonware-codec = { workspace = true }
 commonware-utils = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }

@@ -6,9 +6,8 @@ use crate::mmr::{
     iterator::{PathIterator, PeakIterator},
     Error,
 };
-use bytes::{Buf, BufMut};
-use commonware_cryptography::{Digest, Hasher as CHasher};
-use commonware_utils::{Array, SizedSerialize};
+use commonware_codec::{Codec, Error as CodecError, Reader, SizedCodec, Writer};
+use commonware_cryptography::Hasher as CHasher;
 use futures::future::try_join_all;
 use std::future::Future;
 
@@ -43,6 +42,25 @@ pub trait Storage<D: Digest> {
 impl<H: CHasher> PartialEq for Proof<H> {
     fn eq(&self, other: &Self) -> bool {
         self.size == other.size && self.hashes == other.hashes
+    }
+}
+
+impl<H: CHasher> Codec for Proof<H> {
+    fn len_encoded(&self) -> usize {
+        u64::LEN_CODEC + (self.hashes.len() * H::Digest::LEN_CODEC)
+    }
+
+    fn write(&self, writer: &mut impl Writer) {
+        writer.write_u64(self.size);
+        for hash in self.hashes.iter() {
+            writer.write_fixed(hash.as_ref());
+        }
+    }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
+        let size = reader.read_u64()?;
+        let hashes = reader.read_vec_bounded(u8::MAX as usize)?;
+        Ok(Self { size, hashes })
     }
 }
 
@@ -115,58 +133,6 @@ impl<H: CHasher> Proof<H> {
             return false;
         }
         *root_hash == mmr_hasher.root_hash(self.size, peak_hashes.iter())
-    }
-
-    /// Return the maximum size in bytes of any serialized `Proof`.
-    pub fn max_serialization_size() -> usize {
-        u64::SERIALIZED_LEN + (u8::MAX as usize * H::Digest::SERIALIZED_LEN)
-    }
-
-    /// Canonically serializes the `Proof` as:
-    /// ```text
-    ///    [0-8): size (u64 big-endian)
-    ///    [8-...): raw bytes of each hash, each of length `H::len()`
-    /// ```
-    pub fn serialize(&self) -> Vec<u8> {
-        // A proof should never contain more hashes than the depth of the MMR, thus a single byte
-        // for encoding the length of the hashes array still allows serializing MMRs up to 2^255
-        // elements.
-        assert!(
-            self.hashes.len() <= u8::MAX as usize,
-            "too many hashes in proof"
-        );
-
-        // Serialize the proof as a byte vector.
-        let bytes_len = u64::SERIALIZED_LEN + (self.hashes.len() * H::Digest::SERIALIZED_LEN);
-        let mut bytes = Vec::with_capacity(bytes_len);
-        bytes.put_u64(self.size);
-        for hash in self.hashes.iter() {
-            bytes.extend_from_slice(hash.as_ref());
-        }
-        assert_eq!(bytes.len(), bytes_len, "serialization length mismatch");
-        bytes.to_vec()
-    }
-
-    /// Deserializes a canonically encoded `Proof`. See `serialize` for the serialization format.
-    pub fn deserialize(bytes: &[u8]) -> Option<Self> {
-        let mut buf = bytes;
-        if buf.len() < u64::SERIALIZED_LEN {
-            return None;
-        }
-        let size = buf.get_u64();
-
-        // A proof should divide neatly into the hash length and not contain more than 255 hashes.
-        let buf_remaining = buf.remaining();
-        let hashes_len = buf_remaining / H::Digest::SERIALIZED_LEN;
-        if buf_remaining % H::Digest::SERIALIZED_LEN != 0 || hashes_len > u8::MAX as usize {
-            return None;
-        }
-        let mut hashes = Vec::with_capacity(hashes_len);
-        for _ in 0..hashes_len {
-            let digest = H::Digest::read_from(&mut buf).ok()?;
-            hashes.push(digest);
-        }
-        Some(Self { size, hashes })
     }
 
     /// Return the list of element positions required by the range proof for the specified range of
@@ -768,7 +734,7 @@ mod tests {
         let (executor, _, _) = Executor::default();
         executor.start(async move {
             assert_eq!(
-                Proof::<Sha256>::max_serialization_size(),
+                u64::LEN_CODEC + (u8::MAX as usize * Sha256::Digest::LEN_CODEC),
                 8168,
                 "wrong max serialization size of a Sha256 proof"
             );

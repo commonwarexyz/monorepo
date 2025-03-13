@@ -13,7 +13,7 @@ use commonware_cryptography::{
 };
 use commonware_runtime::{Sink, Spawner, Stream};
 use commonware_stream::{public_key::Connection, Receiver, Sender};
-use commonware_utils::{hex, Array, SizedSerialize};
+use commonware_utils::{hex, Array};
 use futures::{channel::mpsc, StreamExt};
 use prost::Message as _;
 use rand::Rng;
@@ -113,7 +113,7 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                                 .expect("indexer is corrupt");
 
                             // Use certificate as message
-                            let mut msg = Vec::with_capacity(u8::SERIALIZED_LEN + proof.len());
+                            let mut msg = Vec::with_capacity(u8::LEN_CODEC + proof.len());
                             msg.put_u8(1);
                             msg.extend(proof);
                             msg
