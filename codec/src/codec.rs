@@ -40,17 +40,16 @@ pub trait Codec: Sized {
 }
 
 /// Trait for types that have a fixed-length encoding
-pub trait SizedCodec: Codec {
-    /// The encoded length of this value.
-    const LEN_CODEC: usize;
-
+pub trait SizedCodec<const N: usize>: Codec {
     /// Returns the encoded length of this value.
+    ///
+    /// Should not be overridden by implementations.
     fn len_encoded(&self) -> usize {
-        Self::LEN_CODEC
+        N
     }
 
     /// Encodes a value to fixed-size bytes.
-    fn encode_fixed<const N: usize>(&self) -> [u8; N] {
+    fn encode_fixed(&self) -> [u8; N] {
         self.encode().try_into().unwrap()
     }
 }
@@ -398,11 +397,11 @@ impl Writer for WriteBuffer {
         }
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::buffer::{ReadBuffer, WriteBuffer};
-    use crate::error::Error;
+    use crate::{Codec, Error, ReadBuffer, WriteBuffer};
     use bytes::Bytes;
 
     #[test]
@@ -482,5 +481,13 @@ mod tests {
             reader.read_vec_lte::<u8>(2),
             Err(Error::LengthExceeded(3, 2))
         ));
+    }
+
+    #[test]
+    fn test_encode_fixed() {
+        let value = 42u32;
+        let encoded: [u8; 4] = value.encode_fixed();
+        let decoded = u32::decode(Bytes::copy_from_slice(&encoded)).unwrap();
+        assert_eq!(value, decoded);
     }
 }
