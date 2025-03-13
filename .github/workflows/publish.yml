@@ -22,7 +22,7 @@ jobs:
       continue-on-error: true
       env:
         CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-    - name: Public codec
+    - name: Publish codec
       run: cargo publish --manifest-path codec/Cargo.toml
       continue-on-error: true
       env:
