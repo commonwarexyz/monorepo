@@ -885,6 +885,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-codec"
+version = "0.0.40"
+dependencies = [
+ "bytes",
+ "paste",
+ "thiserror 2.0.12",
+]
+
+[[package]]
 name = "commonware-consensus"
 version = "0.0.40"
 dependencies = [
