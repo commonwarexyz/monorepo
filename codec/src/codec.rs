@@ -101,8 +101,7 @@ pub trait Reader {
     /// Reads bytes with a length prefix
     fn read_bytes(&mut self) -> Result<Bytes, Error>;
 
-    /// Reads bytes with a length prefix, with a limit on the number of bytes.
-    /// Returns an error if the length exceeds the max.
+    /// Reads bytes with a length prefix, with a limit on the number of bytes
     fn read_bytes_lte(&mut self, max: usize) -> Result<Bytes, Error>;
 
     /// Reads a fixed number of bytes
