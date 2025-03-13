@@ -56,23 +56,19 @@ pub async fn refresh(config_path: &PathBuf) -> Result<(), Error> {
             let mut already_allowed = false;
 
             // Check existing permissions
-            if let Some(permissions) = sg.ip_permissions() {
-                for perm in permissions {
-                    if perm.ip_protocol() == Some("tcp")
-                        && perm.from_port() == Some(0)
-                        && perm.to_port() == Some(65535)
-                    {
-                        if let Some(ip_ranges) = perm.ip_ranges() {
-                            for ip_range in ip_ranges {
-                                if ip_range.cidr_ip() == Some(&format!("{}/32", &deployer_ip)) {
-                                    already_allowed = true;
-                                    break;
-                                }
-                            }
-                        }
-                        if already_allowed {
+            for perm in sg.ip_permissions() {
+                if perm.ip_protocol() == Some("tcp")
+                    && perm.from_port() == Some(0)
+                    && perm.to_port() == Some(65535)
+                {
+                    for ip_range in perm.ip_ranges() {
+                        if ip_range.cidr_ip() == Some(&format!("{}/32", &deployer_ip)) {
+                            already_allowed = true;
                             break;
                         }
+                    }
+                    if already_allowed {
+                        break;
                     }
                 }
             }
@@ -95,7 +91,8 @@ pub async fn refresh(config_path: &PathBuf) -> Result<(), Error> {
                             .build(),
                     )
                     .send()
-                    .await?;
+                    .await
+                    .map_err(|err| err.into_service_error())?;
                 info!(sg_id, "added ingress rule for deployer IP");
             } else {
                 info!(sg_id, "deployer IP already allowed");

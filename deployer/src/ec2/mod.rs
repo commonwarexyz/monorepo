@@ -102,6 +102,10 @@
 //! 2. Uploads the latest binary and configuration from the YAML config.
 //! 3. Restarts the `binary` service, ensuring minimal downtime.
 //!
+//! ## `ec2 refresh`
+//!
+//! 1.
+//!
 //! ## `ec2 destroy`
 //!
 //! 1. Terminates all instances across regions.
