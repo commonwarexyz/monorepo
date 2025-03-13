@@ -36,7 +36,7 @@ pub async fn refresh(config_path: &PathBuf) -> Result<(), Error> {
 
     // Get deployer's current public IP
     let deployer_ip = get_public_ip().await?;
-    info!(ip = deployer_ip.as_str(), "recovered public IP");
+    info!(ip = deployer_ip.as_str(), "deployer public IP");
 
     // Determine all regions involved
     let mut all_regions = HashSet::new();
@@ -46,16 +46,17 @@ pub async fn refresh(config_path: &PathBuf) -> Result<(), Error> {
     }
 
     // Update security groups in each region
+    let mut changes = Vec::new();
     for region in all_regions {
         let ec2_client = create_ec2_client(Region::new(region.clone())).await;
         info!(region = region.as_str(), "created EC2 client");
 
+        // Iterate over all security groups
         let security_groups = find_security_groups_by_tag(&ec2_client, tag).await?;
         for sg in security_groups {
+            // Check existing permissions
             let sg_id = sg.group_id().unwrap();
             let mut already_allowed = false;
-
-            // Check existing permissions
             for perm in sg.ip_permissions() {
                 if perm.ip_protocol() == Some("tcp")
                     && perm.from_port() == Some(0)
@@ -94,12 +95,12 @@ pub async fn refresh(config_path: &PathBuf) -> Result<(), Error> {
                     .await
                     .map_err(|err| err.into_service_error())?;
                 info!(sg_id, "added ingress rule for deployer IP");
+                changes.push(sg_id.to_string());
             } else {
                 info!(sg_id, "deployer IP already allowed");
             }
         }
     }
-
-    info!("security groups refreshed");
+    info!(?changes, "deployer IP refreshed");
     Ok(())
 }
