@@ -1,6 +1,8 @@
 //! `refresh` subcommand for `ec2`
 
-use crate::ec2::utils::get_public_ip;
+use crate::ec2::utils::{
+    exact_cidr, get_public_ip, DEPLOYER_MAX_PORT, DEPLOYER_MIN_PORT, DEPLOYER_PROTOCOL,
+};
 use crate::ec2::{
     aws::*, deployer_directory, Config, Error, CREATED_FILE_NAME, DESTROYED_FILE_NAME,
     MONITORING_REGION,
@@ -58,12 +60,14 @@ pub async fn refresh(config_path: &PathBuf) -> Result<(), Error> {
             let sg_id = sg.group_id().unwrap();
             let mut already_allowed = false;
             for perm in sg.ip_permissions() {
-                if perm.ip_protocol() == Some("tcp")
-                    && perm.from_port() == Some(0)
-                    && perm.to_port() == Some(65535)
+                // We enforce an exact match to avoid accidentally skipping because
+                // of an ingress rule with different ports or protocols.
+                if perm.ip_protocol() == Some(DEPLOYER_PROTOCOL)
+                    && perm.from_port() == Some(DEPLOYER_MIN_PORT)
+                    && perm.to_port() == Some(DEPLOYER_MAX_PORT)
                 {
                     for ip_range in perm.ip_ranges() {
-                        if ip_range.cidr_ip() == Some(&format!("{}/32", &deployer_ip)) {
+                        if ip_range.cidr_ip() == Some(&exact_cidr(&deployer_ip)) {
                             already_allowed = true;
                             break;
                         }
@@ -84,14 +88,10 @@ pub async fn refresh(config_path: &PathBuf) -> Result<(), Error> {
                 .group_id(sg_id)
                 .ip_permissions(
                     IpPermission::builder()
-                        .ip_protocol("tcp")
-                        .from_port(0)
-                        .to_port(65535)
-                        .ip_ranges(
-                            IpRange::builder()
-                                .cidr_ip(format!("{}/32", deployer_ip))
-                                .build(),
-                        )
+                        .ip_protocol(DEPLOYER_PROTOCOL)
+                        .from_port(DEPLOYER_MIN_PORT)
+                        .to_port(DEPLOYER_MAX_PORT)
+                        .ip_ranges(IpRange::builder().cidr_ip(exact_cidr(&deployer_ip)).build())
                         .build(),
                 )
                 .send()

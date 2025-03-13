@@ -1,6 +1,9 @@
 //! AWS EC2 SDK function wrappers
 
-use crate::ec2::{utils::RETRY_INTERVAL, PortConfig};
+use crate::ec2::{
+    utils::{exact_cidr, DEPLOYER_MAX_PORT, DEPLOYER_MIN_PORT, DEPLOYER_PROTOCOL, RETRY_INTERVAL},
+    PortConfig,
+};
 use aws_config::BehaviorVersion;
 pub use aws_config::Region;
 use aws_sdk_ec2::error::BuildError;
@@ -213,14 +216,10 @@ pub async fn create_security_group_monitoring(
         .group_id(&sg_id)
         .ip_permissions(
             IpPermission::builder()
-                .ip_protocol("tcp")
-                .from_port(0)
-                .to_port(65535)
-                .ip_ranges(
-                    IpRange::builder()
-                        .cidr_ip(format!("{}/32", deployer_ip))
-                        .build(),
-                )
+                .ip_protocol(DEPLOYER_PROTOCOL)
+                .from_port(DEPLOYER_MIN_PORT)
+                .to_port(DEPLOYER_MAX_PORT)
+                .ip_ranges(IpRange::builder().cidr_ip(exact_cidr(deployer_ip)).build())
                 .build(),
         )
         .send()
@@ -256,14 +255,10 @@ pub async fn create_security_group_binary(
         .group_id(&sg_id)
         .ip_permissions(
             IpPermission::builder()
-                .ip_protocol("tcp")
-                .from_port(0)
-                .to_port(65535)
-                .ip_ranges(
-                    IpRange::builder()
-                        .cidr_ip(format!("{}/32", deployer_ip))
-                        .build(),
-                )
+                .ip_protocol(DEPLOYER_PROTOCOL)
+                .from_port(DEPLOYER_MIN_PORT)
+                .to_port(DEPLOYER_MAX_PORT)
+                .ip_ranges(IpRange::builder().cidr_ip(exact_cidr(deployer_ip)).build())
                 .build(),
         )
         .ip_permissions(
@@ -273,7 +268,7 @@ pub async fn create_security_group_binary(
                 .to_port(9090)
                 .ip_ranges(
                     IpRange::builder()
-                        .cidr_ip(format!("{}/32", monitoring_ip))
+                        .cidr_ip(exact_cidr(monitoring_ip))
                         .build(),
                 )
                 .build(),
