@@ -53,6 +53,17 @@ async fn main() -> std::process::ExitCode {
                         ),
                 )
                 .subcommand(
+                    Command::new(ec2::REFRESH_CMD)
+                        .about("Add the deployer's current IP to all security groups (if not already present).")
+                        .arg(
+                            Arg::new("config")
+                                .long("config")
+                                .required(true)
+                                .help("Path to YAML config file")
+                                .value_parser(clap::value_parser!(PathBuf)),
+                        ),
+                )
+                .subcommand(
                     Command::new(ec2::DESTROY_CMD)
                         .about("Destroy all resources associated with a given deployment.")
                         .arg(
@@ -62,7 +73,7 @@ async fn main() -> std::process::ExitCode {
                                 .help("Path to YAML config file")
                                 .value_parser(clap::value_parser!(PathBuf)),
                         ),
-                ),
+                )
         )
         .get_matches();
 
@@ -89,6 +100,14 @@ async fn main() -> std::process::ExitCode {
                 let config_path = matches.get_one::<PathBuf>("config").unwrap();
                 if let Err(e) = ec2::update(config_path).await {
                     error!(error=?e, "failed to update EC2 deployment");
+                } else {
+                    return std::process::ExitCode::SUCCESS;
+                }
+            }
+            Some((ec2::REFRESH_CMD, matches)) => {
+                let config_path = matches.get_one::<PathBuf>("config").unwrap();
+                if let Err(e) = ec2::refresh(config_path).await {
+                    error!(error=?e, "failed to refresh EC2 deployment");
                 } else {
                     return std::process::ExitCode::SUCCESS;
                 }

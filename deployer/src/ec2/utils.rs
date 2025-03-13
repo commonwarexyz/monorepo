@@ -14,6 +14,15 @@ pub const MAX_POLL_ATTEMPTS: usize = 30;
 /// Interval between retries
 pub const RETRY_INTERVAL: Duration = Duration::from_secs(10);
 
+/// Protocol for deployer ingress
+pub const DEPLOYER_PROTOCOL: &str = "tcp";
+
+/// Minimum port for deployer ingress
+pub const DEPLOYER_MIN_PORT: i32 = 0;
+
+/// Maximum port for deployer ingress
+pub const DEPLOYER_MAX_PORT: i32 = 65535;
+
 /// Fetch the current machine's public IPv4 address
 pub async fn get_public_ip() -> Result<String, Error> {
     // icanhazip.com is maintained by Cloudflare as of 6/6/2021 (https://major.io/p/a-new-future-for-icanhazip/)
@@ -152,4 +161,9 @@ pub async fn enable_bbr(key_file: &str, ip: &str, bbr_conf_local_path: &str) -> 
     .await?;
     ssh_execute(key_file, ip, "sudo sysctl -p /etc/sysctl.d/99-bbr.conf").await?;
     Ok(())
+}
+
+/// Converts an IP address to a CIDR block
+pub fn exact_cidr(ip: &str) -> String {
+    format!("{}/32", ip)
 }
