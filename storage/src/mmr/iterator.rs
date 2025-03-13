@@ -112,6 +112,38 @@ pub(crate) fn nodes_needing_parents(peak_iterator: PeakIterator) -> Vec<u64> {
     peaks
 }
 
+/// Returns the leaf's number based on its given position `leaf_pos`.
+///
+/// This computation is O(log2(n)) in the given position.
+#[allow(dead_code)] // TODO: remove this when we start using it
+pub(crate) fn leaf_pos_to_num(leaf_pos: u64) -> u64 {
+    if leaf_pos == 0 {
+        return 0;
+    }
+
+    let start = u64::MAX >> (leaf_pos + 1).leading_zeros();
+    let height = start.trailing_ones();
+    let mut two_h = 1 << (height - 1);
+    let mut cur_node = start - 1;
+    let mut leaf_num_floor = 0u64;
+
+    while two_h > 1 {
+        assert!(cur_node != leaf_pos, "leaf_pos invalid: {}", leaf_pos);
+        let left_pos = cur_node - two_h;
+        two_h >>= 1;
+        if leaf_pos > left_pos {
+            // The leaf is in the right subtree, so we must account for the leaves in the left
+            // subtree all of which precede it.
+            leaf_num_floor += two_h;
+            cur_node -= 1; // move to the right child
+        } else {
+            // The node is in the left subtree
+            cur_node = left_pos;
+        }
+    }
+    leaf_num_floor
+}
+
 /// Returns the position of the oldest provable node in the represented MMR.
 pub(crate) fn oldest_provable_pos(peak_iterator: PeakIterator, oldest_retained_pos: u64) -> u64 {
     if peak_iterator.size == 0 {
@@ -241,6 +273,8 @@ impl Iterator for PathIterator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mmr::mem::Mmr;
+    use commonware_cryptography::{sha256::hash, Sha256};
 
     // Very basic testing for the proving boundary computations. Testing of the validity of these
     // boundaries appears in the verification crate.
@@ -257,5 +291,35 @@ mod tests {
             let oldest_required = oldest_required_proof_pos(iter, provable_pos);
             assert!(oldest_required <= provable_pos);
         }
+    }
+
+    #[test]
+    fn test_leaf_num_calculation() {
+        let digest = hash(b"testing");
+
+        // Build MMR with 1000 leaves and make sure we can convert each leaf position to its number.
+        let mut mmr = Mmr::<Sha256>::new();
+        let mut hasher = Sha256::default();
+        let mut leaf_num_to_pos = Vec::new();
+        for _ in 0u64..1000 {
+            leaf_num_to_pos.push(mmr.add(&mut hasher, &digest));
+        }
+
+        for (leaf_num_expected, leaf_pos) in leaf_num_to_pos.iter().enumerate() {
+            let leaf_num_got = leaf_pos_to_num(*leaf_pos);
+            assert_eq!(leaf_num_got, leaf_num_expected as u64);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "leaf_pos invalid")]
+    fn test_leaf_num_invalid_pos_is_first_internal_node() {
+        leaf_pos_to_num(2);
+    }
+
+    #[test]
+    #[should_panic(expected = "leaf_pos invalid")]
+    fn test_leaf_num_invalid_pos_is_later_internal_node() {
+        leaf_pos_to_num(14);
     }
 }

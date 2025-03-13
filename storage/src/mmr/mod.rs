@@ -13,7 +13,9 @@
 //! The nodes of the MMR are ordered by a post-order traversal of the MMR trees, starting from the
 //! from tallest tree to shortest. The "position" of a node in the MMR is defined as the 0-based
 //! index of the node in this ordering. This implies the positions of elements, which are always
-//! leaves, may not be contiguous even if they were consecutively added.
+//! leaves, may not be contiguous even if they were consecutively added. An element's "number" is
+//! its 0-based index in the order of element insertion. In the example below, the right-most
+//! element has position 18 and number 10.
 //!
 //! As the MMR is an append-only data structure, node positions never change and can be used as
 //! stable identifiers.
@@ -41,6 +43,8 @@
 //!      1     2     5      9     12     17
 //!           / \   / \    / \   /  \   /  \
 //!      0   0   1 3   4  7   8 10  11 15  16 18
+//!
+//! Number   0   1 2   3  4   5  6   7  8   9 10
 //! ```
 //!
 //! The root hash in this example is computed as:
