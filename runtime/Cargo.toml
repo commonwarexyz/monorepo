@@ -2,7 +2,7 @@
 name = "commonware-runtime"
 edition = "2021"
 publish = true
-version = "0.0.40"
+version = "0.0.41"
 license = "MIT OR Apache-2.0"
 description = "Execute asynchronous tasks with a configurable scheduler."
 readme = "README.md"

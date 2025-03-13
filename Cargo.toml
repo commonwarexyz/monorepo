@@ -20,18 +20,18 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
-commonware-broadcast = { version = "0.0.40", path = "broadcast" }
-commonware-codec = { version = "0.0.40", path = "codec" }
-commonware-consensus = { version = "0.0.40", path = "consensus" }
-commonware-cryptography = { version = "0.0.40", path = "cryptography" }
-commonware-deployer = { version = "0.0.40", path = "deployer" }
-commonware-macros = { version = "0.0.40", path = "macros" }
-commonware-p2p = { version = "0.0.40", path = "p2p" }
-commonware-resolver = { version = "0.0.40", path = "resolver" }
-commonware-runtime = { version = "0.0.40", path = "runtime" }
-commonware-storage = { version = "0.0.40", path = "storage" }
-commonware-stream = { version = "0.0.40", path = "stream" }
-commonware-utils = { version = "0.0.40", path = "utils" }
+commonware-broadcast = { version = "0.0.41", path = "broadcast" }
+commonware-codec = { version = "0.0.41", path = "codec" }
+commonware-consensus = { version = "0.0.41", path = "consensus" }
+commonware-cryptography = { version = "0.0.41", path = "cryptography" }
+commonware-deployer = { version = "0.0.41", path = "deployer" }
+commonware-macros = { version = "0.0.41", path = "macros" }
+commonware-p2p = { version = "0.0.41", path = "p2p" }
+commonware-resolver = { version = "0.0.41", path = "resolver" }
+commonware-runtime = { version = "0.0.41", path = "runtime" }
+commonware-storage = { version = "0.0.41", path = "storage" }
+commonware-stream = { version = "0.0.41", path = "stream" }
+commonware-utils = { version = "0.0.41", path = "utils" }
 thiserror = "2.0.12"
 bytes = "1.7.1"
 sha2 = "0.10.8"
