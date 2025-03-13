@@ -36,7 +36,7 @@ pub async fn refresh(config_path: &PathBuf) -> Result<(), Error> {
 
     // Get deployer's current public IP
     let deployer_ip = get_public_ip().await?;
-    info!(ip = deployer_ip.as_str(), "deployer public IP");
+    info!(ip = deployer_ip, "deployer public IP");
 
     // Determine all regions involved
     let mut all_regions = HashSet::new();
@@ -75,30 +75,30 @@ pub async fn refresh(config_path: &PathBuf) -> Result<(), Error> {
             }
 
             // Add ingress rule if not already allowed
-            if !already_allowed {
-                ec2_client
-                    .authorize_security_group_ingress()
-                    .group_id(sg_id)
-                    .ip_permissions(
-                        IpPermission::builder()
-                            .ip_protocol("tcp")
-                            .from_port(0)
-                            .to_port(65535)
-                            .ip_ranges(
-                                IpRange::builder()
-                                    .cidr_ip(format!("{}/32", deployer_ip))
-                                    .build(),
-                            )
-                            .build(),
-                    )
-                    .send()
-                    .await
-                    .map_err(|err| err.into_service_error())?;
-                info!(sg_id, "added ingress rule for deployer IP");
-                changes.push(sg_id.to_string());
-            } else {
+            if already_allowed {
                 info!(sg_id, "deployer IP already allowed");
+                continue;
             }
+            ec2_client
+                .authorize_security_group_ingress()
+                .group_id(sg_id)
+                .ip_permissions(
+                    IpPermission::builder()
+                        .ip_protocol("tcp")
+                        .from_port(0)
+                        .to_port(65535)
+                        .ip_ranges(
+                            IpRange::builder()
+                                .cidr_ip(format!("{}/32", deployer_ip))
+                                .build(),
+                        )
+                        .build(),
+                )
+                .send()
+                .await
+                .map_err(|err| err.into_service_error())?;
+            info!(sg_id, "added ingress rule for deployer IP");
+            changes.push(sg_id.to_string());
         }
     }
     info!(?changes, "deployer IP refreshed");
