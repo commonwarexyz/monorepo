@@ -11,6 +11,7 @@ repository = "https://github.com/commonwarexyz/monorepo/tree/main/resolver"
 documentation = "https://docs.rs/commonware-resolver"
 
 [dependencies]
+commonware-codec = { workspace = true }
 commonware-cryptography = { workspace = true }
 commonware-macros = { workspace = true }
 commonware-p2p = { workspace = true }

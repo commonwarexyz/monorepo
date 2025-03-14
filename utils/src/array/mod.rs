@@ -1,5 +1,6 @@
 use crate::SizedSerialize;
 use bytes::Buf;
+use commonware_codec::{Codec, SizedCodec};
 use std::{
     cmp::{Ord, PartialOrd},
     error::Error as StdError,
@@ -48,6 +49,8 @@ pub trait Array:
     + for<'a> TryFrom<&'a Vec<u8>, Error = <Self as Array>::Error>
     + TryFrom<Vec<u8>, Error = <Self as Array>::Error>
     + SizedSerialize
+    + Codec
+    + SizedCodec
 {
     /// Errors returned when parsing an invalid byte sequence.
     type Error: StdError + Send + Sync + 'static;

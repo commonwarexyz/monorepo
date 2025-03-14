@@ -1,4 +1,5 @@
 use crate::{Array, SizedSerialize};
+use commonware_codec::{Codec, Error as CodecError, Reader, SizedCodec, Writer};
 use std::{
     cmp::{Ord, PartialOrd},
     fmt::{Debug, Display},
@@ -27,6 +28,24 @@ impl U64 {
     pub fn to_u64(&self) -> u64 {
         u64::from_be_bytes(self.0)
     }
+}
+
+impl Codec for U64 {
+    fn write(&self, writer: &mut impl Writer) {
+        self.0.write(writer);
+    }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
+        <[u8; U64::SERIALIZED_LEN]>::read(reader).map(Self)
+    }
+
+    fn len_encoded(&self) -> usize {
+        U64::SERIALIZED_LEN
+    }
+}
+
+impl SizedCodec for U64 {
+    const LEN_ENCODED: usize = U64::SERIALIZED_LEN;
 }
 
 impl Array for U64 {
@@ -120,5 +139,17 @@ mod tests {
         let vec = array.to_vec();
         assert_eq!(value, U64::try_from(&vec).unwrap().to_u64());
         assert_eq!(value, U64::try_from(vec).unwrap().to_u64());
+    }
+
+    #[test]
+    fn test_codec() {
+        let original = U64::new(42u64);
+
+        let encoded = original.encode();
+        assert_eq!(encoded.len(), U64::SERIALIZED_LEN);
+        assert_eq!(encoded, original.as_ref());
+
+        let decoded = U64::decode(encoded).unwrap();
+        assert_eq!(original, decoded);
     }
 }
