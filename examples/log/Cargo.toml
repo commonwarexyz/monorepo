@@ -2,7 +2,7 @@
 name = "commonware-log"
 edition = "2021"
 publish = true
-version = "0.0.41"
+version = "0.0.42"
 license = "MIT OR Apache-2.0"
 description = "Commit to a secret log and agree to its hash."
 readme = "README.md"
