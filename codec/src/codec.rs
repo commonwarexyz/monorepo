@@ -401,7 +401,7 @@ impl Writer for WriteBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Codec, Error, ReadBuffer, WriteBuffer};
+    use crate::{varint::varint_size, Codec, Error, ReadBuffer, WriteBuffer};
     use bytes::Bytes;
 
     #[test]
@@ -423,20 +423,13 @@ mod tests {
     }
 
     #[test]
-    fn test_max_varint() {
-        let encoded =
-            Bytes::from_static(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01]);
-        assert!(ReadBuffer::new(encoded).read_varint().unwrap() == 0xFFFFFFFFFFFFFFFF);
-    }
-
-    #[test]
-    fn test_invalid_varint() {
-        let encoded =
-            Bytes::from_static(&[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x02]);
-        assert!(matches!(
-            ReadBuffer::new(encoded).read_varint(),
-            Err(Error::InvalidVarint)
-        ));
+    fn test_varint() {
+        let value = u64::MAX / 2;
+        let mut writer = WriteBuffer::new(varint_size(value));
+        writer.write_varint(value);
+        let mut reader = ReadBuffer::new(writer.freeze());
+        let result = reader.read_varint().unwrap();
+        assert_eq!(result, value);
     }
 
     #[test]

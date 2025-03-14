@@ -119,7 +119,7 @@ mod tests {
             0xFFFFFFFF,
             0x1FFFFFFFFFF,
             0xFFFFFFFFFFFFFF,
-            0xFFFFFFFFFFFFFFFF,
+            u64::MAX,
         ];
 
         for &value in &test_cases {
@@ -131,13 +131,8 @@ mod tests {
             let mut read_buf = &buf[..];
             let decoded = decode_varint(&mut read_buf).unwrap();
 
-            assert_eq!(decoded, value, "Failed for value: {}", value);
-            assert_eq!(
-                read_buf.len(),
-                0,
-                "Not all bytes consumed for value: {}",
-                value
-            );
+            assert_eq!(decoded, value);
+            assert_eq!(read_buf.len(), 0);
         }
     }
 
@@ -157,24 +152,21 @@ mod tests {
             -129,
             0x7FFFFFFF,
             -0x7FFFFFFF,
-            0x7FFFFFFFFFFFFFFF,
-            -0x7FFFFFFFFFFFFFFF,
+            i64::MIN,
+            i64::MAX,
         ];
 
         for &value in &test_cases {
             let mut buf = Vec::new();
             encode_varint_i64(value, &mut buf);
 
+            assert_eq!(buf.len(), varint_i64_size(value));
+
             let mut read_buf = &buf[..];
             let decoded = decode_varint_i64(&mut read_buf).unwrap();
 
-            assert_eq!(decoded, value, "Failed for value: {}", value);
-            assert_eq!(
-                read_buf.len(),
-                0,
-                "Not all bytes consumed for value: {}",
-                value
-            );
+            assert_eq!(decoded, value);
+            assert_eq!(read_buf.len(), 0,);
         }
     }
 
@@ -206,7 +198,14 @@ mod tests {
 
     #[test]
     fn test_varint_insufficient_buffer() {
-        let mut buf = Bytes::from_static(&[0x80]); // Incomplete varint
+        let mut buf = Bytes::from_static(&[0x80]);
         assert!(matches!(decode_varint(&mut buf), Err(Error::EndOfBuffer)));
+    }
+
+    #[test]
+    fn test_varint_invalid() {
+        let mut buf =
+            Bytes::from_static(&[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x02]);
+        assert!(matches!(decode_varint(&mut buf), Err(Error::InvalidVarint)));
     }
 }
