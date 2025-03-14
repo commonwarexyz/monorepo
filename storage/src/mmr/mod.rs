@@ -89,4 +89,8 @@ pub enum Error {
     MissingPeak(u64),
     #[error("MMR is empty")]
     Empty,
+    #[error("missing hashes in proof")]
+    MissingHashes,
+    #[error("extra hashes in proof")]
+    ExtraHashes,
 }
