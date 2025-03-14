@@ -26,7 +26,9 @@ macro_rules! impl_primitive {
             }
         }
 
-        impl SizedCodec<$size> for $type {}
+        impl SizedCodec for $type {
+            const LEN_ENCODED: usize = $size;
+        }
     };
 }
 
@@ -80,7 +82,9 @@ impl<const N: usize> Codec for [u8; N] {
     }
 }
 
-impl<const N: usize> SizedCodec<N> for [u8; N] {}
+impl<const N: usize> SizedCodec for [u8; N] {
+    const LEN_ENCODED: usize = N;
+}
 
 // Option implementation
 impl<T: Codec> Codec for Option<T> {
@@ -109,7 +113,7 @@ macro_rules! impl_codec_for_tuple {
         paste! {
             impl<$( [<T $index>]: Codec ),*> Codec for ( $( [<T $index>], )* ) {
                 fn write(&self, writer: &mut impl Writer) {
-                    $( writer.write(&self.$index); )*
+                    $( self.$index.write(writer); )*
                 }
 
                 fn len_encoded(&self) -> usize {
@@ -117,7 +121,7 @@ macro_rules! impl_codec_for_tuple {
                 }
 
                 fn read(reader: &mut impl Reader) -> Result<Self, Error> {
-                    Ok(( $( reader.read::<[<T $index>]>()? , )* ))
+                    Ok(( $( [<T $index>]::read(reader)?, )* ))
                 }
             }
         }

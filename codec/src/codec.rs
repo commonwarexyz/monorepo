@@ -40,25 +40,35 @@ pub trait Codec: Sized {
 }
 
 /// Trait for types that have a fixed-length encoding
-pub trait SizedCodec<const N: usize>: Codec {
+pub trait SizedCodec: Codec {
+    /// The encoded length of this value.
+    const LEN_ENCODED: usize;
+
     /// Returns the encoded length of this value.
     ///
     /// Should not be overridden by implementations.
     fn len_encoded(&self) -> usize {
-        N
+        Self::LEN_ENCODED
     }
 
     /// Encodes a value to fixed-size bytes.
-    fn encode_fixed(&self) -> [u8; N] {
+    fn encode_fixed<const N: usize>(&self) -> [u8; N] {
+        // Ideally this is a compile-time check, but we can't do that in the current Rust version
+        // without adding a new generic parameter to the trait.
+        assert_eq!(
+            N,
+            Self::LEN_ENCODED,
+            "Can't encode {} bytes into {} bytes",
+            Self::LEN_ENCODED,
+            N
+        );
+
         self.encode().try_into().unwrap()
     }
 }
 
 /// Trait for codec read operations
 pub trait Reader {
-    /// Reads a value of type T
-    fn read<T: Codec>(&mut self) -> Result<T, Error>;
-
     /// Reads a u8 value
     fn read_u8(&mut self) -> Result<u8, Error>;
 
@@ -125,9 +135,6 @@ pub trait Reader {
 
 /// Trait for codec write operations
 pub trait Writer {
-    /// Writes a value of type T
-    fn write<T: Codec>(&mut self, value: &T);
-
     /// Writes a u8 value
     fn write_u8(&mut self, value: u8);
 
@@ -185,10 +192,6 @@ pub trait Writer {
 
 // Implement Reader for ReadBuffer
 impl Reader for ReadBuffer {
-    fn read<T: Codec>(&mut self) -> Result<T, Error> {
-        T::read(self)
-    }
-
     fn read_u8(&mut self) -> Result<u8, Error> {
         self.get_u8()
     }
@@ -277,7 +280,7 @@ impl Reader for ReadBuffer {
         let has_value = self.read_bool()?;
 
         if has_value {
-            Ok(Some(self.read()?))
+            Ok(Some(T::read(self)?))
         } else {
             Ok(None)
         }
@@ -287,7 +290,7 @@ impl Reader for ReadBuffer {
         let len = self.read_varint()? as usize;
         let mut items = Vec::with_capacity(len);
         for _ in 0..len {
-            items.push(self.read()?);
+            items.push(T::read(self)?);
         }
         Ok(items)
     }
@@ -301,7 +304,7 @@ impl Reader for ReadBuffer {
 
         let mut items = Vec::with_capacity(len);
         for _ in 0..len {
-            items.push(self.read()?);
+            items.push(T::read(self)?);
         }
         Ok(items)
     }
@@ -309,10 +312,6 @@ impl Reader for ReadBuffer {
 
 // Implement Writer for WriteBuffer
 impl Writer for WriteBuffer {
-    fn write<T: Codec>(&mut self, value: &T) {
-        value.write(self);
-    }
-
     fn write_u8(&mut self, value: u8) {
         self.put_u8(value)
     }
@@ -382,7 +381,7 @@ impl Writer for WriteBuffer {
         match value {
             Some(v) => {
                 self.write_bool(true);
-                self.write(v);
+                v.write(self);
             }
             None => {
                 self.write_bool(false);
@@ -393,7 +392,7 @@ impl Writer for WriteBuffer {
     fn write_vec<T: Codec>(&mut self, values: &[T]) {
         self.write_varint(values.len() as u64);
         for value in values {
-            self.write(value);
+            value.write(self);
         }
     }
 }
@@ -488,5 +487,11 @@ mod tests {
         let encoded: [u8; 4] = value.encode_fixed();
         let decoded = u32::decode(Bytes::copy_from_slice(&encoded)).unwrap();
         assert_eq!(value, decoded);
+    }
+
+    #[test]
+    #[should_panic(expected = "Can't encode 4 bytes into 5 bytes")]
+    fn test_encode_fixed_panic() {
+        let _: [u8; 5] = 42u32.encode_fixed();
     }
 }
