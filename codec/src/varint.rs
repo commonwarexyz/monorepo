@@ -6,12 +6,6 @@
 use crate::error::Error;
 use bytes::{Buf, BufMut};
 
-/// Maximum number of bytes needed to encode a 64-bit integer as a varint
-pub const MAX_VARINT_LEN_U64: usize = 10;
-
-/// Maximum number of bytes needed to encode a 32-bit integer as a varint
-pub const MAX_VARINT_LEN_U32: usize = 5;
-
 /// Encodes a unsigned 64-bit integer as a varint
 pub fn encode_varint(value: u64, buf: &mut impl BufMut) {
     if value < 0x80 {
@@ -86,18 +80,18 @@ fn to_i64(value: u64) -> i64 {
 }
 
 /// Encodes a signed 64-bit integer as a varint using ZigZag encoding
-pub fn encode_svarint(value: i64, buf: &mut impl BufMut) {
+pub fn encode_varint_i64(value: i64, buf: &mut impl BufMut) {
     encode_varint(to_u64(value), buf);
 }
 
 /// Decodes a signed 64-bit integer from a varint using ZigZag encoding
-pub fn decode_svarint(buf: &mut impl Buf) -> Result<i64, Error> {
+pub fn decode_varint_i64(buf: &mut impl Buf) -> Result<i64, Error> {
     let zigzag = decode_varint(buf)?;
     Ok(to_i64(zigzag))
 }
 
 /// Calculates the number of bytes needed to encode a signed integer as a varint
-pub fn svarint_size(value: i64) -> usize {
+pub fn varint_i64_size(value: i64) -> usize {
     varint_size(to_u64(value))
 }
 
@@ -169,10 +163,10 @@ mod tests {
 
         for &value in &test_cases {
             let mut buf = Vec::new();
-            encode_svarint(value, &mut buf);
+            encode_varint_i64(value, &mut buf);
 
             let mut read_buf = &buf[..];
-            let decoded = decode_svarint(&mut read_buf).unwrap();
+            let decoded = decode_varint_i64(&mut read_buf).unwrap();
 
             assert_eq!(decoded, value, "Failed for value: {}", value);
             assert_eq!(

@@ -431,9 +431,8 @@ mod tests {
 
     #[test]
     fn test_invalid_varint() {
-        let encoded = Bytes::from_static(&[
-            0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x02,
-        ]);
+        let encoded =
+            Bytes::from_static(&[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x02]);
         assert!(matches!(
             ReadBuffer::new(encoded).read_varint(),
             Err(Error::InvalidVarint)
