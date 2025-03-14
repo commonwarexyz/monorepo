@@ -5,12 +5,14 @@ use crate::mmr::{
     hasher::Hasher,
     iterator::{PathIterator, PeakIterator},
     Error,
+    Error::*,
 };
 use bytes::{Buf, BufMut};
 use commonware_cryptography::{Digest, Hasher as CHasher};
 use commonware_utils::{Array, SizedSerialize};
 use futures::future::try_join_all;
 use std::future::Future;
+use tracing::debug;
 
 /// Contains the information necessary for proving the inclusion of an element, or some range of elements, in the MMR
 /// from its root hash.
@@ -70,6 +72,32 @@ impl<H: CHasher> Proof<H> {
         end_element_pos: u64,
         root_hash: &H::Digest,
     ) -> bool {
+        let peak_hashes = match self.reconstruct_peak_hashes(
+            hasher,
+            elements,
+            start_element_pos,
+            end_element_pos,
+        ) {
+            Ok(peak_hashes) => peak_hashes,
+            Err(e) => {
+                debug!("failed to reconstruct peak hashes from proof: {:?}", e);
+                return false;
+            }
+        };
+        let mut mmr_hasher = Hasher::<H>::new(hasher);
+        *root_hash == mmr_hasher.root_hash(self.size, peak_hashes.iter())
+    }
+
+    /// Reconstruct the peak hashes of the MMR that produced this proof, returning `MissingHashes`
+    /// error if there are not enough proof hashes, or `ExtraHashes` error if not all proof hashes
+    /// were used in the reconstruction.
+    fn reconstruct_peak_hashes(
+        &self,
+        hasher: &mut H,
+        elements: &[H::Digest],
+        start_element_pos: u64,
+        end_element_pos: u64,
+    ) -> Result<Vec<H::Digest>, Error> {
         let mut proof_hashes_iter = self.hashes.iter();
         let mut elements_iter = elements.iter();
         let mut siblings_iter = self.hashes.iter().rev();
@@ -92,29 +120,28 @@ impl<H: CHasher> Proof<H> {
                     &mut siblings_iter,
                 ) {
                     Ok(peak_hash) => peak_hashes.push(peak_hash),
-                    Err(_) => return false, // missing hashes
+                    Err(_) => return Err(MissingHashes),
                 }
             } else if let Some(hash) = proof_hashes_iter.next() {
                 proof_hashes_used += 1;
                 peak_hashes.push(*hash);
             } else {
-                return false;
+                return Err(MissingHashes);
             }
         }
 
         if elements_iter.next().is_some() {
-            return false; // some elements were not used in the proof
+            return Err(ExtraHashes);
         }
         let next_sibling = siblings_iter.next();
         if (proof_hashes_used == 0 && next_sibling.is_some())
             || (next_sibling.is_some()
                 && *next_sibling.unwrap() != self.hashes[proof_hashes_used - 1])
         {
-            // some proof data was not used during verification, so we must return false to prevent
-            // proof malleability attacks.
-            return false;
+            return Err(ExtraHashes);
         }
-        *root_hash == mmr_hasher.root_hash(self.size, peak_hashes.iter())
+
+        Ok(peak_hashes)
     }
 
     /// Return the maximum size in bytes of any serialized `Proof`.
