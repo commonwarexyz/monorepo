@@ -2,7 +2,7 @@
 name = "commonware-flood"
 edition = "2021"
 publish = true
-version = "0.0.41"
+version = "0.0.42"
 license = "MIT OR Apache-2.0"
 description = "Spam peers deployed to AWS EC2 with random messages."
 readme = "README.md"
