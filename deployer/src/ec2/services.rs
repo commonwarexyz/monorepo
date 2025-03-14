@@ -130,7 +130,7 @@ schema_config:
       schema: v13
       index:
         prefix: index_
-        period: 12h
+        period: 24h
 storage_config:
   tsdb_shipper:
     active_index_directory: /loki/index
