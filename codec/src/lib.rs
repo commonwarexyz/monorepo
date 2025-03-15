@@ -33,16 +33,16 @@
 //! impl Codec for Point {
 //!     fn write(&self, writer: &mut impl Writer) {
 //!         // Basic types can be written by inferring the type
-//!         writer.write(&self.xy);
-//!         writer.write(&self.z);
-//!         writer.write(&self.metadata);
+//!         self.xy.write(writer);
+//!         self.z.write(writer);
+//!         self.metadata.write(writer);
 //!     }
 //!
 //!     fn read(reader: &mut impl Reader) -> Result<Self, Error> {
 //!         // Basic types can be inferred by the return type
-//!         let xy = reader.read()?;
-//!         let z = reader.read()?;
-//!         let metadata = reader.read()?;
+//!         let xy = <(u64, u64)>::read(reader)?;
+//!         let z = <Option<u32>>::read(reader)?;
+//!         let metadata = <[u8; 11]>::read(reader)?;
 //!         Ok(Self { xy, z, metadata })
 //!     }
 //!

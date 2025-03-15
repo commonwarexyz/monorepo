@@ -29,9 +29,7 @@ impl ReadBuffer {
     /// Gets a byte from the buffer
     #[inline]
     pub fn get_u8(&mut self) -> Result<u8, Error> {
-        if !self.has_remaining() {
-            return Err(Error::EndOfBuffer);
-        }
+        self.at_least(1)?;
         Ok(self.inner.get_u8())
     }
 
