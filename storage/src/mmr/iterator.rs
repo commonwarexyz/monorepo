@@ -112,7 +112,7 @@ pub(crate) fn nodes_needing_parents(peak_iterator: PeakIterator) -> Vec<u64> {
     peaks
 }
 
-/// Returns the leaf's number based on its given position `leaf_pos`.
+/// Returns the number of the leaf at position `leaf_pos` in an MMR.
 ///
 /// This computation is O(log2(n)) in the given position.
 #[allow(dead_code)] // TODO: remove this when we start using it
@@ -142,6 +142,37 @@ pub(crate) fn leaf_pos_to_num(leaf_pos: u64) -> u64 {
         }
     }
     leaf_num_floor
+}
+
+/// Returns the position of the leaf with number `leaf_num` in an MMR.
+///
+/// This computation is O(log2(n)) in `leaf_num`.
+#[allow(dead_code)] // TODO: remove this when we start using it
+pub(crate) fn leaf_num_to_pos(leaf_num: u64) -> u64 {
+    if leaf_num == 0 {
+        return 0;
+    }
+
+    // The following won't underflow because any sane leaf number would have several leading zeros.
+    let mut pos = u64::MAX >> (leaf_num.leading_zeros() - 1);
+    let mut two_h = (pos >> 2) + 1;
+    pos -= 1;
+
+    // `pos` is the position of the peak of the lowest mountain that includes both the very first
+    // leaf and the given leaf. We descend from this peak to the leaf level by descending left or
+    // right depending on the relevant bit of `leaf_num`. The position we arrive at is the position
+    // of the leaf.
+    while two_h != 0 {
+        if leaf_num & two_h != 0 {
+            // descend right
+            pos -= 1;
+        } else {
+            pos -= two_h << 1;
+        }
+        two_h >>= 1;
+    }
+
+    pos
 }
 
 /// Returns the position of the oldest provable node in the represented MMR.
@@ -297,17 +328,20 @@ mod tests {
     fn test_leaf_num_calculation() {
         let digest = hash(b"testing");
 
-        // Build MMR with 1000 leaves and make sure we can convert each leaf position to its number.
+        // Build MMR with 1000 leaves and make sure we can correctly convert each leaf position to
+        // its number and back again.
         let mut mmr = Mmr::<Sha256>::new();
         let mut hasher = Sha256::default();
-        let mut leaf_num_to_pos = Vec::new();
+        let mut num_to_pos = Vec::new();
         for _ in 0u64..1000 {
-            leaf_num_to_pos.push(mmr.add(&mut hasher, &digest));
+            num_to_pos.push(mmr.add(&mut hasher, &digest));
         }
 
-        for (leaf_num_expected, leaf_pos) in leaf_num_to_pos.iter().enumerate() {
+        for (leaf_num_expected, leaf_pos) in num_to_pos.iter().enumerate() {
             let leaf_num_got = leaf_pos_to_num(*leaf_pos);
             assert_eq!(leaf_num_got, leaf_num_expected as u64);
+            let leaf_pos_got = leaf_num_to_pos(leaf_num_got);
+            assert_eq!(leaf_pos_got, *leaf_pos);
         }
     }
 
