@@ -1,4 +1,5 @@
 use crate::{Array, BatchScheme, Error, Scheme};
+use commonware_codec::{Codec, Error as CodecError, Reader, SizedCodec, Writer};
 use commonware_utils::{hex, union_unique, SizedSerialize};
 use ed25519_consensus::{self, VerificationKey};
 use rand::{CryptoRng, Rng, RngCore};
@@ -117,6 +118,26 @@ pub struct PrivateKey {
     key: ed25519_consensus::SigningKey,
 }
 
+impl Codec for PrivateKey {
+    fn write(&self, writer: &mut impl Writer) {
+        self.raw.write(writer);
+    }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
+        let raw = <[u8; PRIVATE_KEY_LENGTH]>::read(reader)?;
+        let key = ed25519_consensus::SigningKey::from(raw);
+        Ok(Self { raw, key })
+    }
+
+    fn len_encoded(&self) -> usize {
+        PRIVATE_KEY_LENGTH
+    }
+}
+
+impl SizedCodec for PrivateKey {
+    const LEN_ENCODED: usize = PRIVATE_KEY_LENGTH;
+}
+
 impl Array for PrivateKey {
     type Error = Error;
 }
@@ -215,6 +236,27 @@ pub struct PublicKey {
     key: ed25519_consensus::VerificationKey,
 }
 
+impl Codec for PublicKey {
+    fn write(&self, writer: &mut impl Writer) {
+        self.raw.write(writer);
+    }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
+        let raw = <[u8; PUBLIC_KEY_LENGTH]>::read(reader)?;
+        let key = ed25519_consensus::VerificationKey::try_from(&raw[..])
+            .map_err(|_| CodecError::InvalidData("Ed25519".into(), "Invalid public key".into()))?;
+        Ok(Self { raw, key })
+    }
+
+    fn len_encoded(&self) -> usize {
+        PUBLIC_KEY_LENGTH
+    }
+}
+
+impl SizedCodec for PublicKey {
+    const LEN_ENCODED: usize = PUBLIC_KEY_LENGTH;
+}
+
 impl Array for PublicKey {
     type Error = Error;
 }
@@ -285,6 +327,26 @@ impl Display for PublicKey {
 pub struct Signature {
     raw: [u8; SIGNATURE_LENGTH],
     signature: ed25519_consensus::Signature,
+}
+
+impl Codec for Signature {
+    fn write(&self, writer: &mut impl Writer) {
+        self.raw.write(writer);
+    }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
+        let raw = <[u8; SIGNATURE_LENGTH]>::read(reader)?;
+        let signature = ed25519_consensus::Signature::from(raw);
+        Ok(Self { raw, signature })
+    }
+
+    fn len_encoded(&self) -> usize {
+        SIGNATURE_LENGTH
+    }
+}
+
+impl SizedCodec for Signature {
+    const LEN_ENCODED: usize = SIGNATURE_LENGTH;
 }
 
 impl Array for Signature {

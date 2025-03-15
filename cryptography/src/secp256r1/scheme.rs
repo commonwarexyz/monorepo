@@ -1,4 +1,5 @@
 use crate::{Array, Error, Scheme};
+use commonware_codec::{Codec, Error as CodecError, Reader, SizedCodec, Writer};
 use commonware_utils::{hex, union_unique, SizedSerialize};
 use p256::{
     ecdsa::{
@@ -85,6 +86,28 @@ impl Scheme for Secp256r1 {
 pub struct PrivateKey {
     raw: [u8; PRIVATE_KEY_LENGTH],
     key: SigningKey,
+}
+
+impl Codec for PrivateKey {
+    fn write(&self, writer: &mut impl Writer) {
+        writer.write_fixed(&self.raw);
+    }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
+        let raw = <[u8; PRIVATE_KEY_LENGTH]>::read(reader)?;
+        let key = SigningKey::from_slice(&raw).map_err(|_| {
+            CodecError::InvalidData("Secp256r1".into(), "Invalid private key".into())
+        })?;
+        Ok(Self { raw, key })
+    }
+
+    fn len_encoded(&self) -> usize {
+        PRIVATE_KEY_LENGTH
+    }
+}
+
+impl SizedCodec for PrivateKey {
+    const LEN_ENCODED: usize = PRIVATE_KEY_LENGTH;
 }
 
 impl Array for PrivateKey {
@@ -177,6 +200,28 @@ pub struct PublicKey {
     key: VerifyingKey,
 }
 
+impl Codec for PublicKey {
+    fn write(&self, writer: &mut impl Writer) {
+        writer.write_fixed(&self.raw);
+    }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
+        let raw = <[u8; PUBLIC_KEY_LENGTH]>::read(reader)?;
+        let key = VerifyingKey::from_sec1_bytes(&raw).map_err(|_| {
+            CodecError::InvalidData("Secp256r1".into(), "Invalid public key".into())
+        })?;
+        Ok(Self { raw, key })
+    }
+
+    fn len_encoded(&self) -> usize {
+        PUBLIC_KEY_LENGTH
+    }
+}
+
+impl SizedCodec for PublicKey {
+    const LEN_ENCODED: usize = PUBLIC_KEY_LENGTH;
+}
+
 impl Array for PublicKey {
     type Error = Error;
 }
@@ -254,6 +299,27 @@ impl Display for PublicKey {
 pub struct Signature {
     raw: [u8; SIGNATURE_LENGTH],
     signature: p256::ecdsa::Signature,
+}
+
+impl Codec for Signature {
+    fn write(&self, writer: &mut impl Writer) {
+        writer.write_fixed(&self.raw);
+    }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
+        let raw = <[u8; SIGNATURE_LENGTH]>::read(reader)?;
+        let signature = p256::ecdsa::Signature::from_slice(&raw)
+            .map_err(|_| CodecError::InvalidData("Secp256r1".into(), "Invalid signature".into()))?;
+        Ok(Self { raw, signature })
+    }
+
+    fn len_encoded(&self) -> usize {
+        SIGNATURE_LENGTH
+    }
+}
+
+impl SizedCodec for Signature {
+    const LEN_ENCODED: usize = SIGNATURE_LENGTH;
 }
 
 impl Array for Signature {
@@ -417,6 +483,50 @@ mod tests {
             return format!("0{}", value);
         }
         value.to_string()
+    }
+
+    #[test]
+    fn test_codec_private_key() {
+        let original: PrivateKey = create_private_key();
+        let encoded = original.encode();
+        assert_eq!(encoded.len(), PRIVATE_KEY_LENGTH);
+
+        let decoded = PrivateKey::decode(encoded).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_codec_public_key() {
+        let private_key = create_private_key();
+        let signer = <Secp256r1 as Scheme>::from(private_key).unwrap();
+        let original: PublicKey = signer.public_key();
+
+        let encoded = original.encode();
+        assert_eq!(encoded.len(), PUBLIC_KEY_LENGTH);
+
+        let decoded = PublicKey::decode(encoded).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_codec_signature() {
+        let private_key = create_private_key();
+        let mut signer = <Secp256r1 as Scheme>::from(private_key).unwrap();
+        let original = signer.sign(None, "Hello World".as_bytes());
+
+        let encoded = original.encode();
+        assert_eq!(encoded.len(), SIGNATURE_LENGTH);
+
+        let decoded = Signature::decode(encoded).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    fn create_private_key() -> PrivateKey {
+        const HEX: &str = "519b423d715f8b581f4fa8ee59f4771a5b44c8130b4e3eacca54a56dda72b464";
+        commonware_utils::from_hex_formatted(HEX)
+            .unwrap()
+            .try_into()
+            .unwrap()
     }
 
     #[test]

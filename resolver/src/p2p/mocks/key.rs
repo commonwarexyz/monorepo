@@ -1,3 +1,4 @@
+use commonware_codec::{Codec, Error as CodecError, Reader, SizedCodec, Writer};
 use commonware_utils::{Array, SizedSerialize};
 use std::{fmt, ops::Deref};
 use thiserror::Error;
@@ -51,6 +52,24 @@ impl TryFrom<Vec<u8>> for Key {
 
 impl SizedSerialize for Key {
     const SERIALIZED_LEN: usize = 1;
+}
+
+impl Codec for Key {
+    fn write(&self, writer: &mut impl Writer) {
+        self.0.write(writer);
+    }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
+        u8::read(reader).map(Self)
+    }
+
+    fn len_encoded(&self) -> usize {
+        Self::SERIALIZED_LEN
+    }
+}
+
+impl SizedCodec for Key {
+    const LEN_ENCODED: usize = Self::SERIALIZED_LEN;
 }
 
 impl Array for Key {

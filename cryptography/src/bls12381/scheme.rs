@@ -24,6 +24,7 @@ use super::primitives::{
     ops,
 };
 use crate::{Array, Error, Scheme};
+use commonware_codec::{Codec, Error as CodecError, Reader, SizedCodec, Writer};
 use commonware_utils::{hex, SizedSerialize};
 use rand::{CryptoRng, Rng};
 use std::{
@@ -89,6 +90,29 @@ impl Scheme for Bls12381 {
 pub struct PrivateKey {
     raw: [u8; group::PRIVATE_KEY_LENGTH],
     key: group::Private,
+}
+
+impl Codec for PrivateKey {
+    fn write(&self, writer: &mut impl Writer) {
+        self.raw.write(writer);
+    }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
+        let raw = <[u8; group::PRIVATE_KEY_LENGTH]>::read(reader)?;
+        let key = group::Private::deserialize(&raw).ok_or(CodecError::InvalidData(
+            "Bls12381".into(),
+            "Invalid private key".into(),
+        ))?;
+        Ok(Self { raw, key })
+    }
+
+    fn len_encoded(&self) -> usize {
+        group::PRIVATE_KEY_LENGTH
+    }
+}
+
+impl SizedCodec for PrivateKey {
+    const LEN_ENCODED: usize = group::PRIVATE_KEY_LENGTH;
 }
 
 impl Array for PrivateKey {
@@ -181,6 +205,29 @@ pub struct PublicKey {
     key: group::Public,
 }
 
+impl Codec for PublicKey {
+    fn write(&self, writer: &mut impl Writer) {
+        self.raw.write(writer);
+    }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
+        let raw = <[u8; group::PUBLIC_KEY_LENGTH]>::read(reader)?;
+        let key = group::Public::deserialize(&raw).ok_or(CodecError::InvalidData(
+            "Bls12381".into(),
+            "Invalid public key".into(),
+        ))?;
+        Ok(Self { raw, key })
+    }
+
+    fn len_encoded(&self) -> usize {
+        group::PUBLIC_KEY_LENGTH
+    }
+}
+
+impl SizedCodec for PublicKey {
+    const LEN_ENCODED: usize = group::PUBLIC_KEY_LENGTH;
+}
+
 impl Array for PublicKey {
     type Error = Error;
 }
@@ -269,6 +316,29 @@ impl Display for PublicKey {
 pub struct Signature {
     raw: [u8; group::SIGNATURE_LENGTH],
     signature: group::Signature,
+}
+
+impl Codec for Signature {
+    fn write(&self, writer: &mut impl Writer) {
+        self.raw.write(writer);
+    }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
+        let raw = <[u8; group::SIGNATURE_LENGTH]>::read(reader)?;
+        let signature = group::Signature::deserialize(&raw).ok_or(CodecError::InvalidData(
+            "Bls12381".into(),
+            "Invalid signature".into(),
+        ))?;
+        Ok(Self { raw, signature })
+    }
+
+    fn len_encoded(&self) -> usize {
+        group::SIGNATURE_LENGTH
+    }
+}
+
+impl SizedCodec for Signature {
+    const LEN_ENCODED: usize = group::SIGNATURE_LENGTH;
 }
 
 impl Array for Signature {
