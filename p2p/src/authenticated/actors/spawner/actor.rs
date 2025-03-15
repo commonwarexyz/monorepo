@@ -30,7 +30,7 @@ pub struct Actor<
 
     receiver: mpsc::Receiver<Message<E, Si, St, P>>,
 
-    connected_peers: Gauge,
+    connections: Gauge,
     sent_messages: Family<metrics::Message, Counter>,
     received_messages: Family<metrics::Message, Counter>,
     rate_limited: Family<metrics::Message, Counter>,
@@ -44,14 +44,14 @@ impl<
     > Actor<E, Si, St, P>
 {
     pub fn new(context: E, cfg: Config) -> (Self, Mailbox<E, Si, St, P>) {
-        let connected_peers = Gauge::default();
+        let connections = Gauge::default();
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();
         let rate_limited = Family::<metrics::Message, Counter>::default();
         context.register(
-            "connected_peers",
+            "connections",
             "number of connected peers",
-            connected_peers.clone(),
+            connections.clone(),
         );
         context.register("messages_sent", "messages sent", sent_messages.clone());
         context.register(
@@ -74,7 +74,7 @@ impl<
                 allowed_bit_vec_rate: cfg.allowed_bit_vec_rate,
                 allowed_peers_rate: cfg.allowed_peers_rate,
                 receiver,
-                connected_peers,
+                connections,
                 sent_messages,
                 received_messages,
                 rate_limited,
@@ -100,10 +100,10 @@ impl<
                     reservation,
                 } => {
                     // Mark peer as connected
-                    self.connected_peers.inc();
+                    self.connections.inc();
 
                     // Clone required variables
-                    let connected_peers = self.connected_peers.clone();
+                    let connections = self.connections.clone();
                     let sent_messages = self.sent_messages.clone();
                     let received_messages = self.received_messages.clone();
                     let rate_limited = self.rate_limited.clone();
@@ -135,7 +135,7 @@ impl<
 
                             // Run peer
                             let e = actor.run(peer.clone(), connection, tracker, channels).await;
-                            connected_peers.dec();
+                            connections.dec();
 
                             // Let the router know the peer has exited
                             info!(error = ?e, ?peer, "peer shutdown");
