@@ -1435,35 +1435,29 @@ impl<
             return;
         };
 
-        // Verify signature
-        let Some(signature) = Eval::deserialize(&notarize.proposal_signature) else {
+        // Parse signatures
+        let Some(notarize_signature) = Eval::deserialize(&notarize.proposal_signature) else {
             return;
         };
-        if signature.index != public_key_index {
+        let Some(seed_signature) = Eval::deserialize(&notarize.seed_signature) else {
             return;
-        }
+        };
+
+        // Verify aggregate signature
         let notarize_message = proposal_message(proposal.view, proposal.parent, &payload);
-        if ops::partial_verify_message(
+        let notarize_message = (
+            Some(self.notarize_namespace.as_ref()),
+            notarize_message.as_ref(),
+        );
+        let seed_message = seed_message(proposal.view);
+        let seed_message = (Some(self.seed_namespace.as_ref()), seed_message.as_ref());
+        if partial_verify_multiple_messages(
             identity,
-            Some(&self.notarize_namespace),
-            &notarize_message,
-            &signature,
+            public_key_index,
+            &[notarize_message, seed_message],
+            &[notarize_signature, seed_signature],
         )
         .is_err()
-        {
-            return;
-        }
-
-        // Verify seed
-        let Some(seed) = Eval::deserialize(&notarize.seed_signature) else {
-            return;
-        };
-        if seed.index != public_key_index {
-            return;
-        }
-        let seed_message = seed_message(proposal.view);
-        if ops::partial_verify_message(identity, Some(&self.seed_namespace), &seed_message, &seed)
-            .is_err()
         {
             return;
         }
