@@ -32,7 +32,7 @@ use commonware_utils::quorum;
 use futures::{
     channel::{mpsc, oneshot},
     future::Either,
-    pin_mut, StreamExt,
+    pin_mut, SinkExt, StreamExt,
 };
 use prometheus_client::metrics::{
     counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
@@ -638,6 +638,15 @@ impl<
     }
 }
 
+enum Verified<D: Digest> {
+    Notarize(u32, Parsed<wire::Notarize, D>),
+    Notarization(Parsed<wire::Notarization, D>),
+    Nullify(u32, wire::Nullify),
+    Nullification(wire::Nullification),
+    Finalize(u32, Parsed<wire::Finalize, D>),
+    Finalization(Parsed<wire::Finalization, D>),
+}
+
 pub struct Actor<
     B: Blob,
     E: Clock + Rng + Spawner + Storage<B> + Metrics,
@@ -678,6 +687,9 @@ pub struct Actor<
     skip_timeout: View,
 
     mailbox_receiver: mpsc::Receiver<Message<D>>,
+
+    handler_sender: mpsc::Sender<Verified>,
+    handler_receiver: mpsc::Receiver<Verified>,
 
     last_finalized: View,
     view: View,
@@ -1559,6 +1571,14 @@ impl<
         ) {
             return;
         }
+
+        self.handler_sender
+            .send(Verified::Notarization(Parsed {
+                message: notarization,
+                digest: payload,
+            }))
+            .await
+            .expect("unable to send verified notarization");
 
         // Handle notarization
         self.handle_notarization(Parsed {
@@ -2541,55 +2561,78 @@ impl<
                     match payload {
                         wire::voter::Payload::Notarize(notarize) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::notarize(&s)).inc();
-                            view = match &notarize.proposal {
-                                Some(proposal) => proposal.view,
-                                None => {
-                                    continue;
-                                }
-                            };
+                            if notarize.proposal.is_none() {
+                                continue;
+                            }
                             self.notarize(&s, notarize).await;
                         }
                         wire::voter::Payload::Notarization(notarization) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::notarization(&s)).inc();
-                            view = match &notarization.proposal {
-                                Some(proposal) => proposal.view,
-                                None => {
-                                    continue;
-                                }
-                            };
+                            if notarization.proposal.is_none() {
+                                continue;
+                            }
                             self.notarization(notarization).await;
                         }
                         wire::voter::Payload::Nullify(nullify) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::nullify(&s)).inc();
-                            view = nullify.view;
                             self.nullify(&s, nullify).await;
                         }
                         wire::voter::Payload::Nullification(nullification) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::nullification(&s)).inc();
-                            view = nullification.view;
                             self.nullification(nullification).await;
                         }
                         wire::voter::Payload::Finalize(finalize) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::finalize(&s)).inc();
-                            view = match &finalize.proposal {
-                                Some(proposal) => proposal.view,
-                                None => {
-                                    continue;
-                                }
-                            };
+                            if finalize.proposal.is_none() {
+                                continue;
+                            }
                             self.finalize(&s, finalize).await;
                         }
                         wire::voter::Payload::Finalization(finalization) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::finalization(&s)).inc();
-                            view = match &finalization.proposal {
-                                Some(proposal) => proposal.view,
-                                None => {
-                                    continue;
-                                }
-                            };
+                            if finalization.proposal.is_none() {
+                                continue;
+                            }
                             self.finalization(finalization).await;
                         }
                     };
+
+                    // Continue processing (nothing can happen until handler called)
+                    continue;
+                },
+                handled = self.handler_receiver.recv() => {
+                    // Ensure not null
+                    let Ok(handled) = handled else {
+                        break;
+                    };
+
+                    // Handle message
+                    match handled {
+                        Verified::Notarize(public_key_index, notarize) => {
+                            view = notarize.message.proposal.as_ref().unwrap().view;
+                            self.handle_notarize(public_key_index, notarize).await;
+                        }
+                        Verified::Notarization(notarization) => {
+                            view = notarization.message.proposal.as_ref().unwrap().view;
+                            self.handle_notarization(notarization).await;
+                        }
+                        Verified::Nullify(public_key_index, nullify) => {
+                            view = nullify.view;
+                            self.handle_nullify(public_key_index, nullify).await;
+                        }
+                        Verified::Nullification(nullification) => {
+                            view = nullification.view;
+                            self.handle_nullification(nullification).await;
+                        }
+                        Verified::Finalize(public_key_index, finalize) => {
+                            view = finalize.message.proposal.as_ref().unwrap().view;
+                            self.handle_finalize(public_key_index, finalize).await;
+                        }
+                        Verified::Finalization(finalization) => {
+                            view = finalization.message.proposal.as_ref().unwrap().view;
+                            self.handle_finalization(finalization).await;
+                        }
+                    }
                 },
             };
 
