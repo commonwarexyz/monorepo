@@ -185,6 +185,9 @@ where
         )
     }
 
+    /// Abort the task (if abortable).
+    ///
+    /// Blocking tasks cannot be aborted.
     pub fn abort(&self) {
         // Abort the task (if abortable)
         let Some(aborter) = &self.aborter else {
