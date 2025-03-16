@@ -1596,24 +1596,42 @@ impl<
             }
         }
 
-        // Verify notarization
-        if !verify_notarization::<D, S>(
-            &self.supervisor,
-            &self.notarize_namespace,
-            &self.seed_namespace,
-            &notarization,
-        ) {
+        // Get public key
+        let Some(polynomial) = self.supervisor.identity(proposal.view) else {
+            debug!(
+                view = proposal.view,
+                reason = "unable to get identity for view",
+                "dropping notarization"
+            );
             return;
-        }
+        };
+        let public_key = poly::public(polynomial);
 
-        // Handle notarization
-        self.verified_sender
-            .send(Verified::Notarization(Parsed {
-                message: notarization,
-                digest: payload,
-            }))
-            .await
-            .expect("unable to send verified notarization");
+        // Verify notarization
+        self.context.with_label("notarization").spawn({
+            let mut verified_sender = self.verified_sender.clone();
+            let notarize_namespace = self.notarize_namespace.clone();
+            let seed_namespace = self.seed_namespace.clone();
+            move |_| async move {
+                if !verify_notarization::<D>(
+                    &public_key,
+                    &notarize_namespace,
+                    &seed_namespace,
+                    &notarization,
+                ) {
+                    return;
+                }
+
+                // Handle notarization
+                verified_sender
+                    .send(Verified::Notarization(Parsed {
+                        message: notarization,
+                        digest: payload,
+                    }))
+                    .await
+                    .expect("unable to send verified notarization");
+            }
+        });
     }
 
     async fn handle_notarization(&mut self, notarization: Parsed<wire::Notarization, D>) {
@@ -1660,21 +1678,39 @@ impl<
             }
         }
 
-        // Verify nullification
-        if !verify_nullification::<S>(
-            &self.supervisor,
-            &self.nullify_namespace,
-            &self.seed_namespace,
-            &nullification,
-        ) {
+        // Get public key
+        let Some(polynomial) = self.supervisor.identity(nullification.view) else {
+            debug!(
+                view = nullification.view,
+                reason = "unable to get identity for view",
+                "dropping nullification"
+            );
             return;
-        }
+        };
+        let public_key = poly::public(polynomial);
 
-        // Handle notarization
-        self.verified_sender
-            .send(Verified::Nullification(nullification))
-            .await
-            .expect("unable to send verified nullification");
+        // Verify nullification
+        self.context.with_label("nullification").spawn({
+            let mut verified_sender = self.verified_sender.clone();
+            let nullify_namespace = self.nullify_namespace.clone();
+            let seed_namespace = self.seed_namespace.clone();
+            move |_| async move {
+                if !verify_nullification(
+                    &public_key,
+                    &nullify_namespace,
+                    &seed_namespace,
+                    &nullification,
+                ) {
+                    return;
+                }
+
+                // Handle nullification
+                verified_sender
+                    .send(Verified::Nullification(nullification))
+                    .await
+                    .expect("unable to send verified nullification");
+            }
+        });
     }
 
     async fn handle_nullification(&mut self, nullification: wire::Nullification) {

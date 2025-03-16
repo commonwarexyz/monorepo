@@ -11,11 +11,8 @@ use commonware_cryptography::bls12381::primitives::{
 use commonware_utils::Array;
 use tracing::debug;
 
-pub fn verify_notarization<
-    D: Array,
-    S: ThresholdSupervisor<Index = View, Identity = poly::Public>,
->(
-    supervisor: &S,
+pub fn verify_notarization<D: Array>(
+    public_key: &group::Public,
     notarization_namespace: &[u8],
     seed_namespace: &[u8],
     notarization: &wire::Notarization,
@@ -34,17 +31,6 @@ pub fn verify_notarization<
         debug!(reason = "invalid payload", "dropping notarization");
         return false;
     };
-
-    // Get public key
-    let Some(polynomial) = supervisor.identity(proposal.view) else {
-        debug!(
-            view = proposal.view,
-            reason = "unable to get identity for view",
-            "dropping notarization"
-        );
-        return false;
-    };
-    let public_key = poly::public(polynomial);
 
     // Parse signature
     let Some(signature) = group::Signature::deserialize(&notarization.proposal_signature) else {
@@ -83,23 +69,12 @@ pub fn verify_notarization<
     true
 }
 
-pub fn verify_nullification<S: ThresholdSupervisor<Index = View, Identity = poly::Public>>(
-    supervisor: &S,
+pub fn verify_nullification(
+    public_key: &group::Public,
     nullification_namespace: &[u8],
     seed_namespace: &[u8],
     nullification: &wire::Nullification,
 ) -> bool {
-    // Get public key
-    let Some(polynomial) = supervisor.identity(nullification.view) else {
-        debug!(
-            view = nullification.view,
-            reason = "unable to get identity for view",
-            "dropping nullification"
-        );
-        return false;
-    };
-    let public_key = poly::public(polynomial);
-
     // Parse signature
     let Some(signature) = group::Signature::deserialize(&nullification.view_signature) else {
         debug!(reason = "invalid signature", "dropping nullification");
