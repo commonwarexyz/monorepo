@@ -1,8 +1,33 @@
 //! An authenticatable bitmap.
 
-use crate::mmr::{iterator::leaf_num_to_pos, mem::Mmr};
+use crate::mmr::{
+    iterator::leaf_num_to_pos, mem::Mmr, verification::Proof, verification::Storage, Error,
+};
 use commonware_cryptography::Hasher as CHasher;
 use commonware_utils::SizedSerialize;
+
+/// Implements the [Storage] trait for generating inclusion proofs over the bitmap.
+struct BitmapStorage<'a, H: CHasher> {
+    /// The Merkle tree over all bitmap bits other than the last chunk.
+    mmr: &'a Mmr<H>,
+
+    /// A pruned Merkle tree over all bits of the bitmap including the last chunk.
+    last_chunk_mmr: &'a Mmr<H>,
+}
+
+impl<H: CHasher + Send + Sync> Storage<H::Digest> for BitmapStorage<'_, H> {
+    async fn get_node(&self, pos: u64) -> Result<Option<H::Digest>, Error> {
+        if pos < self.mmr.size() {
+            self.mmr.get_node(pos).await
+        } else {
+            self.last_chunk_mmr.get_node(pos).await
+        }
+    }
+
+    async fn size(&self) -> Result<u64, Error> {
+        Ok(self.last_chunk_mmr.size())
+    }
+}
 
 /// A bitmap supporting inclusion proofs through Merkelization.
 ///
@@ -52,10 +77,10 @@ impl<H: CHasher> Bitmap<H> {
         (self.bitmap.len() * 8 - Self::CHUNK_SIZE * 8 + self.next_bit) as u64
     }
 
-    /// Return the last chunk of the bitmap as a slice.
-    fn last_chunk(&self) -> &[u8] {
+    /// Return the last chunk of the bitmap as a digest.
+    fn last_chunk(&self) -> H::Digest {
         let len = self.bitmap.len();
-        &self.bitmap[len - Self::CHUNK_SIZE..len]
+        H::Digest::try_from(&self.bitmap[len - Self::CHUNK_SIZE..len]).unwrap()
     }
 
     /// Return the last chunk of the bitmap as a mutable slice.
@@ -64,9 +89,15 @@ impl<H: CHasher> Bitmap<H> {
         &mut self.bitmap[len - Self::CHUNK_SIZE..len]
     }
 
+    /// Returns the bitmap chunk containing the specified bit as a digest.
+    fn get_chunk(&self, bit_offset: u64) -> H::Digest {
+        let byte_offset = bit_offset as usize / 8 / Self::CHUNK_SIZE * Self::CHUNK_SIZE;
+        H::Digest::try_from(&self.bitmap[byte_offset..byte_offset + Self::CHUNK_SIZE]).unwrap()
+    }
+
     /// Commit the last chunk of the bitmap to the Merkle tree and initialize the next chunk.
     fn commit_last_chunk(&mut self, hasher: &mut H) {
-        let chunk = H::Digest::try_from(self.last_chunk()).unwrap();
+        let chunk = self.last_chunk();
         self.mmr.add(hasher, &chunk);
         self.next_bit = 0;
         self.bitmap.extend(vec![0u8; Self::CHUNK_SIZE]);
@@ -121,6 +152,12 @@ impl<H: CHasher> Bitmap<H> {
         1 << (bit_offset % 8)
     }
 
+    /// Convert a bit offset into the position of the Merkle tree leaf it belongs to.
+    fn leaf_pos(bit_offset: u64) -> u64 {
+        let leaf_num = bit_offset / 8 / Self::CHUNK_SIZE as u64;
+        leaf_num_to_pos(leaf_num)
+    }
+
     /// Get the value of a bit.
     pub fn get_bit(&self, bit_offset: u64) -> bool {
         assert!(bit_offset < self.bit_count(), "out of bounds");
@@ -146,13 +183,9 @@ impl<H: CHasher> Bitmap<H> {
             return;
         }
 
-        let leaf_num = bit_offset as usize / Self::CHUNK_SIZE / 8;
-        let start_byte = leaf_num * Self::CHUNK_SIZE;
-        let chunk =
-            H::Digest::try_from(&self.bitmap[start_byte..start_byte + Self::CHUNK_SIZE]).unwrap();
-        self.mmr
-            .update_leaf(hasher, leaf_num_to_pos(leaf_num as u64), &chunk)
-            .unwrap();
+        let chunk = self.get_chunk(bit_offset);
+        let leaf_pos = Self::leaf_pos(bit_offset);
+        self.mmr.update_leaf(hasher, leaf_pos, &chunk).unwrap();
     }
 
     /// Return the root hash of the Merkle tree over the bitmap.
@@ -171,10 +204,52 @@ impl<H: CHasher> Bitmap<H> {
         // a temporary lightweight (fully pruned) copy of the tree so that we don't require
         // mutability of the original.
         let mut mmr = self.mmr.clone_pruned();
-        let chunk = H::Digest::try_from(self.last_chunk()).unwrap();
-        mmr.add(hasher, &chunk);
+        let last_chunk = self.last_chunk();
+        mmr.add(hasher, &last_chunk);
 
         mmr.root(hasher)
+    }
+
+    /// Return an inclusion proof for the specified bit, along with the chunk of the bitmap
+    /// containing that bit. The proof can be used to prove any bit in the chunk.
+    pub async fn proof(
+        &self,
+        hasher: &mut H,
+        bit_offset: u64,
+    ) -> Result<(Proof<H>, H::Digest), Error> {
+        assert!(bit_offset < self.bit_count(), "out of bounds");
+
+        let leaf_pos = Self::leaf_pos(bit_offset);
+        let chunk = self.get_chunk(bit_offset);
+
+        if self.next_bit == 0 {
+            let proof = Proof::<H>::range_proof(&self.mmr, leaf_pos, leaf_pos).await?;
+            return Ok((proof, chunk));
+        }
+
+        // We must account for the bits in the last chunk.
+        let mut mmr = self.mmr.clone_pruned();
+        let last_chunk = self.last_chunk();
+        mmr.add(hasher, &last_chunk);
+
+        let storage = BitmapStorage {
+            mmr: &self.mmr,
+            last_chunk_mmr: &mmr,
+        };
+        let proof = Proof::<H>::range_proof(&storage, leaf_pos, leaf_pos).await?;
+
+        Ok((proof, chunk))
+    }
+
+    pub fn verify_bit_inclusion(
+        hasher: &mut H,
+        proof: &Proof<H>,
+        chunk: &H::Digest,
+        bit_offset: u64,
+        root_hash: &H::Digest,
+    ) -> bool {
+        let leaf_pos = Self::leaf_pos(bit_offset);
+        proof.verify_element_inclusion(hasher, chunk, leaf_pos, root_hash)
     }
 }
 
@@ -182,6 +257,7 @@ impl<H: CHasher> Bitmap<H> {
 mod tests {
     use super::*;
     use commonware_cryptography::{hash, Sha256};
+    use commonware_runtime::{deterministic::Executor, Runner};
 
     #[test]
     fn test_bitmap_building() {
@@ -285,12 +361,13 @@ mod tests {
 
     #[test]
     fn test_bitmap_get_set_bits() {
-        // Build a test MMR with two chunks + 1 byte + a couple extra bits worth of bits.
+        // Build a test MMR with two chunks worth of bits.
         let mut bitmap = Bitmap::<Sha256>::default();
         let test_digest = hash(b"test");
         let mut hasher = Sha256::new();
         bitmap.append_chunk_unchecked(&mut hasher, &test_digest);
         bitmap.append_chunk_unchecked(&mut hasher, &test_digest);
+        // Add a few extra bits to exercise not being on a chunk or byte boundary.
         bitmap.append_byte_unchecked(&mut hasher, 0xF1);
         bitmap.append(&mut hasher, true);
         bitmap.append(&mut hasher, false);
@@ -310,5 +387,54 @@ mod tests {
             let new_root = bitmap.root(&mut hasher);
             assert_eq!(root, new_root);
         }
+    }
+
+    #[test]
+    fn test_bitmap_mmr_proof_verification() {
+        let (executor, _, _) = Executor::default();
+        executor.start(async move {
+            // Build a bitmap with 10 chunks worth of bits.
+            let mut hasher = Sha256::new();
+            let mut bitmap = Bitmap::new();
+            for i in 0u32..10 {
+                let digest = hash(&[b"bytes", i.to_be_bytes().as_ref()].concat());
+                bitmap.append_chunk_unchecked(&mut hasher, &digest);
+            }
+            // Add a few extra bits to exercise not being on a chunk or byte boundary.
+            bitmap.append_byte_unchecked(&mut hasher, 0xA6);
+            bitmap.append(&mut hasher, true);
+            bitmap.append(&mut hasher, false);
+            bitmap.append(&mut hasher, true);
+            bitmap.append(&mut hasher, true);
+            bitmap.append(&mut hasher, false);
+
+            let root = bitmap.root(&mut hasher);
+
+            // Try and prove every bit.
+            for i in 0..bitmap.bit_count() {
+                let (proof, chunk) = bitmap.proof(&mut hasher, i).await.unwrap();
+
+                // Proof should verify for the original chunk containing the bit.
+                assert!(
+                    Bitmap::verify_bit_inclusion(&mut hasher, &proof, &chunk, i, &root),
+                    "failed to prove bit {}",
+                    i
+                );
+
+                // Flip the bit in the chunk and make sure the proof fails.
+                let mask: u8 = 1 << (i % 8);
+                let byte_offset = (i as usize / 8) % Bitmap::<Sha256>::CHUNK_SIZE;
+                let corrupted = {
+                    let mut tmp = chunk.as_ref().to_vec();
+                    tmp[byte_offset] ^= mask;
+                    <Sha256 as CHasher>::Digest::try_from(&tmp).unwrap()
+                };
+                assert!(
+                    !Bitmap::verify_bit_inclusion(&mut hasher, &proof, &corrupted, i, &root),
+                    "proving bit {} after flipping should have failed",
+                    i
+                );
+            }
+        })
     }
 }
