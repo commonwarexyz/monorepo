@@ -65,6 +65,8 @@ struct Work {
 struct Metrics {
     tasks_spawned: Family<Work, Counter>,
     tasks_running: Family<Work, Gauge>,
+    blocking_tasks_spawned: Family<Work, Counter>,
+    blocking_tasks_running: Family<Work, Gauge>,
     task_polls: Family<Work, Counter>,
 
     network_bandwidth: Counter,
@@ -80,8 +82,10 @@ impl Metrics {
     pub fn init(registry: &mut Registry) -> Self {
         let metrics = Self {
             task_polls: Family::default(),
-            tasks_running: Family::default(),
             tasks_spawned: Family::default(),
+            tasks_running: Family::default(),
+            blocking_tasks_spawned: Family::default(),
+            blocking_tasks_running: Family::default(),
             network_bandwidth: Counter::default(),
             open_blobs: Gauge::default(),
             storage_reads: Counter::default(),
@@ -98,6 +102,16 @@ impl Metrics {
             "tasks_running",
             "Number of tasks currently running",
             metrics.tasks_running.clone(),
+        );
+        registry.register(
+            "blocking_tasks_spawned",
+            "Total number of blocking tasks spawned",
+            metrics.blocking_tasks_spawned.clone(),
+        );
+        registry.register(
+            "blocking_tasks_running",
+            "Number of blocking tasks currently running",
+            metrics.blocking_tasks_running.clone(),
         );
         registry.register(
             "task_polls",
@@ -876,6 +890,39 @@ impl crate::Spawner for Context {
             Tasks::register(&executor.tasks, &label, false, Box::pin(f));
             handle
         }
+    }
+
+    fn spawn_blocking<F, T>(self, f: F) -> Handle<T>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        // Ensure a context only spawns one task
+        assert!(!self.spawned, "already spawned");
+
+        // Get metrics
+        let work = Work {
+            label: self.label.clone(),
+        };
+        self.executor
+            .metrics
+            .blocking_tasks_spawned
+            .get_or_create(&work)
+            .inc();
+        let gauge = self
+            .executor
+            .metrics
+            .blocking_tasks_running
+            .get_or_create(&work)
+            .clone();
+
+        // Initialize the blocking task
+        let (f, handle) = Handle::init_blocking(f, gauge, false);
+
+        // Spawn the task
+        let f = async move { f() };
+        Tasks::register(&self.executor.tasks, &self.label, false, Box::pin(f));
+        handle
     }
 
     fn stop(&self, value: i32) {
