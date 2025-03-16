@@ -70,6 +70,7 @@
 use commonware_utils::array;
 use thiserror::Error;
 
+pub mod bitmap;
 mod hasher;
 mod iterator;
 pub mod journaled;
