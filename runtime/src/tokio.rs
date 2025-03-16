@@ -60,6 +60,8 @@ struct Work {
 struct Metrics {
     tasks_spawned: Family<Work, Counter>,
     tasks_running: Family<Work, Gauge>,
+    blocking_tasks_spawned: Family<Work, Counter>,
+    blocking_tasks_running: Family<Work, Gauge>,
 
     // As nice as it would be to track each of these by socket address,
     // it quickly becomes an OOM attack vector.
@@ -80,6 +82,8 @@ impl Metrics {
         let metrics = Self {
             tasks_spawned: Family::default(),
             tasks_running: Family::default(),
+            blocking_tasks_spawned: Family::default(),
+            blocking_tasks_running: Family::default(),
             inbound_connections: Counter::default(),
             outbound_connections: Counter::default(),
             inbound_bandwidth: Counter::default(),
@@ -99,6 +103,16 @@ impl Metrics {
             "tasks_running",
             "Number of tasks currently running",
             metrics.tasks_running.clone(),
+        );
+        registry.register(
+            "blocking_tasks_spawned",
+            "Total number of blocking tasks spawned",
+            metrics.blocking_tasks_spawned.clone(),
+        );
+        registry.register(
+            "blocking_tasks_running",
+            "Number of blocking tasks currently running",
+            metrics.blocking_tasks_running.clone(),
         );
         registry.register(
             "inbound_connections",
@@ -395,13 +409,13 @@ impl crate::Spawner for Context {
         };
         self.executor
             .metrics
-            .tasks_spawned
+            .blocking_tasks_spawned
             .get_or_create(&work)
             .inc();
         let gauge = self
             .executor
             .metrics
-            .tasks_running
+            .blocking_tasks_running
             .get_or_create(&work)
             .clone();
 
