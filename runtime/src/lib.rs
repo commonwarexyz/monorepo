@@ -132,6 +132,10 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     /// This method is designed for synchronous, potentially long-running operations that should
     /// not block the asynchronous event loop. The task starts executing immediately, and the
     /// returned handle can be awaited to retrieve the result.
+    ///
+    /// # Warning
+    ///
+    /// Blocking tasks cannot be aborted.
     fn spawn_blocking<F, T>(self, f: F) -> Handle<T>
     where
         F: FnOnce() -> T + Send + 'static,
