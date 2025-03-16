@@ -194,7 +194,7 @@ pub struct Config {
 
     /// Maximum buffer size for operations on blobs.
     ///
-    /// `tokio` defaults this value to 2MB.
+    /// Tokio sets the default value to 2MB.
     pub maximum_buffer_size: usize,
 }
 
