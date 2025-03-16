@@ -802,4 +802,121 @@ mod tests {
             aggregate_verify_multiple_messages(&public, &wrong_messages, &aggregate_sig, 4);
         assert!(matches!(result, Err(Error::InvalidSignature)));
     }
+
+    #[test]
+    fn test_partial_verify_multiple_messages() {
+        // Generate polynomial and shares
+        let degree = 3;
+        let n = 5;
+        let mut rng = thread_rng();
+        let poly_private = poly::new_from(degree, &mut rng);
+        let shares: Vec<Share> = (0..n)
+            .map(|i| {
+                let eval = poly_private.evaluate(i);
+                Share {
+                    index: i,
+                    private: eval.value,
+                }
+            })
+            .collect();
+        let poly_public = poly::Public::commit(poly_private.clone());
+
+        // Select signer with index 0
+        let signer = &shares[0];
+
+        // Successful verification with namespaced messages
+        let messages: Vec<(Option<&[u8]>, &[u8])> = vec![
+            (Some(&b"ns"[..]), b"msg1"),
+            (Some(&b"ns"[..]), b"msg2"),
+            (Some(&b"ns"[..]), b"msg3"),
+        ];
+        let partials: Vec<PartialSignature> = messages
+            .iter()
+            .map(|(ns, msg)| partial_sign_message(signer, *ns, msg))
+            .collect();
+        partial_verify_multiple_messages(&poly_public, signer.index, &messages, &partials)
+            .expect("Verification with namespaced messages should succeed");
+
+        // Successful verification with non-namespaced messages
+        let messages_no_ns: Vec<(Option<&[u8]>, &[u8])> =
+            vec![(None, b"msg1"), (None, b"msg2"), (None, b"msg3")];
+        let partials_no_ns: Vec<PartialSignature> = messages_no_ns
+            .iter()
+            .map(|(ns, msg)| partial_sign_message(signer, *ns, msg))
+            .collect();
+        partial_verify_multiple_messages(
+            &poly_public,
+            signer.index,
+            &messages_no_ns,
+            &partials_no_ns,
+        )
+        .expect("Verification with non-namespaced messages should succeed");
+
+        // Successful verification with mixed namespaces
+        let messages_mixed: Vec<(Option<&[u8]>, &[u8])> = vec![
+            (Some(&b"ns1"[..]), b"msg1"),
+            (None, b"msg2"),
+            (Some(&b"ns2"[..]), b"msg3"),
+        ];
+        let partials_mixed: Vec<PartialSignature> = messages_mixed
+            .iter()
+            .map(|(ns, msg)| partial_sign_message(signer, *ns, msg))
+            .collect();
+        partial_verify_multiple_messages(
+            &poly_public,
+            signer.index,
+            &messages_mixed,
+            &partials_mixed,
+        )
+        .expect("Verification with mixed namespaces should succeed");
+
+        // Failure with wrong signer index
+        assert!(matches!(
+            partial_verify_multiple_messages(&poly_public, 1, &messages, &partials),
+            Err(Error::InvalidSignature)
+        ));
+
+        // Success with swapped partial signatures
+        let mut partials_swapped = partials.clone();
+        partials_swapped.swap(0, 1);
+        partial_verify_multiple_messages(&poly_public, signer.index, &messages, &partials_swapped)
+            .expect("Verification with swapped partials should succeed");
+
+        // Failure with fewer signatures than messages
+        let partials_fewer = partials[..2].to_vec();
+        assert!(matches!(
+            partial_verify_multiple_messages(
+                &poly_public,
+                signer.index,
+                &messages,
+                &partials_fewer
+            ),
+            Err(Error::InvalidSignature)
+        ));
+
+        // Failure with more signatures than messages
+        let extra_message = (Some(&b"ns"[..]), b"msg4");
+        let extra_partial = partial_sign_message(signer, extra_message.0, extra_message.1);
+        let mut partials_more = partials.clone();
+        partials_more.push(extra_partial);
+        assert!(matches!(
+            partial_verify_multiple_messages(&poly_public, signer.index, &messages, &partials_more),
+            Err(Error::InvalidSignature)
+        ));
+
+        // Failure with signatures from different signers
+        let signer2 = &shares[1];
+        let partial2 = partial_sign_message(signer2, messages[0].0, messages[0].1);
+        let mut partials_mixed_signers = partials.clone();
+        partials_mixed_signers[0] = partial2;
+        assert!(matches!(
+            partial_verify_multiple_messages(
+                &poly_public,
+                signer.index,
+                &messages,
+                &partials_mixed_signers
+            ),
+            Err(Error::InvalidSignature)
+        ));
+    }
 }
