@@ -50,7 +50,10 @@ pub fn verify_notarization<
     let Some(notarization_signature) =
         group::Signature::deserialize(&notarization.proposal_signature)
     else {
-        debug!(reason = "invalid signature", "dropping notarization");
+        debug!(
+            reason = "invalid notarization signature",
+            "dropping notarization"
+        );
         return false;
     };
     let Some(seed_signature) = group::Signature::deserialize(&notarization.seed_signature) else {
@@ -72,7 +75,10 @@ pub fn verify_notarization<
     )
     .is_err()
     {
-        debug!(reason = "invalid signature", "dropping notarization");
+        debug!(
+            reason = "signature verification failed",
+            "dropping notarization"
+        );
         return false;
     }
     debug!(view = proposal.view, "notarization verified");
@@ -100,7 +106,10 @@ pub fn verify_nullification<S: ThresholdSupervisor<Index = View, Identity = poly
     let Some(nullification_signature) =
         group::Signature::deserialize(&nullification.view_signature)
     else {
-        debug!(reason = "invalid signature", "dropping nullification");
+        debug!(
+            reason = "invalid nullification signature",
+            "dropping nullification"
+        );
         return false;
     };
     let Some(seed_signature) = group::Signature::deserialize(&nullification.seed_signature) else {
@@ -125,7 +134,10 @@ pub fn verify_nullification<S: ThresholdSupervisor<Index = View, Identity = poly
     )
     .is_err()
     {
-        debug!(reason = "invalid signature", "dropping nullification");
+        debug!(
+            reason = "signature verification failed",
+            "dropping nullification"
+        );
         return false;
     }
     debug!(view = nullification.view, "nullification verified");
@@ -171,7 +183,10 @@ pub fn verify_finalization<
     let Some(finalization_signature) =
         group::Signature::deserialize(&finalization.proposal_signature)
     else {
-        debug!(reason = "invalid signature", "dropping finalization");
+        debug!(
+            reason = "invalid finalization signature",
+            "dropping finalization"
+        );
         return false;
     };
     let Some(seed_signature) = group::Signature::deserialize(&finalization.seed_signature) else {
@@ -193,7 +208,10 @@ pub fn verify_finalization<
     )
     .is_err()
     {
-        debug!(reason = "invalid signature", "dropping finalization");
+        debug!(
+            reason = "signature verification failed",
+            "dropping finalization"
+        );
         return false;
     }
     debug!(view = proposal.view, "finalization verified");
