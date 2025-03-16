@@ -1770,7 +1770,7 @@ impl<
         let public = identity.evaluate(signature.index);
 
         // Verify signature
-        self.context.with_label("notarize").spawn({
+        self.context.with_label("finalize").spawn({
             let mut verified_sender = self.verified_sender.clone();
             let finalize_namespace = self.finalize_namespace.clone();
             move |_| async move {
