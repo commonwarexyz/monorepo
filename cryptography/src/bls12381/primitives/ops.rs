@@ -713,7 +713,11 @@ mod tests {
         // Aggregate the signatures
         let aggregate_sig = aggregate_signatures(&signatures);
 
-        // Verify the aggregated signature
+        // Verify the aggregated signature without parallelism
+        aggregate_verify_multiple_messages(&public, &messages, &aggregate_sig, 1)
+            .expect("Aggregated signature should be valid");
+
+        // Verify the aggregated signature with parallelism
         aggregate_verify_multiple_messages(&public, &messages, &aggregate_sig, 4)
             .expect("Aggregated signature should be valid");
 
@@ -748,12 +752,19 @@ mod tests {
         // Aggregate the signatures
         let aggregate_sig = aggregate_signatures(&signatures);
 
-        // Verify the aggregated signature
+        // Construct wrong messages
         let wrong_messages: Vec<(Option<&[u8]>, &[u8])> = vec![
             (namespace, b"Message 1"),
             (namespace, b"Message 2"),
             (namespace, b"Message 4"),
         ];
+
+        // Verify the aggregated signature without parallelism
+        let result =
+            aggregate_verify_multiple_messages(&public, &wrong_messages, &aggregate_sig, 1);
+        assert!(matches!(result, Err(Error::InvalidSignature)));
+
+        // Verify the aggregated signature with parallelism
         let result =
             aggregate_verify_multiple_messages(&public, &wrong_messages, &aggregate_sig, 4);
         assert!(matches!(result, Err(Error::InvalidSignature)));
@@ -777,9 +788,16 @@ mod tests {
         // Aggregate the signatures
         let aggregate_sig = aggregate_signatures(&signatures);
 
-        // Verify the aggregated signature
+        // Construct wrong messages
         let wrong_messages: Vec<(Option<&[u8]>, &[u8])> =
             vec![(namespace, b"Message 1"), (namespace, b"Message 2")];
+
+        // Verify the aggregated signature without parallelism
+        let result =
+            aggregate_verify_multiple_messages(&public, &wrong_messages, &aggregate_sig, 1);
+        assert!(matches!(result, Err(Error::InvalidSignature)));
+
+        // Verify the aggregated signature with parallelism
         let result =
             aggregate_verify_multiple_messages(&public, &wrong_messages, &aggregate_sig, 4);
         assert!(matches!(result, Err(Error::InvalidSignature)));
