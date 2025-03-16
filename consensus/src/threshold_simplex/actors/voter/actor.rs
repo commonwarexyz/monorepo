@@ -17,7 +17,10 @@ use crate::{
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{self, Element},
-        ops::{self, partial_verify_multiple_messages},
+        ops::{
+            partial_sign_message, partial_verify_message, partial_verify_multiple_messages,
+            threshold_signature_recover,
+        },
         poly::{self, Eval},
     },
     hash,
@@ -463,10 +466,10 @@ impl<
                 let eval = Eval::deserialize(&notarize.message.seed_signature).unwrap();
                 seed.push(eval);
             }
-            let proposal_signature = ops::threshold_signature_recover(threshold, notarization)
+            let proposal_signature = threshold_signature_recover(threshold, notarization)
                 .unwrap()
                 .serialize();
-            let seed_signature = ops::threshold_signature_recover(threshold, seed)
+            let seed_signature = threshold_signature_recover(threshold, seed)
                 .unwrap()
                 .serialize();
 
@@ -512,10 +515,10 @@ impl<
             let eval = Eval::deserialize(&nullify.seed_signature).unwrap();
             seed.push(eval);
         }
-        let view_signature = ops::threshold_signature_recover(threshold, nullification)
+        let view_signature = threshold_signature_recover(threshold, nullification)
             .unwrap()
             .serialize();
-        let seed_signature = ops::threshold_signature_recover(threshold, seed)
+        let seed_signature = threshold_signature_recover(threshold, seed)
             .unwrap()
             .serialize();
 
@@ -594,7 +597,7 @@ impl<
                 let eval = Eval::deserialize(&finalize.message.proposal_signature).unwrap();
                 finalization.push(eval);
             }
-            let proposal_signature = ops::threshold_signature_recover(threshold, finalization)
+            let proposal_signature = threshold_signature_recover(threshold, finalization)
                 .unwrap()
                 .serialize();
 
@@ -1009,10 +1012,10 @@ impl<
         let share = self.supervisor.share(self.view).unwrap();
         let message = nullify_message(self.view);
         let view_signature =
-            ops::partial_sign_message(share, Some(&self.nullify_namespace), &message).serialize();
+            partial_sign_message(share, Some(&self.nullify_namespace), &message).serialize();
         let message = seed_message(self.view);
         let seed_signature =
-            ops::partial_sign_message(share, Some(&self.seed_namespace), &message).serialize();
+            partial_sign_message(share, Some(&self.seed_namespace), &message).serialize();
         let null = wire::Nullify {
             view: self.view,
             view_signature,
@@ -1668,7 +1671,7 @@ impl<
             return;
         }
         let finalize_message = proposal_message(proposal.view, proposal.parent, &payload);
-        if ops::partial_verify_message(
+        if partial_verify_message(
             identity,
             Some(&self.finalize_namespace),
             &finalize_message,
@@ -1823,10 +1826,10 @@ impl<
             &proposal.digest,
         );
         let proposal_signature =
-            ops::partial_sign_message(share, Some(&self.notarize_namespace), &message).serialize();
+            partial_sign_message(share, Some(&self.notarize_namespace), &message).serialize();
         let message = seed_message(view);
         let seed_signature =
-            ops::partial_sign_message(share, Some(&self.seed_namespace), &message).serialize();
+            partial_sign_message(share, Some(&self.seed_namespace), &message).serialize();
         round.broadcast_notarize = true;
         Some(Parsed {
             message: wire::Notarize {
@@ -1906,7 +1909,7 @@ impl<
             &proposal.digest,
         );
         let proposal_signature =
-            ops::partial_sign_message(share, Some(&self.finalize_namespace), &message).serialize();
+            partial_sign_message(share, Some(&self.finalize_namespace), &message).serialize();
         round.broadcast_finalize = true;
         Some(Parsed {
             message: wire::Finalize {
