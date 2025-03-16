@@ -2,7 +2,7 @@
 name = "commonware-p2p"
 edition = "2021"
 publish = true
-version = "0.0.42"
+version = "0.0.43"
 license = "MIT OR Apache-2.0"
 description = "Communicate with authenticated peers over encrypted connections."
 readme = "README.md"
