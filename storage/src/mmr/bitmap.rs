@@ -41,7 +41,7 @@ impl<H: CHasher> Bitmap<H> {
     /// Return a new empty bitmap.
     pub fn new() -> Self {
         Bitmap {
-            bitmap: vec![0u8; H::Digest::SERIALIZED_LEN],
+            bitmap: vec![0u8; Self::CHUNK_SIZE],
             next_bit: 0,
             mmr: Mmr::new(),
         }
@@ -52,10 +52,21 @@ impl<H: CHasher> Bitmap<H> {
         (self.bitmap.len() * 8 - Self::CHUNK_SIZE * 8 + self.next_bit) as u64
     }
 
+    /// Return the last chunk of the bitmap as a slice.
+    fn last_chunk(&self) -> &[u8] {
+        let len = self.bitmap.len();
+        &self.bitmap[len - Self::CHUNK_SIZE..len]
+    }
+
+    /// Return the last chunk of the bitmap as a mutable slice.
+    fn last_chunk_mut(&mut self) -> &mut [u8] {
+        let len = self.bitmap.len();
+        &mut self.bitmap[len - Self::CHUNK_SIZE..len]
+    }
+
     /// Commit the last chunk of the bitmap to the Merkle tree and initialize the next chunk.
     fn commit_last_chunk(&mut self, hasher: &mut H) {
-        let len = self.bitmap.len();
-        let chunk = H::Digest::try_from(&self.bitmap[len - Self::CHUNK_SIZE..len]).unwrap();
+        let chunk = H::Digest::try_from(self.last_chunk()).unwrap();
         self.mmr.add(hasher, &chunk);
         self.next_bit = 0;
         self.bitmap.extend(vec![0u8; Self::CHUNK_SIZE]);
@@ -69,8 +80,7 @@ impl<H: CHasher> Bitmap<H> {
             "cannot add chunk when not chunk aligned"
         );
 
-        let len = self.bitmap.len();
-        let _ = &self.bitmap[len - Self::CHUNK_SIZE..len].copy_from_slice(chunk.as_ref());
+        self.last_chunk_mut().copy_from_slice(chunk.as_ref());
         self.commit_last_chunk(hasher);
     }
 
@@ -82,9 +92,11 @@ impl<H: CHasher> Bitmap<H> {
             "cannot add byte when not byte aligned"
         );
 
-        let len = self.bitmap.len() - Self::CHUNK_SIZE;
-        self.bitmap[len + self.next_bit / 8] = byte;
+        let chunk_byte = self.next_bit / 8;
+        self.last_chunk_mut()[chunk_byte] = byte;
         self.next_bit += 8;
+        assert!(self.next_bit <= Self::CHUNK_SIZE * 8);
+
         if self.next_bit == Self::CHUNK_SIZE * 8 {
             self.commit_last_chunk(hasher);
         }
@@ -93,13 +105,20 @@ impl<H: CHasher> Bitmap<H> {
     /// Add a single bit to the bitmap.
     pub fn append(&mut self, hasher: &mut H, bit: bool) {
         if bit {
-            let len = self.bitmap.len() - Self::CHUNK_SIZE;
-            self.bitmap[len + self.next_bit as usize / 8] |= (1 << (self.next_bit % 8)) as u8;
+            let chunk_byte = self.next_bit / 8;
+            self.last_chunk_mut()[chunk_byte] |= Self::mask_for(self.next_bit as u64);
         }
         self.next_bit += 1;
+        assert!(self.next_bit <= Self::CHUNK_SIZE * 8);
+
         if self.next_bit == Self::CHUNK_SIZE * 8 {
             self.commit_last_chunk(hasher);
         }
+    }
+
+    /// Convert a bit offset into a bit mask.
+    fn mask_for(bit_offset: u64) -> u8 {
+        1 << (bit_offset % 8)
     }
 
     /// Get the value of a bit.
@@ -107,7 +126,7 @@ impl<H: CHasher> Bitmap<H> {
         assert!(bit_offset < self.bit_count(), "out of bounds");
 
         let byte_offset = bit_offset as usize / 8;
-        self.bitmap[byte_offset] & (1 << (bit_offset % 8)) != 0
+        self.bitmap[byte_offset] & Self::mask_for(bit_offset) != 0
     }
 
     /// Set the value of an existing bit.
@@ -115,11 +134,11 @@ impl<H: CHasher> Bitmap<H> {
         assert!(bit_offset < self.bit_count(), "out of bounds");
 
         let byte_offset = bit_offset as usize / 8;
-        let mask = 1 << (bit_offset % 8);
+        let mask = Self::mask_for(bit_offset);
         if bit {
-            self.bitmap[byte_offset] |= mask as u8;
+            self.bitmap[byte_offset] |= mask;
         } else {
-            self.bitmap[byte_offset] &= !mask as u8;
+            self.bitmap[byte_offset] &= !mask;
         }
         if byte_offset >= self.bitmap.len() - Self::CHUNK_SIZE {
             // No need to update the Merkle tree since this bit is within the last (yet to be
@@ -152,8 +171,7 @@ impl<H: CHasher> Bitmap<H> {
         // a temporary lightweight (fully pruned) copy of the tree so that we don't require
         // mutability of the original.
         let mut mmr = self.mmr.clone_pruned();
-        let len = self.bitmap.len();
-        let chunk = H::Digest::try_from(&self.bitmap[len - Self::CHUNK_SIZE..len]).unwrap();
+        let chunk = H::Digest::try_from(self.last_chunk()).unwrap();
         mmr.add(hasher, &chunk);
 
         mmr.root(hasher)
