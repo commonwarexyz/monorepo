@@ -393,17 +393,12 @@ impl crate::Spawner for Context {
             .get_or_create(&work)
             .clone();
 
-        // Spawn the blocking task
+        // Initialize the blocking task using the new function
         let executor = self.executor.clone();
-        let join_handle = executor.runtime.spawn_blocking(f);
+        let (f, handle) = Handle::init_blocking(f, gauge, executor.cfg.catch_panics);
 
-        // Set up the task
-        let catch_panics = self.executor.cfg.catch_panics;
-        let future = async move { join_handle.await.unwrap() };
-        let (f, handle) = Handle::init(future, gauge, catch_panics);
-
-        // Spawn the async task
-        executor.runtime.spawn(f);
+        // Spawn the blocking task
+        executor.runtime.spawn_blocking(f);
         handle
     }
 
