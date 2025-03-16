@@ -308,6 +308,7 @@ pub trait Blob: Clone + Send + Sync + 'static {
 mod tests {
     use super::*;
     use commonware_macros::select;
+    use futures::channel::oneshot;
     use futures::{channel::mpsc, future::ready, join, SinkExt, StreamExt};
     use prometheus_client::metrics::counter::Counter;
     use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -847,7 +848,17 @@ mod tests {
 
     fn test_spawn_blocking_abort(runner: impl Runner, context: impl Spawner) {
         runner.start(async move {
+            // Create task
+            let (sender, mut receiver) = oneshot::channel();
             let handle = context.spawn_blocking(move || {
+                // Wait for abort to be called
+                loop {
+                    if receiver.try_recv().is_ok() {
+                        break;
+                    }
+                }
+
+                // Perform a long-running operation
                 let mut count = 0;
                 loop {
                     count += 1;
@@ -857,7 +868,12 @@ mod tests {
                 }
                 count
             });
+
+            // Abort the task
             handle.abort();
+            sender.send(()).unwrap();
+
+            // Wait for the task to complete
             assert_eq!(handle.await, Ok(100_000_000));
         });
     }
