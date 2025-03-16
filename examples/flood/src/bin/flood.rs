@@ -91,7 +91,7 @@ fn main() {
 
     // Initialize runtime
     let cfg = tokio::Config {
-        threads: config.worker_threads,
+        worker_threads: config.worker_threads,
         ..Default::default()
     };
     let (executor, context) = tokio::Executor::init(cfg);

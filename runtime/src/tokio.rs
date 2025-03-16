@@ -60,6 +60,8 @@ struct Work {
 struct Metrics {
     tasks_spawned: Family<Work, Counter>,
     tasks_running: Family<Work, Gauge>,
+    blocking_tasks_spawned: Family<Work, Counter>,
+    blocking_tasks_running: Family<Work, Gauge>,
 
     // As nice as it would be to track each of these by socket address,
     // it quickly becomes an OOM attack vector.
@@ -80,6 +82,8 @@ impl Metrics {
         let metrics = Self {
             tasks_spawned: Family::default(),
             tasks_running: Family::default(),
+            blocking_tasks_spawned: Family::default(),
+            blocking_tasks_running: Family::default(),
             inbound_connections: Counter::default(),
             outbound_connections: Counter::default(),
             inbound_bandwidth: Counter::default(),
@@ -99,6 +103,16 @@ impl Metrics {
             "tasks_running",
             "Number of tasks currently running",
             metrics.tasks_running.clone(),
+        );
+        registry.register(
+            "blocking_tasks_spawned",
+            "Total number of blocking tasks spawned",
+            metrics.blocking_tasks_spawned.clone(),
+        );
+        registry.register(
+            "blocking_tasks_running",
+            "Number of blocking tasks currently running",
+            metrics.blocking_tasks_running.clone(),
         );
         registry.register(
             "inbound_connections",
@@ -152,8 +166,21 @@ impl Metrics {
 /// Configuration for the `tokio` runtime.
 #[derive(Clone)]
 pub struct Config {
-    /// Number of threads to use for the runtime.
-    pub threads: usize,
+    /// Number of threads to use for handling async tasks.
+    ///
+    /// Worker threads are always active (waiting for work).
+    ///
+    /// Tokio sets the default value to the number of logical CPUs.
+    pub worker_threads: usize,
+
+    /// Maximum number of threads to use for blocking tasks.
+    ///
+    /// Unlike worker threads, blocking threads are created as needed and
+    /// exit if left idle for too long.
+    ///
+    /// Tokio sets the default value to 512 to avoid hanging on lower-level
+    /// operations that require blocking (like `fs` and writing to `Stdout`).
+    pub max_blocking_threads: usize,
 
     /// Whether or not to catch panics.
     pub catch_panics: bool,
@@ -181,7 +208,7 @@ pub struct Config {
 
     /// Maximum buffer size for operations on blobs.
     ///
-    /// `tokio` defaults this value to 2MB.
+    /// Tokio sets the default value to 2MB.
     pub maximum_buffer_size: usize,
 }
 
@@ -193,7 +220,8 @@ impl Default for Config {
 
         // Return the configuration
         Self {
-            threads: 2,
+            worker_threads: 2,
+            max_blocking_threads: 512,
             catch_panics: true,
             read_timeout: Duration::from_secs(60),
             write_timeout: Duration::from_secs(30),
@@ -225,7 +253,8 @@ impl Executor {
         // Initialize runtime
         let metrics = Arc::new(Metrics::init(runtime_registry));
         let runtime = Builder::new_multi_thread()
-            .worker_threads(cfg.threads)
+            .worker_threads(cfg.worker_threads)
+            .max_blocking_threads(cfg.max_blocking_threads)
             .enable_all()
             .build()
             .expect("failed to create Tokio runtime");
@@ -364,6 +393,38 @@ impl crate::Spawner for Context {
             executor.runtime.spawn(f);
             handle
         }
+    }
+
+    fn spawn_blocking<F, T>(self, f: F) -> Handle<T>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        // Ensure a context only spawns one task
+        assert!(!self.spawned, "already spawned");
+
+        // Get metrics
+        let work = Work {
+            label: self.label.clone(),
+        };
+        self.executor
+            .metrics
+            .blocking_tasks_spawned
+            .get_or_create(&work)
+            .inc();
+        let gauge = self
+            .executor
+            .metrics
+            .blocking_tasks_running
+            .get_or_create(&work)
+            .clone();
+
+        // Initialize the blocking task using the new function
+        let (f, handle) = Handle::init_blocking(f, gauge, self.executor.cfg.catch_panics);
+
+        // Spawn the blocking task
+        self.executor.runtime.spawn_blocking(f);
+        handle
     }
 
     fn stop(&self, value: i32) {

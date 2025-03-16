@@ -15,7 +15,7 @@ use prometheus_client::metrics::gauge::Gauge;
 use std::{
     any::Any,
     future::Future,
-    panic::{resume_unwind, AssertUnwindSafe},
+    panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
     pin::Pin,
     sync::{Arc, Once},
     task::{Context, Poll},
@@ -60,7 +60,7 @@ pub struct Handle<T>
 where
     T: Send + 'static,
 {
-    aborter: AbortHandle,
+    aborter: Option<AbortHandle>,
     receiver: oneshot::Receiver<Result<T, Error>>,
 
     running: Gauge,
@@ -121,7 +121,7 @@ where
         (
             abortable.map(|_| ()),
             Self {
-                aborter,
+                aborter: Some(aborter),
                 receiver,
 
                 running,
@@ -130,9 +130,66 @@ where
         )
     }
 
+    pub(crate) fn init_blocking<F>(f: F, running: Gauge, catch_panic: bool) -> (impl FnOnce(), Self)
+    where
+        F: FnOnce() -> T + Send + 'static,
+    {
+        // Increment the running tasks gauge
+        running.inc();
+
+        // Initialize channel to handle result
+        let once = Arc::new(Once::new());
+        let (sender, receiver) = oneshot::channel();
+
+        // Wrap the closure with panic handling
+        let f = {
+            let once = once.clone();
+            let running = running.clone();
+            move || {
+                // Run blocking task
+                let result = catch_unwind(AssertUnwindSafe(f));
+
+                // Decrement running counter
+                once.call_once(|| {
+                    running.dec();
+                });
+
+                // Handle result
+                let result = match result {
+                    Ok(value) => Ok(value),
+                    Err(err) => {
+                        if !catch_panic {
+                            resume_unwind(err);
+                        }
+                        let err = extract_panic_message(&*err);
+                        error!(?err, "blocking task panicked");
+                        Err(Error::Exited)
+                    }
+                };
+                let _ = sender.send(result);
+            }
+        };
+
+        // Return the task and handle
+        (
+            f,
+            Self {
+                aborter: None,
+                receiver,
+
+                running,
+                once,
+            },
+        )
+    }
+
+    /// Abort the task (if not blocking).
     pub fn abort(&self) {
-        // Stop task
-        self.aborter.abort();
+        // Get aborter and abort
+        let Some(aborter) = &self.aborter else {
+            return;
+        };
+        aborter.abort();
 
         // Decrement running counter
         self.once.call_once(|| {
@@ -148,9 +205,27 @@ where
     type Output = Result<T, Error>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        Pin::new(&mut self.receiver)
-            .poll(cx)
-            .map(|res| res.map_err(|_| Error::Closed).and_then(|r| r))
+        match Pin::new(&mut self.receiver).poll(cx) {
+            Poll::Ready(Ok(Ok(value))) => {
+                self.once.call_once(|| {
+                    self.running.dec();
+                });
+                Poll::Ready(Ok(value))
+            }
+            Poll::Ready(Ok(Err(err))) => {
+                self.once.call_once(|| {
+                    self.running.dec();
+                });
+                Poll::Ready(Err(err))
+            }
+            Poll::Ready(Err(_)) => {
+                self.once.call_once(|| {
+                    self.running.dec();
+                });
+                Poll::Ready(Err(Error::Closed))
+            }
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 
