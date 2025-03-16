@@ -837,6 +837,14 @@ mod tests {
         });
     }
 
+    fn test_spawn_blocking(runner: impl Runner, context: impl Spawner) {
+        runner.start(async move {
+            let handle = context.spawn_blocking(|| 42);
+            let result = handle.await;
+            assert_eq!(result, Ok(42));
+        });
+    }
+
     fn test_metrics(runner: impl Runner, context: impl Spawner + Metrics) {
         runner.start(async move {
             // Assert label
@@ -991,14 +999,6 @@ mod tests {
         test_spawn_duplicate(executor, context);
     }
 
-    fn test_spawn_blocking(runner: impl Runner, context: impl Spawner) {
-        runner.start(async move {
-            let handle = context.spawn_blocking(|| 42);
-            let result = handle.await;
-            assert_eq!(result, Ok(42));
-        });
-    }
-
     #[test]
     fn test_deterministic_spawn_blocking() {
         let (executor, context, _) = deterministic::Executor::default();
@@ -1014,24 +1014,6 @@ mod tests {
                 panic!("blocking task panicked");
             });
             handle.await.unwrap();
-        });
-    }
-
-    #[test]
-    fn test_tokio_spawn_blocking() {
-        let (executor, context) = tokio::Executor::default();
-        test_spawn_blocking(executor, context);
-    }
-
-    #[test]
-    fn test_tokio_spawn_blocking_panic() {
-        let (executor, context) = tokio::Executor::default();
-        executor.start(async move {
-            let handle = context.spawn_blocking(|| {
-                panic!("blocking task panicked");
-            });
-            let result = handle.await;
-            assert_eq!(result, Err(Error::Exited));
         });
     }
 
@@ -1161,6 +1143,24 @@ mod tests {
     fn test_tokio_spawn_duplicate() {
         let (executor, context) = tokio::Executor::default();
         test_spawn_duplicate(executor, context);
+    }
+
+    #[test]
+    fn test_tokio_spawn_blocking() {
+        let (executor, context) = tokio::Executor::default();
+        test_spawn_blocking(executor, context);
+    }
+
+    #[test]
+    fn test_tokio_spawn_blocking_panic() {
+        let (executor, context) = tokio::Executor::default();
+        executor.start(async move {
+            let handle = context.spawn_blocking(|| {
+                panic!("blocking task panicked");
+            });
+            let result = handle.await;
+            assert_eq!(result, Err(Error::Exited));
+        });
     }
 
     #[test]
