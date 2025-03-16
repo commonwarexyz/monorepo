@@ -878,6 +878,39 @@ impl crate::Spawner for Context {
         }
     }
 
+    fn spawn_blocking<F, T>(self, f: F) -> Handle<T>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        // Ensure a context only spawns one task
+        assert!(!self.spawned, "already spawned");
+
+        // Get metrics
+        let work = Work {
+            label: self.label.clone(),
+        };
+        self.executor
+            .metrics
+            .tasks_spawned
+            .get_or_create(&work)
+            .inc();
+        let gauge = self
+            .executor
+            .metrics
+            .tasks_running
+            .get_or_create(&work)
+            .clone();
+
+        // Create a future that runs the closure when polled
+        let future = async move { f() };
+
+        // Use Handle::init with catch_panics = false
+        let (f, handle) = Handle::init(future, gauge, false);
+        Tasks::register(&self.executor.tasks, &self.label, false, Box::pin(f));
+        handle
+    }
+
     fn stop(&self, value: i32) {
         self.executor.auditor.stop(value);
         self.executor.signaler.lock().unwrap().signal(value);

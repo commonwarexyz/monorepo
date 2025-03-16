@@ -127,6 +127,16 @@ pub trait Spawner: Clone + Send + Sync + 'static {
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static;
 
+    /// Enqueue a blocking task to be executed.
+    ///
+    /// This method is designed for synchronous, potentially long-running operations that should
+    /// not block the asynchronous event loop. The task starts executing immediately, and the
+    /// returned handle can be awaited to retrieve the result.
+    fn spawn_blocking<F, T>(self, f: F) -> Handle<T>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static;
+
     /// Signals the runtime to stop execution and that all outstanding tasks
     /// should perform any required cleanup and exit. This method is idempotent and
     /// can be called multiple times.
@@ -975,6 +985,50 @@ mod tests {
     fn test_deterministic_spawn_duplicate() {
         let (executor, context, _) = deterministic::Executor::default();
         test_spawn_duplicate(executor, context);
+    }
+
+    fn test_spawn_blocking(runner: impl Runner, context: impl Spawner) {
+        runner.start(async move {
+            let handle = context.spawn_blocking(|| 42);
+            let result = handle.await;
+            assert_eq!(result, Ok(42));
+        });
+    }
+
+    #[test]
+    fn test_deterministic_spawn_blocking() {
+        let (executor, context, _) = deterministic::Executor::default();
+        test_spawn_blocking(executor, context);
+    }
+
+    #[test]
+    fn test_tokio_spawn_blocking() {
+        let (executor, context) = tokio::Executor::default();
+        test_spawn_blocking(executor, context);
+    }
+
+    #[test]
+    #[should_panic(expected = "blocking task panicked")]
+    fn test_deterministic_spawn_blocking_panic() {
+        let (executor, context, _) = deterministic::Executor::default();
+        executor.start(async move {
+            let handle = context.spawn_blocking(|| {
+                panic!("blocking task panicked");
+            });
+            handle.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_tokio_spawn_blocking_panic() {
+        let (executor, context) = tokio::Executor::default();
+        executor.start(async move {
+            let handle = context.spawn_blocking(|| {
+                panic!("blocking task panicked");
+            });
+            let result = handle.await;
+            assert_eq!(result, Err(Error::Exited));
+        });
     }
 
     #[test]

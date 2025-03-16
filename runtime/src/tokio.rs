@@ -152,7 +152,10 @@ impl Metrics {
 /// Configuration for the `tokio` runtime.
 #[derive(Clone)]
 pub struct Config {
-    /// Number of threads to use for the runtime.
+    /// Number of threads to use for handling async tasks.
+    ///
+    /// Blocking tasks are handled by a separate thread pool within `tokio`
+    /// that blocks once 512 blocking tasks are spawned.
     pub threads: usize,
 
     /// Whether or not to catch panics.
@@ -364,6 +367,44 @@ impl crate::Spawner for Context {
             executor.runtime.spawn(f);
             handle
         }
+    }
+
+    fn spawn_blocking<F, T>(self, f: F) -> Handle<T>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        // Ensure a context only spawns one task
+        assert!(!self.spawned, "already spawned");
+
+        // Get metrics
+        let work = Work {
+            label: self.label.clone(),
+        };
+        self.executor
+            .metrics
+            .tasks_spawned
+            .get_or_create(&work)
+            .inc();
+        let gauge = self
+            .executor
+            .metrics
+            .tasks_running
+            .get_or_create(&work)
+            .clone();
+
+        // Spawn the blocking task
+        let executor = self.executor.clone();
+        let join_handle = executor.runtime.spawn_blocking(f);
+
+        // Set up the task
+        let catch_panics = self.executor.cfg.catch_panics;
+        let future = async move { join_handle.await.unwrap() };
+        let (f, handle) = Handle::init(future, gauge, catch_panics);
+
+        // Spawn the async task
+        executor.runtime.spawn(f);
+        handle
     }
 
     fn stop(&self, value: i32) {
