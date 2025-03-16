@@ -17,7 +17,7 @@ use crate::{
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{self, Element},
-        ops,
+        ops::{self, aggregate_signatures, aggregate_verify_multiple_messages},
         poly::{self, Eval},
     },
     hash,
@@ -1475,50 +1475,44 @@ impl<
             return;
         };
 
-        // Parse partial signature to get index
+        // Parse proposal signature
         let Some(signature) = Eval::deserialize(&notarize.proposal_signature) else {
             return;
         };
         if signature.index != public_key_index {
             return;
         }
-        let public = identity.evaluate(signature.index);
+
+        // Parse seed signature
+        let Some(seed) = Eval::deserialize(&notarize.seed_signature) else {
+            return;
+        };
+        if seed.index != public_key_index {
+            return;
+        }
 
         // Verify signature
         self.context.with_label("notarize").spawn({
+            let public = identity.evaluate(signature.index);
             let mut verified_sender = self.verified_sender.clone();
             let notarize_namespace = self.notarize_namespace.clone();
             let seed_namespace = self.seed_namespace.clone();
             move |_| async move {
-                // Create a new reference to the proposal
+                // Create messages
                 let proposal = notarize.proposal.as_ref().unwrap();
-
-                // Verify notarize
                 let notarize_message = proposal_message(proposal.view, proposal.parent, &payload);
-                if ops::verify_message(
-                    &public.value,
-                    Some(&notarize_namespace),
-                    &notarize_message,
-                    &signature.value,
-                )
-                .is_err()
-                {
-                    return;
-                }
-
-                // Verify seed
-                let Some(seed) = Eval::deserialize(&notarize.seed_signature) else {
-                    return;
-                };
-                if seed.index != public_key_index {
-                    return;
-                }
+                let notarize_message =
+                    (Some(notarize_namespace.as_ref()), notarize_message.as_ref());
                 let seed_message = seed_message(proposal.view);
-                if ops::verify_message(
+                let seed_message = (Some(seed_namespace.as_ref()), seed_message.as_ref());
+
+                // Perform batch verification
+                let signature = aggregate_signatures(&[signature.value, seed.value]);
+                if aggregate_verify_multiple_messages(
                     &public.value,
-                    Some(&seed_namespace),
-                    &seed_message,
-                    &seed.value,
+                    &[notarize_message, seed_message],
+                    &signature,
+                    1,
                 )
                 .is_err()
                 {
