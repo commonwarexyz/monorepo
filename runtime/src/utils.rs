@@ -137,11 +137,9 @@ where
         // Increment the running tasks gauge
         running.inc();
 
-        // Create a oneshot channel for communication
-        let (sender, receiver) = oneshot::channel();
-
-        // Create a Once instance to ensure the gauge is decremented only once
+        // Initialize channel to handle result
         let once = Arc::new(Once::new());
+        let (sender, receiver) = oneshot::channel();
 
         // Wrap the closure with panic handling
         let f = {
@@ -185,11 +183,9 @@ where
         )
     }
 
-    /// Abort the task (if abortable).
-    ///
-    /// Blocking tasks cannot be aborted.
+    /// Abort the task (if not blocking).
     pub fn abort(&self) {
-        // Abort the task (if abortable)
+        // Get aborter and abort
         let Some(aborter) = &self.aborter else {
             return;
         };
