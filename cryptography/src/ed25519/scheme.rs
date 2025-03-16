@@ -8,6 +8,7 @@ use std::fmt::{Debug, Display};
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 
+const CURVE_NAME: &str = "Ed25519";
 const PRIVATE_KEY_LENGTH: usize = 32;
 const PUBLIC_KEY_LENGTH: usize = 32;
 const SIGNATURE_LENGTH: usize = 64;
@@ -243,8 +244,8 @@ impl Codec for PublicKey {
 
     fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
         let raw = <[u8; PUBLIC_KEY_LENGTH]>::read(reader)?;
-        let key = ed25519_consensus::VerificationKey::try_from(&raw[..])
-            .map_err(|_| CodecError::InvalidData("Ed25519".into(), "Invalid public key".into()))?;
+        let key = ed25519_consensus::VerificationKey::try_from(raw)
+            .map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))?;
         Ok(Self { raw, key })
     }
 

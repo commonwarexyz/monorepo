@@ -33,6 +33,8 @@ use std::{
     ops::Deref,
 };
 
+const CURVE_NAME: &str = "BLS12-381";
+
 /// BLS12-381 implementation of the `Scheme` trait.
 ///
 /// This implementation uses the `blst` crate for BLS12-381 operations. This
@@ -99,10 +101,8 @@ impl Codec for PrivateKey {
 
     fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
         let raw = <[u8; group::PRIVATE_KEY_LENGTH]>::read(reader)?;
-        let key = group::Private::deserialize(&raw).ok_or(CodecError::InvalidData(
-            "Bls12381".into(),
-            "Invalid private key".into(),
-        ))?;
+        let key = group::Private::deserialize(&raw)
+            .ok_or(CodecError::Invalid(CURVE_NAME, "Invalid private key"))?;
         Ok(Self { raw, key })
     }
 
@@ -212,10 +212,8 @@ impl Codec for PublicKey {
 
     fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
         let raw = <[u8; group::PUBLIC_KEY_LENGTH]>::read(reader)?;
-        let key = group::Public::deserialize(&raw).ok_or(CodecError::InvalidData(
-            "Bls12381".into(),
-            "Invalid public key".into(),
-        ))?;
+        let key = group::Public::deserialize(&raw)
+            .ok_or(CodecError::Invalid(CURVE_NAME, "Invalid public key"))?;
         Ok(Self { raw, key })
     }
 
@@ -325,10 +323,8 @@ impl Codec for Signature {
 
     fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
         let raw = <[u8; group::SIGNATURE_LENGTH]>::read(reader)?;
-        let signature = group::Signature::deserialize(&raw).ok_or(CodecError::InvalidData(
-            "Bls12381".into(),
-            "Invalid signature".into(),
-        ))?;
+        let signature = group::Signature::deserialize(&raw)
+            .ok_or(CodecError::Invalid(CURVE_NAME, "Invalid signature"))?;
         Ok(Self { raw, signature })
     }
 

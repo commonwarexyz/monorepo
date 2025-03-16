@@ -16,6 +16,7 @@ use std::{
     ops::Deref,
 };
 
+const CURVE_NAME: &str = "secp256r1";
 const PRIVATE_KEY_LENGTH: usize = 32;
 const PUBLIC_KEY_LENGTH: usize = 33; // Y-Parity || X
 const SIGNATURE_LENGTH: usize = 64; // R || S
@@ -95,9 +96,8 @@ impl Codec for PrivateKey {
 
     fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
         let raw = <[u8; PRIVATE_KEY_LENGTH]>::read(reader)?;
-        let key = SigningKey::from_slice(&raw).map_err(|_| {
-            CodecError::InvalidData("Secp256r1".into(), "Invalid private key".into())
-        })?;
+        let key = SigningKey::from_slice(&raw)
+            .map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))?;
         Ok(Self { raw, key })
     }
 
@@ -207,9 +207,8 @@ impl Codec for PublicKey {
 
     fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
         let raw = <[u8; PUBLIC_KEY_LENGTH]>::read(reader)?;
-        let key = VerifyingKey::from_sec1_bytes(&raw).map_err(|_| {
-            CodecError::InvalidData("Secp256r1".into(), "Invalid public key".into())
-        })?;
+        let key = VerifyingKey::from_sec1_bytes(&raw)
+            .map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))?;
         Ok(Self { raw, key })
     }
 
@@ -309,7 +308,14 @@ impl Codec for Signature {
     fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
         let raw = <[u8; SIGNATURE_LENGTH]>::read(reader)?;
         let signature = p256::ecdsa::Signature::from_slice(&raw)
-            .map_err(|_| CodecError::InvalidData("Secp256r1".into(), "Invalid signature".into()))?;
+            .map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))?;
+        if signature.s().is_high().into() {
+            // Reject any signatures with a `s` value in the upper half of the curve order.
+            return Err(CodecError::Wrapped(
+                CURVE_NAME,
+                Error::InvalidSignature.into(),
+            ));
+        }
         Ok(Self { raw, signature })
     }
 
@@ -416,6 +422,14 @@ impl Display for Signature {
 mod tests {
     use super::*;
 
+    fn create_private_key() -> PrivateKey {
+        const HEX: &str = "519b423d715f8b581f4fa8ee59f4771a5b44c8130b4e3eacca54a56dda72b464";
+        commonware_utils::from_hex_formatted(HEX)
+            .unwrap()
+            .try_into()
+            .unwrap()
+    }
+
     fn parse_vector_keypair(private_key: &str, qx: &str, qy: &str) -> (PrivateKey, PublicKey) {
         let public_key = parse_public_key_as_compressed(qx, qy);
         (
@@ -521,12 +535,11 @@ mod tests {
         assert_eq!(original, decoded);
     }
 
-    fn create_private_key() -> PrivateKey {
-        const HEX: &str = "519b423d715f8b581f4fa8ee59f4771a5b44c8130b4e3eacca54a56dda72b464";
-        commonware_utils::from_hex_formatted(HEX)
-            .unwrap()
-            .try_into()
-            .unwrap()
+    #[test]
+    fn test_codec_signature_invalid() {
+        let (_, sig, ..) = vector_sig_verification_5();
+        let result = Signature::decode(sig);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -750,7 +763,8 @@ mod tests {
                 let mut ecdsa_signature = p256::ecdsa::Signature::from_slice(&sig).unwrap();
                 if ecdsa_signature.s().is_high().into() {
                     // Valid signatures not normalized must be considered invalid.
-                    assert!(Signature::try_from(sig).is_err());
+                    assert!(Signature::try_from(sig.clone()).is_err());
+                    assert!(Signature::decode(sig).is_err());
 
                     // Normalizing sig to test its validity.
                     if let Some(normalized_sig) = ecdsa_signature.normalize_s() {
@@ -760,9 +774,17 @@ mod tests {
                 let signature = Signature::from(ecdsa_signature);
                 Secp256r1::verify(None, &message, &public_key, &signature)
             } else {
-                let signature = Signature::try_from(sig);
-                signature.is_err()
-                    || !Secp256r1::verify(None, &message, &public_key, &signature.unwrap())
+                let tf_res = Signature::try_from(sig.clone());
+                let dc_res = Signature::decode(sig);
+                if tf_res.is_err() && dc_res.is_err() {
+                    // The parsing should fail
+                    true
+                } else {
+                    // Or the validation should fail
+                    let f1 = !Secp256r1::verify(None, &message, &public_key, &tf_res.unwrap());
+                    let f2 = !Secp256r1::verify(None, &message, &public_key, &dc_res.unwrap());
+                    f1 && f2
+                }
             };
             assert!(expected, "vector_signature_verification_{}", index + 1);
         }
