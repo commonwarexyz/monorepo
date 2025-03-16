@@ -1768,36 +1768,46 @@ impl<
             return;
         };
 
-        // Verify signature
+        // Parse partial signature to get index
         let Some(signature) = Eval::deserialize(&finalize.proposal_signature) else {
             return;
         };
         if signature.index != public_key_index {
             return;
         }
-        let finalize_message = proposal_message(proposal.view, proposal.parent, &payload);
-        if ops::partial_verify_message(
-            identity,
-            Some(&self.finalize_namespace),
-            &finalize_message,
-            &signature,
-        )
-        .is_err()
-        {
-            return;
-        }
+        let public = identity.evaluate(signature.index);
 
-        // Handle finalize
-        self.verified_sender
-            .send(Verified::Finalize(
-                public_key_index,
-                Parsed {
-                    message: finalize,
-                    digest: payload,
-                },
-            ))
-            .await
-            .expect("unable to send verified finalize");
+        // Verify signature
+        self.context.with_label("notarize").spawn({
+            let mut verified_sender = self.verified_sender.clone();
+            let finalize_namespace = self.finalize_namespace.clone();
+            move |_| async move {
+                let proposal = finalize.proposal.as_ref().unwrap();
+                let finalize_message = proposal_message(proposal.view, proposal.parent, &payload);
+                if ops::verify_message(
+                    &public.value,
+                    Some(&finalize_namespace),
+                    &finalize_message,
+                    &signature.value,
+                )
+                .is_err()
+                {
+                    return;
+                }
+
+                // Handle finalize
+                verified_sender
+                    .send(Verified::Finalize(
+                        public_key_index,
+                        Parsed {
+                            message: finalize,
+                            digest: payload,
+                        },
+                    ))
+                    .await
+                    .expect("unable to send verified finalize");
+            }
+        });
     }
 
     async fn handle_finalize(
@@ -1856,24 +1866,42 @@ impl<
             }
         }
 
-        // Verify finalization
-        if !verify_finalization::<D, S>(
-            &self.supervisor,
-            &self.finalize_namespace,
-            &self.seed_namespace,
-            &finalization,
-        ) {
+        // Get public key
+        let Some(polynomial) = self.supervisor.identity(proposal.view) else {
+            debug!(
+                view = proposal.view,
+                reason = "unable to get identity for view",
+                "dropping finalization"
+            );
             return;
-        }
+        };
+        let public_key = poly::public(polynomial);
 
-        // Process finalization
-        self.verified_sender
-            .send(Verified::Finalization(Parsed {
-                message: finalization,
-                digest: payload,
-            }))
-            .await
-            .expect("unable to send verified finalization");
+        // Verify finalization
+        self.context.with_label("finalization").spawn({
+            let mut verified_sender = self.verified_sender.clone();
+            let finalize_namespace = self.finalize_namespace.clone();
+            let seed_namespace = self.seed_namespace.clone();
+            move |_| async move {
+                if !verify_finalization::<D>(
+                    &public_key,
+                    &finalize_namespace,
+                    &seed_namespace,
+                    &finalization,
+                ) {
+                    return;
+                }
+
+                // Process finalization
+                verified_sender
+                    .send(Verified::Finalization(Parsed {
+                        message: finalization,
+                        digest: payload,
+                    }))
+                    .await
+                    .expect("unable to send verified finalization");
+            }
+        });
     }
 
     async fn handle_finalization(&mut self, finalization: Parsed<wire::Finalization, D>) {

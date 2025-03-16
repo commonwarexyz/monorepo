@@ -1,12 +1,10 @@
 use super::{
     encoder::{nullify_message, proposal_message, seed_message},
-    wire, View,
+    wire,
 };
-use crate::ThresholdSupervisor;
 use commonware_cryptography::bls12381::primitives::{
     self,
     group::{self, Element},
-    poly,
 };
 use commonware_utils::Array;
 use tracing::debug;
@@ -41,7 +39,7 @@ pub fn verify_notarization<D: Array>(
     // Verify threshold notarization
     let message = proposal_message(proposal.view, proposal.parent, &payload);
     if primitives::ops::verify_message(
-        &public_key,
+        public_key,
         Some(notarization_namespace),
         &message,
         &signature,
@@ -59,8 +57,7 @@ pub fn verify_notarization<D: Array>(
         debug!(reason = "invalid seed signature", "dropping notarization");
         return false;
     };
-    if primitives::ops::verify_message(&public_key, Some(seed_namespace), &seed, &signature)
-        .is_err()
+    if primitives::ops::verify_message(public_key, Some(seed_namespace), &seed, &signature).is_err()
     {
         debug!(reason = "invalid seed signature", "dropping notarization");
         return false;
@@ -84,7 +81,7 @@ pub fn verify_nullification(
     // Verify threshold nullification
     let message = nullify_message(nullification.view);
     if primitives::ops::verify_message(
-        &public_key,
+        public_key,
         Some(nullification_namespace),
         &message,
         &signature,
@@ -102,8 +99,7 @@ pub fn verify_nullification(
         debug!(reason = "invalid seed signature", "dropping nullification");
         return false;
     };
-    if primitives::ops::verify_message(&public_key, Some(seed_namespace), &seed, &signature)
-        .is_err()
+    if primitives::ops::verify_message(public_key, Some(seed_namespace), &seed, &signature).is_err()
     {
         debug!(reason = "invalid seed signature", "dropping nullification");
         return false;
@@ -112,11 +108,8 @@ pub fn verify_nullification(
     true
 }
 
-pub fn verify_finalization<
-    D: Array,
-    S: ThresholdSupervisor<Index = View, Identity = poly::Public>,
->(
-    supervisor: &S,
+pub fn verify_finalization<D: Array>(
+    public_key: &group::Public,
     finalization_namespace: &[u8],
     seed_namespace: &[u8],
     finalization: &wire::Finalization,
@@ -136,17 +129,6 @@ pub fn verify_finalization<
         return false;
     };
 
-    // Get public key
-    let Some(polynomial) = supervisor.identity(proposal.view) else {
-        debug!(
-            view = proposal.view,
-            reason = "unable to get identity for view",
-            "dropping finalization"
-        );
-        return false;
-    };
-    let public_key = poly::public(polynomial);
-
     // Parse signature
     let Some(signature) = group::Signature::deserialize(&finalization.proposal_signature) else {
         debug!(reason = "invalid signature", "dropping finalization");
@@ -156,7 +138,7 @@ pub fn verify_finalization<
     // Verify threshold finalization
     let message = proposal_message(proposal.view, proposal.parent, &payload);
     if primitives::ops::verify_message(
-        &public_key,
+        public_key,
         Some(finalization_namespace),
         &message,
         &signature,
@@ -174,8 +156,7 @@ pub fn verify_finalization<
         debug!(reason = "invalid seed signature", "dropping finalization");
         return false;
     };
-    if primitives::ops::verify_message(&public_key, Some(seed_namespace), &seed, &signature)
-        .is_err()
+    if primitives::ops::verify_message(public_key, Some(seed_namespace), &seed, &signature).is_err()
     {
         debug!(reason = "invalid seed signature", "dropping finalization");
         return false;

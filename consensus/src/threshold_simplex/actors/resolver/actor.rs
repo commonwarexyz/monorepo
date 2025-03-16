@@ -561,7 +561,16 @@ impl<
                                     debug!(view, sender = ?s, "unnecessary notarization");
                                     continue;
                                 }
-                                if !verify_notarization::<D, S>(&self.supervisor, &self.notarize_namespace, &self.seed_namespace, &notarization) {
+                                let Some(polynomial) = self.supervisor.identity(view) else {
+                                    debug!(
+                                        view,
+                                        reason = "unable to get identity for view",
+                                        "dropping nullification"
+                                    );
+                                    continue;
+                                };
+                                let public_key = poly::public(polynomial);
+                                if !verify_notarization::<D>(&public_key, &self.notarize_namespace, &self.seed_namespace, &notarization) {
                                     warn!(view, sender = ?s, "invalid notarization");
                                     self.requester.block(s.clone());
                                     continue;
@@ -583,7 +592,16 @@ impl<
                                     debug!(view, sender = ?s, "unnecessary nullification");
                                     continue;
                                 }
-                                if !verify_nullification::<S>(&self.supervisor, &self.nullify_namespace, &self.seed_namespace, &nullification) {
+                                let Some(polynomial) = self.supervisor.identity(view) else {
+                                    debug!(
+                                        view,
+                                        reason = "unable to get identity for view",
+                                        "dropping nullification"
+                                    );
+                                    continue;
+                                };
+                                let public_key = poly::public(polynomial);
+                                if !verify_nullification(&public_key, &self.nullify_namespace, &self.seed_namespace, &nullification) {
                                     warn!(view, sender = ?s, "invalid nullification");
                                     self.requester.block(s.clone());
                                     continue;
