@@ -1503,7 +1503,6 @@ impl<
                 let seed_message = (Some(seed_namespace.as_ref()), seed_message.as_ref());
 
                 // Perform batch verification
-                // TODO: send aggregate signature rather than multiple
                 let signature = aggregate_signatures(&[signature.value, seed.value]);
                 if aggregate_verify_multiple_messages(
                     &public.value,
