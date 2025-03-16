@@ -845,6 +845,23 @@ mod tests {
         });
     }
 
+    fn test_spawn_blocking_abort(runner: impl Runner, context: impl Spawner) {
+        runner.start(async move {
+            let handle = context.spawn_blocking(move || {
+                let mut count = 0;
+                loop {
+                    count += 1;
+                    if count >= 100_000_000 {
+                        break;
+                    }
+                }
+                count
+            });
+            handle.abort();
+            assert_eq!(handle.await, Ok(100_000_000));
+        });
+    }
+
     fn test_metrics(runner: impl Runner, context: impl Spawner + Metrics) {
         runner.start(async move {
             // Assert label
@@ -1018,6 +1035,12 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_spawn_blocking_abort() {
+        let (executor, context, _) = deterministic::Executor::default();
+        test_spawn_blocking_abort(executor, context);
+    }
+
+    #[test]
     fn test_deterministic_metrics() {
         let (executor, context, _) = deterministic::Executor::default();
         test_metrics(executor, context);
@@ -1161,6 +1184,12 @@ mod tests {
             let result = handle.await;
             assert_eq!(result, Err(Error::Exited));
         });
+    }
+
+    #[test]
+    fn test_tokio_spawn_blocking_abort() {
+        let (executor, context) = tokio::Executor::default();
+        test_spawn_blocking_abort(executor, context);
     }
 
     #[test]
