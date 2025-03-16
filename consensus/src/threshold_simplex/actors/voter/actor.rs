@@ -1073,14 +1073,22 @@ impl<
             return;
         };
 
-        // Parse partial signature to get index
+        // Parse view signature
         let Some(signature) = Eval::deserialize(&nullify.view_signature) else {
             return;
         };
         if signature.index != public_key_index {
             return;
         }
+
+        // Parse seed signature
         let public = identity.evaluate(signature.index);
+        let Some(seed) = Eval::deserialize(&nullify.seed_signature) else {
+            return;
+        };
+        if seed.index != public_key_index {
+            return;
+        }
 
         // Verify signature
         self.context.with_label("nullify").spawn({
@@ -1088,31 +1096,19 @@ impl<
             let nullify_namespace = self.nullify_namespace.clone();
             let seed_namespace = self.seed_namespace.clone();
             move |_| async move {
+                // Create messages
                 let nullify_message = nullify_message(nullify.view);
-                if ops::verify_message(
-                    &public.value,
-                    Some(&nullify_namespace),
-                    &nullify_message,
-                    &signature.value,
-                )
-                .is_err()
-                {
-                    return;
-                }
-
-                // Verify seed
-                let Some(seed) = Eval::deserialize(&nullify.seed_signature) else {
-                    return;
-                };
-                if seed.index != public_key_index {
-                    return;
-                }
+                let nullify_message = (Some(nullify_namespace.as_ref()), nullify_message.as_ref());
                 let seed_message = seed_message(nullify.view);
-                if ops::verify_message(
+                let seed_message = (Some(seed_namespace.as_ref()), seed_message.as_ref());
+
+                // Perform batch verification
+                let signature = aggregate_signatures(&[signature.value, seed.value]);
+                if aggregate_verify_multiple_messages(
                     &public.value,
-                    Some(&seed_namespace),
-                    &seed_message,
-                    &seed.value,
+                    &[nullify_message, seed_message],
+                    &signature,
+                    1,
                 )
                 .is_err()
                 {
@@ -1507,6 +1503,7 @@ impl<
                 let seed_message = (Some(seed_namespace.as_ref()), seed_message.as_ref());
 
                 // Perform batch verification
+                // TODO: send aggregate signature rather than multiple
                 let signature = aggregate_signatures(&[signature.value, seed.value]);
                 if aggregate_verify_multiple_messages(
                     &public.value,
