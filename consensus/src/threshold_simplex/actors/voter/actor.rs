@@ -688,8 +688,8 @@ pub struct Actor<
 
     mailbox_receiver: mpsc::Receiver<Message<D>>,
 
-    handler_sender: mpsc::Sender<Verified>,
-    handler_receiver: mpsc::Receiver<Verified>,
+    handler_sender: mpsc::Sender<Verified<D>>,
+    handler_receiver: mpsc::Receiver<Verified<D>>,
 
     last_finalized: View,
     view: View,
@@ -766,6 +766,7 @@ impl<
         // Initialize store
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::new(mailbox_sender);
+        let (handler_sender, handler_receiver) = mpsc::channel(cfg.mailbox_size);
         (
             Self {
                 context,
@@ -793,6 +794,9 @@ impl<
                 skip_timeout: cfg.skip_timeout,
 
                 mailbox_receiver,
+
+                handler_sender,
+                handler_receiver,
 
                 last_finalized: 0,
                 view: 0,
@@ -1112,7 +1116,10 @@ impl<
         }
 
         // Handle nullify
-        self.handle_nullify(public_key_index, nullify).await;
+        self.handler_sender
+            .send(Verified::Nullify(public_key_index, nullify))
+            .await
+            .expect("unable to send verified nullify");
     }
 
     async fn handle_nullify(&mut self, public_key_index: u32, nullify: wire::Nullify) {
@@ -1496,14 +1503,16 @@ impl<
         }
 
         // Handle notarize
-        self.handle_notarize(
-            public_key_index,
-            Parsed {
-                message: notarize,
-                digest: payload,
-            },
-        )
-        .await;
+        self.handler_sender
+            .send(Verified::Notarize(
+                public_key_index,
+                Parsed {
+                    message: notarize,
+                    digest: payload,
+                },
+            ))
+            .await
+            .expect("unable to send verified notarize");
     }
 
     async fn handle_notarize(
@@ -1572,6 +1581,7 @@ impl<
             return;
         }
 
+        // Handle notarization
         self.handler_sender
             .send(Verified::Notarization(Parsed {
                 message: notarization,
@@ -1579,13 +1589,6 @@ impl<
             }))
             .await
             .expect("unable to send verified notarization");
-
-        // Handle notarization
-        self.handle_notarization(Parsed {
-            message: notarization,
-            digest: payload,
-        })
-        .await;
     }
 
     async fn handle_notarization(&mut self, notarization: Parsed<wire::Notarization, D>) {
@@ -1643,7 +1646,10 @@ impl<
         }
 
         // Handle notarization
-        self.handle_nullification(nullification).await;
+        self.handler_sender
+            .send(Verified::Nullification(nullification))
+            .await
+            .expect("unable to send verified nullification");
     }
 
     async fn handle_nullification(&mut self, nullification: wire::Nullification) {
@@ -1721,14 +1727,16 @@ impl<
         }
 
         // Handle finalize
-        self.handle_finalize(
-            public_key_index,
-            Parsed {
-                message: finalize,
-                digest: payload,
-            },
-        )
-        .await;
+        self.handler_sender
+            .send(Verified::Finalize(
+                public_key_index,
+                Parsed {
+                    message: finalize,
+                    digest: payload,
+                },
+            ))
+            .await
+            .expect("unable to send verified finalize");
     }
 
     async fn handle_finalize(
@@ -1798,11 +1806,13 @@ impl<
         }
 
         // Process finalization
-        self.handle_finalization(Parsed {
-            message: finalization,
-            digest: payload,
-        })
-        .await;
+        self.handler_sender
+            .send(Verified::Finalization(Parsed {
+                message: finalization,
+                digest: payload,
+            }))
+            .await
+            .expect("unable to send verified finalization");
     }
 
     async fn handle_finalization(&mut self, finalization: Parsed<wire::Finalization, D>) {
@@ -2600,9 +2610,9 @@ impl<
                     // Continue processing (nothing can happen until handler called)
                     continue;
                 },
-                handled = self.handler_receiver.recv() => {
+                handled = self.handler_receiver.next() => {
                     // Ensure not null
-                    let Ok(handled) = handled else {
+                    let Some(handled) = handled else {
                         break;
                     };
 
