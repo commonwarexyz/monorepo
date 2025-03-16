@@ -420,11 +420,10 @@ impl crate::Spawner for Context {
             .clone();
 
         // Initialize the blocking task using the new function
-        let executor = self.executor.clone();
-        let (f, handle) = Handle::init_blocking(f, gauge, executor.cfg.catch_panics);
+        let (f, handle) = Handle::init_blocking(f, gauge, self.executor.cfg.catch_panics);
 
         // Spawn the blocking task
-        executor.runtime.spawn_blocking(f);
+        self.executor.runtime.spawn_blocking(f);
         handle
     }
 
