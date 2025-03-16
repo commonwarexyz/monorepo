@@ -470,18 +470,18 @@ impl<
                 let eval = Eval::deserialize(&notarize.message.seed_signature).unwrap();
                 seed.push(eval);
             }
-            let proposal_signature =
-                self.context
-                    .with_label("notarization_recovery")
-                    .spawn(move |_| async move {
-                        threshold_signature_recover(threshold, notarization)
-                            .unwrap()
-                            .serialize()
-                    });
+            let proposal_signature = self
+                .context
+                .with_label("notarization_recovery")
+                .spawn_blocking(move || {
+                    threshold_signature_recover(threshold, notarization)
+                        .unwrap()
+                        .serialize()
+                });
             let seed_signature =
                 self.context
                     .with_label("seed_recovery")
-                    .spawn(move |_| async move {
+                    .spawn_blocking(move || {
                         threshold_signature_recover(threshold, seed)
                             .unwrap()
                             .serialize()
@@ -531,18 +531,18 @@ impl<
             let eval = Eval::deserialize(&nullify.seed_signature).unwrap();
             seed.push(eval);
         }
-        let view_signature =
-            self.context
-                .with_label("nullification_recovery")
-                .spawn(move |_| async move {
-                    threshold_signature_recover(threshold, nullification)
-                        .unwrap()
-                        .serialize()
-                });
+        let view_signature = self
+            .context
+            .with_label("nullification_recovery")
+            .spawn_blocking(move || {
+                threshold_signature_recover(threshold, nullification)
+                    .unwrap()
+                    .serialize()
+            });
         let seed_signature = self
             .context
             .with_label("seed_recovery")
-            .spawn(move |_| async move {
+            .spawn_blocking(move || {
                 threshold_signature_recover(threshold, seed)
                     .unwrap()
                     .serialize()
