@@ -175,6 +175,64 @@ pub fn partial_verify_message(
     verify_message(&public.value, namespace, message, &partial.value)
 }
 
+/// Aggregates multiple partial signatures into a single signature.
+///
+/// # Warning
+///
+/// This function assumes a group check was already performed on each `signature` and
+/// that each `signature` is unique. If any of these assumptions are violated, an attacker can
+/// exploit this function to verify an incorrect aggregate signature.
+pub fn partial_aggregate_signatures(
+    partials: &[PartialSignature],
+) -> Option<(u32, group::Signature)> {
+    if partials.is_empty() {
+        return None;
+    }
+    let index = partials[0].index;
+    let mut s = group::Signature::zero();
+    for partial in partials {
+        if partial.index != index {
+            return None;
+        }
+        s.add(&partial.value);
+    }
+    Some((index, s))
+}
+
+/// Verifies the signatures from multiple partial signatures over multiple unique messages from a single
+/// signer.
+///
+/// # Warning
+///
+/// This function assumes a group check was already performed on each `signature`.
+pub fn partial_verify_multiple_messages(
+    public: &poly::Public,
+    messages: &[(Option<&[u8]>, &[u8])],
+    signatures: &[PartialSignature],
+) -> Result<(), Error> {
+    // Aggregate the partial signatures
+    let (index, signature) =
+        partial_aggregate_signatures(signatures).ok_or(Error::InvalidSignature)?;
+    let public = public.evaluate(index).value;
+
+    // Sum the hashed messages
+    let mut hm_sum = group::Signature::zero();
+    for (namespace, msg) in messages {
+        let mut hm = group::Signature::zero();
+        match namespace {
+            Some(namespace) => hm.map(MESSAGE, &union_unique(namespace, msg)),
+            None => hm.map(MESSAGE, msg),
+        };
+        hm_sum.add(&hm);
+    }
+
+    // Verify the signature
+    if !equal(&public, &signature, &hm_sum) {
+        return Err(Error::InvalidSignature);
+    }
+    Ok(())
+}
+
 /// Recovers a signature from at least `threshold` partial signatures.
 ///
 /// # Determinism
