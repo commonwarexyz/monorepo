@@ -11,7 +11,10 @@ fn benchmark_aggregate_verify_multiple_messages(c: &mut Criterion) {
             thread_rng().fill(&mut msg);
             msgs.push(msg);
         }
-        let msgs = msgs.iter().map(|msg| msg.as_ref()).collect::<Vec<_>>();
+        let msgs = msgs
+            .iter()
+            .map(|msg| (Some(&namespace[..]), msg.as_ref()))
+            .collect::<Vec<_>>();
         for concurrency in [1, 2, 4, 8].into_iter() {
             c.bench_function(
                 &format!("{}/conc={} msgs={}", module_path!(), concurrency, n,),
@@ -20,7 +23,7 @@ fn benchmark_aggregate_verify_multiple_messages(c: &mut Criterion) {
                         || {
                             let (private, public) = ops::keypair(&mut thread_rng());
                             let mut signatures = Vec::with_capacity(n);
-                            for msg in msgs.iter() {
+                            for (_, msg) in msgs.iter() {
                                 let signature = ops::sign_message(&private, Some(namespace), msg);
                                 signatures.push(signature);
                             }
@@ -29,7 +32,6 @@ fn benchmark_aggregate_verify_multiple_messages(c: &mut Criterion) {
                         |(public, signature)| {
                             ops::aggregate_verify_multiple_messages(
                                 &public,
-                                Some(namespace),
                                 &msgs,
                                 &signature,
                                 concurrency,
