@@ -1002,12 +1002,6 @@ mod tests {
     }
 
     #[test]
-    fn test_tokio_spawn_blocking() {
-        let (executor, context) = tokio::Executor::default();
-        test_spawn_blocking(executor, context);
-    }
-
-    #[test]
     #[should_panic(expected = "blocking task panicked")]
     fn test_deterministic_spawn_blocking_panic() {
         let (executor, context, _) = deterministic::Executor::default();
@@ -1017,6 +1011,12 @@ mod tests {
             });
             handle.await.unwrap();
         });
+    }
+
+    #[test]
+    fn test_tokio_spawn_blocking() {
+        let (executor, context) = tokio::Executor::default();
+        test_spawn_blocking(executor, context);
     }
 
     #[test]
