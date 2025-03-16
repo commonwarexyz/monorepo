@@ -504,7 +504,7 @@ impl<
         None
     }
 
-    fn nullifiable(&mut self, threshold: u32, force: bool) -> Option<wire::Nullification> {
+    async fn nullifiable(&mut self, threshold: u32, force: bool) -> Option<wire::Nullification> {
         // Ensure we haven't already broadcast
         if !force && (self.broadcast_nullification || self.broadcast_notarization) {
             return None;
@@ -531,18 +531,29 @@ impl<
             let eval = Eval::deserialize(&nullify.seed_signature).unwrap();
             seed.push(eval);
         }
-        let view_signature = threshold_signature_recover(threshold, nullification)
-            .unwrap()
-            .serialize();
-        let seed_signature = threshold_signature_recover(threshold, seed)
-            .unwrap()
-            .serialize();
+        let view_signature =
+            self.context
+                .with_label("nullification_recovery")
+                .spawn(move |_| async move {
+                    threshold_signature_recover(threshold, nullification)
+                        .unwrap()
+                        .serialize()
+                });
+        let seed_signature = self
+            .context
+            .with_label("seed_recovery")
+            .spawn(move |_| async move {
+                threshold_signature_recover(threshold, seed)
+                    .unwrap()
+                    .serialize()
+            });
+        let (view_signature, seed_signature) = join(view_signature, seed_signature).await;
 
         // Construct nullification
         let nullification = wire::Nullification {
             view: self.view,
-            view_signature,
-            seed_signature,
+            view_signature: view_signature.unwrap(),
+            seed_signature: seed_signature.unwrap(),
         };
         self.broadcast_nullification = true;
         Some(nullification)
@@ -1005,7 +1016,8 @@ impl<
                     .get_or_create(&metrics::NOTARIZATION)
                     .inc();
                 debug!(view = past_view, "rebroadcast entry notarization");
-            } else if let Some(nullification) = self.construct_nullification(past_view, true) {
+            } else if let Some(nullification) = self.construct_nullification(past_view, true).await
+            {
                 let msg = wire::Voter {
                     payload: Some(wire::voter::Payload::Nullification(nullification)),
                 }
@@ -1894,7 +1906,11 @@ impl<
         round.notarizable(threshold, force).await
     }
 
-    fn construct_nullification(&mut self, view: u64, force: bool) -> Option<wire::Nullification> {
+    async fn construct_nullification(
+        &mut self,
+        view: u64,
+        force: bool,
+    ) -> Option<wire::Nullification> {
         // Get requested view
         let round = match self.views.get_mut(&view) {
             Some(view) => view,
@@ -1906,7 +1922,7 @@ impl<
         // Attempt to construct nullification
         let identity = self.supervisor.identity(view)?;
         let threshold = identity.required();
-        round.nullifiable(threshold, force)
+        round.nullifiable(threshold, force).await
     }
 
     fn construct_finalize(&mut self, view: u64) -> Option<Parsed<wire::Finalize, D>> {
@@ -2054,7 +2070,7 @@ impl<
         // Attempt to nullification
         //
         // We handle broadcast of nullify in `timeout`.
-        if let Some(nullification) = self.construct_nullification(view, false) {
+        if let Some(nullification) = self.construct_nullification(view, false).await {
             // Update backfiller
             backfiller.nullified(nullification.clone()).await;
 
