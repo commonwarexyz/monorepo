@@ -154,9 +154,19 @@ impl Metrics {
 pub struct Config {
     /// Number of threads to use for handling async tasks.
     ///
-    /// Blocking tasks are handled by a separate thread pool within `tokio`
-    /// that blocks once 512 blocking tasks are spawned.
-    pub threads: usize,
+    /// Worker threads are always active (waiting for work).
+    ///
+    /// Tokio sets the default value to the number of logical CPUs.
+    pub worker_threads: usize,
+
+    /// Maximum number of threads to use for blocking tasks.
+    ///
+    /// Unlike worker threads, blocking threads are created as needed and
+    /// exit if left idle for too long.
+    ///
+    /// Tokio sets the default value to 512 to avoid hanging on lower-level
+    /// operations that require blocking (like `fs` and writing to `Stdout`).
+    pub max_blocking_threads: usize,
 
     /// Whether or not to catch panics.
     pub catch_panics: bool,
@@ -196,7 +206,8 @@ impl Default for Config {
 
         // Return the configuration
         Self {
-            threads: 2,
+            worker_threads: 2,
+            max_blocking_threads: 512,
             catch_panics: true,
             read_timeout: Duration::from_secs(60),
             write_timeout: Duration::from_secs(30),
@@ -228,7 +239,8 @@ impl Executor {
         // Initialize runtime
         let metrics = Arc::new(Metrics::init(runtime_registry));
         let runtime = Builder::new_multi_thread()
-            .worker_threads(cfg.threads)
+            .worker_threads(cfg.worker_threads)
+            .max_blocking_threads(cfg.max_blocking_threads)
             .enable_all()
             .build()
             .expect("failed to create Tokio runtime");
