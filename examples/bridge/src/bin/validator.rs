@@ -121,7 +121,7 @@ fn main() {
     let identity = from_hex(identity).expect("Identity not well-formed");
     let identity: Poly<group::Public> =
         Poly::deserialize(&identity, threshold).expect("Identity not well-formed");
-    let public = poly::public(&identity);
+    let public = *poly::public(&identity);
     let share = matches
         .get_one::<String>("share")
         .expect("Please provide share");
