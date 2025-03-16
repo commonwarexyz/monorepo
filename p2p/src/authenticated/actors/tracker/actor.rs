@@ -209,8 +209,8 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
         let updated_peers = Family::<metrics::Peer, Counter>::default();
         context.register("tracked_peers", "tracked peers", tracked_peers.clone());
         context.register(
-            "connections",
-            "number of connections",
+            "reservations",
+            "number of reserved connections",
             reserved_connections.clone(),
         );
         context.register(
