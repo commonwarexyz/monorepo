@@ -688,8 +688,8 @@ pub struct Actor<
 
     mailbox_receiver: mpsc::Receiver<Message<D>>,
 
-    handler_sender: mpsc::Sender<Verified<D>>,
-    handler_receiver: mpsc::Receiver<Verified<D>>,
+    verified_sender: mpsc::Sender<Verified<D>>,
+    verified_receiver: mpsc::Receiver<Verified<D>>,
 
     last_finalized: View,
     view: View,
@@ -766,7 +766,7 @@ impl<
         // Initialize store
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::new(mailbox_sender);
-        let (handler_sender, handler_receiver) = mpsc::channel(cfg.mailbox_size);
+        let (verified_sender, verified_receiver) = mpsc::channel(cfg.mailbox_size);
         (
             Self {
                 context,
@@ -795,8 +795,8 @@ impl<
 
                 mailbox_receiver,
 
-                handler_sender,
-                handler_receiver,
+                verified_sender,
+                verified_receiver,
 
                 last_finalized: 0,
                 view: 0,
@@ -1116,7 +1116,7 @@ impl<
         }
 
         // Handle nullify
-        self.handler_sender
+        self.verified_sender
             .send(Verified::Nullify(public_key_index, nullify))
             .await
             .expect("unable to send verified nullify");
@@ -1503,7 +1503,7 @@ impl<
         }
 
         // Handle notarize
-        self.handler_sender
+        self.verified_sender
             .send(Verified::Notarize(
                 public_key_index,
                 Parsed {
@@ -1582,7 +1582,7 @@ impl<
         }
 
         // Handle notarization
-        self.handler_sender
+        self.verified_sender
             .send(Verified::Notarization(Parsed {
                 message: notarization,
                 digest: payload,
@@ -1646,7 +1646,7 @@ impl<
         }
 
         // Handle notarization
-        self.handler_sender
+        self.verified_sender
             .send(Verified::Nullification(nullification))
             .await
             .expect("unable to send verified nullification");
@@ -1727,7 +1727,7 @@ impl<
         }
 
         // Handle finalize
-        self.handler_sender
+        self.verified_sender
             .send(Verified::Finalize(
                 public_key_index,
                 Parsed {
@@ -1806,7 +1806,7 @@ impl<
         }
 
         // Process finalization
-        self.handler_sender
+        self.verified_sender
             .send(Verified::Finalization(Parsed {
                 message: finalization,
                 digest: payload,
@@ -2610,7 +2610,7 @@ impl<
                     // Continue processing (nothing can happen until handler called)
                     continue;
                 },
-                handled = self.handler_receiver.next() => {
+                handled = self.verified_receiver.next() => {
                     // Ensure not null
                     let Some(handled) = handled else {
                         break;
