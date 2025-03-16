@@ -559,7 +559,7 @@ impl<
         Some(nullification)
     }
 
-    fn finalizable(
+    async fn finalizable(
         &mut self,
         threshold: u32,
         force: bool,
@@ -624,14 +624,20 @@ impl<
                 let eval = Eval::deserialize(&finalize.message.proposal_signature).unwrap();
                 finalization.push(eval);
             }
-            let proposal_signature = threshold_signature_recover(threshold, finalization)
-                .unwrap()
-                .serialize();
+            let proposal_signature = self
+                .context
+                .with_label("finalization_recovery")
+                .spawn_blocking(move || {
+                    threshold_signature_recover(threshold, finalization)
+                        .unwrap()
+                        .serialize()
+                })
+                .await;
 
             // Construct finalization
             let finalization = wire::Finalization {
                 proposal: Some(proposal.clone()),
-                proposal_signature,
+                proposal_signature: proposal_signature.unwrap(),
                 seed_signature,
             };
             // self.finalization = Some(finalization.clone());
@@ -1970,7 +1976,7 @@ impl<
         })
     }
 
-    fn construct_finalization(
+    async fn construct_finalization(
         &mut self,
         view: u64,
         force: bool,
@@ -1985,7 +1991,7 @@ impl<
         // Attempt to construct finalization
         let identity = self.supervisor.identity(view)?;
         let threshold = identity.required();
-        round.finalizable(threshold, force)
+        round.finalizable(threshold, force).await
     }
 
     async fn notify(
@@ -2128,8 +2134,9 @@ impl<
                     last_finalized = self.last_finalized,
                     "not backfilling because parent is behind finalized tip, broadcasting finalized"
                 );
-                    let finalization = self.construct_finalization(self.last_finalized, true);
-                    if let Some(finalization) = finalization {
+                    if let Some(finalization) =
+                        self.construct_finalization(self.last_finalized, true).await
+                    {
                         let msg = wire::Voter {
                             payload: Some(wire::voter::Payload::Finalization(finalization.message)),
                         }
@@ -2179,7 +2186,7 @@ impl<
         };
 
         // Attempt to finalization
-        if let Some(finalization) = self.construct_finalization(view, false) {
+        if let Some(finalization) = self.construct_finalization(view, false).await {
             // Record latency if we are the leader (only way to get unbiased observation)
             if let Some((leader, elapsed)) = self.since_view_start(view) {
                 if leader {
