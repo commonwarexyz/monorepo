@@ -207,12 +207,16 @@ pub fn partial_aggregate_signatures(
 /// This function assumes a group check was already performed on each `signature`.
 pub fn partial_verify_multiple_messages(
     public: &poly::Public,
+    partial_signer: u32,
     messages: &[(Option<&[u8]>, &[u8])],
     signatures: &[PartialSignature],
 ) -> Result<(), Error> {
     // Aggregate the partial signatures
     let (index, signature) =
         partial_aggregate_signatures(signatures).ok_or(Error::InvalidSignature)?;
+    if partial_signer != index {
+        return Err(Error::InvalidSignature);
+    }
     let public = public.evaluate(index).value;
 
     // Sum the hashed messages

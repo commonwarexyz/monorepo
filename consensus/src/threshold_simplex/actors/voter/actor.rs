@@ -17,7 +17,7 @@ use crate::{
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{self, Element},
-        ops,
+        ops::{self, partial_verify_multiple_messages},
         poly::{self, Eval},
     },
     hash,
@@ -1057,44 +1057,29 @@ impl<
             return;
         };
 
-        // Verify signature
-        let Some(signature) = Eval::deserialize(&nullify.view_signature) else {
-            debug!(
-                public_key_index,
-                "partial signature is not formatted correctly"
-            );
+        // Parse signatures
+        let Some(nullify_signature) = Eval::deserialize(&nullify.view_signature) else {
             return;
         };
-        if signature.index != public_key_index {
-            debug!(
-                public_key_index,
-                partial_signature = signature.index,
-                "invalid signature index for nullify"
-            );
+        let Some(seed_signature) = Eval::deserialize(&nullify.seed_signature) else {
             return;
-        }
+        };
+
+        // Verify aggregate signature
         let nullify_message = nullify_message(nullify.view);
-        if ops::partial_verify_message(
+        let nullify_message = (
+            Some(self.nullify_namespace.as_ref()),
+            nullify_message.as_ref(),
+        );
+        let seed_message = seed_message(nullify.view);
+        let seed_message = (Some(self.seed_namespace.as_ref()), seed_message.as_ref());
+        if partial_verify_multiple_messages(
             identity,
-            Some(&self.nullify_namespace),
-            &nullify_message,
-            &signature,
+            public_key_index,
+            &[nullify_message, seed_message],
+            &[nullify_signature, seed_signature],
         )
         .is_err()
-        {
-            return;
-        }
-
-        // Verify seed
-        let Some(seed) = Eval::deserialize(&nullify.seed_signature) else {
-            return;
-        };
-        if seed.index != public_key_index {
-            return;
-        }
-        let seed_message = seed_message(nullify.view);
-        if ops::partial_verify_message(identity, Some(&self.seed_namespace), &seed_message, &seed)
-            .is_err()
         {
             return;
         }
