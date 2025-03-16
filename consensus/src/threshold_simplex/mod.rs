@@ -357,7 +357,7 @@ mod tests {
             // Derive threshold
             let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
             let pk = poly::public(&public);
-            let prover = Prover::new(pk, &namespace);
+            let prover = Prover::new(*pk, &namespace);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -540,7 +540,6 @@ mod tests {
         // Derive threshold
         let mut rng = StdRng::seed_from_u64(0);
         let (public, shares) = ops::generate_shares(&mut rng, None, n, threshold);
-        let pk = poly::public(&public);
 
         // Random restarts every x seconds
         let shutdowns: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
@@ -594,7 +593,8 @@ mod tests {
                 link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
                 // Create engines
-                let prover = Prover::new(pk, &namespace);
+                let pk = poly::public(&public);
+                let prover = Prover::new(*pk, &namespace);
                 let relay = Arc::new(mocks::relay::Relay::new());
                 let mut supervisors = HashMap::new();
                 let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -808,7 +808,7 @@ skip_timeout,
             // Derive threshold
             let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
             let pk = poly::public(&public);
-            let prover = Prover::new(pk, &namespace);
+            let prover = Prover::new(*pk, &namespace);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -1103,7 +1103,7 @@ skip_timeout,
             // Derive threshold
             let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
             let pk = poly::public(&public);
-            let prover = Prover::new(pk, &namespace);
+            let prover = Prover::new(*pk, &namespace);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -1288,7 +1288,7 @@ skip_timeout,
             // Derive threshold
             let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
             let pk = poly::public(&public);
-            let prover = Prover::new(pk, &namespace);
+            let prover = Prover::new(*pk, &namespace);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -1479,7 +1479,7 @@ skip_timeout,
             // Derive threshold
             let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
             let pk = poly::public(&public);
-            let prover = Prover::new(pk, &namespace);
+            let prover = Prover::new(*pk, &namespace);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -1652,7 +1652,7 @@ skip_timeout,
             // Derive threshold
             let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
             let pk = poly::public(&public);
-            let prover = Prover::new(pk, &namespace);
+            let prover = Prover::new(*pk, &namespace);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -1881,7 +1881,7 @@ skip_timeout,
             // Derive threshold
             let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
             let pk = poly::public(&public);
-            let prover = Prover::new(pk, &namespace);
+            let prover = Prover::new(*pk, &namespace);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -2060,7 +2060,7 @@ skip_timeout,
             // Derive threshold
             let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
             let pk = poly::public(&public);
-            let prover = Prover::new(pk, &namespace);
+            let prover = Prover::new(*pk, &namespace);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -2246,7 +2246,7 @@ skip_timeout,
             // Derive threshold
             let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
             let pk = poly::public(&public);
-            let prover = Prover::new(pk, &namespace);
+            let prover = Prover::new(*pk, &namespace);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
