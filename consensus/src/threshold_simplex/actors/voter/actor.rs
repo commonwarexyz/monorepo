@@ -1073,7 +1073,7 @@ impl<
             return;
         };
 
-        // Verify signature
+        // Parse view partial signature to get index
         let Some(signature) = Eval::deserialize(&nullify.view_signature) else {
             debug!(
                 public_key_index,
@@ -1089,37 +1089,52 @@ impl<
             );
             return;
         }
-        let nullify_message = nullify_message(nullify.view);
-        if ops::partial_verify_message(
-            identity,
-            Some(&self.nullify_namespace),
-            &nullify_message,
-            &signature,
-        )
-        .is_err()
-        {
-            return;
-        }
+        let public = identity.evaluate(signature.index);
 
-        // Verify seed
-        let Some(seed) = Eval::deserialize(&nullify.seed_signature) else {
-            return;
-        };
-        if seed.index != public_key_index {
-            return;
-        }
-        let seed_message = seed_message(nullify.view);
-        if ops::partial_verify_message(identity, Some(&self.seed_namespace), &seed_message, &seed)
-            .is_err()
-        {
-            return;
-        }
+        // Verify signature
+        self.context.with_label("nullify").spawn({
+            let mut verified_sender = self.verified_sender.clone();
+            let nullify_namespace = self.nullify_namespace.clone();
+            let seed_namespace = self.seed_namespace.clone();
+            move |_| async move {
+                let nullify_message = nullify_message(nullify.view);
+                if ops::verify_message(
+                    &public.value,
+                    Some(&nullify_namespace),
+                    &nullify_message,
+                    &signature.value,
+                )
+                .is_err()
+                {
+                    return;
+                }
 
-        // Handle nullify
-        self.verified_sender
-            .send(Verified::Nullify(public_key_index, nullify))
-            .await
-            .expect("unable to send verified nullify");
+                // Verify seed
+                let Some(seed) = Eval::deserialize(&nullify.seed_signature) else {
+                    return;
+                };
+                if seed.index != public_key_index {
+                    return;
+                }
+                let seed_message = seed_message(nullify.view);
+                if ops::verify_message(
+                    &public.value,
+                    Some(&seed_namespace),
+                    &seed_message,
+                    &seed.value,
+                )
+                .is_err()
+                {
+                    return;
+                }
+
+                // Handle nullify
+                verified_sender
+                    .send(Verified::Nullify(public_key_index, nullify))
+                    .await
+                    .expect("unable to send verified nullify");
+            }
+        });
     }
 
     async fn handle_nullify(&mut self, public_key_index: u32, nullify: wire::Nullify) {
