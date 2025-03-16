@@ -1073,20 +1073,11 @@ impl<
             return;
         };
 
-        // Parse view partial signature to get index
+        // Parse partial signature to get index
         let Some(signature) = Eval::deserialize(&nullify.view_signature) else {
-            debug!(
-                public_key_index,
-                "partial signature is not formatted correctly"
-            );
             return;
         };
         if signature.index != public_key_index {
-            debug!(
-                public_key_index,
-                partial_signature = signature.index,
-                "invalid signature index for nullify"
-            );
             return;
         }
         let public = identity.evaluate(signature.index);
@@ -1462,7 +1453,7 @@ impl<
 
     async fn notarize(&mut self, sender: &C::PublicKey, notarize: wire::Notarize) {
         // Extract proposal
-        let Some(proposal) = notarize.proposal.as_ref() else {
+        let Some(proposal) = &notarize.proposal else {
             return;
         };
 
@@ -1484,50 +1475,69 @@ impl<
             return;
         };
 
-        // Verify signature
+        // Parse partial signature to get index
         let Some(signature) = Eval::deserialize(&notarize.proposal_signature) else {
             return;
         };
         if signature.index != public_key_index {
             return;
         }
-        let notarize_message = proposal_message(proposal.view, proposal.parent, &payload);
-        if ops::partial_verify_message(
-            identity,
-            Some(&self.notarize_namespace),
-            &notarize_message,
-            &signature,
-        )
-        .is_err()
-        {
-            return;
-        }
+        let public = identity.evaluate(signature.index);
 
-        // Verify seed
-        let Some(seed) = Eval::deserialize(&notarize.seed_signature) else {
-            return;
-        };
-        if seed.index != public_key_index {
-            return;
-        }
-        let seed_message = seed_message(proposal.view);
-        if ops::partial_verify_message(identity, Some(&self.seed_namespace), &seed_message, &seed)
-            .is_err()
-        {
-            return;
-        }
+        // Verify signature
+        self.context.with_label("notarize").spawn({
+            let mut verified_sender = self.verified_sender.clone();
+            let notarize_namespace = self.notarize_namespace.clone();
+            let seed_namespace = self.seed_namespace.clone();
+            move |_| async move {
+                // Create a new reference to the proposal
+                let proposal = notarize.proposal.as_ref().unwrap();
 
-        // Handle notarize
-        self.verified_sender
-            .send(Verified::Notarize(
-                public_key_index,
-                Parsed {
-                    message: notarize,
-                    digest: payload,
-                },
-            ))
-            .await
-            .expect("unable to send verified notarize");
+                // Verify notarize
+                let notarize_message = proposal_message(proposal.view, proposal.parent, &payload);
+                if ops::verify_message(
+                    &public.value,
+                    Some(&notarize_namespace),
+                    &notarize_message,
+                    &signature.value,
+                )
+                .is_err()
+                {
+                    return;
+                }
+
+                // Verify seed
+                let Some(seed) = Eval::deserialize(&notarize.seed_signature) else {
+                    return;
+                };
+                if seed.index != public_key_index {
+                    return;
+                }
+                let seed_message = seed_message(proposal.view);
+                if ops::verify_message(
+                    &public.value,
+                    Some(&seed_namespace),
+                    &seed_message,
+                    &seed.value,
+                )
+                .is_err()
+                {
+                    return;
+                }
+
+                // Handle notarize
+                verified_sender
+                    .send(Verified::Notarize(
+                        public_key_index,
+                        Parsed {
+                            message: notarize,
+                            digest: payload,
+                        },
+                    ))
+                    .await
+                    .expect("unable to send verified notarize");
+            }
+        });
     }
 
     async fn handle_notarize(
