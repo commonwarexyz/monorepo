@@ -268,8 +268,8 @@ impl<C: Element> Poly<C> {
 }
 
 /// Returns the public key of the polynomial (constant term).
-pub fn public(public: &Public) -> group::Public {
-    *public.constant()
+pub fn public(public: &Public) -> &group::Public {
+    public.constant()
 }
 
 #[cfg(test)]

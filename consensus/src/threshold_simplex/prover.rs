@@ -452,7 +452,7 @@ mod tests {
     fn generate_threshold() -> (group::Public, poly::Public, Vec<Share>) {
         let mut sampler = StdRng::seed_from_u64(0);
         let (public, shares) = generate_shares(&mut sampler, None, 4, 3);
-        (poly::public(&public), public, shares)
+        (*poly::public(&public), public, shares)
     }
 
     fn generate_keypair() -> (group::Private, group::Public) {

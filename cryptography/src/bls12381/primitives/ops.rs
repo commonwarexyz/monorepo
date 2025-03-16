@@ -375,11 +375,11 @@ mod tests {
         let threshold_pub = poly::public(&public);
 
         // Verify PoP
-        verify_proof_of_possession(&threshold_pub, &threshold_sig)
+        verify_proof_of_possession(threshold_pub, &threshold_sig)
             .expect("signature should be valid");
 
         // Verify PoP using blst
-        blst_verify_proof_of_possession(&threshold_pub, &threshold_sig)
+        blst_verify_proof_of_possession(threshold_pub, &threshold_sig)
             .expect("signature should be valid");
     }
 
@@ -470,12 +470,12 @@ mod tests {
         let threshold_pub = poly::public(&public);
 
         // Verify the signature
-        verify_message(&threshold_pub, Some(namespace), msg, &threshold_sig)
+        verify_message(threshold_pub, Some(namespace), msg, &threshold_sig)
             .expect("signature should be valid");
 
         // Verify the signature using blst
         let payload = union_unique(namespace, msg);
-        blst_verify_message(&threshold_pub, &payload, &threshold_sig)
+        blst_verify_message(threshold_pub, &payload, &threshold_sig)
             .expect("signature should be valid");
     }
 

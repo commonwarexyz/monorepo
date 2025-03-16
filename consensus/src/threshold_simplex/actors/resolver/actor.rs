@@ -570,7 +570,7 @@ impl<
                                     continue;
                                 };
                                 let public_key = poly::public(polynomial);
-                                if !verify_notarization::<D>(&public_key, &self.notarize_namespace, &self.seed_namespace, &notarization) {
+                                if !verify_notarization::<D>(public_key, &self.notarize_namespace, &self.seed_namespace, &notarization) {
                                     warn!(view, sender = ?s, "invalid notarization");
                                     self.requester.block(s.clone());
                                     continue;
@@ -601,7 +601,7 @@ impl<
                                     continue;
                                 };
                                 let public_key = poly::public(polynomial);
-                                if !verify_nullification(&public_key, &self.nullify_namespace, &self.seed_namespace, &nullification) {
+                                if !verify_nullification(public_key, &self.nullify_namespace, &self.seed_namespace, &nullification) {
                                     warn!(view, sender = ?s, "invalid nullification");
                                     self.requester.block(s.clone());
                                     continue;

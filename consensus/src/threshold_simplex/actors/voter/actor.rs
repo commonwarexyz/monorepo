@@ -1609,6 +1609,7 @@ impl<
 
         // Verify notarization
         self.context.with_label("notarization").spawn({
+            let public_key = *public_key;
             let mut verified_sender = self.verified_sender.clone();
             let notarize_namespace = self.notarize_namespace.clone();
             let seed_namespace = self.seed_namespace.clone();
@@ -1691,6 +1692,7 @@ impl<
 
         // Verify nullification
         self.context.with_label("nullification").spawn({
+            let public_key = *public_key;
             let mut verified_sender = self.verified_sender.clone();
             let nullify_namespace = self.nullify_namespace.clone();
             let seed_namespace = self.seed_namespace.clone();
@@ -1879,6 +1881,7 @@ impl<
 
         // Verify finalization
         self.context.with_label("finalization").spawn({
+            let public_key = *public_key;
             let mut verified_sender = self.verified_sender.clone();
             let finalize_namespace = self.finalize_namespace.clone();
             let seed_namespace = self.seed_namespace.clone();
