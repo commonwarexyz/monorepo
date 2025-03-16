@@ -870,6 +870,10 @@ mod tests {
             });
 
             // Abort the task
+            //
+            // If there was an `.await` prior to sending a message over the oneshot, this test
+            // could deadlock (depending on the runtime implementation) because the blocking task
+            // would never yield (preventing send from being called).
             handle.abort();
             sender.send(()).unwrap();
 
