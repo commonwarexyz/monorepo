@@ -64,8 +64,14 @@ pub fn verify_notarization<
     let notarization_message = (Some(notarization_namespace), notarization_message.as_ref());
     let seed_message = seed_message(proposal.view);
     let seed_message = (Some(seed_namespace), seed_message.as_ref());
-    let messages = [notarization_message, seed_message];
-    if aggregate_verify_multiple_messages(public_key, &messages, &signature, 1).is_err() {
+    if aggregate_verify_multiple_messages(
+        public_key,
+        &[notarization_message, seed_message],
+        &signature,
+        1,
+    )
+    .is_err()
+    {
         debug!(reason = "invalid signature", "dropping notarization");
         return false;
     }
@@ -111,8 +117,14 @@ pub fn verify_nullification<S: ThresholdSupervisor<Index = View, Identity = poly
     );
     let seed_message = seed_message(nullification.view);
     let seed_message = (Some(seed_namespace), seed_message.as_ref());
-    let messages = [nullification_message, seed_message];
-    if aggregate_verify_multiple_messages(public_key, &messages, &signature, 1).is_err() {
+    if aggregate_verify_multiple_messages(
+        public_key,
+        &[nullification_message, seed_message],
+        &signature,
+        1,
+    )
+    .is_err()
+    {
         debug!(reason = "invalid signature", "dropping nullification");
         return false;
     }
@@ -173,8 +185,14 @@ pub fn verify_finalization<
     let finalization_message = (Some(finalization_namespace), finalization_message.as_ref());
     let seed_message = seed_message(proposal.view);
     let seed_message = (Some(seed_namespace), seed_message.as_ref());
-    let messages = [finalization_message, seed_message];
-    if aggregate_verify_multiple_messages(public_key, &messages, &signature, 1).is_err() {
+    if aggregate_verify_multiple_messages(
+        public_key,
+        &[finalization_message, seed_message],
+        &signature,
+        1,
+    )
+    .is_err()
+    {
         debug!(reason = "invalid signature", "dropping finalization");
         return false;
     }
