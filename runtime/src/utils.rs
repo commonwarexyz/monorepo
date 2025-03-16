@@ -130,7 +130,7 @@ where
         )
     }
 
-    pub fn init_blocking<F>(f: F, running: Gauge, catch_panic: bool) -> (impl FnOnce(), Self)
+    pub(crate) fn init_blocking<F>(f: F, running: Gauge, catch_panic: bool) -> (impl FnOnce(), Self)
     where
         F: FnOnce() -> T + Send + 'static,
     {
