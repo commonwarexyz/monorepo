@@ -815,7 +815,7 @@ impl<
         };
         let public_key = poly::public(identity);
         ops::verify_message(
-            &public_key,
+            public_key,
             Some(&self.ack_namespace),
             &serializer::ack(&parent_chunk, parent.epoch),
             &parent.threshold,

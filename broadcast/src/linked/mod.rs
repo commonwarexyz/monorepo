@@ -225,7 +225,7 @@ mod tests {
             let (collector, collector_mailbox) =
                 mocks::collector::Collector::<Ed25519, Sha256Digest>::new(
                     namespace,
-                    poly::public(&identity),
+                    *poly::public(&identity),
                 );
             context.with_label("collector").spawn(|_| collector.run());
             collectors.insert(validator.clone(), collector_mailbox);

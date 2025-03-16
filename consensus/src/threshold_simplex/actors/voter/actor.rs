@@ -17,7 +17,10 @@ use crate::{
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{self, Element},
-        ops,
+        ops::{
+            partial_sign_message, partial_verify_message, partial_verify_multiple_messages,
+            threshold_signature_recover,
+        },
         poly::{self, Eval},
     },
     hash,
@@ -31,7 +34,7 @@ use commonware_storage::journal::variable::Journal;
 use commonware_utils::quorum;
 use futures::{
     channel::{mpsc, oneshot},
-    future::Either,
+    future::{join, Either},
     pin_mut, StreamExt,
 };
 use prometheus_client::metrics::{
@@ -51,6 +54,7 @@ const GENESIS_VIEW: View = 0;
 struct Round<
     C: Scheme,
     D: Digest,
+    E: Spawner + Metrics + Clock,
     S: ThresholdSupervisor<
         Seed = group::Signature,
         Index = View,
@@ -59,6 +63,7 @@ struct Round<
     >,
 > {
     start: SystemTime,
+    context: E,
     supervisor: S,
 
     leader: Option<C::PublicKey>,
@@ -97,17 +102,19 @@ struct Round<
 impl<
         C: Scheme,
         D: Digest,
+        E: Spawner + Metrics + Clock,
         S: ThresholdSupervisor<
             Seed = group::Signature,
             Index = View,
             Share = group::Share,
             PublicKey = C::PublicKey,
         >,
-    > Round<C, D, S>
+    > Round<C, D, E, S>
 {
-    pub fn new(current: SystemTime, supervisor: S, view: View) -> Self {
+    pub fn new(ctx: E, supervisor: S, view: View) -> Self {
         Self {
-            start: current,
+            start: ctx.current(),
+            context: ctx,
             supervisor,
 
             view,
@@ -418,7 +425,7 @@ impl<
         true
     }
 
-    fn notarizable(
+    async fn notarizable(
         &mut self,
         threshold: u32,
         force: bool,
@@ -463,18 +470,30 @@ impl<
                 let eval = Eval::deserialize(&notarize.message.seed_signature).unwrap();
                 seed.push(eval);
             }
-            let proposal_signature = ops::threshold_signature_recover(threshold, notarization)
-                .unwrap()
-                .serialize();
-            let seed_signature = ops::threshold_signature_recover(threshold, seed)
-                .unwrap()
-                .serialize();
+            let proposal_signature = self
+                .context
+                .with_label("notarization_recovery")
+                .spawn_blocking(move || {
+                    threshold_signature_recover(threshold, notarization)
+                        .unwrap()
+                        .serialize()
+                });
+            let seed_signature =
+                self.context
+                    .with_label("seed_recovery")
+                    .spawn_blocking(move || {
+                        threshold_signature_recover(threshold, seed)
+                            .unwrap()
+                            .serialize()
+                    });
+            let (proposal_signature, seed_signature) =
+                join(proposal_signature, seed_signature).await;
 
             // Construct notarization
             let notarization = wire::Notarization {
                 proposal: Some(proposal.clone()),
-                proposal_signature,
-                seed_signature,
+                proposal_signature: proposal_signature.unwrap(),
+                seed_signature: seed_signature.unwrap(),
             };
             self.broadcast_notarization = true;
             return Some(Parsed {
@@ -485,7 +504,7 @@ impl<
         None
     }
 
-    fn nullifiable(&mut self, threshold: u32, force: bool) -> Option<wire::Nullification> {
+    async fn nullifiable(&mut self, threshold: u32, force: bool) -> Option<wire::Nullification> {
         // Ensure we haven't already broadcast
         if !force && (self.broadcast_nullification || self.broadcast_notarization) {
             return None;
@@ -512,24 +531,35 @@ impl<
             let eval = Eval::deserialize(&nullify.seed_signature).unwrap();
             seed.push(eval);
         }
-        let view_signature = ops::threshold_signature_recover(threshold, nullification)
-            .unwrap()
-            .serialize();
-        let seed_signature = ops::threshold_signature_recover(threshold, seed)
-            .unwrap()
-            .serialize();
+        let view_signature = self
+            .context
+            .with_label("nullification_recovery")
+            .spawn_blocking(move || {
+                threshold_signature_recover(threshold, nullification)
+                    .unwrap()
+                    .serialize()
+            });
+        let seed_signature = self
+            .context
+            .with_label("seed_recovery")
+            .spawn_blocking(move || {
+                threshold_signature_recover(threshold, seed)
+                    .unwrap()
+                    .serialize()
+            });
+        let (view_signature, seed_signature) = join(view_signature, seed_signature).await;
 
         // Construct nullification
         let nullification = wire::Nullification {
             view: self.view,
-            view_signature,
-            seed_signature,
+            view_signature: view_signature.unwrap(),
+            seed_signature: seed_signature.unwrap(),
         };
         self.broadcast_nullification = true;
         Some(nullification)
     }
 
-    fn finalizable(
+    async fn finalizable(
         &mut self,
         threshold: u32,
         force: bool,
@@ -594,14 +624,20 @@ impl<
                 let eval = Eval::deserialize(&finalize.message.proposal_signature).unwrap();
                 finalization.push(eval);
             }
-            let proposal_signature = ops::threshold_signature_recover(threshold, finalization)
-                .unwrap()
-                .serialize();
+            let proposal_signature = self
+                .context
+                .with_label("finalization_recovery")
+                .spawn_blocking(move || {
+                    threshold_signature_recover(threshold, finalization)
+                        .unwrap()
+                        .serialize()
+                })
+                .await;
 
             // Construct finalization
             let finalization = wire::Finalization {
                 proposal: Some(proposal.clone()),
-                proposal_signature,
+                proposal_signature: proposal_signature.unwrap(),
                 seed_signature,
             };
             // self.finalization = Some(finalization.clone());
@@ -681,7 +717,7 @@ pub struct Actor<
 
     last_finalized: View,
     view: View,
-    views: BTreeMap<View, Round<C, D, S>>,
+    views: BTreeMap<View, Round<C, D, E, S>>,
 
     current_view: Gauge,
     tracked_views: Gauge,
@@ -975,7 +1011,7 @@ impl<
         // If retry, broadcast notarization that led us to enter this view
         let past_view = self.view - 1;
         if retry && past_view > 0 {
-            if let Some(notarization) = self.construct_notarization(past_view, true) {
+            if let Some(notarization) = self.construct_notarization(past_view, true).await {
                 let msg = wire::Voter {
                     payload: Some(wire::voter::Payload::Notarization(notarization.message)),
                 }
@@ -986,7 +1022,8 @@ impl<
                     .get_or_create(&metrics::NOTARIZATION)
                     .inc();
                 debug!(view = past_view, "rebroadcast entry notarization");
-            } else if let Some(nullification) = self.construct_nullification(past_view, true) {
+            } else if let Some(nullification) = self.construct_nullification(past_view, true).await
+            {
                 let msg = wire::Voter {
                     payload: Some(wire::voter::Payload::Nullification(nullification)),
                 }
@@ -1009,10 +1046,10 @@ impl<
         let share = self.supervisor.share(self.view).unwrap();
         let message = nullify_message(self.view);
         let view_signature =
-            ops::partial_sign_message(share, Some(&self.nullify_namespace), &message).serialize();
+            partial_sign_message(share, Some(&self.nullify_namespace), &message).serialize();
         let message = seed_message(self.view);
         let seed_signature =
-            ops::partial_sign_message(share, Some(&self.seed_namespace), &message).serialize();
+            partial_sign_message(share, Some(&self.seed_namespace), &message).serialize();
         let null = wire::Nullify {
             view: self.view,
             view_signature,
@@ -1057,44 +1094,29 @@ impl<
             return;
         };
 
-        // Verify signature
-        let Some(signature) = Eval::deserialize(&nullify.view_signature) else {
-            debug!(
-                public_key_index,
-                "partial signature is not formatted correctly"
-            );
+        // Parse signatures
+        let Some(nullify_signature) = Eval::deserialize(&nullify.view_signature) else {
             return;
         };
-        if signature.index != public_key_index {
-            debug!(
-                public_key_index,
-                partial_signature = signature.index,
-                "invalid signature index for nullify"
-            );
+        let Some(seed_signature) = Eval::deserialize(&nullify.seed_signature) else {
             return;
-        }
+        };
+
+        // Verify aggregate signature
         let nullify_message = nullify_message(nullify.view);
-        if ops::partial_verify_message(
+        let nullify_message = (
+            Some(self.nullify_namespace.as_ref()),
+            nullify_message.as_ref(),
+        );
+        let seed_message = seed_message(nullify.view);
+        let seed_message = (Some(self.seed_namespace.as_ref()), seed_message.as_ref());
+        if partial_verify_multiple_messages(
             identity,
-            Some(&self.nullify_namespace),
-            &nullify_message,
-            &signature,
+            public_key_index,
+            &[nullify_message, seed_message],
+            &[nullify_signature, seed_signature],
         )
         .is_err()
-        {
-            return;
-        }
-
-        // Verify seed
-        let Some(seed) = Eval::deserialize(&nullify.seed_signature) else {
-            return;
-        };
-        if seed.index != public_key_index {
-            return;
-        }
-        let seed_message = seed_message(nullify.view);
-        if ops::partial_verify_message(identity, Some(&self.seed_namespace), &seed_message, &seed)
-            .is_err()
         {
             return;
         }
@@ -1106,10 +1128,13 @@ impl<
     async fn handle_nullify(&mut self, public_key_index: u32, nullify: wire::Nullify) {
         // Check to see if nullify is for proposal in view
         let view = nullify.view;
-        let round = self
-            .views
-            .entry(view)
-            .or_insert_with(|| Round::new(self.context.current(), self.supervisor.clone(), view));
+        let round = self.views.entry(view).or_insert_with(|| {
+            Round::new(
+                self.context.with_label("round"),
+                self.supervisor.clone(),
+                view,
+            )
+        });
 
         // Handle nullify
         let nullify_bytes = wire::Voter {
@@ -1331,10 +1356,13 @@ impl<
         }
 
         // Setup new view
-        let round = self
-            .views
-            .entry(view)
-            .or_insert_with(|| Round::new(self.context.current(), self.supervisor.clone(), view));
+        let round = self.views.entry(view).or_insert_with(|| {
+            Round::new(
+                self.context.with_label("round"),
+                self.supervisor.clone(),
+                view,
+            )
+        });
         round.leader_deadline = Some(self.context.current() + self.leader_timeout);
         round.advance_deadline = Some(self.context.current() + self.notarization_timeout);
         round.set_leader(seed);
@@ -1450,35 +1478,29 @@ impl<
             return;
         };
 
-        // Verify signature
-        let Some(signature) = Eval::deserialize(&notarize.proposal_signature) else {
+        // Parse signatures
+        let Some(notarize_signature) = Eval::deserialize(&notarize.proposal_signature) else {
             return;
         };
-        if signature.index != public_key_index {
+        let Some(seed_signature) = Eval::deserialize(&notarize.seed_signature) else {
             return;
-        }
+        };
+
+        // Verify aggregate signature
         let notarize_message = proposal_message(proposal.view, proposal.parent, &payload);
-        if ops::partial_verify_message(
+        let notarize_message = (
+            Some(self.notarize_namespace.as_ref()),
+            notarize_message.as_ref(),
+        );
+        let seed_message = seed_message(proposal.view);
+        let seed_message = (Some(self.seed_namespace.as_ref()), seed_message.as_ref());
+        if partial_verify_multiple_messages(
             identity,
-            Some(&self.notarize_namespace),
-            &notarize_message,
-            &signature,
+            public_key_index,
+            &[notarize_message, seed_message],
+            &[notarize_signature, seed_signature],
         )
         .is_err()
-        {
-            return;
-        }
-
-        // Verify seed
-        let Some(seed) = Eval::deserialize(&notarize.seed_signature) else {
-            return;
-        };
-        if seed.index != public_key_index {
-            return;
-        }
-        let seed_message = seed_message(proposal.view);
-        if ops::partial_verify_message(identity, Some(&self.seed_namespace), &seed_message, &seed)
-            .is_err()
         {
             return;
         }
@@ -1501,10 +1523,13 @@ impl<
     ) {
         // Check to see if notarize is for proposal in view
         let view = notarize.message.proposal.as_ref().unwrap().view;
-        let round = self
-            .views
-            .entry(view)
-            .or_insert_with(|| Round::new(self.context.current(), self.supervisor.clone(), view));
+        let round = self.views.entry(view).or_insert_with(|| {
+            Round::new(
+                self.context.with_label("round"),
+                self.supervisor.clone(),
+                view,
+            )
+        });
 
         // Handle notarize
         let notarize_bytes = wire::Voter {
@@ -1571,10 +1596,13 @@ impl<
     async fn handle_notarization(&mut self, notarization: Parsed<wire::Notarization, D>) {
         // Create round (if it doesn't exist)
         let view = notarization.message.proposal.as_ref().unwrap().view;
-        let round = self
-            .views
-            .entry(view)
-            .or_insert_with(|| Round::new(self.context.current(), self.supervisor.clone(), view));
+        let round = self.views.entry(view).or_insert_with(|| {
+            Round::new(
+                self.context.with_label("round"),
+                self.supervisor.clone(),
+                view,
+            )
+        });
 
         // Store notarization
         let notarization_bytes = wire::Voter {
@@ -1631,7 +1659,7 @@ impl<
         let view = nullification.view;
         let round = self.views.entry(view).or_insert_with(|| {
             Round::new(
-                self.context.current(),
+                self.context.with_label("round"),
                 self.supervisor.clone(),
                 nullification.view,
             )
@@ -1689,7 +1717,7 @@ impl<
             return;
         }
         let finalize_message = proposal_message(proposal.view, proposal.parent, &payload);
-        if ops::partial_verify_message(
+        if partial_verify_message(
             identity,
             Some(&self.finalize_namespace),
             &finalize_message,
@@ -1718,10 +1746,13 @@ impl<
     ) {
         // Get view for finalize
         let view = finalize.message.proposal.as_ref().unwrap().view;
-        let round = self
-            .views
-            .entry(view)
-            .or_insert_with(|| Round::new(self.context.current(), self.supervisor.clone(), view));
+        let round = self.views.entry(view).or_insert_with(|| {
+            Round::new(
+                self.context.with_label("round"),
+                self.supervisor.clone(),
+                view,
+            )
+        });
 
         // Handle finalize
         let finalize_bytes = wire::Voter {
@@ -1788,10 +1819,13 @@ impl<
     async fn handle_finalization(&mut self, finalization: Parsed<wire::Finalization, D>) {
         // Create round (if it doesn't exist)
         let view = finalization.message.proposal.as_ref().unwrap().view;
-        let round = self
-            .views
-            .entry(view)
-            .or_insert_with(|| Round::new(self.context.current(), self.supervisor.clone(), view));
+        let round = self.views.entry(view).or_insert_with(|| {
+            Round::new(
+                self.context.with_label("round"),
+                self.supervisor.clone(),
+                view,
+            )
+        });
 
         // Store finalization
         let finalization_bytes = wire::Voter {
@@ -1844,10 +1878,10 @@ impl<
             &proposal.digest,
         );
         let proposal_signature =
-            ops::partial_sign_message(share, Some(&self.notarize_namespace), &message).serialize();
+            partial_sign_message(share, Some(&self.notarize_namespace), &message).serialize();
         let message = seed_message(view);
         let seed_signature =
-            ops::partial_sign_message(share, Some(&self.seed_namespace), &message).serialize();
+            partial_sign_message(share, Some(&self.seed_namespace), &message).serialize();
         round.broadcast_notarize = true;
         Some(Parsed {
             message: wire::Notarize {
@@ -1859,7 +1893,7 @@ impl<
         })
     }
 
-    fn construct_notarization(
+    async fn construct_notarization(
         &mut self,
         view: u64,
         force: bool,
@@ -1875,10 +1909,14 @@ impl<
         // Attempt to construct notarization
         let identity = self.supervisor.identity(view)?;
         let threshold = identity.required();
-        round.notarizable(threshold, force)
+        round.notarizable(threshold, force).await
     }
 
-    fn construct_nullification(&mut self, view: u64, force: bool) -> Option<wire::Nullification> {
+    async fn construct_nullification(
+        &mut self,
+        view: u64,
+        force: bool,
+    ) -> Option<wire::Nullification> {
         // Get requested view
         let round = match self.views.get_mut(&view) {
             Some(view) => view,
@@ -1890,7 +1928,7 @@ impl<
         // Attempt to construct nullification
         let identity = self.supervisor.identity(view)?;
         let threshold = identity.required();
-        round.nullifiable(threshold, force)
+        round.nullifiable(threshold, force).await
     }
 
     fn construct_finalize(&mut self, view: u64) -> Option<Parsed<wire::Finalize, D>> {
@@ -1927,7 +1965,7 @@ impl<
             &proposal.digest,
         );
         let proposal_signature =
-            ops::partial_sign_message(share, Some(&self.finalize_namespace), &message).serialize();
+            partial_sign_message(share, Some(&self.finalize_namespace), &message).serialize();
         round.broadcast_finalize = true;
         Some(Parsed {
             message: wire::Finalize {
@@ -1938,7 +1976,7 @@ impl<
         })
     }
 
-    fn construct_finalization(
+    async fn construct_finalization(
         &mut self,
         view: u64,
         force: bool,
@@ -1953,7 +1991,7 @@ impl<
         // Attempt to construct finalization
         let identity = self.supervisor.identity(view)?;
         let threshold = identity.required();
-        round.finalizable(threshold, force)
+        round.finalizable(threshold, force).await
     }
 
     async fn notify(
@@ -1992,7 +2030,7 @@ impl<
         };
 
         // Attempt to notarization
-        if let Some(notarization) = self.construct_notarization(view, false) {
+        if let Some(notarization) = self.construct_notarization(view, false).await {
             // Record latency if we are the leader (only way to get unbiased observation)
             if let Some((leader, elapsed)) = self.since_view_start(view) {
                 if leader {
@@ -2038,7 +2076,7 @@ impl<
         // Attempt to nullification
         //
         // We handle broadcast of nullify in `timeout`.
-        if let Some(nullification) = self.construct_nullification(view, false) {
+        if let Some(nullification) = self.construct_nullification(view, false).await {
             // Update backfiller
             backfiller.nullified(nullification.clone()).await;
 
@@ -2096,8 +2134,9 @@ impl<
                     last_finalized = self.last_finalized,
                     "not backfilling because parent is behind finalized tip, broadcasting finalized"
                 );
-                    let finalization = self.construct_finalization(self.last_finalized, true);
-                    if let Some(finalization) = finalization {
+                    if let Some(finalization) =
+                        self.construct_finalization(self.last_finalized, true).await
+                    {
                         let msg = wire::Voter {
                             payload: Some(wire::voter::Payload::Finalization(finalization.message)),
                         }
@@ -2147,7 +2186,7 @@ impl<
         };
 
         // Attempt to finalization
-        if let Some(finalization) = self.construct_finalization(view, false) {
+        if let Some(finalization) = self.construct_finalization(view, false).await {
             // Record latency if we are the leader (only way to get unbiased observation)
             if let Some((leader, elapsed)) = self.since_view_start(view) {
                 if leader {
