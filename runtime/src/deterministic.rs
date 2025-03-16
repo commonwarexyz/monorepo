@@ -902,11 +902,11 @@ impl crate::Spawner for Context {
             .get_or_create(&work)
             .clone();
 
-        // Create a future that runs the closure when polled
-        let future = async move { f() };
+        // Initialize the blocking task
+        let (f, handle) = Handle::init_blocking(f, gauge, false);
 
-        // Use Handle::init with catch_panics = false
-        let (f, handle) = Handle::init(future, gauge, false);
+        // Spawn the task
+        let f = async move { f() };
         Tasks::register(&self.executor.tasks, &self.label, false, Box::pin(f));
         handle
     }
