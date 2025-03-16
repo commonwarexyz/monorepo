@@ -4,7 +4,6 @@ use super::{
 };
 use crate::ThresholdSupervisor;
 use commonware_cryptography::bls12381::primitives::{
-    self,
     group::{self, Element},
     ops::{aggregate_signatures, aggregate_verify_multiple_messages},
     poly,
@@ -98,34 +97,26 @@ pub fn verify_nullification<S: ThresholdSupervisor<Index = View, Identity = poly
         debug!(reason = "invalid signature", "dropping nullification");
         return false;
     };
+    let Some(seed_signature) = group::Signature::deserialize(&nullification.seed_signature) else {
+        debug!(reason = "invalid seed signature", "dropping nullification");
+        return false;
+    };
 
-    // Verify threshold nullification
-    let message = nullify_message(nullification.view);
-    if primitives::ops::verify_message(
-        public_key,
+    // Verify aggregate signature
+    let signature = aggregate_signatures(&[nullification_signature, seed_signature]);
+    let nullification_message = nullify_message(nullification.view);
+    let nullification_message = (
         Some(nullification_namespace),
-        &message,
-        &signature,
-    )
-    .is_err()
-    {
+        nullification_message.as_ref(),
+    );
+    let seed_message = seed_message(nullification.view);
+    let seed_message = (Some(seed_namespace), seed_message.as_ref());
+    let messages = [nullification_message, seed_message];
+    if aggregate_verify_multiple_messages(public_key, &messages, &signature, 1).is_err() {
         debug!(reason = "invalid signature", "dropping nullification");
         return false;
     }
     debug!(view = nullification.view, "nullification verified");
-
-    // Verify seed
-    let seed = seed_message(nullification.view);
-    let Some(signature) = group::Signature::deserialize(&nullification.seed_signature) else {
-        debug!(reason = "invalid seed signature", "dropping nullification");
-        return false;
-    };
-    if primitives::ops::verify_message(public_key, Some(seed_namespace), &seed, &signature).is_err()
-    {
-        debug!(reason = "invalid seed signature", "dropping nullification");
-        return false;
-    }
-    debug!(view = nullification.view, "seed verified");
     true
 }
 
@@ -164,38 +155,29 @@ pub fn verify_finalization<
     };
     let public_key = poly::public(polynomial);
 
-    // Parse signature
-    let Some(signature) = group::Signature::deserialize(&finalization.proposal_signature) else {
+    // Parse signatures
+    let Some(finalization_signature) =
+        group::Signature::deserialize(&finalization.proposal_signature)
+    else {
         debug!(reason = "invalid signature", "dropping finalization");
         return false;
     };
+    let Some(seed_signature) = group::Signature::deserialize(&finalization.seed_signature) else {
+        debug!(reason = "invalid seed signature", "dropping finalization");
+        return false;
+    };
 
-    // Verify threshold finalization
-    let message = proposal_message(proposal.view, proposal.parent, &payload);
-    if primitives::ops::verify_message(
-        public_key,
-        Some(finalization_namespace),
-        &message,
-        &signature,
-    )
-    .is_err()
-    {
+    // Verify aggregate signature
+    let signature = aggregate_signatures(&[finalization_signature, seed_signature]);
+    let finalization_message = proposal_message(proposal.view, proposal.parent, &payload);
+    let finalization_message = (Some(finalization_namespace), finalization_message.as_ref());
+    let seed_message = seed_message(proposal.view);
+    let seed_message = (Some(seed_namespace), seed_message.as_ref());
+    let messages = [finalization_message, seed_message];
+    if aggregate_verify_multiple_messages(public_key, &messages, &signature, 1).is_err() {
         debug!(reason = "invalid signature", "dropping finalization");
         return false;
     }
     debug!(view = proposal.view, "finalization verified");
-
-    // Verify seed
-    let seed = seed_message(proposal.view);
-    let Some(signature) = group::Signature::deserialize(&finalization.seed_signature) else {
-        debug!(reason = "invalid seed signature", "dropping finalization");
-        return false;
-    };
-    if primitives::ops::verify_message(public_key, Some(seed_namespace), &seed, &signature).is_err()
-    {
-        debug!(reason = "invalid seed signature", "dropping finalization");
-        return false;
-    }
-    debug!(view = proposal.view, "seed verified");
     true
 }
