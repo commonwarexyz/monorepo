@@ -17,7 +17,7 @@ use crate::{
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{self, Element},
-        ops,
+        ops::{self, aggregate_signatures, aggregate_verify_multiple_messages},
         poly::{self, Eval},
     },
     hash,
@@ -32,7 +32,7 @@ use commonware_utils::quorum;
 use futures::{
     channel::{mpsc, oneshot},
     future::Either,
-    pin_mut, StreamExt,
+    pin_mut, SinkExt, StreamExt,
 };
 use prometheus_client::metrics::{
     counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
@@ -638,6 +638,15 @@ impl<
     }
 }
 
+enum Verified<D: Digest> {
+    Notarize(u32, Parsed<wire::Notarize, D>),
+    Notarization(Parsed<wire::Notarization, D>),
+    Nullify(u32, wire::Nullify),
+    Nullification(wire::Nullification),
+    Finalize(u32, Parsed<wire::Finalize, D>),
+    Finalization(Parsed<wire::Finalization, D>),
+}
+
 pub struct Actor<
     B: Blob,
     E: Clock + Rng + Spawner + Storage<B> + Metrics,
@@ -678,6 +687,9 @@ pub struct Actor<
     skip_timeout: View,
 
     mailbox_receiver: mpsc::Receiver<Message<D>>,
+
+    verified_sender: mpsc::Sender<Verified<D>>,
+    verified_receiver: mpsc::Receiver<Verified<D>>,
 
     last_finalized: View,
     view: View,
@@ -754,6 +766,7 @@ impl<
         // Initialize store
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::new(mailbox_sender);
+        let (verified_sender, verified_receiver) = mpsc::channel(cfg.mailbox_size);
         (
             Self {
                 context,
@@ -781,6 +794,9 @@ impl<
                 skip_timeout: cfg.skip_timeout,
 
                 mailbox_receiver,
+
+                verified_sender,
+                verified_receiver,
 
                 last_finalized: 0,
                 view: 0,
@@ -1057,50 +1073,55 @@ impl<
             return;
         };
 
-        // Verify signature
+        // Parse view signature
         let Some(signature) = Eval::deserialize(&nullify.view_signature) else {
-            debug!(
-                public_key_index,
-                "partial signature is not formatted correctly"
-            );
             return;
         };
         if signature.index != public_key_index {
-            debug!(
-                public_key_index,
-                partial_signature = signature.index,
-                "invalid signature index for nullify"
-            );
-            return;
-        }
-        let nullify_message = nullify_message(nullify.view);
-        if ops::partial_verify_message(
-            identity,
-            Some(&self.nullify_namespace),
-            &nullify_message,
-            &signature,
-        )
-        .is_err()
-        {
             return;
         }
 
-        // Verify seed
+        // Parse seed signature
+        let public = identity.evaluate(signature.index);
         let Some(seed) = Eval::deserialize(&nullify.seed_signature) else {
             return;
         };
         if seed.index != public_key_index {
             return;
         }
-        let seed_message = seed_message(nullify.view);
-        if ops::partial_verify_message(identity, Some(&self.seed_namespace), &seed_message, &seed)
-            .is_err()
-        {
-            return;
-        }
 
-        // Handle nullify
-        self.handle_nullify(public_key_index, nullify).await;
+        // Verify signature
+        self.context.with_label("nullify").spawn({
+            let mut verified_sender = self.verified_sender.clone();
+            let nullify_namespace = self.nullify_namespace.clone();
+            let seed_namespace = self.seed_namespace.clone();
+            move |_| async move {
+                // Create messages
+                let nullify_message = nullify_message(nullify.view);
+                let nullify_message = (Some(nullify_namespace.as_ref()), nullify_message.as_ref());
+                let seed_message = seed_message(nullify.view);
+                let seed_message = (Some(seed_namespace.as_ref()), seed_message.as_ref());
+
+                // Perform batch verification
+                let signature = aggregate_signatures(&[signature.value, seed.value]);
+                if aggregate_verify_multiple_messages(
+                    &public.value,
+                    &[nullify_message, seed_message],
+                    &signature,
+                    1,
+                )
+                .is_err()
+                {
+                    return;
+                }
+
+                // Handle nullify
+                verified_sender
+                    .send(Verified::Nullify(public_key_index, nullify))
+                    .await
+                    .expect("unable to send verified nullify");
+            }
+        });
     }
 
     async fn handle_nullify(&mut self, public_key_index: u32, nullify: wire::Nullify) {
@@ -1428,7 +1449,7 @@ impl<
 
     async fn notarize(&mut self, sender: &C::PublicKey, notarize: wire::Notarize) {
         // Extract proposal
-        let Some(proposal) = notarize.proposal.as_ref() else {
+        let Some(proposal) = &notarize.proposal else {
             return;
         };
 
@@ -1450,48 +1471,63 @@ impl<
             return;
         };
 
-        // Verify signature
+        // Parse proposal signature
         let Some(signature) = Eval::deserialize(&notarize.proposal_signature) else {
             return;
         };
         if signature.index != public_key_index {
             return;
         }
-        let notarize_message = proposal_message(proposal.view, proposal.parent, &payload);
-        if ops::partial_verify_message(
-            identity,
-            Some(&self.notarize_namespace),
-            &notarize_message,
-            &signature,
-        )
-        .is_err()
-        {
-            return;
-        }
 
-        // Verify seed
+        // Parse seed signature
         let Some(seed) = Eval::deserialize(&notarize.seed_signature) else {
             return;
         };
         if seed.index != public_key_index {
             return;
         }
-        let seed_message = seed_message(proposal.view);
-        if ops::partial_verify_message(identity, Some(&self.seed_namespace), &seed_message, &seed)
-            .is_err()
-        {
-            return;
-        }
 
-        // Handle notarize
-        self.handle_notarize(
-            public_key_index,
-            Parsed {
-                message: notarize,
-                digest: payload,
-            },
-        )
-        .await;
+        // Verify signature
+        self.context.with_label("notarize").spawn({
+            let public = identity.evaluate(signature.index);
+            let mut verified_sender = self.verified_sender.clone();
+            let notarize_namespace = self.notarize_namespace.clone();
+            let seed_namespace = self.seed_namespace.clone();
+            move |_| async move {
+                // Create messages
+                let proposal = notarize.proposal.as_ref().unwrap();
+                let notarize_message = proposal_message(proposal.view, proposal.parent, &payload);
+                let notarize_message =
+                    (Some(notarize_namespace.as_ref()), notarize_message.as_ref());
+                let seed_message = seed_message(proposal.view);
+                let seed_message = (Some(seed_namespace.as_ref()), seed_message.as_ref());
+
+                // Perform batch verification
+                let signature = aggregate_signatures(&[signature.value, seed.value]);
+                if aggregate_verify_multiple_messages(
+                    &public.value,
+                    &[notarize_message, seed_message],
+                    &signature,
+                    1,
+                )
+                .is_err()
+                {
+                    return;
+                }
+
+                // Handle notarize
+                verified_sender
+                    .send(Verified::Notarize(
+                        public_key_index,
+                        Parsed {
+                            message: notarize,
+                            digest: payload,
+                        },
+                    ))
+                    .await
+                    .expect("unable to send verified notarize");
+            }
+        });
     }
 
     async fn handle_notarize(
@@ -1550,22 +1586,43 @@ impl<
             }
         }
 
-        // Verify notarization
-        if !verify_notarization::<D, S>(
-            &self.supervisor,
-            &self.notarize_namespace,
-            &self.seed_namespace,
-            &notarization,
-        ) {
+        // Get public key
+        let Some(polynomial) = self.supervisor.identity(proposal.view) else {
+            debug!(
+                view = proposal.view,
+                reason = "unable to get identity for view",
+                "dropping notarization"
+            );
             return;
-        }
+        };
+        let public_key = poly::public(polynomial);
 
-        // Handle notarization
-        self.handle_notarization(Parsed {
-            message: notarization,
-            digest: payload,
-        })
-        .await;
+        // Verify notarization
+        self.context.with_label("notarization").spawn({
+            let public_key = *public_key;
+            let mut verified_sender = self.verified_sender.clone();
+            let notarize_namespace = self.notarize_namespace.clone();
+            let seed_namespace = self.seed_namespace.clone();
+            move |_| async move {
+                if !verify_notarization::<D>(
+                    &public_key,
+                    &notarize_namespace,
+                    &seed_namespace,
+                    &notarization,
+                ) {
+                    return;
+                }
+
+                // Handle notarization
+                verified_sender
+                    .send(Verified::Notarization(Parsed {
+                        message: notarization,
+                        digest: payload,
+                    }))
+                    .await
+                    .expect("unable to send verified notarization");
+            }
+        });
     }
 
     async fn handle_notarization(&mut self, notarization: Parsed<wire::Notarization, D>) {
@@ -1612,18 +1669,40 @@ impl<
             }
         }
 
-        // Verify nullification
-        if !verify_nullification::<S>(
-            &self.supervisor,
-            &self.nullify_namespace,
-            &self.seed_namespace,
-            &nullification,
-        ) {
+        // Get public key
+        let Some(polynomial) = self.supervisor.identity(nullification.view) else {
+            debug!(
+                view = nullification.view,
+                reason = "unable to get identity for view",
+                "dropping nullification"
+            );
             return;
-        }
+        };
+        let public_key = poly::public(polynomial);
 
-        // Handle notarization
-        self.handle_nullification(nullification).await;
+        // Verify nullification
+        self.context.with_label("nullification").spawn({
+            let public_key = *public_key;
+            let mut verified_sender = self.verified_sender.clone();
+            let nullify_namespace = self.nullify_namespace.clone();
+            let seed_namespace = self.seed_namespace.clone();
+            move |_| async move {
+                if !verify_nullification(
+                    &public_key,
+                    &nullify_namespace,
+                    &seed_namespace,
+                    &nullification,
+                ) {
+                    return;
+                }
+
+                // Handle nullification
+                verified_sender
+                    .send(Verified::Nullification(nullification))
+                    .await
+                    .expect("unable to send verified nullification");
+            }
+        });
     }
 
     async fn handle_nullification(&mut self, nullification: wire::Nullification) {
@@ -1681,34 +1760,46 @@ impl<
             return;
         };
 
-        // Verify signature
+        // Parse partial signature to get index
         let Some(signature) = Eval::deserialize(&finalize.proposal_signature) else {
             return;
         };
         if signature.index != public_key_index {
             return;
         }
-        let finalize_message = proposal_message(proposal.view, proposal.parent, &payload);
-        if ops::partial_verify_message(
-            identity,
-            Some(&self.finalize_namespace),
-            &finalize_message,
-            &signature,
-        )
-        .is_err()
-        {
-            return;
-        }
+        let public = identity.evaluate(signature.index);
 
-        // Handle finalize
-        self.handle_finalize(
-            public_key_index,
-            Parsed {
-                message: finalize,
-                digest: payload,
-            },
-        )
-        .await;
+        // Verify signature
+        self.context.with_label("finalize").spawn({
+            let mut verified_sender = self.verified_sender.clone();
+            let finalize_namespace = self.finalize_namespace.clone();
+            move |_| async move {
+                let proposal = finalize.proposal.as_ref().unwrap();
+                let finalize_message = proposal_message(proposal.view, proposal.parent, &payload);
+                if ops::verify_message(
+                    &public.value,
+                    Some(&finalize_namespace),
+                    &finalize_message,
+                    &signature.value,
+                )
+                .is_err()
+                {
+                    return;
+                }
+
+                // Handle finalize
+                verified_sender
+                    .send(Verified::Finalize(
+                        public_key_index,
+                        Parsed {
+                            message: finalize,
+                            digest: payload,
+                        },
+                    ))
+                    .await
+                    .expect("unable to send verified finalize");
+            }
+        });
     }
 
     async fn handle_finalize(
@@ -1767,22 +1858,43 @@ impl<
             }
         }
 
-        // Verify finalization
-        if !verify_finalization::<D, S>(
-            &self.supervisor,
-            &self.finalize_namespace,
-            &self.seed_namespace,
-            &finalization,
-        ) {
+        // Get public key
+        let Some(polynomial) = self.supervisor.identity(proposal.view) else {
+            debug!(
+                view = proposal.view,
+                reason = "unable to get identity for view",
+                "dropping finalization"
+            );
             return;
-        }
+        };
+        let public_key = poly::public(polynomial);
 
-        // Process finalization
-        self.handle_finalization(Parsed {
-            message: finalization,
-            digest: payload,
-        })
-        .await;
+        // Verify finalization
+        self.context.with_label("finalization").spawn({
+            let public_key = *public_key;
+            let mut verified_sender = self.verified_sender.clone();
+            let finalize_namespace = self.finalize_namespace.clone();
+            let seed_namespace = self.seed_namespace.clone();
+            move |_| async move {
+                if !verify_finalization::<D>(
+                    &public_key,
+                    &finalize_namespace,
+                    &seed_namespace,
+                    &finalization,
+                ) {
+                    return;
+                }
+
+                // Process finalization
+                verified_sender
+                    .send(Verified::Finalization(Parsed {
+                        message: finalization,
+                        digest: payload,
+                    }))
+                    .await
+                    .expect("unable to send verified finalization");
+            }
+        });
     }
 
     async fn handle_finalization(&mut self, finalization: Parsed<wire::Finalization, D>) {
@@ -2541,55 +2653,78 @@ impl<
                     match payload {
                         wire::voter::Payload::Notarize(notarize) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::notarize(&s)).inc();
-                            view = match &notarize.proposal {
-                                Some(proposal) => proposal.view,
-                                None => {
-                                    continue;
-                                }
-                            };
+                            if notarize.proposal.is_none() {
+                                continue;
+                            }
                             self.notarize(&s, notarize).await;
                         }
                         wire::voter::Payload::Notarization(notarization) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::notarization(&s)).inc();
-                            view = match &notarization.proposal {
-                                Some(proposal) => proposal.view,
-                                None => {
-                                    continue;
-                                }
-                            };
+                            if notarization.proposal.is_none() {
+                                continue;
+                            }
                             self.notarization(notarization).await;
                         }
                         wire::voter::Payload::Nullify(nullify) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::nullify(&s)).inc();
-                            view = nullify.view;
                             self.nullify(&s, nullify).await;
                         }
                         wire::voter::Payload::Nullification(nullification) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::nullification(&s)).inc();
-                            view = nullification.view;
                             self.nullification(nullification).await;
                         }
                         wire::voter::Payload::Finalize(finalize) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::finalize(&s)).inc();
-                            view = match &finalize.proposal {
-                                Some(proposal) => proposal.view,
-                                None => {
-                                    continue;
-                                }
-                            };
+                            if finalize.proposal.is_none() {
+                                continue;
+                            }
                             self.finalize(&s, finalize).await;
                         }
                         wire::voter::Payload::Finalization(finalization) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::finalization(&s)).inc();
-                            view = match &finalization.proposal {
-                                Some(proposal) => proposal.view,
-                                None => {
-                                    continue;
-                                }
-                            };
+                            if finalization.proposal.is_none() {
+                                continue;
+                            }
                             self.finalization(finalization).await;
                         }
                     };
+
+                    // Continue processing (nothing can happen until handler called)
+                    continue;
+                },
+                handled = self.verified_receiver.next() => {
+                    // Ensure not null
+                    let Some(handled) = handled else {
+                        break;
+                    };
+
+                    // Handle message
+                    match handled {
+                        Verified::Notarize(public_key_index, notarize) => {
+                            view = notarize.message.proposal.as_ref().unwrap().view;
+                            self.handle_notarize(public_key_index, notarize).await;
+                        }
+                        Verified::Notarization(notarization) => {
+                            view = notarization.message.proposal.as_ref().unwrap().view;
+                            self.handle_notarization(notarization).await;
+                        }
+                        Verified::Nullify(public_key_index, nullify) => {
+                            view = nullify.view;
+                            self.handle_nullify(public_key_index, nullify).await;
+                        }
+                        Verified::Nullification(nullification) => {
+                            view = nullification.view;
+                            self.handle_nullification(nullification).await;
+                        }
+                        Verified::Finalize(public_key_index, finalize) => {
+                            view = finalize.message.proposal.as_ref().unwrap().view;
+                            self.handle_finalize(public_key_index, finalize).await;
+                        }
+                        Verified::Finalization(finalization) => {
+                            view = finalization.message.proposal.as_ref().unwrap().view;
+                            self.handle_finalization(finalization).await;
+                        }
+                    }
                 },
             };
 

@@ -51,7 +51,7 @@ mod tests {
         // Generate and verify the threshold sig
         let threshold_sig = threshold_signature_recover(t, partials).unwrap();
         let threshold_pub = public(&group);
-        verify_message(&threshold_pub, namespace, msg, &threshold_sig).unwrap();
+        verify_message(threshold_pub, namespace, msg, &threshold_sig).unwrap();
     }
 
     #[test]
@@ -87,7 +87,7 @@ mod tests {
         let threshold_sig = threshold_signature_recover(t, partials).unwrap();
         let threshold_pub = public(&group);
         assert!(matches!(
-            verify_message(&threshold_pub, namespace, msg, &threshold_sig).unwrap_err(),
+            verify_message(threshold_pub, namespace, msg, &threshold_sig).unwrap_err(),
             Error::InvalidSignature
         ));
     }
@@ -187,6 +187,6 @@ mod tests {
         // Generate and verify the threshold sig
         let threshold_sig = threshold_signature_recover(t, partials).unwrap();
         let threshold_pub = public(&group);
-        verify_message(&threshold_pub, namespace, msg, &threshold_sig).unwrap();
+        verify_message(threshold_pub, namespace, msg, &threshold_sig).unwrap();
     }
 }

@@ -307,7 +307,7 @@ mod tests {
         let signature =
             threshold_signature_recover(t, partials).expect("unable to recover signature");
         let public_key = public(&outputs.iter().next().unwrap().1.public);
-        verify_proof_of_possession(&public_key, &signature).expect("invalid proof of possession");
+        verify_proof_of_possession(public_key, &signature).expect("invalid proof of possession");
 
         // Create reshare players (assume no overlap)
         let mut reshare_players = Vec::new();
@@ -418,7 +418,7 @@ mod tests {
         let signature =
             threshold_signature_recover(t, partials).expect("unable to recover signature");
         let public_key = public(&outputs[0].public);
-        verify_proof_of_possession(&public_key, &signature).expect("invalid proof of possession");
+        verify_proof_of_possession(public_key, &signature).expect("invalid proof of possession");
     }
 
     #[test]
