@@ -61,7 +61,7 @@ impl<H: CHasher> Default for Bitmap<H> {
 }
 
 impl<H: CHasher> Bitmap<H> {
-    pub(crate) const CHUNK_SIZE: usize = H::Digest::SERIALIZED_LEN;
+    const CHUNK_SIZE: usize = H::Digest::SERIALIZED_LEN;
 
     /// Return a new empty bitmap.
     pub fn new() -> Self {

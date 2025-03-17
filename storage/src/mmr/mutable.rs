@@ -1,13 +1,14 @@
-//! An in-memory authenticatable & mutable key-value store.
+//! An in-memory authenticatable & updatable key-value store.
 //!
-//! A *mutable MMR* is an authenticatable and updatable key-value store based on an MMR over all
-//! updates called the *update tree*. An authenticatable bitmap, called the *active state tree*,
-//! indicates which positions in the update tree correspond to the latest value of a particular key.
-//! For example, if the same key K was updated at positions X, Y, and Z in that order, then the
-//! authenticatable bitmap will store 0s for the bits corresponding to X and Y, and a 1 for the bit
-//! corresponding to Z. The root hash of the mutable MMR is the result of hashing together the roots
-//! of these two trees. A Merkle proof over this combined structure can then prove that the key K
-//! currently has the value of its most recent update.
+//! A *mutable MMR* is an authenticatable and updatable key-value store based on an
+//! [crate::mmr::mem::Mmr] over all updates called the *update tree*. An authenticatable
+//! [crate::mmr::bitmap::Bitmap], called the *active state tree*, indicates which leaves in the
+//! update tree correspond to the latest value of a particular key. For example, if the same key K
+//! was updated at positions X, Y, and Z in that order, then the bitmap will store 0s for the bits
+//! corresponding to X and Y, and a 1 for the bit corresponding to Z. The root hash of the mutable
+//! MMR is the result of hashing together the roots of these two trees. A concise Merkle proof over
+//! this combined structure ([ActiveValueProof]) can then prove that any key K currently has the
+//! value of its most recent update in the store corresponding to a particular root hash.
 
 use crate::mmr::{
     bitmap::Bitmap, hasher::Hasher, iterator::leaf_pos_to_num, mem::Mmr,
@@ -16,11 +17,11 @@ use crate::mmr::{
 use commonware_cryptography::Hasher as CHasher;
 use commonware_utils::Array;
 use std::{collections::HashMap, marker::PhantomData};
-use tracing::debug;
+use tracing::{debug, error};
 
 /// A proof that a particular key has a particular (currently active) value in the store.
 pub struct ActiveValueProof<K: Array, V: Array, H: CHasher> {
-    /// The offset of the leaf storing the active value for the key in the updates tree.
+    /// The offset of the leaf storing the active value for the key in the update tree.
     tree_pos: u64,
 
     /// A proof that the record at the given offset has a certain key and value.
@@ -93,7 +94,7 @@ impl<K: Array, V: Array, H: CHasher> ActiveValueProof<K, V, H> {
 }
 
 /// A record representing one key/value update.
-struct UpdateRecord<K: Array, V: Array, H: CHasher> {
+pub struct UpdateRecord<K: Array, V: Array, H: CHasher> {
     /// The position of the leaf representing this record in the updates tree, or Bitmap::DELETED if
     /// this record corresponds to a deletion of the key.
     tree_pos: u64,
@@ -115,7 +116,7 @@ impl<K: Array, V: Array, H: CHasher> UpdateRecord<K, V, H> {
     }
 
     /// Return a digest of the `key` `value` pair.
-    fn key_value_hash(hasher: &mut H, key: &K, value: &V) -> H::Digest {
+    pub fn key_value_hash(hasher: &mut H, key: &K, value: &V) -> H::Digest {
         hasher.update(key);
         hasher.update(value);
         hasher.finalize()
@@ -170,6 +171,66 @@ impl<K: Array, V: Array, H: CHasher> MutableMmr<K, V, H> {
         });
 
         store
+    }
+
+    /// Return a mutable MMR store initialized to the state corresponding to the update sequence
+    /// given by `records`.
+    ///
+    /// Performs some checks that the records constitute a valid sequence of updates, and returns
+    /// error if an invalid sequence is encountered.  These checks are not exhaustive.
+    pub fn init_from_records(
+        hasher: &mut H,
+        records: Vec<UpdateRecord<K, V, H>>,
+    ) -> Result<Self, Error> {
+        let mut store = MutableMmr {
+            updates: Mmr::new(),
+            active_state: Bitmap::new(),
+            snapshot: HashMap::new(),
+            records,
+            phantom_key: PhantomData,
+        };
+
+        for (i, record) in store.records.iter().enumerate() {
+            let digest = record.hash(hasher);
+            let pos = store.updates.add(hasher, &digest);
+
+            let old_record = if record.tree_pos != Self::DELETED {
+                if pos != record.tree_pos {
+                    error!("record.tree pos invalid");
+                    return Err(Error::InvalidRecord);
+                }
+                store.active_state.append(hasher, true);
+                let Some(old_location) = store.snapshot.insert(record.key.clone(), i) else {
+                    continue;
+                };
+                &store.records[old_location]
+            } else {
+                // This record deletes its key.
+                store.active_state.append(hasher, false);
+                if i == 0 {
+                    // Record 0 is a placeholder and not an actual deletion.
+                    continue;
+                }
+                let Some(old_location) = store.snapshot.remove(&record.key) else {
+                    error!("record deletes non-existent key");
+                    return Err(Error::InvalidRecord);
+                };
+                &store.records[old_location]
+            };
+
+            if old_record.key != record.key {
+                error!("record.key doesn't match old record");
+                return Err(Error::InvalidRecord);
+            }
+
+            let bit_offset = leaf_pos_to_num(old_record.tree_pos);
+            assert!(store.active_state.get_bit(bit_offset));
+            store.active_state.set_bit(hasher, bit_offset, false);
+        }
+
+        assert_eq!(store.active_state.bit_count() as usize, store.records.len());
+
+        Ok(store)
     }
 
     /// Get the value currently associated with they key in the store, or None if the key was
@@ -239,16 +300,17 @@ impl<K: Array, V: Array, H: CHasher> MutableMmr<K, V, H> {
         };
         let record_digest = new_record.hash(hasher);
         self.records.push(new_record);
+        println!("pos!! {} {}", self.updates.size(), record_digest);
 
         // Update the updates tree
         self.updates.add(hasher, &record_digest);
 
         // Update the active state tree.
-        self.active_state.append(hasher, true);
+        self.active_state.append(hasher, false);
         assert_eq!(self.records.len(), self.active_state.bit_count() as usize);
     }
 
-    pub fn root(&mut self, hasher: &mut H) -> H::Digest {
+    pub fn root(&self, hasher: &mut H) -> H::Digest {
         let updates_root = self.updates.root(hasher);
         let active_state_root = self.active_state.root(hasher);
         let mut h = Hasher::new(hasher);
@@ -286,6 +348,11 @@ impl<K: Array, V: Array, H: CHasher> MutableMmr<K, V, H> {
         };
 
         Ok((proof, record.value.clone()))
+    }
+
+    /// Consume the store and return its update records.
+    pub fn to_records(self) -> Vec<UpdateRecord<K, V, H>> {
+        self.records
     }
 }
 
@@ -484,14 +551,15 @@ mod test {
             let mut store = empty_store(&mut hasher);
 
             let mut map = HashMap::<Digest, Digest>::default();
-            for i in 0u64..1000 {
+            const ELEMENTS: u64 = 1000;
+            for i in 0u64..ELEMENTS {
                 let k = hash(&i.to_be_bytes());
                 let v = hash(&(i * 1000).to_be_bytes());
                 store.update(&mut hasher, k, v);
                 map.insert(k, v);
             }
             // Update every 3rd key
-            for i in 0u64..1000 {
+            for i in 0u64..ELEMENTS {
                 if i % 3 != 0 {
                     continue;
                 }
@@ -501,7 +569,7 @@ mod test {
                 map.insert(k, v);
             }
             // Delete every 7th key
-            for i in 0u64..1000 {
+            for i in 0u64..ELEMENTS {
                 if i % 7 != 0 {
                     continue;
                 }
@@ -527,6 +595,11 @@ mod test {
                     assert!(store.get(&k).is_none());
                 }
             }
+
+            // Test we can recreate the store purely from its records.
+            let records = store.to_records();
+            let store2 = MutableMmr::init_from_records(&mut hasher, records).unwrap();
+            assert_eq!(root_hash, store2.root(&mut hasher));
         });
     }
 }

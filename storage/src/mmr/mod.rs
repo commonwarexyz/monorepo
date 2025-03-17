@@ -95,4 +95,6 @@ pub enum Error {
     MissingHashes,
     #[error("extra hashes in proof")]
     ExtraHashes,
+    #[error("invalid record")]
+    InvalidRecord,
 }
