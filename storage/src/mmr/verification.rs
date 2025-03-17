@@ -91,7 +91,7 @@ impl<H: CHasher> Proof<H> {
     /// Reconstruct the peak hashes of the MMR that produced this proof, returning `MissingHashes`
     /// error if there are not enough proof hashes, or `ExtraHashes` error if not all proof hashes
     /// were used in the reconstruction.
-    fn reconstruct_peak_hashes(
+    pub(crate) fn reconstruct_peak_hashes(
         &self,
         hasher: &mut H,
         elements: &[H::Digest],

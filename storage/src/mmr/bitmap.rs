@@ -148,12 +148,12 @@ impl<H: CHasher> Bitmap<H> {
     }
 
     /// Convert a bit offset into a bit mask.
-    fn mask_for(bit_offset: u64) -> u8 {
+    pub(crate) fn mask_for(bit_offset: u64) -> u8 {
         1 << (bit_offset % 8)
     }
 
     /// Convert a bit offset into the position of the Merkle tree leaf it belongs to.
-    fn leaf_pos(bit_offset: u64) -> u64 {
+    pub(crate) fn leaf_pos(bit_offset: u64) -> u64 {
         let leaf_num = bit_offset / 8 / Self::CHUNK_SIZE as u64;
         leaf_num_to_pos(leaf_num)
     }
