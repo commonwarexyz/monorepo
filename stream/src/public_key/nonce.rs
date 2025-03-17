@@ -3,52 +3,44 @@ use chacha20poly1305::Nonce;
 
 /// A struct that holds the nonce information.
 ///
-/// The nonce contains:
-/// - `dialer`: a boolean that is true if the nonce is for the dialer side.
-/// - `iter` and `seq`: combined, an 80-bit value that can be incremented.
+/// Holds a `u128` value that is incremented by 2 each time the nonce is incremented.
+/// The least-significant bit is used to indicate the dialer side and does not change.
+///
+/// Is able to be incremented up-to 96 bits (12 bytes) before overflowing.
 pub struct Info {
-    dialer: bool,
-    iter: u16,
-    seq: u64,
+    counter: u128,
 }
 
 impl Info {
     pub fn new(dialer: bool) -> Self {
         Self {
-            dialer,
-            iter: 0,
-            seq: 0,
+            counter: if dialer { 1 } else { 0 },
         }
     }
 
     /// Increments the nonce.
     ///
-    /// `seq` holds the least significant 64 bits of the nonce, and `iter` holds the most significant 16 bits.
-    /// An error is returned if-and-only-if the nonce overflows.
+    /// Counter is incremented by 2, maintaining the dialer bit.
+    /// An error is returned if-and-only-if the nonce overflows 96 bits.
     pub fn inc(&mut self) -> Result<(), Error> {
-        if self.seq == u64::MAX {
-            if self.iter == u16::MAX {
-                return Err(Error::NonceOverflow);
-            }
-            self.iter += 1;
-            self.seq = 0;
-            return Ok(());
+        const OVERFLOW: u128 = 1 << 96;
+        self.counter += 2;
+        if self.counter >= OVERFLOW {
+            return Err(Error::NonceOverflow);
         }
-        self.seq += 1;
         Ok(())
     }
 
     /// Encodes the nonce information into a 12-byte array.
     pub fn encode(&self) -> Nonce {
+        // 16 bytes, big-endian
+        let bytes = self.counter.to_be_bytes();
+
+        // The output is a 12-byte array
         let mut result = Nonce::default();
-        if self.dialer {
-            result[0] = 0b10000000; // Set the first bit of the byte
-        }
-        if self.iter > 0 {
-            result[1..3].copy_from_slice(&self.iter.to_be_bytes());
-        }
-        result[3..11].copy_from_slice(&self.seq.to_be_bytes());
-        // The last byte is currently unused.
+
+        // Copy the least-significant 12 bytes (96 bits)
+        result.copy_from_slice(&bytes[4..16]);
         result
     }
 }
@@ -59,98 +51,75 @@ mod tests {
 
     #[test]
     fn test_encode() {
-        // Test case 1: dialer is true
-        let ni = Info {
-            dialer: true,
-            iter: 1,
-            seq: 1,
-        };
-        let nonce = ni.encode();
-        assert_eq!(nonce[0], 0b10000000);
-        assert_eq!(&nonce[1..3], &1u16.to_be_bytes());
-        assert_eq!(&nonce[3..11], &1u64.to_be_bytes());
-        assert_eq!(&nonce[11], &0);
+        let mut expected = [0u8; 12];
 
-        // Test case 2: dialer is false
-        let ni = Info {
-            dialer: false,
-            iter: 1,
-            seq: 1,
-        };
-        let nonce = ni.encode();
-        assert_eq!(nonce[0], 0b00000000);
-        assert_eq!(&nonce[1..3], &1u16.to_be_bytes());
-        assert_eq!(&nonce[3..11], &1u64.to_be_bytes());
-        assert_eq!(&nonce[11], &0);
+        // Even
+        let even = Info::new(false);
+        assert_eq!(even.encode()[..], expected[..]);
 
-        // Test case 3: different iter and seq values
-        let ni = Info {
-            dialer: true,
-            iter: 65535,
-            seq: 123456789,
-        };
-        let nonce = ni.encode();
-        assert_eq!(nonce[0], 0b10000000);
-        assert_eq!(&nonce[1..3], &65535u16.to_be_bytes());
-        assert_eq!(&nonce[3..11], &123456789u64.to_be_bytes());
-        assert_eq!(&nonce[11], &0);
+        // Odd
+        let odd = Info::new(true);
+        expected = [0u8; 12];
+        expected[11] = 1;
+        assert_eq!(odd.encode()[..], expected[..]);
 
-        // Test case 4: iter is 0
-        let ni = Info {
-            dialer: true,
-            iter: 0,
-            seq: 123456789,
-        };
-        let nonce = ni.encode();
-        assert_eq!(nonce[0], 0b10000000);
-        assert_eq!(&nonce[1..3], &0u16.to_be_bytes());
-        assert_eq!(&nonce[3..11], &123456789u64.to_be_bytes());
-        assert_eq!(&nonce[11], &0);
+        // Two bytes are set
+        let two_byte = Info { counter: 0x0102 };
+        expected = [0u8; 12];
+        expected[10] = 1;
+        expected[11] = 2;
+        assert_eq!(two_byte.encode()[..], expected[..]);
+
+        // Every byte is set
+        let mut value: u128 = 0;
+        for (i, exp) in expected.iter_mut().enumerate() {
+            let val = (i + 1) as u128;
+            *exp = val as u8;
+            value += val << ((11 - i) * 8);
+        }
+        let odd = Info { counter: value };
+        assert_eq!(odd.encode()[..], expected[..]);
     }
 
     #[test]
-    fn test_inc() {
-        const ITER: u16 = 5;
-        let mut ni = Info {
-            dialer: true,
-            iter: ITER,
-            seq: 0,
-        };
+    fn test_even() {
+        let mut even = Info::new(false);
+        assert_eq!(even.counter, 0);
 
-        // Increment once
-        ni.inc().unwrap();
-        assert_eq!(ni.seq, 1);
-        assert_eq!(ni.iter, ITER);
-        assert!(ni.dialer);
+        even.inc().unwrap();
+        assert_eq!(even.counter, 2);
 
-        // Increment again
-        ni.inc().unwrap();
-        assert_eq!(ni.seq, 2);
-        assert_eq!(ni.iter, ITER);
-        assert!(ni.dialer);
+        even.inc().unwrap();
+        assert_eq!(even.counter, 4);
     }
 
     #[test]
-    fn test_inc_seq_overflow() {
-        const ITER: u16 = 5;
-        let mut ni = Info {
-            dialer: true,
-            iter: ITER,
-            seq: u64::MAX,
-        };
-        ni.inc().unwrap();
-        assert_eq!(ni.seq, 0);
-        assert_eq!(ni.iter, ITER + 1);
+    fn test_odd() {
+        let mut odd = Info::new(true);
+        assert_eq!(odd.counter, 1);
+
+        odd.inc().unwrap();
+        assert_eq!(odd.counter, 3);
+
+        odd.inc().unwrap();
+        assert_eq!(odd.counter, 5);
     }
 
     #[test]
-    fn test_inc_seq_iter_overflow() {
-        let mut ni = Info {
-            dialer: true,
-            iter: u16::MAX,
-            seq: u64::MAX,
+    fn test_inc_overflow_even() {
+        let mut nonce = Info {
+            counter: (1 << 96) - 2,
         };
-        let result = ni.inc();
-        assert!(matches!(result, Err(Error::NonceOverflow)));
+
+        assert!(nonce.inc().is_err());
+    }
+
+    #[test]
+    fn test_inc_overflow_odd() {
+        let mut nonce = Info {
+            counter: (1 << 96) - 1,
+        };
+
+        assert!(nonce.inc().is_err());
     }
 }
