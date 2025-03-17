@@ -24,10 +24,11 @@ impl Info {
     /// An error is returned if-and-only-if the nonce overflows 96 bits.
     pub fn inc(&mut self) -> Result<(), Error> {
         const OVERFLOW: u128 = 1 << 96;
-        self.counter += 2;
-        if self.counter >= OVERFLOW {
+        let new_counter = self.counter + 2; // Overflow check not necessary unless counter was improperly initialized
+        if new_counter >= OVERFLOW {
             return Err(Error::NonceOverflow);
         }
+        self.counter = new_counter;
         Ok(())
     }
 
@@ -107,19 +108,19 @@ mod tests {
 
     #[test]
     fn test_inc_overflow_even() {
-        let mut nonce = Info {
-            counter: (1 << 96) - 2,
-        };
+        let initial = (1 << 96) - 2;
+        let mut nonce = Info { counter: initial };
 
         assert!(nonce.inc().is_err());
+        assert_eq!(nonce.counter, initial);
     }
 
     #[test]
     fn test_inc_overflow_odd() {
-        let mut nonce = Info {
-            counter: (1 << 96) - 1,
-        };
+        let initial = (1 << 96) - 1;
+        let mut nonce = Info { counter: initial };
 
         assert!(nonce.inc().is_err());
+        assert_eq!(nonce.counter, initial);
     }
 }
