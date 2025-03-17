@@ -110,6 +110,15 @@ mod tests {
     use bytes::{Buf, BytesMut};
 
     #[test]
+    fn test_codec() {
+        let original = FixedBytes::new([1, 2, 3, 4]);
+        let encoded = original.encode();
+        assert_eq!(encoded.len(), original.len());
+        let decoded = FixedBytes::decode(encoded).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
     fn test_bytes_creation_and_conversion() {
         let value = [1, 2, 3, 4];
         let bytes = FixedBytes::new(value);
