@@ -75,6 +75,7 @@ mod hasher;
 mod iterator;
 pub mod journaled;
 pub mod mem;
+pub mod mutable;
 pub mod verification;
 
 /// Errors that can occur when interacting with an MMR.
@@ -94,4 +95,6 @@ pub enum Error {
     MissingHashes,
     #[error("extra hashes in proof")]
     ExtraHashes,
+    #[error("invalid update")]
+    InvalidUpdate,
 }

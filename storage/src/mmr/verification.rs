@@ -3,7 +3,8 @@
 
 use crate::mmr::{
     hasher::Hasher,
-    iterator::{PathIterator, PeakIterator},
+    iterator::{leaf_num_to_pos, leaf_pos_to_num, PathIterator, PeakIterator},
+    mutable::{MutableMmr, UpdateRecord},
     Error,
     Error::*,
 };
@@ -11,7 +12,7 @@ use bytes::{Buf, BufMut};
 use commonware_cryptography::{Digest, Hasher as CHasher};
 use commonware_utils::{Array, SizedSerialize};
 use futures::future::try_join_all;
-use std::future::Future;
+use std::{future::Future, marker::PhantomData};
 use tracing::debug;
 
 /// Contains the information necessary for proving the inclusion of an element, or some range of elements, in the MMR
@@ -91,7 +92,7 @@ impl<H: CHasher> Proof<H> {
     /// Reconstruct the peak hashes of the MMR that produced this proof, returning `MissingHashes`
     /// error if there are not enough proof hashes, or `ExtraHashes` error if not all proof hashes
     /// were used in the reconstruction.
-    fn reconstruct_peak_hashes(
+    pub(crate) fn reconstruct_peak_hashes(
         &self,
         hasher: &mut H,
         elements: &[H::Digest],
@@ -368,6 +369,62 @@ fn peak_hash_from_range<'a, H: CHasher>(
         }
     }
     Ok(hasher.node_hash(pos, &left_hash.unwrap(), &right_hash.unwrap()))
+}
+
+/// A proof that a [MutableMmr] with a particular root hash underwent the represented key update
+/// operations in sequence starting at the node with position `tree_pos`.
+pub struct UpdateProof<K: Array, V: Array, H: CHasher> {
+    /// The offset of the leaf at the beginning of the update sequence.
+    pub start_pos: u64,
+
+    /// A range_proof over the updates tree proving that the range of updates was applied in
+    /// sequence.
+    pub updates_proof: Proof<H>,
+
+    _phantom_key: PhantomData<K>,
+    _phantom_value: PhantomData<V>,
+}
+
+impl<K: Array, V: Array, H: CHasher> UpdateProof<K, V, H> {
+    /// Return a new update proof with the provided proof material.
+    pub fn new(start_pos: u64, updates_proof: Proof<H>) -> Self {
+        Self {
+            start_pos,
+            updates_proof,
+            _phantom_key: PhantomData,
+            _phantom_value: PhantomData,
+        }
+    }
+
+    /// Return true if the given sequence of `updates` took place in the MMR with the provided root
+    /// hash.
+    pub fn verify_updates(
+        &self,
+        hasher: &mut H,
+        updates: &[UpdateRecord<K, V>],
+        root_hash: &H::Digest,
+    ) -> bool {
+        let Some(start_leaf_num) = leaf_pos_to_num(self.start_pos) else {
+            debug!("start_pos is not a leaf: {}", self.start_pos);
+            return false;
+        };
+        let end_leaf_num = start_leaf_num + updates.len() as u64;
+        let end_pos = leaf_num_to_pos(end_leaf_num);
+
+        let mut digests = Vec::new();
+        for record in updates {
+            let digest = MutableMmr::<K, V, H>::record_digest(hasher, record);
+            digests.push(digest);
+        }
+
+        self.updates_proof.verify_range_inclusion(
+            hasher,
+            &digests,
+            self.start_pos,
+            end_pos,
+            root_hash,
+        )
+    }
 }
 
 #[cfg(test)]
