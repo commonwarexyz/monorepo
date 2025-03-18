@@ -93,9 +93,18 @@ impl<H: CHasher> Mmr<H> {
         s
     }
 
-    /// Return the total number of nodes in the MMR, irrespective of any pruning.
+    /// Return the total number of nodes in the MMR, irrespective of any pruning. The next added
+    /// element's position will have this value.
     pub fn size(&self) -> u64 {
         self.nodes.len() as u64 + self.oldest_retained_pos
+    }
+
+    pub fn last_leaf_pos(&self) -> Option<u64> {
+        if self.size() == 0 {
+            return None;
+        }
+
+        Some(PeakIterator::last_leaf_pos(self.size()))
     }
 
     /// Return the position of the oldest retained node in the MMR, not including the peaks which
@@ -366,6 +375,7 @@ mod tests {
                 "empty iterator should have no peaks"
             );
             assert_eq!(mmr.size(), 0);
+            assert_eq!(mmr.last_leaf_pos(), None);
             assert_eq!(mmr.oldest_provable_pos(), None);
             assert_eq!(mmr.oldest_retained_pos(), None);
             assert_eq!(mmr.get_node(0).await.unwrap(), None);
@@ -397,6 +407,7 @@ mod tests {
             let mut hasher = Sha256::default();
             for _ in 0..11 {
                 leaves.push(mmr.add(&mut hasher, &element));
+                assert_eq!(mmr.last_leaf_pos().unwrap(), *leaves.last().unwrap());
                 let peaks: Vec<(u64, u32)> = mmr.peak_iterator().collect();
                 assert_ne!(peaks.len(), 0);
                 assert!(peaks.len() <= mmr.size() as usize);
@@ -490,7 +501,9 @@ mod tests {
                 "attempts to range_prove elements at or before the oldest retained should fail"
             );
             assert!(
-                mmr.range_proof(15, 18).await.is_ok(),
+                mmr.range_proof(15, mmr.last_leaf_pos().unwrap())
+                    .await
+                    .is_ok(),
                 "attempts to range_prove over elements following oldest retained should succeed"
             );
 

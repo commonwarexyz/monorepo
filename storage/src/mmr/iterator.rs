@@ -33,6 +33,18 @@ impl PeakIterator {
         }
     }
 
+    /// Return the position of the last leaf in an MMR of the given size.
+    ///
+    /// This is an O(log2(n)) operation.
+    pub(crate) fn last_leaf_pos(size: u64) -> u64 {
+        if size == 0 {
+            return 0;
+        }
+
+        let last_peak = PeakIterator::new(size).last().unwrap();
+        last_peak.0 - last_peak.1 as u64
+    }
+
     /// Return if an MMR of the given `size` has a valid structure.
     ///
     /// The implementation verifies that peaks in the MMR of the given size have strictly decreasing
@@ -112,13 +124,14 @@ pub(crate) fn nodes_needing_parents(peak_iterator: PeakIterator) -> Vec<u64> {
     peaks
 }
 
-/// Returns the number of the leaf at position `leaf_pos` in an MMR.
+/// Returns the number of the leaf at position `leaf_pos` in an MMR, or None if
+/// this is not a leaf.
 ///
 /// This computation is O(log2(n)) in the given position.
 #[allow(dead_code)] // TODO: remove this when we start using it
-pub(crate) fn leaf_pos_to_num(leaf_pos: u64) -> u64 {
+pub(crate) fn leaf_pos_to_num(leaf_pos: u64) -> Option<u64> {
     if leaf_pos == 0 {
-        return 0;
+        return Some(0);
     }
 
     let start = u64::MAX >> (leaf_pos + 1).leading_zeros();
@@ -128,7 +141,9 @@ pub(crate) fn leaf_pos_to_num(leaf_pos: u64) -> u64 {
     let mut leaf_num_floor = 0u64;
 
     while two_h > 1 {
-        assert!(cur_node != leaf_pos, "leaf_pos invalid: {}", leaf_pos);
+        if cur_node == leaf_pos {
+            return None;
+        }
         let left_pos = cur_node - two_h;
         two_h >>= 1;
         if leaf_pos > left_pos {
@@ -141,7 +156,8 @@ pub(crate) fn leaf_pos_to_num(leaf_pos: u64) -> u64 {
             cur_node = left_pos;
         }
     }
-    leaf_num_floor
+
+    Some(leaf_num_floor)
 }
 
 /// Returns the position of the leaf with number `leaf_num` in an MMR.
@@ -336,23 +352,16 @@ mod tests {
             num_to_pos.push(mmr.add(&mut hasher, &digest));
         }
 
+        let mut last_leaf_pos = 0;
         for (leaf_num_expected, leaf_pos) in num_to_pos.iter().enumerate() {
-            let leaf_num_got = leaf_pos_to_num(*leaf_pos);
+            let leaf_num_got = leaf_pos_to_num(*leaf_pos).unwrap();
             assert_eq!(leaf_num_got, leaf_num_expected as u64);
             let leaf_pos_got = leaf_num_to_pos(leaf_num_got);
             assert_eq!(leaf_pos_got, *leaf_pos);
+            for i in last_leaf_pos + 1..*leaf_pos {
+                assert!(leaf_pos_to_num(i).is_none());
+            }
+            last_leaf_pos = *leaf_pos;
         }
-    }
-
-    #[test]
-    #[should_panic(expected = "leaf_pos invalid")]
-    fn test_leaf_num_invalid_pos_is_first_internal_node() {
-        leaf_pos_to_num(2);
-    }
-
-    #[test]
-    #[should_panic(expected = "leaf_pos invalid")]
-    fn test_leaf_num_invalid_pos_is_later_internal_node() {
-        leaf_pos_to_num(14);
     }
 }
