@@ -54,6 +54,11 @@ impl ReadBuffer {
         Ok(())
     }
 
+    #[inline]
+    pub fn chunk(&self) -> &[u8] {
+        self.inner.chunk()
+    }
+
     /// Advance the buffer by `cnt` bytes
     #[inline]
     pub fn advance(&mut self, cnt: usize) {

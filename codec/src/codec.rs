@@ -4,7 +4,7 @@ use crate::{
     buffer::{ReadBuffer, WriteBuffer},
     error::Error,
 };
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 
 /// Trait for types that can be encoded to and decoded from bytes
 pub trait Codec: Sized {
@@ -68,7 +68,7 @@ pub trait SizedCodec: Codec {
 }
 
 /// Trait for codec read operations
-pub trait Reader {
+pub trait Reader: Buf {
     /// Reads a u8 value
     fn read_u8(&mut self) -> Result<u8, Error>;
 
@@ -188,6 +188,20 @@ pub trait Writer {
 
     /// Writes a vector with a length prefix
     fn write_vec<T: Codec>(&mut self, values: &[T]);
+}
+
+impl Buf for ReadBuffer {
+    fn remaining(&self) -> usize {
+        self.remaining()
+    }
+
+    fn chunk(&self) -> &[u8] {
+        self.chunk()
+    }
+
+    fn advance(&mut self, cnt: usize) {
+        self.advance(cnt)
+    }
 }
 
 // Implement Reader for ReadBuffer

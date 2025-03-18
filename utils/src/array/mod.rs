@@ -1,5 +1,6 @@
 use crate::SizedSerialize;
 use bytes::Buf;
+use commonware_codec::{Codec, SizedCodec};
 use std::{
     cmp::{Ord, PartialOrd},
     error::Error as StdError,
@@ -48,12 +49,14 @@ pub trait Array:
     + for<'a> TryFrom<&'a Vec<u8>, Error = <Self as Array>::Error>
     + TryFrom<Vec<u8>, Error = <Self as Array>::Error>
     + SizedSerialize
+    + Codec
+    + SizedCodec
 {
     /// Errors returned when parsing an invalid byte sequence.
     type Error: StdError + Send + Sync + 'static;
 
     /// Attempts to read an array from the provided buffer.
-    fn read_from<B: Buf>(buf: &mut B) -> Result<Self, Error<<Self as Array>::Error>> {
+    fn read_from(buf: &mut impl Buf) -> Result<Self, Error<<Self as Array>::Error>> {
         let len = Self::SERIALIZED_LEN;
         if buf.remaining() < len {
             return Err(Error::InsufficientBytes);

@@ -1,4 +1,5 @@
 use crate::{Array, BatchScheme, Error, Scheme};
+use commonware_codec::{Codec, Error as CodecError, Reader, SizedCodec, Writer};
 use commonware_utils::{hex, union_unique, SizedSerialize};
 use ed25519_consensus::{self, VerificationKey};
 use rand::{CryptoRng, Rng, RngCore};
@@ -7,6 +8,7 @@ use std::fmt::{Debug, Display};
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 
+const CURVE_NAME: &str = "ed25519";
 const PRIVATE_KEY_LENGTH: usize = 32;
 const PUBLIC_KEY_LENGTH: usize = 32;
 const SIGNATURE_LENGTH: usize = 64;
@@ -117,6 +119,24 @@ pub struct PrivateKey {
     key: ed25519_consensus::SigningKey,
 }
 
+impl Codec for PrivateKey {
+    fn write(&self, writer: &mut impl Writer) {
+        self.raw.write(writer);
+    }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
+        Self::read_from(reader).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
+    }
+
+    fn len_encoded(&self) -> usize {
+        PRIVATE_KEY_LENGTH
+    }
+}
+
+impl SizedCodec for PrivateKey {
+    const LEN_ENCODED: usize = PRIVATE_KEY_LENGTH;
+}
+
 impl Array for PrivateKey {
     type Error = Error;
 }
@@ -215,6 +235,24 @@ pub struct PublicKey {
     key: ed25519_consensus::VerificationKey,
 }
 
+impl Codec for PublicKey {
+    fn write(&self, writer: &mut impl Writer) {
+        self.raw.write(writer);
+    }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
+        Self::read_from(reader).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
+    }
+
+    fn len_encoded(&self) -> usize {
+        PUBLIC_KEY_LENGTH
+    }
+}
+
+impl SizedCodec for PublicKey {
+    const LEN_ENCODED: usize = PUBLIC_KEY_LENGTH;
+}
+
 impl Array for PublicKey {
     type Error = Error;
 }
@@ -285,6 +323,24 @@ impl Display for PublicKey {
 pub struct Signature {
     raw: [u8; SIGNATURE_LENGTH],
     signature: ed25519_consensus::Signature,
+}
+
+impl Codec for Signature {
+    fn write(&self, writer: &mut impl Writer) {
+        self.raw.write(writer);
+    }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
+        Self::read_from(reader).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
+    }
+
+    fn len_encoded(&self) -> usize {
+        SIGNATURE_LENGTH
+    }
+}
+
+impl SizedCodec for Signature {
+    const LEN_ENCODED: usize = SIGNATURE_LENGTH;
 }
 
 impl Array for Signature {
@@ -466,6 +522,50 @@ mod tests {
                 ",
             ),
         )
+    }
+
+    #[test]
+    fn test_codec_private_key() {
+        let private_key = parse_private_key(
+            "
+            9d61b19deffd5a60ba844af492ec2cc4
+            4449c5697b326919703bac031cae7f60
+            ",
+        );
+        let encoded = private_key.encode();
+        assert_eq!(encoded.len(), PRIVATE_KEY_LENGTH);
+        let decoded = PrivateKey::decode(encoded).unwrap();
+        assert_eq!(private_key, decoded);
+    }
+
+    #[test]
+    fn test_codec_public_key() {
+        let public_key = parse_public_key(
+            "
+            d75a980182b10ab7d54bfed3c964073a
+            0ee172f3daa62325af021a68f707511a
+            ",
+        );
+        let encoded = public_key.encode();
+        assert_eq!(encoded.len(), PUBLIC_KEY_LENGTH);
+        let decoded = PublicKey::decode(encoded).unwrap();
+        assert_eq!(public_key, decoded);
+    }
+
+    #[test]
+    fn test_codec_signature() {
+        let signature = parse_signature(
+            "
+            e5564300c360ac729086e2cc806e828a
+            84877f1eb8e5d974d873e06522490155
+            5fb8821590a33bacc61e39701cf9b46b
+            d25bf5f0595bbe24655141438e7a100b
+            ",
+        );
+        let encoded = signature.encode();
+        assert_eq!(encoded.len(), SIGNATURE_LENGTH);
+        let decoded = Signature::decode(encoded).unwrap();
+        assert_eq!(signature, decoded);
     }
 
     #[test]

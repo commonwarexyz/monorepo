@@ -1,4 +1,5 @@
 use crate::{hex, Array, SizedSerialize};
+use commonware_codec::{Codec, Error as CodecError, Reader, SizedCodec, Writer};
 use std::{
     cmp::{Ord, PartialOrd},
     fmt::{Debug, Display},
@@ -24,6 +25,25 @@ impl<const N: usize> FixedBytes<N> {
     pub fn new(value: [u8; N]) -> Self {
         Self(value)
     }
+}
+
+impl<const N: usize> Codec for FixedBytes<N> {
+    fn write(&self, writer: &mut impl Writer) {
+        writer.write_fixed(&self.0);
+    }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
+        let value = reader.read_fixed()?;
+        Ok(Self(value))
+    }
+
+    fn len_encoded(&self) -> usize {
+        N
+    }
+}
+
+impl<const N: usize> SizedCodec for FixedBytes<N> {
+    const LEN_ENCODED: usize = N;
 }
 
 impl<const N: usize> Array for FixedBytes<N> {
@@ -88,6 +108,15 @@ mod tests {
     use super::*;
     use crate::array::Error as ArrayError;
     use bytes::{Buf, BytesMut};
+
+    #[test]
+    fn test_codec() {
+        let original = FixedBytes::new([1, 2, 3, 4]);
+        let encoded = original.encode();
+        assert_eq!(encoded.len(), original.len());
+        let decoded = FixedBytes::decode(encoded).unwrap();
+        assert_eq!(original, decoded);
+    }
 
     #[test]
     fn test_bytes_creation_and_conversion() {

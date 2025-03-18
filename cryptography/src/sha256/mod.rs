@@ -21,6 +21,7 @@
 //! ```
 
 use crate::{Array, Error, Hasher};
+use commonware_codec::{Codec, Error as CodecError, Reader, SizedCodec, Writer};
 use commonware_utils::{hex, SizedSerialize};
 use rand::{CryptoRng, Rng};
 use sha2::{Digest as _, Sha256 as ISha256};
@@ -90,6 +91,24 @@ impl Hasher for Sha256 {
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[repr(transparent)]
 pub struct Digest([u8; DIGEST_LENGTH]);
+
+impl Codec for Digest {
+    fn write(&self, writer: &mut impl Writer) {
+        self.0.write(writer);
+    }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
+        Self::read_from(reader).map_err(|err| CodecError::Wrapped("Digest", err.into()))
+    }
+
+    fn len_encoded(&self) -> usize {
+        DIGEST_LENGTH
+    }
+}
+
+impl SizedCodec for Digest {
+    const LEN_ENCODED: usize = DIGEST_LENGTH;
+}
 
 impl Array for Digest {
     type Error = Error;
@@ -200,5 +219,20 @@ mod tests {
     #[test]
     fn test_sha256_len() {
         assert_eq!(Digest::SERIALIZED_LEN, DIGEST_LENGTH);
+    }
+
+    #[test]
+    fn test_codec() {
+        let msg = b"hello world";
+        let mut hasher = Sha256::new();
+        hasher.update(msg);
+        let digest = hasher.finalize();
+
+        let encoded = digest.encode();
+        assert_eq!(encoded.len(), DIGEST_LENGTH);
+        assert_eq!(encoded, digest.as_ref());
+
+        let decoded = Digest::decode(encoded).unwrap();
+        assert_eq!(digest, decoded);
     }
 }

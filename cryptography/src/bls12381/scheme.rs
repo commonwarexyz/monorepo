@@ -24,6 +24,7 @@ use super::primitives::{
     ops,
 };
 use crate::{Array, Error, Scheme};
+use commonware_codec::{Codec, Error as CodecError, Reader, SizedCodec, Writer};
 use commonware_utils::{hex, SizedSerialize};
 use rand::{CryptoRng, Rng};
 use std::{
@@ -31,6 +32,8 @@ use std::{
     hash::{Hash, Hasher},
     ops::Deref,
 };
+
+const CURVE_NAME: &str = "bls12381";
 
 /// BLS12-381 implementation of the `Scheme` trait.
 ///
@@ -89,6 +92,24 @@ impl Scheme for Bls12381 {
 pub struct PrivateKey {
     raw: [u8; group::PRIVATE_KEY_LENGTH],
     key: group::Private,
+}
+
+impl Codec for PrivateKey {
+    fn write(&self, writer: &mut impl Writer) {
+        self.raw.write(writer);
+    }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
+        Self::read_from(reader).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
+    }
+
+    fn len_encoded(&self) -> usize {
+        group::PRIVATE_KEY_LENGTH
+    }
+}
+
+impl SizedCodec for PrivateKey {
+    const LEN_ENCODED: usize = group::PRIVATE_KEY_LENGTH;
 }
 
 impl Array for PrivateKey {
@@ -181,6 +202,24 @@ pub struct PublicKey {
     key: group::Public,
 }
 
+impl Codec for PublicKey {
+    fn write(&self, writer: &mut impl Writer) {
+        self.raw.write(writer);
+    }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
+        Self::read_from(reader).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
+    }
+
+    fn len_encoded(&self) -> usize {
+        group::PUBLIC_KEY_LENGTH
+    }
+}
+
+impl SizedCodec for PublicKey {
+    const LEN_ENCODED: usize = group::PUBLIC_KEY_LENGTH;
+}
+
 impl Array for PublicKey {
     type Error = Error;
 }
@@ -271,6 +310,24 @@ pub struct Signature {
     signature: group::Signature,
 }
 
+impl Codec for Signature {
+    fn write(&self, writer: &mut impl Writer) {
+        self.raw.write(writer);
+    }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
+        Self::read_from(reader).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
+    }
+
+    fn len_encoded(&self) -> usize {
+        group::SIGNATURE_LENGTH
+    }
+}
+
+impl SizedCodec for Signature {
+    const LEN_ENCODED: usize = group::SIGNATURE_LENGTH;
+}
+
 impl Array for Signature {
     type Error = Error;
 }
@@ -358,6 +415,39 @@ impl Display for Signature {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_codec_private_key() {
+        let original =
+            parse_private_key("0x263dbd792f5b1be47ed85f8938c0f29586af0d3ac7b977f21c278fe1462040e3")
+                .unwrap();
+        let encoded = original.encode();
+        assert_eq!(encoded.len(), PrivateKey::SERIALIZED_LEN);
+        let decoded = PrivateKey::decode(encoded).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_codec_public_key() {
+        let original =
+            parse_public_key("0xa491d1b0ecd9bb917989f0e74f0dea0422eac4a873e5e2644f368dffb9a6e20fd6e10c1b77654d067c0618f6e5a7f79a")
+                .unwrap();
+        let encoded = original.encode();
+        assert_eq!(encoded.len(), PublicKey::SERIALIZED_LEN);
+        let decoded = PublicKey::decode(encoded).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_codec_signature() {
+        let original =
+            parse_signature("0x882730e5d03f6b42c3abc26d3372625034e1d871b65a8a6b900a56dae22da98abbe1b68f85e49fe7652a55ec3d0591c20767677e33e5cbb1207315c41a9ac03be39c2e7668edc043d6cb1d9fd93033caa8a1c5b0e84bedaeb6c64972503a43eb")
+                .unwrap();
+        let encoded = original.encode();
+        assert_eq!(encoded.len(), Signature::SERIALIZED_LEN);
+        let decoded = Signature::decode(encoded).unwrap();
+        assert_eq!(original, decoded);
+    }
 
     #[test]
     fn test_sign() {

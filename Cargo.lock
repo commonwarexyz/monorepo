@@ -923,6 +923,7 @@ version = "0.0.43"
 dependencies = [
  "blst",
  "bytes",
+ "commonware-codec",
  "commonware-utils",
  "criterion",
  "ed25519-consensus",
@@ -1046,6 +1047,7 @@ version = "0.0.43"
 dependencies = [
  "bimap",
  "bytes",
+ "commonware-codec",
  "commonware-cryptography",
  "commonware-macros",
  "commonware-p2p",
@@ -1130,6 +1132,7 @@ name = "commonware-utils"
 version = "0.0.43"
 dependencies = [
  "bytes",
+ "commonware-codec",
  "futures",
  "num-bigint",
  "prost",
