@@ -242,7 +242,7 @@ fn main() {
                 debug!(?peer, "unauthorized peer");
                 continue;
             }
-            let stream = match Connection::upgrade_as_dialee(context.clone(), incoming).await {
+            let stream = match Connection::upgrade_listener(context.clone(), incoming).await {
                 Ok(connection) => connection,
                 Err(e) => {
                     debug!(error = ?e, ?peer, "failed to upgrade connection");

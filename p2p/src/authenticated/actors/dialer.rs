@@ -105,7 +105,7 @@ impl<
                     debug!(?peer, address = address.to_string(), "dialed peer");
 
                     // Upgrade connection
-                    let instance = match Connection::upgrade_as_dialer(
+                    let instance = match Connection::upgrade_dialer(
                         context,
                         config,
                         sink,

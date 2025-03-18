@@ -110,7 +110,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
     ///
     /// This will send a handshake message to the peer, wait for a response,
     /// and verify the peer's handshake message.
-    pub async fn upgrade_as_dialer<R: Rng + CryptoRng + Spawner + Clock, C: Scheme>(
+    pub async fn upgrade_dialer<R: Rng + CryptoRng + Spawner + Clock, C: Scheme>(
         mut context: R,
         mut config: Config<C>,
         mut sink: Si,
@@ -187,7 +187,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
     /// Because we already verified the peer's handshake, this function
     /// only needs to send our handshake message for the connection to be fully
     /// initialized.
-    pub async fn upgrade_as_dialee<R: Rng + CryptoRng + Spawner + Clock, C: Scheme>(
+    pub async fn upgrade_listener<R: Rng + CryptoRng + Spawner + Clock, C: Scheme>(
         mut context: R,
         incoming: IncomingConnection<C, Si, St>,
     ) -> Result<Self, Error> {
@@ -406,8 +406,8 @@ mod tests {
             let max_message_size = 1024;
 
             // Create channels
-            let (dialer_sink, dialee_stream) = mocks::Channel::init();
-            let (dialee_sink, dialer_stream) = mocks::Channel::init();
+            let (dialer_sink, listener_stream) = mocks::Channel::init();
+            let (listener_sink, dialer_stream) = mocks::Channel::init();
 
             // Create dialer connection
             let connection_dialer = Connection::from_preestablished(
@@ -418,41 +418,41 @@ mod tests {
                 max_message_size,
             );
 
-            // Create dialee connection
-            let connection_dialee = Connection::from_preestablished(
-                false, // dialee
-                dialee_sink,
-                dialee_stream,
+            // Create listener connection
+            let connection_listener = Connection::from_preestablished(
+                false, // listener
+                listener_sink,
+                listener_stream,
                 cipher,
                 max_message_size,
             );
 
             // Split into sender and receiver for both connections
             let (mut dialer_sender, mut dialer_receiver) = connection_dialer.split();
-            let (mut dialee_sender, mut dialee_receiver) = connection_dialee.split();
+            let (mut listener_sender, mut listener_receiver) = connection_listener.split();
 
-            // Test 1: Send from dialer to dialee
+            // Test 1: Send from dialer to listener
             let msg1 = b"hello from dialer";
             dialer_sender.send(msg1).await.unwrap();
-            let received1 = dialee_receiver.receive().await.unwrap();
+            let received1 = listener_receiver.receive().await.unwrap();
             assert_eq!(received1, &msg1[..]);
 
-            // Test 2: Send from dialee to dialer
-            let msg2 = b"hello from dialee";
-            dialee_sender.send(msg2).await.unwrap();
+            // Test 2: Send from listener to dialer
+            let msg2 = b"hello from listener";
+            listener_sender.send(msg2).await.unwrap();
             let received2 = dialer_receiver.receive().await.unwrap();
             assert_eq!(received2, &msg2[..]);
 
             // Test 3: Send multiple messages both ways
-            let messages_to_dialee = vec![b"msg1", b"msg2", b"msg3"];
-            for msg in &messages_to_dialee {
+            let messages_to_listener = vec![b"msg1", b"msg2", b"msg3"];
+            for msg in &messages_to_listener {
                 dialer_sender.send(*msg).await.unwrap();
-                let received = dialee_receiver.receive().await.unwrap();
+                let received = listener_receiver.receive().await.unwrap();
                 assert_eq!(received, &msg[..]);
             }
             let messages_to_dialer = vec![b"reply1", b"reply2", b"reply3"];
             for msg in &messages_to_dialer {
-                dialee_sender.send(*msg).await.unwrap();
+                listener_sender.send(*msg).await.unwrap();
                 let received = dialer_receiver.receive().await.unwrap();
                 assert_eq!(received, &msg[..]);
             }
@@ -464,11 +464,11 @@ mod tests {
         executor.start(async move {
             // Create cryptographic identities
             let dialer_crypto = Ed25519::from_seed(0);
-            let dialee_crypto = Ed25519::from_seed(1);
+            let listener_crypto = Ed25519::from_seed(1);
 
             // Set up mock channels for transport simulation
-            let (dialer_sink, dialee_stream) = mocks::Channel::init();
-            let (dialee_sink, dialer_stream) = mocks::Channel::init();
+            let (dialer_sink, listener_stream) = mocks::Channel::init();
+            let (listener_sink, dialer_stream) = mocks::Channel::init();
 
             // Configuration for dialer
             let dialer_config = Config {
@@ -480,9 +480,9 @@ mod tests {
                 handshake_timeout: Duration::from_secs(5),
             };
 
-            // Configuration for dialee
-            let dialee_config = Config {
-                crypto: dialee_crypto.clone(),
+            // Configuration for listener
+            let listener_config = Config {
+                crypto: listener_crypto.clone(),
                 namespace: b"test_namespace".to_vec(),
                 max_message_size: 1024,
                 synchrony_bound: Duration::from_secs(5),
@@ -490,55 +490,54 @@ mod tests {
                 handshake_timeout: Duration::from_secs(5),
             };
 
-            // Spawn dialee to handle incoming connection
-            let dialee_handle = context.with_label("dialee").spawn({
-                let dialee_config = dialee_config.clone();
+            // Spawn listener to handle incoming connection
+            let listener_handle = context.with_label("listener").spawn({
                 move |context| async move {
                     let incoming = IncomingConnection::verify(
                         &context,
-                        dialee_config,
-                        dialee_sink,
-                        dialee_stream,
+                        listener_config,
+                        listener_sink,
+                        listener_stream,
                     )
                     .await
                     .unwrap();
-                    Connection::upgrade_as_dialee(context, incoming)
+                    Connection::upgrade_listener(context, incoming)
                         .await
                         .unwrap()
                 }
             });
 
             // Dialer initiates the connection
-            let dialer_connection = Connection::upgrade_as_dialer(
+            let dialer_connection = Connection::upgrade_dialer(
                 context.clone(),
                 dialer_config,
                 dialer_sink,
                 dialer_stream,
-                dialee_crypto.public_key(),
+                listener_crypto.public_key(),
             )
             .await
             .unwrap();
 
-            // Wait for dialee connection to be established
-            let dialee_connection = dialee_handle.await.unwrap();
+            // Wait for listener connection to be established
+            let listener_connection = listener_handle.await.unwrap();
 
             // Split connections into sender and receiver halves
             let (mut dialer_sender, mut dialer_receiver) = dialer_connection.split();
-            let (mut dialee_sender, mut dialee_receiver) = dialee_connection.split();
+            let (mut listener_sender, mut listener_receiver) = listener_connection.split();
 
-            // Dialer sends to dialee twice
+            // Dialer sends to listener twice
             let message1 = b"Hello from dialer";
             dialer_sender.send(message1).await.unwrap();
             dialer_sender.send(message1).await.unwrap();
-            let received = dialee_receiver.receive().await.unwrap();
+            let received = listener_receiver.receive().await.unwrap();
             assert_eq!(&received[..], &message1[..]);
-            let received = dialee_receiver.receive().await.unwrap();
+            let received = listener_receiver.receive().await.unwrap();
             assert_eq!(&received[..], &message1[..]);
 
-            // Dialee sends to dialer twice
-            let message2 = b"Hello from dialee";
-            dialee_sender.send(message2).await.unwrap();
-            dialee_sender.send(message2).await.unwrap();
+            // Listener sends to dialer twice
+            let message2 = b"Hello from listener";
+            listener_sender.send(message2).await.unwrap();
+            listener_sender.send(message2).await.unwrap();
             let received = dialer_receiver.receive().await.unwrap();
             assert_eq!(&received[..], &message2[..]);
             let received = dialer_receiver.receive().await.unwrap();
@@ -547,7 +546,7 @@ mod tests {
     }
 
     #[test]
-    fn test_upgrade_as_dialer_wrong_peer() {
+    fn test_upgrade_dialer_wrong_peer() {
         let (executor, context, _) = Executor::default();
         executor.start(async move {
             // Create cryptographic identities
@@ -591,7 +590,7 @@ mod tests {
             });
 
             // Attempt connection with expected peer key
-            let result = Connection::upgrade_as_dialer(
+            let result = Connection::upgrade_dialer(
                 context,
                 dialer_config,
                 dialer_sink,

@@ -21,20 +21,20 @@
 //! it can be simulated deterministically.
 //!
 //! In any handshake, the dialer is the party that attempts to connect to some known address/identity (public key)
-//! and the recipient of this connection is the dialee. Upon forming a TCP connection, the dialer sends a signed
-//! handshake message to the dialee. Besides the signature and the public key of the dialer, the handshake message
+//! and the recipient of this connection is the listener. Upon forming a TCP connection, the dialer sends a signed
+//! handshake message to the listener. Besides the signature and the public key of the dialer, the handshake message
 //! contains:
 //!
-//! - The dialee's public key (the public key of the peer we are trying to connect to).
-//! - The dialer's ephemeral public key (used to establish a shared secret).
+//! - The receiver's public key.
+//! - The sender's ephemeral public key (used to establish a shared secret).
 //! - The current timestamp (used to prevent replay attacks).
 //!
-//! The dialee verifies the public keys are well-formatted, the timestamp is valid (not too old/not too far in the future),
-//! and that the signature is valid. If all these checks pass, the dialee checks to see if it is already connected or dialing
+//! The listener verifies the public keys are well-formatted, the timestamp is valid (not too old/not too far in the future),
+//! and that the signature is valid. If all these checks pass, the listener checks to see if it is already connected or dialing
 //! this peer. If it is, it drops the connection. If it isn't, it sends back its own signed handshake message (same as above)
 //! and considers the connection established.
 //!
-//! Upon receiving the dialee's handshake message, the dialer verifies the same data as the dialee and additionally verifies
+//! Upon receiving the listener's handshake message, the dialer verifies the same data as the listener and additionally verifies
 //! that the public key returned matches what they expected at the address. If all these checks pass, the dialer considers the
 //! connection established. If not, the dialer drops the connection.
 //!
@@ -50,7 +50,7 @@
 //!
 //! Each peer maintains a pair of ChaCha20-Poly1305 nonces (12 bytes), one for itself and one for
 //! the other. Each nonce is constructed using a counter that starts at either 1 for the dialer, or
-//! 0 for the dialee. For each message sent, the relevant counter is incremented by 2, ensuring that
+//! 0 for the listener. For each message sent, the relevant counter is incremented by 2, ensuring that
 //! the two counters have disjoint nonce spaces.
 //!
 //! The nonce is the least-significant 12 bytes of the counter, encoded big-endian. This provides 2^95 unique nonces

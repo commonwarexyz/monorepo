@@ -182,7 +182,7 @@ fn main() {
             .await
             .expect("Failed to dial indexer");
         let indexer =
-            Connection::upgrade_as_dialer(context.clone(), indexer_cfg, sink, stream, indexer)
+            Connection::upgrade_dialer(context.clone(), indexer_cfg, sink, stream, indexer)
                 .await
                 .expect("Failed to upgrade connection with indexer");
 

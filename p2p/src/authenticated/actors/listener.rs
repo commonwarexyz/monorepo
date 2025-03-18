@@ -110,7 +110,7 @@ impl<
         };
 
         // Perform handshake
-        let stream = match Connection::upgrade_as_dialee(context, incoming).await {
+        let stream = match Connection::upgrade_listener(context, incoming).await {
             Ok(connection) => connection,
             Err(e) => {
                 debug!(error = ?e, ?peer, "failed to upgrade connection");
