@@ -153,29 +153,6 @@ LimitNOFILE=infinity
 WantedBy=multi-user.target
 "#;
 
-/// Generates Pyroscope configuration with scrape targets for binary instances
-pub fn generate_pyroscope_config(binary_instances: &[(&str, &str, &str)]) -> String {
-    let mut config = String::from(
-        r#"
-scrape_configs:
-- job_name: 'pyroscope'
-  static_configs:
-"#,
-    );
-    for (name, private_ip, region) in binary_instances {
-        config.push_str(&format!(
-            r#"
-    - targets: ['{}:9091']  # Adjust port if necessary
-      labels:
-        instance: '{}'
-        region: '{}'
-"#,
-            private_ip, name, region
-        ));
-    }
-    config
-}
-
 /// Command to install monitoring services (Prometheus, Loki, Grafana) on the monitoring instance
 pub fn install_monitoring_cmd(
     prometheus_version: &str,
@@ -403,6 +380,29 @@ scrape_configs:
           region: '{}'
 "#,
             name, ip, region
+        ));
+    }
+    config
+}
+
+/// Generates Pyroscope configuration with scrape targets for binary instances
+pub fn generate_pyroscope_config(binary_instances: &[(&str, &str, &str)]) -> String {
+    let mut config = String::from(
+        r#"
+scrape_configs:
+- job_name: 'pyroscope'
+  static_configs:
+"#,
+    );
+    for (name, private_ip, region) in binary_instances {
+        config.push_str(&format!(
+            r#"
+    - targets: ['{}:9091']
+      labels:
+        instance: '{}'
+        region: '{}'
+"#,
+            private_ip, name, region
         ));
     }
     config

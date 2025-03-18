@@ -1,5 +1,6 @@
 //! AWS EC2 SDK function wrappers
 
+use super::{METRICS_PORT, PROFILES_PORT};
 use crate::ec2::{
     utils::{exact_cidr, DEPLOYER_MAX_PORT, DEPLOYER_MIN_PORT, DEPLOYER_PROTOCOL, RETRY_INTERVAL},
     PortConfig,
@@ -17,8 +18,6 @@ use aws_sdk_ec2::{Client as Ec2Client, Error as Ec2Error};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tokio::time::sleep;
-
-use super::{METRICS_PORT, PROFILES_PORT};
 
 /// Creates an EC2 client for the specified AWS region
 pub async fn create_ec2_client(region: Region) -> Ec2Client {
