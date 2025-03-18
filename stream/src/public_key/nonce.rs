@@ -3,8 +3,9 @@ use chacha20poly1305::Nonce;
 
 /// A struct that holds the nonce information.
 ///
-/// Holds a `u128` value that is incremented by 2 each time the nonce is incremented.
-/// The least-significant bit is used to indicate the dialer side and does not change.
+/// Holds a counter value that is incremented by 2 each time the nonce is used.
+/// The least-significant bit does not change, allowing for two disjoint nonce spaces (one for each
+/// side of a connection).
 ///
 /// Is able to be incremented up-to 96 bits (12 bytes) before overflowing.
 pub struct Info {
@@ -16,21 +17,34 @@ pub struct Info {
 const OVERFLOW_VALUE: u128 = 1 << 96;
 
 impl Info {
-    pub fn new(dialer: bool) -> Self {
+    /// Creates a new `Info` struct.
+    ///
+    /// The `sender_is_dialer` parameter indicates whether the sender is the dialer or not.
+    /// For example, if the client was the dialer, this is set to true for your own nonces, but
+    /// false for the peer's nonces.
+    pub fn new(sender_is_dialer: bool) -> Self {
         Self {
-            counter: if dialer { 1 } else { 0 },
+            counter: if sender_is_dialer { 1 } else { 0 },
         }
     }
 
     /// Increments the nonce.
     ///
-    /// Counter is incremented by 2, maintaining the dialer bit.
+    /// The counter is incremented by 2, which prevents nonce reuse while also maintaining the value
+    /// of the least-significant bit. This ensures that the nonce space is disjoint for two nonces
+    /// initialized with different boolean values.
+    ///
     /// An error is returned if-and-only-if the nonce overflows 96 bits.
     pub fn inc(&mut self) -> Result<(), Error> {
-        let new_counter = self.counter + 2; // Overflow check not necessary unless counter was improperly initialized
+        // This line does not need to check for overflow as the counter should not be initialized
+        // to a value greater than 2^96.
+        let new_counter = self.counter + 2;
+
+        // Check for overflow over 96 bits (12 bytes)
         if new_counter >= OVERFLOW_VALUE {
             return Err(Error::NonceOverflow);
         }
+
         self.counter = new_counter;
         Ok(())
     }

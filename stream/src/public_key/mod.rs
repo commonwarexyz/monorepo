@@ -59,8 +59,9 @@
 //! counter, encoded big-endian.
 //!
 //! This provides 2^95 unique nonces per sender, sufficient for over 1 trillion years at 1 billion
-//! messages/second—far exceeding practical limits. In an unlikely case of overflow, the connection
-//! would terminate, and a new handshake would be required.
+//! messages/second—far exceeding practical limits. Maintaining long-lived connections to reliable
+//! peers enhances network stability by removing the overhead of connection churn. In an unlikely
+//! case of overflow, the connection would terminate, and a new handshake would be required.
 //!
 //! This construction saves bandwidth, as the nonce does not need to be sent as part of the message.
 //! It also prevents nonce-reuse, which would otherwise allow for messages to be decrypted.
