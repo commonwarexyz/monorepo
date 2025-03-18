@@ -147,13 +147,18 @@ impl<H: CHasher> Bitmap<H> {
         }
     }
 
-    /// Convert a bit offset into a bit mask.
-    fn mask_for(bit_offset: u64) -> u8 {
+    /// Convert a bit offset into a bit mask for the byte containing that bit.
+    pub(crate) fn mask_for(bit_offset: u64) -> u8 {
         1 << (bit_offset % 8)
     }
 
+    /// Convert a bit offset into the offset of the byte within a chunk containing the bit.
+    pub(crate) fn chunk_byte_offset(bit_offset: u64) -> usize {
+        (bit_offset as usize / 8) % Self::CHUNK_SIZE
+    }
+
     /// Convert a bit offset into the position of the Merkle tree leaf it belongs to.
-    fn leaf_pos(bit_offset: u64) -> u64 {
+    pub(crate) fn leaf_pos(bit_offset: u64) -> u64 {
         let leaf_num = bit_offset / 8 / Self::CHUNK_SIZE as u64;
         leaf_num_to_pos(leaf_num)
     }
@@ -422,8 +427,8 @@ mod tests {
                 );
 
                 // Flip the bit in the chunk and make sure the proof fails.
-                let mask: u8 = 1 << (i % 8);
-                let byte_offset = (i as usize / 8) % Bitmap::<Sha256>::CHUNK_SIZE;
+                let mask: u8 = Bitmap::<Sha256>::mask_for(i);
+                let byte_offset = Bitmap::<Sha256>::chunk_byte_offset(i);
                 let corrupted = {
                     let mut tmp = chunk.as_ref().to_vec();
                     tmp[byte_offset] ^= mask;
