@@ -1,73 +1,113 @@
-use super::{wire, x25519};
-use crate::{utils::codec::recv_frame, Error};
-use bytes::{BufMut, Bytes};
+use super::x25519;
+use crate::Error;
+use commonware_codec::{Codec, Error as CodecError, Reader, SizedCodec, Writer};
 use commonware_cryptography::Scheme;
-use commonware_macros::select;
-use commonware_runtime::{Clock, Sink, Spawner, Stream};
-use commonware_utils::{SizedSerialize, SystemTimeExt};
-use prost::Message;
-use std::time::{Duration, SystemTime};
+use commonware_runtime::Clock;
+use commonware_utils::SystemTimeExt;
+use std::time::Duration;
 
-pub fn create_handshake<C: Scheme>(
-    crypto: &mut C,
-    namespace: &[u8],
+/// Handshake information that is signed over by the sender.
+pub struct Info<C: Scheme> {
+    recipient: C::PublicKey,
+    ephemeral_public_key: x25519::PublicKey,
     timestamp: u64,
-    recipient_public_key: C::PublicKey,
-    ephemeral_public_key: x25519_dalek::PublicKey,
-) -> Result<Bytes, Error> {
-    // Sign their public key
-    let ephemeral_public_key_bytes = ephemeral_public_key.as_bytes();
-    let payload_len =
-        C::PublicKey::SERIALIZED_LEN + ephemeral_public_key_bytes.len() + u64::SERIALIZED_LEN;
-    let mut payload = Vec::with_capacity(payload_len);
-    payload.extend_from_slice(&recipient_public_key);
-    payload.extend_from_slice(ephemeral_public_key_bytes);
-    payload.put_u64(timestamp);
-    let signature = crypto.sign(Some(namespace), &payload);
+}
 
-    // Send handshake
-    Ok(wire::Handshake {
-        recipient_public_key: recipient_public_key.to_vec(),
-        ephemeral_public_key: x25519::encode_public_key(ephemeral_public_key).to_vec(),
-        timestamp,
-        signature: Some(wire::Signature {
-            public_key: crypto.public_key().to_vec(),
-            signature: signature.to_vec(),
-        }),
+impl<C: Scheme> Info<C> {
+    pub fn new(
+        recipient: C::PublicKey,
+        secret: &x25519_dalek::EphemeralSecret,
+        timestamp: u64,
+    ) -> Self {
+        Self {
+            recipient,
+            ephemeral_public_key: x25519::PublicKey::from_secret(secret),
+            timestamp,
+        }
     }
-    .encode_to_vec()
-    .into())
 }
 
-pub struct Handshake<C: Scheme> {
-    pub ephemeral_public_key: x25519_dalek::PublicKey,
-    pub peer_public_key: C::PublicKey,
+impl<C: Scheme> Codec for Info<C> {
+    fn write(&self, writer: &mut impl Writer) {
+        self.recipient.write(writer);
+        self.ephemeral_public_key.write(writer);
+        self.timestamp.write(writer);
+    }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
+        let recipient = C::PublicKey::read(reader)?;
+        let ephemeral_public_key = x25519::PublicKey::read(reader)?;
+        let timestamp = u64::read(reader)?;
+        Ok(Info {
+            recipient,
+            ephemeral_public_key,
+            timestamp,
+        })
+    }
+
+    fn len_encoded(&self) -> usize {
+        Self::LEN_ENCODED
+    }
 }
 
-impl<C: Scheme> Handshake<C> {
+impl<C: Scheme> SizedCodec for Info<C> {
+    const LEN_ENCODED: usize =
+        C::PublicKey::LEN_ENCODED + x25519::PublicKey::LEN_ENCODED + u64::LEN_ENCODED;
+}
+
+// Allows recipient to verify that the sender has the private key
+// of public key before sending any data.
+//
+// By requiring the server to have their public key signed, they prevent
+// a malicious peer from forwarding a handshake message from a previous
+// connection with public key (which could be used to convince the server
+// to start a useless handshake). Alternatively, we could require the
+// dialer to sign some random bytes provided by the server but this would
+// require the server to send a message to a peer before authorizing that
+// it should connect to them.
+pub struct Signed<C: Scheme> {
+    // The handshake info that was signed over
+    info: Info<C>,
+
+    // The public key of the sender
+    signer: C::PublicKey,
+
+    // The signature of the sender
+    signature: C::Signature,
+}
+
+impl<C: Scheme> Signed<C> {
+    pub fn sign(crypto: &mut C, namespace: &[u8], info: Info<C>) -> Self {
+        let signature = crypto.sign(Some(namespace), &info.encode());
+        Self {
+            info,
+            signer: crypto.public_key(),
+            signature,
+        }
+    }
+
+    pub fn signer(&self) -> C::PublicKey {
+        self.signer.clone()
+    }
+
+    pub fn ephemeral(&self) -> x25519::PublicKey {
+        self.info.ephemeral_public_key
+    }
+
     pub fn verify<E: Clock>(
+        &self,
         context: &E,
         crypto: &C,
         namespace: &[u8],
         synchrony_bound: Duration,
         max_handshake_age: Duration,
-        msg: Bytes,
-    ) -> Result<Self, Error> {
-        // Parse handshake message
-        let handshake = wire::Handshake::decode(msg).map_err(Error::UnableToDecode)?;
-
-        // Verify that ephemeral public key is valid
-        let ephemeral_public_key = x25519::decode_public_key(&handshake.ephemeral_public_key)
-            .map_err(|_| Error::InvalidEphemeralPublicKey)?;
-
+    ) -> Result<(), Error> {
         // Verify that the signature is for us
         //
         // If we didn't verify this, it would be trivial for any peer to impersonate another peer (even though
         // they would not be able to decrypt any messages from the shared secret). This would prevent us
         // from making a legitimate connection to the intended peer.
-        let our_public_key = C::PublicKey::try_from(handshake.recipient_public_key)
-            .map_err(|_| Error::InvalidChannelPublicKey)?;
-        if crypto.public_key() != our_public_key {
+        if crypto.public_key() != self.info.recipient {
             return Err(Error::HandshakeNotForUs);
         }
 
@@ -79,101 +119,65 @@ impl<C: Scheme> Handshake<C> {
         // to others (if an adversary recovered a handshake message could open a
         // connection to a peer first, peers only maintain one connection per peer).
         let current_timestamp = context.current().epoch();
-        let handshake_timestamp = Duration::from_millis(handshake.timestamp);
+        let handshake_timestamp = Duration::from_millis(self.info.timestamp);
         if handshake_timestamp + max_handshake_age < current_timestamp {
-            return Err(Error::InvalidTimestampOld(handshake.timestamp));
+            return Err(Error::InvalidTimestampOld(self.info.timestamp));
         }
         if handshake_timestamp > current_timestamp + synchrony_bound {
-            return Err(Error::InvalidTimestampFuture(handshake.timestamp));
+            return Err(Error::InvalidTimestampFuture(self.info.timestamp));
         }
-
-        // Get signature from peer
-        let signature = handshake.signature.ok_or(Error::MissingSignature)?;
-        let public_key: C::PublicKey = C::PublicKey::try_from(signature.public_key)
-            .map_err(|_| Error::InvalidPeerPublicKey)?;
-
-        // Construct signing payload (ephemeral public key + my public key + timestamp)
-        let payload_len = C::PublicKey::SERIALIZED_LEN
-            + handshake.ephemeral_public_key.len()
-            + u64::SERIALIZED_LEN;
-        let mut payload = Vec::with_capacity(payload_len);
-        payload.extend_from_slice(&our_public_key);
-        payload.extend_from_slice(&handshake.ephemeral_public_key);
-        payload.put_u64(handshake.timestamp);
 
         // Verify signature
-        let signature =
-            C::Signature::try_from(signature.signature).map_err(|_| Error::InvalidSignature)?;
-        if !C::verify(Some(namespace), &payload, &public_key, &signature) {
+        if !C::verify(
+            Some(namespace),
+            &self.info.encode(),
+            &self.signer,
+            &self.signature,
+        ) {
             return Err(Error::InvalidSignature);
         }
-        Ok(Self {
-            ephemeral_public_key,
-            peer_public_key: public_key,
-        })
+        Ok(())
     }
 }
 
-pub struct IncomingHandshake<Si: Sink, St: Stream, C: Scheme> {
-    pub sink: Si,
-    pub stream: St,
-    pub deadline: SystemTime,
-    pub ephemeral_public_key: x25519_dalek::PublicKey,
-    pub peer_public_key: C::PublicKey,
-}
+impl<C: Scheme> Codec for Signed<C> {
+    fn write(&self, writer: &mut impl Writer) {
+        self.info.write(writer);
+        self.signer.write(writer);
+        self.signature.write(writer);
+    }
 
-impl<Si: Sink, St: Stream, C: Scheme> IncomingHandshake<Si, St, C> {
-    #[allow(clippy::too_many_arguments)]
-    pub async fn verify<E: Clock + Spawner>(
-        context: &E,
-        crypto: &C,
-        namespace: &[u8],
-        max_message_size: usize,
-        synchrony_bound: Duration,
-        max_handshake_age: Duration,
-        handshake_timeout: Duration,
-        sink: Si,
-        mut stream: St,
-    ) -> Result<Self, Error> {
-        // Set handshake deadline
-        let deadline = context.current() + handshake_timeout;
-
-        // Wait for up to handshake timeout for response
-        let msg = select! {
-            _ = context.sleep_until(deadline) => {
-                return Err(Error::HandshakeTimeout);
-            },
-            result = recv_frame(&mut stream, max_message_size) => {
-                result.map_err(|_| Error::RecvFailed)?
-            },
-        };
-
-        // Verify handshake message from peer
-        let handshake = Handshake::verify(
-            context,
-            crypto,
-            namespace,
-            synchrony_bound,
-            max_handshake_age,
-            msg,
-        )?;
+    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
+        let info = Info::<C>::read(reader)?;
+        let signer = C::PublicKey::read(reader)?;
+        let signature = C::Signature::read(reader)?;
         Ok(Self {
-            sink,
-            stream,
-            deadline,
-            ephemeral_public_key: handshake.ephemeral_public_key,
-            peer_public_key: handshake.peer_public_key,
+            info,
+            signer,
+            signature,
         })
     }
+
+    fn len_encoded(&self) -> usize {
+        Self::LEN_ENCODED
+    }
+}
+
+impl<C: Scheme> SizedCodec for Signed<C> {
+    const LEN_ENCODED: usize =
+        Info::<C>::LEN_ENCODED + C::PublicKey::LEN_ENCODED + C::Signature::LEN_ENCODED;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::codec::send_frame;
+    use crate::{
+        public_key::{Config, IncomingConnection},
+        utils::codec::send_frame,
+    };
     use commonware_cryptography::{Ed25519, Scheme};
-    use commonware_runtime::{deterministic::Executor, mocks, Metrics, Runner};
-    use x25519_dalek::PublicKey;
+    use commonware_runtime::{deterministic::Executor, mocks, Metrics, Runner, Spawner};
+    use x25519::PublicKey;
 
     const TEST_NAMESPACE: &[u8] = b"test_namespace";
     const ONE_MEGABYTE: usize = 1024 * 1024;
@@ -186,67 +190,56 @@ mod tests {
             // Create participants
             let mut sender = Ed25519::from_seed(0);
             let recipient = Ed25519::from_seed(1);
-            let ephemeral_public_key = PublicKey::from([3u8; 32]);
+            let ephemeral_public_key = PublicKey::from_bytes([3u8; 32]);
 
             // Create handshake message
             let epoch_millis = context.current().epoch_millis();
-            let handshake_bytes = create_handshake(
+            let handshake = Signed::sign(
                 &mut sender,
                 TEST_NAMESPACE,
-                epoch_millis,
-                recipient.public_key(),
-                ephemeral_public_key,
-            )
-            .unwrap();
+                Info {
+                    timestamp: epoch_millis,
+                    recipient: recipient.public_key(),
+                    ephemeral_public_key,
+                },
+            );
 
             // Decode the handshake message
-            let handshake = wire::Handshake::decode(handshake_bytes.clone())
-                .expect("failed to decode handshake");
+            let handshake =
+                Signed::<Ed25519>::decode(handshake.encode()).expect("failed to decode handshake");
 
             // Verify the timestamp
             let synchrony_bound = Duration::from_secs(5);
             let max_handshake_age = Duration::from_secs(5);
-            let handshake_timestamp = Duration::from_millis(handshake.timestamp);
+            let handshake_timestamp = Duration::from_millis(handshake.info.timestamp);
             let current_timestamp = Duration::from_millis(epoch_millis);
             assert!(handshake_timestamp <= current_timestamp + synchrony_bound);
             assert!(handshake_timestamp + max_handshake_age >= current_timestamp);
-            let handshake_recipient_public_key =
-                <Ed25519 as Scheme>::PublicKey::try_from(&handshake.recipient_public_key).unwrap();
-            let handshake_signature =
-                <Ed25519 as Scheme>::Signature::try_from(&handshake.signature.unwrap().signature)
-                    .unwrap();
 
             // Verify the signature
-            assert_eq!(handshake_recipient_public_key, recipient.public_key());
-            assert_eq!(
-                handshake.ephemeral_public_key,
-                x25519::encode_public_key(ephemeral_public_key)
-            );
-            let mut payload = Vec::new();
-            payload.extend_from_slice(&handshake.recipient_public_key);
-            payload.extend_from_slice(&handshake.ephemeral_public_key);
-            payload.put_u64(handshake.timestamp);
+            assert_eq!(handshake.info.recipient, recipient.public_key());
+            assert_eq!(handshake.info.ephemeral_public_key, ephemeral_public_key,);
 
             // Verify signature
             assert!(Ed25519::verify(
                 Some(TEST_NAMESPACE),
-                &payload,
+                &handshake.info.encode(),
                 &sender.public_key(),
-                &handshake_signature,
+                &handshake.signature,
             ));
 
             // Verify using the handshake struct
-            let handshake = Handshake::verify(
-                &context,
-                &recipient,
-                TEST_NAMESPACE,
-                synchrony_bound,
-                max_handshake_age,
-                handshake_bytes,
-            )
-            .unwrap();
-            assert_eq!(handshake.peer_public_key, sender.public_key());
-            assert_eq!(handshake.ephemeral_public_key, ephemeral_public_key);
+            handshake
+                .verify(
+                    &context,
+                    &recipient,
+                    TEST_NAMESPACE,
+                    synchrony_bound,
+                    max_handshake_age,
+                )
+                .unwrap();
+            assert_eq!(handshake.signer, sender.public_key());
+            assert_eq!(handshake.info.ephemeral_public_key, ephemeral_public_key);
         });
     }
 
@@ -258,17 +251,18 @@ mod tests {
             // Create participants
             let mut sender = Ed25519::from_seed(0);
             let recipient = Ed25519::from_seed(1);
-            let ephemeral_public_key = PublicKey::from([3u8; 32]);
+            let ephemeral_public_key = PublicKey::from_bytes([3u8; 32]);
 
             // Create handshake message
-            let handshake_bytes = create_handshake(
+            let handshake = Signed::sign(
                 &mut sender,
                 TEST_NAMESPACE,
-                0, // timestamp
-                recipient.public_key(),
-                ephemeral_public_key,
-            )
-            .unwrap();
+                Info {
+                    timestamp: 0,
+                    recipient: recipient.public_key(),
+                    ephemeral_public_key,
+                },
+            );
 
             // Setup a mock sink and stream
             let (sink, _) = mocks::Channel::init();
@@ -276,29 +270,27 @@ mod tests {
 
             // Send message over stream
             context.with_label("stream_sender").spawn(|_| async move {
-                send_frame(&mut stream_sender, &handshake_bytes, ONE_MEGABYTE)
+                send_frame(&mut stream_sender, &handshake.encode(), ONE_MEGABYTE)
                     .await
                     .unwrap();
             });
 
             // Call the verify function
-            let result = IncomingHandshake::verify(
-                &context,
-                &recipient,
-                TEST_NAMESPACE,
-                ONE_MEGABYTE,
-                Duration::from_secs(5),
-                Duration::from_secs(5),
-                Duration::from_secs(5),
-                sink,
-                stream,
-            )
-            .await
-            .unwrap();
+            let config = Config {
+                crypto: recipient.clone(),
+                namespace: TEST_NAMESPACE.to_vec(),
+                max_message_size: ONE_MEGABYTE,
+                synchrony_bound: Duration::from_secs(5),
+                max_handshake_age: Duration::from_secs(5),
+                handshake_timeout: Duration::from_secs(5),
+            };
+            let result = IncomingConnection::verify(&context, config, sink, stream)
+                .await
+                .unwrap();
 
             // Assert that the result is expected
-            assert_eq!(result.peer_public_key, sender.public_key());
-            assert_eq!(result.ephemeral_public_key, ephemeral_public_key);
+            assert_eq!(result.peer(), sender.public_key());
+            assert_eq!(result.ephemeral(), ephemeral_public_key);
         });
     }
 
@@ -309,17 +301,18 @@ mod tests {
         executor.start(async move {
             // Create participants
             let mut sender = Ed25519::from_seed(0);
-            let ephemeral_public_key = PublicKey::from([3u8; 32]);
+            let ephemeral_public_key = PublicKey::from_bytes([3u8; 32]);
 
             // Create handshake message
-            let handshake_bytes = create_handshake(
+            let handshake = Signed::sign(
                 &mut sender,
                 TEST_NAMESPACE,
-                0, // timestamp
-                Ed25519::from_seed(1).public_key(),
-                ephemeral_public_key,
-            )
-            .unwrap();
+                Info {
+                    timestamp: 0,
+                    recipient: Ed25519::from_seed(1).public_key(),
+                    ephemeral_public_key,
+                },
+            );
 
             // Setup a mock sink and stream
             let (sink, _) = mocks::Channel::init();
@@ -327,24 +320,21 @@ mod tests {
 
             // Send message over stream
             context.with_label("stream_sender").spawn(|_| async move {
-                send_frame(&mut stream_sender, &handshake_bytes, ONE_MEGABYTE)
+                send_frame(&mut stream_sender, &handshake.encode(), ONE_MEGABYTE)
                     .await
                     .unwrap();
             });
 
             // Call the verify function
-            let result = IncomingHandshake::verify(
-                &context,
-                &Ed25519::from_seed(2),
-                TEST_NAMESPACE,
-                ONE_MEGABYTE,
-                Duration::from_secs(5),
-                Duration::from_secs(5),
-                Duration::from_secs(5),
-                sink,
-                stream,
-            )
-            .await;
+            let config = Config {
+                crypto: Ed25519::from_seed(2),
+                namespace: TEST_NAMESPACE.to_vec(),
+                max_message_size: ONE_MEGABYTE,
+                synchrony_bound: Duration::from_secs(5),
+                max_handshake_age: Duration::from_secs(5),
+                handshake_timeout: Duration::from_secs(5),
+            };
+            let result = IncomingConnection::verify(&context, config, sink, stream).await;
 
             // Assert that the result is an error
             assert!(matches!(result, Err(Error::HandshakeNotForUs)));
@@ -368,18 +358,15 @@ mod tests {
             });
 
             // Call the verify function
-            let result = IncomingHandshake::verify(
-                &context,
-                &Ed25519::from_seed(0),
-                TEST_NAMESPACE,
-                ONE_MEGABYTE,
-                Duration::from_secs(1),
-                Duration::from_secs(1),
-                Duration::from_secs(1),
-                sink,
-                stream,
-            )
-            .await;
+            let config = Config {
+                crypto: Ed25519::from_seed(0),
+                namespace: TEST_NAMESPACE.to_vec(),
+                max_message_size: ONE_MEGABYTE,
+                synchrony_bound: Duration::from_secs(1),
+                max_handshake_age: Duration::from_secs(1),
+                handshake_timeout: Duration::from_secs(1),
+            };
+            let result = IncomingConnection::verify(&context, config, sink, stream).await;
 
             // Assert that the result is an error
             assert!(matches!(result, Err(Error::UnableToDecode(_))));
@@ -388,138 +375,25 @@ mod tests {
 
     #[test]
     fn test_incoming_handshake_verify_timeout() {
-        // Initialize context
         let (executor, context, _) = Executor::default();
         executor.start(async move {
-            // Create participants
-            let mut sender = Ed25519::from_seed(0);
-            let recipient = Ed25519::from_seed(1);
-            let ephemeral_public_key = PublicKey::from([3u8; 32]);
-
             // Setup a mock sink and stream
             let (sink, _) = mocks::Channel::init();
-            let (mut stream_sender, stream) = mocks::Channel::init();
+            let (_, stream) = mocks::Channel::init();
 
-            // Accept connections but do nothing
-            context.with_label("stream_sender").spawn({
-                let recipient = recipient.clone();
-                move |context| async move {
-                    context.sleep(Duration::from_secs(10)).await;
-                    let timestamp = context.current().epoch_millis();
-                    let handshake_bytes = create_handshake(
-                        &mut sender,
-                        TEST_NAMESPACE,
-                        timestamp,
-                        recipient.public_key(),
-                        ephemeral_public_key,
-                    )
-                    .unwrap();
-                    send_frame(&mut stream_sender, &handshake_bytes, ONE_MEGABYTE)
-                        .await
-                        .unwrap();
-                }
-            });
-
-            // Call the verify function
-            let result = IncomingHandshake::verify(
-                &context,
-                &recipient,
-                TEST_NAMESPACE,
-                ONE_MEGABYTE,
-                Duration::from_secs(1),
-                Duration::from_secs(1),
-                Duration::from_secs(1),
-                sink,
-                stream,
-            )
-            .await;
+            // Call the verify function for one peer, but never send the handshake from the other
+            let config = Config {
+                crypto: Ed25519::from_seed(1),
+                namespace: TEST_NAMESPACE.to_vec(),
+                max_message_size: ONE_MEGABYTE,
+                synchrony_bound: Duration::from_secs(1),
+                max_handshake_age: Duration::from_secs(1),
+                handshake_timeout: Duration::from_secs(1),
+            };
+            let result = IncomingConnection::verify(&context, config, sink, stream).await;
 
             // Assert that the result is an Err of type Error::HandshakeTimeout
             assert!(matches!(result, Err(Error::HandshakeTimeout)));
-        });
-    }
-
-    #[test]
-    fn test_handshake_verify_invalid_public_key() {
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
-            let mut crypto = Ed25519::from_seed(0);
-            let recipient_public_key = crypto.public_key();
-            let ephemeral_public_key = x25519_dalek::PublicKey::from([0u8; 32]);
-
-            let handshake = create_handshake(
-                &mut crypto,
-                TEST_NAMESPACE,
-                0, // timestamp
-                recipient_public_key,
-                ephemeral_public_key,
-            )
-            .unwrap();
-
-            // Tamper with the handshake to make the signature invalid
-            let mut handshake =
-                wire::Handshake::decode(handshake).expect("failed to decode handshake");
-            let (public_key, signature) = match handshake.signature {
-                Some(wire::Signature {
-                    public_key,
-                    signature,
-                }) => (public_key, signature),
-                _ => panic!("signature missing"),
-            };
-            let mut public_key = public_key.to_vec();
-            public_key.truncate(28);
-            handshake.signature = Some(wire::Signature {
-                public_key,
-                signature,
-            });
-
-            // Verify the handshake
-            let result = Handshake::verify(
-                &context,
-                &crypto,
-                TEST_NAMESPACE,
-                Duration::from_secs(5),
-                Duration::from_secs(5),
-                handshake.encode_to_vec().into(),
-            );
-            assert!(matches!(result, Err(Error::InvalidPeerPublicKey)));
-        });
-    }
-
-    #[test]
-    fn test_handshake_verify_invalid_ephemeral_public_key() {
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
-            let mut crypto = Ed25519::from_seed(0);
-            let recipient_public_key = crypto.public_key();
-            let ephemeral_public_key = x25519_dalek::PublicKey::from([0u8; 32]);
-
-            let handshake = create_handshake(
-                &mut crypto,
-                TEST_NAMESPACE,
-                0, // timestamp
-                recipient_public_key,
-                ephemeral_public_key,
-            )
-            .unwrap();
-
-            // Tamper with the handshake to make the signature invalid
-            let mut handshake =
-                wire::Handshake::decode(handshake).expect("failed to decode handshake");
-            let mut ephemeral_public_key = handshake.ephemeral_public_key.to_vec();
-            ephemeral_public_key.truncate(28);
-            handshake.ephemeral_public_key = ephemeral_public_key;
-
-            // Verify the handshake
-            let result = Handshake::verify(
-                &context,
-                &crypto,
-                TEST_NAMESPACE,
-                Duration::from_secs(5),
-                Duration::from_secs(5),
-                handshake.encode_to_vec().into(),
-            );
-            assert!(matches!(result, Err(Error::InvalidEphemeralPublicKey)));
         });
     }
 
@@ -528,43 +402,31 @@ mod tests {
         let (executor, context, _) = Executor::default();
         executor.start(async move {
             let mut crypto = Ed25519::from_seed(0);
-            let recipient_public_key = crypto.public_key();
-            let ephemeral_public_key = x25519_dalek::PublicKey::from([0u8; 32]);
+            let recipient = crypto.public_key();
+            let ephemeral_public_key = x25519::PublicKey::from_bytes([0u8; 32]);
 
-            let handshake = create_handshake(
+            let handshake = Signed::sign(
                 &mut crypto,
                 TEST_NAMESPACE,
-                0, // timestamp
-                recipient_public_key,
-                ephemeral_public_key,
-            )
-            .unwrap();
+                Info {
+                    timestamp: 0,
+                    recipient,
+                    ephemeral_public_key,
+                },
+            );
 
             // Tamper with the handshake to make the signature invalid
             let mut handshake =
-                wire::Handshake::decode(handshake).expect("failed to decode handshake");
-            let (public_key, signature) = match handshake.signature {
-                Some(wire::Signature {
-                    public_key,
-                    signature,
-                }) => (public_key, signature),
-                _ => panic!("signature missing"),
-            };
-            let mut signature = signature.to_vec();
-            signature[0] ^= 0xFF;
-            handshake.signature = Some(wire::Signature {
-                public_key,
-                signature,
-            });
+                Signed::decode(handshake.encode()).expect("failed to decode handshake");
+            handshake.info.timestamp += 1;
 
             // Verify the handshake
-            let result = Handshake::verify(
+            let result = handshake.verify(
                 &context,
                 &crypto,
                 TEST_NAMESPACE,
                 Duration::from_secs(5),
                 Duration::from_secs(5),
-                handshake.encode_to_vec().into(),
             );
             assert!(matches!(result, Err(Error::InvalidSignature)));
         });
@@ -575,48 +437,48 @@ mod tests {
         let (executor, context, _) = Executor::default();
         executor.start(async move {
             let mut crypto = Ed25519::from_seed(0);
-            let recipient_public_key = crypto.public_key();
-            let ephemeral_public_key = x25519_dalek::PublicKey::from([0u8; 32]);
+            let recipient = crypto.public_key();
+            let ephemeral_public_key = x25519::PublicKey::from_bytes([0u8; 32]);
 
             let timeout_duration = Duration::from_secs(5);
             let synchrony_bound = Duration::from_secs(0);
 
             // Create a handshake, setting the timestamp to 0.
-            let handshake = create_handshake(
+            let handshake = Signed::sign(
                 &mut crypto,
                 TEST_NAMESPACE,
-                0, // timestamp
-                recipient_public_key,
-                ephemeral_public_key,
-            )
-            .unwrap();
+                Info {
+                    timestamp: 0,
+                    recipient,
+                    ephemeral_public_key,
+                },
+            );
 
             // Time starts at 0 in deterministic executor.
             // Sleep for the exact timeout duration.
             context.sleep(timeout_duration).await;
 
             // Verify the handshake, it should be fine still.
-            Handshake::verify(
-                &context,
-                &crypto,
-                TEST_NAMESPACE,
-                synchrony_bound,
-                timeout_duration,
-                handshake.clone(),
-            )
-            .unwrap(); // no error
+            handshake
+                .verify(
+                    &context,
+                    &crypto,
+                    TEST_NAMESPACE,
+                    synchrony_bound,
+                    timeout_duration,
+                )
+                .unwrap();
 
             // Timeout by waiting 1 more millisecond.
             context.sleep(Duration::from_millis(1)).await;
 
             // Verify that a timeout error is returned.
-            let result = Handshake::verify(
+            let result = handshake.verify(
                 &context,
                 &crypto,
                 TEST_NAMESPACE,
                 synchrony_bound,
                 timeout_duration,
-                handshake,
             );
             assert!(matches!(result, Err(Error::InvalidTimestampOld(t)) if t == 0));
         });
@@ -627,49 +489,51 @@ mod tests {
         let (executor, context, _) = Executor::default();
         executor.start(async move {
             let mut crypto = Ed25519::from_seed(0);
-            let recipient_public_key = crypto.public_key();
-            let ephemeral_public_key = x25519_dalek::PublicKey::from([0u8; 32]);
+            let recipient = crypto.public_key();
+            let ephemeral_public_key = x25519::PublicKey::from_bytes([0u8; 32]);
 
             let timeout_duration = Duration::from_secs(0);
             const SYNCHRONY_BOUND_MILLIS: u64 = 5_000;
             let synchrony_bound = Duration::from_millis(SYNCHRONY_BOUND_MILLIS);
 
             // Create a handshake at the synchrony bound.
-            let handshake_ok = create_handshake(
+            let handshake_ok = Signed::sign(
                 &mut crypto,
                 TEST_NAMESPACE,
-                SYNCHRONY_BOUND_MILLIS,
-                recipient_public_key.clone(),
-                ephemeral_public_key,
-            ).unwrap();
+                Info{
+                    timestamp: SYNCHRONY_BOUND_MILLIS,
+                    recipient: recipient.clone(),
+                    ephemeral_public_key,
+                },
+            );
 
             // Create a handshake 1ms too far into the future.
-            let handshake_late = create_handshake(
+            let handshake_late = Signed::sign(
                 &mut crypto,
                 TEST_NAMESPACE,
-                SYNCHRONY_BOUND_MILLIS + 1,
-                recipient_public_key,
-                ephemeral_public_key,
-            ).unwrap();
+                Info{
+                    timestamp:SYNCHRONY_BOUND_MILLIS + 1,
+                    recipient,
+                    ephemeral_public_key,
+                },
+            );
 
             // Verify the okay handshake.
-            Handshake::verify(
+            handshake_ok.verify(
                 &context,
                 &crypto,
                 TEST_NAMESPACE,
                 synchrony_bound,
                 timeout_duration,
-                handshake_ok,
             ).unwrap(); // no error
 
             // Handshake too far into the future fails.
-            let result = Handshake::verify(
+            let result = handshake_late.verify(
                 &context,
                 &crypto,
                 TEST_NAMESPACE,
                 synchrony_bound,
                 timeout_duration,
-                handshake_late,
             );
             assert!(matches!(result, Err(Error::InvalidTimestampFuture(t)) if t == SYNCHRONY_BOUND_MILLIS + 1));
         });
