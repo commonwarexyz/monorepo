@@ -8,7 +8,7 @@ use std::fmt::{Debug, Display};
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 
-const CURVE_NAME: &str = "Ed25519";
+const CURVE_NAME: &str = "ed25519";
 const PRIVATE_KEY_LENGTH: usize = 32;
 const PUBLIC_KEY_LENGTH: usize = 32;
 const SIGNATURE_LENGTH: usize = 64;

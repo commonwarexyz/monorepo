@@ -33,7 +33,7 @@ use std::{
     ops::Deref,
 };
 
-const CURVE_NAME: &str = "BLS12-381";
+const CURVE_NAME: &str = "bls12381";
 
 /// BLS12-381 implementation of the `Scheme` trait.
 ///

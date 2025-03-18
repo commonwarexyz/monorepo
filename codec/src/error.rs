@@ -15,10 +15,8 @@ pub enum Error {
     InvalidVarint,
     #[error("Invalid Bool")]
     InvalidBool,
-
     #[error("Invalid. Context({0}), Message({1})")]
-    Invalid(&'static str, &'static str), // context, message
-
-    #[error("Invalid: Err({1})")]
+    Invalid(&'static str, &'static str),
+    #[error("Invalid. Context({0}), Error({1})")]
     Wrapped(&'static str, Box<dyn std::error::Error + Send + Sync>),
 }
