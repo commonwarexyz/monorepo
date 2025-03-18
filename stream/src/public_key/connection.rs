@@ -124,10 +124,11 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         let secret = x25519::new(&mut context);
 
         // Send handshake
+        let timestamp = context.current().epoch_millis();
         let msg = handshake::Signed::sign(
             &mut config.crypto,
             &config.namespace,
-            handshake::Info::<C>::new(peer.clone(), &secret, context.current().epoch_millis()),
+            handshake::Info::<C>::new(peer.clone(), &secret, timestamp),
         )
         .encode();
 
@@ -202,14 +203,11 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         let secret = x25519::new(&mut context);
 
         // Send handshake
+        let timestamp = context.current().epoch_millis();
         let msg = handshake::Signed::sign(
             &mut crypto,
             &namespace,
-            handshake::Info::<C>::new(
-                incoming.peer_public_key,
-                &secret,
-                context.current().epoch_millis(),
-            ),
+            handshake::Info::<C>::new(incoming.peer_public_key, &secret, timestamp),
         )
         .encode();
 

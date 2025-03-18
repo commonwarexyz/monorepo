@@ -193,12 +193,12 @@ mod tests {
             let ephemeral_public_key = PublicKey::from_bytes([3u8; 32]);
 
             // Create handshake message
-            let epoch_millis = context.current().epoch_millis();
+            let timestamp = context.current().epoch_millis();
             let handshake = Signed::sign(
                 &mut sender,
                 TEST_NAMESPACE,
                 Info {
-                    timestamp: epoch_millis,
+                    timestamp,
                     recipient: recipient.public_key(),
                     ephemeral_public_key,
                 },
@@ -212,7 +212,7 @@ mod tests {
             let synchrony_bound = Duration::from_secs(5);
             let max_handshake_age = Duration::from_secs(5);
             let handshake_timestamp = Duration::from_millis(handshake.info.timestamp);
-            let current_timestamp = Duration::from_millis(epoch_millis);
+            let current_timestamp = Duration::from_millis(timestamp);
             assert!(handshake_timestamp <= current_timestamp + synchrony_bound);
             assert!(handshake_timestamp + max_handshake_age >= current_timestamp);
 
