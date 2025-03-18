@@ -47,7 +47,7 @@ Description=Prometheus Monitoring Service
 After=network.target
 
 [Service]
-ExecStart=/opt/prometheus/prometheus --config.file=/opt/prometheus/prometheus.yml --storage.tsdb.path=/opt/prometheus/data
+ExecStart=/opt/prometheus/prometheus --config.file=/opt/prometheus/prometheus.yml --storage.tsdb.path=/opt/prometheus/data --storage.tsdb.retention.time=7d
 TimeoutStopSec=60
 Restart=always
 User=ubuntu
