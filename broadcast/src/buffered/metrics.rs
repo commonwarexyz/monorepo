@@ -21,7 +21,7 @@ impl SequencerLabel {
     }
 }
 
-/// Metrics for the broadcast/linked module.
+/// Metrics for the [`Engine`](super::Engine)
 #[derive(Default)]
 pub struct Metrics {
     /// Number of broadcasts received by peer

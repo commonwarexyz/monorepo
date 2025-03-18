@@ -1,11 +1,10 @@
-//! Engine for the broadcast module.
+//! Engine for the module.
 //!
 //! It is responsible for:
-//! - Broadcasting nodes (if a sequencer)
-//! - Signing chunks (if a validator)
-//! - Tracking the latest chunk in each sequencer’s chain
-//! - Recovering threshold signatures from partial signatures for each chunk
-//! - Notifying other actors of new chunks and threshold signatures
+//! - Broadcasting messages to the network
+//! - Receiving messages from the network
+//! - Storing messages in the cache
+//! - Responding to requests from the application
 
 use super::{metrics, Config, Mailbox, Message};
 use crate::buffered::metrics::SequencerLabel;
@@ -29,7 +28,7 @@ use std::{
 };
 use tracing::{debug, error, trace, warn};
 
-/// Instance of the `linked` broadcast engine.
+/// Instance of the engine
 pub struct Engine<
     E: Clock + Spawner + Metrics,
     P: Array,
@@ -158,7 +157,7 @@ impl<
                     let (peer, msg) = match msg {
                         Ok(r) => r,
                         Err(err) => {
-                            warn!(?err, "receiver failed");
+                            error!(?err, "receiver failed");
                             break;
                         }
                     };
@@ -217,7 +216,7 @@ impl<
     /// Handles a blob that was received from a peer.
     async fn handle_network(&mut self, peer: P, blob: B) {
         if !self.insert_blob(peer.clone(), blob) {
-            warn!(?peer, "blob already stored");
+            debug!(?peer, "blob already stored");
             self.metrics.receive.inc(Status::Dropped);
             return;
         }
