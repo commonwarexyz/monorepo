@@ -9,10 +9,13 @@ pub const PROMTAIL_VERSION: &str = "3.4.2";
 /// Version of Loki to download and install
 pub const LOKI_VERSION: &str = "3.4.2";
 
+/// Version of Pyroscope to download and install
+pub const PYROSCOPE_VERSION: &str = "1.12.0";
+
 /// Version of Grafana to download and install
 pub const GRAFANA_VERSION: &str = "11.5.2";
 
-/// YAML configuration for Grafana datasources (Prometheus and Loki)
+/// YAML configuration for Grafana datasources (Prometheus, Loki, and Pyroscope)
 pub const DATASOURCES_YML: &str = r#"
 apiVersion: 1
 datasources:
@@ -24,6 +27,11 @@ datasources:
   - name: Loki
     type: loki
     url: http://localhost:3100
+    access: proxy
+    isDefault: false
+  - name: Pyroscope
+    type: grafana-pyroscope-datasource
+    url: http://localhost:4040
     access: proxy
     isDefault: false
 "#;
@@ -91,25 +99,6 @@ LimitNOFILE=infinity
 WantedBy=multi-user.target
 "#;
 
-/// Systemd service file content for the deployed binary
-pub const BINARY_SERVICE: &str = r#"
-[Unit]
-Description=Deployed Binary Service
-After=network.target
-
-[Service]
-ExecStart=/home/ubuntu/binary --peers=/home/ubuntu/peers.yaml --config=/home/ubuntu/config.conf
-TimeoutStopSec=60
-Restart=always
-User=ubuntu
-LimitNOFILE=infinity
-StandardOutput=append:/var/log/binary.log
-StandardError=append:/var/log/binary.log
-
-[Install]
-WantedBy=multi-user.target
-"#;
-
 /// YAML configuration for Loki
 pub const LOKI_CONFIG: &str = r#"
 auth_enabled: false
@@ -147,11 +136,52 @@ ingester:
     dir: /loki/wal
 "#;
 
+/// Systemd service file content for Pyroscope
+pub const PYROSCOPE_SERVICE: &str = r#"
+[Unit]
+Description=Pyroscope Profiling Service
+After=network.target
+
+[Service]
+ExecStart=/opt/pyroscope/pyroscope server --config.file=/etc/pyroscope/pyroscope.yml --storage.data-path=/var/lib/pyroscope
+TimeoutStopSec=60
+Restart=always
+User=ubuntu
+LimitNOFILE=infinity
+
+[Install]
+WantedBy=multi-user.target
+"#;
+
+/// Generates Pyroscope configuration with scrape targets for binary instances
+pub fn generate_pyroscope_config(binary_instances: &[(&str, &str, &str)]) -> String {
+    let mut config = String::from(
+        r#"
+scrape_configs:
+- job_name: 'pyroscope'
+  static_configs:
+"#,
+    );
+    for (name, private_ip, region) in binary_instances {
+        config.push_str(&format!(
+            r#"
+    - targets: ['{}:9091']  # Adjust port if necessary
+      labels:
+        instance: '{}'
+        region: '{}'
+"#,
+            private_ip, name, region
+        ));
+    }
+    config
+}
+
 /// Command to install monitoring services (Prometheus, Loki, Grafana) on the monitoring instance
 pub fn install_monitoring_cmd(
     prometheus_version: &str,
     grafana_version: &str,
     loki_version: &str,
+    pyroscope_version: &str,
 ) -> String {
     let prometheus_url = format!(
     "https://github.com/prometheus/prometheus/releases/download/v{}/prometheus-{}.linux-arm64.tar.gz",
@@ -165,6 +195,10 @@ pub fn install_monitoring_cmd(
         "https://github.com/grafana/loki/releases/download/v{}/loki-linux-arm64.zip",
         loki_version
     );
+    let pyroscope_url = format!(
+      "https://github.com/grafana/pyroscope/releases/download/v{}/pyroscope_{}_linux_arm64.tar.gz",
+      pyroscope_version, pyroscope_version
+  );
     format!(
         r#"
 sudo apt-get update -y
@@ -188,6 +222,12 @@ for i in {{1..5}}; do
   sleep 10
 done
 
+# Download Pyroscope with retries
+for i in {{1..5}}; do
+  wget -O /home/ubuntu/pyroscope.tar.gz {} && break
+  sleep 10
+done
+
 # Install Prometheus
 sudo mkdir -p /opt/prometheus /opt/prometheus/data
 sudo chown -R ubuntu:ubuntu /opt/prometheus
@@ -206,9 +246,19 @@ sudo chown -R ubuntu:ubuntu /loki
 unzip -o /home/ubuntu/loki.zip -d /home/ubuntu
 sudo mv /home/ubuntu/loki-linux-arm64 /opt/loki/loki
 
+# Install Pyroscope
+sudo mkdir -p /opt/pyroscope /var/lib/pyroscope
+sudo chown -R ubuntu:ubuntu /opt/pyroscope /var/lib/pyroscope
+tar xvfz /home/ubuntu/pyroscope.tar.gz -C /home/ubuntu
+sudo mv /home/ubuntu/pyroscope /opt/pyroscope/pyroscope
+sudo chmod +x /opt/pyroscope/pyroscope
+
 # Configure Grafana
 sudo sed -i '/^\[auth.anonymous\]$/,/^\[/ {{ /^; *enabled = /s/.*/enabled = true/; /^; *org_role = /s/.*/org_role = Admin/ }}' /etc/grafana/grafana.ini
 sudo mkdir -p /etc/grafana/provisioning/datasources /etc/grafana/provisioning/dashboards /var/lib/grafana/dashboards
+
+# Install Pyroscope data source plugin
+sudo grafana-cli plugins install grafana-pyroscope-datasource
 
 # Move configuration files (assuming they are uploaded via SCP)
 sudo mv /home/ubuntu/prometheus.yml /opt/prometheus/prometheus.yml
@@ -218,10 +268,14 @@ sudo mv /home/ubuntu/dashboard.json /var/lib/grafana/dashboards/dashboard.json
 sudo mkdir -p /etc/loki
 sudo mv /home/ubuntu/loki.yml /etc/loki/loki.yml
 sudo chown root:root /etc/loki/loki.yml
+sudo mkdir -p /etc/pyroscope
+sudo mv /home/ubuntu/pyroscope.yml /etc/pyroscope/pyroscope.yml
+sudo chown root:root /etc/pyroscope/pyroscope.yml
 
 # Move service files
 sudo mv /home/ubuntu/prometheus.service /etc/systemd/system/prometheus.service
 sudo mv /home/ubuntu/loki.service /etc/systemd/system/loki.service
+sudo mv /home/ubuntu/pyroscope.service /etc/systemd/system/pyroscope.service
 
 # Set ownership
 sudo chown -R grafana:grafana /etc/grafana /var/lib/grafana
@@ -232,12 +286,15 @@ sudo systemctl start prometheus
 sudo systemctl enable prometheus
 sudo systemctl start loki
 sudo systemctl enable loki
-sudo systemctl start grafana-server
+sudo systemctl start pyroscope
+sudo systemctl enable pyroscope
+sudo systemctl restart grafana-server
 sudo systemctl enable grafana-server
 "#,
         prometheus_url,
         grafana_url,
         loki_url,
+        pyroscope_url,
         prometheus_version,
         prometheus_version,
         prometheus_version
@@ -363,3 +420,22 @@ pub const LOGROTATE_CONF: &str = r#"
 
 /// Configuration for BBR sysctl settings
 pub const BBR_CONF: &str = "net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr\n";
+
+/// Systemd service file content for the deployed binary
+pub const BINARY_SERVICE: &str = r#"
+[Unit]
+Description=Deployed Binary Service
+After=network.target
+
+[Service]
+ExecStart=/home/ubuntu/binary --peers=/home/ubuntu/peers.yaml --config=/home/ubuntu/config.conf
+TimeoutStopSec=60
+Restart=always
+User=ubuntu
+LimitNOFILE=infinity
+StandardOutput=append:/var/log/binary.log
+StandardError=append:/var/log/binary.log
+
+[Install]
+WantedBy=multi-user.target
+"#;

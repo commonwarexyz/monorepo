@@ -412,6 +412,8 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     std::fs::write(&promtail_service_path, PROMTAIL_SERVICE)?;
     let loki_service_path = temp_dir.join("loki.service");
     std::fs::write(&loki_service_path, LOKI_SERVICE)?;
+    let pyroscope_service_path = temp_dir.join("pyroscope.service");
+    std::fs::write(&pyroscope_service_path, PYROSCOPE_SERVICE)?;
     let binary_service_path = temp_dir.join("binary.service");
     std::fs::write(&binary_service_path, BINARY_SERVICE)?;
 
@@ -445,6 +447,9 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     std::fs::write(&all_yaml_path, ALL_YML)?;
     let loki_config_path = temp_dir.join("loki.yml");
     std::fs::write(&loki_config_path, LOKI_CONFIG)?;
+    let pyroscope_config = generate_pyroscope_config(&instances);
+    let pyroscope_config_path = temp_dir.join("pyroscope.yml");
+    std::fs::write(&pyroscope_config_path, pyroscope_config)?;
     scp_file(
         private_key,
         prom_path.to_str().unwrap(),
@@ -494,15 +499,35 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         "/home/ubuntu/loki.service",
     )
     .await?;
+    scp_file(
+        private_key,
+        pyroscope_config_path.to_str().unwrap(),
+        &monitoring_ip,
+        "/home/ubuntu/pyroscope.yml",
+    )
+    .await?;
+    scp_file(
+        private_key,
+        pyroscope_service_path.to_str().unwrap(),
+        &monitoring_ip,
+        "/home/ubuntu/pyroscope.service",
+    )
+    .await?;
     enable_bbr(private_key, &monitoring_ip, bbr_conf_path.to_str().unwrap()).await?;
     ssh_execute(
         private_key,
         &monitoring_ip,
-        &install_monitoring_cmd(PROMETHEUS_VERSION, GRAFANA_VERSION, LOKI_VERSION),
+        &install_monitoring_cmd(
+            PROMETHEUS_VERSION,
+            GRAFANA_VERSION,
+            LOKI_VERSION,
+            PYROSCOPE_VERSION,
+        ),
     )
     .await?;
     poll_service_active(private_key, &monitoring_ip, "prometheus").await?;
     poll_service_active(private_key, &monitoring_ip, "loki").await?;
+    poll_service_active(private_key, &monitoring_ip, "pyroscope").await?;
     poll_service_active(private_key, &monitoring_ip, "grafana-server").await?;
     info!("configured monitoring instance");
 
