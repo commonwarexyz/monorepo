@@ -4,7 +4,7 @@ use commonware_cryptography::{
     ed25519::{PrivateKey, PublicKey},
     Ed25519, Scheme,
 };
-use commonware_deployer::ec2::Peers;
+use commonware_deployer::ec2::{Peers, METRICS_PORT, PROFILES_PORT};
 use commonware_flood::Config;
 use commonware_p2p::{authenticated, Receiver, Recipients, Sender};
 use commonware_runtime::{tokio, Clock, Metrics, Network, Runner, Spawner};
@@ -12,6 +12,8 @@ use commonware_utils::{from_hex_formatted, union};
 use futures::future::try_join_all;
 use governor::Quota;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
+use pyroscope::PyroscopeAgent;
+use pyroscope_pprofrs::{pprof_backend, PprofConfig};
 use rand::{rngs::StdRng, Rng, RngCore, SeedableRng};
 use std::{
     collections::HashMap,
@@ -26,7 +28,6 @@ use tracing::{error, info, Level};
 
 const SYSTEM_METRICS_REFRESH: Duration = Duration::from_secs(5);
 const FLOOD_NAMESPACE: &[u8] = b"_COMMONWARE_FLOOD";
-const METRICS_PORT: u16 = 9090;
 
 fn main() {
     // Parse arguments
@@ -75,6 +76,16 @@ fn main() {
         message_size = config.message_size,
         "loaded config"
     );
+
+    // Create profiler
+    let profiler = PyroscopeAgent::builder(
+        format!("http://0.0.0.0:{}", PROFILES_PORT),
+        public_key.to_string(),
+    )
+    .backend(pprof_backend(PprofConfig::new().sample_rate(100)))
+    .build()
+    .expect("Could not create Pyroscope agent");
+    let profiler = profiler.start().expect("Could not start Pyroscope agent");
 
     // Configure peers and bootstrappers
     let peer_keys = peers.keys().cloned().collect::<Vec<_>>();
@@ -243,5 +254,9 @@ fn main() {
         {
             error!(?e, "task failed");
         }
+
+        // Stop profiler
+        let profiler = profiler.stop().expect("Could not stop Pyroscope agent");
+        profiler.shutdown();
     });
 }
