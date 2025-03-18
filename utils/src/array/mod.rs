@@ -56,7 +56,7 @@ pub trait Array:
     type Error: StdError + Send + Sync + 'static;
 
     /// Attempts to read an array from the provided buffer.
-    fn read_from<B: Buf>(buf: &mut B) -> Result<Self, Error<<Self as Array>::Error>> {
+    fn read_from(buf: &mut impl Buf) -> Result<Self, Error<<Self as Array>::Error>> {
         let len = Self::SERIALIZED_LEN;
         if buf.remaining() < len {
             return Err(Error::InsufficientBytes);

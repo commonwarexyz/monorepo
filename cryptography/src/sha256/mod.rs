@@ -98,7 +98,7 @@ impl Codec for Digest {
     }
 
     fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
-        <[u8; DIGEST_LENGTH]>::read(reader).map(Self)
+        Self::read_from(reader).map_err(|err| CodecError::Wrapped("Digest", err.into()))
     }
 
     fn len_encoded(&self) -> usize {

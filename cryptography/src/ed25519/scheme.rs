@@ -125,9 +125,7 @@ impl Codec for PrivateKey {
     }
 
     fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
-        let raw = <[u8; PRIVATE_KEY_LENGTH]>::read(reader)?;
-        let key = ed25519_consensus::SigningKey::from(raw);
-        Ok(Self { raw, key })
+        Self::read_from(reader).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
     }
 
     fn len_encoded(&self) -> usize {
@@ -243,10 +241,7 @@ impl Codec for PublicKey {
     }
 
     fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
-        let raw = <[u8; PUBLIC_KEY_LENGTH]>::read(reader)?;
-        let key = ed25519_consensus::VerificationKey::try_from(raw)
-            .map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))?;
-        Ok(Self { raw, key })
+        Self::read_from(reader).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
     }
 
     fn len_encoded(&self) -> usize {
@@ -336,9 +331,7 @@ impl Codec for Signature {
     }
 
     fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
-        let raw = <[u8; SIGNATURE_LENGTH]>::read(reader)?;
-        let signature = ed25519_consensus::Signature::from(raw);
-        Ok(Self { raw, signature })
+        Self::read_from(reader).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
     }
 
     fn len_encoded(&self) -> usize {

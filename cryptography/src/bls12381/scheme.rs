@@ -100,10 +100,7 @@ impl Codec for PrivateKey {
     }
 
     fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
-        let raw = <[u8; group::PRIVATE_KEY_LENGTH]>::read(reader)?;
-        let key = group::Private::deserialize(&raw)
-            .ok_or(CodecError::Invalid(CURVE_NAME, "Invalid private key"))?;
-        Ok(Self { raw, key })
+        Self::read_from(reader).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
     }
 
     fn len_encoded(&self) -> usize {
@@ -211,10 +208,7 @@ impl Codec for PublicKey {
     }
 
     fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
-        let raw = <[u8; group::PUBLIC_KEY_LENGTH]>::read(reader)?;
-        let key = group::Public::deserialize(&raw)
-            .ok_or(CodecError::Invalid(CURVE_NAME, "Invalid public key"))?;
-        Ok(Self { raw, key })
+        Self::read_from(reader).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
     }
 
     fn len_encoded(&self) -> usize {
@@ -322,10 +316,7 @@ impl Codec for Signature {
     }
 
     fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
-        let raw = <[u8; group::SIGNATURE_LENGTH]>::read(reader)?;
-        let signature = group::Signature::deserialize(&raw)
-            .ok_or(CodecError::Invalid(CURVE_NAME, "Invalid signature"))?;
-        Ok(Self { raw, signature })
+        Self::read_from(reader).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
     }
 
     fn len_encoded(&self) -> usize {
