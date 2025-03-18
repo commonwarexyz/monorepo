@@ -6,8 +6,6 @@
 //! expect breaking changes and occasional instability.
 
 use bytes::Bytes;
-use commonware_cryptography::Digest;
-use commonware_utils::Array;
 
 pub mod linked;
 pub mod simplex;
@@ -26,6 +24,8 @@ pub type Proof = Bytes;
 
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
+        use commonware_utils::Array;
+        use commonware_cryptography::Digest;
         use futures::channel::oneshot;
         use std::future::Future;
 
@@ -173,23 +173,6 @@ cfg_if::cfg_if! {
             /// Returns share to sign with at a given index. After resharing, the share
             /// may change (and old shares may be deleted).
             fn share(&self, index: Self::Index) -> Option<&Self::Share>;
-        }
-
-
-        /// Coordinator is the interface responsible for managing the active set of sequencers and signers.
-        ///
-        /// ## Synchronization
-        ///
-        /// The same considerations for `ThresholdSupervisor` apply here.
-        pub trait Coordinator: ThresholdSupervisor {
-            /// Returns the current index of the coordinator.
-            fn index(&self) -> Self::Index;
-
-            /// Get the **sorted** sequencers for the given `Index`.
-            fn sequencers(&self, index: Self::Index) -> Option<&Vec<Self::PublicKey>>;
-
-            /// Returns the index of the sequencer (in the list of sorted sequencers) if the candidate is a sequencer at the given `Index`.
-            fn is_sequencer(&self, index: Self::Index, candidate: &Self::PublicKey) -> Option<u32>;
         }
     }
 }

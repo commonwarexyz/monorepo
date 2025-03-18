@@ -1,11 +1,14 @@
 use super::{parsed, Epoch};
-use commonware_cryptography::bls12381::primitives::{group, ops, poly::PartialSignature};
+use commonware_cryptography::{
+    bls12381::primitives::{group, ops, poly::PartialSignature},
+    Digest,
+};
 use commonware_utils::Array;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// A struct representing a set of partial signatures for a payload digest.
 #[derive(Default)]
-struct Partials<D: Array> {
+struct Partials<D: Digest> {
     // The set of share indices that have signed the payload.
     pub shares: HashSet<u32>,
 
@@ -16,12 +19,12 @@ struct Partials<D: Array> {
 
 /// Evidence for a chunk.
 /// This is either a set of partial signatures or a threshold signature.
-enum Evidence<D: Array> {
+enum Evidence<D: Digest> {
     Partials(Partials<D>),
     Threshold(group::Signature),
 }
 
-impl<D: Array> Default for Evidence<D> {
+impl<D: Digest> Default for Evidence<D> {
     fn default() -> Self {
         Self::Partials(Partials {
             shares: HashSet::new(),
@@ -32,7 +35,7 @@ impl<D: Array> Default for Evidence<D> {
 
 /// Manages acknowledgements for chunks.
 #[derive(Default)]
-pub struct AckManager<D: Array, P: Array> {
+pub struct AckManager<D: Digest, P: Array> {
     // Acknowledgements for digests.
     //
     // Map from Sequencer => Height => Epoch => Evidence
@@ -45,7 +48,7 @@ pub struct AckManager<D: Array, P: Array> {
     acks: HashMap<P, BTreeMap<u64, BTreeMap<Epoch, Evidence<D>>>>,
 }
 
-impl<D: Array, P: Array> AckManager<D, P> {
+impl<D: Digest, P: Array> AckManager<D, P> {
     /// Creates a new `AckManager`.
     pub fn new() -> Self {
         Self {
@@ -70,12 +73,12 @@ impl<D: Array, P: Array> AckManager<D, P> {
             Evidence::Threshold(_) => None,
             Evidence::Partials(p) => {
                 if !p.shares.insert(ack.partial.index) {
-                    // Signer already existed
+                    // Validator already signed
                     return None;
                 }
 
                 // Add the partial
-                let partials = p.sigs.entry(ack.chunk.payload.clone()).or_default();
+                let partials = p.sigs.entry(ack.chunk.payload).or_default();
                 partials.push(ack.partial.clone());
 
                 // Return early if no quorum

@@ -1,35 +1,31 @@
-use crate::{
-    linked::{Context, Epoch},
-    Automaton, Committer, Coordinator, Relay,
-};
-use commonware_cryptography::{
-    bls12381::primitives::{group, poly},
-    Scheme,
-};
-use commonware_utils::Array;
+use super::{Context, Epoch, Epocher};
+use crate::{Automaton, Committer, Relay, Supervisor, ThresholdSupervisor};
+use commonware_cryptography::{Digest, Scheme};
 use std::time::Duration;
 
 /// Configuration for the [`Engine`](super::Engine).
 pub struct Config<
     C: Scheme,
-    D: Array,
+    D: Digest,
     A: Automaton<Context = Context<C::PublicKey>, Digest = D>,
     R: Relay<Digest = D>,
     Z: Committer<Digest = D>,
-    S: Coordinator<
-        Index = Epoch,
-        Seed = group::Signature,
-        Share = group::Share,
-        Identity = poly::Public,
-        PublicKey = C::PublicKey,
-    >,
+    Ep: Epocher,
+    Su: Supervisor<Index = Epoch, PublicKey = C::PublicKey>,
+    TSu: ThresholdSupervisor<Index = Epoch, PublicKey = C::PublicKey>,
 > {
     /// The cryptographic scheme used if the engine is a sequencer.
     pub crypto: C,
 
-    /// Manages the set of sequencers and signers.
-    /// Also manages the cryptographic partial share if the engine is a signer.
-    pub coordinator: S,
+    /// The epocher.
+    pub epocher: Ep,
+
+    /// Manages the set of validators and the group identity.
+    /// Also manages the cryptographic partial share if the engine is a validator.
+    pub validators: TSu,
+
+    /// Manages the set of sequencers.
+    pub sequencers: Su,
 
     /// Proposes and verifies digests.
     pub automaton: A,
@@ -38,7 +34,7 @@ pub struct Config<
     pub relay: R,
 
     /// Notified when a chunk receives a threshold of acks.
-    pub collector: Z,
+    pub committer: Z,
 
     /// The application namespace used to sign over different types of messages.
     /// Used to prevent replay attacks on other applications.
@@ -56,7 +52,7 @@ pub struct Config<
     /// How often the epoch is refreshed.
     pub refresh_epoch_timeout: Duration,
 
-    /// How often the chunk is rebroadcast to all signers if no threshold is reached.
+    /// How often a proposal is rebroadcast to all validators if no threshold is reached.
     pub rebroadcast_timeout: Duration,
 
     /// A tuple representing the epochs to keep in memory.

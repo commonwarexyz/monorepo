@@ -1,16 +1,17 @@
-//! Engine for the broadcast module.
+//! Engine for the linked module.
 //!
 //! It is responsible for:
-//! - Broadcasting nodes (if a sequencer)
+//! - Proposing nodes (if a sequencer)
 //! - Signing chunks (if a validator)
 //! - Tracking the latest chunk in each sequencer’s chain
 //! - Recovering threshold signatures from partial signatures for each chunk
 //! - Notifying other actors of new chunks and threshold signatures
 
 use super::{
-    metrics, namespace, parsed, serializer, AckManager, Config, Context, Epoch, Prover, TipManager,
+    metrics, namespace, parsed, serializer, AckManager, Config, Context, Epoch, Epocher, Prover,
+    TipManager,
 };
-use crate::{Automaton, Committer, Coordinator, Relay};
+use crate::{Automaton, Committer, Relay, Supervisor, ThresholdSupervisor};
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{self},
@@ -44,28 +45,29 @@ use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
 /// Represents a pending verification request to the automaton.
-struct Verify<C: Scheme, D: Array, E: Clock> {
+struct Verify<C: Scheme, D: Digest, E: Clock> {
     timer: histogram::Timer<E>,
     context: Context<C::PublicKey>,
     payload: D,
     result: Result<bool, Error>,
 }
 
-/// Instance of the `linked` broadcast engine.
+/// Instance of the `linked` engine.
 pub struct Engine<
     B: Blob,
     E: Clock + Spawner + Storage<B> + Metrics,
     C: Scheme,
-    D: Array,
+    D: Digest,
     A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
     R: Relay<Digest = D>,
     Z: Committer<Digest = D>,
-    S: Coordinator<
+    Ep: Epocher,
+    Su: Supervisor<Index = Epoch, PublicKey = C::PublicKey>,
+    TSu: ThresholdSupervisor<
         Index = Epoch,
-        Seed = group::Signature,
+        PublicKey = C::PublicKey,
         Share = group::Share,
         Identity = poly::Public,
-        PublicKey = C::PublicKey,
     >,
     NetS: Sender<PublicKey = C::PublicKey>,
     NetR: Receiver<PublicKey = C::PublicKey>,
@@ -77,8 +79,10 @@ pub struct Engine<
     crypto: C,
     automaton: A,
     relay: R,
-    coordinator: S,
-    collector: Z,
+    epocher: Ep,
+    sequencers: Su,
+    validators: TSu,
+    committer: Z,
 
     ////////////////////////////////////////
     // Namespace Constants
@@ -98,7 +102,7 @@ pub struct Engine<
     refresh_epoch_timeout: Duration,
     refresh_epoch_deadline: Option<SystemTime>,
 
-    // The configured timeout for rebroadcasting a chunk to all signers
+    // The configured timeout for rebroadcasting a chunk to all validators
     rebroadcast_timeout: Duration,
     rebroadcast_deadline: Option<SystemTime>,
 
@@ -188,31 +192,32 @@ pub struct Engine<
     // Metrics
     metrics: metrics::Metrics<E>,
 
-    // The timer of my last broadcast_new
-    broadcast_timer: Option<histogram::Timer<E>>,
+    // The timer of my last new proposal
+    propose_timer: Option<histogram::Timer<E>>,
 }
 
 impl<
         B: Blob,
         E: Clock + Spawner + Storage<B> + Metrics,
         C: Scheme,
-        D: Array,
+        D: Digest,
         A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
         R: Relay<Digest = D>,
         Z: Committer<Digest = D>,
-        S: Coordinator<
+        Ep: Epocher,
+        Su: Supervisor<Index = Epoch, PublicKey = C::PublicKey>,
+        TSu: ThresholdSupervisor<
             Index = Epoch,
-            Seed = group::Signature,
+            PublicKey = C::PublicKey,
             Share = group::Share,
             Identity = poly::Public,
-            PublicKey = C::PublicKey,
         >,
         NetS: Sender<PublicKey = C::PublicKey>,
         NetR: Receiver<PublicKey = C::PublicKey>,
-    > Engine<B, E, C, D, A, R, Z, S, NetS, NetR>
+    > Engine<B, E, C, D, A, R, Z, Ep, Su, TSu, NetS, NetR>
 {
     /// Creates a new engine with the given context and configuration.
-    pub fn new(context: E, cfg: Config<C, D, A, R, Z, S>) -> Self {
+    pub fn new(context: E, cfg: Config<C, D, A, R, Z, Ep, Su, TSu>) -> Self {
         let metrics = metrics::Metrics::init(context.clone());
 
         Self {
@@ -220,8 +225,10 @@ impl<
             crypto: cfg.crypto,
             automaton: cfg.automaton,
             relay: cfg.relay,
-            collector: cfg.collector,
-            coordinator: cfg.coordinator,
+            committer: cfg.committer,
+            epocher: cfg.epocher,
+            sequencers: cfg.sequencers,
+            validators: cfg.validators,
             chunk_namespace: namespace::chunk(&cfg.namespace),
             ack_namespace: namespace::ack(&cfg.namespace),
             refresh_epoch_timeout: cfg.refresh_epoch_timeout,
@@ -243,7 +250,7 @@ impl<
             priority_acks: cfg.priority_acks,
             _phantom: PhantomData,
             metrics,
-            broadcast_timer: None,
+            propose_timer: None,
         }
     }
 
@@ -253,7 +260,7 @@ impl<
     /// - Requesting and processing proposals from the application
     /// - Timeouts
     ///   - Refreshing the Epoch
-    ///   - Rebroadcasting Nodes
+    ///   - Rebroadcasting Proposals
     /// - Messages from the network:
     ///   - Nodes
     ///   - Acks
@@ -267,21 +274,29 @@ impl<
         let (mut ack_sender, mut ack_receiver) = ack_network;
         let mut shutdown = self.context.stopped();
 
+        // Tracks if there is an outstanding proposal request to the automaton.
+        let mut pending: Option<(Context<C::PublicKey>, oneshot::Receiver<D>)> = None;
+
         // Before starting on the main loop, initialize my own sequencer journal
         // and attempt to rebroadcast if necessary.
         self.refresh_epoch();
         self.journal_prepare(&self.crypto.public_key()).await;
         if let Err(err) = self.rebroadcast(&mut node_sender).await {
-            // Rebroadcasting my return a non-critical error, so log the error and continue.
+            // Rebroadcasting may return a non-critical error, so log the error and continue.
             info!(?err, "initial rebroadcast failed");
         }
-
-        // Track if there is an outstanding proposal request to the automaton.
-        let mut pending_propose: Option<(Context<C::PublicKey>, oneshot::Receiver<D>)> = None;
 
         loop {
             // Enter the epoch
             self.refresh_epoch();
+
+            // Request a new proposal if necessary
+            if pending.is_none() {
+                if let Some(context) = self.should_propose() {
+                    let receiver = self.automaton.propose(context.clone()).await;
+                    pending = Some((context, receiver));
+                }
+            }
 
             // Create deadline futures.
             // If the deadline is None, the future will never resolve.
@@ -293,37 +308,7 @@ impl<
                 Some(deadline) => Either::Left(self.context.sleep_until(deadline)),
                 None => Either::Right(future::pending()),
             };
-
-            // Set the proposal context if necessary
-            let me = self.crypto.public_key();
-            let mut proposal_context: Option<Context<C::PublicKey>> = None;
-            if pending_propose.is_none() && self.coordinator.is_sequencer(self.epoch, &me).is_some()
-            {
-                // Check my existing tip
-                proposal_context = match self.tip_manager.get(&me) {
-                    // Genesis proposal
-                    None => Some(Context {
-                        sequencer: me,
-                        height: 0,
-                    }),
-
-                    // Propose the next height if-and-only-if the threshold exists
-                    Some(tip) => self
-                        .ack_manager
-                        .get_threshold(&me, tip.chunk.height)
-                        .map(|_| Context {
-                            sequencer: me,
-                            height: tip.chunk.height.checked_add(1).unwrap(),
-                        }),
-                }
-            }
-
-            // Propose a new chunk if necessary
-            if let Some(context) = proposal_context.take() {
-                let receiver = self.automaton.propose(context.clone()).await;
-                pending_propose = Some((context, receiver));
-            };
-            let propose_wait = match &mut pending_propose {
+            let propose = match &mut pending {
                 Some((_context, receiver)) => Either::Left(receiver),
                 None => Either::Right(futures::future::pending()),
             };
@@ -356,11 +341,11 @@ impl<
                 },
 
                 // Propose a new chunk
-                receiver = propose_wait => {
-                    debug!("broadcast");
+                receiver = propose => {
+                    debug!("propose");
 
                     // Clear the pending proposal
-                    let (context, _) = pending_propose.take().unwrap();
+                    let (context, _) = pending.take().unwrap();
 
                     // Error handling for dropped proposals
                     let Ok(payload) = receiver else {
@@ -368,9 +353,9 @@ impl<
                         continue;
                     };
 
-                    // Broadcast the message
-                    if let Err(err) = self.broadcast_new(context.clone(), payload, &mut node_sender).await {
-                        warn!(?err, ?context, "broadcast new failed");
+                    // Propose the chunk
+                    if let Err(err) = self.propose(context.clone(), payload, &mut node_sender).await {
+                        warn!(?err, ?context, "propose new failed");
                         continue;
                     }
                 },
@@ -499,7 +484,7 @@ impl<
         }
 
         // Construct partial signature
-        let Some(share) = self.coordinator.share(self.epoch) else {
+        let Some(share) = self.validators.share(self.epoch) else {
             return Err(Error::UnknownShare(self.epoch));
         };
         let partial = ops::partial_sign_message(
@@ -512,15 +497,15 @@ impl<
         // the same height, even if the node crashes and restarts.
         self.journal_sync(&context.sequencer, context.height).await;
 
-        // The recipients are all the signers in the epoch and the sequencer.
-        // The sequencer may or may not be a signer.
+        // The recipients are all the validators in the epoch and the sequencer.
+        // The sequencer may or may not be a validator.
         let recipients = {
-            let Some(signers) = self.coordinator.participants(self.epoch) else {
-                return Err(Error::UnknownSigners(self.epoch));
+            let Some(validators) = self.validators.participants(self.epoch) else {
+                return Err(Error::UnknownValidators(self.epoch));
             };
-            let mut recipients = signers.clone();
+            let mut recipients = validators.clone();
             if self
-                .coordinator
+                .validators
                 .is_participant(self.epoch, &tip.chunk.sequencer)
                 .is_none()
             {
@@ -553,7 +538,7 @@ impl<
     /// Handles a threshold, either received from a `Node` from the network or generated locally.
     ///
     /// The threshold must already be verified.
-    /// If the threshold is new, it is stored and the proof is emitted to the collector.
+    /// If the threshold is new, it is stored and the proof is emitted to the committer.
     /// If the threshold is already known, it is ignored.
     async fn handle_threshold(
         &mut self,
@@ -571,7 +556,7 @@ impl<
 
         // If the threshold is for my sequencer, record metric
         if chunk.sequencer == self.crypto.public_key() {
-            self.broadcast_timer.take();
+            self.propose_timer.take();
         }
 
         // Emit the proof
@@ -581,7 +566,7 @@ impl<
         };
         let proof =
             Prover::<C, D>::serialize_threshold(&context, &chunk.payload, epoch, &threshold);
-        self.collector.finalized(proof, chunk.payload.clone()).await;
+        self.committer.finalized(proof, chunk.payload).await;
     }
 
     /// Handles an ack
@@ -590,7 +575,7 @@ impl<
     /// (e.g. already exists, threshold already exists, is outside the epoch bounds, etc.).
     async fn handle_ack(&mut self, ack: &parsed::Ack<D, C::PublicKey>) -> Result<(), Error> {
         // Get the quorum
-        let Some(identity) = self.coordinator.identity(ack.epoch) else {
+        let Some(identity) = self.validators.identity(ack.epoch) else {
             return Err(Error::UnknownIdentity(ack.epoch));
         };
         let quorum = identity.required();
@@ -640,11 +625,11 @@ impl<
             sequencer: node.chunk.sequencer.clone(),
             height: node.chunk.height,
         };
-        let payload = node.chunk.payload.clone();
+        let payload = node.chunk.payload;
         let mut automaton = self.automaton.clone();
         let timer = self.metrics.verify_duration.timer();
         self.pending_verifies.push(async move {
-            let receiver = automaton.verify(context.clone(), payload.clone()).await;
+            let receiver = automaton.verify(context.clone(), payload).await;
             let result = receiver.await.map_err(Error::AppVerifyCanceled);
             Verify {
                 timer,
@@ -656,20 +641,45 @@ impl<
     }
 
     ////////////////////////////////////////
-    // Broadcasting
+    // Proposing
     ////////////////////////////////////////
 
-    /// Broadcast a message to the network.
+    /// Returns a `Context` if the engine should request a proposal from the automaton.
+    ///
+    /// Should only be called if the engine is not already waiting for a proposal.
+    fn should_propose(&self) -> Option<Context<C::PublicKey>> {
+        let me = self.crypto.public_key();
+
+        // Return `None` if I am not a sequencer in the current epoch
+        self.sequencers.is_participant(self.epoch, &me)?;
+
+        // Return the next context unless my current tip has no threshold signature
+        match self.tip_manager.get(&me) {
+            None => Some(Context {
+                sequencer: me,
+                height: 0,
+            }),
+            Some(tip) => self
+                .ack_manager
+                .get_threshold(&me, tip.chunk.height)
+                .map(|_| Context {
+                    sequencer: me,
+                    height: tip.chunk.height.checked_add(1).unwrap(),
+                }),
+        }
+    }
+
+    /// Propose a new chunk to the network.
     ///
     /// The result is returned to the caller via the provided channel.
-    /// The broadcast is only successful if the parent Chunk and threshold signature are known.
-    async fn broadcast_new(
+    /// The proposal is only successful if the parent Chunk and threshold signature are known.
+    async fn propose(
         &mut self,
         context: Context<C::PublicKey>,
         payload: D,
         node_sender: &mut NetS,
     ) -> Result<(), Error> {
-        let mut guard = self.metrics.new_broadcast.guard(Status::Dropped);
+        let mut guard = self.metrics.propose.guard(Status::Dropped);
         let me = self.crypto.public_key();
 
         // Error-check context sequencer
@@ -678,7 +688,7 @@ impl<
         }
 
         // Error-check that I am a sequencer in the current epoch
-        if self.coordinator.is_sequencer(self.epoch, &me).is_none() {
+        if self.sequencers.is_participant(self.epoch, &me).is_none() {
             return Err(Error::IAmNotASequencer(self.epoch));
         }
 
@@ -724,12 +734,12 @@ impl<
         // Deal with the chunk as if it were received over the network
         self.handle_node(&node).await;
 
-        // Sync the journal to prevent ever broadcasting two conflicting chunks
+        // Sync the journal to prevent ever proposing two conflicting chunks
         // at the same height, even if the node crashes and restarts
         self.journal_sync(&me, height).await;
 
-        // Record the start time of the broadcast
-        self.broadcast_timer = Some(self.metrics.e2e_duration.timer());
+        // Record the start time of the proposal
+        self.propose_timer = Some(self.metrics.e2e_duration.timer());
 
         // Broadcast to network
         if let Err(err) = self.broadcast(&node, node_sender, self.epoch).await {
@@ -742,7 +752,7 @@ impl<
         Ok(())
     }
 
-    /// Attempt to rebroadcast the highest-height chunk of this sequencer to all signers.
+    /// Attempt to rebroadcast the highest-height chunk of this sequencer to all validators.
     ///
     /// This is only done if:
     /// - this instance is the sequencer for the current epoch.
@@ -756,7 +766,7 @@ impl<
 
         // Return if not a sequencer in the current epoch
         let me = self.crypto.public_key();
-        if self.coordinator.is_sequencer(self.epoch, &me).is_none() {
+        if self.sequencers.is_participant(self.epoch, &me).is_none() {
             return Err(Error::IAmNotASequencer(self.epoch));
         }
 
@@ -771,7 +781,7 @@ impl<
             .get_threshold(&me, tip.chunk.height)
             .is_some()
         {
-            return Err(Error::AlreadyBroadcast);
+            return Err(Error::AlreadyThresholded);
         }
 
         // Broadcast the message, which resets the rebroadcast deadline
@@ -781,25 +791,25 @@ impl<
         Ok(())
     }
 
-    /// Send a  `Node` message to all signers in the given epoch.
+    /// Send a  `Node` message to all validators in the given epoch.
     async fn broadcast(
         &mut self,
         node: &parsed::Node<C, D>,
         node_sender: &mut NetS,
         epoch: Epoch,
     ) -> Result<(), Error> {
-        // Get the signers for the epoch
-        let Some(signers) = self.coordinator.participants(epoch) else {
-            return Err(Error::UnknownSigners(epoch));
+        // Get the validators for the epoch
+        let Some(validators) = self.validators.participants(epoch) else {
+            return Err(Error::UnknownValidators(epoch));
         };
 
         // Tell the relay to broadcast the full data
-        self.relay.broadcast(node.chunk.payload.clone()).await;
+        self.relay.broadcast(node.chunk.payload).await;
 
-        // Send the node to all signers
+        // Send the node to all validators
         node_sender
             .send(
-                Recipients::Some(signers.clone()),
+                Recipients::Some(validators.clone()),
                 node.encode().into(),
                 self.priority_proposals,
             )
@@ -870,7 +880,7 @@ impl<
         };
 
         // Verify parent threshold signature
-        let Some(identity) = self.coordinator.identity(parent.epoch) else {
+        let Some(identity) = self.validators.identity(parent.epoch) else {
             return Err(Error::UnknownIdentity(parent.epoch));
         };
         let public_key = poly::public(identity);
@@ -898,10 +908,10 @@ impl<
         self.validate_chunk(&ack.chunk, ack.epoch)?;
 
         // Validate sender
-        let Some(signer_index) = self.coordinator.is_participant(ack.epoch, sender) else {
-            return Err(Error::UnknownSigner(ack.epoch, sender.to_string()));
+        let Some(index) = self.validators.is_participant(ack.epoch, sender) else {
+            return Err(Error::UnknownValidator(ack.epoch, sender.to_string()));
         };
-        if signer_index != ack.partial.index {
+        if index != ack.partial.index {
             return Err(Error::PeerMismatch);
         }
 
@@ -934,7 +944,7 @@ impl<
 
         // Validate partial signature
         // Optimization: If the ack already exists, don't verify
-        let Some(identity) = self.coordinator.identity(ack.epoch) else {
+        let Some(identity) = self.validators.identity(ack.epoch) else {
             return Err(Error::UnknownIdentity(ack.epoch));
         };
         ops::partial_verify_message(
@@ -959,8 +969,8 @@ impl<
     ) -> Result<(), Error> {
         // Verify sequencer
         if self
-            .coordinator
-            .is_sequencer(epoch, &chunk.sequencer)
+            .sequencers
+            .is_participant(epoch, &chunk.sequencer)
             .is_none()
         {
             return Err(Error::UnknownSequencer(epoch, chunk.sequencer.to_string()));
@@ -1097,13 +1107,13 @@ impl<
     // Epoch
     ////////////////////////////////////////
 
-    /// Updates the epoch to the value of the coordinator, and sets the refresh epoch deadline.
+    /// Updates the epoch to the value of the epocher, and sets the refresh epoch deadline.
     fn refresh_epoch(&mut self) {
         // Set the refresh epoch deadline
         self.refresh_epoch_deadline = Some(self.context.current() + self.refresh_epoch_timeout);
 
         // Ensure epoch is not before the current epoch
-        let epoch = self.coordinator.index();
+        let epoch = self.epocher.epoch();
         assert!(epoch >= self.epoch);
 
         // Update the epoch
@@ -1129,8 +1139,8 @@ enum Error {
     UnableToSendMessage,
 
     // Broadcast errors
-    #[error("Already broadcast")]
-    AlreadyBroadcast,
+    #[error("Already thresholded")]
+    AlreadyThresholded,
     #[error("I am not a sequencer in epoch {0}")]
     IAmNotASequencer(u64),
     #[error("Nothing to rebroadcast")]
@@ -1153,12 +1163,12 @@ enum Error {
     // Epoch Errors
     #[error("Unknown identity at epoch {0}")]
     UnknownIdentity(u64),
-    #[error("Unknown signers at epoch {0}")]
-    UnknownSigners(u64),
+    #[error("Unknown validators at epoch {0}")]
+    UnknownValidators(u64),
     #[error("Epoch {0} has no sequencer {1}")]
     UnknownSequencer(u64, String),
-    #[error("Epoch {0} has no signer {1}")]
-    UnknownSigner(u64, String),
+    #[error("Epoch {0} has no validator {1}")]
+    UnknownValidator(u64, String),
     #[error("Unknown share at epoch {0}")]
     UnknownShare(u64),
 

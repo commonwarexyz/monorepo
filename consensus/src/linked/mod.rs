@@ -35,34 +35,46 @@
 
 use commonware_utils::Array;
 
-mod ack_manager;
-use ack_manager::AckManager;
-mod config;
-pub use config::Config;
-mod engine;
-pub use engine::Engine;
-mod metrics;
 mod namespace;
 mod parsed;
 mod prover;
 pub use prover::Prover;
 mod serializer;
-mod tip_manager;
-use tip_manager::TipManager;
 mod wire {
     include!(concat!(env!("OUT_DIR"), "/wire.rs"));
 }
+
+cfg_if::cfg_if! {
+    if #[cfg(not(target_arch = "wasm32"))] {
+        mod ack_manager;
+        use ack_manager::AckManager;
+        mod config;
+        pub use config::Config;
+        mod engine;
+        pub use engine::Engine;
+        mod metrics;
+        mod tip_manager;
+        use tip_manager::TipManager;
+    }
+}
+
 #[cfg(test)]
 pub mod mocks;
 
-/// Used as the [`Index`](crate::Coordinator::Index) type.
-/// Defines the current set of sequencers and signers.
+/// Used as the [`Index`](crate::Supervisor::Index) type.
+/// Defines the current set of sequencers and validators.
 ///
 /// This is not a single "View" in the sense of a consensus protocol, but rather a continuous
-/// sequence of views in-which the set of sequencers and signers is constant.
+/// sequence of views in-which the set of sequencers and validators is constant.
 pub type Epoch = u64;
 
-/// Used as the [`Application::Context`](crate::Application::Context) type.
+/// Returns the current epoch to the [`Engine`].
+pub trait Epocher: Clone + Send + 'static {
+    /// Returns the current epoch.
+    fn epoch(&self) -> Epoch;
+}
+
+/// Used as the [`Automaton::Context`](crate::Automaton::Context) type.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct Context<P: Array> {
     /// Sequencer's public key.
@@ -201,7 +213,7 @@ mod tests {
         validators: &[(PublicKey, Ed25519, Share)],
         registrations: &mut Registrations<PublicKey>,
         automatons: &mut BTreeMap<PublicKey, mocks::Automaton<PublicKey>>,
-        collectors: &mut BTreeMap<PublicKey, mocks::comitter::Mailbox<Ed25519, Sha256Digest>>,
+        committers: &mut BTreeMap<PublicKey, mocks::CommitterMailbox<Ed25519, Sha256Digest>>,
         refresh_epoch_timeout: Duration,
         rebroadcast_timeout: Duration,
         invalid_when: fn(u64) -> bool,
@@ -209,23 +221,18 @@ mod tests {
         let namespace = b"my testing namespace";
         for (validator, scheme, share) in validators.iter() {
             let context = context.with_label(&validator.to_string());
-            let mut coordinator = mocks::coordinator::Coordinator::<PublicKey>::new(
-                identity.clone(),
-                pks.to_vec(),
-                *share,
-            );
-            coordinator.set_view(111);
+            let epocher = mocks::Epocher::new(111);
+            let sequencers = mocks::Sequencers::<PublicKey>::new(pks.to_vec());
+            let validators =
+                mocks::Validators::<PublicKey>::new(identity.clone(), pks.to_vec(), *share);
 
             let automaton = mocks::Automaton::<PublicKey>::new(invalid_when);
             automatons.insert(validator.clone(), automaton.clone());
 
-            let (collector, collector_mailbox) =
-                mocks::comitter::Collector::<Ed25519, Sha256Digest>::new(
-                    namespace,
-                    *poly::public(&identity),
-                );
-            context.with_label("collector").spawn(|_| collector.run());
-            collectors.insert(validator.clone(), collector_mailbox);
+            let (committer, committer_mailbox) =
+                mocks::Committer::<Ed25519, Sha256Digest>::new(namespace, *poly::public(&identity));
+            context.with_label("committer").spawn(|_| committer.run());
+            committers.insert(validator.clone(), committer_mailbox);
 
             let engine = Engine::new(
                 context.with_label("engine"),
@@ -233,8 +240,10 @@ mod tests {
                     crypto: scheme.clone(),
                     relay: automaton.clone(),
                     automaton: automaton.clone(),
-                    collector: collectors.get(validator).unwrap().clone(),
-                    coordinator,
+                    committer: committers.get(validator).unwrap().clone(),
+                    epocher,
+                    sequencers,
+                    validators,
                     verify_concurrent: 1024,
                     namespace: namespace.to_vec(),
                     epoch_bounds: (1, 1),
@@ -254,25 +263,25 @@ mod tests {
         }
     }
 
-    async fn await_collectors(
+    async fn await_committers(
         context: Context,
-        collectors: &BTreeMap<PublicKey, mocks::comitter::Mailbox<Ed25519, Sha256Digest>>,
+        committers: &BTreeMap<PublicKey, mocks::CommitterMailbox<Ed25519, Sha256Digest>>,
         threshold: u64,
     ) {
         let mut receivers = Vec::new();
-        for (sequencer, mailbox) in collectors.iter() {
-            // Create a oneshot channel to signal when the collector has reached the threshold.
+        for (sequencer, mailbox) in committers.iter() {
+            // Create a oneshot channel to signal when the committer has reached the threshold.
             let (tx, rx) = oneshot::channel();
             receivers.push(rx);
 
-            // Spawn a watcher for the collector.
-            context.with_label("collector_watcher").spawn({
+            // Spawn a watcher for the committer.
+            context.with_label("committer_watcher").spawn({
                 let sequencer = sequencer.clone();
                 let mut mailbox = mailbox.clone();
                 move |context| async move {
                     loop {
                         let tip = mailbox.get_tip(sequencer.clone()).await.unwrap_or(0);
-                        debug!(tip, ?sequencer, "collector");
+                        debug!(tip, ?sequencer, "committer");
                         if tip >= threshold {
                             let _ = tx.send(sequencer.clone());
                             break;
@@ -285,7 +294,7 @@ mod tests {
 
         // Wait for all oneshot receivers to complete.
         let results = join_all(receivers).await;
-        assert_eq!(results.len(), collectors.len());
+        assert_eq!(results.len(), committers.len());
     }
 
     #[test_traced]
@@ -307,8 +316,8 @@ mod tests {
             let automatons = Arc::new(Mutex::new(
                 BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
             ));
-            let mut collectors =
-                BTreeMap::<PublicKey, mocks::comitter::Mailbox<Ed25519, Sha256Digest>>::new();
+            let mut committers =
+                BTreeMap::<PublicKey, mocks::CommitterMailbox<Ed25519, Sha256Digest>>::new();
             spawn_validator_engines(
                 context.with_label("validator"),
                 identity.clone(),
@@ -316,12 +325,12 @@ mod tests {
                 &validators,
                 &mut registrations,
                 &mut automatons.lock().unwrap(),
-                &mut collectors,
+                &mut committers,
                 Duration::from_millis(100),
                 Duration::from_secs(5),
                 |_| false,
             );
-            await_collectors(context.with_label("collector"), &collectors, 100).await;
+            await_committers(context.with_label("committer"), &committers, 100).await;
         });
     }
 
@@ -378,10 +387,9 @@ mod tests {
                         PublicKey,
                         mocks::Automaton<PublicKey>,
                     >::new()));
-                    let mut collectors = BTreeMap::<
-                        PublicKey,
-                        mocks::comitter::Mailbox<Ed25519, Sha256Digest>,
-                    >::new();
+                    let mut committers =
+                        BTreeMap::<PublicKey, mocks::CommitterMailbox<Ed25519, Sha256Digest>>::new(
+                        );
                     spawn_validator_engines(
                         context.with_label("validator"),
                         identity.clone(),
@@ -389,23 +397,23 @@ mod tests {
                         &validators,
                         &mut registrations,
                         &mut automatons.lock().unwrap(),
-                        &mut collectors,
+                        &mut committers,
                         Duration::from_millis(100),
                         Duration::from_secs(5),
                         |_| false,
                     );
 
-                    let collector_pairs: Vec<(
+                    let committer_pairs: Vec<(
                         PublicKey,
-                        mocks::comitter::Mailbox<Ed25519, Sha256Digest>,
-                    )> = collectors
+                        mocks::CommitterMailbox<Ed25519, Sha256Digest>,
+                    )> = committers
                         .iter()
                         .map(|(v, m)| (v.clone(), m.clone()))
                         .collect();
-                    for (validator, mut mailbox) in collector_pairs {
+                    for (validator, mut mailbox) in committer_pairs {
                         let completed_clone = completed.clone();
                         context
-                            .with_label("collector_unclean")
+                            .with_label("committer_unclean")
                             .spawn(|context| async move {
                                 loop {
                                     let tip = mailbox.get_tip(validator.clone()).await.unwrap_or(0);
@@ -446,8 +454,8 @@ mod tests {
             let automatons = Arc::new(Mutex::new(
                 BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
             ));
-            let mut collectors =
-                BTreeMap::<PublicKey, mocks::comitter::Mailbox<Ed25519, Sha256Digest>>::new();
+            let mut committers =
+                BTreeMap::<PublicKey, mocks::CommitterMailbox<Ed25519, Sha256Digest>>::new();
             spawn_validator_engines(
                 context.with_label("validator"),
                 identity.clone(),
@@ -455,7 +463,7 @@ mod tests {
                 &validators,
                 &mut registrations,
                 &mut automatons.lock().unwrap(),
-                &mut collectors,
+                &mut committers,
                 Duration::from_millis(100),
                 Duration::from_secs(1),
                 |_| false,
@@ -470,7 +478,7 @@ mod tests {
                 success_rate: 1.0,
             };
             link_validators(&mut oracle, &pks, Action::Link(link), None).await;
-            await_collectors(context.with_label("collector"), &collectors, 100).await;
+            await_committers(context.with_label("committer"), &committers, 100).await;
         });
     }
 
@@ -505,8 +513,8 @@ mod tests {
             let automatons = Arc::new(Mutex::new(
                 BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
             ));
-            let mut collectors =
-                BTreeMap::<PublicKey, mocks::comitter::Mailbox<Ed25519, Sha256Digest>>::new();
+            let mut committers =
+                BTreeMap::<PublicKey, mocks::CommitterMailbox<Ed25519, Sha256Digest>>::new();
             spawn_validator_engines(
                 context.with_label("validator"),
                 identity.clone(),
@@ -514,13 +522,13 @@ mod tests {
                 &validators,
                 &mut registrations,
                 &mut automatons.lock().unwrap(),
-                &mut collectors,
+                &mut committers,
                 Duration::from_millis(100),
                 Duration::from_millis(150),
                 |_| false,
             );
 
-            await_collectors(context.with_label("collector"), &collectors, 40).await;
+            await_committers(context.with_label("committer"), &committers, 40).await;
         });
         auditor.state()
     }
@@ -560,8 +568,8 @@ mod tests {
             let automatons = Arc::new(Mutex::new(
                 BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
             ));
-            let mut collectors =
-                BTreeMap::<PublicKey, mocks::comitter::Mailbox<Ed25519, Sha256Digest>>::new();
+            let mut committers =
+                BTreeMap::<PublicKey, mocks::CommitterMailbox<Ed25519, Sha256Digest>>::new();
             spawn_validator_engines(
                 context.with_label("validator"),
                 identity.clone(),
@@ -569,13 +577,13 @@ mod tests {
                 &validators,
                 &mut registrations,
                 &mut automatons.lock().unwrap(),
-                &mut collectors,
+                &mut committers,
                 Duration::from_millis(100),
                 Duration::from_secs(5),
                 |i| i % 10 == 0,
             );
 
-            await_collectors(context.with_label("collector"), &collectors, 100).await;
+            await_committers(context.with_label("committer"), &committers, 100).await;
         });
     }
 }

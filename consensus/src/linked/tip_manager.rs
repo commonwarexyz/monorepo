@@ -1,20 +1,19 @@
 use super::parsed;
-use commonware_cryptography::Scheme;
-use commonware_utils::Array;
+use commonware_cryptography::{Digest, Scheme};
 use std::collections::{hash_map::Entry, HashMap};
 
 /// Manages the highest-height chunk for each sequencer.
 #[derive(Default, Debug)]
-pub struct TipManager<C: Scheme, D: Array> {
+pub struct TipManager<C: Scheme, D: Digest> {
     // The highest-height chunk for each sequencer.
     // The chunk must have the threshold signature of its parent.
     // Existence of the chunk implies:
     // - The existence of the sequencer's entire chunk chain (from height zero)
-    // - That the chunk has been acked by this signer.
+    // - That the chunk has been acked by this validator.
     tips: HashMap<C::PublicKey, parsed::Node<C, D>>,
 }
 
-impl<C: Scheme, D: Array> TipManager<C, D> {
+impl<C: Scheme, D: Digest> TipManager<C, D> {
     /// Creates a new `TipManager`.
     pub fn new() -> Self {
         Self {
