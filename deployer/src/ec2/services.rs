@@ -391,6 +391,8 @@ pub fn generate_pyroscope_config(binary_instances: &[(&str, &str, &str)]) -> Str
         r#"
 scrape_configs:
 - job_name: 'pyroscope'
+  scrape_interval: 30s
+  scrape_timeout: 20s
   static_configs:
 "#,
     );
