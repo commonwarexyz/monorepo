@@ -4,39 +4,30 @@ pub mod public_key;
 pub mod utils;
 
 use bytes::Bytes;
-use prost::DecodeError;
+use commonware_codec::Error as CodecError;
+use commonware_runtime::Error as RuntimeError;
 use std::future::Future;
 use thiserror::Error;
 
 /// Errors that can occur when interacting with a stream.
 #[derive(Error, Debug)]
 pub enum Error {
-    #[error("unexpected message")]
-    UnexpectedMessage,
     #[error("unable to decode: {0}")]
-    UnableToDecode(DecodeError),
-    #[error("invalid ephemeral public key")]
-    InvalidEphemeralPublicKey,
-    #[error("invalid channel public key")]
-    InvalidChannelPublicKey,
-    #[error("invalid peer public key")]
-    InvalidPeerPublicKey,
+    UnableToDecode(CodecError),
     #[error("handshake not for us")]
     HandshakeNotForUs,
     #[error("handshake timeout")]
     HandshakeTimeout,
-    #[error("missing signature")]
-    MissingSignature,
     #[error("invalid signature")]
     InvalidSignature,
     #[error("wrong peer")]
     WrongPeer,
     #[error("recv failed")]
-    RecvFailed,
+    RecvFailed(RuntimeError),
     #[error("recv too large: {0} bytes")]
     RecvTooLarge(usize),
     #[error("send failed")]
-    SendFailed,
+    SendFailed(RuntimeError),
     #[error("send zero size")]
     SendZeroSize,
     #[error("send too large: {0} bytes")]

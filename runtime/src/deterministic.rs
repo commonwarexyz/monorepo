@@ -200,22 +200,22 @@ impl Auditor {
         *hash = hasher.finalize().to_vec();
     }
 
-    fn dial(&self, dialer: SocketAddr, dialee: SocketAddr) {
+    fn dial(&self, dialer: SocketAddr, listener: SocketAddr) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
         hasher.update(&*hash);
         hasher.update(b"dial");
         hasher.update(dialer.to_string().as_bytes());
-        hasher.update(dialee.to_string().as_bytes());
+        hasher.update(listener.to_string().as_bytes());
         *hash = hasher.finalize().to_vec();
     }
 
-    fn accept(&self, dialee: SocketAddr, dialer: SocketAddr) {
+    fn accept(&self, listener: SocketAddr, dialer: SocketAddr) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
         hasher.update(&*hash);
         hasher.update(b"accept");
-        hasher.update(dialee.to_string().as_bytes());
+        hasher.update(listener.to_string().as_bytes());
         hasher.update(dialer.to_string().as_bytes());
         *hash = hasher.finalize().to_vec();
     }
@@ -1085,13 +1085,13 @@ impl ReasonablyRealtime for Context {}
 
 type Dialable = mpsc::UnboundedSender<(
     SocketAddr,
-    mocks::Sink,   // Dialee -> Dialer
-    mocks::Stream, // Dialer -> Dialee
+    mocks::Sink,   // Listener -> Dialer
+    mocks::Stream, // Dialer -> Listener
 )>;
 
 /// Implementation of [`crate::Network`] for the `deterministic` runtime.
 ///
-/// When a dialer connects to a dialee, the dialee is given a new ephemeral port
+/// When a dialer connects to a listener, the listener is given a new ephemeral port
 /// from the range `32768..61000`. To keep things simple, it is not possible to
 /// bind to an ephemeral port. Likewise, if ports are not reused and when exhausted,
 /// the runtime will panic.
@@ -1152,7 +1152,7 @@ impl Networking {
         };
         self.auditor.dial(dialer, socket);
 
-        // Get dialee
+        // Get listener
         let mut sender = {
             let listeners = self.listeners.lock().unwrap();
             let sender = listeners.get(&socket).ok_or(Error::ConnectionFailed)?;
@@ -1161,9 +1161,9 @@ impl Networking {
 
         // Construct connection
         let (dialer_sender, dialer_receiver) = mocks::Channel::init();
-        let (dialee_sender, dialee_receiver) = mocks::Channel::init();
+        let (listener_sender, listener_receiver) = mocks::Channel::init();
         sender
-            .send((dialer, dialer_sender, dialee_receiver))
+            .send((dialer, dialer_sender, listener_receiver))
             .await
             .map_err(|_| Error::ConnectionFailed)?;
         Ok((
@@ -1172,7 +1172,7 @@ impl Networking {
                 auditor: self.auditor.clone(),
                 me: dialer,
                 peer: socket,
-                sender: dialee_sender,
+                sender: listener_sender,
             },
             Stream {
                 auditor: self.auditor.clone(),

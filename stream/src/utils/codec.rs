@@ -21,10 +21,10 @@ pub async fn send_frame<S: Sink>(
 
     // Send the length of the message
     let f: [u8; 4] = len.to_be_bytes();
-    sink.send(&f).await.map_err(|_| Error::SendFailed)?;
+    sink.send(&f).await.map_err(Error::SendFailed)?;
 
     // Send the rest of the message
-    sink.send(buf).await.map_err(|_| Error::SendFailed)?;
+    sink.send(buf).await.map_err(Error::SendFailed)?;
 
     Ok(())
 }
@@ -37,7 +37,7 @@ pub async fn recv_frame<T: Stream>(
 ) -> Result<Bytes, Error> {
     // Read the first 4 bytes to get the length of the message
     let mut buf = [0u8; 4];
-    stream.recv(&mut buf).await.map_err(|_| Error::RecvFailed)?;
+    stream.recv(&mut buf).await.map_err(Error::RecvFailed)?;
 
     // Validate frame size
     let len = u32::from_be_bytes(buf) as usize;
@@ -50,7 +50,7 @@ pub async fn recv_frame<T: Stream>(
 
     // Read the rest of the message
     let mut buf = vec![0u8; len];
-    stream.recv(&mut buf).await.map_err(|_| Error::RecvFailed)?;
+    stream.recv(&mut buf).await.map_err(Error::RecvFailed)?;
 
     Ok(Bytes::from(buf))
 }

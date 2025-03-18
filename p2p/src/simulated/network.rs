@@ -663,7 +663,7 @@ impl Link {
                 // Dial the peer and handshake by sending it the dialer's public key
                 let (mut sink, _) = context.dial(socket).await.unwrap();
                 if let Err(err) = send_frame(&mut sink, &dialer, max_size).await {
-                    error!(?err, "failed to send public key to dialee");
+                    error!(?err, "failed to send public key to listener");
                     return;
                 }
 
