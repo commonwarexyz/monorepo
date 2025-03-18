@@ -2,8 +2,10 @@
 //! the `Storage` trait, and functions for verifying them against a root hash.
 
 use crate::mmr::{
+    bitmap::Bitmap,
     hasher::Hasher,
-    iterator::{PathIterator, PeakIterator},
+    iterator::{leaf_pos_to_num, PathIterator, PeakIterator},
+    mutable::MutableMmr,
     Error,
     Error::*,
 };
@@ -11,7 +13,7 @@ use bytes::{Buf, BufMut};
 use commonware_cryptography::{Digest, Hasher as CHasher};
 use commonware_utils::{Array, SizedSerialize};
 use futures::future::try_join_all;
-use std::future::Future;
+use std::{future::Future, marker::PhantomData};
 use tracing::debug;
 
 /// Contains the information necessary for proving the inclusion of an element, or some range of elements, in the MMR
@@ -368,6 +370,96 @@ fn peak_hash_from_range<'a, H: CHasher>(
         }
     }
     Ok(hasher.node_hash(pos, &left_hash.unwrap(), &right_hash.unwrap()))
+}
+
+/// A proof that a key has a particular (currently active) value in a [MutableMmr] with a particular
+/// root hash.
+pub struct KeyValueProof<K: Array, V: Array, H: CHasher> {
+    /// The offset of the leaf storing the currently active value for the key in the update tree.
+    pub tree_pos: u64,
+
+    /// A proof that the record at the given offset has a certain key and value.
+    pub updates_proof: Proof<H>,
+
+    /// A proof that the value is currently active for the key.
+    pub is_active_proof: Proof<H>,
+
+    /// The bitmap chunk containing the is_active bit of the referenced update record.
+    pub state_bitmap_chunk: H::Digest,
+
+    _phantom_key: PhantomData<K>,
+    _phantom_value: PhantomData<V>,
+}
+
+impl<K: Array, V: Array, H: CHasher> KeyValueProof<K, V, H> {
+    pub fn new(
+        tree_pos: u64,
+        updates_proof: Proof<H>,
+        is_active_proof: Proof<H>,
+        state_bitmap_chunk: H::Digest,
+    ) -> Self {
+        Self {
+            tree_pos,
+            updates_proof,
+            is_active_proof,
+            state_bitmap_chunk,
+            _phantom_key: PhantomData,
+            _phantom_value: PhantomData,
+        }
+    }
+    /// Return true if `key` currently has value `value` in the store with the given `root_hash`
+    /// based on the data in this proof.
+    pub fn verify(&self, hasher: &mut H, key: &K, value: &V, root_hash: &H::Digest) -> bool {
+        // Reconstruct the updates tree root.
+        let kv_digest = MutableMmr::<K, V, H>::key_value_hash(hasher, key, value);
+        let peak_hashes = match self.updates_proof.reconstruct_peak_hashes(
+            hasher,
+            &[kv_digest],
+            self.tree_pos,
+            self.tree_pos,
+        ) {
+            Ok(peak_hashes) => peak_hashes,
+            Err(e) => {
+                debug!("failed to reconstruct update tree root: {:?}", e);
+                return false;
+            }
+        };
+        let updates_root = {
+            let mut h = Hasher::<H>::new(hasher);
+            h.root_hash(self.updates_proof.size, peak_hashes.iter())
+        };
+
+        // Reconstruct the is_active bitmap root.
+        let bit_offset = leaf_pos_to_num(self.tree_pos);
+        let leaf_pos = Bitmap::<H>::leaf_pos(bit_offset);
+        let peak_hashes = match self.is_active_proof.reconstruct_peak_hashes(
+            hasher,
+            &[self.state_bitmap_chunk],
+            leaf_pos,
+            leaf_pos,
+        ) {
+            Ok(peak_hashes) => peak_hashes,
+            Err(e) => {
+                debug!("failed to reconstruct state tree root: {:?}", e);
+                return false;
+            }
+        };
+        let mut h = Hasher::new(hasher);
+        let is_active_root = h.root_hash(self.is_active_proof.size, peak_hashes.iter());
+
+        // Important! Make sure the is_active bit corresponding to this key in the bitmap chunk is
+        // actually a 1. Otherwise it's trivial to create a proof where we'll return true for an
+        // inactive value.
+        let chunk_byte_offset = Bitmap::<H>::chunk_byte_offset(bit_offset);
+        let chunk_byte_mask = Bitmap::<H>::mask_for(bit_offset);
+        if self.state_bitmap_chunk[chunk_byte_offset] & chunk_byte_mask == 0 {
+            return false;
+        }
+
+        // Derive the store's root hash from the two roots, and confirm it matches `root_hash` from
+        // the caller.
+        h.node_hash(0, &updates_root, &is_active_root) == *root_hash
+    }
 }
 
 #[cfg(test)]
