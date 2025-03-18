@@ -55,16 +55,16 @@
 //! Each peer maintains a pair of ChaCha20-Poly1305 nonces (12 bytes), one for itself and one for
 //! the other. Each nonce is constructed using a counter that starts at either 1 for the dialer, or
 //! 0 for the dialee. For each message sent, the relevant counter is incremented by 2, ensuring that
-//! the two counters have disjoint nonce spaces. The nonce is the least-significant 12 bytes of the
-//! counter, encoded big-endian.
+//! the two counters have disjoint nonce spaces.
 //!
-//! This provides 2^95 unique nonces per sender, sufficient for over 1 trillion years at 1 billion
-//! messages/second—far exceeding practical limits. Maintaining long-lived connections to reliable
-//! peers enhances network stability by removing the overhead of connection churn. In an unlikely
-//! case of overflow, the connection would terminate, and a new handshake would be required.
+//! The nonce is the least-significant 12 bytes of the counter, encoded big-endian. This provides 2^95 unique nonces
+//! per sender, sufficient for over 1 trillion years at 1 billion messages/second—far exceeding practical limits. This approach
+//! ensures well-behaving peers, as long as they both stay online, remain connected indefinitely (maximizing the stability
+//! of any p2p construction). In an unlikely case of overflow, the connection would terminate, and a new handshake would be required.
 //!
-//! This construction saves bandwidth, as the nonce does not need to be sent as part of the message.
-//! It also prevents nonce-reuse, which would otherwise allow for messages to be decrypted.
+//! This simple coordination prevents nonce reuse (which would allow for messages to be decrypted) and saves a small amount of
+//! bandwidth (no need to send the nonce alongside the encrypted message). This "pedantic" construction of the nonce
+//! also avoids accidental reuse of a nonce over long-lived connections (when setting it to be a small hash as in XChaCha20-Poly1305).
 
 use commonware_cryptography::Scheme;
 use std::time::Duration;

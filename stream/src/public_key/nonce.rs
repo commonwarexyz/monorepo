@@ -19,12 +19,12 @@ const OVERFLOW_VALUE: u128 = 1 << 96;
 impl Info {
     /// Creates a new `Info` struct.
     ///
-    /// The `sender_is_dialer` parameter indicates whether the sender is the dialer or not.
+    /// The `dialer` parameter indicates whether the sender is the dialer or not.
     /// For example, if the client was the dialer, this is set to true for your own nonces, but
     /// false for the peer's nonces.
-    pub fn new(sender_is_dialer: bool) -> Self {
+    pub fn new(dialer: bool) -> Self {
         Self {
-            counter: if sender_is_dialer { 1 } else { 0 },
+            counter: if dialer { 1 } else { 0 },
         }
     }
 
