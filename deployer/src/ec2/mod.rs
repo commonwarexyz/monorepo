@@ -171,7 +171,9 @@ pub mod utils;
 pub const METRICS_PORT: u16 = 9090;
 
 /// Port on binary where profiles are exposed
-pub const PROFILES_PORT: u16 = 9091;
+pub const PROFILES_PORT: u16 = 4040;
+
+pub const LOGGING_PORT: u16 = 3100;
 
 /// Name of the monitoring instance
 const MONITORING_NAME: &str = "monitoring";
@@ -258,6 +260,8 @@ pub struct Peer {
 /// List of peers
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Peers {
+    /// Monitoring instance
+    pub monitoring_private_ip: IpAddr,
     /// Peers deployed across all regions
     pub peers: Vec<Peer>,
 }

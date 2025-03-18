@@ -2,7 +2,7 @@
 
 use crate::ec2::{
     aws::*, deployer_directory, services::*, utils::*, Config, Error, InstanceConfig, Peer, Peers,
-    CREATED_FILE_NAME, MONITORING_NAME, MONITORING_REGION,
+    CREATED_FILE_NAME, LOGGING_PORT, MONITORING_NAME, MONITORING_REGION, PROFILES_PORT,
 };
 use futures::future::try_join_all;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -390,21 +390,6 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     let deployments: Vec<Deployment> = try_join_all(launch_futures).await?;
     info!("launched binary instances");
 
-    // Generate peers.yaml
-    let peers = Peers {
-        peers: deployments
-            .iter()
-            .map(|d| Peer {
-                name: d.instance.name.clone(),
-                region: d.instance.region.clone(),
-                ip: d.ip.clone().parse::<IpAddr>().unwrap(),
-            })
-            .collect(),
-    };
-    let peers_yaml = serde_yaml::to_string(&peers)?;
-    let peers_path = temp_dir.join("peers.yaml");
-    std::fs::write(&peers_path, peers_yaml)?;
-
     // Write systemd service files
     let prometheus_service_path = temp_dir.join("prometheus.service");
     std::fs::write(&prometheus_service_path, PROMETHEUS_SERVICE)?;
@@ -530,6 +515,22 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     poll_service_active(private_key, &monitoring_ip, "grafana-server").await?;
     info!("configured monitoring instance");
 
+    // Generate peers.yaml
+    let peers = Peers {
+        monitoring_private_ip: monitoring_private_ip.clone().parse::<IpAddr>().unwrap(),
+        peers: deployments
+            .iter()
+            .map(|d| Peer {
+                name: d.instance.name.clone(),
+                region: d.instance.region.clone(),
+                ip: d.ip.clone().parse::<IpAddr>().unwrap(),
+            })
+            .collect(),
+    };
+    let peers_yaml = serde_yaml::to_string(&peers)?;
+    let peers_path = temp_dir.join("peers.yaml");
+    std::fs::write(&peers_path, peers_yaml)?;
+
     // Configure binary instances
     info!("configuring binary instances");
     let mut start_futures = Vec::new();
@@ -629,8 +630,20 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             .ip_permissions(
                 IpPermission::builder()
                     .ip_protocol("tcp")
-                    .from_port(3100)
-                    .to_port(3100)
+                    .from_port(LOGGING_PORT as i32)
+                    .to_port(LOGGING_PORT as i32)
+                    .user_id_group_pairs(
+                        UserIdGroupPair::builder()
+                            .group_id(binary_sg_id.clone())
+                            .build(),
+                    )
+                    .build(),
+            )
+            .ip_permissions(
+                IpPermission::builder()
+                    .ip_protocol("tcp")
+                    .from_port(PROFILES_PORT as i32)
+                    .to_port(PROFILES_PORT as i32)
                     .user_id_group_pairs(
                         UserIdGroupPair::builder()
                             .group_id(binary_sg_id.clone())

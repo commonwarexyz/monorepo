@@ -82,7 +82,7 @@ fn main() {
         format!("http://0.0.0.0:{}", PROFILES_PORT),
         public_key.to_string(),
     )
-    .backend(pprof_backend(PprofConfig::new().sample_rate(100)))
+    .backend(pprof_backend(PprofConfig::new().sample_rate(1000)))
     .build()
     .expect("Could not create Pyroscope agent");
     let profiler = profiler.start().expect("Could not start Pyroscope agent");
