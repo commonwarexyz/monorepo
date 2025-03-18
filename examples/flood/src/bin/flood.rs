@@ -21,7 +21,7 @@ use std::{
     str::FromStr,
     sync::{
         atomic::{AtomicI64, AtomicU64},
-        Mutex,
+        Arc, Mutex,
     },
     time::Duration,
 };
@@ -32,24 +32,26 @@ const SYSTEM_METRICS_REFRESH: Duration = Duration::from_secs(5);
 const FLOOD_NAMESPACE: &[u8] = b"_COMMONWARE_FLOOD";
 
 // CPU profiling handler
-async fn cpu_profile() -> Response<Body> {
+async fn cpu_profile(profiler: Arc<Mutex<ProfilerGuard<'static>>>) -> Response<Body> {
     info!("Starting CPU profiling");
-    match ProfilerGuardBuilder::default().frequency(1000).build() {
-        Ok(guard) => match guard.report().build() {
-            Ok(report) => {
-                let profile = report.pprof().unwrap();
-                let mut body = Vec::new();
-                profile.encode(&mut body).unwrap();
-                Response::builder()
-                    .header("Content-Type", "application/octet-stream")
-                    .body(Body::from(body))
-                    .unwrap()
-            }
-            Err(e) => Response::builder()
-                .status(500)
-                .body(Body::from(e.to_string()))
-                .unwrap(),
-        },
+    match profiler.lock().unwrap().report().build() {
+        Ok(report) => {
+            let profile = match report.pprof() {
+                Ok(profile) => profile,
+                Err(e) => {
+                    return Response::builder()
+                        .status(500)
+                        .body(Body::from(e.to_string()))
+                        .unwrap()
+                }
+            };
+            let mut body = Vec::new();
+            profile.encode(&mut body).unwrap();
+            Response::builder()
+                .header("Content-Type", "application/octet-stream")
+                .body(Body::from(body))
+                .unwrap()
+        }
         Err(e) => Response::builder()
             .status(500)
             .body(Body::from(e.to_string()))
@@ -269,10 +271,11 @@ fn main() {
 
         // Serve profiles
         let profiles = context.with_label("profiles").spawn(|context| async move {
-            let guard = ProfilerGuardBuilder::default()
+            let profiler = ProfilerGuardBuilder::default()
                 .frequency(1000)
                 .build()
                 .expect("Could not create CPU profiler");
+            let profiler = Arc::new(Mutex::new(profiler));
             let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), PROFILES_PORT);
             let listener = context
                 .bind(addr)
@@ -282,26 +285,12 @@ fn main() {
                 .route(
                     "/profile/cpu",
                     get(
-                        |extension: Extension<Mutex<ProfilerGuard<'static>>>| async move {
-                            if let Some(guard) = extension.0.take() {
-                                if let Ok(report) = guard.report().build() {
-                                    let mut body = Vec::new();
-                                    let profile = report.pprof().unwrap();
-                                    profile.encode(&mut body).unwrap();
-                                    Ok(Response::builder()
-                                        .header("Content-Type", "application/octet-stream")
-                                        .body(Body::from(body))
-                                        .unwrap())
-                                } else {
-                                    Ok(Response::new(Body::from("Failed to generate CPU profile")))
-                                }
-                            } else {
-                                Ok(Response::new(Body::from("CPU profiling not started")))
-                            }
+                        |extension: Extension<Arc<Mutex<ProfilerGuard<'static>>>>| async move {
+                            cpu_profile(extension.0).await
                         },
                     ),
                 )
-                .layer(Extension(profiler_state));
+                .layer(Extension(profiler));
             serve(listener, app.into_make_service())
                 .await
                 .expect("Could not serve profiles");

@@ -18,6 +18,8 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tokio::time::sleep;
 
+use super::{METRICS_PORT, PROFILES_PORT};
+
 /// Creates an EC2 client for the specified AWS region
 pub async fn create_ec2_client(region: Region) -> Ec2Client {
     let config = aws_config::defaults(BehaviorVersion::v2024_03_28())
@@ -264,8 +266,8 @@ pub async fn create_security_group_binary(
         .ip_permissions(
             IpPermission::builder()
                 .ip_protocol("tcp")
-                .from_port(9090)
-                .to_port(9091)
+                .from_port(METRICS_PORT as i32)
+                .to_port(PROFILES_PORT as i32)
                 .ip_ranges(
                     IpRange::builder()
                         .cidr_ip(exact_cidr(monitoring_ip))
