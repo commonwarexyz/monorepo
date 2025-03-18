@@ -7,7 +7,7 @@
 //!
 //! * Automated creation, update, and destruction of EC2 instances across multiple regions
 //! * Provide a unique name, instance type, region, binary, and configuration for each deployed instance
-//! * Collect metrics and logs from all deployed instances on a long-lived monitoring instance (accessible only to the deployer's IP)
+//! * Collect metrics, profiles, and logs from all deployed instances on a long-lived monitoring instance (accessible only to the deployer's IP)
 //!
 //! # Architecture
 //!
@@ -20,8 +20,9 @@
 //!               | Monitoring VPC (us-east-1)        |
 //!               |  - Monitoring Instance            |
 //!               |    - Prometheus                   |
-//!               |    - Grafana                      |
 //!               |    - Loki                         |
+//!               |    - Pyroscope                    |
+//!               |    - Grafana                      |
 //!               |  - Security Group                 |
 //!               |    - All: Deployer IP             |
 //!               |    - 3100: Binary VPCs            |
@@ -38,6 +39,7 @@
 //! |  - Security Group            |  |  - Security Group            |
 //! |    - All: Deployer IP        |  |    - All: Deployer IP        |
 //! |    - 9090: Monitoring IP     |  |    - 9090: Monitoring IP     |
+//! |    - 9091: Monitoring IP     |  |    - 9091: Monitoring IP     |
 //! |    - 8012: 0.0.0.0/0         |  |    - 8765: 12.3.7.9/32       |
 //! +------------------------------+  +------------------------------+
 //! ```
@@ -49,8 +51,9 @@
 //! * Deployed in `us-east-1` with a configurable ARM64 instance type (e.g., `t4g.small`) and storage (e.g., 10GB gp2).
 //! * Runs:
 //!     * **Prometheus**: Scrapes metrics from all instances at `:9090`, configured via `/opt/prometheus/prometheus.yml`.
-//!     * **Grafana**: Hosted at `:3000`, provisioned with Prometheus and Loki datasources and a custom dashboard.
 //!     * **Loki**: Listens at `:3100`, storing logs in `/loki/chunks` with a TSDB index at `/loki/index`.
+//!     * **Pyroscope**: Scrapes metrics from all instances at `:9091`, configured via `/opt/pyroscope/config.yml`.
+//!     * **Grafana**: Hosted at `:3000`, provisioned with Prometheus and Loki datasources and a custom dashboard.
 //! * Security:
 //!     * Allows deployer IP access (TCP 0-65535).
 //!     * Binary instance traffic to Loki (TCP 3100).
@@ -59,12 +62,12 @@
 //!
 //! * Deployed in user-specified regions with configurable ARM64 instance types and storage.
 //! * Run:
-//!     * **Custom Binary**: Executes with `--peers=/home/ubuntu/peers.yaml --config=/home/ubuntu/config.conf`, exposing metrics at `:9090` (assumed).
+//!     * **Custom Binary**: Executes with `--peers=/home/ubuntu/peers.yaml --config=/home/ubuntu/config.conf`, exposing metrics at `:9090` and profiles at `:9091`.
 //!     * **Promtail**: Forwards `/var/log/binary.log` to Loki on the monitoring instance.
 //! * Security:
 //!     * Deployer IP access (TCP 0-65535).
-//!     * Monitoring IP access to `:9090` for Prometheus scraping.
-//!         * User-defined ports from the configuration.
+//!     * Monitoring IP access to `:9090` for Prometheus and `:9091` for Pyroscope scraping.
+//!     * User-defined ports from the configuration.
 //!
 //! ## Networking
 //!
@@ -91,7 +94,7 @@
 //! 1. Validates configuration and generates an SSH key pair, stored in `/tmp/deployer-{tag}/id_rsa_{tag}`.
 //! 2. Creates VPCs, subnets, internet gateways, route tables, and security groups per region.
 //! 3. Establishes VPC peering between the monitoring region and binary regions.
-//! 4. Launches the monitoring instance, uploads service files, and installs Prometheus, Grafana, and Loki.
+//! 4. Launches the monitoring instance, uploads service files, and installs Prometheus, Grafana, Loki, and Pyroscope.
 //! 5. Launches binary instances, uploads binaries, configurations, and peers.yaml, and installs Promtail and the binary.
 //! 6. Configures BBR on all instances and updates the monitoring security group for Loki traffic.
 //! 7. Marks completion with `/tmp/deployer-{tag}/created`.
@@ -163,6 +166,12 @@ pub use refresh::refresh;
 mod destroy;
 pub use destroy::destroy;
 pub mod utils;
+
+/// Port on binary where metrics are exposed
+pub const METRICS_PORT: u16 = 9090;
+
+/// Port on binary where profiles are exposed
+pub const PROFILES_PORT: u16 = 9091;
 
 /// Name of the monitoring instance
 const MONITORING_NAME: &str = "monitoring";
