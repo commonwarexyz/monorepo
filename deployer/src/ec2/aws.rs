@@ -265,7 +265,7 @@ pub async fn create_security_group_binary(
             IpPermission::builder()
                 .ip_protocol("tcp")
                 .from_port(9090)
-                .to_port(9090)
+                .to_port(9091)
                 .ip_ranges(
                     IpRange::builder()
                         .cidr_ip(exact_cidr(monitoring_ip))

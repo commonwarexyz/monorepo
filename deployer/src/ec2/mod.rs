@@ -7,7 +7,7 @@
 //!
 //! * Automated creation, update, and destruction of EC2 instances across multiple regions
 //! * Provide a unique name, instance type, region, binary, and configuration for each deployed instance
-//! * Collect metrics and logs from all deployed instances on a long-lived monitoring instance (accessible only to the deployer's IP)
+//! * Collect metrics, profiles, and logs from all deployed instances on a long-lived monitoring instance (accessible only to the deployer's IP)
 //!
 //! # Architecture
 //!
@@ -38,6 +38,7 @@
 //! |  - Security Group            |  |  - Security Group            |
 //! |    - All: Deployer IP        |  |    - All: Deployer IP        |
 //! |    - 9090: Monitoring IP     |  |    - 9090: Monitoring IP     |
+//! |    - 9091: Monitoring IP     |  |    - 9091: Monitoring IP     |
 //! |    - 8012: 0.0.0.0/0         |  |    - 8765: 12.3.7.9/32       |
 //! +------------------------------+  +------------------------------+
 //! ```
@@ -48,7 +49,7 @@
 //!
 //! * Deployed in `us-east-1` with a configurable ARM64 instance type (e.g., `t4g.small`) and storage (e.g., 10GB gp2).
 //! * Runs:
-//!     * **Prometheus**: Scrapes metrics from all instances at `:9090`, configured via `/opt/prometheus/prometheus.yml`.
+//!     * **Prometheus**: Scrapes metrics from all instances at `:9090` and profiles at `:9091`, configured via `/opt/prometheus/prometheus.yml`.
 //!     * **Grafana**: Hosted at `:3000`, provisioned with Prometheus and Loki datasources and a custom dashboard.
 //!     * **Loki**: Listens at `:3100`, storing logs in `/loki/chunks` with a TSDB index at `/loki/index`.
 //! * Security:
@@ -59,11 +60,11 @@
 //!
 //! * Deployed in user-specified regions with configurable ARM64 instance types and storage.
 //! * Run:
-//!     * **Custom Binary**: Executes with `--peers=/home/ubuntu/peers.yaml --config=/home/ubuntu/config.conf`, exposing metrics at `:9090` (assumed).
+//!     * **Custom Binary**: Executes with `--peers=/home/ubuntu/peers.yaml --config=/home/ubuntu/config.conf`, exposing metrics at `:9090` and profiles at `:9091`.
 //!     * **Promtail**: Forwards `/var/log/binary.log` to Loki on the monitoring instance.
 //! * Security:
 //!     * Deployer IP access (TCP 0-65535).
-//!     * Monitoring IP access to `:9090` for Prometheus scraping.
+//!     * Monitoring IP access to `:9090` and `:9091` for Prometheus scraping.
 //!         * User-defined ports from the configuration.
 //!
 //! ## Networking

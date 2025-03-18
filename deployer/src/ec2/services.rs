@@ -344,8 +344,14 @@ scrape_configs:
       - targets: ['{}:9090']
         labels:
           region: '{}'
+  - job_name: '{}_profiles'
+    static_configs:
+      - targets: ['{}:9091']
+        labels:
+          region: '{}'
+          type: 'profiles'
 "#,
-            name, ip, region
+            name, ip, region, name, ip, region,
         ));
     }
     config
