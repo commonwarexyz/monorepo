@@ -7,7 +7,7 @@
 
 use bytes::Bytes;
 
-pub mod linked;
+pub mod ordered_broadcast;
 pub mod simplex;
 pub mod threshold_simplex;
 

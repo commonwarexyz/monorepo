@@ -1,9 +1,12 @@
 use std::io::Result;
 fn main() -> Result<()> {
-    // Proto compilation rules for `linked` dialect
+    // Proto compilation rules for `ordered_broadcast` dialect
     let mut config = prost_build::Config::new();
     config.protoc_arg("--experimental_allow_proto3_optional");
-    config.compile_protos(&["src/linked/wire.proto"], &["src/linked/"])?;
+    config.compile_protos(
+        &["src/ordered_broadcast/wire.proto"],
+        &["src/ordered_broadcast/"],
+    )?;
 
     // Proto compilation rules for `simplex` dialect
     let mut config = prost_build::Config::new();

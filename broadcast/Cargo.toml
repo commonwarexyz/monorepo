@@ -12,10 +12,7 @@ documentation = "https://docs.rs/commonware-broadcast"
 
 [dependencies]
 commonware-codec = { workspace = true }
-commonware-utils = { workspace = true }
 bytes = { workspace = true }
-futures = { workspace = true }
-prost = { workspace = true }
 thiserror = { workspace = true }
 
 [lib]

@@ -254,7 +254,7 @@ mod tests {
                     priority_proposals: false,
                     journal_heights_per_section: 10,
                     journal_replay_concurrency: 1,
-                    journal_name_prefix: format!("broadcast-linked-seq/{}/", validator),
+                    journal_name_prefix: format!("ordered-broadcast-seq/{}/", validator),
                 },
             );
 

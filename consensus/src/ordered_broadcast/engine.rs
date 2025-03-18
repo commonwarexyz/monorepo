@@ -1,4 +1,4 @@
-//! Engine for the linked module.
+//! Engine for the module.
 //!
 //! It is responsible for:
 //! - Proposing nodes (if a sequencer)
@@ -52,7 +52,7 @@ struct Verify<C: Scheme, D: Digest, E: Clock> {
     result: Result<bool, Error>,
 }
 
-/// Instance of the `linked` engine.
+/// Instance of the engine.
 pub struct Engine<
     B: Blob,
     E: Clock + Spawner + Storage<B> + Metrics,

@@ -1,4 +1,4 @@
-use crate::{linked::prover::Prover, Committer as Z, Proof};
+use crate::{ordered_broadcast::prover::Prover, Committer as Z, Proof};
 use commonware_cryptography::{bls12381::primitives::group, Digest, Scheme};
 use futures::{
     channel::{mpsc, oneshot},

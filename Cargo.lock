@@ -848,9 +848,6 @@ version = "0.0.43"
 dependencies = [
  "bytes",
  "commonware-codec",
- "commonware-utils",
- "futures",
- "prost",
  "thiserror 2.0.12",
 ]
 
