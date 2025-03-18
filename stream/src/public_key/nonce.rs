@@ -11,6 +11,10 @@ pub struct Info {
     counter: u128,
 }
 
+/// If the counter is greater-than-or-equal to this value, it is considered to have overflowed.
+/// This is 2^96 or, in binary, one followed by 96 zeros.
+const OVERFLOW_VALUE: u128 = 1 << 96;
+
 impl Info {
     pub fn new(dialer: bool) -> Self {
         Self {
@@ -23,9 +27,8 @@ impl Info {
     /// Counter is incremented by 2, maintaining the dialer bit.
     /// An error is returned if-and-only-if the nonce overflows 96 bits.
     pub fn inc(&mut self) -> Result<(), Error> {
-        const OVERFLOW: u128 = 1 << 96;
         let new_counter = self.counter + 2; // Overflow check not necessary unless counter was improperly initialized
-        if new_counter >= OVERFLOW {
+        if new_counter >= OVERFLOW_VALUE {
             return Err(Error::NonceOverflow);
         }
         self.counter = new_counter;
@@ -111,7 +114,7 @@ mod tests {
         let initial = (1 << 96) - 2;
         let mut nonce = Info { counter: initial };
 
-        assert!(nonce.inc().is_err());
+        assert!(matches!(nonce.inc(), Err(Error::NonceOverflow)));
         assert_eq!(nonce.counter, initial);
     }
 
@@ -120,7 +123,7 @@ mod tests {
         let initial = (1 << 96) - 1;
         let mut nonce = Info { counter: initial };
 
-        assert!(nonce.inc().is_err());
+        assert!(matches!(nonce.inc(), Err(Error::NonceOverflow)));
         assert_eq!(nonce.counter, initial);
     }
 }
