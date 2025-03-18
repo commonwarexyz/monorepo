@@ -1,12 +1,12 @@
 //! Parsed wrappers around wire types.
 
-use crate::linked::{wire, Epoch};
+use super::{wire, Epoch};
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{Element, Signature as ThresholdSignature},
         poly::PartialSignature,
     },
-    Scheme,
+    Digest, Scheme,
 };
 use commonware_utils::Array;
 use prost::Message;
@@ -35,13 +35,13 @@ pub enum Error {
 
 /// Parsed version of a `Chunk`.
 #[derive(Clone, Debug, Eq, PartialOrd, Ord, PartialEq)]
-pub struct Chunk<D: Array, P: Array> {
+pub struct Chunk<D: Digest, P: Array> {
     pub sequencer: P,
     pub height: u64,
     pub payload: D,
 }
 
-impl<D: Array, P: Array> Chunk<D, P> {
+impl<D: Digest, P: Array> Chunk<D, P> {
     /// Returns a `Chunk` from a `wire::Chunk`.
     pub fn from_wire(chunk: wire::Chunk) -> Result<Self, Error> {
         Ok(Self {
@@ -63,13 +63,13 @@ impl<D: Array, P: Array> Chunk<D, P> {
 
 /// Parsed version of a `Parent`.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Parent<D: Array> {
+pub struct Parent<D: Digest> {
     pub payload: D,
     pub epoch: Epoch,
     pub threshold: ThresholdSignature,
 }
 
-impl<D: Array> Parent<D> {
+impl<D: Digest> Parent<D> {
     /// Returns a `Parent` from a `wire::Parent`.
     pub fn from_wire(parent: wire::Parent) -> Result<Self, Error> {
         Ok(Self {
@@ -92,13 +92,13 @@ impl<D: Array> Parent<D> {
 
 /// Parsed version of a `Node`.
 #[derive(Clone, Eq)]
-pub struct Node<C: Scheme, D: Array> {
+pub struct Node<C: Scheme, D: Digest> {
     pub chunk: Chunk<D, C::PublicKey>,
     pub signature: C::Signature,
     pub parent: Option<Parent<D>>,
 }
 
-impl<C: Scheme, D: Array> Node<C, D> {
+impl<C: Scheme, D: Digest> Node<C, D> {
     /// Decode a `Node` from bytes.
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
         let node = wire::Node::decode(bytes)?;
@@ -130,7 +130,7 @@ impl<C: Scheme, D: Array> Node<C, D> {
     }
 }
 
-impl<C: Scheme, D: Array> std::fmt::Debug for Node<C, D> {
+impl<C: Scheme, D: Digest> std::fmt::Debug for Node<C, D> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Node")
             .field("chunk", &self.chunk)
@@ -140,7 +140,7 @@ impl<C: Scheme, D: Array> std::fmt::Debug for Node<C, D> {
     }
 }
 
-impl<C: Scheme, D: Array> PartialEq for Node<C, D> {
+impl<C: Scheme, D: Digest> PartialEq for Node<C, D> {
     fn eq(&self, other: &Self) -> bool {
         self.chunk == other.chunk
             && self.signature == other.signature
@@ -150,13 +150,13 @@ impl<C: Scheme, D: Array> PartialEq for Node<C, D> {
 
 /// Parsed version of an `Ack`.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Ack<D: Array, P: Array> {
+pub struct Ack<D: Digest, P: Array> {
     pub chunk: Chunk<D, P>,
     pub epoch: Epoch,
     pub partial: PartialSignature,
 }
 
-impl<D: Array, P: Array> Ack<D, P> {
+impl<D: Digest, P: Array> Ack<D, P> {
     /// Decode an `Ack` from bytes.
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
         let ack = wire::Ack::decode(bytes).map_err(Error::Decode)?;

@@ -6,7 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1" />
     <link rel="icon" href="../favicon.ico" type="image/x-icon">
 
-    <title>commonware > Scaling Throughput with Linked Broadcast</title>
+    <title>commonware > Scaling Throughput with Ordered Broadcast</title>
     <meta name="description" content="Blockchains require replicating data, like transactions, across nodes in the network—but doing it efficiently and reliably is a challenge. For the last decade, best-effort broadcast has been the norm, relying on consensus to guarantee delivery. The result? Wasted bandwidth by sending the same data multiple times, bottlenecked throughput by routing messages through a single node (the leader in consensus), and degraded performance whenever that node is unresponsive.">
     <meta name="author" content="Brendan Chou">
     <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
@@ -15,16 +15,16 @@
     <meta property="og:type" content="article" />
     <meta property="og:site_name" content="commonware" />
     <meta property="og:image" content="https://commonware.xyz/imgs/broadcast-in-consensus.png" />
-    <meta property="og:title" content="Scaling Throughput with Linked Broadcast" />
+    <meta property="og:title" content="Scaling Throughput with Ordered Broadcast" />
     <meta property="og:description" content="Blockchains require replicating data, like transactions, across nodes in the network—but doing it efficiently and reliably is a challenge. For the last decade, best-effort broadcast has been the norm, relying on consensus to guarantee delivery. The result? Wasted bandwidth by sending the same data multiple times, bottlenecked throughput by routing messages through a single node (the leader in consensus), and degraded performance whenever that node is unresponsive." />
     <meta property="article:author" content="https://x.com/b_chou" />
     <meta property="article:published_time" content="2025-02-20T00:00:00Z" />
-    <meta property="article:modified_time" content="2025-02-20T00:00:00Z" />
+    <meta property="article:modified_time" content="2025-03-18T00:00:00Z" />
 
     <meta name="twitter:card" content="summary_large_image" />
     <meta property="twitter:domain" content="commonware.xyz" />
     <meta property="twitter:url" content="https://commonware.xyz/blogs/commonware-broadcast.html" />
-    <meta property="twitter:title" content="Scaling Throughput with Linked Broadcast" />
+    <meta property="twitter:title" content="Scaling Throughput with Ordered Broadcast" />
     <meta property="twitter:description" content="Blockchains require replicating data, like transactions, across nodes in the network—but doing it efficiently and reliably is a challenge. For the last decade, best-effort broadcast has been the norm, relying on consensus to guarantee delivery. The result? Wasted bandwidth by sending the same data multiple times, bottlenecked throughput by routing messages through a single node (the leader in consensus), and degraded performance whenever that node is unresponsive." />
     <meta property="twitter:image" content="https://commonware.xyz/imgs/broadcast-in-consensus.png" />
     <meta property="twitter:site" content="@commonwarexyz" />
@@ -74,19 +74,19 @@
         </div>
     </div>
     <div class="content">
-        <h1>Scaling Throughput with Linked Broadcast</h1>
+        <h1>Scaling Throughput with Ordered Broadcast</h1>
         <div class="meta">
             <div class="author">By <a href="https://x.com/b_chou">Brendan Chou</a></div>
             <div class="date">February 20, 2025</div>
         </div>
         <p>Blockchains require replicating data, like transactions, across nodes in the network—but doing it efficiently and reliably is a challenge. For the last decade, best-effort broadcast has been the norm, relying on consensus to guarantee delivery. The result? Wasted bandwidth by sending the same data multiple times, bottlenecked throughput by routing messages through a single node (the leader in consensus), and degraded performance whenever that node is unresponsive.</p>
-        <p>Enter <i>commonware-broadcast</i>. Our latest primitive provides a common interface for data dissemination, with multiple “dialects” tailored around different tradeoffs and types of data. The first dialect, <a href="https://docs.rs/commonware-broadcast/latest/commonware_broadcast/linked/index.html">broadcast::linked</a>, uses a concurrent, ordered, and fault-tolerant approach to replication that efficiently integrates with consensus mechanisms using threshold cryptography.</p>
+        <p>Enter <i>commonware-broadcast</i>. Our latest primitive provides a common interface for data dissemination, with multiple “dialects” tailored around different tradeoffs and types of data. The first dialect, <a href="https://docs.rs/commonware-consensus/latest/commonware_consensus/ordered_broadcast/index.html">consensus::ordered_broadcast</a>, uses a concurrent, ordered, and fault-tolerant approach to replication that efficiently integrates with consensus mechanisms using threshold cryptography.</p>
         <p>Let's break it down.</p>
         <p>This dialect specifies two roles in the network: <b>sequencers</b> who initiate and order messages, and <b>validators</b> who verify and acknowledge messages. Membership in the sets is arbitrary; the set of sequencers and validators may overlap or be completely distinct. When used in a blockchain setting, the set of broadcast validators may or may not match the set of block validators.</p>
         <p>Validators acknowledge receipt and validate messages by emitting partial signatures. These partial signatures are aggregated into threshold signatures once a quorum is reached.</p>
         <p>For sequencers, each new message must also carry the threshold signature of the previous message in the sequencer's history. By induction, a single threshold signature provides cryptographic proof of the existence of the entire history of linked messages. That is, each previous message is guaranteed to have been validated by a quorum of validators. Credit goes to <a href="https://arxiv.org/abs/2401.10369">Autobahn</a>, which introduces the idea that certified messages—when linked—imply a complete, valid, and well-replicated history of messages.</p>
         <div class="image-container">
-            <img src="../imgs/linked-broadcast.png" alt="Sequencer broadcasting messages, linking each to the previous one using threshold signatures.">
+            <img src="../imgs/ordered-broadcast.png" alt="Sequencer broadcasting messages, linking each to the previous one using threshold signatures.">
             <div class="image-caption">Figure 1: A diagram of a sequencer broadcasting messages, linking each to the previous one using threshold signatures. Multiple validators are contributing partial signatures.</div>
         </div>
         <p>The formation of threshold signatures over each message has powerful implications.</p>
@@ -99,11 +99,11 @@
             <img src="../imgs/broadcast-in-consensus.png" alt="Every block references a set of sequencer tips, each with a threshold signature.">
             <div class="image-caption">Figure 2: A diagram showing how broadcast messages may be used in consensus. Every block references a set of sequencer tips, each with a threshold signature.</div>
         </div>
-        <p><i>broadcast::linked</i> also handles set reconfiguration. It is robust in the face of changing participants across epochs—distinct periods when the set of validators and sequencers may change. During changes, the aggregate set of validators must still be able to produce a threshold signature using the same threshold public key. Meanwhile, the set of sequencers may change arbitrarily. For example, the system might modify the number of active sequencers or remove and later reinstate them.</p>
+        <p><i>consensus::ordered_broadcast</i> also handles set reconfiguration. It is robust in the face of changing participants across epochs—distinct periods when the set of validators and sequencers may change. During changes, the aggregate set of validators must still be able to produce a threshold signature using the same threshold public key. Meanwhile, the set of sequencers may change arbitrarily. For example, the system might modify the number of active sequencers or remove and later reinstate them.</p>
         <p>Sequencer tips are stored robustly in a write-ahead log, ensuring consistency even in the face of unexpected node shutdown. This prevents honest sequencers from broadcasting conflicting messages and also prevents honest validators from signing conflicting messages from dishonest sequencers. Conflicting messages are messages with the same sequencer and height that contain different data.</p>
         <p>As with other primitives, this dialect is tested for resilience using Commonware's <a href="https://commonware.xyz/blogs/commonware-runtime.html">deterministic simulator</a>. It reproducibly simulates complex scenarios such as packet loss, complete node failure, and temporary network partitions.</p>
-        <p>For developers building decentralized applications, <i>broadcast::linked</i> unlocks high-throughput replication using multiple sequencers and a simple, easily verifiable structure over message dissemination. Its use of threshold signatures proves the integrity of an entire history of messages, allowing for fast, succinct validation by external nodes ingesting network activity and can serve as early confirmation for users (and a slashable commitment for the sequencer).</p>
-        <p>Scalability is no longer a differentiator—it's a requirement. <i>broadcast::linked</i> is your shortcut.</p>
+        <p>For developers building decentralized applications, <i>consensus::ordered_broadcast</i> unlocks high-throughput replication using multiple sequencers and a simple, easily verifiable structure over message dissemination. Its use of threshold signatures proves the integrity of an entire history of messages, allowing for fast, succinct validation by external nodes ingesting network activity and can serve as early confirmation for users (and a slashable commitment for the sequencer).</p>
+        <p>Scalability is no longer a differentiator—it's a requirement. <i>consensus::ordered_broadcast</i> is your shortcut.</p>
     </div>
 
     <div id="footer-placeholder"></div>

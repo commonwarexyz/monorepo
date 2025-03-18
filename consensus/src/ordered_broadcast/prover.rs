@@ -1,6 +1,6 @@
 //! Generate and verify proofs of broadcast.
 //!
-//! The proofs contain threshold signatures of signers that have seen and validated a chunk.
+//! The proofs contain threshold signatures of validators that have seen and validated a chunk.
 
 use super::{namespace, parsed, serializer, Context, Epoch};
 use crate::Proof;
@@ -10,7 +10,7 @@ use commonware_cryptography::{
         group::{self, Element},
         ops,
     },
-    Scheme,
+    Digest, Scheme,
 };
 use commonware_utils::{Array, SizedSerialize};
 use std::marker::PhantomData;
@@ -20,14 +20,14 @@ use std::marker::PhantomData;
 /// We don't use protobuf for proof encoding because we expect external parties
 /// to decode proofs in constrained environments where protobuf may not be implemented.
 #[derive(Clone)]
-pub struct Prover<C: Scheme, D: Array> {
+pub struct Prover<C: Scheme, D: Digest> {
     _crypto: PhantomData<C>,
     _digest: PhantomData<D>,
     namespace: Vec<u8>,
     public: group::Public,
 }
 
-impl<C: Scheme, D: Array> Prover<C, D> {
+impl<C: Scheme, D: Digest> Prover<C, D> {
     /// The length of a serialized proof.
     const PROOF_LEN: usize = C::PublicKey::SERIALIZED_LEN
         + u64::SERIALIZED_LEN
@@ -92,7 +92,7 @@ impl<C: Scheme, D: Array> Prover<C, D> {
         let chunk = parsed::Chunk {
             sequencer: sequencer.clone(),
             height,
-            payload: payload.clone(),
+            payload,
         };
         let msg = serializer::ack(&chunk, epoch);
         if ops::verify_message(&self.public, Some(&self.namespace), &msg, &threshold).is_err() {
