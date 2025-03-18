@@ -1,5 +1,6 @@
-use super::{Broadcaster, Digestible};
-use commonware_utils::Array;
+use crate::Broadcaster;
+use commonware_codec::Codec;
+use commonware_cryptography::{Digest, Digestible};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
@@ -22,17 +23,17 @@ pub enum Message<D, B> {
 
 /// Ingress mailbox for [`Engine`](super::Engine).
 #[derive(Clone)]
-pub struct Mailbox<D: Array, B: Digestible<D>> {
+pub struct Mailbox<D: Digest, B: Digestible<D>> {
     sender: mpsc::Sender<Message<D, B>>,
 }
 
-impl<D: Array, B: Digestible<D>> Mailbox<D, B> {
+impl<D: Digest, B: Digestible<D>> Mailbox<D, B> {
     pub(super) fn new(sender: mpsc::Sender<Message<D, B>>) -> Self {
         Self { sender }
     }
 }
 
-impl<D: Array, B: Digestible<D>> Mailbox<D, B> {
+impl<D: Digest, B: Digestible<D>> Mailbox<D, B> {
     /// Retrieve a blob by digest.
     pub async fn retrieve(&mut self, digest: D) -> oneshot::Receiver<B> {
         let (sender, receiver) = oneshot::channel();
@@ -47,7 +48,7 @@ impl<D: Array, B: Digestible<D>> Mailbox<D, B> {
     }
 }
 
-impl<D: Array, B: Digestible<D>> Broadcaster for Mailbox<D, B> {
+impl<D: Digest, B: Codec + Digestible<D>> Broadcaster for Mailbox<D, B> {
     type Blob = B;
 
     async fn broadcast(&mut self, blob: Self::Blob) {

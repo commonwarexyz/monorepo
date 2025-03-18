@@ -146,6 +146,12 @@ pub trait BatchScheme {
 /// (which should be cheap to clone).
 pub trait Digest: Array + Copy {}
 
+/// An object that can generate a digest.
+pub trait Digestible<D: Digest>: Clone + Send + Sync + 'static {
+    /// Generate a digest from the object.
+    fn digest(&self) -> D;
+}
+
 /// Interface that commonware crates rely on for hashing.
 ///
 /// Hash functions in commonware primitives are not typically hardcoded

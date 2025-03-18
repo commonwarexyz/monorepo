@@ -7,8 +7,11 @@
 //! - Recovering threshold signatures from partial signatures for each chunk
 //! - Notifying other actors of new chunks and threshold signatures
 
-use super::{metrics, Config, Digestible, Mailbox, Message, Serializable};
+use super::{metrics, Config, Mailbox, Message};
 use crate::buffered::metrics::SequencerLabel;
+use bytes::Bytes;
+use commonware_codec::Codec;
+use commonware_cryptography::{Digest, Digestible};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{
@@ -30,8 +33,8 @@ use tracing::{debug, error, trace, warn};
 pub struct Engine<
     E: Clock + Spawner + Metrics,
     P: Array,
-    D: Array,
-    B: Digestible<D> + Serializable,
+    D: Digest,
+    B: Digestible<D> + Codec,
     NetS: Sender<PublicKey = P>,
     NetR: Receiver<PublicKey = P>,
 > {
@@ -81,8 +84,8 @@ pub struct Engine<
 impl<
         E: Clock + Spawner + Metrics,
         P: Array,
-        D: Array,
-        B: Digestible<D> + Serializable,
+        D: Digest,
+        B: Digestible<D> + Codec,
         NetS: Sender<PublicKey = P>,
         NetR: Receiver<PublicKey = P>,
     > Engine<E, P, D, B, NetS, NetR>
@@ -164,7 +167,7 @@ impl<
                     self.metrics.peer.get_or_create(&SequencerLabel::from(&peer)).inc();
 
                     // Decode the message
-                    let blob = match B::deserialize(&msg) {
+                    let blob = match B::decode(msg) {
                         Ok(blob) => blob,
                         Err(err) => {
                             warn!(?err, ?peer, "failed to decode message");
@@ -189,12 +192,9 @@ impl<
         let _ = self.insert_blob(self.public_key.clone(), blob.clone());
 
         // Broadcast the blob to the network
-        let bytes = blob.serialize();
         let recipients = Recipients::All;
-        if let Err(err) = net_sender
-            .send(recipients, bytes.into(), self.priority)
-            .await
-        {
+        let msg = Bytes::from(blob.encode());
+        if let Err(err) = net_sender.send(recipients, msg, self.priority).await {
             warn!(?err, "failed to send message");
         }
     }
@@ -248,7 +248,7 @@ impl<
         }
 
         // Store the blob in the cache
-        self.items.insert(digest.clone(), blob);
+        self.items.insert(digest, blob);
         let cache = self
             .cache
             .entry(peer)

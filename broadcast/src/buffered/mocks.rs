@@ -1,8 +1,10 @@
 //! Mock implementations for testing.
 
-use crate::buffered::{Digestible, Error, Serializable};
-use commonware_cryptography::sha256::{Digest as Sha256Digest, Sha256};
-use commonware_cryptography::Hasher;
+use commonware_codec::Codec;
+use commonware_cryptography::{
+    sha256::{Digest as Sha256Digest, Sha256},
+    Digestible, Hasher,
+};
 
 /// A simple test message.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,14 +30,17 @@ impl Digestible<Sha256Digest> for TestMessage {
     }
 }
 
-impl Serializable for TestMessage {
-    fn serialize(&self) -> Vec<u8> {
-        self.content.clone()
+impl Codec for TestMessage {
+    fn write(&self, writer: &mut impl commonware_codec::Writer) {
+        self.content.write(writer);
     }
 
-    fn deserialize(bytes: &[u8]) -> Result<Self, Error> {
-        Ok(Self {
-            content: bytes.to_vec(),
-        })
+    fn read(reader: &mut impl commonware_codec::Reader) -> Result<Self, commonware_codec::Error> {
+        let content = Vec::<u8>::read(reader)?;
+        Ok(Self { content })
+    }
+
+    fn len_encoded(&self) -> usize {
+        self.content.len_encoded()
     }
 }

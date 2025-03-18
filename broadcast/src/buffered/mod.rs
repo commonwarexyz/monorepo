@@ -9,9 +9,6 @@
 //! - Notifying other actors of new broadcasts
 //! - Serving cached broadcasts on-demand
 
-use commonware_utils::Array;
-use std::future::Future;
-
 mod config;
 pub use config::Config;
 mod engine;
@@ -23,25 +20,13 @@ mod metrics;
 #[cfg(test)]
 pub mod mocks;
 
-pub trait Digestible<D: Array>: Clone + Send + Sync + 'static {
-    fn digest(&self) -> D;
-}
-
-pub trait Serializable: Sized + Clone + Send + Sync + 'static {
-    fn serialize(&self) -> Vec<u8>;
-    fn deserialize(bytes: &[u8]) -> Result<Self, Error>;
-}
-
-#[derive(Debug)]
-pub enum Error {
-    DeserializationError,
-}
-
 #[cfg(test)]
 mod tests {
+    use crate::Broadcaster;
+
     use super::{mocks::TestMessage, *};
     use commonware_cryptography::{
-        ed25519::PublicKey, sha256::Digest as Sha256Digest, Ed25519, Scheme,
+        ed25519::PublicKey, sha256::Digest as Sha256Digest, Digestible, Ed25519, Scheme,
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
