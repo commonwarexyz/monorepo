@@ -214,7 +214,8 @@ impl<T: Translator, K: Array, B: Blob, E: Storage<B> + Metrics> Archive<T, K, B,
         // }
 
         // Update pruning metrics
-        self.keys_pruned.inc_by((records.indices.capacity() - records.indices.len()) as u64);
+        self.keys_pruned
+            .inc_by((records.indices.capacity() - records.indices.len()) as u64);
     }
 
     /// Store an item in `Archive`. Both indices and keys are assumed to both be globally unique.
