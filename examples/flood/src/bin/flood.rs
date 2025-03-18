@@ -49,6 +49,7 @@ fn main() {
     let peer_file = matches.get_one::<String>("peers").unwrap();
     let peers_file = std::fs::read_to_string(peer_file).expect("Could not read peers file");
     let peers: Peers = serde_yaml::from_str(&peers_file).expect("Could not parse peers file");
+    let monitoring_ip = peers.monitoring_private_ip;
     let peers: HashMap<PublicKey, IpAddr> = peers
         .peers
         .into_iter()
@@ -79,7 +80,7 @@ fn main() {
 
     // Create profiler
     let profiler = PyroscopeAgent::builder(
-        format!("http://0.0.0.0:{}", PROFILES_PORT),
+        format!("http://{}:{}", monitoring_ip, PROFILES_PORT),
         public_key.to_string(),
     )
     .backend(pprof_backend(PprofConfig::new().sample_rate(1000)))
