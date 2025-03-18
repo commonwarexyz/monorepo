@@ -447,9 +447,8 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     std::fs::write(&all_yaml_path, ALL_YML)?;
     let loki_config_path = temp_dir.join("loki.yml");
     std::fs::write(&loki_config_path, LOKI_CONFIG)?;
-    let pyroscope_config = generate_pyroscope_config(&instances);
     let pyroscope_config_path = temp_dir.join("pyroscope.yml");
-    std::fs::write(&pyroscope_config_path, pyroscope_config)?;
+    std::fs::write(&pyroscope_config_path, PYROSCOPE_CONFIG)?;
     scp_file(
         private_key,
         prom_path.to_str().unwrap(),
@@ -480,16 +479,16 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     .await?;
     scp_file(
         private_key,
-        loki_config_path.to_str().unwrap(),
+        prometheus_service_path.to_str().unwrap(),
         &monitoring_ip,
-        "/home/ubuntu/loki.yml",
+        "/home/ubuntu/prometheus.service",
     )
     .await?;
     scp_file(
         private_key,
-        prometheus_service_path.to_str().unwrap(),
+        loki_config_path.to_str().unwrap(),
         &monitoring_ip,
-        "/home/ubuntu/prometheus.service",
+        "/home/ubuntu/loki.yml",
     )
     .await?;
     scp_file(

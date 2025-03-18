@@ -136,6 +136,16 @@ ingester:
     dir: /loki/wal
 "#;
 
+/// YAML configuration for Pyroscope
+pub const PYROSCOPE_CONFIG: &str = r#"
+target: all
+server:
+  http_listen_port: 4040
+  grpc_listen_port: 0
+pyroscopedb:
+  data_path: /var/lib/pyroscope
+"#;
+
 /// Systemd service file content for Pyroscope
 pub const PYROSCOPE_SERVICE: &str = r#"
 [Unit]
@@ -380,31 +390,6 @@ scrape_configs:
           region: '{}'
 "#,
             name, ip, region
-        ));
-    }
-    config
-}
-
-/// Generates Pyroscope configuration with scrape targets for binary instances
-pub fn generate_pyroscope_config(binary_instances: &[(&str, &str, &str)]) -> String {
-    let mut config = String::from(
-        r#"
-scrape_configs:
-- job_name: 'pyroscope'
-  scrape_interval: 30s
-  scrape_timeout: 20s
-  static_configs:
-"#,
-    );
-    for (name, private_ip, region) in binary_instances {
-        config.push_str(&format!(
-            r#"
-    - targets: ['{}:9091']
-      labels:
-        instance: '{}'
-        region: '{}'
-"#,
-            private_ip, name, region
         ));
     }
     config
