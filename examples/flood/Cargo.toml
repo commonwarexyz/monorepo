@@ -27,7 +27,8 @@ axum = { workspace = true }
 rand = { workspace = true }
 futures = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
-sysinfo = "0.33.1"
+sysinfo = { workspace = true }
+pprof = { workspace = true, features = ["protobuf", "prost-codec"] }
 
 [[bin]]
 name = "flood"

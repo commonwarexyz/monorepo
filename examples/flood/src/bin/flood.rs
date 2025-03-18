@@ -1,16 +1,17 @@
-use axum::{routing::get, serve, Extension, Router};
+use axum::{body::Body, http::Response, routing::get, serve, Extension, Router};
 use clap::{Arg, Command};
 use commonware_cryptography::{
     ed25519::{PrivateKey, PublicKey},
     Ed25519, Scheme,
 };
-use commonware_deployer::ec2::Peers;
+use commonware_deployer::ec2::{Peers, METRICS_PORT, PROFILES_PORT};
 use commonware_flood::Config;
 use commonware_p2p::{authenticated, Receiver, Recipients, Sender};
 use commonware_runtime::{tokio, Clock, Metrics, Network, Runner, Spawner};
 use commonware_utils::{from_hex_formatted, union};
 use futures::future::try_join_all;
 use governor::Quota;
+use pprof::{protos::Message, ProfilerGuard, ProfilerGuardBuilder};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use rand::{rngs::StdRng, Rng, RngCore, SeedableRng};
 use std::{
@@ -18,7 +19,10 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::NonZeroU32,
     str::FromStr,
-    sync::atomic::{AtomicI64, AtomicU64},
+    sync::{
+        atomic::{AtomicI64, AtomicU64},
+        Mutex,
+    },
     time::Duration,
 };
 use sysinfo::{Disks, System};
@@ -26,7 +30,32 @@ use tracing::{error, info, Level};
 
 const SYSTEM_METRICS_REFRESH: Duration = Duration::from_secs(5);
 const FLOOD_NAMESPACE: &[u8] = b"_COMMONWARE_FLOOD";
-const METRICS_PORT: u16 = 9090;
+
+// CPU profiling handler
+async fn cpu_profile() -> Response<Body> {
+    info!("Starting CPU profiling");
+    match ProfilerGuardBuilder::default().frequency(1000).build() {
+        Ok(guard) => match guard.report().build() {
+            Ok(report) => {
+                let profile = report.pprof().unwrap();
+                let mut body = Vec::new();
+                profile.encode(&mut body).unwrap();
+                Response::builder()
+                    .header("Content-Type", "application/octet-stream")
+                    .body(Body::from(body))
+                    .unwrap()
+            }
+            Err(e) => Response::builder()
+                .status(500)
+                .body(Body::from(e.to_string()))
+                .unwrap(),
+        },
+        Err(e) => Response::builder()
+            .status(500)
+            .body(Body::from(e.to_string()))
+            .unwrap(),
+    }
+}
 
 fn main() {
     // Parse arguments
@@ -238,8 +267,56 @@ fn main() {
                 .expect("Could not serve metrics");
         });
 
+        // Serve profiles
+        let profiles = context.with_label("profiles").spawn(|context| async move {
+            let guard = ProfilerGuardBuilder::default()
+                .frequency(1000)
+                .build()
+                .expect("Could not create CPU profiler");
+            let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), PROFILES_PORT);
+            let listener = context
+                .bind(addr)
+                .await
+                .expect("Could not bind to profiles address");
+            let app = Router::new()
+                .route(
+                    "/profile/cpu",
+                    get(
+                        |extension: Extension<Mutex<ProfilerGuard<'static>>>| async move {
+                            if let Some(guard) = extension.0.take() {
+                                if let Ok(report) = guard.report().build() {
+                                    let mut body = Vec::new();
+                                    let profile = report.pprof().unwrap();
+                                    profile.encode(&mut body).unwrap();
+                                    Ok(Response::builder()
+                                        .header("Content-Type", "application/octet-stream")
+                                        .body(Body::from(body))
+                                        .unwrap())
+                                } else {
+                                    Ok(Response::new(Body::from("Failed to generate CPU profile")))
+                                }
+                            } else {
+                                Ok(Response::new(Body::from("CPU profiling not started")))
+                            }
+                        },
+                    ),
+                )
+                .layer(Extension(profiler_state));
+            serve(listener, app.into_make_service())
+                .await
+                .expect("Could not serve profiles");
+        });
+
         // Wait for any task to error
-        if let Err(e) = try_join_all(vec![p2p, flood_sender, flood_receiver, system, metrics]).await
+        if let Err(e) = try_join_all(vec![
+            p2p,
+            flood_sender,
+            flood_receiver,
+            system,
+            metrics,
+            profiles,
+        ])
+        .await
         {
             error!(?e, "task failed");
         }

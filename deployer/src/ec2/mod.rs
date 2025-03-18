@@ -165,6 +165,12 @@ mod destroy;
 pub use destroy::destroy;
 pub mod utils;
 
+/// Port for Prometheus metrics
+pub const METRICS_PORT: u16 = 9090;
+
+/// Port for pprof profiles
+pub const PROFILES_PORT: u16 = 9091;
+
 /// Name of the monitoring instance
 const MONITORING_NAME: &str = "monitoring";
 
