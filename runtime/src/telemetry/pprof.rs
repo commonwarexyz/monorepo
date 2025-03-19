@@ -1,4 +1,6 @@
-// Copied from: https://github.com/grafana/pyroscope-rs/blob/main/pyroscope_backends/pyroscope_pprofrs/src/lib.rs
+// Inspired by: https://github.com/grafana/pyroscope-rs/blob/main/pyroscope_backends/pyroscope_pprofrs/src/lib.rs
+//
+// pyroscope-rs uses a fork of pprof that isn't public (odd), we prefer to use the canonical pprof crate.
 
 use pprof::{ProfilerGuard, ProfilerGuardBuilder};
 use pyroscope::{
