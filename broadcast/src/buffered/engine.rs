@@ -1,11 +1,3 @@
-//! Engine for the module.
-//!
-//! It is responsible for:
-//! - Broadcasting messages to the network
-//! - Receiving messages from the network
-//! - Storing messages in the cache
-//! - Responding to requests from the application
-
 use super::{metrics, Config, Mailbox, Message};
 use crate::buffered::metrics::SequencerLabel;
 use bytes::Bytes;
@@ -28,7 +20,13 @@ use std::{
 };
 use tracing::{debug, error, trace, warn};
 
-/// Instance of the engine
+/// Instance of the main engine for the module.
+///
+/// It is responsible for:
+/// - Broadcasting messages to the network
+/// - Receiving messages from the network
+/// - Storing messages in the cache
+/// - Responding to requests from the application
 pub struct Engine<
     E: Clock + Spawner + Metrics,
     P: Array,
@@ -53,7 +51,7 @@ pub struct Engine<
     priority: bool,
 
     /// Number of messages to cache per sender
-    per_sender_cache_size: usize,
+    deque_size: usize,
 
     ////////////////////////////////////////
     // Messaging
@@ -65,13 +63,22 @@ pub struct Engine<
     waiters: HashMap<D, Vec<oneshot::Sender<B>>>,
 
     ////////////////////////////////////////
-    // State
+    // Cache
     ////////////////////////////////////////
-    /// A LRUCache of the latest received messages from each sequencer.
-    cache: HashMap<P, VecDeque<D>>,
-
-    /// A cache of the blobs by digest.
+    /// All cached blobs by digest.
     items: HashMap<D, B>,
+
+    /// A LRU cache of the latest received digests from each peer.
+    ///
+    /// This is used to limit the number of digests stored per peer.
+    /// At most `deque_size` digests are stored per peer. This value is expected to be small, so
+    /// membership checks are done in linear time.
+    deques: HashMap<P, VecDeque<D>>,
+
+    /// The number of times each digest exists in one of the deques.
+    ///
+    /// This is because multiple peers can send the same blob.
+    counts: HashMap<D, usize>,
 
     ////////////////////////////////////////
     // Metrics
@@ -101,11 +108,12 @@ impl<
             _phantom: PhantomData,
             public_key: cfg.public_key,
             priority: cfg.priority,
-            per_sender_cache_size: cfg.per_sender_cache_size,
+            deque_size: cfg.deque_size,
             mailbox_receiver,
             waiters: HashMap::new(),
-            cache: HashMap::new(),
+            deques: HashMap::new(),
             items: HashMap::new(),
+            counts: HashMap::new(),
             metrics,
         };
 
@@ -225,19 +233,15 @@ impl<
     }
 
     ////////////////////////////////////////
-    // Utilities
+    // Cache Management
     ////////////////////////////////////////
 
     /// Inserts a blob into the cache.
     ///
     /// Returns `true` if the blob was inserted, `false` if it was already present.
+    /// Updates the deque, item count, and blob cache, potentially evicting an old blob.
     fn insert_blob(&mut self, peer: P, blob: B) -> bool {
         let digest = blob.digest();
-
-        // Check if the blob is already in the cache
-        if self.items.contains_key(&digest) {
-            return false;
-        }
 
         // Send the blob to the waiters, if any, ignoring errors (as the receiver may have dropped)
         if let Some(responders) = self.waiters.remove(&digest) {
@@ -246,22 +250,59 @@ impl<
             }
         }
 
-        // Store the blob in the cache
-        self.items.insert(digest, blob);
-        let cache = self
-            .cache
+        // Get the relevant deque for the peer
+        let deque = self
+            .deques
             .entry(peer)
-            .or_insert_with(|| VecDeque::with_capacity(self.per_sender_cache_size + 1));
-        cache.push_back(digest);
+            .or_insert_with(|| VecDeque::with_capacity(self.deque_size + 1));
 
-        // Evict the oldest blob if the cache is full
-        if cache.len() > self.per_sender_cache_size {
-            let deleted = cache.pop_front().expect("missing cache");
-            self.items.remove(&deleted).expect("missing item");
+        // If the blob is already in the deque, move it to the front and return early
+        if let Some(i) = deque.iter().position(|d| *d == digest) {
+            if i != 0 {
+                deque.remove(i).unwrap(); // Must exist
+                deque.push_front(digest);
+            }
+            return false;
+        };
+
+        // - Insert the blob into the peer cache
+        // - Increment the item count
+        // - Insert the blob if-and-only-if the new item count is 1
+        deque.push_front(digest);
+        let count = self
+            .counts
+            .entry(digest)
+            .and_modify(|c| *c = c.checked_add(1).unwrap())
+            .or_insert(1);
+        if *count == 1 {
+            let existing = self.items.insert(digest, blob);
+            assert!(existing.is_none());
+        }
+
+        // If the cache is full...
+        if deque.len() > self.deque_size {
+            // Remove the oldest digest from the peer cache
+            // Decrement the item count
+            // Remove the blob if-and-only-if the new item count is 0
+            let stale = deque.pop_back().unwrap();
+            let count = self
+                .counts
+                .entry(stale)
+                .and_modify(|c| *c = c.checked_sub(1).unwrap())
+                .or_insert_with(|| unreachable!());
+            if *count == 0 {
+                let existing = self.counts.remove(&stale);
+                assert!(existing == Some(0));
+                self.items.remove(&stale).unwrap(); // Must have existed
+            }
         }
 
         true
     }
+
+    ////////////////////////////////////////
+    // Utilities
+    ////////////////////////////////////////
 
     /// Remove all waiters that have dropped receivers.
     fn cleanup_waiters(&mut self) {

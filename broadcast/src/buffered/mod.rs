@@ -1,20 +1,31 @@
-//! Best-effort broadcast to a network.
+//! Cached, best-effort P2P Broadcast to all peers.
 //!
-//! # Design
+//! # Overview
 //!
 //! The core of the module is the [`Engine`]. It is responsible for:
-//! - Serializing and deserializing messages
-//! - Performing best-effort broadcast to all participants in the network
-//! - Accepting and caching broadcasts from other participants
-//! - Notifying other actors of new broadcasts
-//! - Serving cached broadcasts on-demand
+//! - Accepting and caching messages from other participants
+//! - Broadcasting messages to all peers
+//! - Serving cached messages on-demand
+//!
+//! # Details
+//!
+//! The engine receives messages from other peers and caches them. The cache is a bounded queue of
+//! messages per peer. When the cache is full, the oldest message is removed to make room for the
+//! new one.
+//!
+//! The [`Mailbox`] is used to make requests to the [`Engine`]. It implements the
+//! [`Broadcaster`](crate::Broadcaster) trait. This is used to have the engine send a message to all
+//! other peers in the network in a best-effort manner. It also has a method to request a message by
+//! digest. The engine will return the message immediately if it is in the cache, or wait for it to
+//! be received over the network if it is not.
 
 mod config;
 pub use config::Config;
 mod engine;
 pub use engine::Engine;
 mod ingress;
-use ingress::{Mailbox, Message};
+pub use ingress::Mailbox;
+pub(crate) use ingress::Message;
 mod metrics;
 
 #[cfg(test)]
@@ -107,7 +118,7 @@ mod tests {
             let config = Config {
                 public_key: peer.clone(),
                 mailbox_size: 1024,
-                per_sender_cache_size: CACHE_SIZE,
+                deque_size: CACHE_SIZE,
                 priority: false,
             };
             let (engine, engine_mailbox) =
@@ -145,6 +156,52 @@ mod tests {
                 let retrieved_message = receiver.await.ok();
                 assert_eq!(retrieved_message.unwrap(), message);
             }
+        });
+    }
+
+    #[test_traced]
+    fn test_self_retrieval() {
+        let (runner, context, _) = Executor::timed(Duration::from_secs(5));
+        runner.start(async move {
+            // Initialize simulation with 1 peer
+            let (peers, mut registrations, _oracle) =
+                initialize_simulation(context.clone(), 1, 1.0).await;
+            let mailboxes = spawn_peer_engines(context.clone(), &mut registrations);
+
+            // Set up mailbox for Peer A
+            let mut mailbox_a = mailboxes.get(&peers[0]).unwrap().clone();
+
+            // Create a test message
+            let m1 = TestMessage::new(b"message to retrieve");
+            let digest_m1 = m1.digest();
+
+            // Attempt retrieval before broadcasting
+            let receiver_before = mailbox_a.retrieve(digest_m1).await;
+
+            // Broadcast the message
+            mailbox_a.broadcast(m1.clone()).await;
+
+            // Wait for the pre-broadcast retrieval to complete
+            let retrieved_before = receiver_before
+                .await
+                .expect("Pre-broadcast retrieval failed");
+            assert_eq!(retrieved_before, m1);
+
+            // Perform a second retrieval after the broadcast
+            let receiver_after = mailbox_a.retrieve(digest_m1).await;
+
+            // Measure the time taken for the second retrieval
+            let start = context.current();
+            let retrieved_after = receiver_after
+                .await
+                .expect("Post-broadcast retrieval failed");
+            let duration = context.current().duration_since(start).unwrap();
+
+            // Verify the second retrieval matches the original message
+            assert_eq!(retrieved_after, m1);
+
+            // Verify the second retrieval was instant (less than 10ms)
+            assert!(duration < A_JIFFY, "retrieve not instant");
         });
     }
 
@@ -213,8 +270,7 @@ mod tests {
             let retrieved = receiver.await.expect("failed to retrieve cached message");
             let duration = context.current().duration_since(start).unwrap();
             assert_eq!(retrieved, message);
-            // "Instant" in the testing runtime uses 1ms to switch context
-            assert!(duration < Duration::from_millis(10), "retrieve not instant",);
+            assert!(duration < A_JIFFY, "retrieve not instant",);
         });
     }
 
@@ -252,7 +308,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_cache_eviction() {
+    fn test_cache_eviction_single_peer() {
         let (runner, context, _) = Executor::timed(Duration::from_secs(5));
         runner.start(async move {
             let (peers, mut registrations, _oracle) =
@@ -284,6 +340,66 @@ mod tests {
             select! {
                 _ = context.sleep(A_JIFFY) => {},
                 _ = receiver => { panic!("receiver should have failed")},
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_cache_eviction_multi_peer() {
+        let (runner, context, _) = Executor::timed(Duration::from_secs(10));
+        runner.start(async move {
+            // Initialize simulation with 3 peers
+            let (peers, mut registrations, _oracle) =
+                initialize_simulation(context.clone(), 3, 1.0).await;
+            let mailboxes = spawn_peer_engines(context.clone(), &mut registrations);
+
+            // Assign mailboxes for peers A, B, C
+            let mut mailbox_a = mailboxes.get(&peers[0]).unwrap().clone();
+            let mut mailbox_b = mailboxes.get(&peers[1]).unwrap().clone();
+            let mut mailbox_c = mailboxes.get(&peers[2]).unwrap().clone();
+
+            // Create and broadcast message M1 from A
+            let m1 = TestMessage::new(b"message M1");
+            let digest_m1 = m1.digest();
+            mailbox_a.broadcast(m1.clone()).await;
+            context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
+
+            // Broadcast M1 from C
+            mailbox_c.broadcast(m1.clone()).await;
+            context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
+
+            // M1 is now in A's and C's deques in B's engine
+
+            // Peer A broadcasts 10 new messages to evict M1 from A's deque
+            let mut new_messages_a = Vec::with_capacity(CACHE_SIZE);
+            for i in 0..CACHE_SIZE {
+                new_messages_a.push(TestMessage::new(format!("A{}", i).as_bytes()));
+            }
+            for msg in &new_messages_a {
+                mailbox_a.broadcast(msg.clone()).await;
+            }
+            context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
+
+            // Verify B can still retrieve M1 (in C's deque)
+            let receiver = mailbox_b.retrieve(digest_m1).await;
+            let retrieved = receiver.await.expect("M1 should be retrievable");
+            assert_eq!(retrieved, m1);
+
+            // Peer C broadcasts 10 new messages to evict M1 from C's deque
+            let mut new_messages_c = Vec::with_capacity(CACHE_SIZE);
+            for i in 0..CACHE_SIZE {
+                new_messages_c.push(TestMessage::new(format!("C{}", i).as_bytes()));
+            }
+            for msg in &new_messages_c {
+                mailbox_c.broadcast(msg.clone()).await;
+            }
+            context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
+
+            // Verify B cannot retrieve M1 (evicted from all deques)
+            let receiver = mailbox_b.retrieve(digest_m1).await;
+            select! {
+                _ = context.sleep(A_JIFFY) => {},
+                _ = receiver => { panic!("M1 should not be retrievable"); },
             }
         });
     }

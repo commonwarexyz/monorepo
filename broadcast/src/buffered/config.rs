@@ -9,7 +9,7 @@ pub struct Config<P: Array> {
     pub mailbox_size: usize,
 
     /// The maximum number of cached items per sender.
-    pub per_sender_cache_size: usize,
+    pub deque_size: usize,
 
     /// Whether messages are sent over the network as priority.
     pub priority: bool,
