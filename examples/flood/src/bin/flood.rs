@@ -108,7 +108,7 @@ fn main() {
 
     // Combine layers into a single subscriber
     let subscriber = Registry::default()
-        .with(filter)
+        // .with(filter)
         .with(fmt_layer)
         .with(telemetry_layer);
 
