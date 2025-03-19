@@ -11,10 +11,15 @@ use commonware_runtime::{tokio, Clock, Metrics, Network, Runner, Spawner};
 use commonware_utils::{from_hex_formatted, union};
 use futures::future::try_join_all;
 use governor::Quota;
-use opentelemetry::global;
-use opentelemetry::sdk::trace as sdktrace;
-use opentelemetry::trace::TraceError;
-use opentelemetry_otlp::WithExportConfig;
+use opentelemetry::{
+    global,
+    trace::{TraceError, TracerProvider},
+};
+use opentelemetry_otlp::{SpanExporter, WithExportConfig};
+use opentelemetry_sdk::{
+    trace::{BatchSpanProcessor, SdkTracerProvider, Tracer},
+    Resource,
+};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use rand::{rngs::StdRng, Rng, RngCore, SeedableRng};
 use std::{
@@ -34,20 +39,30 @@ const SYSTEM_METRICS_REFRESH: Duration = Duration::from_secs(5);
 const FLOOD_NAMESPACE: &[u8] = b"_COMMONWARE_FLOOD";
 const METRICS_PORT: u16 = 9090;
 
-fn init_tracer(endpoint: &str) -> Result<sdktrace::Tracer, TraceError> {
-    opentelemetry_otlp::new_pipeline()
-        .tracing()
-        .with_exporter(
-            opentelemetry_otlp::new_exporter()
-                .http()
-                .with_endpoint(endpoint),
-        )
-        .with_trace_config(
-            sdktrace::config().with_resource(opentelemetry::sdk::Resource::new(vec![
-                opentelemetry::KeyValue::new("service.name", "flood"),
-            ])),
-        )
-        .install_batch(opentelemetry::runtime::Tokio)
+fn init_tracer(endpoint: &str) -> Result<Tracer, TraceError> {
+    // Create the OTLP HTTP exporter
+    let exporter = SpanExporter::builder()
+        .with_http()
+        .with_endpoint(endpoint)
+        .build()?;
+
+    // Configure the batch processor
+    let batch_processor = BatchSpanProcessor::builder(exporter).build();
+
+    // Define the resource with service name
+    let resource = Resource::builder().with_service_name("flood").build();
+
+    // Build the tracer provider
+    let tracer_provider = SdkTracerProvider::builder()
+        .with_span_processor(batch_processor)
+        .with_resource(resource)
+        .build();
+
+    // Create the tracer and set it globally
+    let tracer = tracer_provider.tracer("flood");
+    global::set_tracer_provider(tracer_provider);
+
+    Ok(tracer)
 }
 
 fn main() {

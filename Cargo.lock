@@ -980,6 +980,7 @@ dependencies = [
  "governor",
  "opentelemetry",
  "opentelemetry-otlp",
+ "opentelemetry_sdk",
  "prometheus-client",
  "rand",
  "serde",
@@ -2658,6 +2659,9 @@ dependencies = [
  "rand",
  "serde_json",
  "thiserror 2.0.12",
+ "tokio",
+ "tokio-stream",
+ "tracing",
 ]
 
 [[package]]

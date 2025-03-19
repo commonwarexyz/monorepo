@@ -29,6 +29,7 @@ futures = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 sysinfo = "0.33.1"
 opentelemetry = "0.28.0"
+opentelemetry_sdk = { version = "0.28.0", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.28.0", features = ["http-proto"] }
 tracing-opentelemetry = "0.29.0"
 
