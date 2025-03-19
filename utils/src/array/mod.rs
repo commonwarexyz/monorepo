@@ -1,4 +1,3 @@
-use crate::SizedSerialize;
 use bytes::Buf;
 use commonware_codec::{Codec, SizedCodec};
 use std::{
@@ -48,7 +47,6 @@ pub trait Array:
     + for<'a> TryFrom<&'a [u8], Error = <Self as Array>::Error>
     + for<'a> TryFrom<&'a Vec<u8>, Error = <Self as Array>::Error>
     + TryFrom<Vec<u8>, Error = <Self as Array>::Error>
-    + SizedSerialize
     + Codec
     + SizedCodec
 {
@@ -57,7 +55,7 @@ pub trait Array:
 
     /// Attempts to read an array from the provided buffer.
     fn read_from(buf: &mut impl Buf) -> Result<Self, Error<<Self as Array>::Error>> {
-        let len = Self::SERIALIZED_LEN;
+        let len = Self::LEN_ENCODED;
         if buf.remaining() < len {
             return Err(Error::InsufficientBytes);
         }

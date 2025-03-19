@@ -1,8 +1,9 @@
 use super::{Config, Error, Translator};
 use crate::journal::variable::Journal;
 use bytes::{Buf, BufMut, Bytes};
+use commonware_codec::SizedCodec;
 use commonware_runtime::{Blob, Metrics, Storage};
-use commonware_utils::{Array, SizedSerialize};
+use commonware_utils::Array;
 use futures::{pin_mut, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use rangemap::RangeInclusiveSet;
@@ -62,7 +63,7 @@ pub struct Archive<T: Translator, K: Array, B: Blob, E: Storage<B> + Metrics> {
 }
 
 impl<T: Translator, K: Array, B: Blob, E: Storage<B> + Metrics> Archive<T, K, B, E> {
-    const PREFIX_LEN: u32 = (u64::SERIALIZED_LEN + K::SERIALIZED_LEN + u32::SERIALIZED_LEN) as u32;
+    const PREFIX_LEN: u32 = (u64::LEN_ENCODED + K::LEN_ENCODED + u32::LEN_ENCODED) as u32;
 
     /// Initialize a new `Archive` instance.
     ///
@@ -169,9 +170,9 @@ impl<T: Translator, K: Array, B: Blob, E: Storage<B> + Metrics> Archive<T, K, B,
         if data.remaining() != Self::PREFIX_LEN as usize {
             return Err(Error::RecordCorrupted);
         }
-        let found = crc32fast::hash(&data[..K::SERIALIZED_LEN + u64::SERIALIZED_LEN]);
+        let found = crc32fast::hash(&data[..K::LEN_ENCODED + u64::LEN_ENCODED]);
         let index = data.get_u64();
-        let key = data.copy_to_bytes(K::SERIALIZED_LEN);
+        let key = data.copy_to_bytes(K::LEN_ENCODED);
         let expected = data.get_u32();
         if found != expected {
             return Err(Error::RecordCorrupted);
@@ -188,7 +189,7 @@ impl<T: Translator, K: Array, B: Blob, E: Storage<B> + Metrics> Archive<T, K, B,
         data.get_u64();
 
         // Read key from data
-        let key = data.copy_to_bytes(K::SERIALIZED_LEN);
+        let key = data.copy_to_bytes(K::LEN_ENCODED);
 
         // We don't need to compute checksum here as the underlying journal
         // already performs this check for us.
@@ -283,9 +284,9 @@ impl<T: Translator, K: Array, B: Blob, E: Storage<B> + Metrics> Archive<T, K, B,
         };
 
         // Store item in journal
-        let buf_len = u64::SERIALIZED_LEN
-            .checked_add(K::SERIALIZED_LEN)
-            .and_then(|len| len.checked_add(u32::SERIALIZED_LEN))
+        let buf_len = u64::LEN_ENCODED
+            .checked_add(K::LEN_ENCODED)
+            .and_then(|len| len.checked_add(u32::LEN_ENCODED))
             .and_then(|len| len.checked_add(data.len()))
             .ok_or(Error::RecordTooLarge)?;
         let mut buf = Vec::with_capacity(buf_len);

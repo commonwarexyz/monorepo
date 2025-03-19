@@ -1,6 +1,6 @@
 use crate::{Array, BatchScheme, Error, Scheme};
 use commonware_codec::{Codec, Error as CodecError, Reader, SizedCodec, Writer};
-use commonware_utils::{hex, union_unique, SizedSerialize};
+use commonware_utils::{hex, union_unique};
 use ed25519_consensus::{self, VerificationKey};
 use rand::{CryptoRng, Rng, RngCore};
 use std::borrow::Cow;
@@ -141,10 +141,6 @@ impl Array for PrivateKey {
     type Error = Error;
 }
 
-impl SizedSerialize for PrivateKey {
-    const SERIALIZED_LEN: usize = PRIVATE_KEY_LENGTH;
-}
-
 impl Eq for PrivateKey {}
 
 impl Hash for PrivateKey {
@@ -257,10 +253,6 @@ impl Array for PublicKey {
     type Error = Error;
 }
 
-impl SizedSerialize for PublicKey {
-    const SERIALIZED_LEN: usize = PUBLIC_KEY_LENGTH;
-}
-
 impl AsRef<[u8]> for PublicKey {
     fn as_ref(&self) -> &[u8] {
         &self.raw
@@ -345,10 +337,6 @@ impl SizedCodec for Signature {
 
 impl Array for Signature {
     type Error = Error;
-}
-
-impl SizedSerialize for Signature {
-    const SERIALIZED_LEN: usize = SIGNATURE_LENGTH;
 }
 
 impl Hash for Signature {

@@ -22,7 +22,7 @@
 
 use crate::{Array, Error, Hasher};
 use commonware_codec::{Codec, Error as CodecError, Reader, SizedCodec, Writer};
-use commonware_utils::{hex, SizedSerialize};
+use commonware_utils::hex;
 use rand::{CryptoRng, Rng};
 use sha2::{Digest as _, Sha256 as ISha256};
 use std::{
@@ -112,10 +112,6 @@ impl SizedCodec for Digest {
 
 impl Array for Digest {
     type Error = Error;
-}
-
-impl SizedSerialize for Digest {
-    const SERIALIZED_LEN: usize = DIGEST_LENGTH;
 }
 
 impl From<[u8; DIGEST_LENGTH]> for Digest {
@@ -218,7 +214,7 @@ mod tests {
 
     #[test]
     fn test_sha256_len() {
-        assert_eq!(Digest::SERIALIZED_LEN, DIGEST_LENGTH);
+        assert_eq!(Digest::LEN_ENCODED, DIGEST_LENGTH);
     }
 
     #[test]
