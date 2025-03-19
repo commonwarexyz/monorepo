@@ -131,12 +131,13 @@ pub struct Engine<
     ////////////////////////////////////////
 
     // A stream of futures.
-    // Each future represents a verification request to the application
+    //
+    // Each future represents a verification request to the automaton
     // that will either timeout or resolve with a boolean.
+    //
+    // There is no limit to the number of futures in this pool, so the automaton
+    // can apply backpressure by dropping the verification requests if necessary.
     pending_verifies: FuturesPool<Verify<C, D, E>>,
-
-    // The maximum number of items in `pending_verifies`.
-    verify_concurrent: usize,
 
     ////////////////////////////////////////
     // Storage
@@ -238,7 +239,6 @@ impl<
             epoch_bounds: cfg.epoch_bounds,
             height_bound: cfg.height_bound,
             pending_verifies: FuturesPool::default(),
-            verify_concurrent: cfg.verify_concurrent,
             journal_heights_per_section: cfg.journal_heights_per_section,
             journal_replay_concurrency: cfg.journal_replay_concurrency,
             journal_name_prefix: cfg.journal_name_prefix,
@@ -611,13 +611,6 @@ impl<
             self.journal_append(node).await;
             self.journal_sync(&node.chunk.sequencer, node.chunk.height)
                 .await;
-        }
-
-        // Drop the node if there are too many pending verifies
-        let n = self.pending_verifies.len();
-        if n >= self.verify_concurrent {
-            warn!(?n, "too many pending verifies");
-            return;
         }
 
         // Verify the chunk with the automaton

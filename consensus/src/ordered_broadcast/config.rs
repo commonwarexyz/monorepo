@@ -46,9 +46,6 @@ pub struct Config<
     /// Whether acks are sent as priority.
     pub priority_acks: bool,
 
-    /// The maximum number of concurrent pending requests to the application.
-    pub verify_concurrent: usize,
-
     /// How often the epoch is refreshed.
     pub refresh_epoch_timeout: Duration,
 
