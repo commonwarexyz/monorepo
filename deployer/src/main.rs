@@ -53,7 +53,7 @@ async fn main() -> std::process::ExitCode {
                         ),
                 )
                 .subcommand(
-                    Command::new(ec2::REFRESH_CMD)
+                    Command::new(ec2::AUTHORIZE_CMD)
                         .about("Add the deployer's public IP (or the one provided) to all security groups.")
                         .arg(
                             Arg::new("config")
@@ -110,11 +110,11 @@ async fn main() -> std::process::ExitCode {
                     return std::process::ExitCode::SUCCESS;
                 }
             }
-            Some((ec2::REFRESH_CMD, matches)) => {
+            Some((ec2::AUTHORIZE_CMD, matches)) => {
                 let config_path = matches.get_one::<PathBuf>("config").unwrap();
                 let ip = matches.get_one::<String>("ip").cloned();
-                if let Err(e) = ec2::refresh(config_path, ip).await {
-                    error!(error=?e, "failed to refresh EC2 deployment");
+                if let Err(e) = ec2::authorize(config_path, ip).await {
+                    error!(error=?e, "failed to authorize EC2 deployment");
                 } else {
                     return std::process::ExitCode::SUCCESS;
                 }

@@ -102,10 +102,10 @@
 //! 2. Uploads the latest binary and configuration from the YAML config.
 //! 3. Restarts the `binary` service, ensuring minimal downtime.
 //!
-//! ## `ec2 refresh`
+//! ## `ec2 authorize`
 //!
-//! 1. Obtains the deployer's current public IP address.
-//! 2. For each security group in the deployment, adds an ingress rule for the deployer's IP (if it doesn't already exist).
+//! 1. Obtains the deployer's current public IP address (or parses the one provided).
+//! 2. For each security group in the deployment, adds an ingress rule for the IP (if it doesn't already exist).
 //!
 //! ## `ec2 destroy`
 //!
@@ -158,8 +158,8 @@ pub mod services;
 pub use create::create;
 mod update;
 pub use update::update;
-mod refresh;
-pub use refresh::refresh;
+mod authorize;
+pub use authorize::authorize;
 mod destroy;
 pub use destroy::destroy;
 pub mod utils;
@@ -179,8 +179,8 @@ pub const CREATE_CMD: &str = "create";
 /// Update subcommand name
 pub const UPDATE_CMD: &str = "update";
 
-/// Refresh subcommand name
-pub const REFRESH_CMD: &str = "refresh";
+/// Authorize subcommand name
+pub const AUTHORIZE_CMD: &str = "authorize";
 
 /// Destroy subcommand name
 pub const DESTROY_CMD: &str = "destroy";

@@ -1,4 +1,4 @@
-//! `refresh` subcommand for `ec2`
+//! `authorize` subcommand for `ec2`
 
 use crate::ec2::utils::{
     exact_cidr, get_public_ip, DEPLOYER_MAX_PORT, DEPLOYER_MIN_PORT, DEPLOYER_PROTOCOL,
@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use tracing::info;
 
 /// Adds the deployer's IP (or the one provided) to all security groups.
-pub async fn refresh(config_path: &PathBuf, ip: Option<String>) -> Result<(), Error> {
+pub async fn authorize(config_path: &PathBuf, ip: Option<String>) -> Result<(), Error> {
     // Load configuration
     let config: Config = {
         let config_file = File::open(config_path)?;
