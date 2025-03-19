@@ -54,7 +54,7 @@ async fn main() -> std::process::ExitCode {
                 )
                 .subcommand(
                     Command::new(ec2::REFRESH_CMD)
-                        .about("Add the deployer's public IP to all security groups (if not already present).")
+                        .about("Add the deployer's public IP (or the one provided) to all security groups.")
                         .arg(
                             Arg::new("config")
                                 .long("config")
