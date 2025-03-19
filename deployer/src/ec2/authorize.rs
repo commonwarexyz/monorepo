@@ -1,4 +1,4 @@
-//! `refresh` subcommand for `ec2`
+//! `authorize` subcommand for `ec2`
 
 use crate::ec2::utils::{
     exact_cidr, get_public_ip, DEPLOYER_MAX_PORT, DEPLOYER_MIN_PORT, DEPLOYER_PROTOCOL,
@@ -12,8 +12,8 @@ use std::fs::File;
 use std::path::PathBuf;
 use tracing::info;
 
-/// Adds the deployer's current IP to all security groups if not already present.
-pub async fn refresh(config_path: &PathBuf) -> Result<(), Error> {
+/// Adds the deployer's IP (or the one provided) to all security groups.
+pub async fn authorize(config_path: &PathBuf, ip: Option<String>) -> Result<(), Error> {
     // Load configuration
     let config: Config = {
         let config_file = File::open(config_path)?;
@@ -36,9 +36,24 @@ pub async fn refresh(config_path: &PathBuf) -> Result<(), Error> {
         return Err(Error::DeploymentAlreadyDestroyed(tag.clone()));
     }
 
-    // Get deployer's current public IP
-    let deployer_ip = get_public_ip().await?;
-    info!(ip = deployer_ip, "deployer public IP");
+    // Determine new IP
+    let new_ip = if let Some(ip_str) = ip {
+        // Validate provided IP as IPv4
+        let ip_addr: std::net::IpAddr = ip_str
+            .parse()
+            .map_err(|_| Error::InvalidIpAddress(ip_str.clone()))?;
+        let std::net::IpAddr::V4(ipv4) = ip_addr else {
+            return Err(Error::InvalidIpAddress(ip_str));
+        };
+        ipv4.to_string()
+    } else {
+        // Fetch public IP
+        get_public_ip().await?
+    };
+    info!(
+        ip = new_ip.as_str(),
+        "adding IP to existing security groups"
+    );
 
     // Determine all regions involved
     let mut all_regions = HashSet::new();
@@ -67,7 +82,7 @@ pub async fn refresh(config_path: &PathBuf) -> Result<(), Error> {
                     && perm.to_port() == Some(DEPLOYER_MAX_PORT)
                 {
                     for ip_range in perm.ip_ranges() {
-                        if ip_range.cidr_ip() == Some(&exact_cidr(&deployer_ip)) {
+                        if ip_range.cidr_ip() == Some(&exact_cidr(&new_ip)) {
                             already_allowed = true;
                             break;
                         }
@@ -80,7 +95,7 @@ pub async fn refresh(config_path: &PathBuf) -> Result<(), Error> {
 
             // Add ingress rule if not already allowed
             if already_allowed {
-                info!(sg_id, "deployer IP already allowed");
+                info!(sg_id, "IP already allowed");
                 continue;
             }
             ec2_client
@@ -91,16 +106,16 @@ pub async fn refresh(config_path: &PathBuf) -> Result<(), Error> {
                         .ip_protocol(DEPLOYER_PROTOCOL)
                         .from_port(DEPLOYER_MIN_PORT)
                         .to_port(DEPLOYER_MAX_PORT)
-                        .ip_ranges(IpRange::builder().cidr_ip(exact_cidr(&deployer_ip)).build())
+                        .ip_ranges(IpRange::builder().cidr_ip(exact_cidr(&new_ip)).build())
                         .build(),
                 )
                 .send()
                 .await
                 .map_err(|err| err.into_service_error())?;
-            info!(sg_id, "added ingress rule for deployer IP");
+            info!(sg_id, "added ingress rule for IP");
             changes.push(sg_id.to_string());
         }
     }
-    info!(?changes, "deployer IP refreshed");
+    info!(?changes, "IP added to security groups");
     Ok(())
 }
