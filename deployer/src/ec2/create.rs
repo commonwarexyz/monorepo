@@ -670,8 +670,16 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                 .ip_permissions(
                     IpPermission::builder()
                         .ip_protocol("tcp")
-                        .from_port(3100)
-                        .to_port(3100)
+                        .from_port(LOGGING_PORT as i32)
+                        .to_port(LOGGING_PORT as i32)
+                        .ip_ranges(IpRange::builder().cidr_ip(binary_cidr).build())
+                        .build(),
+                )
+                .ip_permissions(
+                    IpPermission::builder()
+                        .ip_protocol("tcp")
+                        .from_port(PROFILES_PORT as i32)
+                        .to_port(PROFILES_PORT as i32)
                         .ip_ranges(IpRange::builder().cidr_ip(binary_cidr).build())
                         .build(),
                 )
