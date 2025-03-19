@@ -153,7 +153,7 @@ Description=Pyroscope Profiling Service
 After=network.target
 
 [Service]
-ExecStart=/opt/pyroscope/pyroscope server --config.file=/etc/pyroscope/pyroscope.yml --storage.data-path=/var/lib/pyroscope
+ExecStart=/opt/pyroscope/pyroscope --config.file=/etc/pyroscope/pyroscope.yml
 TimeoutStopSec=60
 Restart=always
 User=ubuntu
