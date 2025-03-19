@@ -104,6 +104,7 @@ pub const LOKI_CONFIG: &str = r#"
 auth_enabled: false
 target: all
 server:
+  grpc_listen_port: 9095
   http_listen_port: 3100
 common:
   ring:
@@ -156,17 +157,21 @@ WantedBy=multi-user.target
 /// YAML configuration for Tempo
 pub const TEMPO_CONFIG: &str = r#"
 server:
+  grpc_listen_port: 9096
   http_listen_port: 3200
-receiver:
-  otlp:
-    protocols:
-      http:
-        endpoint: "0.0.0.0:4318"
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        http:
+          endpoint: "0.0.0.0:4318"
 storage:
   trace:
     backend: local
     local:
       path: /tempo/traces
+    wal:
+      path: /tempo/wal
 compactor:
   compaction:
     block_retention: 12h
@@ -241,11 +246,13 @@ sudo mkdir -p /opt/loki /loki/index /loki/index_cache /loki/chunks /loki/compact
 sudo chown -R ubuntu:ubuntu /loki
 unzip -o /home/ubuntu/loki.zip -d /home/ubuntu
 sudo mv /home/ubuntu/loki-linux-arm64 /opt/loki/loki
+sudo chmod +x /opt/loki/loki
 
 # Install Tempo
-sudo mkdir -p /opt/tempo /tempo/traces
+sudo mkdir -p /opt/tempo /tempo/traces /tempo/wal
 sudo chown -R ubuntu:ubuntu /tempo
-tar xvfz /home/ubuntu/tempo.tar.gz -C /opt/tempo --strip-components=1
+tar xvfz /home/ubuntu/tempo.tar.gz -C /home/ubuntu
+sudo mv /home/ubuntu/tempo /opt/tempo/tempo
 sudo chmod +x /opt/tempo/tempo
 
 # Configure Grafana
@@ -260,6 +267,9 @@ sudo mv /home/ubuntu/dashboard.json /var/lib/grafana/dashboards/dashboard.json
 sudo mkdir -p /etc/loki
 sudo mv /home/ubuntu/loki.yml /etc/loki/loki.yml
 sudo chown root:root /etc/loki/loki.yml
+sudo mkdir -p /etc/tempo
+sudo mv /home/ubuntu/tempo.yml /etc/tempo/tempo.yml
+sudo chown root:root /etc/tempo/tempo.yml
 
 # Move service files
 sudo mv /home/ubuntu/prometheus.service /etc/systemd/system/prometheus.service
