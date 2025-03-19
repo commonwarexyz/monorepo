@@ -199,8 +199,8 @@ fn main() {
                 context.register("messages", "Sent messages", messages.clone());
                 loop {
                     // Start span
-                    let span = info_span!("send_message");
-                    let _enter = span.enter();
+                    let span = info_span!("build_message");
+                    let enter = span.enter();
 
                     // Create message
                     let mut msg = vec![0; config.message_size];
@@ -209,6 +209,7 @@ fn main() {
                     // Send to all peers
                     let recipient_index = rng.gen_range(0..valid_recipients.len());
                     let recipient = Recipients::One(valid_recipients[recipient_index].clone());
+                    drop(enter);
                     if let Err(e) = flood_sender.send(recipient, msg.into(), false).await {
                         error!(?e, "could not send flood message");
                     }
@@ -222,10 +223,6 @@ fn main() {
                     let messages: Counter<u64, AtomicU64> = Counter::default();
                     context.register("messages", "Received messages", messages.clone());
                     loop {
-                        // Start span
-                        let span = info_span!("receive_message");
-                        let _enter = span.enter();
-
                         // Receive message
                         if let Err(e) = flood_receiver.recv().await {
                             error!(?e, "could not receive flood message");
