@@ -55,6 +55,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aligned-vec"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc890384c8602f339876ded803c97ad529f3842aba97f6392b3dba0dd171769b"
+dependencies = [
+ "equator",
+]
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -988,7 +997,6 @@ dependencies = [
  "governor",
  "prometheus-client",
  "pyroscope",
- "pyroscope_pprofrs",
  "rand 0.8.5",
  "serde",
  "serde_yaml",
@@ -1097,7 +1105,9 @@ dependencies = [
  "futures",
  "getrandom 0.2.15",
  "governor",
+ "pprof",
  "prometheus-client",
+ "pyroscope",
  "rand 0.8.5",
  "sha2 0.10.8",
  "thiserror 2.0.12",
@@ -1554,6 +1564,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75030f3c4f45dafd7586dd6780965a8c7e8e285a5ecb86713e63a79c5b2766f3"
 dependencies = [
  "cfg-if",
+]
+
+[[package]]
+name = "equator"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4711b213838dfee0117e3be6ac926007d7f433d7bbe33595975d4190cb07e6fc"
+dependencies = [
+ "equator-macro",
+]
+
+[[package]]
+name = "equator-macro"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "44f23cf4b44bfce11a86ace86f8a73ffdec849c9fd00a386a53d278bd9e81fb3"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.98",
 ]
 
 [[package]]
@@ -2828,11 +2858,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "439ee305def115ba05938db6eb1644ff94165c5ab5e9420d1c1bcedbba909391"
 
 [[package]]
-name = "pprof2"
-version = "0.13.0"
+name = "pprof"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ef2b298bd8930da969971e9a884346161b263ee7530acbe1b1436d5588953fe"
+checksum = "ebbe2f8898beba44815fdc9e5a4ae9c929e21c5dc29b0c774a15555f7f58d6d0"
 dependencies = [
+ "aligned-vec",
  "backtrace",
  "cfg-if",
  "findshlibs",
@@ -2998,18 +3029,6 @@ dependencies = [
  "thiserror 1.0.63",
  "url",
  "winapi",
-]
-
-[[package]]
-name = "pyroscope_pprofrs"
-version = "0.2.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "614a25777053da6bdca9d84a67892490b5a57590248dbdee3d7bf0716252af70"
-dependencies = [
- "log",
- "pprof2",
- "pyroscope",
- "thiserror 1.0.63",
 ]
 
 [[package]]

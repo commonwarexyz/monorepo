@@ -31,6 +31,8 @@ features = ["js"]
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true, features = ["full"] }
 axum = { workspace = true }
+pprof = "0.14.0"
+pyroscope = "0.5.8"
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }

@@ -7,13 +7,15 @@ use commonware_cryptography::{
 use commonware_deployer::ec2::{Peers, METRICS_PORT, PROFILES_PORT};
 use commonware_flood::Config;
 use commonware_p2p::{authenticated, Receiver, Recipients, Sender};
-use commonware_runtime::{tokio, Clock, Metrics, Network, Runner, Spawner};
+use commonware_runtime::{
+    telemetry::pprof::{pprof_backend, PprofConfig},
+    tokio, Clock, Metrics, Network, Runner, Spawner,
+};
 use commonware_utils::{from_hex_formatted, union};
 use futures::future::try_join_all;
 use governor::Quota;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use pyroscope::PyroscopeAgent;
-use pyroscope_pprofrs::{pprof_backend, PprofConfig};
 use rand::{rngs::StdRng, Rng, RngCore, SeedableRng};
 use std::{
     collections::HashMap,
@@ -83,7 +85,7 @@ fn main() {
         format!("http://{}:{}", monitoring_ip, PROFILES_PORT),
         public_key.to_string(),
     )
-    .backend(pprof_backend(PprofConfig::new().sample_rate(1000)))
+    .backend(pprof_backend(PprofConfig::new().sample_rate(100)))
     .build()
     .expect("Could not create Pyroscope agent");
     let profiler = profiler.start().expect("Could not start Pyroscope agent");
