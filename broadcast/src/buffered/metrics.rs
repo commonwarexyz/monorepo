@@ -28,8 +28,8 @@ pub struct Metrics {
     pub peer: Family<SequencerLabel, Counter>,
     /// Number of received messages by status
     pub receive: status::Counter,
-    /// Number of retrieves by status
-    pub retrieve: status::Counter,
+    /// Number of `get` requests by status
+    pub get: status::Counter,
 }
 
 impl Metrics {
@@ -47,9 +47,9 @@ impl Metrics {
             metrics.receive.clone(),
         );
         context.register(
-            "retrieve",
-            "Number of retrieves by status",
-            metrics.retrieve.clone(),
+            "get",
+            "Number of `get` requests by status",
+            metrics.get.clone(),
         );
         metrics
     }

@@ -1,4 +1,4 @@
-//! Cached, best-effort P2P Broadcast to all peers.
+//! Broadcast messages to and cache messages from untrusted peers.
 //!
 //! # Overview
 //!
@@ -148,13 +148,13 @@ mod tests {
             // Allow time for propagation
             context.sleep(Duration::from_secs(1)).await;
 
-            // Check that all peers can retrieve the message
+            // Check that all peers received the message
             for peer in peers.iter() {
                 let mut mailbox = mailboxes.get(peer).unwrap().clone();
                 let digest = message.digest();
-                let receiver = mailbox.retrieve(digest).await;
-                let retrieved_message = receiver.await.ok();
-                assert_eq!(retrieved_message.unwrap(), message);
+                let receiver = mailbox.get(digest).await;
+                let received_message = receiver.await.ok();
+                assert_eq!(received_message.unwrap(), message);
             }
         });
     }
@@ -172,36 +172,36 @@ mod tests {
             let mut mailbox_a = mailboxes.get(&peers[0]).unwrap().clone();
 
             // Create a test message
-            let m1 = TestMessage::new(b"message to retrieve");
+            let m1 = TestMessage::new(b"hello world");
             let digest_m1 = m1.digest();
 
             // Attempt retrieval before broadcasting
-            let receiver_before = mailbox_a.retrieve(digest_m1).await;
+            let receiver_before = mailbox_a.get(digest_m1).await;
 
             // Broadcast the message
             mailbox_a.broadcast(m1.clone()).await;
 
             // Wait for the pre-broadcast retrieval to complete
-            let retrieved_before = receiver_before
+            let msg_before = receiver_before
                 .await
                 .expect("Pre-broadcast retrieval failed");
-            assert_eq!(retrieved_before, m1);
+            assert_eq!(msg_before, m1);
 
             // Perform a second retrieval after the broadcast
-            let receiver_after = mailbox_a.retrieve(digest_m1).await;
+            let receiver_after = mailbox_a.get(digest_m1).await;
 
             // Measure the time taken for the second retrieval
             let start = context.current();
-            let retrieved_after = receiver_after
+            let msg_after = receiver_after
                 .await
                 .expect("Post-broadcast retrieval failed");
             let duration = context.current().duration_since(start).unwrap();
 
             // Verify the second retrieval matches the original message
-            assert_eq!(retrieved_after, m1);
+            assert_eq!(msg_after, m1);
 
             // Verify the second retrieval was instant (less than 10ms)
-            assert!(duration < A_JIFFY, "retrieve not instant");
+            assert!(duration < A_JIFFY, "get not instant");
         });
     }
 
@@ -228,7 +228,7 @@ mod tests {
                 let mut all_received = true;
                 for peer in peers.iter() {
                     let mut mailbox = mailboxes.get(peer).unwrap().clone();
-                    let receiver = mailbox.retrieve(digest).await;
+                    let receiver = mailbox.get(digest).await;
                     let has = select! {
                         _ = context.sleep(A_JIFFY) => {false},
                         r = receiver => { r.is_ok() },
@@ -247,7 +247,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_retrieve_cached() {
+    fn test_get_cached() {
         let (runner, context, _) = Executor::timed(Duration::from_secs(5));
         runner.start(async move {
             let (peers, mut registrations, _oracle) =
@@ -262,20 +262,20 @@ mod tests {
             // Wait for propagation
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
-            // Retrieve from cache (should be instant)
+            // Get from cache (should be instant)
             let digest = message.digest();
             let mut mailbox = mailboxes.get(peers.last().unwrap()).unwrap().clone();
-            let receiver = mailbox.retrieve(digest).await;
+            let receiver = mailbox.get(digest).await;
             let start = context.current();
-            let retrieved = receiver.await.expect("failed to retrieve cached message");
+            let received = receiver.await.expect("failed to get cached message");
             let duration = context.current().duration_since(start).unwrap();
-            assert_eq!(retrieved, message);
-            assert!(duration < A_JIFFY, "retrieve not instant",);
+            assert_eq!(received, message);
+            assert!(duration < A_JIFFY, "get not instant",);
         });
     }
 
     #[test_traced]
-    fn test_retrieve_nonexistent() {
+    fn test_get_nonexistent() {
         let (runner, context, _) = Executor::timed(Duration::from_secs(5));
         runner.start(async move {
             let (peers, mut registrations, _oracle) =
@@ -287,11 +287,11 @@ mod tests {
             let digest = message.digest();
             let mut mailbox1 = mailboxes.get(&peers[0]).unwrap().clone();
             let mut mailbox2 = mailboxes.get(&peers[1]).unwrap().clone();
-            let receiver = mailbox1.retrieve(digest).await;
+            let receiver = mailbox1.get(digest).await;
 
             // Create two other requests which are dropped
-            let dummy1 = mailbox1.retrieve(digest).await;
-            let dummy2 = mailbox2.retrieve(digest).await;
+            let dummy1 = mailbox1.get(digest).await;
+            let dummy2 = mailbox2.get(digest).await;
             drop(dummy1);
             drop(dummy2);
 
@@ -302,8 +302,8 @@ mod tests {
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
             // Check receiver1 gets the message, receiver2 was dropped
-            let retrieved = receiver.await.expect("receiver1 should get message");
-            assert_eq!(retrieved, message);
+            let received = receiver.await.expect("receiver1 should get message");
+            assert_eq!(received, message);
         });
     }
 
@@ -331,12 +331,12 @@ mod tests {
             // Check all other messages exist
             let mut peer_mailbox = mailboxes.get(&peers[1]).unwrap().clone();
             for msg in messages.iter().skip(1) {
-                let result = peer_mailbox.retrieve(msg.digest()).await.await.unwrap();
+                let result = peer_mailbox.get(msg.digest()).await.await.unwrap();
                 assert_eq!(result, msg.clone());
             }
 
             // Check first message times out
-            let receiver = peer_mailbox.retrieve(messages[0].digest()).await;
+            let receiver = peer_mailbox.get(messages[0].digest()).await;
             select! {
                 _ = context.sleep(A_JIFFY) => {},
                 _ = receiver => { panic!("receiver should have failed")},
@@ -380,10 +380,10 @@ mod tests {
             }
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
-            // Verify B can still retrieve M1 (in C's deque)
-            let receiver = mailbox_b.retrieve(digest_m1).await;
-            let retrieved = receiver.await.expect("M1 should be retrievable");
-            assert_eq!(retrieved, m1);
+            // Verify B can still get M1 (in C's deque)
+            let receiver = mailbox_b.get(digest_m1).await;
+            let received = receiver.await.expect("M1 should be retrievable");
+            assert_eq!(received, m1);
 
             // Peer C broadcasts 10 new messages to evict M1 from C's deque
             let mut new_messages_c = Vec::with_capacity(CACHE_SIZE);
@@ -395,8 +395,8 @@ mod tests {
             }
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
-            // Verify B cannot retrieve M1 (evicted from all deques)
-            let receiver = mailbox_b.retrieve(digest_m1).await;
+            // Verify B cannot get M1 (evicted from all deques)
+            let receiver = mailbox_b.get(digest_m1).await;
             select! {
                 _ = context.sleep(A_JIFFY) => {},
                 _ = receiver => { panic!("M1 should not be retrievable"); },

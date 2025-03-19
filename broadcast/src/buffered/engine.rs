@@ -31,7 +31,7 @@ pub struct Engine<
     E: Clock + Spawner + Metrics,
     P: Array,
     D: Digest,
-    B: Digestible<D> + Codec,
+    M: Digestible<D> + Codec,
     NetS: Sender<PublicKey = P>,
     NetR: Receiver<PublicKey = P>,
 > {
@@ -57,16 +57,16 @@ pub struct Engine<
     // Messaging
     ////////////////////////////////////////
     /// The mailbox for receiving messages.
-    mailbox_receiver: mpsc::Receiver<Message<D, B>>,
+    mailbox_receiver: mpsc::Receiver<Message<D, M>>,
 
     /// Pending requests from the application.
-    waiters: HashMap<D, Vec<oneshot::Sender<B>>>,
+    waiters: HashMap<D, Vec<oneshot::Sender<M>>>,
 
     ////////////////////////////////////////
     // Cache
     ////////////////////////////////////////
-    /// All cached blobs by digest.
-    items: HashMap<D, B>,
+    /// All cached messages by digest.
+    items: HashMap<D, M>,
 
     /// A LRU cache of the latest received digests from each peer.
     ///
@@ -77,7 +77,7 @@ pub struct Engine<
 
     /// The number of times each digest exists in one of the deques.
     ///
-    /// This is because multiple peers can send the same blob.
+    /// This is because multiple peers can send the same message.
     counts: HashMap<D, usize>,
 
     ////////////////////////////////////////
@@ -91,16 +91,16 @@ impl<
         E: Clock + Spawner + Metrics,
         P: Array,
         D: Digest,
-        B: Digestible<D> + Codec,
+        M: Digestible<D> + Codec,
         NetS: Sender<PublicKey = P>,
         NetR: Receiver<PublicKey = P>,
-    > Engine<E, P, D, B, NetS, NetR>
+    > Engine<E, P, D, M, NetS, NetR>
 {
     /// Creates a new engine with the given context and configuration.
     /// Returns the engine and a mailbox for sending messages to the engine.
-    pub fn new(context: E, cfg: Config<P>) -> (Self, Mailbox<D, B>) {
+    pub fn new(context: E, cfg: Config<P>) -> (Self, Mailbox<D, M>) {
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
-        let mailbox = Mailbox::<D, B>::new(mailbox_sender);
+        let mailbox = Mailbox::<D, M>::new(mailbox_sender);
         let metrics = metrics::Metrics::init(context.clone());
 
         let result = Self {
@@ -147,13 +147,13 @@ impl<
                         break;
                     };
                     match msg {
-                        Message::Broadcast{ blob } => {
-                            trace!("broadcast");
-                            self.handle_broadcast(&mut net_sender, blob).await;
+                        Message::Broadcast{ message } => {
+                            trace!("mailbox: broadcast");
+                            self.handle_broadcast(&mut net_sender, message).await;
                         }
-                        Message::Retrieve{ digest, responder } => {
-                            trace!("retrieve");
-                            self.handle_retrieve(digest, responder).await;
+                        Message::Get{ digest, responder } => {
+                            trace!("mailbox: get");
+                            self.handle_get(digest, responder).await;
                         }
                     }
                 },
@@ -170,12 +170,9 @@ impl<
                         }
                     };
 
-                    // Metrics
-                    self.metrics.peer.get_or_create(&SequencerLabel::from(&peer)).inc();
-
                     // Decode the message
-                    let blob = match B::decode(msg) {
-                        Ok(blob) => blob,
+                    let message = match M::decode(msg) {
+                        Ok(message) => message,
                         Err(err) => {
                             warn!(?err, ?peer, "failed to decode message");
                             self.metrics.receive.inc(Status::Invalid);
@@ -183,7 +180,8 @@ impl<
                         }
                     };
 
-                    self.handle_network(peer, blob).await;
+                    self.metrics.peer.get_or_create(&SequencerLabel::from(&peer)).inc();
+                    self.handle_network(peer, message).await;
                 },
             }
         }
@@ -193,27 +191,27 @@ impl<
     // Handling
     ////////////////////////////////////////
 
-    /// Handles a broadcast request from the application.
-    async fn handle_broadcast(&mut self, net_sender: &mut NetS, blob: B) {
-        // Store the blob, continue even if it was already stored
-        let _ = self.insert_blob(self.public_key.clone(), blob.clone());
+    /// Handles a `broadcast` request from the application.
+    async fn handle_broadcast(&mut self, net_sender: &mut NetS, msg: M) {
+        // Store the message, continue even if it was already stored
+        let _ = self.insert_message(self.public_key.clone(), msg.clone());
 
-        // Broadcast the blob to the network
+        // Broadcast the message to the network
         let recipients = Recipients::All;
-        let msg = Bytes::from(blob.encode());
+        let msg = Bytes::from(msg.encode());
         if let Err(err) = net_sender.send(recipients, msg, self.priority).await {
             warn!(?err, "failed to send message");
         }
     }
 
-    /// Handles a retrieve request from the application.
+    /// Handles a `get` request from the application.
     ///
-    /// If the blob is already in the cache, the responder is immediately sent the blob.
+    /// If the message is already in the cache, the responder is immediately sent the message.
     /// Otherwise, the responder is stored in the waiters list.
-    async fn handle_retrieve(&mut self, digest: D, responder: oneshot::Sender<B>) {
-        // Check if the blob is already in the cache
-        if let Some(blob) = self.items.get(&digest) {
-            self.respond(responder, blob.clone());
+    async fn handle_get(&mut self, digest: D, responder: oneshot::Sender<M>) {
+        // Check if the message is already in the cache
+        if let Some(msg) = self.items.get(&digest) {
+            self.respond(responder, msg.clone());
             return;
         }
 
@@ -221,10 +219,10 @@ impl<
         self.waiters.entry(digest).or_default().push(responder);
     }
 
-    /// Handles a blob that was received from a peer.
-    async fn handle_network(&mut self, peer: P, blob: B) {
-        if !self.insert_blob(peer.clone(), blob) {
-            debug!(?peer, "blob already stored");
+    /// Handles a message that was received from a peer.
+    async fn handle_network(&mut self, peer: P, msg: M) {
+        if !self.insert_message(peer.clone(), msg) {
+            debug!(?peer, "message already stored");
             self.metrics.receive.inc(Status::Dropped);
             return;
         }
@@ -236,17 +234,17 @@ impl<
     // Cache Management
     ////////////////////////////////////////
 
-    /// Inserts a blob into the cache.
+    /// Inserts a message into the cache.
     ///
-    /// Returns `true` if the blob was inserted, `false` if it was already present.
-    /// Updates the deque, item count, and blob cache, potentially evicting an old blob.
-    fn insert_blob(&mut self, peer: P, blob: B) -> bool {
-        let digest = blob.digest();
+    /// Returns `true` if the message was inserted, `false` if it was already present.
+    /// Updates the deque, item count, and message cache, potentially evicting an old message.
+    fn insert_message(&mut self, peer: P, msg: M) -> bool {
+        let digest = msg.digest();
 
-        // Send the blob to the waiters, if any, ignoring errors (as the receiver may have dropped)
+        // Send the message to the waiters, if any, ignoring errors (as the receiver may have dropped)
         if let Some(responders) = self.waiters.remove(&digest) {
             for responder in responders {
-                self.respond(responder, blob.clone());
+                self.respond(responder, msg.clone());
             }
         }
 
@@ -256,7 +254,7 @@ impl<
             .entry(peer)
             .or_insert_with(|| VecDeque::with_capacity(self.deque_size + 1));
 
-        // If the blob is already in the deque, move it to the front and return early
+        // If the message is already in the deque, move it to the front and return early
         if let Some(i) = deque.iter().position(|d| *d == digest) {
             if i != 0 {
                 deque.remove(i).unwrap(); // Must exist
@@ -265,9 +263,9 @@ impl<
             return false;
         };
 
-        // - Insert the blob into the peer cache
+        // - Insert the message into the peer cache
         // - Increment the item count
-        // - Insert the blob if-and-only-if the new item count is 1
+        // - Insert the message if-and-only-if the new item count is 1
         deque.push_front(digest);
         let count = self
             .counts
@@ -275,7 +273,7 @@ impl<
             .and_modify(|c| *c = c.checked_add(1).unwrap())
             .or_insert(1);
         if *count == 1 {
-            let existing = self.items.insert(digest, blob);
+            let existing = self.items.insert(digest, msg);
             assert!(existing.is_none());
         }
 
@@ -283,7 +281,7 @@ impl<
         if deque.len() > self.deque_size {
             // Remove the oldest digest from the peer cache
             // Decrement the item count
-            // Remove the blob if-and-only-if the new item count is 0
+            // Remove the message if-and-only-if the new item count is 0
             let stale = deque.pop_back().unwrap();
             let count = self
                 .counts
@@ -313,18 +311,18 @@ impl<
 
             // Increment metrics for each dropped waiter
             for _ in 0..dropped_count {
-                self.metrics.retrieve.inc(Status::Dropped);
+                self.metrics.get.inc(Status::Dropped);
             }
 
             !waiters.is_empty()
         });
     }
 
-    /// Respond to a waiter with a blob.
+    /// Respond to a waiter with a message.
     /// Increments the appropriate metric based on the result.
-    fn respond(&mut self, responder: oneshot::Sender<B>, blob: B) {
-        let result = responder.send(blob);
-        self.metrics.retrieve.inc(match result {
+    fn respond(&mut self, responder: oneshot::Sender<M>, msg: M) {
+        let result = responder.send(msg);
+        self.metrics.get.inc(match result {
             Ok(_) => Status::Success,
             Err(_) => Status::Dropped,
         });

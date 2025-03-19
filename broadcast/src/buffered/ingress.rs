@@ -7,38 +7,38 @@ use futures::{
 };
 
 /// Message types that can be sent to the `Mailbox`
-pub enum Message<D, B> {
-    /// Broadcast a blob to the network.
-    Broadcast { blob: B },
+pub enum Message<D, M> {
+    /// Broadcast a [`Message`](crate::Broadcaster::Message) to the network.
+    Broadcast { message: M },
 
-    /// Request to retrieve a blob by digest.
+    /// Get a message by digest.
     ///
-    /// The responder will be sent the blob if it is available.
-    /// The request can be canceled by dropping the responder.
-    Retrieve {
+    /// The responder will be sent the message when it is available; either instantly (if cached) or
+    /// when it is received from the network. The request can be canceled by dropping the responder.
+    Get {
         digest: D,
-        responder: oneshot::Sender<B>,
+        responder: oneshot::Sender<M>,
     },
 }
 
 /// Ingress mailbox for [`Engine`](super::Engine).
 #[derive(Clone)]
-pub struct Mailbox<D: Digest, B: Digestible<D>> {
-    sender: mpsc::Sender<Message<D, B>>,
+pub struct Mailbox<D: Digest, M: Digestible<D>> {
+    sender: mpsc::Sender<Message<D, M>>,
 }
 
-impl<D: Digest, B: Digestible<D>> Mailbox<D, B> {
-    pub(super) fn new(sender: mpsc::Sender<Message<D, B>>) -> Self {
+impl<D: Digest, M: Digestible<D>> Mailbox<D, M> {
+    pub(super) fn new(sender: mpsc::Sender<Message<D, M>>) -> Self {
         Self { sender }
     }
 }
 
-impl<D: Digest, B: Digestible<D>> Mailbox<D, B> {
-    /// Retrieve a blob by digest.
-    pub async fn retrieve(&mut self, digest: D) -> oneshot::Receiver<B> {
+impl<D: Digest, M: Digestible<D>> Mailbox<D, M> {
+    /// Get a message by digest.
+    pub async fn get(&mut self, digest: D) -> oneshot::Receiver<M> {
         let (sender, receiver) = oneshot::channel();
         self.sender
-            .send(Message::Retrieve {
+            .send(Message::Get {
                 digest,
                 responder: sender,
             })
@@ -48,12 +48,12 @@ impl<D: Digest, B: Digestible<D>> Mailbox<D, B> {
     }
 }
 
-impl<D: Digest, B: Codec + Digestible<D>> Broadcaster for Mailbox<D, B> {
-    type Blob = B;
+impl<D: Digest, M: Codec + Digestible<D>> Broadcaster for Mailbox<D, M> {
+    type Message = M;
 
-    async fn broadcast(&mut self, blob: Self::Blob) {
+    async fn broadcast(&mut self, message: Self::Message) {
         self.sender
-            .send(Message::Broadcast { blob })
+            .send(Message::Broadcast { message })
             .await
             .expect("mailbox closed");
     }
