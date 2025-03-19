@@ -78,16 +78,6 @@ fn main() {
         "loaded config"
     );
 
-    // Create profiler
-    let profiler = PyroscopeAgent::builder(
-        format!("http://{}:{}", monitoring_ip, PROFILES_PORT),
-        public_key.to_string(),
-    )
-    .backend(pprof_backend(PprofConfig::new().sample_rate(1000)))
-    .build()
-    .expect("Could not create Pyroscope agent");
-    let profiler = profiler.start().expect("Could not start Pyroscope agent");
-
     // Configure peers and bootstrappers
     let peer_keys = peers.keys().cloned().collect::<Vec<_>>();
     let mut bootstrappers = Vec::new();
@@ -255,9 +245,5 @@ fn main() {
         {
             error!(?e, "task failed");
         }
-
-        // Stop profiler
-        let profiler = profiler.stop().expect("Could not stop Pyroscope agent");
-        profiler.shutdown();
     });
 }
