@@ -53,7 +53,7 @@ fn init_tracer(endpoint: &str) -> Result<Tracer, TraceError> {
     let resource = Resource::builder().with_service_name("flood").build();
 
     // Build the tracer provider
-    let sampler = Sampler::TraceIdRatioBased(0.1);
+    let sampler = Sampler::TraceIdRatioBased(0.001);
     let tracer_provider = SdkTracerProvider::builder()
         .with_span_processor(batch_processor)
         .with_resource(resource)
