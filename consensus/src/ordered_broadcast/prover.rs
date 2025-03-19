@@ -5,6 +5,7 @@
 use super::{namespace, parsed, serializer, Context, Epoch};
 use crate::Proof;
 use bytes::{Buf, BufMut};
+use commonware_codec::SizedCodec;
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{self, Element},
@@ -12,7 +13,7 @@ use commonware_cryptography::{
     },
     Digest, Scheme,
 };
-use commonware_utils::{Array, SizedSerialize};
+use commonware_utils::Array;
 use std::marker::PhantomData;
 
 /// Encode and decode proofs of broadcast.
@@ -29,10 +30,10 @@ pub struct Prover<C: Scheme, D: Digest> {
 
 impl<C: Scheme, D: Digest> Prover<C, D> {
     /// The length of a serialized proof.
-    const PROOF_LEN: usize = C::PublicKey::SERIALIZED_LEN
-        + u64::SERIALIZED_LEN
-        + D::SERIALIZED_LEN
-        + u64::SERIALIZED_LEN
+    const PROOF_LEN: usize = C::PublicKey::LEN_ENCODED
+        + u64::LEN_ENCODED
+        + D::LEN_ENCODED
+        + u64::LEN_ENCODED
         + group::SIGNATURE_LENGTH;
 
     /// Create a new prover with the given signing `namespace`.

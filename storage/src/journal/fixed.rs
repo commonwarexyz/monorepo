@@ -50,8 +50,9 @@
 
 use super::Error;
 use bytes::BufMut;
+use commonware_codec::SizedCodec;
 use commonware_runtime::{Blob, Error as RError, Metrics, Storage};
-use commonware_utils::{hex, Array, SizedSerialize};
+use commonware_utils::{hex, Array};
 use futures::stream::{self, Stream, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::BTreeMap;
@@ -91,7 +92,7 @@ pub struct Journal<B: Blob, E: Storage<B> + Metrics, A: Array> {
 }
 
 impl<B: Blob, E: Storage<B> + Metrics, A: Array> Journal<B, E, A> {
-    const CHUNK_SIZE: usize = u32::SERIALIZED_LEN + A::SERIALIZED_LEN;
+    const CHUNK_SIZE: usize = u32::LEN_ENCODED + A::LEN_ENCODED;
     const CHUNK_SIZE_U64: u64 = Self::CHUNK_SIZE as u64;
 
     /// Initialize a new `Journal` instance.
@@ -316,12 +317,12 @@ impl<B: Blob, E: Storage<B> + Metrics, A: Array> Journal<B, E, A> {
 
     /// Verify the integrity of the Array + checksum in `buf`, returning the array if it is valid.
     fn verify_integrity(buf: &[u8]) -> Result<A, Error> {
-        let stored_checksum = u32::from_be_bytes(buf[A::SERIALIZED_LEN..].try_into().unwrap());
-        let checksum = crc32fast::hash(&buf[..A::SERIALIZED_LEN]);
+        let stored_checksum = u32::from_be_bytes(buf[A::LEN_ENCODED..].try_into().unwrap());
+        let checksum = crc32fast::hash(&buf[..A::LEN_ENCODED]);
         if checksum != stored_checksum {
             return Err(Error::ChecksumMismatch(stored_checksum, checksum));
         }
-        Ok(buf[..A::SERIALIZED_LEN].try_into().unwrap())
+        Ok(buf[..A::LEN_ENCODED].try_into().unwrap())
     }
 
     /// Returns an unordered stream of all items in the journal.
@@ -668,8 +669,8 @@ mod tests {
             journal.close().await.expect("Failed to close journal");
 
             // Corrupt one of the checksums and make sure it's detected.
-            let checksum_offset = Digest::SERIALIZED_LEN as u64
-                + (ITEMS_PER_BLOB / 2) * (Digest::SERIALIZED_LEN + u32::SERIALIZED_LEN) as u64;
+            let checksum_offset = Digest::LEN_ENCODED as u64
+                + (ITEMS_PER_BLOB / 2) * (Digest::LEN_ENCODED + u32::LEN_ENCODED) as u64;
             let blob = context
                 .open(&cfg.partition, &40u64.to_be_bytes())
                 .await

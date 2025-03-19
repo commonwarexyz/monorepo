@@ -8,8 +8,9 @@ use crate::mmr::{
     Error::*,
 };
 use bytes::{Buf, BufMut};
+use commonware_codec::SizedCodec;
 use commonware_cryptography::{Digest, Hasher as CHasher};
-use commonware_utils::{Array, SizedSerialize};
+use commonware_utils::Array;
 use futures::future::try_join_all;
 use std::future::Future;
 use tracing::debug;
@@ -146,7 +147,7 @@ impl<H: CHasher> Proof<H> {
 
     /// Return the maximum size in bytes of any serialized `Proof`.
     pub fn max_serialization_size() -> usize {
-        u64::SERIALIZED_LEN + (u8::MAX as usize * H::Digest::SERIALIZED_LEN)
+        u64::LEN_ENCODED + (u8::MAX as usize * H::Digest::LEN_ENCODED)
     }
 
     /// Canonically serializes the `Proof` as:
@@ -164,7 +165,7 @@ impl<H: CHasher> Proof<H> {
         );
 
         // Serialize the proof as a byte vector.
-        let bytes_len = u64::SERIALIZED_LEN + (self.hashes.len() * H::Digest::SERIALIZED_LEN);
+        let bytes_len = u64::LEN_ENCODED + (self.hashes.len() * H::Digest::LEN_ENCODED);
         let mut bytes = Vec::with_capacity(bytes_len);
         bytes.put_u64(self.size);
         for hash in self.hashes.iter() {
@@ -177,15 +178,15 @@ impl<H: CHasher> Proof<H> {
     /// Deserializes a canonically encoded `Proof`. See `serialize` for the serialization format.
     pub fn deserialize(bytes: &[u8]) -> Option<Self> {
         let mut buf = bytes;
-        if buf.len() < u64::SERIALIZED_LEN {
+        if buf.len() < u64::LEN_ENCODED {
             return None;
         }
         let size = buf.get_u64();
 
         // A proof should divide neatly into the hash length and not contain more than 255 hashes.
         let buf_remaining = buf.remaining();
-        let hashes_len = buf_remaining / H::Digest::SERIALIZED_LEN;
-        if buf_remaining % H::Digest::SERIALIZED_LEN != 0 || hashes_len > u8::MAX as usize {
+        let hashes_len = buf_remaining / H::Digest::LEN_ENCODED;
+        if buf_remaining % H::Digest::LEN_ENCODED != 0 || hashes_len > u8::MAX as usize {
             return None;
         }
         let mut hashes = Vec::with_capacity(hashes_len);

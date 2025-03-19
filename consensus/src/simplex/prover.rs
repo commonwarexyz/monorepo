@@ -7,8 +7,9 @@ use super::{
 };
 use crate::Proof;
 use bytes::{Buf, BufMut};
+use commonware_codec::SizedCodec;
 use commonware_cryptography::Scheme;
-use commonware_utils::{Array, SizedSerialize};
+use commonware_utils::Array;
 use std::{collections::HashSet, marker::PhantomData};
 
 /// Encode and decode proofs of activity.
@@ -45,11 +46,11 @@ impl<C: Scheme, D: Array> Prover<C, D> {
         signature: &C::Signature,
     ) -> Proof {
         // Setup proof
-        let len = u64::SERIALIZED_LEN
-            + u64::SERIALIZED_LEN
-            + D::SERIALIZED_LEN
-            + C::PublicKey::SERIALIZED_LEN
-            + C::Signature::SERIALIZED_LEN;
+        let len = u64::LEN_ENCODED
+            + u64::LEN_ENCODED
+            + D::LEN_ENCODED
+            + C::PublicKey::LEN_ENCODED
+            + C::Signature::LEN_ENCODED;
 
         // Encode proof
         let mut proof = Vec::with_capacity(len);
@@ -70,11 +71,11 @@ impl<C: Scheme, D: Array> Prover<C, D> {
     ) -> Option<(View, View, D, C::PublicKey)> {
         // Ensure proof is big enough
         if proof.len()
-            != u64::SERIALIZED_LEN
-                + u64::SERIALIZED_LEN
-                + D::SERIALIZED_LEN
-                + C::PublicKey::SERIALIZED_LEN
-                + C::Signature::SERIALIZED_LEN
+            != u64::LEN_ENCODED
+                + u64::LEN_ENCODED
+                + D::LEN_ENCODED
+                + C::PublicKey::LEN_ENCODED
+                + C::Signature::LEN_ENCODED
         {
             return None;
         }
@@ -101,11 +102,11 @@ impl<C: Scheme, D: Array> Prover<C, D> {
         signatures: Vec<(&C::PublicKey, C::Signature)>,
     ) -> Proof {
         // Setup proof
-        let len = u64::SERIALIZED_LEN
-            + u64::SERIALIZED_LEN
-            + D::SERIALIZED_LEN
-            + u32::SERIALIZED_LEN
-            + signatures.len() * (C::PublicKey::SERIALIZED_LEN + C::Signature::SERIALIZED_LEN);
+        let len = u64::LEN_ENCODED
+            + u64::LEN_ENCODED
+            + D::LEN_ENCODED
+            + u32::LEN_ENCODED
+            + signatures.len() * (C::PublicKey::LEN_ENCODED + C::Signature::LEN_ENCODED);
 
         // Encode proof
         let mut proof = Vec::with_capacity(len);
@@ -129,8 +130,7 @@ impl<C: Scheme, D: Array> Prover<C, D> {
         namespace: &[u8],
     ) -> Option<(View, View, D, Vec<C::PublicKey>)> {
         // Ensure proof prefix is big enough
-        let len =
-            u64::SERIALIZED_LEN + u64::SERIALIZED_LEN + D::SERIALIZED_LEN + u32::SERIALIZED_LEN;
+        let len = u64::LEN_ENCODED + u64::LEN_ENCODED + D::LEN_ENCODED + u32::LEN_ENCODED;
         if proof.len() < len {
             return None;
         }
@@ -147,7 +147,7 @@ impl<C: Scheme, D: Array> Prover<C, D> {
         let message = proposal_message(view, parent, &payload);
 
         // Check for integer overflow in size calculation
-        let item_size = C::PublicKey::SERIALIZED_LEN.checked_add(C::Signature::SERIALIZED_LEN)?;
+        let item_size = C::PublicKey::LEN_ENCODED.checked_add(C::Signature::LEN_ENCODED)?;
         let total_size = count.checked_mul(item_size)?;
         if proof.remaining() != total_size {
             return None;
@@ -224,14 +224,14 @@ impl<C: Scheme, D: Array> Prover<C, D> {
         signature_2: &C::Signature,
     ) -> Proof {
         // Setup proof
-        let len = u64::SERIALIZED_LEN
-            + C::PublicKey::SERIALIZED_LEN
-            + u64::SERIALIZED_LEN
-            + D::SERIALIZED_LEN
-            + C::Signature::SERIALIZED_LEN
-            + u64::SERIALIZED_LEN
-            + D::SERIALIZED_LEN
-            + C::Signature::SERIALIZED_LEN;
+        let len = u64::LEN_ENCODED
+            + C::PublicKey::LEN_ENCODED
+            + u64::LEN_ENCODED
+            + D::LEN_ENCODED
+            + C::Signature::LEN_ENCODED
+            + u64::LEN_ENCODED
+            + D::LEN_ENCODED
+            + C::Signature::LEN_ENCODED;
 
         // Encode proof
         let mut proof = Vec::with_capacity(len);
@@ -253,14 +253,14 @@ impl<C: Scheme, D: Array> Prover<C, D> {
         namespace: &[u8],
     ) -> Option<(C::PublicKey, View)> {
         // Ensure proof is big enough
-        let len = u64::SERIALIZED_LEN
-            + C::PublicKey::SERIALIZED_LEN
-            + u64::SERIALIZED_LEN
-            + D::SERIALIZED_LEN
-            + C::Signature::SERIALIZED_LEN
-            + u64::SERIALIZED_LEN
-            + D::SERIALIZED_LEN
-            + C::Signature::SERIALIZED_LEN;
+        let len = u64::LEN_ENCODED
+            + C::PublicKey::LEN_ENCODED
+            + u64::LEN_ENCODED
+            + D::LEN_ENCODED
+            + C::Signature::LEN_ENCODED
+            + u64::LEN_ENCODED
+            + D::LEN_ENCODED
+            + C::Signature::LEN_ENCODED;
         if proof.len() != len {
             return None;
         }
@@ -372,12 +372,12 @@ impl<C: Scheme, D: Array> Prover<C, D> {
         signature_null: &C::Signature,
     ) -> Proof {
         // Setup proof
-        let len = u64::SERIALIZED_LEN
-            + C::PublicKey::SERIALIZED_LEN
-            + u64::SERIALIZED_LEN
-            + D::SERIALIZED_LEN
-            + C::Signature::SERIALIZED_LEN
-            + C::Signature::SERIALIZED_LEN;
+        let len = u64::LEN_ENCODED
+            + C::PublicKey::LEN_ENCODED
+            + u64::LEN_ENCODED
+            + D::LEN_ENCODED
+            + C::Signature::LEN_ENCODED
+            + C::Signature::LEN_ENCODED;
 
         // Encode proof
         let mut proof = Vec::with_capacity(len);
@@ -397,12 +397,12 @@ impl<C: Scheme, D: Array> Prover<C, D> {
         check_sig: bool,
     ) -> Option<(C::PublicKey, View)> {
         // Ensure proof is big enough
-        let len = u64::SERIALIZED_LEN
-            + C::PublicKey::SERIALIZED_LEN
-            + u64::SERIALIZED_LEN
-            + D::SERIALIZED_LEN
-            + C::Signature::SERIALIZED_LEN
-            + C::Signature::SERIALIZED_LEN;
+        let len = u64::LEN_ENCODED
+            + C::PublicKey::LEN_ENCODED
+            + u64::LEN_ENCODED
+            + D::LEN_ENCODED
+            + C::Signature::LEN_ENCODED
+            + C::Signature::LEN_ENCODED;
         if proof.len() != len {
             return None;
         }

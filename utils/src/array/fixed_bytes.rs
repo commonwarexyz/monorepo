@@ -1,4 +1,4 @@
-use crate::{hex, Array, SizedSerialize};
+use crate::{hex, Array};
 use commonware_codec::{Codec, Error as CodecError, Reader, SizedCodec, Writer};
 use std::{
     cmp::{Ord, PartialOrd},
@@ -48,10 +48,6 @@ impl<const N: usize> SizedCodec for FixedBytes<N> {
 
 impl<const N: usize> Array for FixedBytes<N> {
     type Error = Error;
-}
-
-impl<const N: usize> SizedSerialize for FixedBytes<N> {
-    const SERIALIZED_LEN: usize = N;
 }
 
 impl<const N: usize> TryFrom<&[u8]> for FixedBytes<N> {

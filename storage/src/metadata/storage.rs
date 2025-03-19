@@ -1,7 +1,8 @@
 use super::{Config, Error};
 use bytes::{BufMut, Bytes};
+use commonware_codec::SizedCodec;
 use commonware_runtime::{Blob, Clock, Metrics, Storage};
-use commonware_utils::{Array, SizedSerialize, SystemTimeExt as _};
+use commonware_utils::{Array, SystemTimeExt as _};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::{
     collections::BTreeMap,
@@ -134,10 +135,10 @@ impl<B: Blob, E: Clock + Storage<B> + Metrics, K: Array> Metadata<B, E, K> {
         // If the checksum is correct, we assume data is correctly packed and we don't perform
         // length checks on the cursor.
         let mut data = BTreeMap::new();
-        let mut cursor = u128::SERIALIZED_LEN;
+        let mut cursor = u128::LEN_ENCODED;
         while cursor < checksum_index {
             // Read key
-            let next_cursor = cursor + K::SERIALIZED_LEN;
+            let next_cursor = cursor + K::LEN_ENCODED;
             let key = K::read_from(&mut buf[cursor..next_cursor].as_ref()).unwrap();
             cursor = next_cursor;
 
