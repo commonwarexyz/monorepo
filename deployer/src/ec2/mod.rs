@@ -231,6 +231,8 @@ pub enum Error {
     DeploymentAlreadyDestroyed(String),
     #[error("private key not found")]
     PrivateKeyNotFound,
+    #[error("invalid IP address: {0}")]
+    InvalidIpAddress(String),
 }
 
 /// Peer deployment information

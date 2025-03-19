@@ -61,6 +61,12 @@ async fn main() -> std::process::ExitCode {
                                 .required(true)
                                 .help("Path to YAML config file")
                                 .value_parser(clap::value_parser!(PathBuf)),
+                        )
+                        .arg(
+                            Arg::new("ip")
+                                .long("ip")
+                                .help("IPv4 address to add to security groups instead of the current IP. If not provided, the current public IPv4 address will be used.")
+                                .value_parser(clap::value_parser!(String)),
                         ),
                 )
                 .subcommand(
@@ -106,7 +112,8 @@ async fn main() -> std::process::ExitCode {
             }
             Some((ec2::REFRESH_CMD, matches)) => {
                 let config_path = matches.get_one::<PathBuf>("config").unwrap();
-                if let Err(e) = ec2::refresh(config_path).await {
+                let ip = matches.get_one::<String>("ip").cloned();
+                if let Err(e) = ec2::refresh(config_path, ip).await {
                     error!(error=?e, "failed to refresh EC2 deployment");
                 } else {
                     return std::process::ExitCode::SUCCESS;

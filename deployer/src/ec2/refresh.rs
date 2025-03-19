@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use tracing::info;
 
 /// Adds the deployer's current IP to all security groups if not already present.
-pub async fn refresh(config_path: &PathBuf) -> Result<(), Error> {
+pub async fn refresh(config_path: &PathBuf, ip: Option<String>) -> Result<(), Error> {
     // Load configuration
     let config: Config = {
         let config_file = File::open(config_path)?;
@@ -36,9 +36,33 @@ pub async fn refresh(config_path: &PathBuf) -> Result<(), Error> {
         return Err(Error::DeploymentAlreadyDestroyed(tag.clone()));
     }
 
-    // Get deployer's current public IP
-    let deployer_ip = get_public_ip().await?;
-    info!(ip = deployer_ip, "deployer public IP");
+    // Get the IP to use
+    let deployer_ip = if let Some(ip_str) = ip {
+        // Validate provided IP as IPv4
+        let ip_addr: std::net::IpAddr = ip_str
+            .parse()
+            .map_err(|_| Error::InvalidIpAddress(ip_str.clone()))?;
+        if let std::net::IpAddr::V4(ipv4) = ip_addr {
+            ipv4.to_string()
+        } else {
+            return Err(Error::InvalidIpAddress(ip_str.clone()));
+        }
+    } else {
+        // Fetch and validate current public IP
+        let ip_str = get_public_ip().await?;
+        let ip_addr: std::net::IpAddr = ip_str
+            .parse()
+            .map_err(|_| Error::InvalidIpAddress(ip_str.clone()))?;
+        if let std::net::IpAddr::V4(ipv4) = ip_addr {
+            ipv4.to_string()
+        } else {
+            return Err(Error::InvalidIpAddress(ip_str.clone()));
+        }
+    };
+    info!(
+        ip = deployer_ip.as_str(),
+        "using IP for security group update"
+    );
 
     // Determine all regions involved
     let mut all_regions = HashSet::new();
