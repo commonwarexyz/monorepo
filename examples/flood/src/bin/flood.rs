@@ -95,10 +95,10 @@ fn main() {
     let tracer = init_tracer(&endpoint).expect("Failed to initialize tracer");
 
     // Create fmt layer for logging
-    let fmt_layer = tracing_subscriber::fmt::layer()
-        .json()
-        .with_line_number(true)
-        .with_file(true);
+    // let fmt_layer = tracing_subscriber::fmt::layer()
+    //     .json()
+    //     .with_line_number(true)
+    //     .with_file(true);
 
     // Create a filter layer to set the maximum level to INFO
     let filter = tracing_subscriber::EnvFilter::new("debug");
@@ -109,7 +109,7 @@ fn main() {
     // Combine layers into a single subscriber
     let subscriber = Registry::default()
         .with(filter)
-        .with(fmt_layer)
+        // .with(fmt_layer)
         .with(telemetry_layer);
 
     // Set the combined subscriber as the global default
