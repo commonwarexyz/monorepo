@@ -2,7 +2,7 @@ use commonware_runtime::{telemetry::status, Metrics as RuntimeMetrics};
 use commonware_utils::Array;
 use prometheus_client::{
     encoding::EncodeLabelSet,
-    metrics::{counter::Counter, family::Family},
+    metrics::{counter::Counter, family::Family, gauge::Gauge},
 };
 
 /// Label for sequencer height metrics
@@ -30,6 +30,9 @@ pub struct Metrics {
     pub receive: status::Counter,
     /// Number of `get` requests by status
     pub get: status::Counter,
+    /// Number of digests being awaited. May be less than the number of waiters since there may be
+    /// multiple waiters for the same digest.
+    pub waiters: Gauge,
 }
 
 impl Metrics {
@@ -50,6 +53,11 @@ impl Metrics {
             "get",
             "Number of `get` requests by status",
             metrics.get.clone(),
+        );
+        context.register(
+            "waiters",
+            "Number of digests being awaited",
+            metrics.waiters.clone(),
         );
         metrics
     }

@@ -133,6 +133,7 @@ impl<
         loop {
             // Cleanup waiters
             self.cleanup_waiters();
+            self.metrics.waiters.set(self.waiters.len() as i64);
 
             select! {
                 // Handle shutdown signal
@@ -160,7 +161,6 @@ impl<
 
                 // Handle incoming messages
                 msg = net_receiver.recv() => {
-                    trace!("receiver");
                     // Error handling
                     let (peer, msg) = match msg {
                         Ok(r) => r,
@@ -180,6 +180,7 @@ impl<
                         }
                     };
 
+                    trace!(?peer, "network");
                     self.metrics.peer.get_or_create(&SequencerLabel::from(&peer)).inc();
                     self.handle_network(peer, message).await;
                 },
