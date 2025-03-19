@@ -43,7 +43,7 @@ pub async fn refresh(config_path: &PathBuf, ip: Option<String>) -> Result<(), Er
             .parse()
             .map_err(|_| Error::InvalidIpAddress(ip_str.clone()))?;
         let std::net::IpAddr::V4(ipv4) = ip_addr else {
-            return Err(Error::InvalidIpAddress(ip_str.clone()));
+            return Err(Error::InvalidIpAddress(ip_str));
         };
         ipv4.to_string()
     } else {
