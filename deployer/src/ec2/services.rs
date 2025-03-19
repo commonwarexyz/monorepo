@@ -144,6 +144,8 @@ server:
   grpc_listen_port: 0
 pyroscopedb:
   data_path: /var/lib/pyroscope
+self_profiling:
+  disable_push: true
 "#;
 
 /// Systemd service file content for Pyroscope
