@@ -1,202 +1,182 @@
-//! An in-memory authenticatable & updatable key-value store.
+//! An authenticatable & mutable key-value store based on an MMR over the log of state-change
+//! operations.
 //!
-//! A _mutable MMR_ is an authenticatable and updatable key-value store based on an [Mmr] over all
-//! updates called the _update tree_.
+//! # Terminology
+//!
+//! A _key_ in the store either has a _value_ or it doesn't. Two types of _operations_ can be
+//! applied to the store to modify the state of a specific key. A key that has a value can change to
+//! one without a value through the _delete_ operation. The _update_ operation gives a key a
+//! specific value whether it previously had no value or had a different value.
 
-use crate::mmr::{iterator::leaf_pos_to_num, mem::Mmr, verification::UpdateProof, Error};
+use crate::mmr::{
+    iterator::{leaf_num_to_pos, leaf_pos_to_num},
+    mem::Mmr,
+    verification::Proof,
+    Error,
+};
 use commonware_cryptography::Hasher as CHasher;
 use commonware_utils::Array;
 use std::collections::HashMap;
 use tracing::error;
 
+/// The types of operations that change a key's state in the store.
 #[derive(Clone)]
-pub enum UpdateOp<V: Array> {
-    /// Indicates a key was deleted.
+pub enum Type<V: Array> {
+    /// Indicates the key no longer has a value.
     Deleted,
 
-    /// Indicates the wrapped value was assigned to a key.
-    Assign(V),
+    /// Indicates the key now has the wrapped value.
+    Update(V),
 }
 
-/// A record representing one key/value assignment or deletion.
+/// An operation applied to the store.
 #[derive(Clone)]
-pub struct UpdateRecord<K: Array, V: Array> {
-    tree_pos: u64,
-
-    /// The key that was updated.
+pub struct Operation<K: Array, V: Array> {
+    /// The key whose state is changed by this operation.
     pub key: K,
 
-    /// The update operation that was performed.
-    pub update_op: UpdateOp<V>,
+    /// The new state of the key.
+    pub op_type: Type<V>,
 }
 
-/// A mutable MMR based key-value store.
+/// A mutable key-value store based on an MMR over its log of operations.
 pub struct MutableMmr<K: Array, V: Array, H: CHasher> {
-    /// An MMR over digests of the updates made to the store. The number of leaves in this MMR
-    /// always equals the number of update records.
-    updates: Mmr<H>,
+    /// An MMR over digests of the operations applied to the store. The number of leaves in this MMR
+    /// always equals the number of operations in the `log`.
+    ops: Mmr<H>,
 
-    /// All updates made to the store in order of execution. The index of each record in this vector
-    /// is called its _location_.
-    records: Vec<UpdateRecord<K, V>>,
+    /// A log of all operations applied to the store in order of occurrence. The index of each
+    /// operation in this vector is called its _location_.
+    ///
+    /// Invariant: An operation's location is always equal to the number of the MMR leaf storing the
+    /// digest of the operation.
+    log: Vec<Operation<K, V>>,
 
-    /// A map from each key to the record location containing its most recently assigned value. Keys
-    /// that have been deleted are not stored in this map.
+    /// A map from each key to the location in the log containing its most recent update. Only
+    /// contains the keys that currently have a value (that is, deleted keys are not in the map).
     snapshot: HashMap<K, usize>,
 }
 
 impl<K: Array, V: Array, H: CHasher> Default for MutableMmr<K, V, H> {
+    /// Return a new, empty store.
     fn default() -> Self {
         MutableMmr::new()
     }
 }
 
 impl<K: Array, V: Array, H: CHasher> MutableMmr<K, V, H> {
-    /// Create a new, empty mutable MMR.
+    /// Return a new, empty store.
     pub fn new() -> Self {
         MutableMmr {
-            updates: Mmr::new(),
+            ops: Mmr::new(),
+            log: Vec::<Operation<K, V>>::new(),
             snapshot: HashMap::new(),
-            records: Vec::<UpdateRecord<K, V>>::new(),
         }
     }
 
-    /// Return a mutable MMR store initialized to the state corresponding to the update sequence
-    /// given by `records`.
+    /// Return a store initialized to the state corresponding to the operation sequence given by
+    /// `log`.
     ///
-    /// Performs some checks that the records constitute a valid sequence of updates, and returns
-    /// [Error::InvalidUpdate] if an invalid sequence is encountered. These checks are not
-    /// exhaustive.
-    pub fn init_from_records(
-        hasher: &mut H,
-        records: Vec<UpdateRecord<K, V>>,
-    ) -> Result<Self, Error> {
+    /// Performs some checks that the log constitutes a valid sequence of operations, and returns
+    /// [Error::InvalidUpdate] if an invalid sequence is encountered.
+    pub fn init_from_log(hasher: &mut H, log: Vec<Operation<K, V>>) -> Result<Self, Error> {
         let mut store = MutableMmr {
-            updates: Mmr::new(),
+            ops: Mmr::new(),
+            log,
             snapshot: HashMap::new(),
-            records,
         };
 
-        for (i, record) in store.records.iter().enumerate() {
-            let digest = Self::key_update_digest(hasher, &record.key, &record.update_op);
-            let pos = store.updates.add(hasher, &digest);
-            if pos != record.tree_pos {
-                error!("record.tree pos invalid");
-                return Err(Error::InvalidUpdate);
-            }
+        for (i, op) in store.log.iter().enumerate() {
+            let digest = Self::op_digest(hasher, op);
+            store.ops.add(hasher, &digest);
 
-            let old_location = match record.update_op {
-                UpdateOp::Deleted => {
-                    let location = store.snapshot.remove(&record.key);
-                    if location.is_none() {
-                        error!(
-                            "deleted key {} at location {} not found in snapshot",
-                            record.key,
-                            location.unwrap()
-                        );
+            match op.op_type {
+                Type::Deleted => {
+                    let loc = store.snapshot.remove(&op.key);
+                    if loc.is_none() {
+                        // Shouldn't be allowed to delete a key that already has no value.
+                        error!("deleted key {} not found in snapshot", op.key);
                         return Err(Error::InvalidUpdate);
                     }
-                    location
                 }
-                UpdateOp::Assign(_) => store.snapshot.insert(record.key.clone(), i),
+                Type::Update(_) => {
+                    store.snapshot.insert(op.key.clone(), i);
+                }
             };
-
-            let Some(old_location) = old_location else {
-                continue;
-            };
-            let old_record = &store.records[old_location];
-
-            if old_record.key != record.key {
-                error!("record.key doesn't match old record");
-                return Err(Error::InvalidUpdate);
-            }
         }
 
         Ok(store)
     }
 
     const DELETE_CONTEXT: u8 = 0;
-    const ASSIGN_CONTEXT: u8 = 1;
+    const UPDATE_CONTEXT: u8 = 1;
 
-    /// Return a digest of the key plus its update operation.
+    /// Return a digest of the operation.
     ///
-    /// The first byte of the key material is an operation type byte, 0 for Delete and 1 for Assign.
-    /// For assignment, the value is appended next, followed by the key. For deletion, the key
-    /// alone is appended.
-    pub fn key_update_digest(hasher: &mut H, key: &K, update_op: &UpdateOp<V>) -> H::Digest {
-        match update_op {
-            UpdateOp::Deleted => hasher.update(&[Self::DELETE_CONTEXT]),
-            UpdateOp::Assign(value) => {
-                hasher.update(&[Self::ASSIGN_CONTEXT]);
+    /// The first byte of the digest material is an operation type byte: 0 for Delete and 1 for
+    /// Update. For an update, the value is appended next, followed by the key. For deletion, the
+    /// key is appended without any value.
+    pub fn op_digest(hasher: &mut H, op: &Operation<K, V>) -> H::Digest {
+        match op.op_type {
+            Type::Deleted => hasher.update(&[Self::DELETE_CONTEXT]),
+            Type::Update(ref value) => {
+                hasher.update(&[Self::UPDATE_CONTEXT]);
                 hasher.update(value);
             }
         }
-        hasher.update(key);
+        hasher.update(&op.key);
         hasher.finalize()
-    }
-
-    /// Compute the key update digest for `record`.
-    pub fn record_digest(hasher: &mut H, record: &UpdateRecord<K, V>) -> H::Digest {
-        Self::key_update_digest(hasher, &record.key, &record.update_op)
     }
 
     /// Get the value of `key` in the store, or None if it has no value.
     pub fn get(&self, key: &K) -> Option<&V> {
         let pos = self.snapshot.get(key)?;
-        let record = &self.records[*pos];
-        match &record.update_op {
-            UpdateOp::Deleted => panic!("deleted key should not be in snapshot: {}", key),
-            UpdateOp::Assign(ref v) => Some(v),
+        let op = &self.log[*pos];
+        match &op.op_type {
+            Type::Deleted => panic!("deleted key should not be in snapshot: {}", key),
+            Type::Update(ref v) => Some(v),
         }
     }
 
-    /// Get the update corresponding to the mmr leaf at `pos`, or None if the
-    /// position is not for a leaf.
-    pub fn get_update(&self, pos: u64) -> Option<&UpdateOp<V>> {
-        assert!(pos < self.updates.size());
-        let leaf_num = leaf_pos_to_num(pos)?;
-        let record = &self.records[leaf_num as usize];
-
-        Some(&record.update_op)
+    /// Get the number of operations that have been applied to this store.
+    pub fn op_count(&self) -> u64 {
+        self.log.len() as u64
     }
 
-    /// Assigns `value` to `key` in the store.  If the key is already assigned the same value, then
-    /// this is a no-op.
-    pub fn assign(&mut self, hasher: &mut H, key: K, value: V) {
-        let new_location = self.records.len();
+    /// Updates `key` to have value `value`.  If the key already has this same value, then this is a
+    /// no-op.
+    pub fn update(&mut self, hasher: &mut H, key: K, value: V) {
+        let new_loc = self.log.len();
 
         // Update the snapshot.
-        if let Some(location) = self.snapshot.get_mut(&key) {
-            let last_value = match self.records[*location].update_op {
-                UpdateOp::Deleted => panic!("deleted key should not be in snapshot: {}", key),
-                UpdateOp::Assign(ref v) => v,
+        if let Some(loc) = self.snapshot.get_mut(&key) {
+            let last_value = match self.log[*loc].op_type {
+                Type::Deleted => panic!("deleted key should not be in snapshot: {}", key),
+                Type::Update(ref v) => v,
             };
             if value == *last_value {
                 // Trying to assign the same value is a no-op.
                 return;
             }
-            *location = new_location;
+            *loc = new_loc;
         } else {
-            self.snapshot.insert(key.clone(), new_location);
+            self.snapshot.insert(key.clone(), new_loc);
         }
 
-        let update_op = UpdateOp::Assign(value.clone());
-        self.update_work(hasher, key, update_op);
+        let op = Type::Update(value.clone());
+        self.apply_op(hasher, key, op);
     }
 
-    /// Update the updates tree and records vector with the given key and update operation.
-    fn update_work(&mut self, hasher: &mut H, key: K, update_op: UpdateOp<V>) {
-        // Update the updates tree
-        let record_digest = Self::key_update_digest(hasher, &key, &update_op);
-        let tree_pos = self.updates.add(hasher, &record_digest);
+    /// Update the log and operations MMR with the given key and operation.
+    fn apply_op(&mut self, hasher: &mut H, key: K, op_type: Type<V>) {
+        let op = Operation { key, op_type };
 
-        // Append the new record to the records vector.
-        let new_record = UpdateRecord {
-            tree_pos,
-            key,
-            update_op,
-        };
-        self.records.push(new_record);
+        // Update the ops MMR.
+        let digest = Self::op_digest(hasher, &op);
+        self.ops.add(hasher, &digest);
+
+        // Append the operation to the log.
+        self.log.push(op);
     }
 
     /// Delete `key` and its value from the store. Deleting a key that already has no value is a
@@ -207,50 +187,65 @@ impl<K: Array, V: Array, H: CHasher> MutableMmr<K, V, H> {
             return;
         }
 
-        let update_op = UpdateOp::Deleted;
-        self.update_work(hasher, key, update_op);
+        self.apply_op(hasher, key, Type::Deleted);
     }
 
     /// Return the root hash of the mutable MMR.
     pub fn root(&self, hasher: &mut H) -> H::Digest {
-        self.updates.root(hasher)
+        self.ops.root(hasher)
     }
 
-    /// Return the size of the underlying MMR.
-    ///
-    /// This value will be the position of the next leaf to be added to the underlying MMR, and can
-    /// be used to retrieve a starting position value for generating a proof over the next batch of
-    /// updates.
-    pub fn size(&self) -> u64 {
-        self.updates.size()
-    }
-
-    /// Return a proof of all updates to the store starting at (and including) the leaf at position
-    /// `start_pos`, along with all update records from the range.
+    /// Generate and return:
+    ///  1. a proof of all operations applied to the store in the range starting at (and including)
+    ///     location `start_loc`, and ending at the first of either:
+    ///         - the last operation performed, or
+    ///         - the operation `max_ops` from the start.
+    ///  2. the operations corresponding to the leaves in this range.
     pub async fn proof_to_tip(
         &self,
-        start_pos: u64,
-    ) -> Result<(UpdateProof<K, V, H>, Vec<UpdateRecord<K, V>>), Error> {
-        let Some(start_leaf_num) = leaf_pos_to_num(start_pos) else {
-            panic!("start_pos is not a leaf");
+        start_loc: u64,
+        max_ops: u64,
+    ) -> Result<(Proof<H>, Vec<Operation<K, V>>), Error> {
+        let start_pos = leaf_num_to_pos(start_loc);
+        let end_pos_last = self.ops.last_leaf_pos().unwrap();
+        let end_pos_max = leaf_num_to_pos(start_loc + max_ops - 1);
+        let (end_pos, end_loc) = if end_pos_last < end_pos_max {
+            (end_pos_last, leaf_pos_to_num(end_pos_last).unwrap())
+        } else {
+            (end_pos_max, start_loc + max_ops - 1)
         };
-        assert!(start_pos < self.updates.size());
 
-        let end_pos = self.updates.last_leaf_pos().unwrap();
-        let updates_proof = self.updates.range_proof(start_pos, end_pos).await?;
-        let proof = UpdateProof::new(start_pos, updates_proof);
+        let proof = self.ops.range_proof(start_pos, end_pos).await?;
+        let ops = self.log[start_loc as usize..=end_loc as usize].to_vec();
 
-        let end_leaf_num = leaf_pos_to_num(end_pos).unwrap();
-
-        Ok((
-            proof,
-            self.records[start_leaf_num as usize..=end_leaf_num as usize + 1].to_vec(),
-        ))
+        Ok((proof, ops))
     }
 
-    /// Consume the store and return its update records.
-    pub fn to_records(self) -> Vec<UpdateRecord<K, V>> {
-        self.records
+    /// Return true if the given sequence of `ops` took place starting at location `start_loc` in
+    /// the MMR with the provided root hash.
+    pub fn verify_proof(
+        hasher: &mut H,
+        proof: &Proof<H>,
+        start_loc: u64,
+        ops: &[Operation<K, V>],
+        root_hash: &H::Digest,
+    ) -> bool {
+        let start_pos = leaf_num_to_pos(start_loc);
+        let end_loc = start_loc + ops.len() as u64 - 1;
+        let end_pos = leaf_num_to_pos(end_loc);
+
+        let digests = ops
+            .iter()
+            .map(|op| MutableMmr::op_digest(hasher, op))
+            .collect::<Vec<_>>();
+
+        proof.verify_range_inclusion(hasher, &digests, start_pos, end_pos, root_hash)
+    }
+
+    /// Consume the store and return its log of operations, from which the state of the store can be
+    /// recovered.
+    pub fn to_log(self) -> Vec<Operation<K, V>> {
+        self.log
     }
 }
 
@@ -279,11 +274,11 @@ mod test {
         assert!(store.get(&d1).is_none());
         assert!(store.get(&d2).is_none());
 
-        store.assign(&mut hasher, d1, d2);
+        store.update(&mut hasher, d1, d2);
         assert_eq!(store.get(&d1).unwrap(), &d2);
         assert!(store.get(&d2).is_none());
 
-        store.assign(&mut hasher, d2, d1);
+        store.update(&mut hasher, d2, d1);
         assert_eq!(store.get(&d1).unwrap(), &d2);
         assert_eq!(store.get(&d2).unwrap(), &d1);
 
@@ -291,25 +286,25 @@ mod test {
         assert!(store.get(&d1).is_none());
         assert_eq!(store.get(&d2).unwrap(), &d1);
 
-        store.assign(&mut hasher, d1, d1);
+        store.update(&mut hasher, d1, d1);
         assert_eq!(store.get(&d1).unwrap(), &d1);
 
-        store.assign(&mut hasher, d2, d2);
+        store.update(&mut hasher, d2, d2);
         assert_eq!(store.get(&d2).unwrap(), &d2);
 
-        assert_eq!(store.records.len(), 5); // 4 updates, 1 deletion
+        assert_eq!(store.log.len(), 5); // 4 updates, 1 deletion
         assert_eq!(store.snapshot.len(), 2);
 
         let root = store.root(&mut hasher);
 
         // multiple assignments of the same value should be a no-op.
-        store.assign(&mut hasher, d1, d1);
-        store.assign(&mut hasher, d2, d2);
+        store.update(&mut hasher, d1, d1);
+        store.update(&mut hasher, d2, d2);
         assert_eq!(store.root(&mut hasher), root);
 
-        // The update tree's size should always be greater than the position of the last leaf.
+        // The MMR's size should always be greater than the position of the last leaf.
         let last_leaf_pos = leaf_num_to_pos(4);
-        assert!(store.updates.size() > last_leaf_pos);
+        assert!(store.ops.size() > last_leaf_pos);
 
         store.delete(&mut hasher, d1);
         store.delete(&mut hasher, d2);
@@ -336,13 +331,16 @@ mod test {
         executor.start(async move {
             let mut store = empty_store();
             let mut hasher = Sha256::new();
+            // Store the store's root for every (non-no-op) update.
+            let mut roots = Vec::new();
 
             let mut map = HashMap::<Digest, Digest>::default();
             const ELEMENTS: u64 = 1000;
             for i in 0u64..ELEMENTS {
                 let k = hash(&i.to_be_bytes());
                 let v = hash(&(i * 1000).to_be_bytes());
-                store.assign(&mut hasher, k, v);
+                store.update(&mut hasher, k, v);
+                roots.push(store.root(&mut hasher));
                 map.insert(k, v);
             }
             // Update every 3rd key
@@ -351,8 +349,9 @@ mod test {
                     continue;
                 }
                 let k = hash(&i.to_be_bytes());
-                let v = hash(&(i * 10000).to_be_bytes());
-                store.assign(&mut hasher, k, v);
+                let v = hash(&((i + 1) * 10000).to_be_bytes());
+                store.update(&mut hasher, k, v);
+                roots.push(store.root(&mut hasher));
                 map.insert(k, v);
             }
             // Delete every 7th key
@@ -362,12 +361,12 @@ mod test {
                 }
                 let k = hash(&i.to_be_bytes());
                 store.delete(&mut hasher, k);
+                roots.push(store.root(&mut hasher));
                 map.remove(&k);
             }
 
-            // Make sure the contents of the store match that of the map, and that each active value
-            // can be authenticated against the root.
-            let root_hash = store.root(&mut hasher);
+            // Confirm the store's state matches that of the map.
+            let root_hash = roots.last().unwrap();
             for i in 0u64..1000 {
                 let k = hash(&i.to_be_bytes());
                 if let Some(map_value) = map.get(&k) {
@@ -380,10 +379,26 @@ mod test {
                 }
             }
 
-            // Test we can recreate the store purely from its records.
-            let records = store.to_records();
-            let store2 = MutableMmr::init_from_records(&mut hasher, records).unwrap();
-            assert_eq!(root_hash, store2.root(&mut hasher));
+            // Test we can recreate the store purely from its log.
+            let log = store.to_log();
+            let store = MutableMmr::init_from_log(&mut hasher, log).unwrap();
+            assert_eq!(*root_hash, store.root(&mut hasher));
+
+            // Make sure size-constrained batches of operations are provable from inception to tip.
+            let end = store.op_count();
+            assert_eq!(roots.len() as u64, end);
+            let max_ops = 4;
+            let root = store.root(&mut hasher);
+            for i in 0..end {
+                let (proof, log) = store.proof_to_tip(i, max_ops).await.unwrap();
+                assert!(MutableMmr::verify_proof(
+                    &mut hasher,
+                    &proof,
+                    i,
+                    &log,
+                    &root
+                ));
+            }
         });
     }
 }
