@@ -81,7 +81,7 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
                 .unwrap();
 
             // Revoke ingress rule from monitoring security group to binary security group
-            let ip_permission = IpPermission::builder()
+            let logging_permission = IpPermission::builder()
                 .ip_protocol("tcp")
                 .from_port(3100)
                 .to_port(3100)
@@ -90,7 +90,30 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
             if let Err(e) = ec2_client
                 .revoke_security_group_ingress()
                 .group_id(monitoring_sg)
-                .ip_permissions(ip_permission)
+                .ip_permissions(logging_permission)
+                .send()
+                .await
+            {
+                warn!(%e, "failed to revoke ingress rule between monitoring and binary security groups");
+            } else {
+                info!(
+                    monitoring_sg,
+                    binary_sg,
+                    "revoking ingress rule between monitoring and binary security groups"
+                );
+            }
+
+            // Revoke ingress rule from monitoring security group to binary security group
+            let profiling_permission = IpPermission::builder()
+                .ip_protocol("tcp")
+                .from_port(4040)
+                .to_port(4040)
+                .user_id_group_pairs(UserIdGroupPair::builder().group_id(binary_sg).build())
+                .build();
+            if let Err(e) = ec2_client
+                .revoke_security_group_ingress()
+                .group_id(monitoring_sg)
+                .ip_permissions(profiling_permission)
                 .send()
                 .await
             {
