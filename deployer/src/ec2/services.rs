@@ -9,6 +9,9 @@ pub const PROMTAIL_VERSION: &str = "3.4.2";
 /// Version of Loki to download and install
 pub const LOKI_VERSION: &str = "3.4.2";
 
+/// Version of Tempo to download and install
+pub const TEMPO_VERSION: &str = "2.7.1";
+
 /// Version of Grafana to download and install
 pub const GRAFANA_VERSION: &str = "11.5.2";
 
@@ -24,6 +27,11 @@ datasources:
   - name: Loki
     type: loki
     url: http://localhost:3100
+    access: proxy
+    isDefault: false
+  - name: Tempo
+    type: tempo
+    url: http://localhost:3200
     access: proxy
     isDefault: false
 "#;
@@ -91,25 +99,6 @@ LimitNOFILE=infinity
 WantedBy=multi-user.target
 "#;
 
-/// Systemd service file content for the deployed binary
-pub const BINARY_SERVICE: &str = r#"
-[Unit]
-Description=Deployed Binary Service
-After=network.target
-
-[Service]
-ExecStart=/home/ubuntu/binary --peers=/home/ubuntu/peers.yaml --config=/home/ubuntu/config.conf
-TimeoutStopSec=60
-Restart=always
-User=ubuntu
-LimitNOFILE=infinity
-StandardOutput=append:/var/log/binary.log
-StandardError=append:/var/log/binary.log
-
-[Install]
-WantedBy=multi-user.target
-"#;
-
 /// YAML configuration for Loki
 pub const LOKI_CONFIG: &str = r#"
 auth_enabled: false
@@ -147,11 +136,47 @@ ingester:
     dir: /loki/wal
 "#;
 
+/// Systemd service file content for Tempo
+pub const TEMPO_SERVICE: &str = r#"
+[Unit]
+Description=Tempo Tracing Service
+After=network.target
+
+[Service]
+ExecStart=/opt/tempo/tempo -config.file=/etc/tempo/tempo.yml
+TimeoutStopSec=60
+Restart=always
+User=ubuntu
+LimitNOFILE=infinity
+
+[Install]
+WantedBy=multi-user.target
+"#;
+
+/// YAML configuration for Tempo
+pub const TEMPO_CONFIG: &str = r#"
+server:
+  http_listen_port: 3200
+
+receiver:
+  otlp:
+    protocols:
+      http:
+        endpoint: "0.0.0.0:4318"
+
+storage:
+  trace:
+    backend: local
+    local:
+      path: /tempo/traces
+"#;
+
 /// Command to install monitoring services (Prometheus, Loki, Grafana) on the monitoring instance
 pub fn install_monitoring_cmd(
     prometheus_version: &str,
     grafana_version: &str,
     loki_version: &str,
+    tempo_version: &str,
 ) -> String {
     let prometheus_url = format!(
     "https://github.com/prometheus/prometheus/releases/download/v{}/prometheus-{}.linux-arm64.tar.gz",
@@ -164,6 +189,10 @@ pub fn install_monitoring_cmd(
     let loki_url = format!(
         "https://github.com/grafana/loki/releases/download/v{}/loki-linux-arm64.zip",
         loki_version
+    );
+    let tempo_url = format!(
+        "https://github.com/grafana/tempo/releases/download/v{}/tempo_{}_linux_arm64.tar.gz",
+        tempo_version, tempo_version
     );
     format!(
         r#"
@@ -188,6 +217,12 @@ for i in {{1..5}}; do
   sleep 10
 done
 
+# Download Tempo with retries
+for i in {{1..5}}; do
+  wget -O /home/ubuntu/tempo.tar.gz {} && break
+  sleep 10
+done
+
 # Install Prometheus
 sudo mkdir -p /opt/prometheus /opt/prometheus/data
 sudo chown -R ubuntu:ubuntu /opt/prometheus
@@ -206,6 +241,12 @@ sudo chown -R ubuntu:ubuntu /loki
 unzip -o /home/ubuntu/loki.zip -d /home/ubuntu
 sudo mv /home/ubuntu/loki-linux-arm64 /opt/loki/loki
 
+# Install Tempo
+sudo mkdir -p /opt/tempo /tempo/traces
+sudo chown -R ubuntu:ubuntu /tempo
+tar xvfz /home/ubuntu/tempo.tar.gz -C /opt/tempo --strip-components=1
+sudo chmod +x /opt/tempo/tempo
+
 # Configure Grafana
 sudo sed -i '/^\[auth.anonymous\]$/,/^\[/ {{ /^; *enabled = /s/.*/enabled = true/; /^; *org_role = /s/.*/org_role = Admin/ }}' /etc/grafana/grafana.ini
 sudo mkdir -p /etc/grafana/provisioning/datasources /etc/grafana/provisioning/dashboards /var/lib/grafana/dashboards
@@ -222,6 +263,7 @@ sudo chown root:root /etc/loki/loki.yml
 # Move service files
 sudo mv /home/ubuntu/prometheus.service /etc/systemd/system/prometheus.service
 sudo mv /home/ubuntu/loki.service /etc/systemd/system/loki.service
+sudo mv /home/ubuntu/tempo.service /etc/systemd/system/tempo.service
 
 # Set ownership
 sudo chown -R grafana:grafana /etc/grafana /var/lib/grafana
@@ -232,12 +274,15 @@ sudo systemctl start prometheus
 sudo systemctl enable prometheus
 sudo systemctl start loki
 sudo systemctl enable loki
+sudo systemctl start tempo
+sudo systemctl enable tempo
 sudo systemctl start grafana-server
 sudo systemctl enable grafana-server
 "#,
         prometheus_url,
         grafana_url,
         loki_url,
+        tempo_url,
         prometheus_version,
         prometheus_version,
         prometheus_version
@@ -257,6 +302,25 @@ echo "0 * * * * /usr/sbin/logrotate /etc/logrotate.d/binary" | crontab -
 sudo systemctl daemon-reload
 sudo systemctl start binary
 sudo systemctl enable binary
+"#;
+
+/// Systemd service file content for the deployed binary
+pub const BINARY_SERVICE: &str = r#"
+[Unit]
+Description=Deployed Binary Service
+After=network.target
+
+[Service]
+ExecStart=/home/ubuntu/binary --peers=/home/ubuntu/peers.yaml --config=/home/ubuntu/config.conf
+TimeoutStopSec=60
+Restart=always
+User=ubuntu
+LimitNOFILE=infinity
+StandardOutput=append:/var/log/binary.log
+StandardError=append:/var/log/binary.log
+
+[Install]
+WantedBy=multi-user.target
 "#;
 
 /// Command to set up Promtail on binary instances

@@ -249,8 +249,12 @@ pub struct Peer {
 }
 
 /// List of peers
+/// TODO: change name of peers
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Peers {
+    /// Private IP address of the monitoring instance
+    pub monitoring_private_ip: IpAddr,
+
     /// Peers deployed across all regions
     pub peers: Vec<Peer>,
 }
