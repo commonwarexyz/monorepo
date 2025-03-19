@@ -244,7 +244,6 @@ mod tests {
                     epocher,
                     sequencers,
                     validators,
-                    verify_concurrent: 1024,
                     namespace: namespace.to_vec(),
                     epoch_bounds: (1, 1),
                     height_bound: 2,
