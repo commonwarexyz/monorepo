@@ -19,7 +19,7 @@ commonware-utils = { workspace = true }
 clap = { workspace = true }
 prometheus-client = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true, features = ["fmt", "json"] }
+tracing-subscriber = { workspace = true, features = ["fmt", "json", "env-filter"] }
 serde = { workspace = true, features = ["derive"] }
 serde_yaml = { workspace = true }
 governor = { workspace = true }

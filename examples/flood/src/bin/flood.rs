@@ -31,7 +31,7 @@ use std::{
     time::Duration,
 };
 use sysinfo::{Disks, System};
-use tracing::{error, info, info_span, Level};
+use tracing::{error, info, info_span};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::Registry;
 
@@ -75,14 +75,6 @@ fn main() {
         .arg(Arg::new("config").long("config").required(true))
         .get_matches();
 
-    // Create logger
-    tracing_subscriber::fmt()
-        .json()
-        .with_max_level(Level::DEBUG)
-        .with_line_number(true)
-        .with_file(true)
-        .init();
-
     // Load peers
     let peer_file = matches.get_one::<String>("peers").unwrap();
     let peers_file = std::fs::read_to_string(peer_file).expect("Could not read peers file");
@@ -97,16 +89,34 @@ fn main() {
             (key, peer.ip)
         })
         .collect();
-    info!(peers = peers.len(), "loaded peers");
 
     // Initialize tracing
     let endpoint = format!("http://{}:4318", monitoring_ip);
     let tracer = init_tracer(&endpoint).expect("Failed to initialize tracer");
-    let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
-    let subscriber = Registry::default().with(telemetry);
+
+    // Create fmt layer for logging
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .json()
+        .with_line_number(true)
+        .with_file(true);
+
+    // Create a filter layer to set the maximum level to INFO
+    let filter = tracing_subscriber::EnvFilter::new("debug");
+
+    // Create OpenTelemetry layer for tracing
+    let telemetry_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+
+    // Combine layers into a single subscriber
+    let subscriber = Registry::default()
+        .with(filter)
+        .with(fmt_layer)
+        .with(telemetry_layer);
+
+    // Set the combined subscriber as the global default
     tracing::subscriber::set_global_default(subscriber).expect("Failed to set tracing subscriber");
 
     // Load config
+    info!(peers = peers.len(), "loaded peers");
     let config_file = matches.get_one::<String>("config").unwrap();
     let config_file = std::fs::read_to_string(config_file).expect("Could not read config file");
     let config: Config = serde_yaml::from_str(&config_file).expect("Could not parse config file");
