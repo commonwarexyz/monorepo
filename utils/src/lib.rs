@@ -1,6 +1,6 @@
 //! Leverage common functionality across multiple primitives.
 
-use prost::{encode_length_delimiter, length_delimiter_len};
+use commonware_codec::{varint::varint_size, WriteBuffer, Writer};
 
 pub mod array;
 pub use array::Array;
@@ -71,12 +71,12 @@ pub fn union(a: &[u8], b: &[u8]) -> Vec<u8> {
 ///
 /// This produces a unique byte sequence (i.e. no collisions) for each `(namespace, msg)` pair.
 pub fn union_unique(namespace: &[u8], msg: &[u8]) -> Vec<u8> {
-    let ld_len = length_delimiter_len(namespace.len());
-    let mut result = Vec::with_capacity(ld_len + namespace.len() + msg.len());
-    encode_length_delimiter(namespace.len(), &mut result).unwrap();
-    result.extend_from_slice(namespace);
-    result.extend_from_slice(msg);
-    result
+    let len_prefix = namespace.len() as u64;
+    let mut writer = WriteBuffer::new(varint_size(len_prefix) + namespace.len() + msg.len());
+    writer.write_varint(len_prefix);
+    writer.write_fixed(namespace);
+    writer.write_fixed(msg);
+    writer.into()
 }
 
 /// Compute the modulo of bytes interpreted as a big-endian integer.

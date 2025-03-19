@@ -14,7 +14,6 @@ documentation = "https://docs.rs/commonware-utils"
 commonware-codec = { workspace = true }
 bytes = { workspace = true }
 futures = { workspace = true }
-prost = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]

@@ -1135,7 +1135,6 @@ dependencies = [
  "commonware-codec",
  "futures",
  "num-bigint",
- "prost",
  "rand",
  "thiserror 2.0.12",
 ]
