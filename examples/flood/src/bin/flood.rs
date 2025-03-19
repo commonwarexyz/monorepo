@@ -17,7 +17,7 @@ use opentelemetry::{
 };
 use opentelemetry_otlp::{SpanExporter, WithExportConfig};
 use opentelemetry_sdk::{
-    trace::{BatchSpanProcessor, SdkTracerProvider, Tracer},
+    trace::{BatchSpanProcessor, Sampler, SdkTracerProvider, Tracer},
     Resource,
 };
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
@@ -53,9 +53,11 @@ fn init_tracer(endpoint: &str) -> Result<Tracer, TraceError> {
     let resource = Resource::builder().with_service_name("flood").build();
 
     // Build the tracer provider
+    let sampler = Sampler::TraceIdRatioBased(0.1);
     let tracer_provider = SdkTracerProvider::builder()
         .with_span_processor(batch_processor)
         .with_resource(resource)
+        .with_sampler(sampler)
         .build();
 
     // Create the tracer and set it globally

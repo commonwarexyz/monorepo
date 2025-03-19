@@ -157,18 +157,19 @@ WantedBy=multi-user.target
 pub const TEMPO_CONFIG: &str = r#"
 server:
   http_listen_port: 3200
-
 receiver:
   otlp:
     protocols:
       http:
         endpoint: "0.0.0.0:4318"
-
 storage:
   trace:
     backend: local
     local:
       path: /tempo/traces
+compactor:
+  compaction:
+    block_retention: 12h
 "#;
 
 /// Command to install monitoring services (Prometheus, Loki, Grafana) on the monitoring instance
