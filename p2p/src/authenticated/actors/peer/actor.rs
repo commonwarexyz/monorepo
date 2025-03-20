@@ -15,7 +15,7 @@ use prometheus_client::metrics::{counter::Counter, family::Family};
 use prost::Message as _;
 use rand::{CryptoRng, Rng};
 use std::{collections::HashMap, sync::Arc, time::Duration};
-use tracing::debug;
+use tracing::{debug, instrument};
 
 pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, P: Array> {
     context: E,
@@ -78,6 +78,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, P: Arr
     }
 
     /// Creates a message from a payload, then sends and increments metrics.
+    #[instrument(skip(sender, sent_messages, metric, payload))]
     async fn send<Si: Sink>(
         sender: &mut Sender<Si>,
         sent_messages: &Family<metrics::Message, Counter>,

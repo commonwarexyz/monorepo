@@ -29,6 +29,7 @@ prometheus-client = { workspace = true }
 zstd = { workspace = true }
 bitvec = "1.0.1"
 either = "1.13.0"
+tracing-attributes = "0.1.28"
 
 [build-dependencies]
 prost-build = { workspace = true }

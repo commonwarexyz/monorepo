@@ -31,7 +31,7 @@ use std::{
     time::Duration,
 };
 use sysinfo::{Disks, System};
-use tracing::{error, info, info_span};
+use tracing::{error, info};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::Registry;
 
@@ -198,10 +198,6 @@ fn main() {
                 let messages: Counter<u64, AtomicU64> = Counter::default();
                 context.register("messages", "Sent messages", messages.clone());
                 loop {
-                    // Start span
-                    let span = info_span!("build_message");
-                    let enter = span.enter();
-
                     // Create message
                     let mut msg = vec![0; config.message_size];
                     rng.fill_bytes(&mut msg);
@@ -209,7 +205,6 @@ fn main() {
                     // Send to all peers
                     let recipient_index = rng.gen_range(0..valid_recipients.len());
                     let recipient = Recipients::One(valid_recipients[recipient_index].clone());
-                    drop(enter);
                     if let Err(e) = flood_sender.send(recipient, msg.into(), false).await {
                         error!(?e, "could not send flood message");
                     }
