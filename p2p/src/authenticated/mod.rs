@@ -168,9 +168,7 @@ mod config;
 mod ip;
 mod metrics;
 mod network;
-mod wire {
-    include!(concat!(env!("OUT_DIR"), "/wire.rs"));
-}
+mod types;
 
 use thiserror::Error;
 

@@ -30,16 +30,10 @@ pub struct Config<C: Scheme> {
 
 #[derive(Error, Debug)]
 pub enum Error {
-    #[error("invalid IP length: {0}")]
-    InvalidIPLength(usize),
     #[error("too many peers: {0}")]
     TooManyPeers(usize),
     #[error("private IPs not allowed: {0}")]
     PrivateIPsNotAllowed(IpAddr),
-    #[error("network peer unsigned")]
-    PeerUnsigned,
-    #[error("invalid public key")]
-    InvalidPublicKey,
     #[error("received self")]
     ReceivedSelf,
     #[error("invalid signature")]

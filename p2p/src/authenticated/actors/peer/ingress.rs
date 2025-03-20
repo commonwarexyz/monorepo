@@ -1,35 +1,40 @@
 use super::Error;
-use crate::{authenticated::wire, Channel};
+use crate::{authenticated::types, Channel};
 use bytes::Bytes;
+use commonware_cryptography::Scheme;
 use futures::{channel::mpsc, SinkExt};
 
-pub enum Message {
-    BitVec { bit_vec: wire::BitVec },
-    Peers { peers: wire::Peers },
+pub enum Message<C: Scheme> {
+    BitVec {
+        bit_vec: types::BitVec,
+    },
+    Peers {
+        peers: Vec<types::SignedPeerInfo<C>>,
+    },
     Kill,
 }
 
 #[derive(Clone)]
-pub struct Mailbox {
-    sender: mpsc::Sender<Message>,
+pub struct Mailbox<C: Scheme> {
+    sender: mpsc::Sender<Message<C>>,
 }
 
-impl Mailbox {
-    pub(super) fn new(sender: mpsc::Sender<Message>) -> Self {
+impl<C: Scheme> Mailbox<C> {
+    pub(super) fn new(sender: mpsc::Sender<Message<C>>) -> Self {
         Self { sender }
     }
 
     #[cfg(test)]
-    pub fn test() -> (Self, mpsc::Receiver<Message>) {
+    pub fn test() -> (Self, mpsc::Receiver<Message<C>>) {
         let (sender, receiver) = mpsc::channel(1);
         (Self { sender }, receiver)
     }
 
-    pub async fn bit_vec(&mut self, bit_vec: wire::BitVec) {
+    pub async fn bit_vec(&mut self, bit_vec: types::BitVec) {
         let _ = self.sender.send(Message::BitVec { bit_vec }).await;
     }
 
-    pub async fn peers(&mut self, peers: wire::Peers) {
+    pub async fn peers(&mut self, peers: Vec<types::SignedPeerInfo<C>>) {
         let _ = self.sender.send(Message::Peers { peers }).await;
     }
 
@@ -40,12 +45,12 @@ impl Mailbox {
 
 #[derive(Clone)]
 pub struct Relay {
-    low: mpsc::Sender<wire::Data>,
-    high: mpsc::Sender<wire::Data>,
+    low: mpsc::Sender<types::Data>,
+    high: mpsc::Sender<types::Data>,
 }
 
 impl Relay {
-    pub fn new(low: mpsc::Sender<wire::Data>, high: mpsc::Sender<wire::Data>) -> Self {
+    pub fn new(low: mpsc::Sender<types::Data>, high: mpsc::Sender<types::Data>) -> Self {
         Self { low, high }
     }
 
@@ -66,7 +71,7 @@ impl Relay {
             &mut self.low
         };
         sender
-            .send(wire::Data { channel, message })
+            .send(types::Data { channel, message })
             .await
             .map_err(|_| Error::MessageDropped)
     }
@@ -86,7 +91,7 @@ mod tests {
             let mut relay = Relay::new(low_sender, high_sender);
 
             // Send a high priority message
-            let data = wire::Data {
+            let data = types::Data {
                 channel: 1,
                 message: Bytes::from("test high prio message"),
             };
@@ -104,7 +109,7 @@ mod tests {
             assert!(low_receiver.try_next().is_err());
 
             // Send a low priority message
-            let data = wire::Data {
+            let data = types::Data {
                 channel: 1,
                 message: Bytes::from("test low prio message"),
             };

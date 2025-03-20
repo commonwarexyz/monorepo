@@ -1,78 +1,87 @@
-use super::Error;
-use crate::authenticated::wire::Peer;
-use bytes::BufMut;
-use commonware_codec::SizedCodec;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use crate::authenticated::types::SignedPeerInfo;
+use commonware_cryptography::Scheme;
+use std::net::SocketAddr;
 
 #[derive(Clone)]
-pub enum Address {
-    Config(SocketAddr), // Provided during initialization
-    Network(Signature), // Learned from other peers
+pub enum Address<C: Scheme> {
+    /// Provided during initialization
+    Bootstrapper(SocketAddr),
+
+    /// Not yet known
+    Unknown,
+
+    /// Learned from other peers
+    Discovered(SignedPeerInfo<C>),
 }
 
-const IPV4_LEN: usize = 6;
-const IPV6_LEN: usize = 18;
+pub struct AddressCount<C: Scheme> {
+    /// Address of the peer.
+    /// If this is `None`, then the address of the peer is not (yet) known.
+    pub address: Address<C>,
 
-#[derive(Clone)]
-pub struct Signature {
-    pub addr: SocketAddr,
-    pub peer: Peer,
+    /// Number of peer sets this peer is part of.
+    /// If this is `usize::MAX`, then this is a bootstrapper address.
+    pub count: usize,
 }
 
-pub fn wire_peer_payload(peer: &Peer) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(peer.socket.len() + u64::LEN_ENCODED);
-    payload.extend_from_slice(&peer.socket);
-    payload.put_u64(peer.timestamp);
-    payload
-}
-
-pub fn socket_peer_payload(socket: &SocketAddr, timestamp: u64) -> (Vec<u8>, Vec<u8>) {
-    let socket = bytes(socket);
-    let mut payload = Vec::with_capacity(socket.len() + u64::LEN_ENCODED);
-    payload.extend_from_slice(&socket);
-    payload.put_u64(timestamp);
-    (socket, payload)
-}
-
-pub fn socket_from_payload(peer: &Peer) -> Result<SocketAddr, Error> {
-    let bytes = &peer.socket;
-    if bytes.len() == IPV4_LEN {
-        // IPv4: 4 bytes for IP + 2 bytes for port
-        let ip = Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3]);
-        let port = u16::from_be_bytes([bytes[4], bytes[5]]);
-        Ok(SocketAddr::new(ip.into(), port))
-    } else if bytes.len() == IPV6_LEN {
-        // IPv6: 16 bytes for IP + 2 bytes for port
-        let ip = Ipv6Addr::new(
-            u16::from_be_bytes([bytes[0], bytes[1]]),
-            u16::from_be_bytes([bytes[2], bytes[3]]),
-            u16::from_be_bytes([bytes[4], bytes[5]]),
-            u16::from_be_bytes([bytes[6], bytes[7]]),
-            u16::from_be_bytes([bytes[8], bytes[9]]),
-            u16::from_be_bytes([bytes[10], bytes[11]]),
-            u16::from_be_bytes([bytes[12], bytes[13]]),
-            u16::from_be_bytes([bytes[14], bytes[15]]),
-        );
-        let port = u16::from_be_bytes([bytes[16], bytes[17]]);
-        Ok(SocketAddr::new(ip.into(), port))
-    } else {
-        Err(Error::InvalidIPLength(bytes.len()))
+impl<C: Scheme> AddressCount<C> {
+    /// Create a new `AddressCount` with no address and a count of 1.
+    pub fn new() -> Self {
+        Self {
+            address: Address::Unknown,
+            count: 1,
+        }
     }
-}
 
-pub fn bytes(socket: &SocketAddr) -> Vec<u8> {
-    match socket {
-        SocketAddr::V4(v4) => {
-            let mut bytes = Vec::with_capacity(IPV4_LEN);
-            bytes.extend_from_slice(&v4.ip().octets());
-            bytes.put_u16(v4.port());
-            bytes
+    /// Get the address of the peer.
+    pub fn get_address(&self) -> Option<SocketAddr> {
+        match &self.address {
+            Address::Bootstrapper(socket) => Some(*socket),
+            Address::Discovered(info) => Some(info.info.socket),
+            Address::Unknown => None,
         }
-        SocketAddr::V6(v6) => {
-            let mut bytes = Vec::with_capacity(IPV6_LEN);
-            bytes.extend_from_slice(&v6.ip().octets());
-            bytes.put_u16(v6.port());
-            bytes
+    }
+
+    /// Create a bootstrapper address.
+    pub fn new_bootstrapper(address: SocketAddr) -> Self {
+        Self {
+            address: Address::Bootstrapper(address),
+            // Ensures that we never remove a bootstrapper (even
+            // if not in any active set)
+            count: usize::MAX,
         }
+    }
+
+    /// Set as a discovered address.
+    pub fn set_discovered(&mut self, signed_peer_info: SignedPeerInfo<C>) -> bool {
+        if let Address::Discovered(past) = &self.address {
+            if past.info.timestamp >= signed_peer_info.info.timestamp {
+                return false;
+            }
+        }
+        self.address = Address::Discovered(signed_peer_info);
+        true
+    }
+
+    /// Check if the address is a discovered address.
+    pub fn has_discovered(&self) -> bool {
+        matches!(self.address, Address::Discovered(_))
+    }
+
+    /// Increase the count.
+    pub fn increment(&mut self) {
+        if self.count == usize::MAX {
+            return;
+        }
+        self.count += 1;
+    }
+
+    /// Decreases the count and returns true if the count is 0.
+    pub fn decrement(&mut self) -> bool {
+        if self.count == usize::MAX {
+            return false;
+        }
+        self.count -= 1;
+        self.count == 0
     }
 }
