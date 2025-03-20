@@ -91,7 +91,7 @@ fn main() {
         .collect();
 
     // Initialize tracing
-    let endpoint = format!("http://{}:4318", monitoring_ip);
+    let endpoint = format!("http://{}:4318/v1/traces", monitoring_ip);
     let tracer = init_tracer(&endpoint).expect("Failed to initialize tracer");
 
     // Create fmt layer for logging
