@@ -15,7 +15,7 @@ use prometheus_client::metrics::{counter::Counter, family::Family};
 use prost::Message as _;
 use rand::{CryptoRng, Rng};
 use std::{collections::HashMap, sync::Arc, time::Duration};
-use tracing::debug;
+use tracing::{debug, info_span, Instrument};
 
 pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, P: Array> {
     context: E,
@@ -215,6 +215,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, P: Arr
                             tracker.peers(peers, self.mailbox.clone()).await;
                         }
                         Some(wire::message::Payload::Data(data)) => {
+                            let span = info_span!("received", channel = data.channel);
+                            let _guard = span.enter();
                             self.received_messages
                                 .get_or_create(&metrics::Message::new_data(&peer, data.channel))
                                 .inc();
@@ -237,17 +239,21 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, P: Arr
                                         ))
                                         .inc();
                                     let wait = negative.wait_time_from(context.now());
-                                    context.sleep(wait).await;
+                                    context
+                                        .sleep(wait)
+                                        .instrument(info_span!("rate_limit_sleep"))
+                                        .await;
                                 }
                             }
+                            let sender = senders.get_mut(&data.channel).unwrap();
 
                             // Send message to client
                             //
                             // If the channel handler is closed, we log an error but don't
                             // close the peer (as other channels may still be open).
-                            let sender = senders.get_mut(&data.channel).unwrap();
                             if let Err(e) = sender
                                 .send((peer.clone(), data.message))
+                                .instrument(info_span!("send"))
                                 .await
                                 .map_err(|_| Error::ChannelClosed(data.channel))
                             {

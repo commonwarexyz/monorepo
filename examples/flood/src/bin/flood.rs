@@ -11,6 +11,15 @@ use commonware_runtime::{tokio, Clock, Metrics, Network, Runner, Spawner};
 use commonware_utils::{from_hex_formatted, union};
 use futures::future::try_join_all;
 use governor::Quota;
+use opentelemetry::{
+    global,
+    trace::{TraceError, TracerProvider},
+};
+use opentelemetry_otlp::{SpanExporter, WithExportConfig};
+use opentelemetry_sdk::{
+    trace::{BatchSpanProcessor, Sampler, SdkTracerProvider, Tracer},
+    Resource,
+};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use rand::{rngs::StdRng, Rng, RngCore, SeedableRng};
 use std::{
@@ -22,11 +31,41 @@ use std::{
     time::Duration,
 };
 use sysinfo::{Disks, System};
-use tracing::{error, info, Level};
+use tracing::{error, info};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::Registry;
 
 const SYSTEM_METRICS_REFRESH: Duration = Duration::from_secs(5);
 const FLOOD_NAMESPACE: &[u8] = b"_COMMONWARE_FLOOD";
 const METRICS_PORT: u16 = 9090;
+
+fn init_tracer(endpoint: &str) -> Result<Tracer, TraceError> {
+    // Create the OTLP HTTP exporter
+    let exporter = SpanExporter::builder()
+        .with_http()
+        .with_endpoint(endpoint)
+        .build()?;
+
+    // Configure the batch processor
+    let batch_processor = BatchSpanProcessor::builder(exporter).build();
+
+    // Define the resource with service name
+    let resource = Resource::builder().with_service_name("flood").build();
+
+    // Build the tracer provider
+    let sampler = Sampler::TraceIdRatioBased(0.001);
+    let tracer_provider = SdkTracerProvider::builder()
+        .with_span_processor(batch_processor)
+        .with_resource(resource)
+        .with_sampler(sampler)
+        .build();
+
+    // Create the tracer and set it globally
+    let tracer = tracer_provider.tracer("flood");
+    global::set_tracer_provider(tracer_provider);
+
+    Ok(tracer)
+}
 
 fn main() {
     // Parse arguments
@@ -36,18 +75,11 @@ fn main() {
         .arg(Arg::new("config").long("config").required(true))
         .get_matches();
 
-    // Create logger
-    tracing_subscriber::fmt()
-        .json()
-        .with_max_level(Level::DEBUG)
-        .with_line_number(true)
-        .with_file(true)
-        .init();
-
     // Load peers
     let peer_file = matches.get_one::<String>("peers").unwrap();
     let peers_file = std::fs::read_to_string(peer_file).expect("Could not read peers file");
     let peers: Peers = serde_yaml::from_str(&peers_file).expect("Could not parse peers file");
+    let monitoring_ip = peers.monitoring_private_ip;
     let peers: HashMap<PublicKey, IpAddr> = peers
         .peers
         .into_iter()
@@ -57,9 +89,34 @@ fn main() {
             (key, peer.ip)
         })
         .collect();
-    info!(peers = peers.len(), "loaded peers");
+
+    // Initialize tracing
+    let endpoint = format!("http://{}:4318/v1/traces", monitoring_ip);
+    let tracer = init_tracer(&endpoint).expect("Failed to initialize tracer");
+
+    // Create fmt layer for logging
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .json()
+        .with_line_number(true)
+        .with_file(true);
+
+    // Create a filter layer to set the maximum level to INFO
+    let filter = tracing_subscriber::EnvFilter::new("info");
+
+    // Create OpenTelemetry layer for tracing
+    let telemetry_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+
+    // Combine layers into a single subscriber
+    let subscriber = Registry::default()
+        .with(filter)
+        .with(fmt_layer)
+        .with(telemetry_layer);
+
+    // Set the combined subscriber as the global default
+    tracing::subscriber::set_global_default(subscriber).expect("Failed to set tracing subscriber");
 
     // Load config
+    info!(peers = peers.len(), "loaded peers");
     let config_file = matches.get_one::<String>("config").unwrap();
     let config_file = std::fs::read_to_string(config_file).expect("Could not read config file");
     let config: Config = serde_yaml::from_str(&config_file).expect("Could not parse config file");
@@ -161,6 +218,7 @@ fn main() {
                     let messages: Counter<u64, AtomicU64> = Counter::default();
                     context.register("messages", "Received messages", messages.clone());
                     loop {
+                        // Receive message
                         if let Err(e) = flood_receiver.recv().await {
                             error!(?e, "could not receive flood message");
                         }

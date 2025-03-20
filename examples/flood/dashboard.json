@@ -696,7 +696,7 @@
                 {
                     "disableTextWrap": false,
                     "editorMode": "builder",
-                    "expr": "network_tracker_connections{job=~\"$Job\"}",
+                    "expr": "network_spawner_connections{job=~\"$Job\"}",
                     "fullMetaSearch": false,
                     "includeNullMetadata": true,
                     "legendFormat": "{{job}} ({{instance}})",

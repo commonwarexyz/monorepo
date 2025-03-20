@@ -390,21 +390,6 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     let deployments: Vec<Deployment> = try_join_all(launch_futures).await?;
     info!("launched binary instances");
 
-    // Generate peers.yaml
-    let peers = Peers {
-        peers: deployments
-            .iter()
-            .map(|d| Peer {
-                name: d.instance.name.clone(),
-                region: d.instance.region.clone(),
-                ip: d.ip.clone().parse::<IpAddr>().unwrap(),
-            })
-            .collect(),
-    };
-    let peers_yaml = serde_yaml::to_string(&peers)?;
-    let peers_path = temp_dir.join("peers.yaml");
-    std::fs::write(&peers_path, peers_yaml)?;
-
     // Write systemd service files
     let prometheus_service_path = temp_dir.join("prometheus.service");
     std::fs::write(&prometheus_service_path, PROMETHEUS_SERVICE)?;
@@ -412,6 +397,8 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     std::fs::write(&promtail_service_path, PROMTAIL_SERVICE)?;
     let loki_service_path = temp_dir.join("loki.service");
     std::fs::write(&loki_service_path, LOKI_SERVICE)?;
+    let tempo_service_path = temp_dir.join("tempo.service");
+    std::fs::write(&tempo_service_path, TEMPO_SERVICE)?;
     let binary_service_path = temp_dir.join("binary.service");
     std::fs::write(&binary_service_path, BINARY_SERVICE)?;
 
@@ -445,6 +432,8 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     std::fs::write(&all_yaml_path, ALL_YML)?;
     let loki_config_path = temp_dir.join("loki.yml");
     std::fs::write(&loki_config_path, LOKI_CONFIG)?;
+    let tempo_yml_path = temp_dir.join("tempo.yml");
+    std::fs::write(&tempo_yml_path, TEMPO_CONFIG)?;
     scp_file(
         private_key,
         prom_path.to_str().unwrap(),
@@ -482,6 +471,13 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     .await?;
     scp_file(
         private_key,
+        tempo_yml_path.to_str().unwrap(),
+        &monitoring_ip,
+        "/home/ubuntu/tempo.yml",
+    )
+    .await?;
+    scp_file(
+        private_key,
         prometheus_service_path.to_str().unwrap(),
         &monitoring_ip,
         "/home/ubuntu/prometheus.service",
@@ -494,17 +490,46 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         "/home/ubuntu/loki.service",
     )
     .await?;
+    scp_file(
+        private_key,
+        tempo_service_path.to_str().unwrap(),
+        &monitoring_ip,
+        "/home/ubuntu/tempo.service",
+    )
+    .await?;
     enable_bbr(private_key, &monitoring_ip, bbr_conf_path.to_str().unwrap()).await?;
     ssh_execute(
         private_key,
         &monitoring_ip,
-        &install_monitoring_cmd(PROMETHEUS_VERSION, GRAFANA_VERSION, LOKI_VERSION),
+        &install_monitoring_cmd(
+            PROMETHEUS_VERSION,
+            GRAFANA_VERSION,
+            LOKI_VERSION,
+            TEMPO_VERSION,
+        ),
     )
     .await?;
     poll_service_active(private_key, &monitoring_ip, "prometheus").await?;
     poll_service_active(private_key, &monitoring_ip, "loki").await?;
+    poll_service_active(private_key, &monitoring_ip, "tempo").await?;
     poll_service_active(private_key, &monitoring_ip, "grafana-server").await?;
     info!("configured monitoring instance");
+
+    // Generate peers.yaml
+    let peers = Peers {
+        monitoring_private_ip: monitoring_private_ip.clone().parse::<IpAddr>().unwrap(),
+        peers: deployments
+            .iter()
+            .map(|d| Peer {
+                name: d.instance.name.clone(),
+                region: d.instance.region.clone(),
+                ip: d.ip.clone().parse::<IpAddr>().unwrap(),
+            })
+            .collect(),
+    };
+    let peers_yaml = serde_yaml::to_string(&peers)?;
+    let peers_path = temp_dir.join("peers.yaml");
+    std::fs::write(&peers_path, peers_yaml)?;
 
     // Configure binary instances
     info!("configuring binary instances");
@@ -614,6 +639,18 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                     )
                     .build(),
             )
+            .ip_permissions(
+                IpPermission::builder()
+                    .ip_protocol("tcp")
+                    .from_port(4318)
+                    .to_port(4318)
+                    .user_id_group_pairs(
+                        UserIdGroupPair::builder()
+                            .group_id(binary_sg_id.clone())
+                            .build(),
+                    )
+                    .build(),
+            )
             .send()
             .await
             .map_err(|err| err.into_service_error())?;
@@ -635,6 +672,14 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                         .ip_protocol("tcp")
                         .from_port(3100)
                         .to_port(3100)
+                        .ip_ranges(IpRange::builder().cidr_ip(binary_cidr).build())
+                        .build(),
+                )
+                .ip_permissions(
+                    IpPermission::builder()
+                        .ip_protocol("tcp")
+                        .from_port(4318)
+                        .to_port(4318)
                         .ip_ranges(IpRange::builder().cidr_ip(binary_cidr).build())
                         .build(),
                 )
