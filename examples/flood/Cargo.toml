@@ -30,6 +30,9 @@ uuid = { workspace = true, features = ["v4"] }
 sysinfo = "0.33.1"
 pyroscope = "0.5.8"
 
+[profile.release]
+rustflags = ["-C", "force-frame-pointers=yes"]
+
 [[bin]]
 name = "flood"
 path = "src/bin/flood.rs"
@@ -40,5 +43,3 @@ name = "setup"
 path = "src/bin/setup.rs"
 bench = false
 
-[profile.release]
-debug = true
