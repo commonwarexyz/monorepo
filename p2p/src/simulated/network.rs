@@ -273,7 +273,7 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock + Metrics, P: A
             // Record sent message as soon as we determine there is a link with recipient (approximates
             // having an open connection)
             self.sent_messages
-                .get_or_create(&metrics::Message::new(&origin, &recipient, channel))
+                .get_or_create(&metrics::MessageLabel::new(&origin, &recipient, channel))
                 .inc();
 
             // Apply link settings
@@ -317,7 +317,7 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock + Metrics, P: A
 
                     // Only record received messages that were successfully sent
                     received_messages
-                        .get_or_create(&metrics::Message::new(&origin, &recipient, channel))
+                        .get_or_create(&metrics::MessageLabel::new(&origin, &recipient, channel))
                         .inc();
                 }
             });

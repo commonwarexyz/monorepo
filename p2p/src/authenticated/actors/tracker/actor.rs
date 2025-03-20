@@ -1,6 +1,7 @@
-pub use super::{
+use super::{
     address::AddressRecord,
     ingress::{Mailbox, Message, Oracle, Reservation},
+    metrics::Metrics,
     Config, Error,
 };
 use crate::authenticated::{
@@ -10,16 +11,13 @@ use crate::authenticated::{
 use bitvec::prelude::*;
 use commonware_codec::Codec;
 use commonware_cryptography::Scheme;
-use commonware_runtime::{Clock, Handle, Metrics, Spawner};
+use commonware_runtime::{Clock, Handle, Metrics as RuntimeMetrics, Spawner};
 use commonware_utils::{union, Array, SystemTimeExt};
 use futures::{channel::mpsc, StreamExt};
 use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore,
     RateLimiter,
 };
-use prometheus_client::metrics::counter::Counter;
-use prometheus_client::metrics::family::Family;
-use prometheus_client::metrics::gauge::Gauge;
 use rand::{
     prelude::{IteratorRandom, SliceRandom},
     Rng,
@@ -89,7 +87,7 @@ impl<P: Array> PeerSet<P> {
     }
 }
 
-pub struct Actor<E: Spawner + Rng + GClock + Metrics, C: Scheme> {
+pub struct Actor<E: Spawner + Rng + GClock + RuntimeMetrics, C: Scheme> {
     context: E,
 
     crypto: C,
@@ -108,15 +106,12 @@ pub struct Actor<E: Spawner + Rng + GClock + Metrics, C: Scheme> {
         RateLimiter<C::PublicKey, HashMapStateStore<C::PublicKey>, E, NoOpMiddleware<E::Instant>>,
     connections: HashSet<C::PublicKey>,
 
-    tracked_peers: Gauge,
-    reserved_connections: Gauge,
-    rate_limited_connections: Family<metrics::Peer, Counter>,
-    updated_peers: Family<metrics::Peer, Counter>,
-
     ip_signature: types::SignedPeerInfo<C>,
+
+    metrics: Metrics,
 }
 
-impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
+impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> {
     #[allow(clippy::type_complexity)]
     pub fn new(context: E, mut cfg: Config<C>) -> (Self, Mailbox<E, C>, Oracle<E, C>) {
         // Construct IP signature
@@ -157,26 +152,7 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
             RateLimiter::hashmap_with_clock(cfg.allowed_connection_rate_per_peer, &context);
 
         // Create metrics
-        let tracked_peers = Gauge::default();
-        let reserved_connections = Gauge::default();
-        let rate_limited_connections = Family::<metrics::Peer, Counter>::default();
-        let updated_peers = Family::<metrics::Peer, Counter>::default();
-        context.register("tracked_peers", "tracked peers", tracked_peers.clone());
-        context.register(
-            "reservations",
-            "number of reserved connections",
-            reserved_connections.clone(),
-        );
-        context.register(
-            "rate_limited_connections",
-            "number of rate limited connections",
-            rate_limited_connections.clone(),
-        );
-        context.register(
-            "updated_peers",
-            "number of peer records updated",
-            updated_peers.clone(),
-        );
+        let metrics = Metrics::init(context.clone());
 
         (
             Self {
@@ -198,10 +174,7 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
                 connections_rate_limiter,
                 connections: HashSet::new(),
 
-                tracked_peers,
-                reserved_connections,
-                rate_limited_connections,
-                updated_peers,
+                metrics,
             },
             Mailbox::new(sender.clone()),
             Oracle::new(sender),
@@ -248,7 +221,10 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
         // Update stored counters
         let set = self.sets.get_mut(&index).unwrap();
         for peer in peers.iter() {
-            let address = self.peers.entry(peer.clone()).or_insert(AddressRecord::Unknown(0));
+            let address = self
+                .peers
+                .entry(peer.clone())
+                .or_insert(AddressRecord::Unknown(0));
             address.increment();
             if address.is_discovered() {
                 set.found(peer.clone());
@@ -310,26 +286,20 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
             return false;
         }
 
-        // Check if peer is bootstrapped
-        let record = self.peers.get_mut(peer).unwrap();
-        if let AddressRecord::Bootstrapper(_) = record {
-            // We don't want to modify bootstrapped peers
-            trace!(?peer, "ignoring update of bootstrapped peer");
-            return false;
-        }
-
         // Update peer address
         //
         // It is not safe to rate limit how many times this can happen
         // over some interval because a malicious peer may just replay
         // old IPs to prevent us from propagating a new one.
+        let record = self.peers.get_mut(peer).unwrap();
         let wire_time = peer_info.timestamp;
         if !record.set_discovered(peer_info) {
             trace!(?peer, wire_time, "stored peer newer");
             return false;
         }
-        self.updated_peers
-            .get_or_create(&metrics::Peer::new(peer))
+        self.metrics
+            .updated_peers
+            .get_or_create(&metrics::PeerLabel::new(peer))
             .inc();
 
         // Update peer set knowledge
@@ -479,15 +449,16 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
         // This could happen if we open a connection and then it is immediately closed by
         // the peer. We don't want to keep trying to connect to the peer in this case.
         if self.connections_rate_limiter.check_key(&peer).is_err() {
-            self.rate_limited_connections
-                .get_or_create(&metrics::Peer::new(&peer))
+            self.metrics
+                .rate_limited_connections
+                .get_or_create(&metrics::PeerLabel::new(&peer))
                 .inc();
             return None;
         }
 
         // Reserve the connection
         self.connections.insert(peer.clone());
-        self.reserved_connections.inc();
+        self.metrics.reserved_connections.inc();
         Some(Reservation::new(
             self.context.clone(),
             peer,
@@ -563,7 +534,7 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
                 }
                 Message::Register { index, peers } => {
                     self.store_peer_set(index, peers);
-                    self.tracked_peers.set(self.peers.len() as i64);
+                    self.metrics.tracked_peers.set(self.peers.len() as i64);
                 }
                 Message::Reserve { peer, reservation } => {
                     // Get latest peer set
@@ -578,7 +549,7 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
                 }
                 Message::Release { peer } => {
                     self.connections.remove(&peer);
-                    self.reserved_connections.dec();
+                    self.metrics.reserved_connections.dec();
                 }
             }
         }

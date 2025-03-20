@@ -1,9 +1,9 @@
-use super::{Config, Error, Mailbox, Message, Relay};
+use super::{metrics::Metrics, Config, Error, Mailbox, Message, Relay};
 use crate::authenticated::{actors::tracker, channels::Channels, metrics, types};
 use commonware_codec::Codec;
 use commonware_cryptography::Scheme;
 use commonware_macros::select;
-use commonware_runtime::{Clock, Handle, Metrics, Sink, Spawner, Stream};
+use commonware_runtime::{Clock, Handle, Metrics as RuntimeMetrics, Sink, Spawner, Stream};
 use commonware_stream::{
     public_key::{Connection, Sender},
     Receiver as _, Sender as _,
@@ -15,7 +15,7 @@ use rand::{CryptoRng, Rng};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tracing::debug;
 
-pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: Scheme> {
+pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + RuntimeMetrics, C: Scheme> {
     context: E,
 
     gossip_bit_vec_frequency: Duration,
@@ -27,15 +27,15 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: Scheme> {
     high: mpsc::Receiver<types::Data>,
     low: mpsc::Receiver<types::Data>,
 
-    sent_messages: Family<metrics::Message, Counter>,
-    received_messages: Family<metrics::Message, Counter>,
-    rate_limited: Family<metrics::Message, Counter>,
+    metrics: Metrics,
 
     // When reservation goes out-of-scope, the tracker will be notified.
     _reservation: tracker::Reservation<E, C>,
 }
 
-impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Scheme> Actor<E, C> {
+impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RuntimeMetrics, C: Scheme>
+    Actor<E, C>
+{
     pub fn new(context: E, cfg: Config, reservation: tracker::Reservation<E, C>) -> (Self, Relay) {
         let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
@@ -51,9 +51,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Sch
                 control: control_receiver,
                 high: high_receiver,
                 low: low_receiver,
-                sent_messages: cfg.sent_messages,
-                received_messages: cfg.received_messages,
-                rate_limited: cfg.rate_limited,
+                metrics: cfg.metrics,
                 _reservation: reservation,
             },
             Relay::new(low_sender, high_sender),
@@ -78,8 +76,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Sch
     /// Creates a message from a payload, then sends and increments metrics.
     async fn send<Si: Sink>(
         sender: &mut Sender<Si>,
-        sent_messages: &Family<metrics::Message, Counter>,
-        metric: metrics::Message,
+        sent_messages: &Family<metrics::MessageLabel, Counter>,
+        metric: metrics::MessageLabel,
         payload: types::Payload<C>,
     ) -> Result<(), Error> {
         let msg = payload.encode();
@@ -130,24 +128,25 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Sch
                             };
                             let (metric, payload) = match msg {
                                 Message::BitVec { bit_vec } =>
-                                    (metrics::Message::new_bit_vec(&peer), types::Payload::BitVec(bit_vec)),
+                                    (metrics::MessageLabel::new_bit_vec(&peer), types::Payload::BitVec(bit_vec)),
                                 Message::Peers { peers: msg } =>
-                                    (metrics::Message::new_peers(&peer), types::Payload::Peers(msg)),
+                                    (metrics::MessageLabel::new_peers(&peer), types::Payload::Peers(msg)),
                                 Message::Kill => {
                                     return Err(Error::PeerKilled(peer.to_string()))
                                 }
                             };
-                            Self::send(&mut conn_sender, &self.sent_messages, metric, payload)
-                                .await?;
+                            conn_sender.send(&payload.encode()).await.map_err(Error::SendFailed)?;
+                            self.metrics.sent_messages.get_or_create(&metric).inc();
                         },
                         msg_high = self.high.next() => {
                             let msg = Self::validate_msg(msg_high, &rate_limits)?;
-                            Self::send(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, msg.channel), types::Payload::Data(msg))
-                                .await?;
+                            conn_sender.send(&types::Payload::Data(msg).encode()).await.map_err(Error::SendFailed)?;
+                            let metric = metrics::MessageLabel::new_data(&peer, msg.channel);
+                            self.metrics.sent_messages.get_or_create(&metric).inc();
                         },
                         msg_low = self.low.next() => {
                             let msg = Self::validate_msg(msg_low, &rate_limits)?;
-                            Self::send(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, msg.channel), types::Payload::Data(msg))
+                            Self::send(&mut conn_sender, &self.metrics.sent_messages, metrics::MessageLabel::new_data(&peer, msg.channel), types::Payload::Data(msg))
                                 .await?;
                         }
                     }
@@ -170,24 +169,27 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Sch
                     let msg = match types::Payload::decode(msg) {
                         Ok(msg) => msg,
                         Err(err) => {
-                            self.received_messages
-                                .get_or_create(&metrics::Message::new_unknown(&peer))
+                            self.metrics
+                                .received_messages
+                                .get_or_create(&metrics::MessageLabel::new_unknown(&peer))
                                 .inc();
                             return Err(Error::DecodeFailed(err));
                         }
                     };
                     match msg {
                         types::Payload::BitVec(bit_vec) => {
-                            self.received_messages
-                                .get_or_create(&metrics::Message::new_bit_vec(&peer))
+                            self.metrics
+                                .received_messages
+                                .get_or_create(&metrics::MessageLabel::new_bit_vec(&peer))
                                 .inc();
 
                             // Ensure peer is not spamming us with bit vectors
                             match bit_vec_rate_limiter.check() {
                                 Ok(_) => {}
                                 Err(negative) => {
-                                    self.rate_limited
-                                        .get_or_create(&metrics::Message::new_bit_vec(&peer))
+                                    self.metrics
+                                        .rate_limited
+                                        .get_or_create(&metrics::MessageLabel::new_bit_vec(&peer))
                                         .inc();
                                     let wait = negative.wait_time_from(context.now());
                                     context.sleep(wait).await;
@@ -198,16 +200,18 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Sch
                             tracker.bit_vec(bit_vec, self.mailbox.clone()).await;
                         }
                         types::Payload::Peers(peers) => {
-                            self.received_messages
-                                .get_or_create(&metrics::Message::new_peers(&peer))
+                            self.metrics
+                                .received_messages
+                                .get_or_create(&metrics::MessageLabel::new_peers(&peer))
                                 .inc();
 
                             // Ensure peer is not spamming us with peer messages
                             match peers_rate_limiter.check() {
                                 Ok(_) => {}
                                 Err(negative) => {
-                                    self.rate_limited
-                                        .get_or_create(&metrics::Message::new_peers(&peer))
+                                    self.metrics
+                                        .rate_limited
+                                        .get_or_create(&metrics::MessageLabel::new_peers(&peer))
                                         .inc();
                                     let wait = negative.wait_time_from(context.now());
                                     context.sleep(wait).await;
@@ -218,8 +222,12 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Sch
                             tracker.peers(peers, self.mailbox.clone()).await;
                         }
                         types::Payload::Data(data) => {
-                            self.received_messages
-                                .get_or_create(&metrics::Message::new_data(&peer, data.channel))
+                            self.metrics
+                                .received_messages
+                                .get_or_create(&metrics::MessageLabel::new_data(
+                                    &peer,
+                                    data.channel,
+                                ))
                                 .inc();
 
                             // Ensure peer is not spamming us with content messages
@@ -233,8 +241,9 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Sch
                             match rate_limiter.check() {
                                 Ok(_) => {}
                                 Err(negative) => {
-                                    self.rate_limited
-                                        .get_or_create(&metrics::Message::new_data(
+                                    self.metrics
+                                        .rate_limited
+                                        .get_or_create(&metrics::MessageLabel::new_data(
                                             &peer,
                                             data.channel,
                                         ))

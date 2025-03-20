@@ -1,22 +1,19 @@
 use super::{
     ingress::{Mailbox, Message},
+    metrics::Metrics,
     Config,
 };
-use crate::authenticated::{
-    actors::{peer, router, tracker},
-    metrics,
-};
+use crate::authenticated::actors::{peer, router, tracker};
 use commonware_cryptography::Scheme;
-use commonware_runtime::{Clock, Handle, Metrics, Sink, Spawner, Stream};
+use commonware_runtime::{Clock, Handle, Metrics as RuntimeMetrics, Sink, Spawner, Stream};
 use futures::{channel::mpsc, StreamExt};
 use governor::{clock::ReasonablyRealtime, Quota};
-use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
 use rand::{CryptoRng, Rng};
 use std::time::Duration;
 use tracing::{debug, info};
 
 pub struct Actor<
-    E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics,
+    E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RuntimeMetrics,
     Si: Sink,
     St: Stream,
     C: Scheme,
@@ -29,43 +26,21 @@ pub struct Actor<
     allowed_peers_rate: Quota,
 
     receiver: mpsc::Receiver<Message<E, Si, St, C>>,
-
-    connections: Gauge,
-    sent_messages: Family<metrics::Message, Counter>,
-    received_messages: Family<metrics::Message, Counter>,
-    rate_limited: Family<metrics::Message, Counter>,
+    metrics: Metrics,
+    peer_metrics: peer::Metrics,
 }
 
 impl<
-        E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics,
+        E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RuntimeMetrics,
         Si: Sink,
         St: Stream,
         C: Scheme,
     > Actor<E, Si, St, C>
 {
     pub fn new(context: E, cfg: Config) -> (Self, Mailbox<E, Si, St, C>) {
-        let connections = Gauge::default();
-        let sent_messages = Family::<metrics::Message, Counter>::default();
-        let received_messages = Family::<metrics::Message, Counter>::default();
-        let rate_limited = Family::<metrics::Message, Counter>::default();
-        context.register(
-            "connections",
-            "number of connected peers",
-            connections.clone(),
-        );
-        context.register("messages_sent", "messages sent", sent_messages.clone());
-        context.register(
-            "messages_received",
-            "messages received",
-            received_messages.clone(),
-        );
-        context.register(
-            "messages_rate_limited",
-            "messages rate limited",
-            rate_limited.clone(),
-        );
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
-
+        let metrics = Metrics::init(context.clone());
+        let peer_metrics = peer::Metrics::init(context.clone());
         (
             Self {
                 context,
@@ -74,10 +49,8 @@ impl<
                 allowed_bit_vec_rate: cfg.allowed_bit_vec_rate,
                 allowed_peers_rate: cfg.allowed_peers_rate,
                 receiver,
-                connections,
-                sent_messages,
-                received_messages,
-                rate_limited,
+                metrics,
+                peer_metrics,
             },
             Mailbox::new(sender),
         )
@@ -100,15 +73,13 @@ impl<
                     reservation,
                 } => {
                     // Mark peer as connected
-                    self.connections.inc();
+                    self.metrics.connections.inc();
 
                     // Clone required variables
-                    let connections = self.connections.clone();
-                    let sent_messages = self.sent_messages.clone();
-                    let received_messages = self.received_messages.clone();
-                    let rate_limited = self.rate_limited.clone();
+                    let connections = self.metrics.connections.clone();
                     let tracker = tracker.clone();
                     let mut router = router.clone();
+                    let metrics = self.peer_metrics.clone();
 
                     // Spawn peer
                     self.context
@@ -119,13 +90,11 @@ impl<
                             let (actor, messenger) = peer::Actor::new(
                                 context,
                                 peer::Config {
-                                    sent_messages,
-                                    received_messages,
-                                    rate_limited,
                                     mailbox_size: self.mailbox_size,
                                     gossip_bit_vec_frequency: self.gossip_bit_vec_frequency,
                                     allowed_bit_vec_rate: self.allowed_bit_vec_rate,
                                     allowed_peers_rate: self.allowed_peers_rate,
+                                    metrics,
                                 },
                                 reservation,
                             );

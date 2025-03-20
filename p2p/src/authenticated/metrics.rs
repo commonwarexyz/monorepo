@@ -3,11 +3,11 @@ use commonware_utils::Array;
 use prometheus_client::encoding::EncodeLabelSet;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub struct Peer {
+pub struct PeerLabel {
     pub peer: String,
 }
 
-impl Peer {
+impl PeerLabel {
     pub fn new(peer: &impl Array) -> Self {
         Self {
             peer: peer.to_string(),
@@ -16,12 +16,12 @@ impl Peer {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub struct Message {
+pub struct MessageLabel {
     pub peer: String,
     pub message: i32,
 }
 
-impl Message {
+impl MessageLabel {
     const BIT_VEC_TYPE: i32 = -1;
     const PEERS_TYPE: i32 = -2;
     const UNKNOWN_TYPE: i32 = i32::MIN;
