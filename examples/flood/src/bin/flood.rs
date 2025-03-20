@@ -28,7 +28,7 @@ use tracing::{debug, error, info, Level};
 const SYSTEM_METRICS_REFRESH: Duration = Duration::from_secs(5);
 const FLOOD_NAMESPACE: &[u8] = b"_COMMONWARE_FLOOD";
 
-async fn send_profile_to_pyroscope(url: &str, report: Report) {
+async fn send_profile_to_pyroscope(url: &str, report: Report, start: u64, end: u64) {
     // Prepare client
     let report_data = report.pprof().unwrap(); // Convert to pprof format
     let client = reqwest::Client::new();
@@ -36,16 +36,19 @@ async fn send_profile_to_pyroscope(url: &str, report: Report) {
     // Serialize profile
     let body = report_data.encode_to_vec();
 
+    // Add query parameters
+    let pyroscope_url = format!("{}?name=flood&from={}&until={}", url, start, end);
+
     // Send profile
     let res = client
-        .post(url)
+        .post(&pyroscope_url)
         .header("Content-Type", "application/octet-stream")
         .body(body)
         .send()
         .await;
     match res {
-        Ok(_) => debug!("Profile sent successfully"),
-        Err(e) => error!(?e, "Failed to send profile"),
+        Ok(_) => debug!("Profile sent successfully to {}", pyroscope_url),
+        Err(e) => error!(?e, "Failed to send profile to {}", pyroscope_url),
     }
 }
 
@@ -274,6 +277,11 @@ fn main() {
         let profiles = context.with_label("profiles").spawn(|context| async move {
             loop {
                 // Wait for profile
+                let start = context
+                    .current()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
                 context.sleep(Duration::from_secs(30)).await;
                 let report = match guard.report().build() {
                     Ok(report) => report,
@@ -282,9 +290,14 @@ fn main() {
                         continue;
                     }
                 };
+                let end = context
+                    .current()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
 
                 // Send profile
-                send_profile_to_pyroscope(&profiles_url, report).await;
+                send_profile_to_pyroscope(&profiles_url, report, start, end).await;
             }
         });
 
