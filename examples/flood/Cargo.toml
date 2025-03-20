@@ -40,3 +40,6 @@ bench = false
 name = "setup"
 path = "src/bin/setup.rs"
 bench = false
+
+[profile.release]
+debug = true
