@@ -9,7 +9,7 @@ use commonware_flood::Config;
 use commonware_p2p::{authenticated, Receiver, Recipients, Sender};
 use commonware_runtime::{tokio, Clock, Metrics, Network, Runner, Spawner};
 use commonware_utils::{from_hex_formatted, union};
-use futures::future::try_join_all;
+use futures::{executor::block_on, future::try_join_all};
 use governor::Quota;
 use pprof::{protos::Message, ProfilerGuard, Report};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
@@ -20,6 +20,7 @@ use std::{
     num::NonZeroU32,
     str::FromStr,
     sync::atomic::{AtomicI64, AtomicU64},
+    thread,
     time::Duration,
 };
 use sysinfo::{Disks, System};
@@ -112,6 +113,34 @@ fn main() {
         .blocklist(&["libc", "libgcc", "pthread", "vdso"])
         .build()
         .unwrap();
+
+    // Run profiles
+    thread::spawn(move || {
+        block_on(async move {
+            loop {
+                // Wait for profile
+                let start = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                thread::sleep(Duration::from_secs(30));
+                let report = match guard.report().build() {
+                    Ok(report) => report,
+                    Err(e) => {
+                        error!(?e, "Could not build profile");
+                        continue;
+                    }
+                };
+                let end = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+
+                // Send profile
+                send_profile_to_pyroscope(&profiles_url, report, start, end).await;
+            }
+        })
+    });
 
     // Configure peers and bootstrappers
     let peer_keys = peers.keys().cloned().collect::<Vec<_>>();
@@ -275,44 +304,8 @@ fn main() {
                 .expect("Could not serve metrics");
         });
 
-        // Upload profiles
-        let profiles = context.with_label("profiles").spawn(|context| async move {
-            loop {
-                // Wait for profile
-                let start = context
-                    .current()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
-                context.sleep(Duration::from_secs(30)).await;
-                let report = match guard.report().build() {
-                    Ok(report) => report,
-                    Err(e) => {
-                        error!(?e, "Could not build profile");
-                        continue;
-                    }
-                };
-                let end = context
-                    .current()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
-
-                // Send profile
-                send_profile_to_pyroscope(&profiles_url, report, start, end).await;
-            }
-        });
-
         // Wait for any task to error
-        if let Err(e) = try_join_all(vec![
-            p2p,
-            flood_sender,
-            flood_receiver,
-            system,
-            metrics,
-            profiles,
-        ])
-        .await
+        if let Err(e) = try_join_all(vec![p2p, flood_sender, flood_receiver, system, metrics]).await
         {
             error!(?e, "task failed");
         }
