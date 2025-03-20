@@ -7,12 +7,15 @@ use commonware_cryptography::{
 use commonware_deployer::ec2::{Peers, METRICS_PORT, PROFILES_PORT};
 use commonware_flood::Config;
 use commonware_p2p::{authenticated, Receiver, Recipients, Sender};
-use commonware_runtime::{tokio, Clock, Metrics, Network, Runner, Spawner};
+use commonware_runtime::{
+    telemetry::pprof::{pprof_backend, PprofConfig},
+    tokio, Clock, Metrics, Network, Runner, Spawner,
+};
 use commonware_utils::{from_hex_formatted, union};
-use futures::{executor::block_on, future::try_join_all};
+use futures::future::try_join_all;
 use governor::Quota;
-use pprof::{protos::Message, ProfilerGuard, Report};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
+use pyroscope::PyroscopeAgent;
 use rand::{rngs::StdRng, Rng, RngCore, SeedableRng};
 use std::{
     collections::HashMap,
@@ -24,38 +27,10 @@ use std::{
     time::Duration,
 };
 use sysinfo::{Disks, System};
-use tracing::{debug, error, info, Level};
+use tracing::{error, info, Level};
 
 const SYSTEM_METRICS_REFRESH: Duration = Duration::from_secs(5);
 const FLOOD_NAMESPACE: &[u8] = b"_COMMONWARE_FLOOD";
-
-async fn send_profile_to_pyroscope(url: &str, report: Report, start: u64, end: u64) {
-    // Prepare client
-    let report_data = report.pprof().unwrap(); // Convert to pprof format
-    let client = reqwest::Client::new();
-
-    // Serialize profile
-    let body = report_data.encode_to_vec();
-
-    // Add query parameters
-    let pyroscope_url = format!("{}?name=flood&from={}&until={}", url, start, end);
-
-    // Send profile
-    let res = client
-        .post(&pyroscope_url)
-        .header("Content-Type", "application/octet-stream")
-        .body(body)
-        .send()
-        .await;
-    match res {
-        Ok(res) => debug!(
-            "Profile sent successfully to {}:{}",
-            pyroscope_url,
-            res.status()
-        ),
-        Err(e) => error!(?e, "Failed to send profile to {}", pyroscope_url),
-    }
-}
 
 fn main() {
     // Parse arguments
@@ -106,40 +81,19 @@ fn main() {
         "loaded config"
     );
 
-    // Create profiler
-    let profiles_url = format!("http://{}:{}/ingest", monitoring_ip, PROFILES_PORT);
-    let guard = pprof::ProfilerGuardBuilder::default()
-        .frequency(1000)
-        .blocklist(&["libc", "libgcc", "pthread", "vdso"])
-        .build()
-        .unwrap();
-
     // Run profiles
-    thread::spawn(move || {
-        block_on(async move {
-            loop {
-                // Wait for profile
-                let start = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
-                thread::sleep(Duration::from_secs(30));
-                let report = match guard.report().build() {
-                    Ok(report) => report,
-                    Err(e) => {
-                        error!(?e, "Could not build profile");
-                        continue;
-                    }
-                };
-                let end = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
-
-                // Send profile
-                send_profile_to_pyroscope(&profiles_url, report, start, end).await;
-            }
-        })
+    thread::spawn({
+        let public_key = public_key.clone();
+        move || {
+            let profiler = PyroscopeAgent::builder(
+                format!("http://{}:{}", monitoring_ip, PROFILES_PORT),
+                public_key.to_string(),
+            )
+            .backend(pprof_backend(PprofConfig::new().sample_rate(100)))
+            .build()
+            .expect("Could not create Pyroscope agent");
+            profiler.start().expect("Could not start Pyroscope agent");
+        }
     });
 
     // Configure peers and bootstrappers
