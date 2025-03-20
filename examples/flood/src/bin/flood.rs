@@ -23,7 +23,7 @@ use std::{
     time::Duration,
 };
 use sysinfo::{Disks, System};
-use tracing::{error, info, Level};
+use tracing::{debug, error, info, Level};
 
 const SYSTEM_METRICS_REFRESH: Duration = Duration::from_secs(5);
 const FLOOD_NAMESPACE: &[u8] = b"_COMMONWARE_FLOOD";
@@ -44,8 +44,8 @@ async fn send_profile_to_pyroscope(url: &str, report: Report) {
         .send()
         .await;
     match res {
-        Ok(_) => println!("Profile sent successfully"),
-        Err(e) => eprintln!("Failed to send profile: {}", e),
+        Ok(_) => debug!("Profile sent successfully"),
+        Err(e) => error!(?e, "Failed to send profile"),
     }
 }
 
@@ -103,7 +103,7 @@ fn main() {
     let guard = match ProfilerGuard::new(100) {
         Ok(guard) => guard,
         Err(e) => {
-            eprintln!("Could not start profiler: {}", e);
+            error!(?e, "Could not start profiler");
             return;
         }
     };
@@ -278,7 +278,7 @@ fn main() {
                 let report = match guard.report().build() {
                     Ok(report) => report,
                     Err(e) => {
-                        eprintln!("Could not build profile: {}", e);
+                        error!(?e, "Could not build profile");
                         continue;
                     }
                 };
