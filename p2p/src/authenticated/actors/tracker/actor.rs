@@ -1,7 +1,7 @@
-use super::address::AddressCount;
 pub use super::{
-    address::Address,
+    address_record::AddressRecord,
     ingress::{Mailbox, Message, Oracle, Reservation},
+    peer_set::PeerSet,
     Config, Error,
 };
 use crate::authenticated::{
@@ -12,7 +12,7 @@ use bitvec::prelude::*;
 use commonware_codec::Codec;
 use commonware_cryptography::Scheme;
 use commonware_runtime::{Clock, Handle, Metrics, Spawner};
-use commonware_utils::{union, Array, SystemTimeExt};
+use commonware_utils::{union, SystemTimeExt};
 use futures::{channel::mpsc, StreamExt};
 use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore,
@@ -27,68 +27,13 @@ use rand::{
 };
 use std::time::Duration;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashSet},
     net::SocketAddr,
 };
 use tracing::{debug, trace};
 
 // Bytes to add to the namespace to prevent replay attacks.
 const NAMESPACE_SUFFIX_IP: &[u8] = b"_IP";
-
-struct PeerSet<P: Array> {
-    index: u64,
-    sorted: Vec<P>,
-    order: HashMap<P, usize>,
-    knowledge: BitVec<u8, Lsb0>,
-    msg: types::BitVec,
-}
-
-impl<P: Array> PeerSet<P> {
-    fn new(index: u64, mut peers: Vec<P>) -> Self {
-        // Insert peers in sorted order
-        peers.sort();
-        let mut order = HashMap::new();
-        for (idx, peer) in peers.iter().enumerate() {
-            order.insert(peer.clone(), idx);
-        }
-
-        // Create bit vector
-        let knowledge = BitVec::repeat(false, peers.len());
-
-        // Create message
-        let msg = types::BitVec {
-            index,
-            bits: knowledge.clone().into(),
-        };
-
-        Self {
-            index,
-            sorted: peers,
-            order,
-            knowledge,
-            msg,
-        }
-    }
-
-    fn found(&mut self, peer: P) -> bool {
-        if let Some(idx) = self.order.get(&peer) {
-            self.knowledge.set(*idx, true);
-            return true;
-        }
-        false
-    }
-
-    fn update_msg(&mut self) {
-        self.msg = types::BitVec {
-            index: self.index,
-            bits: self.knowledge.clone().into(),
-        };
-    }
-
-    fn msg(&self) -> types::BitVec {
-        self.msg.clone()
-    }
-}
 
 pub struct Actor<E: Spawner + Rng + GClock + Metrics, C: Scheme> {
     context: E,
@@ -102,7 +47,7 @@ pub struct Actor<E: Spawner + Rng + GClock + Metrics, C: Scheme> {
 
     sender: mpsc::Sender<Message<E, C>>,
     receiver: mpsc::Receiver<Message<E, C>>,
-    peers: BTreeMap<C::PublicKey, AddressCount<C>>,
+    peers: BTreeMap<C::PublicKey, AddressRecord<C>>,
     sets: BTreeMap<u64, PeerSet<C::PublicKey>>,
     #[allow(clippy::type_complexity)]
     connections_rate_limiter:
@@ -121,15 +66,15 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
     #[allow(clippy::type_complexity)]
     pub fn new(context: E, mut cfg: Config<C>) -> (Self, Mailbox<E, C>, Oracle<E, C>) {
         // Construct IP signature
+        let socket = cfg.address;
         let timestamp = context.current().epoch_millis();
         let ip_namespace = union(&cfg.namespace, NAMESPACE_SUFFIX_IP);
-        let peer_info = types::PeerInfo {
-            socket: cfg.address,
-            timestamp,
-        };
-        let signature = cfg.crypto.sign(Some(&ip_namespace), &peer_info.encode());
+        let signature = cfg
+            .crypto
+            .sign(Some(&ip_namespace), &(socket, timestamp).encode());
         let ip_signature = types::SignedPeerInfo {
-            info: peer_info,
+            socket,
+            timestamp,
             public_key: cfg.crypto.public_key(),
             signature,
         };
@@ -140,7 +85,7 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
             if peer == cfg.crypto.public_key() {
                 continue;
             }
-            peers.insert(peer, AddressCount::new_bootstrapper(address));
+            peers.insert(peer, AddressRecord::Bootstrapper(address));
         }
 
         // Configure peer set
@@ -249,13 +194,13 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
         // Update stored counters
         let set = self.sets.get_mut(&index).unwrap();
         for peer in peers.iter() {
-            if let Some(address) = self.peers.get_mut(peer) {
-                address.increment();
-                if address.has_discovered() {
-                    set.found(peer.clone());
-                }
-            } else {
-                self.peers.insert(peer.clone(), AddressCount::new());
+            let address = self
+                .peers
+                .entry(peer.clone())
+                .or_insert(AddressRecord::Unknown(0));
+            address.increment();
+            if address.is_discovered() {
+                set.found(peer.clone());
             }
         }
 
@@ -308,7 +253,7 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
         reserved
     }
 
-    fn handle_peer(&mut self, peer: &C::PublicKey, signed_peer_info: SignedPeerInfo<C>) -> bool {
+    fn handle_peer(&mut self, peer: &C::PublicKey, peer_info: SignedPeerInfo<C>) -> bool {
         // Check if peer is authorized
         if !self.allowed(peer) {
             return false;
@@ -320,8 +265,8 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
         // over some interval because a malicious peer may just replay
         // old IPs to prevent us from propagating a new one.
         let record = self.peers.get_mut(peer).unwrap();
-        let wire_time = signed_peer_info.info.timestamp;
-        if !record.set_discovered(signed_peer_info) {
+        let wire_time = peer_info.timestamp;
+        if !record.set_discovered(peer_info) {
             trace!(?peer, wire_time, "stored peer newer");
             return false;
         }
@@ -349,11 +294,8 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
         // for duplicates (no need to create an additional set to check this)
         let mut updated = false;
         for peer in peers {
-            // Check if address is well formatted
-            let address = peer.info.socket;
-
             // Check if IP is allowed
-            let ip = address.ip();
+            let ip = peer.socket.ip();
             if !ip::is_global(ip) && !self.allow_private_ips {
                 return Err(Error::PrivateIPsNotAllowed(ip));
             }
@@ -366,7 +308,7 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
             // If any signature is invalid, disconnect from the peer
             if !C::verify(
                 Some(&self.ip_namespace),
-                &peer.info.encode(),
+                &(peer.socket, peer.timestamp).encode(),
                 &peer.public_key,
                 &peer.signature,
             ) {
@@ -374,7 +316,7 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
             }
 
             // If any timestamp is too far into the future, disconnect from the peer
-            if Duration::from_millis(peer.info.timestamp)
+            if Duration::from_millis(peer.timestamp)
                 > self.context.current().epoch() + self.synchrony_bound
             {
                 return Err(Error::InvalidSignature);
@@ -446,14 +388,11 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
                 peers.push(self.ip_signature.clone());
                 continue;
             }
-            let signed_peer_info = match self.peers.get(peer) {
-                Some(AddressCount {
-                    address: Address::Discovered(signed_peer_info),
-                    ..
-                }) => signed_peer_info,
+            let peer_info = match self.peers.get(peer) {
+                Some(AddressRecord::Discovered(_, peer_info)) => peer_info,
                 _ => continue,
             };
-            peers.push(signed_peer_info.clone());
+            peers.push(peer_info.clone());
         }
 
         // Return None if no peers to send
@@ -722,13 +661,11 @@ mod tests {
 
             // Provide peer address
             let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
-            let peer_info = types::PeerInfo {
-                socket,
-                timestamp: 0,
-            };
-            let signature = peer1_signer.sign(Some(&ip_namespace), &peer_info.encode());
+            let timestamp = 0;
+            let signature = peer1_signer.sign(Some(&ip_namespace), &(socket, timestamp).encode());
             let peers = vec![types::SignedPeerInfo {
-                info: peer_info,
+                socket,
+                timestamp,
                 public_key: peer1.clone(),
                 signature,
             }];
