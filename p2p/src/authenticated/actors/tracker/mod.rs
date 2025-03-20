@@ -9,8 +9,9 @@ use std::time::Duration;
 use thiserror::Error;
 
 mod actor;
-mod address;
+mod address_record;
 mod ingress;
+mod peer_set;
 
 pub use actor::Actor;
 pub use ingress::{Mailbox, Oracle, Reservation};

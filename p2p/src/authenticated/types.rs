@@ -5,14 +5,15 @@ use std::net::SocketAddr;
 
 // Payload is the only allowed message format that can be sent between peers.
 pub enum Payload<C: Scheme> {
+    /// Bit vector that represents the peers a peer knows about.
+    ///
+    /// Also used as a ping message to keep the connection alive.
     BitVec(BitVec),
 
-    // Peers is gossiped to peers periodically to
-    // inform them of new peers that they can connect to.
-    //
-    // Peer will include their signed IP in this message.
+    /// A vector of verifiable peer information.
     Peers(Vec<SignedPeerInfo<C>>),
 
+    /// Arbitrary data sent between peers.
     Data(Data),
 }
 
@@ -65,14 +66,15 @@ impl<C: Scheme> Codec for Payload<C> {
     }
 }
 
-// BitVec is a bit vector that represents the peers a peer
-// knows about at a given index.
-//
-// A peer should respond with a Peers message
-// if they know of any peers that the sender does not.
+/// BitVec is a bit vector that represents the peers a peer knows about at a given index.
+///
+/// A peer should respond with a `Peers` message if they know of any peers that the sender does not.
 #[derive(Clone)]
 pub struct BitVec {
+    /// The index that the bit vector applies to.
     pub index: u64,
+
+    /// The bit vector itself.
     pub bits: Vec<u8>,
 }
 
@@ -93,56 +95,48 @@ impl Codec for BitVec {
     }
 }
 
-/// TODO
-#[derive(Clone)]
-pub struct PeerInfo {
-    pub socket: SocketAddr,
-    pub timestamp: u64,
-}
-
-impl Codec for PeerInfo {
-    fn write(&self, writer: &mut impl Writer) {
-        self.socket.write(writer);
-        self.timestamp.write(writer);
-    }
-
-    fn len_encoded(&self) -> usize {
-        self.socket.len_encoded() + self.timestamp.len_encoded()
-    }
-
-    fn read(reader: &mut impl Reader) -> Result<Self, Error> {
-        let socket = SocketAddr::read(reader)?;
-        let timestamp = u64::read(reader)?;
-        Ok(PeerInfo { socket, timestamp })
-    }
-}
-
-// Peer will send its signed IP to the recipient for gossip
-// after the handshake has been established.
+/// A signed message from a peer attesting to its own socket address and public key at a given time.
+///
+/// This is used to share the peer's socket address and public key with other peers in a verified
+/// manner.
 #[derive(Clone)]
 pub struct SignedPeerInfo<C: Scheme> {
-    pub info: PeerInfo,
+    /// The socket address of the peer.
+    pub socket: SocketAddr,
+
+    /// The timestamp at which the socket was signed over.
+    pub timestamp: u64,
+
+    /// The public key of the peer.
     pub public_key: C::PublicKey,
+
+    /// The peer's signature over the socket and timestamp.
     pub signature: C::Signature,
 }
 
 impl<C: Scheme> Codec for SignedPeerInfo<C> {
     fn write(&self, writer: &mut impl Writer) {
-        self.info.write(writer);
+        self.socket.write(writer);
+        self.timestamp.write(writer);
         self.public_key.write(writer);
         self.signature.write(writer);
     }
 
     fn len_encoded(&self) -> usize {
-        self.info.len_encoded() + self.public_key.len_encoded() + self.signature.len_encoded()
+        self.socket.len_encoded()
+            + self.timestamp.len_encoded()
+            + self.public_key.len_encoded()
+            + self.signature.len_encoded()
     }
 
     fn read(reader: &mut impl Reader) -> Result<Self, Error> {
-        let info = PeerInfo::read(reader)?;
+        let socket = SocketAddr::read(reader)?;
+        let timestamp = u64::read(reader)?;
         let public_key = C::PublicKey::read(reader)?;
         let signature = C::Signature::read(reader)?;
         Ok(SignedPeerInfo {
-            info,
+            socket,
+            timestamp,
             public_key,
             signature,
         })
@@ -152,7 +146,12 @@ impl<C: Scheme> Codec for SignedPeerInfo<C> {
 // Data is an arbitrary message sent between peers.
 #[derive(Clone)]
 pub struct Data {
+    /// A unique identifier for the channel the message is sent on.
+    ///
+    /// This is used to route the message to the correct handler.
     pub channel: u32,
+
+    /// The payload of the message.
     pub message: Bytes,
 }
 
