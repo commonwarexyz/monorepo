@@ -467,10 +467,10 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
         // Parse bit vector bytes
         let bits: BitVec<u8, Lsb0> = BitVec::from_vec(bit_vec.bits);
 
-        // Ensure bit vector is the correct length
-        let required_bytes = (set.order.len() / 8 + 1) * 8;
-        if bits.len() != required_bytes {
-            return Err(Error::BitVecLengthMismatch(required_bytes, bits.len()));
+        // Calculate the required number of bits (padded to the nearest byte)
+        let required_bits = ((set.order.len() + 7) / 8) * 8;
+        if bits.len() != required_bits {
+            return Err(Error::BitVecLengthMismatch(required_bits, bits.len()));
         }
 
         // Compile peers to send
