@@ -101,7 +101,7 @@ fn main() {
         .with_file(true);
 
     // Create a filter layer to set the maximum level to INFO
-    let filter = tracing_subscriber::EnvFilter::new("debug");
+    let filter = tracing_subscriber::EnvFilter::new("info");
 
     // Create OpenTelemetry layer for tracing
     let telemetry_layer = tracing_opentelemetry::layer().with_tracer(tracer);
