@@ -78,7 +78,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, P: Arr
     }
 
     /// Creates a message from a payload, then sends and increments metrics.
-    #[instrument(skip(sender, sent_messages, metric, payload))]
+    #[instrument(level = "info", skip(sender, sent_messages, metric, payload))]
     async fn send<Si: Sink>(
         sender: &mut Sender<Si>,
         sent_messages: &Family<metrics::Message, Counter>,
