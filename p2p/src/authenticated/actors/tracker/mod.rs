@@ -11,6 +11,7 @@ use thiserror::Error;
 mod actor;
 mod address;
 mod ingress;
+mod metrics;
 
 pub use actor::Actor;
 pub use ingress::{Mailbox, Oracle, Reservation};

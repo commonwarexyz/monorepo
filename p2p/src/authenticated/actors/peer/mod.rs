@@ -1,9 +1,7 @@
 //! Peer
 
-use crate::authenticated::metrics;
 use commonware_codec::Error as CodecError;
 use governor::Quota;
-use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::time::Duration;
 use thiserror::Error;
 
@@ -13,15 +11,15 @@ pub use actor::Actor;
 mod ingress;
 pub use ingress::{Mailbox, Message, Relay};
 
+mod metrics;
+pub(crate) use metrics::Metrics;
+
 pub struct Config {
     pub mailbox_size: usize,
     pub gossip_bit_vec_frequency: Duration,
     pub allowed_bit_vec_rate: Quota,
     pub allowed_peers_rate: Quota,
-
-    pub sent_messages: Family<metrics::Message, Counter>,
-    pub received_messages: Family<metrics::Message, Counter>,
-    pub rate_limited: Family<metrics::Message, Counter>,
+    pub metrics: metrics::Metrics,
 }
 
 #[derive(Error, Debug)]

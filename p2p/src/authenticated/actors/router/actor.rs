@@ -66,12 +66,12 @@ impl<E: Spawner + Metrics, P: Array> Actor<E, P> {
                 sent.push(recipient.clone());
             } else {
                 self.messages_dropped
-                    .get_or_create(&metrics::Message::new_data(recipient, channel))
+                    .get_or_create(&metrics::MessageLabel::new_data(recipient, channel))
                     .inc();
             }
         } else {
             self.messages_dropped
-                .get_or_create(&metrics::Message::new_data(recipient, channel))
+                .get_or_create(&metrics::MessageLabel::new_data(recipient, channel))
                 .inc();
         }
     }
@@ -134,7 +134,7 @@ impl<E: Spawner + Metrics, P: Array> Actor<E, P> {
                                     sent.push(recipient.clone());
                                 } else {
                                     self.messages_dropped
-                                        .get_or_create(&metrics::Message::new_data(
+                                        .get_or_create(&metrics::MessageLabel::new_data(
                                             recipient, channel,
                                         ))
                                         .inc();

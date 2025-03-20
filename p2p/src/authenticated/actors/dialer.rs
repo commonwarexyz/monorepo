@@ -39,7 +39,7 @@ pub struct Actor<
 
     dial_limiter: RateLimiter<NotKeyed, InMemoryState, E, NoOpMiddleware<E::Instant>>,
 
-    dial_attempts: Family<metrics::Peer, Counter>,
+    dial_attempts: Family<metrics::PeerLabel, Counter>,
 
     _phantom_si: PhantomData<Si>,
     _phantom_st: PhantomData<St>,
@@ -55,7 +55,7 @@ impl<
     > Actor<Si, St, L, E, C>
 {
     pub fn new(context: E, cfg: Config<C>) -> Self {
-        let dial_attempts = Family::<metrics::Peer, Counter>::default();
+        let dial_attempts = Family::<metrics::PeerLabel, Counter>::default();
         context.register(
             "dial_attempts",
             "number of dial attempts",
@@ -86,7 +86,7 @@ impl<
                 break;
             }
             self.dial_attempts
-                .get_or_create(&metrics::Peer::new(&peer))
+                .get_or_create(&metrics::PeerLabel::new(&peer))
                 .inc();
 
             // Spawn dialer to connect to peer
