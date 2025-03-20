@@ -1052,7 +1052,6 @@ dependencies = [
  "rand_distr",
  "thiserror 2.0.12",
  "tracing",
- "tracing-attributes",
  "tracing-subscriber",
  "zstd",
 ]
