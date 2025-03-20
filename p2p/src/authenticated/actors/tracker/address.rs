@@ -3,85 +3,72 @@ use commonware_cryptography::Scheme;
 use std::net::SocketAddr;
 
 #[derive(Clone)]
-pub enum Address<C: Scheme> {
+pub enum AddressRecord<C: Scheme> {
     /// Provided during initialization
     Bootstrapper(SocketAddr),
 
-    /// Not yet known
-    Unknown,
+    /// Peer address is not yet known.
+    /// Tracks the number of peer sets this peer is part of.
+    Unknown(usize),
 
-    /// Learned from other peers
-    Discovered(SignedPeerInfo<C>),
+    /// Discovered this peer's address from other peers.
+    /// Tracks the number of peer sets this peer is part of.
+    Discovered(usize, SignedPeerInfo<C>),
 }
 
-pub struct AddressCount<C: Scheme> {
-    /// Address of the peer.
-    /// If this is `None`, then the address of the peer is not (yet) known.
-    pub address: Address<C>,
-
-    /// Number of peer sets this peer is part of.
-    /// If this is `usize::MAX`, then this is a bootstrapper address.
-    pub count: usize,
-}
-
-impl<C: Scheme> AddressCount<C> {
+impl<C: Scheme> AddressRecord<C> {
     /// Create a new `AddressCount` with no address and a count of 1.
     pub fn new() -> Self {
-        Self {
-            address: Address::Unknown,
-            count: 1,
-        }
+        Self::Unknown(1)
     }
 
     /// Get the address of the peer.
     pub fn get_address(&self) -> Option<SocketAddr> {
-        match &self.address {
-            Address::Bootstrapper(socket) => Some(*socket),
-            Address::Discovered(info) => Some(info.info.socket),
-            Address::Unknown => None,
+        match &self {
+            Self::Bootstrapper(socket) => Some(*socket),
+            Self::Discovered(_, info) => Some(info.info.socket),
+            Self::Unknown(_) => None,
         }
     }
 
-    /// Create a bootstrapper address.
-    pub fn new_bootstrapper(address: SocketAddr) -> Self {
-        Self {
-            address: Address::Bootstrapper(address),
-            // Ensures that we never remove a bootstrapper (even
-            // if not in any active set)
-            count: usize::MAX,
-        }
-    }
-
-    /// Set as a discovered address.
-    pub fn set_discovered(&mut self, signed_peer_info: SignedPeerInfo<C>) -> bool {
-        if let Address::Discovered(past) = &self.address {
-            if past.info.timestamp >= signed_peer_info.info.timestamp {
-                return false;
+    /// Attempt to set the address of a discovered peer.
+    /// 
+    /// Returns true if the update was successful.
+    /// Panics if the address is a bootstrapper.
+    pub fn set_discovered(&mut self, peer_info: SignedPeerInfo<C>) -> bool {
+        let count = match self {
+            Self::Unknown(count) => *count,
+            Self::Discovered(count, past) => {
+                if past.info.timestamp >= peer_info.info.timestamp {
+                    return false;
+                }
+                *count
             }
-        }
-        self.address = Address::Discovered(signed_peer_info);
+            Self::Bootstrapper(_) => unreachable!()
+        };
+        *self = Self::Discovered(count, peer_info);
         true
     }
 
     /// Check if the address is a discovered address.
-    pub fn has_discovered(&self) -> bool {
-        matches!(self.address, Address::Discovered(_))
+    pub fn is_discovered(&self) -> bool {
+        matches!(self, Self::Discovered(_, _))
     }
 
-    /// Increase the count.
+    /// Increase the num
     pub fn increment(&mut self) {
-        if self.count == usize::MAX {
-            return;
+        if let Self::Unknown(count) | Self::Discovered(count, _) = self {
+            *count += 1;
         }
-        self.count += 1;
     }
 
     /// Decreases the count and returns true if the count is 0.
     pub fn decrement(&mut self) -> bool {
-        if self.count == usize::MAX {
-            return false;
+        if let Self::Unknown(count) | Self::Discovered(count, _) = self {
+            *count = count.checked_sub(1).unwrap();
+            *count == 0
+        } else {
+            false
         }
-        self.count -= 1;
-        self.count == 0
     }
 }

@@ -1,6 +1,5 @@
-use super::address::AddressCount;
 pub use super::{
-    address::Address,
+    address::AddressRecord,
     ingress::{Mailbox, Message, Oracle, Reservation},
     Config, Error,
 };
@@ -102,7 +101,7 @@ pub struct Actor<E: Spawner + Rng + GClock + Metrics, C: Scheme> {
 
     sender: mpsc::Sender<Message<E, C>>,
     receiver: mpsc::Receiver<Message<E, C>>,
-    peers: BTreeMap<C::PublicKey, AddressCount<C>>,
+    peers: BTreeMap<C::PublicKey, AddressRecord<C>>,
     sets: BTreeMap<u64, PeerSet<C::PublicKey>>,
     #[allow(clippy::type_complexity)]
     connections_rate_limiter:
@@ -140,7 +139,7 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
             if peer == cfg.crypto.public_key() {
                 continue;
             }
-            peers.insert(peer, AddressCount::new_bootstrapper(address));
+            peers.insert(peer, AddressRecord::Bootstrapper(address));
         }
 
         // Configure peer set
@@ -251,11 +250,11 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
         for peer in peers.iter() {
             if let Some(address) = self.peers.get_mut(peer) {
                 address.increment();
-                if address.has_discovered() {
+                if address.is_discovered() {
                     set.found(peer.clone());
                 }
             } else {
-                self.peers.insert(peer.clone(), AddressCount::new());
+                self.peers.insert(peer.clone(), AddressRecord::new());
             }
         }
 
@@ -308,9 +307,17 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
         reserved
     }
 
-    fn handle_peer(&mut self, peer: &C::PublicKey, signed_peer_info: SignedPeerInfo<C>) -> bool {
+    fn handle_peer(&mut self, peer: &C::PublicKey, peer_info: SignedPeerInfo<C>) -> bool {
         // Check if peer is authorized
         if !self.allowed(peer) {
+            return false;
+        }
+
+        // Check if peer is bootstrapped
+        let record = self.peers.get_mut(peer).unwrap();
+        if let AddressRecord::Bootstrapper(_) = record {
+            // We don't want to modify bootstrapped peers
+            trace!(?peer, "ignoring update of bootstrapped peer");
             return false;
         }
 
@@ -319,9 +326,8 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
         // It is not safe to rate limit how many times this can happen
         // over some interval because a malicious peer may just replay
         // old IPs to prevent us from propagating a new one.
-        let record = self.peers.get_mut(peer).unwrap();
-        let wire_time = signed_peer_info.info.timestamp;
-        if !record.set_discovered(signed_peer_info) {
+        let wire_time = peer_info.info.timestamp;
+        if !record.set_discovered(peer_info) {
             trace!(?peer, wire_time, "stored peer newer");
             return false;
         }
@@ -446,14 +452,11 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
                 peers.push(self.ip_signature.clone());
                 continue;
             }
-            let signed_peer_info = match self.peers.get(peer) {
-                Some(AddressCount {
-                    address: Address::Discovered(signed_peer_info),
-                    ..
-                }) => signed_peer_info,
+            let peer_info = match self.peers.get(peer) {
+                Some(AddressRecord::Discovered(_, peer_info)) => peer_info,
                 _ => continue,
             };
-            peers.push(signed_peer_info.clone());
+            peers.push(peer_info.clone());
         }
 
         // Return None if no peers to send
