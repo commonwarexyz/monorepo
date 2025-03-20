@@ -47,7 +47,11 @@ async fn send_profile_to_pyroscope(url: &str, report: Report, start: u64, end: u
         .send()
         .await;
     match res {
-        Ok(_) => debug!("Profile sent successfully to {}", pyroscope_url),
+        Ok(res) => debug!(
+            "Profile sent successfully to {}:{}",
+            pyroscope_url,
+            res.status()
+        ),
         Err(e) => error!(?e, "Failed to send profile to {}", pyroscope_url),
     }
 }
@@ -103,13 +107,11 @@ fn main() {
 
     // Create profiler
     let profiles_url = format!("http://{}:{}/ingest", monitoring_ip, PROFILES_PORT);
-    let guard = match ProfilerGuard::new(100) {
-        Ok(guard) => guard,
-        Err(e) => {
-            error!(?e, "Could not start profiler");
-            return;
-        }
-    };
+    let guard = pprof::ProfilerGuardBuilder::default()
+        .frequency(1000)
+        .blocklist(&["libc", "libgcc", "pthread", "vdso"])
+        .build()
+        .unwrap();
 
     // Configure peers and bootstrappers
     let peer_keys = peers.keys().cloned().collect::<Vec<_>>();
