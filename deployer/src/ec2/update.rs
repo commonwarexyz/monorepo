@@ -125,6 +125,10 @@ async fn update_instance(
     // Wait for the service to become inactive
     poll_service_inactive(private_key, ip, "binary").await?;
 
+    // Remove the existing binary and config
+    ssh_execute(private_key, ip, "rm -f /home/ubuntu/binary").await?;
+    ssh_execute(private_key, ip, "rm -f /home/ubuntu/config.conf").await?;
+
     // Push the latest binary and config
     scp_file(private_key, binary_path, ip, "/home/ubuntu/binary").await?;
     scp_file(private_key, config_path, ip, "/home/ubuntu/config.conf").await?;
