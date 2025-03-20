@@ -17,34 +17,29 @@ pub enum AddressRecord<C: Scheme> {
 }
 
 impl<C: Scheme> AddressRecord<C> {
-    /// Create a new `AddressCount` with no address and a count of 1.
-    pub fn new() -> Self {
-        Self::Unknown(1)
-    }
-
     /// Get the address of the peer.
     pub fn get_address(&self) -> Option<SocketAddr> {
         match &self {
             Self::Bootstrapper(socket) => Some(*socket),
-            Self::Discovered(_, info) => Some(info.info.socket),
+            Self::Discovered(_, peer_info) => Some(peer_info.socket),
             Self::Unknown(_) => None,
         }
     }
 
     /// Attempt to set the address of a discovered peer.
-    /// 
+    ///
     /// Returns true if the update was successful.
     /// Panics if the address is a bootstrapper.
     pub fn set_discovered(&mut self, peer_info: SignedPeerInfo<C>) -> bool {
         let count = match self {
             Self::Unknown(count) => *count,
-            Self::Discovered(count, past) => {
-                if past.info.timestamp >= peer_info.info.timestamp {
+            Self::Discovered(count, past_info) => {
+                if past_info.timestamp >= peer_info.timestamp {
                     return false;
                 }
                 *count
             }
-            Self::Bootstrapper(_) => unreachable!()
+            Self::Bootstrapper(_) => unreachable!(),
         };
         *self = Self::Discovered(count, peer_info);
         true

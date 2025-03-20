@@ -93,56 +93,39 @@ impl Codec for BitVec {
     }
 }
 
-/// TODO
-#[derive(Clone)]
-pub struct PeerInfo {
-    pub socket: SocketAddr,
-    pub timestamp: u64,
-}
-
-impl Codec for PeerInfo {
-    fn write(&self, writer: &mut impl Writer) {
-        self.socket.write(writer);
-        self.timestamp.write(writer);
-    }
-
-    fn len_encoded(&self) -> usize {
-        self.socket.len_encoded() + self.timestamp.len_encoded()
-    }
-
-    fn read(reader: &mut impl Reader) -> Result<Self, Error> {
-        let socket = SocketAddr::read(reader)?;
-        let timestamp = u64::read(reader)?;
-        Ok(PeerInfo { socket, timestamp })
-    }
-}
-
 // Peer will send its signed IP to the recipient for gossip
 // after the handshake has been established.
 #[derive(Clone)]
 pub struct SignedPeerInfo<C: Scheme> {
-    pub info: PeerInfo,
+    pub socket: SocketAddr,
+    pub timestamp: u64,
     pub public_key: C::PublicKey,
     pub signature: C::Signature,
 }
 
 impl<C: Scheme> Codec for SignedPeerInfo<C> {
     fn write(&self, writer: &mut impl Writer) {
-        self.info.write(writer);
+        self.socket.write(writer);
+        self.timestamp.write(writer);
         self.public_key.write(writer);
         self.signature.write(writer);
     }
 
     fn len_encoded(&self) -> usize {
-        self.info.len_encoded() + self.public_key.len_encoded() + self.signature.len_encoded()
+        self.socket.len_encoded()
+            + self.timestamp.len_encoded()
+            + self.public_key.len_encoded()
+            + self.signature.len_encoded()
     }
 
     fn read(reader: &mut impl Reader) -> Result<Self, Error> {
-        let info = PeerInfo::read(reader)?;
+        let socket = SocketAddr::read(reader)?;
+        let timestamp = u64::read(reader)?;
         let public_key = C::PublicKey::read(reader)?;
         let signature = C::Signature::read(reader)?;
         Ok(SignedPeerInfo {
-            info,
+            socket,
+            timestamp,
             public_key,
             signature,
         })
