@@ -82,19 +82,19 @@ fn main() {
     );
 
     // Run profiles
-    thread::spawn({
-        let public_key = public_key.clone();
-        move || {
-            let profiler = PyroscopeAgent::builder(
-                format!("http://{}:{}", monitoring_ip, PROFILES_PORT),
-                public_key.to_string(),
-            )
-            .backend(pprof_backend(PprofConfig::new().sample_rate(100)))
-            .build()
-            .expect("Could not create Pyroscope agent");
-            profiler.start().expect("Could not start Pyroscope agent");
-        }
-    });
+    // thread::spawn({
+    //     let public_key = public_key.clone();
+    //     move || {
+    //         let profiler = PyroscopeAgent::builder(
+    //             format!("http://{}:{}", monitoring_ip, PROFILES_PORT),
+    //             public_key.to_string(),
+    //         )
+    //         .backend(pprof_backend(PprofConfig::new().sample_rate(100)))
+    //         .build()
+    //         .expect("Could not create Pyroscope agent");
+    //         profiler.start().expect("Could not start Pyroscope agent");
+    //     }
+    // });
 
     // Configure peers and bootstrappers
     let peer_keys = peers.keys().cloned().collect::<Vec<_>>();
