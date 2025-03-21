@@ -82,8 +82,8 @@ impl<
         stream_cfg: StreamConfig<C>,
         sink: Si,
         stream: St,
-        mut tracker: tracker::Mailbox<E, C::PublicKey>,
-        mut supervisor: spawner::Mailbox<E, Si, St, C::PublicKey>,
+        mut tracker: tracker::Mailbox<E, C>,
+        mut supervisor: spawner::Mailbox<E, Si, St, C>,
     ) {
         // Wait for the peer to send us their public key
         //
@@ -125,8 +125,8 @@ impl<
 
     pub fn start(
         self,
-        tracker: tracker::Mailbox<E, C::PublicKey>,
-        supervisor: spawner::Mailbox<E, Si, St, C::PublicKey>,
+        tracker: tracker::Mailbox<E, C>,
+        supervisor: spawner::Mailbox<E, Si, St, C>,
     ) -> Handle<()> {
         self.context
             .clone()
@@ -135,8 +135,8 @@ impl<
 
     async fn run(
         self,
-        tracker: tracker::Mailbox<E, C::PublicKey>,
-        supervisor: spawner::Mailbox<E, Si, St, C::PublicKey>,
+        tracker: tracker::Mailbox<E, C>,
+        supervisor: spawner::Mailbox<E, Si, St, C>,
     ) {
         // Start listening for incoming connections
         let mut listener = self

@@ -62,3 +62,4 @@ pub mod varint;
 pub use buffer::{ReadBuffer, WriteBuffer};
 pub use codec::{Codec, Reader, SizedCodec, Writer};
 pub use error::Error;
+pub use types::{net, primitives};

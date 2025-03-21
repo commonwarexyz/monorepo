@@ -1,9 +1,9 @@
 //! Peer
 
 use crate::authenticated::metrics;
+use commonware_codec::Error as CodecError;
 use governor::Quota;
 use prometheus_client::metrics::{counter::Counter, family::Family};
-use prost::DecodeError;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -35,7 +35,7 @@ pub enum Error {
     #[error("receive failed: {0}")]
     ReceiveFailed(commonware_stream::Error),
     #[error("decode failed: {0}")]
-    DecodeFailed(DecodeError),
+    DecodeFailed(CodecError),
     #[error("unexpected failure: {0}")]
     UnexpectedFailure(commonware_runtime::Error),
     #[error("message dropped")]
