@@ -1,7 +1,5 @@
 //! Implementations of Codec for common types
 
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
-
 use crate::{
     codec::{Codec, Reader, Writer},
     varint, Error, SizedCodec,
@@ -163,56 +161,6 @@ impl<T: Codec> Codec for Vec<T> {
     }
 }
 
-// SocketAddr implementation
-impl Codec for SocketAddr {
-    #[inline]
-    fn write(&self, writer: &mut impl Writer) {
-        match self {
-            SocketAddr::V4(v4) => {
-                writer.write_u8(4);
-                writer.write_fixed(&v4.ip().octets()); // [u8; 4]
-                writer.write_u16(v4.port());
-            }
-            SocketAddr::V6(v6) => {
-                writer.write_u8(6);
-                writer.write_fixed(&v6.ip().octets()); // [u8; 16]
-                writer.write_u16(v6.port());
-            }
-        }
-    }
-
-    #[inline]
-    fn len_encoded(&self) -> usize {
-        match self {
-            SocketAddr::V4(_) => 1 + 6,
-            SocketAddr::V6(_) => 1 + 18,
-        }
-    }
-
-    #[inline]
-    fn read(reader: &mut impl Reader) -> Result<Self, Error> {
-        let version = reader.read_u8()?;
-        match version {
-            4 => {
-                let ip = <[u8; 4]>::read(reader)?;
-                let port = u16::read(reader)?;
-                Ok(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from(ip), port)))
-            }
-            6 => {
-                let ip = <[u8; 16]>::read(reader)?;
-                let port = u16::read(reader)?;
-                Ok(SocketAddr::V6(SocketAddrV6::new(
-                    Ipv6Addr::from(ip),
-                    port,
-                    0,
-                    0,
-                )))
-            }
-            _ => Err(Error::Invalid("SocketAddr", "Invalid version")),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,26 +299,5 @@ mod tests {
             let decoded = Vec::<u8>::decode(encoded).unwrap();
             assert_eq!(value, decoded);
         }
-    }
-
-    #[test]
-    fn test_socket_addr() {
-        let addr_v4 = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 255, 0, 1), 8080));
-
-        let encoded_v4 = addr_v4.encode();
-        let decoded_v4 = SocketAddr::decode(encoded_v4).unwrap();
-        assert_eq!(addr_v4, decoded_v4);
-
-        let addr_v6 = SocketAddr::V6(SocketAddrV6::new(
-            Ipv6Addr::new(
-                0x2a01, 0xdb8, 0x3c4d, 0x15ef, 0x5af3, 0x70ff, 0xdcba, 0x98fe,
-            ),
-            8080,
-            0,
-            0,
-        ));
-        let encoded_v6 = addr_v6.encode();
-        let decoded_v6 = SocketAddr::decode(encoded_v6).unwrap();
-        assert_eq!(addr_v6, decoded_v6);
     }
 }

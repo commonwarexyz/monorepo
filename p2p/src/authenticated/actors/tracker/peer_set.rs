@@ -5,10 +5,19 @@ use std::collections::HashMap;
 
 /// Represents a set of peers and their knowledge of each other.
 pub struct PeerSet<P: Array> {
+    /// The index at which this peer set applies.
     pub index: u64,
+
+    /// The list of peers, sorted.
     pub sorted: Vec<P>,
+
+    /// The index of each peer in the sorted list, for quick lookup.
     pub order: HashMap<P, usize>,
+
+    /// My knowledge of each peer in the set.
     pub knowledge: BitVec<u8, Lsb0>,
+
+    /// The message to send to other peers.
     pub msg: types::BitVec,
 }
 
