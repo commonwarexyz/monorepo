@@ -65,7 +65,6 @@ impl PeakIterator {
         // Height of the root of the smallest perfect binary
         // tree containing `size` (leaf is height 0)
         let mut height = 63 - size.leading_zeros();
-
         while height > 0 && size > 1 {
             // Subtract the size of the next mountain.
             // If it's bigger than the remaining size, it's not in this range.
