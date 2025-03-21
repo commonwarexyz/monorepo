@@ -1,5 +1,6 @@
 use crate::{Array, BatchScheme, Error, Scheme};
-use commonware_codec::{Codec, Error as CodecError, Reader, SizedCodec, Writer};
+use bytes::{Buf, BufMut};
+use commonware_codec::{Codec, Error as CodecError, SizedCodec};
 use commonware_utils::{hex, union_unique};
 use ed25519_consensus::{self, VerificationKey};
 use rand::{CryptoRng, Rng, RngCore};
@@ -120,12 +121,12 @@ pub struct PrivateKey {
 }
 
 impl Codec for PrivateKey {
-    fn write(&self, writer: &mut impl Writer) {
-        self.raw.write(writer);
+    fn write<B: BufMut>(&self, buf: &mut B) {
+        self.raw.write(buf);
     }
 
-    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
-        Self::read_from(reader).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
+    fn read<B: Buf>(buf: &mut B) -> Result<Self, CodecError> {
+        Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
     }
 
     fn len_encoded(&self) -> usize {
@@ -232,12 +233,12 @@ pub struct PublicKey {
 }
 
 impl Codec for PublicKey {
-    fn write(&self, writer: &mut impl Writer) {
-        self.raw.write(writer);
+    fn write<B: BufMut>(&self, buf: &mut B) {
+        self.raw.write(buf);
     }
 
-    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
-        Self::read_from(reader).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
+    fn read<B: Buf>(buf: &mut B) -> Result<Self, CodecError> {
+        Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
     }
 
     fn len_encoded(&self) -> usize {
@@ -318,12 +319,12 @@ pub struct Signature {
 }
 
 impl Codec for Signature {
-    fn write(&self, writer: &mut impl Writer) {
-        self.raw.write(writer);
+    fn write<B: BufMut>(&self, buf: &mut B) {
+        self.raw.write(buf);
     }
 
-    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
-        Self::read_from(reader).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
+    fn read<B: Buf>(buf: &mut B) -> Result<Self, CodecError> {
+        Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
     }
 
     fn len_encoded(&self) -> usize {
@@ -421,6 +422,7 @@ impl Display for Signature {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
     use rand::rngs::OsRng;
 
     fn test_sign_and_verify(
@@ -522,7 +524,7 @@ mod tests {
         );
         let encoded = private_key.encode();
         assert_eq!(encoded.len(), PRIVATE_KEY_LENGTH);
-        let decoded = PrivateKey::decode(encoded).unwrap();
+        let decoded = PrivateKey::decode::<Bytes>(encoded).unwrap();
         assert_eq!(private_key, decoded);
     }
 
@@ -536,7 +538,7 @@ mod tests {
         );
         let encoded = public_key.encode();
         assert_eq!(encoded.len(), PUBLIC_KEY_LENGTH);
-        let decoded = PublicKey::decode(encoded).unwrap();
+        let decoded = PublicKey::decode::<Bytes>(encoded).unwrap();
         assert_eq!(public_key, decoded);
     }
 
@@ -552,7 +554,7 @@ mod tests {
         );
         let encoded = signature.encode();
         assert_eq!(encoded.len(), SIGNATURE_LENGTH);
-        let decoded = Signature::decode(encoded).unwrap();
+        let decoded = Signature::decode::<Bytes>(encoded).unwrap();
         assert_eq!(signature, decoded);
     }
 
