@@ -49,33 +49,33 @@ impl PeakIterator {
     ///
     /// The implementation verifies that peaks in the MMR of the given size have strictly decreasing
     /// height, which is a necessary condition for MMR validity.
-    pub(crate) fn check_validity(size: u64) -> bool {
-        if size == 0 {
+    pub(crate) fn check_validity(mut size: u64) -> bool {
+        if size <= 1 {
             return true;
         }
-        let start = u64::MAX >> size.leading_zeros();
-        let mut two_h = 1 << start.trailing_ones();
-        let mut node_pos = start - 1;
-        while two_h > 1 {
-            if node_pos < size {
-                if two_h == 2 {
-                    // If this peak is a leaf yet there are more nodes remaining, then this MMR is
-                    // invalid.
-                    return node_pos == size - 1;
-                }
-                // move to the right sibling
-                node_pos += two_h - 1;
-                if node_pos < size {
-                    // If the right sibling is in the MMR, then it is invalid.
-                    return false;
-                }
-                continue;
+
+        // Consider each mountain from left to right.
+        // For each, subtract its size from `size`.
+        // We should find that the size eventually reaches 0
+        // (the last mountain has more than 1 element) or 1
+        // (the last mountain has 1 element).
+        // If the size never reaches 0, there are "left over"
+        // nodes and there isn't an MMR with the given `size`.
+
+        // Height of the root of the smallest tree containing `size`
+        // (leaf is height 0)
+        let mut height = 63 - size.leading_zeros();
+
+        while height > 0 && size > 1 {
+            // Subtract the size of the next mountain.
+            // If it's bigger than the remaining size, it's not in this range.
+            let mountain_size = (1 << (height + 1)) - 1;
+            if size >= mountain_size {
+                size -= mountain_size;
             }
-            // descend to the left child
-            two_h >>= 1;
-            node_pos -= two_h;
+            height -= 1;
         }
-        true
+        size <= 1
     }
 }
 
@@ -362,6 +362,42 @@ mod tests {
                 assert!(leaf_pos_to_num(i).is_none());
             }
             last_leaf_pos = *leaf_pos;
+        }
+    }
+
+    #[test]
+    fn test_check_validity() {
+        // Test cases for check_validity function
+        let valid_sizes = vec![
+            0, 1, 3, 4, 7, 8, 10, 11, 15, 16, 18, 19, 22, 23, 25, 26, 31, 32, 34, 35, 38, 39, 41,
+            42, 46, 47, 49, 50, 53, 54, 56, 57, 63, 64, 127, 128, 255, 256, 511, 512, 1023, 1024,
+            2047, 2048, 4095, 4096,
+        ];
+        let invalid_sizes = vec![
+            2, 5, 6, 9, 12, 13, 14, 17, 20, 21, 24, 27, 28, 29, 30, 36, 37, 40, 43, 44, 45, 48, 51,
+            52, 55, 58, 65, 129, 257, 513,
+        ];
+
+        for size in valid_sizes {
+            assert!(
+                PeakIterator::check_validity(size),
+                "Expected validity for size {}",
+                size
+            );
+        }
+
+        for size in invalid_sizes {
+            assert!(
+                !PeakIterator::check_validity(size),
+                "Expected invalidity for size {}",
+                size
+            );
+        }
+
+        for i in 2..63 {
+            assert!(PeakIterator::check_validity((1 << i) - 1));
+            assert!(PeakIterator::check_validity(1 << i));
+            assert!(!PeakIterator::check_validity((1 << i) + 1));
         }
     }
 }
