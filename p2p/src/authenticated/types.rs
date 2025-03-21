@@ -4,6 +4,7 @@ use commonware_cryptography::Scheme;
 use std::net::SocketAddr;
 
 // Payload is the only allowed message format that can be sent between peers.
+#[derive(Clone, Debug, PartialEq)]
 pub enum Payload<C: Scheme> {
     /// Bit vector that represents the peers a peer knows about.
     ///
@@ -69,7 +70,7 @@ impl<C: Scheme> Codec for Payload<C> {
 /// BitVec is a bit vector that represents the peers a peer knows about at a given index.
 ///
 /// A peer should respond with a `Peers` message if they know of any peers that the sender does not.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct BitVec {
     /// The index that the bit vector applies to.
     pub index: u64,
@@ -99,7 +100,7 @@ impl Codec for BitVec {
 ///
 /// This is used to share the peer's socket address and public key with other peers in a verified
 /// manner.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SignedPeerInfo<C: Scheme> {
     /// The socket address of the peer.
     pub socket: SocketAddr,
@@ -144,7 +145,7 @@ impl<C: Scheme> Codec for SignedPeerInfo<C> {
 }
 
 // Data is an arbitrary message sent between peers.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Data {
     /// A unique identifier for the channel the message is sent on.
     ///
@@ -169,5 +170,103 @@ impl Codec for Data {
         let channel = u32::read(reader)?;
         let message = Bytes::read(reader)?;
         Ok(Data { channel, message })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_cryptography::Secp256r1;
+
+    fn signed_peer_info() -> SignedPeerInfo<Secp256r1> {
+        let mut rng = rand::thread_rng();
+        let mut c = Secp256r1::new(&mut rng);
+        SignedPeerInfo {
+            socket: SocketAddr::from(([127, 0, 0, 1], 8080)),
+            timestamp: 1234567890,
+            public_key: c.public_key(),
+            signature: c.sign(None, &[1, 2, 3, 4, 5]),
+        }
+    }
+
+    #[test]
+    fn test_bitvec_codec() {
+        let original = BitVec {
+            index: 0,
+            bits: vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+        };
+        let encoded = original.encode();
+        let decoded = BitVec::decode(encoded).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_signed_peer_info_codec() {
+        let original = signed_peer_info();
+        let encoded = original.encode();
+        let decoded = SignedPeerInfo::<Secp256r1>::decode(encoded).unwrap();
+        assert_eq!(original.socket, decoded.socket);
+        assert_eq!(original.timestamp, decoded.timestamp);
+        assert_eq!(original.public_key, decoded.public_key);
+        assert_eq!(original.signature, decoded.signature);
+    }
+
+    #[test]
+    fn test_data_codec() {
+        let original = Data {
+            channel: 12345,
+            message: Bytes::from("Hello, world!"),
+        };
+        let encoded = original.encode();
+        let decoded = Data::decode(encoded).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_payload_codec() {
+        // Test BitVec
+        let original = BitVec {
+            index: 0,
+            bits: vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+        };
+        let encoded = Payload::<Secp256r1>::BitVec(original.clone()).encode();
+        let decoded = match Payload::<Secp256r1>::decode(encoded) {
+            Ok(Payload::<Secp256r1>::BitVec(b)) => b,
+            _ => panic!(),
+        };
+        assert_eq!(original, decoded);
+
+        // Test Peers
+        let original = vec![signed_peer_info(), signed_peer_info()];
+        let encoded = Payload::Peers(original.clone()).encode();
+        let decoded = match Payload::<Secp256r1>::decode(encoded) {
+            Ok(Payload::<Secp256r1>::Peers(p)) => p,
+            _ => panic!(),
+        };
+        for (a, b) in original.iter().zip(decoded.iter()) {
+            assert_eq!(a.socket, b.socket);
+            assert_eq!(a.timestamp, b.timestamp);
+            assert_eq!(a.public_key, b.public_key);
+            assert_eq!(a.signature, b.signature);
+        }
+
+        // Test Data
+        let original = Data {
+            channel: 12345,
+            message: Bytes::from("Hello, world!"),
+        };
+        let encoded = Payload::<Secp256r1>::Data(original.clone()).encode();
+        let decoded = match Payload::<Secp256r1>::decode(encoded) {
+            Ok(Payload::<Secp256r1>::Data(d)) => d,
+            _ => panic!(),
+        };
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_payload_decode_invalid_type() {
+        let invalid_payload = vec![3, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+        let result = Payload::<Secp256r1>::decode(invalid_payload);
+        assert!(result.is_err());
     }
 }
