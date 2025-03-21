@@ -408,9 +408,39 @@ impl<B: Blob, E: Storage<B> + Metrics, A: Array> Journal<B, E, A> {
         panic!("no blobs found");
     }
 
+    /// Return the potential new outcomes for `oldest_retained_pos` that will result from calling
+    /// `prune` with `min_item_pos` to facilitate recovery should the prune operation fail. The
+    /// result will be empty if the `min_item_pos` is within the oldest blob (and hence no blob can
+    /// be pruned).
+    ///
+    /// The `prune` function works by atomically deleting chunks of `items_per_blob` items at a
+    /// time. This method exposes the potential outcomes, with the last value corresponding to a
+    /// successfully completed call.
+    pub fn prune_pos_outcomes(&self, min_item_pos: u64) -> Vec<u64> {
+        let mut oldest_blob = self.oldest_blob().0;
+        let mut prune_to_blob = min_item_pos / self.cfg.items_per_blob;
+        // We will never prune the newest blob.
+        let (newest_blob, _) = self.newest_blob();
+        if prune_to_blob > newest_blob {
+            prune_to_blob = newest_blob;
+        }
+
+        let mut outcomes = Vec::new();
+        while oldest_blob != prune_to_blob {
+            oldest_blob += 1;
+            outcomes.push(oldest_blob * self.cfg.items_per_blob);
+        }
+
+        outcomes
+    }
+
     /// Allow the journal to prune items older than `min_item_pos`. The journal may not prune all
-    /// such items in order to preserve blob boundaries, but the amount of such items will always
-    /// be less than the configured number of items per blob.
+    /// such items in order to preserve blob boundaries, but the amount of such items will always be
+    /// less than the configured number of items per blob.
+    ///
+    /// Use the last value of `prune_pos_outcomes` to get the actual pruning boundary position that
+    /// will result for a successful call with a given value of `min_item_pos`. Note that pruning
+    /// will not be atomic if there is more than one outcome in this result.
     pub async fn prune(&mut self, min_item_pos: u64) -> Result<(), Error> {
         let oldest_blob = self.oldest_blob().0;
         let mut new_oldest_blob = min_item_pos / self.cfg.items_per_blob;
@@ -421,7 +451,7 @@ impl<B: Blob, E: Storage<B> + Metrics, A: Array> Journal<B, E, A> {
         // Make sure we never prune the most recent blob
         let newest_blob = self.newest_blob();
         if new_oldest_blob > newest_blob.0 {
-            new_oldest_blob = newest_blob.0
+            new_oldest_blob = newest_blob.0;
         }
 
         for index in oldest_blob..new_oldest_blob {
