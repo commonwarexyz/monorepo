@@ -1,7 +1,8 @@
 //! A `u64` array type with a prefix byte to allow for multiple key contexts.
 
 use crate::Array;
-use commonware_codec::{Codec, Error as CodecError, Reader, SizedCodec, Writer};
+use bytes::{Buf, BufMut};
+use commonware_codec::{Codec, Error as CodecError, SizedCodec};
 use std::{
     cmp::{Ord, PartialOrd},
     fmt::{Debug, Display},
@@ -41,12 +42,12 @@ impl U64 {
 }
 
 impl Codec for U64 {
-    fn write(&self, writer: &mut impl Writer) {
-        self.0.write(writer);
+    fn write<B: BufMut>(&self, buf: &mut B) {
+        self.0.write(buf);
     }
 
-    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
-        <[u8; Self::LEN_ENCODED]>::read(reader).map(Self)
+    fn read<B: Buf>(buf: &mut B) -> Result<Self, CodecError> {
+        <[u8; Self::LEN_ENCODED]>::read(buf).map(Self)
     }
 
     fn len_encoded(&self) -> usize {

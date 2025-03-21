@@ -6,8 +6,22 @@
 use crate::error::Error;
 use bytes::{Buf, BufMut};
 
+fn must_u64<T: TryInto<u64>>(value: T) -> u64 {
+    value
+        .try_into()
+        .unwrap_or_else(|_| panic!("Failed to convert to u64"))
+}
+
+fn must_i64<T: TryInto<i64>>(value: T) -> i64 {
+    value
+        .try_into()
+        .unwrap_or_else(|_| panic!("Failed to convert to i64"))
+}
+
 /// Encodes a unsigned 64-bit integer as a varint
-pub fn encode_varint(value: u64, buf: &mut impl BufMut) {
+pub fn write<T: TryInto<u64>>(value: T, buf: &mut impl BufMut) {
+    let value = must_u64(value);
+
     if value < 0x80 {
         // Fast path for small values (common case for lengths)
         buf.put_u8(value as u8);
@@ -23,7 +37,7 @@ pub fn encode_varint(value: u64, buf: &mut impl BufMut) {
 }
 
 /// Decodes a unsigned 64-bit integer from a varint
-pub fn decode_varint(buf: &mut impl Buf) -> Result<u64, Error> {
+pub fn read<T: TryFrom<u64>>(buf: &mut impl Buf) -> Result<T, Error> {
     let mut result = 0u64;
     let mut shift = 0;
 
@@ -45,7 +59,7 @@ pub fn decode_varint(buf: &mut impl Buf) -> Result<u64, Error> {
 
         // If the continuation bit is not set, return.
         if byte & 0x80 == 0 {
-            return Ok(result);
+            return result.try_into().map_err(|_| Error::InvalidVarint);
         }
 
         // Each byte has 7 bits of data.
@@ -54,7 +68,8 @@ pub fn decode_varint(buf: &mut impl Buf) -> Result<u64, Error> {
 }
 
 /// Calculates the number of bytes needed to encode a value as a varint
-pub fn varint_size(value: u64) -> usize {
+pub fn size<T: TryInto<u64>>(value: T) -> usize {
+    let value = must_u64(value);
     match value {
         0..=0x7F => 1,
         0x80..=0x3FFF => 2,
@@ -80,19 +95,20 @@ fn to_i64(value: u64) -> i64 {
 }
 
 /// Encodes a signed 64-bit integer as a varint using ZigZag encoding
-pub fn encode_varint_i64(value: i64, buf: &mut impl BufMut) {
-    encode_varint(to_u64(value), buf);
+pub fn write_i64<T: TryInto<i64>>(value: T, buf: &mut impl BufMut) {
+    let value = must_i64(value);
+    write(to_u64(value), buf);
 }
 
 /// Decodes a signed 64-bit integer from a varint using ZigZag encoding
-pub fn decode_varint_i64(buf: &mut impl Buf) -> Result<i64, Error> {
-    let zigzag = decode_varint(buf)?;
-    Ok(to_i64(zigzag))
+pub fn read_i64<T: TryFrom<i64>>(buf: &mut impl Buf) -> Result<T, Error> {
+    let zigzag = read(buf)?;
+    to_i64(zigzag).try_into().map_err(|_| Error::InvalidVarint)
 }
 
 /// Calculates the number of bytes needed to encode a signed integer as a varint
-pub fn varint_i64_size(value: i64) -> usize {
-    varint_size(to_u64(value))
+pub fn size_i64(value: i64) -> usize {
+    size(to_u64(value))
 }
 
 #[cfg(test)]
@@ -124,12 +140,12 @@ mod tests {
 
         for &value in &test_cases {
             let mut buf = Vec::new();
-            encode_varint(value, &mut buf);
+            write(value, &mut buf);
 
-            assert_eq!(buf.len(), varint_size(value));
+            assert_eq!(buf.len(), size(value));
 
             let mut read_buf = &buf[..];
-            let decoded = decode_varint(&mut read_buf).unwrap();
+            let decoded: u64 = read(&mut read_buf).unwrap();
 
             assert_eq!(decoded, value);
             assert_eq!(read_buf.len(), 0);
@@ -158,12 +174,12 @@ mod tests {
 
         for &value in &test_cases {
             let mut buf = Vec::new();
-            encode_varint_i64(value, &mut buf);
+            write_i64(value, &mut buf);
 
-            assert_eq!(buf.len(), varint_i64_size(value));
+            assert_eq!(buf.len(), size_i64(value));
 
             let mut read_buf = &buf[..];
-            let decoded = decode_varint_i64(&mut read_buf).unwrap();
+            let decoded = read_i64::<i64>(&mut read_buf).unwrap();
 
             assert_eq!(decoded, value);
             assert_eq!(read_buf.len(), 0,);
@@ -171,41 +187,15 @@ mod tests {
     }
 
     #[test]
-    fn test_varint_small_values() {
-        let values = [0u64, 1u64, 127u64];
-        for value in values {
-            let mut buf = Vec::new();
-            encode_varint(value, &mut buf);
-            let mut read_buf = Bytes::from(buf);
-            let decoded = decode_varint(&mut read_buf).unwrap();
-            assert_eq!(decoded, value);
-            assert_eq!(read_buf.len(), 0);
-        }
-    }
-
-    #[test]
-    fn test_varint_multi_byte() {
-        let values = [128u64, 300u64, u64::MAX];
-        for value in values {
-            let mut buf = Vec::new();
-            encode_varint(value, &mut buf);
-            let mut read_buf = Bytes::from(buf);
-            let decoded = decode_varint(&mut read_buf).unwrap();
-            assert_eq!(decoded, value);
-            assert_eq!(read_buf.len(), 0);
-        }
-    }
-
-    #[test]
     fn test_varint_insufficient_buffer() {
         let mut buf = Bytes::from_static(&[0x80]);
-        assert!(matches!(decode_varint(&mut buf), Err(Error::EndOfBuffer)));
+        assert!(matches!(read::<u64>(&mut buf), Err(Error::EndOfBuffer)));
     }
 
     #[test]
     fn test_varint_invalid() {
         let mut buf =
             Bytes::from_static(&[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x02]);
-        assert!(matches!(decode_varint(&mut buf), Err(Error::InvalidVarint)));
+        assert!(matches!(read::<u64>(&mut buf), Err(Error::InvalidVarint)));
     }
 }
