@@ -19,7 +19,8 @@
 //! # Example
 //!
 //! ```
-//! use commonware_codec::{Codec, Reader, Writer, Error};
+//! use bytes::{Buf, BufMut};
+//! use commonware_codec::{Codec, Error};
 //!
 //! // Define a custom struct
 //! #[derive(Debug, Clone, PartialEq)]
@@ -31,18 +32,18 @@
 //!
 //! // Implement the Codec trait
 //! impl Codec for Point {
-//!     fn write(&self, writer: &mut impl Writer) {
+//!     fn write<B: BufMut>(&self, buf: &mut B) {
 //!         // Basic types can be written by inferring the type
-//!         self.xy.write(writer);
-//!         self.z.write(writer);
-//!         self.metadata.write(writer);
+//!         self.xy.write(buf);
+//!         self.z.write(buf);
+//!         self.metadata.write(buf);
 //!     }
 //!
-//!     fn read(reader: &mut impl Reader) -> Result<Self, Error> {
+//!     fn read<B: Buf>(buf: &mut B) -> Result<Self, Error> {
 //!         // Basic types can be inferred by the return type
-//!         let xy = <(u64, u64)>::read(reader)?;
-//!         let z = <Option<u32>>::read(reader)?;
-//!         let metadata = <[u8; 11]>::read(reader)?;
+//!         let xy = <(u64, u64)>::read(buf)?;
+//!         let z = <Option<u32>>::read(buf)?;
+//!         let metadata = <[u8; 11]>::read(buf)?;
 //!         Ok(Self { xy, z, metadata })
 //!     }
 //!
@@ -52,14 +53,13 @@
 //! }
 //! ```
 
-pub mod buffer;
 pub mod codec;
 pub mod error;
 pub mod types;
+pub mod util;
 pub mod varint;
 
 // Re-export main types and traits
-pub use buffer::{ReadBuffer, WriteBuffer};
-pub use codec::{Codec, Reader, SizedCodec, Writer};
+pub use codec::{Codec, SizedCodec};
 pub use error::Error;
 pub use types::{net, primitives};

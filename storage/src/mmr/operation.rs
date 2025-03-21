@@ -1,7 +1,8 @@
 //! An `Array` implementation for operations applied to a `MutableMmr` K/V store, making them
 //! storable in a `fixed::Journal`.
 
-use commonware_codec::{Codec, Error as CodecError, Reader, SizedCodec, Writer};
+use bytes::{Buf, BufMut};
+use commonware_codec::{Codec, Error as CodecError, SizedCodec};
 use commonware_utils::Array;
 use std::{
     cmp::{Ord, PartialOrd},
@@ -143,13 +144,17 @@ impl<K: Array, V: Array> Operation<K, V> {
 }
 
 impl<K: Array, V: Array> Codec for Operation<K, V> {
-    fn write(&self, writer: &mut impl Writer) {
-        writer.write_fixed(&self.data);
+    fn write<B: BufMut>(&self, buf: &mut B) {
+        assert!(self.data.len() == Self::LEN_ENCODED);
+        buf.put(&self.data[..]);
     }
 
-    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
-        let value = reader.read_n_bytes(Self::LEN_ENCODED)?;
-        Self::try_from(value.as_ref()).map_err(|e| CodecError::Wrapped("Operation", e.into()))
+    fn read<B: Buf>(buf: &mut B) -> Result<Self, CodecError> {
+        commonware_codec::util::at_least(buf, Self::LEN_ENCODED)?;
+        let mut value = vec![0; Self::LEN_ENCODED];
+        buf.copy_to_slice(&mut value);
+        Self::try_from(value.as_slice())
+            .map_err(|e: Error<K, V>| CodecError::Wrapped("Operation", e.into()))
     }
 
     fn len_encoded(&self) -> usize {

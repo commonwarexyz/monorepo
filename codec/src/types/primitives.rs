@@ -1,74 +1,120 @@
 //! Implementations of Codec for common types
 
-use crate::{
-    codec::{Codec, Reader, Writer},
-    varint, Error, SizedCodec,
-};
-use bytes::Bytes;
+use crate::{util::at_least, varint, Codec, Error, SizedCodec};
+use bytes::{Buf, BufMut, Bytes};
 use paste::paste;
 
-macro_rules! impl_primitive {
-    ($type:ty, $read_method:ident, $write_method:ident, $size:expr) => {
+// Numeric types implementation
+macro_rules! impl_numeric {
+    ($type:ty, $read_method:ident, $write_method:ident) => {
         impl Codec for $type {
             #[inline]
-            fn write(&self, writer: &mut impl Writer) {
-                writer.$write_method(*self);
+            fn write<B: BufMut>(&self, buf: &mut B) {
+                buf.$write_method(*self);
             }
 
             #[inline]
             fn len_encoded(&self) -> usize {
-                std::mem::size_of::<$type>()
+                Self::LEN_ENCODED
             }
 
             #[inline]
-            fn read(reader: &mut impl Reader) -> Result<Self, Error> {
-                reader.$read_method()
+            fn read<B: Buf>(buf: &mut B) -> Result<Self, Error> {
+                at_least(buf, std::mem::size_of::<$type>())?;
+                Ok(buf.$read_method())
             }
         }
 
         impl SizedCodec for $type {
-            const LEN_ENCODED: usize = $size;
+            const LEN_ENCODED: usize = std::mem::size_of::<$type>();
         }
     };
 }
 
-impl_primitive!(u8, read_u8, write_u8, 1);
-impl_primitive!(u16, read_u16, write_u16, 2);
-impl_primitive!(u32, read_u32, write_u32, 4);
-impl_primitive!(u64, read_u64, write_u64, 8);
-impl_primitive!(u128, read_u128, write_u128, 16);
-impl_primitive!(i8, read_i8, write_i8, 1);
-impl_primitive!(i16, read_i16, write_i16, 2);
-impl_primitive!(i32, read_i32, write_i32, 4);
-impl_primitive!(i64, read_i64, write_i64, 8);
-impl_primitive!(i128, read_i128, write_i128, 16);
-impl_primitive!(f32, read_f32, write_f32, 4);
-impl_primitive!(f64, read_f64, write_f64, 8);
-impl_primitive!(bool, read_bool, write_bool, 1);
+impl_numeric!(u8, get_u8, put_u8);
+impl_numeric!(u16, get_u16, put_u16);
+impl_numeric!(u32, get_u32, put_u32);
+impl_numeric!(u64, get_u64, put_u64);
+impl_numeric!(u128, get_u128, put_u128);
+impl_numeric!(i8, get_i8, put_i8);
+impl_numeric!(i16, get_i16, put_i16);
+impl_numeric!(i32, get_i32, put_i32);
+impl_numeric!(i64, get_i64, put_i64);
+impl_numeric!(i128, get_i128, put_i128);
+impl_numeric!(f32, get_f32, put_f32);
+impl_numeric!(f64, get_f64, put_f64);
 
-// Bytes implementation
-impl Codec for Bytes {
+// Usize implementation
+impl Codec for usize {
     #[inline]
-    fn write(&self, writer: &mut impl Writer) {
-        writer.write_bytes(self);
+    fn write<B: BufMut>(&self, buf: &mut B) {
+        varint::write(*self, buf);
     }
 
     #[inline]
     fn len_encoded(&self) -> usize {
-        self.len() + varint::varint_size(self.len() as u64)
+        varint::size(*self as u64)
     }
 
     #[inline]
-    fn read(reader: &mut impl Reader) -> Result<Self, Error> {
-        reader.read_bytes()
+    fn read<B: Buf>(buf: &mut B) -> Result<Self, Error> {
+        varint::read(buf)
+    }
+}
+
+// Bool implementation
+impl Codec for bool {
+    #[inline]
+    fn write<B: BufMut>(&self, buf: &mut B) {
+        buf.put_u8(if *self { 1 } else { 0 });
+    }
+
+    #[inline]
+    fn len_encoded(&self) -> usize {
+        Self::LEN_ENCODED
+    }
+
+    #[inline]
+    fn read<B: Buf>(buf: &mut B) -> Result<Self, Error> {
+        at_least(buf, 1)?;
+        match buf.get_u8() {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(Error::InvalidBool),
+        }
+    }
+}
+
+impl SizedCodec for bool {
+    const LEN_ENCODED: usize = 1;
+}
+
+// Bytes implementation
+impl Codec for Bytes {
+    #[inline]
+    fn write<B: BufMut>(&self, buf: &mut B) {
+        self.len().write(buf);
+        buf.put_slice(self);
+    }
+
+    #[inline]
+    fn len_encoded(&self) -> usize {
+        self.len() + varint::size(self.len() as u64)
+    }
+
+    #[inline]
+    fn read<B: Buf>(buf: &mut B) -> Result<Self, Error> {
+        let len = <usize>::read(buf)?;
+        at_least(buf, len)?;
+        Ok(buf.copy_to_bytes(len))
     }
 }
 
 // Constant-size array implementation
 impl<const N: usize> Codec for [u8; N] {
     #[inline]
-    fn write(&self, writer: &mut impl Writer) {
-        writer.write_fixed(self);
+    fn write<B: BufMut>(&self, buf: &mut B) {
+        buf.put(&self[..]);
     }
 
     #[inline]
@@ -77,8 +123,11 @@ impl<const N: usize> Codec for [u8; N] {
     }
 
     #[inline]
-    fn read(reader: &mut impl Reader) -> Result<Self, Error> {
-        reader.read_fixed()
+    fn read<B: Buf>(buf: &mut B) -> Result<Self, Error> {
+        at_least(buf, N)?;
+        let mut dst = [0; N];
+        buf.copy_to_slice(&mut dst);
+        Ok(dst)
     }
 }
 
@@ -89,8 +138,11 @@ impl<const N: usize> SizedCodec for [u8; N] {
 // Option implementation
 impl<T: Codec> Codec for Option<T> {
     #[inline]
-    fn write(&self, writer: &mut impl Writer) {
-        writer.write_option(self);
+    fn write<B: BufMut>(&self, buf: &mut B) {
+        self.is_some().write(buf);
+        if let Some(inner) = self {
+            inner.write(buf);
+        }
     }
 
     #[inline]
@@ -102,8 +154,12 @@ impl<T: Codec> Codec for Option<T> {
     }
 
     #[inline]
-    fn read(reader: &mut impl Reader) -> Result<Self, Error> {
-        reader.read_option()
+    fn read<B: Buf>(buf: &mut B) -> Result<Self, Error> {
+        if bool::read(buf)? {
+            Ok(Some(T::read(buf)?))
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -112,16 +168,16 @@ macro_rules! impl_codec_for_tuple {
     ($($index:literal),*) => {
         paste! {
             impl<$( [<T $index>]: Codec ),*> Codec for ( $( [<T $index>], )* ) {
-                fn write(&self, writer: &mut impl Writer) {
-                    $( self.$index.write(writer); )*
+                fn write<B: BufMut>(&self, buf: &mut B) {
+                    $( self.$index.write(buf); )*
                 }
 
                 fn len_encoded(&self) -> usize {
                     0 $( + self.$index.len_encoded() )*
                 }
 
-                fn read(reader: &mut impl Reader) -> Result<Self, Error> {
-                    Ok(( $( [<T $index>]::read(reader)?, )* ))
+                fn read<B: Buf>(buf: &mut B) -> Result<Self, Error> {
+                    Ok(( $( [<T $index>]::read(buf)?, )* ))
                 }
             }
         }
@@ -145,19 +201,27 @@ impl_codec_for_tuple!(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11);
 // Vec implementation
 impl<T: Codec> Codec for Vec<T> {
     #[inline]
-    fn write(&self, writer: &mut impl Writer) {
-        writer.write_vec(self);
+    fn write<B: BufMut>(&self, buf: &mut B) {
+        self.len().write(buf);
+        for item in self {
+            item.write(buf);
+        }
     }
 
     #[inline]
     fn len_encoded(&self) -> usize {
-        let len = varint::varint_size(self.len() as u64);
+        let len = varint::size(self.len() as u64);
         self.iter().map(Codec::len_encoded).sum::<usize>() + len
     }
 
     #[inline]
-    fn read(reader: &mut impl Reader) -> Result<Self, Error> {
-        reader.read_vec()
+    fn read<B: Buf>(buf: &mut B) -> Result<Self, Error> {
+        let len = <usize>::read(buf)?;
+        let mut vec = Vec::with_capacity(len);
+        for _ in 0..len {
+            vec.push(T::read(buf)?);
+        }
+        Ok(vec)
     }
 }
 
@@ -245,7 +309,7 @@ mod tests {
             let encoded = value.encode();
             assert_eq!(
                 encoded.len(),
-                varint::varint_size(value.len() as u64) + value.len()
+                varint::size(value.len() as u64) + value.len()
             );
             let decoded = Bytes::decode(encoded).unwrap();
             assert_eq!(value, decoded);
