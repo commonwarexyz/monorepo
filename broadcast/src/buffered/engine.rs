@@ -171,7 +171,7 @@ impl<
                     };
 
                     // Decode the message
-                    let message = match M::decode(msg) {
+                    let message = match M::decode::<Bytes>(msg) {
                         Ok(message) => message,
                         Err(err) => {
                             warn!(?err, ?peer, "failed to decode message");
