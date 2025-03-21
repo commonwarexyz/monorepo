@@ -62,8 +62,8 @@ impl PeakIterator {
         // If the size never reaches 0, there are "left over"
         // nodes and there isn't an MMR with the given `size`.
 
-        // Height of the root of the smallest tree containing `size`
-        // (leaf is height 0)
+        // Height of the root of the smallest perfect binary
+        // tree containing `size` (leaf is height 0)
         let mut height = 63 - size.leading_zeros();
 
         while height > 0 && size > 1 {
