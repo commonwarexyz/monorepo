@@ -49,7 +49,7 @@ impl PeakIterator {
     ///
     /// The implementation verifies that peaks in the MMR of the given size have strictly decreasing
     /// height, which is a necessary condition for MMR validity.
-    pub(crate) fn check_validity(size: u64) -> bool {
+    pub(crate) const fn check_validity(size: u64) -> bool {
         if size == 0 {
             return true;
         }
@@ -129,7 +129,7 @@ pub(crate) fn nodes_needing_parents(peak_iterator: PeakIterator) -> Vec<u64> {
 ///
 /// This computation is O(log2(n)) in the given position.
 #[allow(dead_code)] // TODO: remove this when we start using it
-pub(crate) fn leaf_pos_to_num(leaf_pos: u64) -> Option<u64> {
+pub(crate) const fn leaf_pos_to_num(leaf_pos: u64) -> Option<u64> {
     if leaf_pos == 0 {
         return Some(0);
     }
@@ -163,7 +163,7 @@ pub(crate) fn leaf_pos_to_num(leaf_pos: u64) -> Option<u64> {
 /// Returns the position of the leaf with number `leaf_num` in an MMR.
 ///
 /// This computation is O(log2(n)) in `leaf_num`.
-pub(crate) fn leaf_num_to_pos(leaf_num: u64) -> u64 {
+pub(crate) const fn leaf_num_to_pos(leaf_num: u64) -> u64 {
     if leaf_num == 0 {
         return 0;
     }

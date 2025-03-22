@@ -45,17 +45,12 @@ impl<H: CHasher> Storage<H::Digest> for Mmr<H> {
     }
 
     async fn get_node(&self, position: u64) -> Result<Option<H::Digest>, Error> {
-        if position < self.oldest_retained_pos {
-            match self.old_peaks.get(&position) {
-                Some(node) => Ok(Some(*node)),
-                None => Ok(None),
-            }
+        let digest = if position < self.oldest_retained_pos {
+            self.old_peaks.get(&position)
         } else {
-            match self.nodes.get(self.pos_to_index(position)) {
-                Some(node) => Ok(Some(*node)),
-                None => Ok(None),
-            }
-        }
+            self.nodes.get(self.pos_to_index(position))
+        };
+        Ok(digest.copied())
     }
 }
 
@@ -300,11 +295,11 @@ impl<H: CHasher> Mmr<H> {
     /// Use prune(pos) to guarantee a desired node (and all that follow it) will remain provable
     /// after pruning.
     pub(crate) fn prune_to_pos(&mut self, pos: u64) {
-        for peak in self.peak_iterator() {
-            if peak.0 < pos && peak.0 >= self.oldest_retained_pos {
+        for (peak_pos, _) in self.peak_iterator() {
+            if peak_pos < pos && peak_pos >= self.oldest_retained_pos {
                 assert!(self
                     .old_peaks
-                    .insert(peak.0, self.nodes[self.pos_to_index(peak.0)])
+                    .insert(peak_pos, self.nodes[self.pos_to_index(peak_pos)])
                     .is_none());
             }
         }
@@ -327,10 +322,10 @@ impl<H: CHasher> Mmr<H> {
 
         // Create the "old_peaks" of the MMR in the fully pruned state.
         let mut cloned_old_peaks = self.old_peaks.clone();
-        for peak in self.peak_iterator() {
-            if peak.0 < pos && peak.0 >= self.oldest_retained_pos {
+        for (peak_pos, _) in self.peak_iterator() {
+            if peak_pos < pos && peak_pos >= self.oldest_retained_pos {
                 assert!(cloned_old_peaks
-                    .insert(peak.0, self.nodes[self.pos_to_index(peak.0)])
+                    .insert(peak_pos, self.nodes[self.pos_to_index(peak_pos)])
                     .is_none());
             }
         }
