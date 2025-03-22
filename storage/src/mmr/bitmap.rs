@@ -18,9 +18,9 @@ struct BitmapStorage<'a, H: CHasher> {
 impl<H: CHasher + Send + Sync> Storage<H::Digest> for BitmapStorage<'_, H> {
     async fn get_node(&self, pos: u64) -> Result<Option<H::Digest>, Error> {
         if pos < self.mmr.size() {
-            self.mmr.get_node(pos).await
+            Ok(self.mmr.get_node(pos))
         } else {
-            self.last_chunk_mmr.get_node(pos).await
+            Ok(self.last_chunk_mmr.get_node(pos))
         }
     }
 
