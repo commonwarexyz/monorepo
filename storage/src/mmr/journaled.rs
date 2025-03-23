@@ -27,6 +27,9 @@ pub struct Config {
     /// the MMR nodes.
     pub journal_partition: String,
 
+    /// The blob cache_capacity to use for the journal.
+    pub cache_capacity: usize,
+
     /// The name of the `commonware-runtime::Storage` storage partition used for the metadata
     /// containing the MMR's current peaks.
     pub metadata_partition: String,
@@ -77,6 +80,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
         let journal_cfg = JConfig {
             partition: cfg.journal_partition,
             items_per_blob: cfg.items_per_blob,
+            cache_capacity: cfg.cache_capacity,
         };
         let mut journal =
             Journal::<B, E, H::Digest>::init(context.with_label("mmr_journal"), journal_cfg)
@@ -360,6 +364,7 @@ mod tests {
                 journal_partition: "journal_partition".into(),
                 metadata_partition: "metadata_partition".into(),
                 items_per_blob: 7,
+                cache_capacity: 100,
             };
             let mut mmr = Mmr::<_, _, Sha256>::init(context.clone(), cfg.clone())
                 .await
@@ -385,6 +390,7 @@ mod tests {
                 journal_partition: "journal_partition".into(),
                 metadata_partition: "metadata_partition".into(),
                 items_per_blob: 7,
+                cache_capacity: 100,
             };
             // Build a test MMR with 255 leaves
             let mut mmr = Mmr::<_, _, Sha256>::init(context.clone(), cfg.clone())
@@ -454,6 +460,7 @@ mod tests {
                 journal_partition: "journal_partition".into(),
                 metadata_partition: "metadata_partition".into(),
                 items_per_blob: 7,
+                cache_capacity: 100,
             };
             let mut mmr = Mmr::<_, _, Sha256>::init(context.clone(), cfg.clone())
                 .await
@@ -543,6 +550,7 @@ mod tests {
                 journal_partition: "journal_partition".into(),
                 metadata_partition: "metadata_partition".into(),
                 items_per_blob: 7,
+                cache_capacity: 100,
             };
 
             // Build two test MMRs with 2000 leaves, one that will be pruned and one that won't, and
@@ -555,6 +563,7 @@ mod tests {
                 journal_partition: "unpruned_journal_partition".into(),
                 metadata_partition: "unpruned_metadata_partition".into(),
                 items_per_blob: 7,
+                cache_capacity: 100,
             };
             let mut mmr = Mmr::<_, _, Sha256>::init(context.clone(), cfg_unpruned)
                 .await
@@ -625,6 +634,7 @@ mod tests {
                 journal_partition: "journal_partition".into(),
                 metadata_partition: "metadata_partition".into(),
                 items_per_blob: 7,
+                cache_capacity: 100,
             };
 
             // Build MMR with 2000 leaves.
