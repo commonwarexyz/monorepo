@@ -198,7 +198,7 @@ impl<H: CHasher> Proof<H> {
     }
 
     /// Return the list of pruned (pos < `start_pos`) node positions that are still required for
-    /// proving any unpruned node.
+    /// proving any retained node.
     pub fn nodes_required_for_proving(size: u64, start_pos: u64) -> Vec<u64> {
         let mut positions = Vec::<u64>::new();
         for peak in PeakIterator::new(size) {
@@ -403,7 +403,7 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_element() {
+    fn test_verification_verify_element() {
         let (executor, _, _) = Executor::default();
         executor.start(async move {
             // create an 11 element MMR over which we'll test single-element inclusion proofs
@@ -496,7 +496,7 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_range() {
+    fn test_verification_verify_range() {
         let (executor, _, _) = Executor::default();
         executor.start(async move {
             // create a new MMR and add a non-trivial amount (49) of elements
@@ -663,7 +663,7 @@ mod tests {
     }
 
     #[test]
-    fn test_unpruned_nodes_all_provable() {
+    fn test_verification_retained_nodes_provable_after_pruning() {
         let (executor, _, _) = Executor::default();
         executor.start(async move {
             // create a new MMR and add a non-trivial amount (49) of elements
@@ -676,7 +676,7 @@ mod tests {
                 element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));
             }
 
-            // Confirm we can successfully prove all unpruned elements in the MMR after pruning.
+            // Confirm we can successfully prove all retained elements in the MMR after pruning.
             let root = mmr.root(&mut hasher);
             for i in 1..mmr.size() {
                 mmr.prune_to_pos(i);
@@ -701,7 +701,7 @@ mod tests {
     }
 
     #[test]
-    fn test_range_proofs_after_pruning() {
+    fn test_verification_ranges_provable_after_pruning() {
         let (executor, _, _) = Executor::default();
         executor.start(async move {
             // create a new MMR and add a non-trivial amount (49) of elements
@@ -779,7 +779,7 @@ mod tests {
     }
 
     #[test]
-    fn test_proof_serialization() {
+    fn test_verification_proof_serialization() {
         let (executor, _, _) = Executor::default();
         executor.start(async move {
             assert_eq!(

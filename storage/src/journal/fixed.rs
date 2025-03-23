@@ -410,7 +410,7 @@ impl<B: Blob, E: Storage<B> + Metrics, A: Array> Journal<B, E, A> {
 
     /// Return the potential new outcomes for `oldest_retained_pos` that will result from calling
     /// `prune` with `min_item_pos` to facilitate recovery should the prune operation fail. The
-    /// result will be empty if the `min_item_pos` is within the oldest blob (and hence no blob can
+    /// result will be empty if the `min_item_pos` is within the oldest blob (and hence no blob will
     /// be pruned).
     ///
     /// The `prune` function works by atomically deleting chunks of `items_per_blob` items at a
@@ -449,10 +449,7 @@ impl<B: Blob, E: Storage<B> + Metrics, A: Array> Journal<B, E, A> {
             return Ok(());
         }
         // Make sure we never prune the most recent blob
-        let newest_blob = self.newest_blob();
-        if new_oldest_blob > newest_blob.0 {
-            new_oldest_blob = newest_blob.0;
-        }
+        new_oldest_blob = std::cmp::min(new_oldest_blob, self.newest_blob().0);
 
         for index in oldest_blob..new_oldest_blob {
             let blob = self.blobs.remove(&index).unwrap();

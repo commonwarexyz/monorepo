@@ -63,18 +63,8 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Storage<H::Digest> fo
     }
 
     async fn get_node(&self, position: u64) -> Result<Option<H::Digest>, Error> {
-        let Some(oldest_retained_pos) = self.mem_mmr.oldest_retained_pos() else {
-            return Ok(None);
-        };
-        if position >= oldest_retained_pos {
-            // Node is cached in the mem_mmr.
-            return Ok(self.mem_mmr.get_node(position));
-        }
-
-        let oldest_retained_pos = self.journal.oldest_retained_pos().await?.unwrap_or(0);
-        if position < oldest_retained_pos {
-            // If the node is stored at all, it must be in old_nodes.
-            return Ok(self.mem_mmr.get_node(position));
+        if let Some(node) = self.mem_mmr.get_node(position) {
+            return Ok(Some(node));
         }
 
         match self.journal.read(position).await {
@@ -133,17 +123,14 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
             journal_size = last_valid_size
         }
 
-        // Initialize the mem_mmr in the "fully pruned" state.
+        // Initialize the mem_mmr in the "prune_all" state.
         let mut old_nodes = Vec::new();
-        for pos in Proof::<H>::nodes_required_for_proving(journal_size, journal_size - 1) {
+        for pos in Proof::<H>::nodes_required_for_proving(journal_size, journal_size) {
             let old_node =
                 Mmr::<B, E, H>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
             old_nodes.push(old_node);
         }
-        let last_digest =
-            Mmr::<B, E, H>::get_from_metadata_or_journal(&metadata, &journal, journal_size - 1)
-                .await?;
-        let mut mem_mmr = MemMmr::init(vec![last_digest], journal_size - 1, old_nodes);
+        let mut mem_mmr = MemMmr::init(vec![], journal_size, old_nodes);
 
         // Compute the additional old nodes needed to prove all journal elements at the current
         // pruning boundary (oldest_retained_pos).
@@ -301,20 +288,21 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
         Proof::<H>::range_proof::<Mmr<B, E, H>>(self, start_element_pos, end_element_pos).await
     }
 
-    /// Prune all but the very last node.
-    ///
-    /// This always leaves the MMR in a valid state since the last node is always a peak.
+    /// Prune as many nodes as possible, leaving behind at most items_per_blob nodes in the current
+    /// blob.
     pub async fn prune_all(&mut self) -> Result<(), Error> {
         if self.mem_mmr.size() != 0 {
-            self.prune_to_pos(self.mem_mmr.size() - 1).await?;
+            self.prune_to_pos(self.mem_mmr.size()).await?;
             return Ok(());
         }
         Ok(())
     }
 
-    /// Prune all nodes up to but not including the given position, except for an O(log2(n)) number
-    /// of older nodes still required for root & proof generation. Ensure no failure can leave the
-    /// MMR in an unrecoverable state.
+    /// Prune all nodes up to but not including the given position, and put the O(log2(n)) number of
+    /// pruned nodes still required for root & proof generation into metadata and the old_nodes
+    /// cache.
+    ///
+    /// This implementation ensures that no failure can leave the MMR in an unrecoverable state.
     pub async fn prune_to_pos(&mut self, pos: u64) -> Result<(), Error> {
         if self.mem_mmr.size() == 0 {
             return Ok(());
@@ -343,12 +331,8 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
             self.mem_mmr.add_old_nodes(old_nodes);
         }
 
-        // Now that recovery is assured, it's safe to start pruning.
+        // Now that recovery from any outcome is assured, it's safe to start pruning.
         self.journal.prune(successful_outcome_pos).await?;
-        assert_eq!(
-            self.oldest_retained_pos().await?.unwrap(),
-            successful_outcome_pos
-        );
 
         // Now that pruning is successful, clear out any old_nodes from the metadata that are no
         // longer needed to keep it from accumulating cruft.
@@ -363,15 +347,14 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
     /// Return the position of the oldest retained node in the MMR, not including the old_nodes
     /// retained for root and proof generation.
     pub async fn oldest_retained_pos(&self) -> Result<Option<u64>, Error> {
-        let Some(oldest_mem_retained_pos) = self.mem_mmr.oldest_retained_pos() else {
+        if self.mem_mmr.size() == 0 {
             return Ok(None);
-        };
-        let oldest_retained_pos = match self.journal.oldest_retained_pos().await? {
-            Some(pos) => pos,
-            None => oldest_mem_retained_pos, // happens when journal has never been synced
-        };
-        assert!(oldest_retained_pos <= oldest_mem_retained_pos);
-        Ok(Some(oldest_retained_pos))
+        }
+
+        match self.journal.oldest_retained_pos().await? {
+            Some(pos) => Ok(Some(pos)),
+            None => Ok(self.mem_mmr.oldest_retained_pos()), // happens when journal has never been synced
+        }
     }
 
     #[cfg(test)]
@@ -423,8 +406,11 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(mmr.size().await.unwrap(), 0);
-            assert_eq!(mmr.get_node(0).await.unwrap(), None);
+            assert!(mmr.get_node(0).await.is_err());
+            assert_eq!(mmr.oldest_retained_pos().await.unwrap(), None);
             assert!(mmr.prune_all().await.is_ok());
+            assert!(mmr.prune_to_pos(0).await.is_ok());
+            assert!(mmr.sync().await.is_ok());
         });
     }
 
@@ -471,9 +457,9 @@ mod tests {
             // Sync the MMR, make sure it flushes the in-mem MMR as expected.
             mmr.sync().await.unwrap();
             assert_eq!(mmr.journal_size, 502);
-            assert_eq!(mmr.mem_mmr.oldest_retained_pos().unwrap(), 501);
+            assert_eq!(mmr.mem_mmr.oldest_retained_pos(), None);
 
-            // Now that the element is flushed from the in-mem MMR, make its proof is still is
+            // Now that the element is flushed from the in-mem MMR, confirm its proof is still is
             // generated correctly.
             let proof2 = mmr.proof(test_element_pos).await.unwrap();
             assert_eq!(proof, proof2);
@@ -652,13 +638,30 @@ mod tests {
             // Prune everything.
             pruned_mmr.prune_all().await.unwrap();
             assert_eq!(pruned_mmr.root(&mut hasher), mmr.root(&mut hasher));
+            // The size of this MMR doesn't fall on a blob boundary, so even though we tried to
+            // prune everything, there will still be nodes retained.
+            assert!(pruned_mmr.size().await.unwrap() % cfg.items_per_blob != 0);
+            assert!(pruned_mmr.oldest_retained_pos().await.unwrap().is_some());
 
-            // Close MMR without syncing and make sure state is as expected on reopening.
+            // Close MMR after adding a new node without syncing and make sure state is as expected
+            // on reopening.
+            mmr.add(&mut hasher, &test_digest(LEAF_COUNT));
+            pruned_mmr.add(&mut hasher, &test_digest(LEAF_COUNT));
+            assert!(pruned_mmr.size().await.unwrap() % cfg.items_per_blob != 0);
             pruned_mmr.close().await.unwrap();
-            let pruned_mmr = Mmr::<_, _, Sha256>::init(context.clone(), cfg.clone())
+            let mut pruned_mmr = Mmr::<_, _, Sha256>::init(context.clone(), cfg.clone())
                 .await
                 .unwrap();
             assert_eq!(pruned_mmr.root(&mut hasher), mmr.root(&mut hasher));
+
+            // Add nodes until we are on a blob boundary, and confirm prune_all removes all retained
+            // nodes.
+            while pruned_mmr.size().await.unwrap() % cfg.items_per_blob != 0 {
+                pruned_mmr.add(&mut hasher, &test_digest(LEAF_COUNT));
+            }
+            pruned_mmr.prune_all().await.unwrap();
+            println!("pruned_mmr size: {}", pruned_mmr.size().await.unwrap());
+            assert_eq!(pruned_mmr.oldest_retained_pos().await.unwrap(), None);
         });
     }
 
