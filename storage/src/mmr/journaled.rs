@@ -20,7 +20,7 @@ use crate::mmr::{
 use bytes::Bytes;
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Blob, Clock, Metrics, Storage as RStorage};
-use commonware_utils::array::U64;
+use commonware_utils::array::prefixed_u64::U64;
 use tracing::{debug, error, warn};
 
 /// Configuration for a journal-backed MMR.
@@ -51,10 +51,13 @@ pub struct Mmr<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> {
     /// cached in the memory resident MMR.
     journal_size: u64,
 
-    /// Stores all "old nodes" (pruned nodes required for proving & root generation) for the
-    /// journaled MMR. The metadata remains empty until pruning is invoked, and its contents change
-    /// only when the pruning boundary moves.
+    /// Stores all "pinned nodes" (pruned nodes required for proving & root generation) for the MMR,
+    /// and the corresponding pruning boundary used to generate them. The metadata remains empty
+    /// until pruning is invoked, and its contents change only when the pruning boundary moves.
     metadata: Metadata<B, E, U64>,
+
+    /// The last pruning boundary used to prune this MMR, or 0 if the MMR has never been pruned.
+    pruned_to_pos: u64,
 }
 
 impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Storage<H::Digest> for Mmr<B, E, H> {
@@ -98,7 +101,26 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
                 journal,
                 journal_size,
                 metadata,
+                pruned_to_pos: 0,
             });
+        }
+
+        // Make sure the journal's pruning position matches that in the metadata.
+        let key: U64 = U64::new(Self::PRUNE_TO_POS_PREFIX, 0);
+        let pruned_to_pos = match metadata.get(&key) {
+            Some(bytes) => u64::from_be_bytes(bytes.as_ref().try_into().unwrap()),
+            None => 0,
+        };
+        let oldest_retained_pos = journal.oldest_retained_pos().await?.unwrap_or(0);
+        if pruned_to_pos != oldest_retained_pos {
+            assert!(pruned_to_pos >= oldest_retained_pos);
+            let actual_prune_point = journal.prune(pruned_to_pos).await?;
+            if actual_prune_point != oldest_retained_pos {
+                warn!(
+                    pos = pruned_to_pos,
+                    "journal had to be pruned to match metadata"
+                );
+            }
         }
 
         let mut last_valid_size = journal_size;
@@ -124,30 +146,30 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
         }
 
         // Initialize the mem_mmr in the "prune_all" state.
-        let mut old_nodes = Vec::new();
+        let mut pinned_nodes = Vec::new();
         for pos in Proof::<H>::nodes_to_pin(journal_size, journal_size) {
-            let old_node =
+            let digest =
                 Mmr::<B, E, H>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
-            old_nodes.push(old_node);
+            pinned_nodes.push(digest);
         }
-        let mut mem_mmr = MemMmr::init(vec![], journal_size, old_nodes);
+        let mut mem_mmr = MemMmr::init(vec![], journal_size, pinned_nodes);
 
-        // Compute the additional old nodes needed to prove all journal elements at the current
-        // pruning boundary (oldest_retained_pos).
-        let oldest_retained_pos = journal.oldest_retained_pos().await?.unwrap();
-        let mut old_nodes_to_add = HashMap::new();
-        for pos in Proof::<H>::nodes_to_pin(journal_size, oldest_retained_pos) {
-            let old_node =
+        // Compute the additional pinned nodes needed to prove all journal elements at the current
+        // pruning boundary.
+        let mut pinned_nodes = HashMap::new();
+        for pos in Proof::<H>::nodes_to_pin(journal_size, pruned_to_pos) {
+            let digest =
                 Mmr::<B, E, H>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
-            old_nodes_to_add.insert(pos, old_node);
+            pinned_nodes.insert(pos, digest);
         }
-        mem_mmr.add_pinned_nodes(old_nodes_to_add);
+        mem_mmr.add_pinned_nodes(pinned_nodes);
 
         let mut s = Self {
             mem_mmr,
             journal,
             journal_size,
             metadata,
+            pruned_to_pos,
         };
 
         if let Some(leaf) = orphaned_leaf {
@@ -170,7 +192,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
         journal: &Journal<B, E, H::Digest>,
         pos: u64,
     ) -> Result<H::Digest, Error> {
-        let bytes = metadata.get(&U64::new(pos));
+        let bytes = metadata.get(&U64::new(0, pos));
         if bytes.is_none() {
             // If a node isn't found in the metadata, it might still be in the journal.
             debug!(pos, "reading node from journal");
@@ -227,37 +249,50 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
         self.journal.sync().await?;
         assert_eq!(self.journal_size, self.journal.size().await?);
 
-        // Recompute old_nodes since we'll need to repopulate the cache after it is cleared by
+        // Recompute pinned nodes since we'll need to repopulate the cache after it is cleared by
         // pruning the mem_mmr.
-        let oldest_retained_pos = self.oldest_retained_pos().await?.unwrap();
-        let mut old_nodes = HashMap::new();
-        let required_positions = Proof::<H>::nodes_to_pin(self.mem_mmr.size(), oldest_retained_pos);
+        let mut pinned_nodes = HashMap::new();
+        let required_positions = Proof::<H>::nodes_to_pin(self.mem_mmr.size(), self.pruned_to_pos);
         for pos in required_positions.into_iter() {
             let digest = self.mem_mmr.get_node_unchecked(pos);
-            old_nodes.insert(pos, *digest);
+            pinned_nodes.insert(pos, *digest);
         }
 
-        // Now that old_nodes is recomputed, it's safe to prune the mem_mmr and reinstate them.
+        // Now that the pinned node set has been recomputed, it's safe to prune the mem_mmr and
+        // reinstate them.
         self.mem_mmr.prune_all();
-        self.mem_mmr.add_pinned_nodes(old_nodes);
+        self.mem_mmr.add_pinned_nodes(pinned_nodes);
+
         Ok(())
     }
+
+    /// Prefix used for nodes in the metadata prefixed U8 key.
+    const NODE_PREFIX: u8 = 0;
+
+    /// Prefix used for the key storing the prune_to_pos position in the metadata.
+    const PRUNE_TO_POS_PREFIX: u8 = 1;
 
     /// Compute and add required nodes for the given pruning point to the metadata, and sync it to
     /// disk. Return the computed set of required nodes.
     async fn sync_metadata(&mut self, prune_to_pos: u64) -> Result<HashMap<u64, H::Digest>, Error> {
-        let mut old_nodes = HashMap::new();
+        let mut pinned_nodes = HashMap::new();
         let required_positions = Proof::<H>::nodes_to_pin(self.mem_mmr.size(), prune_to_pos);
         for pos in required_positions.into_iter() {
             let digest = self.get_node(pos).await?.unwrap();
-            self.metadata
-                .put(U64::new(pos), Bytes::copy_from_slice(digest.as_ref()));
-            old_nodes.insert(pos, digest);
+            self.metadata.put(
+                U64::new(Self::NODE_PREFIX, pos),
+                Bytes::copy_from_slice(digest.as_ref()),
+            );
+            pinned_nodes.insert(pos, digest);
         }
+
+        let key: U64 = U64::new(Self::PRUNE_TO_POS_PREFIX, 0);
+        self.metadata
+            .put(key, Bytes::copy_from_slice(&prune_to_pos.to_be_bytes()));
 
         self.metadata.sync().await.map_err(Error::MetadataError)?;
 
-        Ok(old_nodes)
+        Ok(pinned_nodes)
     }
 
     /// Close the MMR, syncing any cached elements to disk and closing the journal.
@@ -295,9 +330,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
         Ok(())
     }
 
-    /// Prune all nodes up to but not including the given position, and put the O(log2(n)) number of
-    /// pruned nodes still required for root & proof generation into metadata and the old_nodes
-    /// cache.
+    /// Prune all nodes up to but not including the given position and update the pinned nodes.
     ///
     /// This implementation ensures that no failure can leave the MMR in an unrecoverable state.
     pub async fn prune_to_pos(&mut self, pos: u64) -> Result<(), Error> {
@@ -308,50 +341,25 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
         // Flush items cached in the mem_mmr to disk to ensure the current state is recoverable.
         self.sync().await?;
 
-        // Because pruning can be a non-atomic operation, there may be more than one potential
-        // failure outcome, each of which we must be able to recover from.
-        let outcomes = self.journal.prune_pos_outcomes(pos);
-        if outcomes.is_empty() {
-            // pruning would be a no-op
-            return Ok(());
-        }
+        // Sync metadata to reflect the desired pruning boundary, allowing for recovery in the event
+        // of a pruning failure.
+        let pinned_nodes = self.sync_metadata(pos).await?;
 
-        // Sync any old_nodes to metadata that would be required to recover from any possible
-        // outcome.
-        let successful_outcome_pos = *outcomes.last().unwrap();
-        for pos in outcomes {
-            // Because blobs are typically quite large, this loop will typically execute at most one
-            // iteration, thus we don't bother trying to optimize away multiple writes from cases
-            // involving more than one iteration.
-            debug!(pos, "syncing pinned nodes for pruning position");
-            let old_nodes = self.sync_metadata(pos).await?;
-            self.mem_mmr.add_pinned_nodes(old_nodes);
-        }
-
-        // Now that recovery from any outcome is assured, it's safe to start pruning.
-        self.journal.prune(successful_outcome_pos).await?;
-
-        // Now that pruning is successful, clear out any old_nodes from the metadata that are no
-        // longer needed to keep it from accumulating cruft.
-        self.metadata.clear();
-        let old_nodes = self.sync_metadata(successful_outcome_pos).await?;
+        self.journal.prune(pos).await?;
         self.mem_mmr.prune_all();
-        self.mem_mmr.add_pinned_nodes(old_nodes);
+        self.mem_mmr.add_pinned_nodes(pinned_nodes);
+        self.pruned_to_pos = pos;
 
         Ok(())
     }
 
-    /// Return the position of the oldest retained node in the MMR, not including the old_nodes
-    /// retained for root and proof generation.
-    pub async fn oldest_retained_pos(&self) -> Result<Option<u64>, Error> {
-        if self.mem_mmr.size() == 0 {
-            return Ok(None);
+    /// Return the position of the oldest retained node in the MMR, not including pinned nodes.
+    pub fn oldest_retained_pos(&self) -> Option<u64> {
+        if self.pruned_to_pos == self.mem_mmr.size() {
+            return None;
         }
 
-        match self.journal.oldest_retained_pos().await? {
-            Some(pos) => Ok(Some(pos)),
-            None => Ok(self.mem_mmr.oldest_retained_pos()), // happens when journal has never been synced
-        }
+        Some(self.pruned_to_pos)
     }
 
     #[cfg(test)]
@@ -404,7 +412,7 @@ mod tests {
                 .unwrap();
             assert_eq!(mmr.size().await.unwrap(), 0);
             assert!(mmr.get_node(0).await.is_err());
-            assert_eq!(mmr.oldest_retained_pos().await.unwrap(), None);
+            assert_eq!(mmr.oldest_retained_pos(), None);
             assert!(mmr.prune_all().await.is_ok());
             assert!(mmr.prune_to_pos(0).await.is_ok());
             assert!(mmr.sync().await.is_ok());
@@ -612,6 +620,7 @@ mod tests {
             let mut hasher = Sha256::new();
             for i in 0usize..300 {
                 pruned_mmr.prune_to_pos(i as u64 * 10).await.unwrap();
+
                 let digest = test_digest(LEAF_COUNT + i);
                 leaves.push(digest);
                 let last_leaf = leaves.last().unwrap();
@@ -635,10 +644,7 @@ mod tests {
             // Prune everything.
             pruned_mmr.prune_all().await.unwrap();
             assert_eq!(pruned_mmr.root(&mut hasher), mmr.root(&mut hasher));
-            // The size of this MMR doesn't fall on a blob boundary, so even though we tried to
-            // prune everything, there will still be nodes retained.
-            assert!(pruned_mmr.size().await.unwrap() % cfg.items_per_blob != 0);
-            assert!(pruned_mmr.oldest_retained_pos().await.unwrap().is_some());
+            assert_eq!(pruned_mmr.oldest_retained_pos(), None);
 
             // Close MMR after adding a new node without syncing and make sure state is as expected
             // on reopening.
@@ -651,14 +657,13 @@ mod tests {
                 .unwrap();
             assert_eq!(pruned_mmr.root(&mut hasher), mmr.root(&mut hasher));
 
-            // Add nodes until we are on a blob boundary, and confirm prune_all removes all retained
-            // nodes.
+            // Add nodes until we are on a blob boundary, and confirm prune_all still removes all
+            // retained nodes.
             while pruned_mmr.size().await.unwrap() % cfg.items_per_blob != 0 {
                 pruned_mmr.add(&mut hasher, &test_digest(LEAF_COUNT));
             }
             pruned_mmr.prune_all().await.unwrap();
-            println!("pruned_mmr size: {}", pruned_mmr.size().await.unwrap());
-            assert_eq!(pruned_mmr.oldest_retained_pos().await.unwrap(), None);
+            assert_eq!(pruned_mmr.oldest_retained_pos(), None);
         });
     }
 

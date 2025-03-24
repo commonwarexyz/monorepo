@@ -67,7 +67,7 @@
 //! )
 //! ```
 
-use commonware_utils::array;
+use commonware_utils::array::prefixed_u64::U64;
 use thiserror::Error;
 
 pub mod bitmap;
@@ -84,7 +84,7 @@ pub enum Error {
     #[error("an element required for this operation has been pruned: {0}")]
     ElementPruned(u64),
     #[error("metadata error: {0}")]
-    MetadataError(#[from] crate::metadata::Error<array::U64>),
+    MetadataError(#[from] crate::metadata::Error<U64>),
     #[error("journal error: {0}")]
     JournalError(#[from] crate::journal::Error),
     #[error("missing node: {0}")]

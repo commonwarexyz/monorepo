@@ -122,7 +122,7 @@ impl<H: CHasher> Mmr<H> {
         index as u64 + self.oldest_retained_pos
     }
 
-    /// Returns the requested node, assuming it is either unpruned or known to exist in the
+    /// Returns the requested node, assuming it is either retained or known to exist in the
     /// pinned_nodes map.
     pub fn get_node_unchecked(&self, pos: u64) -> &H::Digest {
         if pos < self.oldest_retained_pos {
@@ -279,7 +279,7 @@ impl<H: CHasher> Mmr<H> {
     }
 
     /// Prune all nodes and pin the O(log2(n)) number of them required for proof generation going
-    /// forward.
+    /// forward.ad
     pub fn prune_all(&mut self) {
         if !self.nodes.is_empty() {
             self.prune_to_pos(self.index_to_pos(self.nodes.len()));
@@ -291,13 +291,13 @@ impl<H: CHasher> Mmr<H> {
     pub fn prune_to_pos(&mut self, pos: u64) {
         // Recompute the set of older nodes to retain.
         self.pinned_nodes = self.nodes_to_pin(pos);
-        let unpruned_nodes = self.pos_to_index(pos);
-        self.nodes.drain(0..unpruned_nodes);
+        let retained_nodes = self.pos_to_index(pos);
+        self.nodes.drain(0..retained_nodes);
         self.oldest_retained_pos = pos;
     }
 
     /// Get the nodes (position + digest) that need to be pinned (those required for proof
-    /// generation) in an MMR pruned to position `prune_pos`.
+    /// generation) in this MMR when pruned to position `prune_pos`.
     pub(crate) fn nodes_to_pin(&self, prune_pos: u64) -> HashMap<u64, H::Digest> {
         let positions = Proof::<H>::nodes_to_pin(self.size(), prune_pos);
         positions
@@ -306,8 +306,8 @@ impl<H: CHasher> Mmr<H> {
             .collect()
     }
 
-    /// Get the digests of nodes that need to be pinned (those required for proof generation) in an
-    /// MMR pruned to position `prune_pos`.
+    /// Get the digests of nodes that need to be pinned (those required for proof generation) in
+    /// this MMR when pruned to position `prune_pos`.
     pub(crate) fn node_digests_to_pin(&self, start_pos: u64) -> Vec<H::Digest> {
         let positions = Proof::<H>::nodes_to_pin(self.size(), start_pos);
         positions
