@@ -199,13 +199,25 @@ impl<H: CHasher> Proof<H> {
 
     /// Return the list of pruned (pos < `start_pos`) node positions that are still required for
     /// proving any retained node.
+    ///
+    /// This set consists of every pruned node that is either (1) a peak, or (2) has no descendent
+    /// in the retained section, but its immediate parent does. (A node meeting condition (2) can be
+    /// shown to always be the left-child of its parent.)
+    ///
+    /// Implementation: Iterate over peaks, adding each to the result, until we reach the first peak
+    /// that is retained.  For the first retained peak, we walk the path from peak to the left-most
+    /// retained leaf, adding the left-child of each node on this path to the result if it is
+    /// pruned.
     pub fn nodes_to_pin(size: u64, start_pos: u64) -> Vec<u64> {
         let mut positions = Vec::<u64>::new();
         for (pos, height) in PeakIterator::new(size) {
             if pos >= start_pos {
+                // Found the first unpruned peak, now walk the path towards the leftmost unpruned
+                // leaf (at position `start_pos`).
                 let iter = PathIterator::new(start_pos, pos, height);
                 for (_, sibling_pos) in iter {
                     if sibling_pos < start_pos {
+                        // Found a left-sibling that is pruned, so include it in the set.
                         positions.push(sibling_pos);
                     }
                 }

@@ -4,8 +4,6 @@
 //! used to preserve digests required for root and proof generation that would have otherwise been
 //! pruned.
 
-use std::collections::HashMap;
-
 use crate::journal::{
     fixed::{Config as JConfig, Journal},
     Error as JError,
@@ -21,6 +19,7 @@ use bytes::Bytes;
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Blob, Clock, Metrics, Storage as RStorage};
 use commonware_utils::array::prefixed_u64::U64;
+use std::collections::HashMap;
 use tracing::{debug, error, warn};
 
 /// Configuration for a journal-backed MMR.
@@ -105,20 +104,26 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
             });
         }
 
-        // Make sure the journal's pruning position matches that in the metadata.
+        // Make sure the journal's oldest retained node is as expected based on the last pruning
+        // boundary stored in metadata. If they don't match, prune the journal to the appropriate
+        // location.
         let key: U64 = U64::new(Self::PRUNE_TO_POS_PREFIX, 0);
-        let pruned_to_pos = match metadata.get(&key) {
+        let metadata_prune_pos = match metadata.get(&key) {
             Some(bytes) => u64::from_be_bytes(bytes.as_ref().try_into().unwrap()),
             None => 0,
         };
         let oldest_retained_pos = journal.oldest_retained_pos().await?.unwrap_or(0);
-        if pruned_to_pos != oldest_retained_pos {
-            assert!(pruned_to_pos >= oldest_retained_pos);
-            let actual_prune_point = journal.prune(pruned_to_pos).await?;
+        if metadata_prune_pos != oldest_retained_pos {
+            assert!(metadata_prune_pos >= oldest_retained_pos);
+            // These positions may differ only due to blob boundary alignment, so this case isn't
+            // unusual.
+            let actual_prune_point = journal.prune(metadata_prune_pos).await?;
             if actual_prune_point != oldest_retained_pos {
+                // This should only happen in the event of some failure during the last attempt to
+                // prune the journal.
                 warn!(
-                    pos = pruned_to_pos,
-                    "journal had to be pruned to match metadata"
+                    oldest_retained_pos,
+                    metadata_prune_pos, "journal pruned to match metadata"
                 );
             }
         }
@@ -157,7 +162,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
         // Compute the additional pinned nodes needed to prove all journal elements at the current
         // pruning boundary.
         let mut pinned_nodes = HashMap::new();
-        for pos in Proof::<H>::nodes_to_pin(journal_size, pruned_to_pos) {
+        for pos in Proof::<H>::nodes_to_pin(journal_size, metadata_prune_pos) {
             let digest =
                 Mmr::<B, E, H>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
             pinned_nodes.insert(pos, digest);
@@ -169,7 +174,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
             journal,
             journal_size,
             metadata,
-            pruned_to_pos,
+            pruned_to_pos: metadata_prune_pos,
         };
 
         if let Some(leaf) = orphaned_leaf {
@@ -192,35 +197,31 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
         journal: &Journal<B, E, H::Digest>,
         pos: u64,
     ) -> Result<H::Digest, Error> {
-        let bytes = metadata.get(&U64::new(0, pos));
-        if bytes.is_none() {
-            // If a node isn't found in the metadata, it might still be in the journal.
-            debug!(pos, "reading node from journal");
-            let node = journal.read(pos).await;
-            match node {
-                Ok(node) => return Ok(node),
-                Err(JError::ItemPruned(_)) => {
-                    error!(pos, "node is missing from metadata and journal");
-                    return Err(Error::MissingNode(pos));
-                }
-                Err(e) => {
-                    return Err(Error::JournalError(e));
-                }
-            }
+        if let Some(bytes) = metadata.get(&U64::new(0, pos)) {
+            debug!(pos, "read node from metadata");
+            let digest = H::Digest::try_from(bytes.as_ref());
+            let Ok(digest) = digest else {
+                error!(
+                    pos,
+                    err = %digest.err().unwrap(),
+                    "could not convert node from metadata bytes to digest"
+                );
+                return Err(Error::MissingNode(pos));
+            };
+            return Ok(digest);
         }
 
-        debug!(pos, "read node from metadata");
-        let digest = H::Digest::try_from(bytes.unwrap().as_ref());
-        let Ok(digest) = digest else {
-            error!(
-                pos,
-                err = %digest.err().unwrap(),
-                "could not convert node from metadata bytes to digest"
-            );
-            return Err(Error::MissingNode(pos));
-        };
-
-        Ok(digest)
+        // If a node isn't found in the metadata, it might still be in the journal.
+        debug!(pos, "reading node from journal");
+        let node = journal.read(pos).await;
+        match node {
+            Ok(node) => Ok(node),
+            Err(JError::ItemPruned(_)) => {
+                error!(pos, "node is missing from metadata and journal");
+                Err(Error::MissingNode(pos))
+            }
+            Err(e) => Err(Error::JournalError(e)),
+        }
     }
 
     /// Add an element to the MMR and return its position in the MMR. Elements added to the MMR
@@ -272,9 +273,12 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
     /// Prefix used for the key storing the prune_to_pos position in the metadata.
     const PRUNE_TO_POS_PREFIX: u8 = 1;
 
-    /// Compute and add required nodes for the given pruning point to the metadata, and sync it to
+    /// Compute and add required nodes for the given pruning point to the metadata, and write it to
     /// disk. Return the computed set of required nodes.
-    async fn sync_metadata(&mut self, prune_to_pos: u64) -> Result<HashMap<u64, H::Digest>, Error> {
+    async fn update_metadata(
+        &mut self,
+        prune_to_pos: u64,
+    ) -> Result<HashMap<u64, H::Digest>, Error> {
         let mut pinned_nodes = HashMap::new();
         let required_positions = Proof::<H>::nodes_to_pin(self.mem_mmr.size(), prune_to_pos);
         for pos in required_positions.into_iter() {
@@ -334,6 +338,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
     ///
     /// This implementation ensures that no failure can leave the MMR in an unrecoverable state.
     pub async fn prune_to_pos(&mut self, pos: u64) -> Result<(), Error> {
+        assert!(pos <= self.mem_mmr.size());
         if self.mem_mmr.size() == 0 {
             return Ok(());
         }
@@ -341,12 +346,11 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
         // Flush items cached in the mem_mmr to disk to ensure the current state is recoverable.
         self.sync().await?;
 
-        // Sync metadata to reflect the desired pruning boundary, allowing for recovery in the event
-        // of a pruning failure.
-        let pinned_nodes = self.sync_metadata(pos).await?;
+        // Update metadata to reflect the desired pruning boundary, allowing for recovery in the
+        // event of a pruning failure.
+        let pinned_nodes = self.update_metadata(pos).await?;
 
         self.journal.prune(pos).await?;
-        self.mem_mmr.prune_all();
         self.mem_mmr.add_pinned_nodes(pinned_nodes);
         self.pruned_to_pos = pos;
 
@@ -383,6 +387,21 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
         }
         self.journal.sync().await?;
 
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub async fn simulate_pruning_failure(mut self, prune_to_pos: u64) -> Result<(), Error> {
+        assert!(prune_to_pos <= self.mem_mmr.size());
+
+        // Flush items cached in the mem_mmr to disk to ensure the current state is recoverable.
+        self.sync().await?;
+
+        // Update metadata to reflect the desired pruning boundary, allowing for recovery in the
+        // event of a pruning failure.
+        self.update_metadata(prune_to_pos).await?;
+
+        // Don't actually prune the journal to simulate failure
         Ok(())
     }
 }
@@ -702,9 +721,14 @@ mod tests {
                 let mut mmr = Mmr::<_, _, Sha256>::init(context.clone(), cfg.clone())
                     .await
                     .unwrap();
-                let prune_pos = i as u64 * 50;
-                mmr.prune_to_pos(prune_pos).await.unwrap();
                 let start_size = mmr.size().await.unwrap();
+                let prune_pos = std::cmp::min(i as u64 * 50, start_size);
+                if i % 5 == 0 {
+                    mmr.simulate_pruning_failure(prune_pos).await.unwrap();
+                    continue;
+                }
+                mmr.prune_to_pos(prune_pos).await.unwrap();
+
                 // add 25 new elements, simulating a partial write after each.
                 for j in 0..10 {
                     let digest = test_digest(100 * (i + 1) + j);

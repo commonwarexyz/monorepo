@@ -184,10 +184,8 @@ impl<H: CHasher> Mmr<H> {
             }
             new_size -= 1;
         }
-
-        while self.size() != new_size {
-            self.nodes.pop_back();
-        }
+        let num_to_drain = (self.size() - new_size) as usize;
+        self.nodes.drain(self.nodes.len() - num_to_drain..);
 
         Ok(self.size())
     }
@@ -279,7 +277,7 @@ impl<H: CHasher> Mmr<H> {
     }
 
     /// Prune all nodes and pin the O(log2(n)) number of them required for proof generation going
-    /// forward.ad
+    /// forward.
     pub fn prune_all(&mut self) {
         if !self.nodes.is_empty() {
             self.prune_to_pos(self.index_to_pos(self.nodes.len()));
@@ -318,8 +316,8 @@ impl<H: CHasher> Mmr<H> {
 
     /// Utility used by stores that build on the mem MMR to pin extra nodes if needed. It's up to
     /// the caller to ensure that this set of pinned nodes is valid for their use case.
-    pub(crate) fn add_pinned_nodes(&mut self, old_nodes: HashMap<u64, H::Digest>) {
-        for (pos, node) in old_nodes.into_iter() {
+    pub(crate) fn add_pinned_nodes(&mut self, pinned_nodes: HashMap<u64, H::Digest>) {
+        for (pos, node) in pinned_nodes.into_iter() {
             self.pinned_nodes.insert(pos, node);
         }
     }
