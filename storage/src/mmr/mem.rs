@@ -1,5 +1,13 @@
 //! A basic MMR where all nodes are stored in-memory.
-
+//!
+//! # Terminology
+//!
+//! Nodes in this structure are either _retained_, _pruned_, or _pinned_. Retained nodes are nodes
+//! that have not yet been pruned, and have digests stored explicitly within the tree structure.
+//! Pruned nodes are those whose positions precede that of the _oldest retained_ node, for which no
+//! digests are maintained. Pinned nodes are nodes that would otherwise be pruned based on their
+//! position, but whose digests remain required for proof generation. The digests for pinned nodes
+//! are stored in an auxiliary map, and are at most O(log2(n)) in number.
 use crate::mmr::{
     hasher::Hasher,
     iterator::{nodes_needing_parents, PathIterator, PeakIterator},
@@ -25,9 +33,8 @@ pub struct Mmr<H: CHasher> {
     // are no retained nodes because the MMR is empty or it has been fully pruned.
     oldest_retained_pos: u64,
 
-    // The hashes of any pruned nodes that are required to generate proofs of inclusion for some
-    // retained node.
-    old_nodes: HashMap<u64, H::Digest>,
+    // The auxiliary map from node position to the digest of any pinned node.
+    pinned_nodes: HashMap<u64, H::Digest>,
 }
 
 impl<H: CHasher> Default for Mmr<H> {
@@ -52,21 +59,21 @@ impl<H: CHasher> Mmr<H> {
         Self {
             nodes: Vec::new(),
             oldest_retained_pos: 0,
-            old_nodes: HashMap::new(),
+            pinned_nodes: HashMap::new(),
         }
     }
 
     /// Return an `Mmr` initialized with the given nodes, oldest retained position, and hashes of
-    /// pruned nodes required for root & proof generation.
+    /// pinned nodes.
     pub fn init(
         nodes: Vec<H::Digest>,
         oldest_retained_pos: u64,
-        old_nodes: Vec<H::Digest>,
+        pinned_nodes: Vec<H::Digest>,
     ) -> Self {
         let mut mmr = Self {
             nodes,
             oldest_retained_pos,
-            old_nodes: HashMap::new(),
+            pinned_nodes: HashMap::new(),
         };
         if mmr.size() == 0 {
             return mmr;
@@ -74,9 +81,9 @@ impl<H: CHasher> Mmr<H> {
 
         let required_positions =
             Proof::<H>::nodes_required_for_proving(mmr.size(), oldest_retained_pos);
-        assert_eq!(old_nodes.len(), required_positions.len());
+        assert_eq!(pinned_nodes.len(), required_positions.len());
         for (i, pos) in required_positions.into_iter().enumerate() {
-            mmr.old_nodes.insert(pos, old_nodes[i]);
+            mmr.pinned_nodes.insert(pos, pinned_nodes[i]);
         }
 
         mmr
@@ -97,7 +104,7 @@ impl<H: CHasher> Mmr<H> {
     }
 
     /// Return the position of the oldest retained node in the MMR, not including those cached in
-    /// old_nodes.
+    /// pinned_nodes.
     pub fn oldest_retained_pos(&self) -> Option<u64> {
         if self.oldest_retained_pos == self.size() {
             return None;
@@ -117,10 +124,10 @@ impl<H: CHasher> Mmr<H> {
     }
 
     /// Returns the requested node, assuming it is either unpruned or known to exist in the
-    /// old_nodes set.
+    /// pinned_nodes map.
     pub fn get_node_unchecked(&self, pos: u64) -> &H::Digest {
         if pos < self.oldest_retained_pos {
-            return self.old_nodes.get(&pos).unwrap();
+            return self.pinned_nodes.get(&pos).unwrap();
         }
 
         &self.nodes[self.pos_to_index(pos)]
@@ -129,7 +136,7 @@ impl<H: CHasher> Mmr<H> {
     /// Returns the requested node or None if it is not stored in the MMR.
     pub fn get_node(&self, pos: u64) -> Option<H::Digest> {
         if pos < self.oldest_retained_pos {
-            return self.old_nodes.get(&pos).copied();
+            return self.pinned_nodes.get(&pos).copied();
         }
 
         self.nodes.get(self.pos_to_index(pos)).copied()
@@ -272,37 +279,37 @@ impl<H: CHasher> Mmr<H> {
         Proof::<H>::range_proof(self, start_element_pos, end_element_pos).await
     }
 
-    /// Prune all nodes, preserving only the O(log2(n)) number of older nodes still required for
-    /// root & proof generation within the old_nodes map.
+    /// Prune all nodes and pin the O(log2(n)) number of them required for proof generation going
+    /// forward.
     pub fn prune_all(&mut self) {
         if !self.nodes.is_empty() {
             self.prune_to_pos(self.index_to_pos(self.nodes.len()));
         }
     }
 
-    /// Prune all nodes up to but not including the given position, except for an O(log2(n)) number
-    /// of older nodes still required for root & proof generation.
+    /// Prune all nodes up to but not including the given position, and pin the O(log2(n)) number of
+    /// them required for proof generation.
     pub fn prune_to_pos(&mut self, pos: u64) {
         // Recompute the set of older nodes to retain.
-        self.old_nodes = self.get_required_old_nodes(pos);
+        self.pinned_nodes = self.nodes_to_pin(pos);
         let unpruned_nodes = self.pos_to_index(pos);
         self.nodes = self.nodes[unpruned_nodes..self.nodes.len()].to_vec();
         self.oldest_retained_pos = pos;
     }
 
-    /// Get the set of nodes that precede `start_pos` that are required for computing the root hash
-    /// or generating proofs for any node at or after `start_pos`.
-    fn get_required_old_nodes(&self, start_pos: u64) -> HashMap<u64, H::Digest> {
-        let positions = Proof::<H>::nodes_required_for_proving(self.size(), start_pos);
+    /// Get the nodes (position + digest) that need to be pinned (those required for proof
+    /// generation) in an MMR pruned to position `prune_pos`.
+    pub(crate) fn nodes_to_pin(&self, prune_pos: u64) -> HashMap<u64, H::Digest> {
+        let positions = Proof::<H>::nodes_required_for_proving(self.size(), prune_pos);
         positions
             .into_iter()
             .map(|pos| (pos, *self.get_node_unchecked(pos)))
             .collect()
     }
 
-    /// Get the set of pruned digests that are required for computing the root hash or generating
-    /// proofs in the order expected by `init`.
-    fn get_required_old_digests(&self, start_pos: u64) -> Vec<H::Digest> {
+    /// Get the digests of nodes that need to be pinned (those required for proof generation) in an
+    /// MMR pruned to position `prune_pos`.
+    pub(crate) fn node_digests_to_pin(&self, start_pos: u64) -> Vec<H::Digest> {
         let positions = Proof::<H>::nodes_required_for_proving(self.size(), start_pos);
         positions
             .into_iter()
@@ -310,11 +317,11 @@ impl<H: CHasher> Mmr<H> {
             .collect()
     }
 
-    /// Utility used by stores that build on the mem MMR to store extra old nodes if needed. It's up
-    /// to the caller to ensure that this set of old nodes is valid for their use case.
-    pub(crate) fn add_old_nodes(&mut self, old_nodes: HashMap<u64, H::Digest>) {
+    /// Utility used by stores that build on the mem MMR to pin extra nodes if needed. It's up to
+    /// the caller to ensure that this set of pinned nodes is valid for their use case.
+    pub(crate) fn add_pinned_nodes(&mut self, old_nodes: HashMap<u64, H::Digest>) {
         for (pos, node) in old_nodes.into_iter() {
-            self.old_nodes.insert(pos, node);
+            self.pinned_nodes.insert(pos, node);
         }
     }
 
@@ -329,7 +336,7 @@ impl<H: CHasher> Mmr<H> {
         }
 
         // Create the "old_nodes" of the MMR in the fully pruned state.
-        let old_nodes = self.get_required_old_digests(self.size());
+        let old_nodes = self.node_digests_to_pin(self.size());
 
         Self::init(vec![], self.size(), old_nodes)
     }
@@ -486,7 +493,7 @@ mod tests {
 
             // Test that we can initialize a new MMR from another's elements.
             let oldest_pos = mmr.oldest_retained_pos().unwrap();
-            let digests = mmr.get_required_old_digests(oldest_pos);
+            let digests = mmr.node_digests_to_pin(oldest_pos);
             let mmr_copy = Mmr::<Sha256>::init(mmr.nodes.clone(), oldest_pos, digests);
             assert_eq!(mmr_copy.size(), 19);
             assert_eq!(mmr_copy.oldest_retained_pos(), mmr.oldest_retained_pos());

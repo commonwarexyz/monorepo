@@ -141,7 +141,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
                 Mmr::<B, E, H>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
             old_nodes_to_add.insert(pos, old_node);
         }
-        mem_mmr.add_old_nodes(old_nodes_to_add);
+        mem_mmr.add_pinned_nodes(old_nodes_to_add);
 
         let mut s = Self {
             mem_mmr,
@@ -240,8 +240,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
 
         // Now that old_nodes is recomputed, it's safe to prune the mem_mmr and reinstate them.
         self.mem_mmr.prune_all();
-        self.mem_mmr.add_old_nodes(old_nodes);
-
+        self.mem_mmr.add_pinned_nodes(old_nodes);
         Ok(())
     }
 
@@ -328,7 +327,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
             // involving more than one iteration.
             debug!("syncing old_nodes required for pruning outcome: {}", pos);
             let old_nodes = self.sync_metadata(pos).await?;
-            self.mem_mmr.add_old_nodes(old_nodes);
+            self.mem_mmr.add_pinned_nodes(old_nodes);
         }
 
         // Now that recovery from any outcome is assured, it's safe to start pruning.
@@ -339,7 +338,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
         self.metadata.clear();
         let old_nodes = self.sync_metadata(successful_outcome_pos).await?;
         self.mem_mmr.prune_all();
-        self.mem_mmr.add_old_nodes(old_nodes);
+        self.mem_mmr.add_pinned_nodes(old_nodes);
 
         Ok(())
     }
