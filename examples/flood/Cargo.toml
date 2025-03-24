@@ -40,4 +40,5 @@ path = "src/bin/setup.rs"
 bench = false
 
 [profile.release]
+# Setting debug to true instructs cargo to include debug symbols in the release binary (not to disable optimizations).
 debug = true
