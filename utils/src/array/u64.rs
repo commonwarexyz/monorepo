@@ -1,4 +1,4 @@
-use crate::{Array, SizedSerialize};
+use crate::Array;
 use commonware_codec::{Codec, Error as CodecError, Reader, SizedCodec, Writer};
 use std::{
     cmp::{Ord, PartialOrd},
@@ -18,7 +18,7 @@ pub enum Error {
 /// An `Array` implementation for `u64`.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Default)]
 #[repr(transparent)]
-pub struct U64([u8; U64::SERIALIZED_LEN]);
+pub struct U64([u8; u64::LEN_ENCODED]);
 
 impl U64 {
     pub fn new(value: u64) -> Self {
@@ -36,28 +36,24 @@ impl Codec for U64 {
     }
 
     fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
-        <[u8; U64::SERIALIZED_LEN]>::read(reader).map(Self)
+        <[u8; Self::LEN_ENCODED]>::read(reader).map(Self)
     }
 
     fn len_encoded(&self) -> usize {
-        U64::SERIALIZED_LEN
+        Self::LEN_ENCODED
     }
 }
 
 impl SizedCodec for U64 {
-    const LEN_ENCODED: usize = U64::SERIALIZED_LEN;
+    const LEN_ENCODED: usize = u64::LEN_ENCODED;
 }
 
 impl Array for U64 {
     type Error = Error;
 }
 
-impl SizedSerialize for U64 {
-    const SERIALIZED_LEN: usize = u64::SERIALIZED_LEN;
-}
-
-impl From<[u8; U64::SERIALIZED_LEN]> for U64 {
-    fn from(value: [u8; U64::SERIALIZED_LEN]) -> Self {
+impl From<[u8; U64::LEN_ENCODED]> for U64 {
+    fn from(value: [u8; U64::LEN_ENCODED]) -> Self {
         Self(value)
     }
 }
@@ -66,11 +62,10 @@ impl TryFrom<&[u8]> for U64 {
     type Error = Error;
 
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        if value.len() != U64::SERIALIZED_LEN {
+        if value.len() != U64::LEN_ENCODED {
             return Err(Error::InvalidLength);
         }
-        let array: [u8; U64::SERIALIZED_LEN] =
-            value.try_into().map_err(|_| Error::InvalidLength)?;
+        let array: [u8; U64::LEN_ENCODED] = value.try_into().map_err(|_| Error::InvalidLength)?;
         Ok(Self(array))
     }
 }
@@ -87,14 +82,14 @@ impl TryFrom<Vec<u8>> for U64 {
     type Error = Error;
 
     fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
-        if value.len() != U64::SERIALIZED_LEN {
+        if value.len() != U64::LEN_ENCODED {
             return Err(Error::InvalidLength);
         }
 
         // If the length is correct, we can safely convert the vector into a boxed slice without any
         // copies.
         let boxed_slice = value.into_boxed_slice();
-        let boxed_array: Box<[u8; U64::SERIALIZED_LEN]> =
+        let boxed_array: Box<[u8; U64::LEN_ENCODED]> =
             boxed_slice.try_into().map_err(|_| Error::InvalidLength)?;
         Ok(Self(*boxed_array))
     }
@@ -146,7 +141,7 @@ mod tests {
         let original = U64::new(42u64);
 
         let encoded = original.encode();
-        assert_eq!(encoded.len(), U64::SERIALIZED_LEN);
+        assert_eq!(encoded.len(), U64::LEN_ENCODED);
         assert_eq!(encoded, original.as_ref());
 
         let decoded = U64::decode(encoded).unwrap();

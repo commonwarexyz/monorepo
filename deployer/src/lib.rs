@@ -35,9 +35,9 @@
 //!
 //! Update binaries (and configurations) in-place on all instances.
 //!
-//! ### `refresh`
+//! ### `authorize`
 //!
-//! Add the deployer's current IP to all security groups (if not already present).
+//! Add the deployer's current IP (or the one provided) to all security groups.
 //!
 //! ### `destroy`
 //!

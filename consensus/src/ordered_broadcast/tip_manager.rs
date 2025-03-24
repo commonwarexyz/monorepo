@@ -1,20 +1,19 @@
-use crate::linked::parsed;
-use commonware_cryptography::Scheme;
-use commonware_utils::Array;
+use super::parsed;
+use commonware_cryptography::{Digest, Scheme};
 use std::collections::{hash_map::Entry, HashMap};
 
 /// Manages the highest-height chunk for each sequencer.
 #[derive(Default, Debug)]
-pub struct TipManager<C: Scheme, D: Array> {
+pub struct TipManager<C: Scheme, D: Digest> {
     // The highest-height chunk for each sequencer.
     // The chunk must have the threshold signature of its parent.
     // Existence of the chunk implies:
     // - The existence of the sequencer's entire chunk chain (from height zero)
-    // - That the chunk has been acked by this signer.
+    // - That the chunk has been acked by this validator.
     tips: HashMap<C::PublicKey, parsed::Node<C, D>>,
 }
 
-impl<C: Scheme, D: Array> TipManager<C, D> {
+impl<C: Scheme, D: Digest> TipManager<C, D> {
     /// Creates a new `TipManager`.
     pub fn new() -> Self {
         Self {
@@ -56,15 +55,14 @@ impl<C: Scheme, D: Array> TipManager<C, D> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::linked::parsed;
+    use super::{super::parsed, *};
     use bytes::Bytes;
+    use commonware_codec::SizedCodec;
     use commonware_cryptography::{
         ed25519::{self, Ed25519, PublicKey, Signature},
         sha256::{self, Digest},
     };
     use commonware_utils::Array;
-    use commonware_utils::SizedSerialize;
     use rand::SeedableRng;
 
     /// Helper functions for TipManager tests.
@@ -78,7 +76,7 @@ mod tests {
             payload: &str,
         ) -> parsed::Node<Ed25519, Digest> {
             let signature = {
-                let mut data = Bytes::from(vec![3u8; Signature::SERIALIZED_LEN]);
+                let mut data = Bytes::from(vec![3u8; Signature::LEN_ENCODED]);
                 Signature::read_from(&mut data).unwrap()
             };
             parsed::Node::<Ed25519, Digest> {

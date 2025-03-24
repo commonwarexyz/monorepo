@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use commonware_runtime::{
     telemetry::{histogram, status},
     Clock, Metrics as RuntimeMetrics,
@@ -9,6 +7,7 @@ use prometheus_client::{
     encoding::EncodeLabelSet,
     metrics::{counter::Counter, family::Family, gauge::Gauge, histogram::Histogram},
 };
+use std::sync::Arc;
 
 /// Label for sequencer height metrics
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
@@ -26,7 +25,7 @@ impl SequencerLabel {
     }
 }
 
-/// Metrics for the broadcast/linked module.
+/// Metrics for the [`Engine`](super::Engine)
 pub struct Metrics<E: RuntimeMetrics + Clock> {
     /// Height per sequencer
     pub sequencer_heights: Family<SequencerLabel, Gauge>,
@@ -38,13 +37,13 @@ pub struct Metrics<E: RuntimeMetrics + Clock> {
     pub verify: status::Counter,
     /// Number of threshold signatures produced
     pub threshold: Counter,
-    /// Number of new broadcast attempts by status
-    pub new_broadcast: status::Counter,
+    /// Number of propose attempts by status
+    pub propose: status::Counter,
     /// Number of rebroadcast attempts by status
     pub rebroadcast: status::Counter,
     /// Histogram of application verification durations
     pub verify_duration: histogram::Timed<E>,
-    /// Histogram of time from new broadcast to threshold signature generation
+    /// Histogram of time from new proposal to threshold signature generation
     pub e2e_duration: histogram::Timed<E>,
 }
 
@@ -61,7 +60,7 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
             nodes: status::Counter::default(),
             verify: status::Counter::default(),
             threshold: Counter::default(),
-            new_broadcast: status::Counter::default(),
+            propose: status::Counter::default(),
             rebroadcast: status::Counter::default(),
             verify_duration: histogram::Timed::new(verify_duration.clone(), clock.clone()),
             e2e_duration: histogram::Timed::new(e2e_duration.clone(), clock),
@@ -92,9 +91,9 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
             metrics.threshold.clone(),
         );
         context.register(
-            "new_broadcast",
-            "Number of new broadcast attempts by status",
-            metrics.new_broadcast.clone(),
+            "propose",
+            "Number of propose attempts by status",
+            metrics.propose.clone(),
         );
         context.register(
             "rebroadcast",
@@ -108,7 +107,7 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
         );
         context.register(
             "e2e_duration",
-            "Histogram of time from broadcast to threshold signature generation",
+            "Histogram of time from new proposal to threshold signature generation",
             e2e_duration,
         );
         metrics

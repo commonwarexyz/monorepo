@@ -851,6 +851,7 @@ version = "0.0.43"
 dependencies = [
  "bytes",
  "clap",
+ "commonware-codec",
  "commonware-consensus",
  "commonware-cryptography",
  "commonware-macros",
@@ -874,17 +875,14 @@ name = "commonware-broadcast"
 version = "0.0.43"
 dependencies = [
  "bytes",
+ "commonware-codec",
  "commonware-cryptography",
  "commonware-macros",
  "commonware-p2p",
  "commonware-runtime",
- "commonware-storage",
  "commonware-utils",
  "futures",
  "prometheus-client",
- "prost 0.13.5",
- "prost-build",
- "rand 0.8.5",
  "thiserror 2.0.12",
  "tracing",
  "tracing-subscriber",
@@ -926,6 +924,7 @@ version = "0.0.43"
 dependencies = [
  "bytes",
  "cfg-if",
+ "commonware-codec",
  "commonware-cryptography",
  "commonware-macros",
  "commonware-p2p",
@@ -1049,6 +1048,7 @@ version = "0.0.43"
 dependencies = [
  "bitvec",
  "bytes",
+ "commonware-codec",
  "commonware-cryptography",
  "commonware-macros",
  "commonware-runtime",
@@ -1120,6 +1120,7 @@ name = "commonware-storage"
 version = "0.0.43"
 dependencies = [
  "bytes",
+ "commonware-codec",
  "commonware-cryptography",
  "commonware-macros",
  "commonware-runtime",
@@ -1163,7 +1164,6 @@ dependencies = [
  "commonware-codec",
  "futures",
  "num-bigint",
- "prost 0.13.5",
  "rand 0.8.5",
  "thiserror 2.0.12",
 ]
@@ -1174,6 +1174,7 @@ version = "0.0.43"
 dependencies = [
  "bytes",
  "clap",
+ "commonware-codec",
  "commonware-cryptography",
  "commonware-macros",
  "commonware-p2p",

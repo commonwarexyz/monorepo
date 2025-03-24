@@ -3,8 +3,8 @@
 use crate::mmr::{
     iterator::leaf_num_to_pos, mem::Mmr, verification::Proof, verification::Storage, Error,
 };
+use commonware_codec::SizedCodec;
 use commonware_cryptography::Hasher as CHasher;
-use commonware_utils::SizedSerialize;
 
 /// Implements the [Storage] trait for generating inclusion proofs over the bitmap.
 struct BitmapStorage<'a, H: CHasher> {
@@ -61,7 +61,7 @@ impl<H: CHasher> Default for Bitmap<H> {
 }
 
 impl<H: CHasher> Bitmap<H> {
-    const CHUNK_SIZE: usize = H::Digest::SERIALIZED_LEN;
+    const CHUNK_SIZE: usize = H::Digest::LEN_ENCODED;
 
     /// Return a new empty bitmap.
     pub fn new() -> Self {

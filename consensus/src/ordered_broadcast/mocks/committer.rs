@@ -1,4 +1,4 @@
-use crate::{linked::prover::Prover, Collector as Z, Proof};
+use crate::{ordered_broadcast::prover::Prover, Committer as Z, Proof};
 use commonware_cryptography::{bls12381::primitives::group, Digest, Scheme};
 use futures::{
     channel::{mpsc, oneshot},
@@ -17,7 +17,7 @@ enum Message<C: Scheme, D: Digest> {
     Get(C::PublicKey, u64, oneshot::Sender<Option<D>>),
 }
 
-pub struct Collector<C: Scheme, D: Digest> {
+pub struct Committer<C: Scheme, D: Digest> {
     mailbox: mpsc::Receiver<Message<C, D>>,
 
     // Application namespace
@@ -36,11 +36,11 @@ pub struct Collector<C: Scheme, D: Digest> {
     highest: HashMap<C::PublicKey, u64>,
 }
 
-impl<C: Scheme, D: Digest> Collector<C, D> {
+impl<C: Scheme, D: Digest> Committer<C, D> {
     pub fn new(namespace: &[u8], public: group::Public) -> (Self, Mailbox<C, D>) {
         let (sender, receiver) = mpsc::channel(1024);
         (
-            Collector {
+            Committer {
                 mailbox: receiver,
                 namespace: namespace.to_vec(),
                 public,
@@ -67,7 +67,7 @@ impl<C: Scheme, D: Digest> Collector<C, D> {
                         }
                     };
 
-                    // Update the collector
+                    // Update the committer
                     let digests = self.digests.entry(context.sequencer.clone()).or_default();
                     digests.insert(context.height, payload);
 
@@ -116,11 +116,15 @@ pub struct Mailbox<C: Scheme, D: Digest> {
 
 impl<C: Scheme, D: Digest> Z for Mailbox<C, D> {
     type Digest = D;
-    async fn acknowledged(&mut self, proof: Proof, payload: Self::Digest) {
+    async fn finalized(&mut self, proof: Proof, payload: Self::Digest) {
         self.sender
             .send(Message::Acknowledged(proof, payload))
             .await
             .expect("Failed to send acknowledged");
+    }
+
+    async fn prepared(&mut self, _proof: Proof, _payload: Self::Digest) {
+        unimplemented!()
     }
 }
 

@@ -1,6 +1,6 @@
 use crate::{Array, Error, Scheme};
 use commonware_codec::{Codec, Error as CodecError, Reader, SizedCodec, Writer};
-use commonware_utils::{hex, union_unique, SizedSerialize};
+use commonware_utils::{hex, union_unique};
 use p256::{
     ecdsa::{
         signature::{Signer, Verifier},
@@ -111,10 +111,6 @@ impl Array for PrivateKey {
     type Error = Error;
 }
 
-impl SizedSerialize for PrivateKey {
-    const SERIALIZED_LEN: usize = PRIVATE_KEY_LENGTH;
-}
-
 impl Hash for PrivateKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.raw.hash(state);
@@ -219,10 +215,6 @@ impl Array for PublicKey {
     type Error = Error;
 }
 
-impl SizedSerialize for PublicKey {
-    const SERIALIZED_LEN: usize = PUBLIC_KEY_LENGTH;
-}
-
 impl Hash for PublicKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.raw.hash(state);
@@ -314,10 +306,6 @@ impl SizedCodec for Signature {
 
 impl Array for Signature {
     type Error = Error;
-}
-
-impl SizedSerialize for Signature {
-    const SERIALIZED_LEN: usize = SIGNATURE_LENGTH;
 }
 
 impl Hash for Signature {
