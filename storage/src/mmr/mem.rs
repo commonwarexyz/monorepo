@@ -16,7 +16,7 @@ use crate::mmr::{
     Error::{ElementPruned, Empty},
 };
 use commonware_cryptography::Hasher as CHasher;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 /// Implementation of `Mmr`.
 ///
@@ -27,7 +27,7 @@ use std::collections::HashMap;
 pub struct Mmr<H: CHasher> {
     // The nodes of the MMR, laid out according to a post-order traversal of the MMR trees, starting
     // from the from tallest tree to shortest.
-    nodes: Vec<H::Digest>,
+    nodes: VecDeque<H::Digest>,
 
     // The position of the oldest element still retained by the MMR, or the size of the MMR if there
     // are no retained nodes because the MMR is empty or it has been fully pruned.
@@ -57,7 +57,7 @@ impl<H: CHasher> Mmr<H> {
     /// Return a new (empty) `Mmr`.
     pub fn new() -> Self {
         Self {
-            nodes: Vec::new(),
+            nodes: VecDeque::new(),
             oldest_retained_pos: 0,
             pinned_nodes: HashMap::new(),
         }
@@ -71,7 +71,7 @@ impl<H: CHasher> Mmr<H> {
         pinned_nodes: Vec<H::Digest>,
     ) -> Self {
         let mut mmr = Self {
-            nodes,
+            nodes: VecDeque::from(nodes),
             oldest_retained_pos,
             pinned_nodes: HashMap::new(),
         };
@@ -156,14 +156,14 @@ impl<H: CHasher> Mmr<H> {
         // Insert the element into the MMR as a leaf.
         let mut h = Hasher::new(hasher);
         let mut hash = h.leaf_hash(element_pos, element);
-        self.nodes.push(hash);
+        self.nodes.push_back(hash);
 
         // Compute the new parent nodes if any, and insert them into the MMR.
         for sibling_pos in peaks.into_iter().rev() {
             let parent_pos = self.index_to_pos(self.nodes.len());
             let sibling_hash = self.get_node_unchecked(sibling_pos);
             hash = h.node_hash(parent_pos, sibling_hash, &hash);
-            self.nodes.push(hash);
+            self.nodes.push_back(hash);
         }
         element_pos
     }
@@ -186,7 +186,7 @@ impl<H: CHasher> Mmr<H> {
         }
 
         while self.size() != new_size {
-            self.nodes.pop();
+            self.nodes.pop_back();
         }
 
         Ok(self.size())
@@ -292,7 +292,7 @@ impl<H: CHasher> Mmr<H> {
         // Recompute the set of older nodes to retain.
         self.pinned_nodes = self.nodes_to_pin(pos);
         let unpruned_nodes = self.pos_to_index(pos);
-        self.nodes = self.nodes[unpruned_nodes..self.nodes.len()].to_vec();
+        self.nodes.drain(0..unpruned_nodes);
         self.oldest_retained_pos = pos;
     }
 
@@ -493,7 +493,8 @@ mod tests {
             // Test that we can initialize a new MMR from another's elements.
             let oldest_pos = mmr.oldest_retained_pos().unwrap();
             let digests = mmr.node_digests_to_pin(oldest_pos);
-            let mmr_copy = Mmr::<Sha256>::init(mmr.nodes.clone(), oldest_pos, digests);
+            let mmr_copy =
+                Mmr::<Sha256>::init(mmr.nodes.iter().copied().collect(), oldest_pos, digests);
             assert_eq!(mmr_copy.size(), 19);
             assert_eq!(mmr_copy.oldest_retained_pos(), mmr.oldest_retained_pos());
             assert_eq!(mmr_copy.root(&mut hasher), root_hash);
