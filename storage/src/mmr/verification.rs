@@ -199,11 +199,11 @@ impl<H: CHasher> Proof<H> {
 
     /// Return the list of pruned (pos < `start_pos`) node positions that are still required for
     /// proving any retained node.
-    pub fn nodes_required_for_proving(size: u64, start_pos: u64) -> Vec<u64> {
+    pub fn nodes_to_pin(size: u64, start_pos: u64) -> Vec<u64> {
         let mut positions = Vec::<u64>::new();
-        for peak in PeakIterator::new(size) {
-            if peak.0 >= start_pos {
-                let iter = PathIterator::new(start_pos, peak.0, peak.1);
+        for (pos, height) in PeakIterator::new(size) {
+            if pos >= start_pos {
+                let iter = PathIterator::new(start_pos, pos, height);
                 for (_, sibling_pos) in iter {
                     if sibling_pos < start_pos {
                         positions.push(sibling_pos);
@@ -211,7 +211,7 @@ impl<H: CHasher> Proof<H> {
                 }
                 break;
             }
-            positions.push(peak.0);
+            positions.push(pos);
         }
 
         positions

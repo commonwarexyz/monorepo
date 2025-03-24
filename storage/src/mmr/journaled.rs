@@ -125,7 +125,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
 
         // Initialize the mem_mmr in the "prune_all" state.
         let mut old_nodes = Vec::new();
-        for pos in Proof::<H>::nodes_required_for_proving(journal_size, journal_size) {
+        for pos in Proof::<H>::nodes_to_pin(journal_size, journal_size) {
             let old_node =
                 Mmr::<B, E, H>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
             old_nodes.push(old_node);
@@ -136,7 +136,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
         // pruning boundary (oldest_retained_pos).
         let oldest_retained_pos = journal.oldest_retained_pos().await?.unwrap();
         let mut old_nodes_to_add = HashMap::new();
-        for pos in Proof::<H>::nodes_required_for_proving(journal_size, oldest_retained_pos) {
+        for pos in Proof::<H>::nodes_to_pin(journal_size, oldest_retained_pos) {
             let old_node =
                 Mmr::<B, E, H>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
             old_nodes_to_add.insert(pos, old_node);
@@ -231,8 +231,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
         // pruning the mem_mmr.
         let oldest_retained_pos = self.oldest_retained_pos().await?.unwrap();
         let mut old_nodes = HashMap::new();
-        let required_positions =
-            Proof::<H>::nodes_required_for_proving(self.mem_mmr.size(), oldest_retained_pos);
+        let required_positions = Proof::<H>::nodes_to_pin(self.mem_mmr.size(), oldest_retained_pos);
         for pos in required_positions.into_iter() {
             let digest = self.mem_mmr.get_node_unchecked(pos);
             old_nodes.insert(pos, *digest);
@@ -248,8 +247,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
     /// disk. Return the computed set of required nodes.
     async fn sync_metadata(&mut self, prune_to_pos: u64) -> Result<HashMap<u64, H::Digest>, Error> {
         let mut old_nodes = HashMap::new();
-        let required_positions =
-            Proof::<H>::nodes_required_for_proving(self.mem_mmr.size(), prune_to_pos);
+        let required_positions = Proof::<H>::nodes_to_pin(self.mem_mmr.size(), prune_to_pos);
         for pos in required_positions.into_iter() {
             let digest = self.get_node(pos).await?.unwrap();
             self.metadata
