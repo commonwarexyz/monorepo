@@ -996,7 +996,6 @@ dependencies = [
  "futures",
  "governor",
  "prometheus-client",
- "pyroscope",
  "rand 0.8.5",
  "serde",
  "serde_yaml",

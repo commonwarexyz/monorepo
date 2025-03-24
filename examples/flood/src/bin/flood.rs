@@ -7,15 +7,11 @@ use commonware_cryptography::{
 use commonware_deployer::ec2::{Peers, METRICS_PORT, PROFILES_PORT};
 use commonware_flood::Config;
 use commonware_p2p::{authenticated, Receiver, Recipients, Sender};
-use commonware_runtime::{
-    telemetry::pprof::{pprof_backend, PprofConfig},
-    tokio, Clock, Metrics, Network, Runner, Spawner,
-};
+use commonware_runtime::{tokio, Clock, Metrics, Network, Runner, Spawner};
 use commonware_utils::{from_hex_formatted, union};
 use futures::future::try_join_all;
 use governor::Quota;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
-use pyroscope::PyroscopeAgent;
 use rand::{rngs::StdRng, Rng, RngCore, SeedableRng};
 use std::{
     collections::HashMap,
@@ -23,7 +19,6 @@ use std::{
     num::NonZeroU32,
     str::FromStr,
     sync::atomic::{AtomicI64, AtomicU64},
-    thread,
     time::Duration,
 };
 use sysinfo::{Disks, System};

@@ -28,7 +28,6 @@ rand = { workspace = true }
 futures = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 sysinfo = "0.33.1"
-pyroscope = "0.5.8"
 
 [[bin]]
 name = "flood"
