@@ -156,7 +156,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
             let pos = s.add(&mut hasher, &leaf);
             assert!(pos == journal_size);
             s.sync().await?;
-            warn!(leaf_position = pos, "recovered orphaned leaf");
+            warn!(pos, "recovered orphaned leaf");
         }
 
         Ok(s)
@@ -173,12 +173,12 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
         let bytes = metadata.get(&U64::new(pos));
         if bytes.is_none() {
             // If a node isn't found in the metadata, it might still be in the journal.
-            debug!("reading node {} from journal", pos);
+            debug!(pos, "reading node from journal");
             let node = journal.read(pos).await;
             match node {
                 Ok(node) => return Ok(node),
                 Err(JError::ItemPruned(_)) => {
-                    error!("node {} is missing from metadata and journal", pos);
+                    error!(pos, "node is missing from metadata and journal");
                     return Err(Error::MissingNode(pos));
                 }
                 Err(e) => {
@@ -187,13 +187,13 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
             }
         }
 
-        debug!("read node {} from metadata", pos);
+        debug!(pos, "read node from metadata");
         let digest = H::Digest::try_from(bytes.unwrap().as_ref());
         let Ok(digest) = digest else {
             error!(
-                "Could not convert node {} from metadata bytes to digest: {}",
                 pos,
-                digest.err().unwrap()
+                err = %digest.err().unwrap(),
+                "could not convert node from metadata bytes to digest"
             );
             return Err(Error::MissingNode(pos));
         };
@@ -325,7 +325,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
             // Because blobs are typically quite large, this loop will typically execute at most one
             // iteration, thus we don't bother trying to optimize away multiple writes from cases
             // involving more than one iteration.
-            debug!("syncing old_nodes required for pruning outcome: {}", pos);
+            debug!(pos, "syncing pinned nodes for pruning position");
             let old_nodes = self.sync_metadata(pos).await?;
             self.mem_mmr.add_pinned_nodes(old_nodes);
         }

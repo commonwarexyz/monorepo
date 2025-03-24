@@ -188,7 +188,7 @@ impl<B: Blob, E: Storage<B> + Metrics, A: Array> Journal<B, E, A> {
     pub async fn sync(&mut self) -> Result<(), Error> {
         self.synced.inc();
         let newest_blob = self.newest_blob();
-        debug!("syncing blob {}", newest_blob.0);
+        debug!(blob = newest_blob.0, "syncing blob");
         self.newest_blob().1.sync().await.map_err(Error::Runtime)
     }
 
@@ -227,7 +227,7 @@ impl<B: Blob, E: Storage<B> + Metrics, A: Array> Journal<B, E, A> {
             let next_blob_index = newest_blob.0 + 1;
             // Always sync the previous blob before creating a new one
             newest_blob.1.sync().await?;
-            debug!("creating next blob {}", next_blob_index);
+            debug!(blob = next_blob_index, "creating next blob");
             let next_blob = self
                 .context
                 .open(&self.cfg.partition, &next_blob_index.to_be_bytes())
