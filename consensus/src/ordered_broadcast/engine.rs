@@ -294,6 +294,7 @@ impl<
             }
 
             // Create deadline futures.
+            //
             // If the deadline is None, the future will never resolve.
             let rebroadcast = match self.rebroadcast_deadline {
                 Some(deadline) => Either::Left(self.context.sleep_until(deadline)),
@@ -304,6 +305,7 @@ impl<
                 None => Either::Right(futures::future::pending()),
             };
 
+            // Process the next event
             select! {
                 // Handle shutdown signal
                 _ = &mut shutdown => {
