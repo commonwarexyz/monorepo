@@ -1,17 +1,22 @@
 //! A basic MMR where all nodes are stored in-memory.
-
+//!
+//! # Terminology
+//!
+//! Nodes in this structure are either _retained_, _pruned_, or _pinned_. Retained nodes are nodes
+//! that have not yet been pruned, and have digests stored explicitly within the tree structure.
+//! Pruned nodes are those whose positions precede that of the _oldest retained_ node, for which no
+//! digests are maintained. Pinned nodes are nodes that would otherwise be pruned based on their
+//! position, but whose digests remain required for proof generation. The digests for pinned nodes
+//! are stored in an auxiliary map, and are at most O(log2(n)) in number.
 use crate::mmr::{
     hasher::Hasher,
-    iterator::{
-        nodes_needing_parents, oldest_provable_pos, oldest_required_proof_pos, PathIterator,
-        PeakIterator,
-    },
+    iterator::{nodes_needing_parents, PathIterator, PeakIterator},
     verification::{Proof, Storage},
     Error,
     Error::{ElementPruned, Empty},
 };
 use commonware_cryptography::Hasher as CHasher;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 /// Implementation of `Mmr`.
 ///
@@ -22,15 +27,14 @@ use std::collections::HashMap;
 pub struct Mmr<H: CHasher> {
     // The nodes of the MMR, laid out according to a post-order traversal of the MMR trees, starting
     // from the from tallest tree to shortest.
-    nodes: Vec<H::Digest>,
+    nodes: VecDeque<H::Digest>,
 
-    // The position of the oldest element still retained by the MMR. Will be 0 unless pruning has
-    // been invoked.
+    // The position of the oldest element still retained by the MMR, or the size of the MMR if there
+    // are no retained nodes because the MMR is empty or it has been fully pruned.
     oldest_retained_pos: u64,
 
-    // The hashes of the MMR's peaks that are older than oldest_retained_pos, keyed by their
-    // position.
-    old_peaks: HashMap<u64, H::Digest>,
+    // The auxiliary map from node position to the digest of any pinned node.
+    pinned_nodes: HashMap<u64, H::Digest>,
 }
 
 impl<H: CHasher> Default for Mmr<H> {
@@ -45,12 +49,7 @@ impl<H: CHasher> Storage<H::Digest> for Mmr<H> {
     }
 
     async fn get_node(&self, position: u64) -> Result<Option<H::Digest>, Error> {
-        let digest = if position < self.oldest_retained_pos {
-            self.old_peaks.get(&position)
-        } else {
-            self.nodes.get(self.pos_to_index(position))
-        };
-        Ok(digest.copied())
+        Ok(self.get_node(position))
     }
 }
 
@@ -58,34 +57,35 @@ impl<H: CHasher> Mmr<H> {
     /// Return a new (empty) `Mmr`.
     pub fn new() -> Self {
         Self {
-            nodes: Vec::new(),
+            nodes: VecDeque::new(),
             oldest_retained_pos: 0,
-            old_peaks: HashMap::new(),
+            pinned_nodes: HashMap::new(),
         }
     }
 
-    /// Return an `Mmr` initialized with the given nodes and oldest retained position, and hashes of
-    /// any peaks that are older than the oldest retained position.
+    /// Return an `Mmr` initialized with the given nodes, oldest retained position, and hashes of
+    /// pinned nodes.
     pub fn init(
         nodes: Vec<H::Digest>,
         oldest_retained_pos: u64,
-        old_peaks: Vec<H::Digest>,
+        pinned_nodes: Vec<H::Digest>,
     ) -> Self {
-        let mut s = Self {
-            nodes,
+        let mut mmr = Self {
+            nodes: VecDeque::from(nodes),
             oldest_retained_pos,
-            old_peaks: HashMap::new(),
+            pinned_nodes: HashMap::new(),
         };
-        assert!(PeakIterator::check_validity(s.size()));
-        let mut given_peak_iter = old_peaks.iter();
-        for (peak, _) in s.peak_iterator() {
-            if peak < s.oldest_retained_pos {
-                let given_peak = given_peak_iter.next().unwrap();
-                assert!(s.old_peaks.insert(peak, *given_peak).is_none());
-            }
+        if mmr.size() == 0 {
+            return mmr;
         }
-        assert!(given_peak_iter.next().is_none());
-        s
+
+        let required_positions = Proof::<H>::nodes_to_pin(mmr.size(), oldest_retained_pos);
+        assert_eq!(pinned_nodes.len(), required_positions.len());
+        for (i, pos) in required_positions.into_iter().enumerate() {
+            mmr.pinned_nodes.insert(pos, pinned_nodes[i]);
+        }
+
+        mmr
     }
 
     /// Return the total number of nodes in the MMR, irrespective of any pruning. The next added
@@ -102,12 +102,13 @@ impl<H: CHasher> Mmr<H> {
         Some(PeakIterator::last_leaf_pos(self.size()))
     }
 
-    /// Return the position of the oldest retained node in the MMR, not including the peaks which
-    /// are always retained.
+    /// Return the position of the oldest retained node in the MMR, not including those cached in
+    /// pinned_nodes.
     pub fn oldest_retained_pos(&self) -> Option<u64> {
-        if self.size() == 0 {
+        if self.oldest_retained_pos == self.size() {
             return None;
         }
+
         Some(self.oldest_retained_pos)
     }
 
@@ -121,14 +122,23 @@ impl<H: CHasher> Mmr<H> {
         index as u64 + self.oldest_retained_pos
     }
 
-    /// Returns the requested node, assuming it is either a peak or known to exist within the
-    /// currently retained node set.
-    fn get_node_unchecked(&self, pos: u64) -> &H::Digest {
-        if pos >= self.oldest_retained_pos {
-            &self.nodes[self.pos_to_index(pos)]
-        } else {
-            self.old_peaks.get(&pos).unwrap()
+    /// Returns the requested node, assuming it is either retained or known to exist in the
+    /// pinned_nodes map.
+    pub fn get_node_unchecked(&self, pos: u64) -> &H::Digest {
+        if pos < self.oldest_retained_pos {
+            return self.pinned_nodes.get(&pos).unwrap();
         }
+
+        &self.nodes[self.pos_to_index(pos)]
+    }
+
+    /// Returns the requested node or None if it is not stored in the MMR.
+    pub fn get_node(&self, pos: u64) -> Option<H::Digest> {
+        if pos < self.oldest_retained_pos {
+            return self.pinned_nodes.get(&pos).copied();
+        }
+
+        self.nodes.get(self.pos_to_index(pos)).copied()
     }
 
     /// Return the index of the element in the current nodes vector given its position in the MMR.
@@ -146,14 +156,14 @@ impl<H: CHasher> Mmr<H> {
         // Insert the element into the MMR as a leaf.
         let mut h = Hasher::new(hasher);
         let mut hash = h.leaf_hash(element_pos, element);
-        self.nodes.push(hash);
+        self.nodes.push_back(hash);
 
         // Compute the new parent nodes if any, and insert them into the MMR.
         for sibling_pos in peaks.into_iter().rev() {
             let parent_pos = self.index_to_pos(self.nodes.len());
             let sibling_hash = self.get_node_unchecked(sibling_pos);
             hash = h.node_hash(parent_pos, sibling_hash, &hash);
-            self.nodes.push(hash);
+            self.nodes.push_back(hash);
         }
         element_pos
     }
@@ -167,17 +177,15 @@ impl<H: CHasher> Mmr<H> {
         let mut new_size = self.size() - 1;
         loop {
             if new_size != 0 && new_size == self.oldest_retained_pos {
-                return Err(ElementPruned);
+                return Err(ElementPruned(new_size));
             }
             if PeakIterator::check_validity(new_size) {
                 break;
             }
             new_size -= 1;
         }
-
-        while self.size() != new_size {
-            self.nodes.pop();
-        }
+        let num_to_drain = (self.size() - new_size) as usize;
+        self.nodes.drain(self.nodes.len() - num_to_drain..);
 
         Ok(self.size())
     }
@@ -197,7 +205,7 @@ impl<H: CHasher> Mmr<H> {
         element: &H::Digest,
     ) -> Result<(), Error> {
         if pos < self.oldest_retained_pos {
-            return Err(ElementPruned);
+            return Err(ElementPruned(pos));
         }
 
         for (peak_pos, height) in self.peak_iterator() {
@@ -217,7 +225,7 @@ impl<H: CHasher> Mmr<H> {
             let path: Vec<_> = PathIterator::new(pos, peak_pos, height).collect();
             for (parent_pos, sibling_pos) in path.into_iter().rev() {
                 if sibling_pos < self.oldest_retained_pos {
-                    return Err(ElementPruned);
+                    return Err(ElementPruned(sibling_pos));
                 }
                 if parent_pos == pos {
                     panic!("pos was not for a leaf");
@@ -263,97 +271,77 @@ impl<H: CHasher> Mmr<H> {
         end_element_pos: u64,
     ) -> Result<Proof<H>, Error> {
         if start_element_pos < self.oldest_retained_pos {
-            return Err(ElementPruned);
+            return Err(ElementPruned(start_element_pos));
         }
         Proof::<H>::range_proof(self, start_element_pos, end_element_pos).await
     }
 
-    /// Prune all but the very last node.
-    ///
-    /// This always leaves the MMR in a valid state since the last node is always a peak.
+    /// Prune all nodes and pin the O(log2(n)) number of them required for proof generation going
+    /// forward.
     pub fn prune_all(&mut self) {
         if !self.nodes.is_empty() {
-            self.prune_to_pos(self.index_to_pos(self.nodes.len() - 1));
+            self.prune_to_pos(self.index_to_pos(self.nodes.len()));
         }
     }
 
-    /// Prune the maximum amount of nodes possible while still allowing nodes with position `pos`
-    /// or newer to be provable, returning the position of the oldest retained node.
-    pub fn prune(&mut self, pos: u64) -> Option<u64> {
-        if self.size() == 0 {
-            return None;
-        }
-        let oldest_pos = oldest_required_proof_pos(self.peak_iterator(), pos);
-        self.prune_to_pos(oldest_pos);
-        Some(oldest_pos)
-    }
-
-    /// Prune all nodes up to but not including the given position (except for any peaks in that
-    /// range).
-    ///
-    /// Pruned nodes will no longer be provable, nor will some nodes that follow them in some cases.
-    /// Use prune(pos) to guarantee a desired node (and all that follow it) will remain provable
-    /// after pruning.
-    pub(crate) fn prune_to_pos(&mut self, pos: u64) {
-        for (peak_pos, _) in self.peak_iterator() {
-            if peak_pos < pos && peak_pos >= self.oldest_retained_pos {
-                assert!(self
-                    .old_peaks
-                    .insert(peak_pos, self.nodes[self.pos_to_index(peak_pos)])
-                    .is_none());
-            }
-        }
-        let nodes_to_keep = self.pos_to_index(pos);
-        self.nodes = self.nodes[nodes_to_keep..self.nodes.len()].to_vec();
+    /// Prune all nodes up to but not including the given position, and pin the O(log2(n)) number of
+    /// them required for proof generation.
+    pub fn prune_to_pos(&mut self, pos: u64) {
+        // Recompute the set of older nodes to retain.
+        self.pinned_nodes = self.nodes_to_pin(pos);
+        let retained_nodes = self.pos_to_index(pos);
+        self.nodes.drain(0..retained_nodes);
         self.oldest_retained_pos = pos;
     }
 
-    // A lightweight cloning operation that "clones" only the fully pruned state of this MMR. The output is exactly the
-    // same as the result of mmr.prune_all(), only you get a copy without mutating the original.
+    /// Get the nodes (position + digest) that need to be pinned (those required for proof
+    /// generation) in this MMR when pruned to position `prune_pos`.
+    pub(crate) fn nodes_to_pin(&self, prune_pos: u64) -> HashMap<u64, H::Digest> {
+        let positions = Proof::<H>::nodes_to_pin(self.size(), prune_pos);
+        positions
+            .into_iter()
+            .map(|pos| (pos, *self.get_node_unchecked(pos)))
+            .collect()
+    }
+
+    /// Get the digests of nodes that need to be pinned (those required for proof generation) in
+    /// this MMR when pruned to position `prune_pos`.
+    pub(crate) fn node_digests_to_pin(&self, start_pos: u64) -> Vec<H::Digest> {
+        let positions = Proof::<H>::nodes_to_pin(self.size(), start_pos);
+        positions
+            .into_iter()
+            .map(|pos| *self.get_node_unchecked(pos))
+            .collect()
+    }
+
+    /// Utility used by stores that build on the mem MMR to pin extra nodes if needed. It's up to
+    /// the caller to ensure that this set of pinned nodes is valid for their use case.
+    pub(crate) fn add_pinned_nodes(&mut self, pinned_nodes: HashMap<u64, H::Digest>) {
+        for (pos, node) in pinned_nodes.into_iter() {
+            self.pinned_nodes.insert(pos, node);
+        }
+    }
+
+    // A lightweight cloning operation that "clones" only the fully pruned state of this MMR. The
+    // output is exactly the same as the result of mmr.prune_all(), only you get a copy without
+    // mutating the original.
     //
-    // Overhead is Log_2(n) in the number of elements even if the original MMR is fully unpruned.
+    // Overhead is Log_2(n) in the number of elements even if the original MMR is never pruned.
     pub fn clone_pruned(&self) -> Self {
-        if self.nodes.is_empty() {
+        if self.size() == 0 {
             return Self::new();
         }
 
-        let index = self.nodes.len() - 1;
-        let pos = self.index_to_pos(index);
+        // Create the "old_nodes" of the MMR in the fully pruned state.
+        let old_nodes = self.node_digests_to_pin(self.size());
 
-        // Create the "old_peaks" of the MMR in the fully pruned state.
-        let mut cloned_old_peaks = self.old_peaks.clone();
-        for (peak_pos, _) in self.peak_iterator() {
-            if peak_pos < pos && peak_pos >= self.oldest_retained_pos {
-                assert!(cloned_old_peaks
-                    .insert(peak_pos, self.nodes[self.pos_to_index(peak_pos)])
-                    .is_none());
-            }
-        }
-        let mut peak_digests: Vec<_> = cloned_old_peaks.into_iter().collect();
-        // Peak Digests must be in highest (oldest position) to lowest order.
-        peak_digests.sort_by_key(|(pos, _)| *pos);
-        let peak_digests = peak_digests.into_iter().map(|(_, digest)| digest).collect();
-
-        let cloned_nodes = vec![self.nodes[index]];
-
-        Self::init(cloned_nodes, pos, peak_digests)
-    }
-
-    /// Return the oldest node position provable by this MMR.
-    pub fn oldest_provable_pos(&self) -> Option<u64> {
-        if self.size() == 0 {
-            return None;
-        }
-        Some(oldest_provable_pos(
-            self.peak_iterator(),
-            self.oldest_retained_pos,
-        ))
+        Self::init(vec![], self.size(), old_nodes)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{nodes_needing_parents, Error::*, Hasher, Mmr, PeakIterator, Storage};
+    use super::{nodes_needing_parents, Error::*, Hasher, Mmr, PeakIterator};
     use commonware_cryptography::{Hasher as CHasher, Sha256};
     use commonware_runtime::{deterministic::Executor, Runner};
     use commonware_utils::hex;
@@ -371,10 +359,8 @@ mod tests {
             );
             assert_eq!(mmr.size(), 0);
             assert_eq!(mmr.last_leaf_pos(), None);
-            assert_eq!(mmr.oldest_provable_pos(), None);
             assert_eq!(mmr.oldest_retained_pos(), None);
-            assert_eq!(mmr.get_node(0).await.unwrap(), None);
-            assert_eq!(mmr.prune(0), None);
+            assert_eq!(mmr.get_node(0), None);
             mmr.prune_all();
             assert_eq!(mmr.size(), 0, "prune_all on empty MMR should do nothing");
 
@@ -437,7 +423,7 @@ mod tests {
             let mut mmr_hasher = Hasher::new(&mut hasher);
             for leaf in leaves.iter().by_ref() {
                 let hash = mmr_hasher.leaf_hash(*leaf, &element);
-                assert_eq!(mmr.get_node(*leaf).await.unwrap().unwrap(), hash);
+                assert_eq!(mmr.get_node(*leaf).unwrap(), hash);
             }
 
             // verify height=1 hashes
@@ -476,8 +462,8 @@ mod tests {
             assert_eq!(mmr.oldest_retained_pos().unwrap(), 14);
 
             // After pruning up to a peak, we shouldn't be able to prove any elements before it.
-            assert!(matches!(mmr.proof(0).await, Err(ElementPruned)));
-            assert!(matches!(mmr.proof(11).await, Err(ElementPruned)));
+            assert!(matches!(mmr.proof(0).await, Err(ElementPruned(_))));
+            assert!(matches!(mmr.proof(11).await, Err(ElementPruned(_))));
             // We should still be able to prove any leaf following this peak, the first of which is
             // at position 15.
             assert!(mmr.proof(15).await.is_ok());
@@ -503,17 +489,10 @@ mod tests {
             );
 
             // Test that we can initialize a new MMR from another's elements.
-            let mut old_peaks = Vec::new();
-            mmr.peak_iterator().for_each(|peak| {
-                if peak.0 < mmr.oldest_retained_pos().unwrap() {
-                    old_peaks.push(*mmr.get_node_unchecked(peak.0));
-                }
-            });
-            let mmr_copy = Mmr::<Sha256>::init(
-                mmr.nodes.clone(),
-                mmr.oldest_retained_pos().unwrap(),
-                old_peaks,
-            );
+            let oldest_pos = mmr.oldest_retained_pos().unwrap();
+            let digests = mmr.node_digests_to_pin(oldest_pos);
+            let mmr_copy =
+                Mmr::<Sha256>::init(mmr.nodes.iter().copied().collect(), oldest_pos, digests);
             assert_eq!(mmr_copy.size(), 19);
             assert_eq!(mmr_copy.oldest_retained_pos(), mmr.oldest_retained_pos());
             assert_eq!(mmr_copy.root(&mut hasher), root_hash);
@@ -522,7 +501,7 @@ mod tests {
             // after being fully pruned.
             mmr.prune_to_pos(17); // prune up to the second peak
             let clone = mmr.clone_pruned();
-            assert!(mmr.oldest_retained_pos() < clone.oldest_retained_pos());
+            assert_eq!(clone.oldest_retained_pos(), None);
             mmr.prune_all();
             assert_eq!(mmr.oldest_retained_pos(), clone.oldest_retained_pos());
             assert_eq!(mmr.size(), clone.size());
@@ -837,11 +816,11 @@ mod tests {
             let element = hasher.finalize();
             mmr.add(&mut hasher, &element);
         }
-        let boundary = mmr.prune(100).unwrap();
-        while mmr.size() - 1 > boundary {
+        mmr.prune_to_pos(100);
+        while mmr.size() - 1 > 100 {
             assert!(mmr.pop().is_ok());
         }
-        assert!(matches!(mmr.pop().unwrap_err(), ElementPruned));
+        assert!(matches!(mmr.pop().unwrap_err(), ElementPruned(_)));
     }
 
     #[test]
@@ -874,11 +853,11 @@ mod tests {
         mmr.prune_to_pos(leaves[150]);
         assert!(matches!(
             mmr.update_leaf(&mut hasher, leaves[150], &element),
-            Err(ElementPruned)
+            Err(ElementPruned(_))
         ));
         assert!(matches!(
             mmr.update_leaf(&mut hasher, leaves[149], &element),
-            Err(ElementPruned)
+            Err(ElementPruned(_))
         ));
         assert!(mmr.update_leaf(&mut hasher, leaves[190], &element).is_ok());
     }

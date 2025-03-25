@@ -128,7 +128,6 @@ pub(crate) fn nodes_needing_parents(peak_iterator: PeakIterator) -> Vec<u64> {
 /// this is not a leaf.
 ///
 /// This computation is O(log2(n)) in the given position.
-#[allow(dead_code)] // TODO: remove this when we start using it
 pub(crate) const fn leaf_pos_to_num(leaf_pos: u64) -> Option<u64> {
     if leaf_pos == 0 {
         return Some(0);
@@ -188,72 +187,6 @@ pub(crate) const fn leaf_num_to_pos(leaf_num: u64) -> u64 {
     }
 
     pos
-}
-
-/// Returns the position of the oldest provable node in the represented MMR.
-pub(crate) fn oldest_provable_pos(peak_iterator: PeakIterator, oldest_retained_pos: u64) -> u64 {
-    if peak_iterator.size == 0 {
-        return 0;
-    }
-    for (peak_pos, height) in peak_iterator {
-        if peak_pos < oldest_retained_pos {
-            continue;
-        }
-        // We have found the tree containing the oldest retained node. Now we look for the
-        // highest node in this tree whose left-sibling is pruned (if any). The provable nodes
-        // are those that strictly follow this node. If no such node exists, then all existing
-        // nodes are provable
-        let mut two_h = 1 << height;
-        let mut cur_node = peak_pos;
-        while two_h > 1 {
-            let left_pos = cur_node - two_h;
-            let right_pos = cur_node - 1;
-            if left_pos < oldest_retained_pos {
-                // found pruned left sibling
-                return right_pos + 1;
-            }
-            two_h >>= 1;
-            cur_node = left_pos;
-        }
-        return oldest_retained_pos;
-    }
-    // The oldest retained node should always be at or equal to the last peak (aka the last node
-    // in the MMR), so if we get here, the MMR corresponding to the inputs is invalid.
-    panic!("mmr invalid")
-}
-
-/// Returns the position of the oldest node whose digest will be required to prove inclusion of
-/// `provable_pos`. The implementation assumes that the peak digests will remain available.
-///
-/// Pruning this position will render the node with position `provable_pos` unprovable.
-pub(crate) fn oldest_required_proof_pos(peak_iterator: PeakIterator, provable_pos: u64) -> u64 {
-    if peak_iterator.size == 0 {
-        return 0;
-    }
-    for (peak_pos, height) in peak_iterator {
-        if peak_pos < provable_pos {
-            continue;
-        }
-        // We have found the tree containing the node we want to guarantee is provable. We
-        // now walk down the path from its root to this node.
-        let iter = PathIterator::new(provable_pos, peak_pos, height);
-        for (parent_pos, sibling_pos) in iter {
-            if parent_pos == provable_pos {
-                // If we hit the node we are trying to prove while walking the path, then no
-                // older nodes are required to prove it.
-                return provable_pos;
-            }
-            // If we hit a node whose sibling precedes the position we wish to prove, then that
-            // sibling is required to prove it, and it's the oldest such node.
-            if sibling_pos < provable_pos {
-                return sibling_pos;
-            }
-        }
-        return provable_pos;
-    }
-    // The oldest retained node should always be at or equal to the last peak (aka the last node
-    // in the MMR), so if we get here, the MMR corresponding to the inputs is invalid.
-    panic!("mmr invalid")
 }
 
 /// A PathIterator returns a (parent_pos, sibling_pos) tuple for the sibling of each node along the
@@ -321,23 +254,6 @@ mod tests {
     use super::*;
     use crate::mmr::mem::Mmr;
     use commonware_cryptography::{sha256::hash, Sha256};
-
-    // Very basic testing for the proving boundary computations. Testing of the validity of these
-    // boundaries appears in the verification crate.
-    #[test]
-    fn test_proof_boundaries() {
-        for oldest_retained in 0u64..19 {
-            let iter = PeakIterator::new(19);
-            let oldest_provable = oldest_provable_pos(iter, oldest_retained);
-            assert!(oldest_provable >= oldest_retained);
-        }
-
-        for provable_pos in 0u64..19 {
-            let iter = PeakIterator::new(19);
-            let oldest_required = oldest_required_proof_pos(iter, provable_pos);
-            assert!(oldest_required <= provable_pos);
-        }
-    }
 
     #[test]
     fn test_leaf_num_calculation() {

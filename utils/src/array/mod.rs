@@ -13,6 +13,7 @@ pub mod fixed_bytes;
 pub use fixed_bytes::FixedBytes;
 pub mod u64;
 pub use u64::U64;
+pub mod prefixed_u64;
 
 /// Errors returned by the `Array` trait's functions.
 #[derive(Error, Debug, PartialEq)]

@@ -67,7 +67,7 @@
 //! )
 //! ```
 
-use commonware_utils::array;
+use commonware_utils::array::prefixed_u64::U64;
 use thiserror::Error;
 
 pub mod bitmap;
@@ -81,14 +81,14 @@ pub mod verification;
 /// Errors that can occur when interacting with an MMR.
 #[derive(Error, Debug)]
 pub enum Error {
-    #[error("an element required for this operation has been pruned")]
-    ElementPruned,
+    #[error("an element required for this operation has been pruned: {0}")]
+    ElementPruned(u64),
     #[error("metadata error: {0}")]
-    MetadataError(#[from] crate::metadata::Error<array::U64>),
+    MetadataError(#[from] crate::metadata::Error<U64>),
     #[error("journal error: {0}")]
     JournalError(#[from] crate::journal::Error),
-    #[error("missing peak: {0}")]
-    MissingPeak(u64),
+    #[error("missing node: {0}")]
+    MissingNode(u64),
     #[error("MMR is empty")]
     Empty,
     #[error("missing hashes in proof")]

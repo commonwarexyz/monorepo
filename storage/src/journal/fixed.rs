@@ -188,7 +188,7 @@ impl<B: Blob, E: Storage<B> + Metrics, A: Array> Journal<B, E, A> {
     pub async fn sync(&mut self) -> Result<(), Error> {
         self.synced.inc();
         let newest_blob = self.newest_blob();
-        debug!("syncing blob {}", newest_blob.0);
+        debug!(blob = newest_blob.0, "syncing blob");
         self.newest_blob().1.sync().await.map_err(Error::Runtime)
     }
 
@@ -227,7 +227,7 @@ impl<B: Blob, E: Storage<B> + Metrics, A: Array> Journal<B, E, A> {
             let next_blob_index = newest_blob.0 + 1;
             // Always sync the previous blob before creating a new one
             newest_blob.1.sync().await?;
-            debug!("creating next blob {}", next_blob_index);
+            debug!(blob = next_blob_index, "creating next blob");
             let next_blob = self
                 .context
                 .open(&self.cfg.partition, &next_blob_index.to_be_bytes())
@@ -409,20 +409,21 @@ impl<B: Blob, E: Storage<B> + Metrics, A: Array> Journal<B, E, A> {
     }
 
     /// Allow the journal to prune items older than `min_item_pos`. The journal may not prune all
-    /// such items in order to preserve blob boundaries, but the amount of such items will always
-    /// be less than the configured number of items per blob.
-    pub async fn prune(&mut self, min_item_pos: u64) -> Result<(), Error> {
+    /// such items in order to preserve blob boundaries, but the amount of such items will always be
+    /// less than the configured number of items per blob. The result will contain the actual
+    /// pruning position.
+    ///
+    /// Note that this operation may NOT be atomic, however it's guaranteed not to leave gaps in the
+    /// event of failure as items are always pruned in order from oldest to newest.
+    pub async fn prune(&mut self, min_item_pos: u64) -> Result<u64, Error> {
         let oldest_blob = self.oldest_blob().0;
         let mut new_oldest_blob = min_item_pos / self.cfg.items_per_blob;
         if new_oldest_blob <= oldest_blob {
             // nothing to prune
-            return Ok(());
+            return Ok(new_oldest_blob * self.cfg.items_per_blob);
         }
         // Make sure we never prune the most recent blob
-        let newest_blob = self.newest_blob();
-        if new_oldest_blob > newest_blob.0 {
-            new_oldest_blob = newest_blob.0
-        }
+        new_oldest_blob = std::cmp::min(new_oldest_blob, self.newest_blob().0);
 
         for index in oldest_blob..new_oldest_blob {
             let blob = self.blobs.remove(&index).unwrap();
@@ -436,7 +437,7 @@ impl<B: Blob, E: Storage<B> + Metrics, A: Array> Journal<B, E, A> {
             self.tracked.dec();
         }
 
-        Ok(())
+        Ok(new_oldest_blob * self.cfg.items_per_blob)
     }
 
     /// Close the journal
