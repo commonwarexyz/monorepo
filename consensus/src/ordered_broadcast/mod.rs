@@ -99,7 +99,10 @@ mod tests {
     use commonware_runtime::{Clock, Runner, Spawner};
     use futures::channel::oneshot;
     use futures::future::join_all;
-    use std::sync::{Arc, Mutex};
+    use std::{
+        collections::HashMap,
+        sync::{Arc, Mutex},
+    };
     use std::{
         collections::{BTreeMap, HashSet},
         time::Duration,
@@ -210,11 +213,13 @@ mod tests {
         committers: &mut BTreeMap<PublicKey, mocks::CommitterMailbox<Ed25519, Sha256Digest>>,
         rebroadcast_timeout: Duration,
         invalid_when: fn(u64) -> bool,
-    ) {
+    ) -> HashMap<PublicKey, mocks::Monitor> {
+        let mut monitors = HashMap::new();
         let namespace = b"my testing namespace";
         for (validator, scheme, share) in validators.iter() {
             let context = context.with_label(&validator.to_string());
             let monitor = mocks::Monitor::new(111);
+            monitors.insert(validator.clone(), monitor.clone());
             let sequencers = mocks::Sequencers::<PublicKey>::new(pks.to_vec());
             let validators =
                 mocks::Validators::<PublicKey>::new(identity.clone(), pks.to_vec(), *share);
@@ -252,6 +257,7 @@ mod tests {
             let ((a1, a2), (b1, b2)) = registrations.remove(validator).unwrap();
             engine.start((a1, a2), (b1, b2));
         }
+        monitors
     }
 
     async fn await_committers(
@@ -286,6 +292,19 @@ mod tests {
         // Wait for all oneshot receivers to complete.
         let results = join_all(receivers).await;
         assert_eq!(results.len(), committers.len());
+    }
+
+    async fn get_max_tip(
+        committers: &mut BTreeMap<PublicKey, mocks::CommitterMailbox<Ed25519, Sha256Digest>>,
+    ) -> u64 {
+        let mut max_tip = 0;
+        for (sequencer, mailbox) in committers.iter_mut() {
+            let tip = mailbox.get_tip(sequencer.clone()).await.unwrap_or(0);
+            if tip > max_tip {
+                max_tip = tip;
+            }
+        }
+        max_tip
     }
 
     #[test_traced]
@@ -434,6 +453,7 @@ mod tests {
         shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
         runner.start(async move {
+            // Configure the network
             let (mut oracle, validators, pks, mut registrations) = initialize_simulation(
                 context.with_label("simulation"),
                 num_validators,
@@ -456,9 +476,14 @@ mod tests {
                 Duration::from_secs(1),
                 |_| false,
             );
+
             // Simulate partition by removing all links.
             link_validators(&mut oracle, &pks, Action::Unlink, None).await;
-            context.sleep(Duration::from_secs(5)).await;
+            context.sleep(Duration::from_secs(30)).await;
+
+            // Get the maximum tip from all committers.
+            let max_tip = get_max_tip(&mut committers).await;
+
             // Heal the partition by re-adding links.
             let link = Link {
                 latency: 10.0,
@@ -466,7 +491,7 @@ mod tests {
                 success_rate: 1.0,
             };
             link_validators(&mut oracle, &pks, Action::Link(link), None).await;
-            await_committers(context.with_label("committer"), &committers, 100).await;
+            await_committers(context.with_label("committer"), &committers, max_tip + 100).await;
         });
     }
 
@@ -570,6 +595,63 @@ mod tests {
             );
 
             await_committers(context.with_label("committer"), &committers, 100).await;
+        });
+    }
+
+    #[test_traced]
+    fn test_updated_epoch() {
+        let num_validators: u32 = 4;
+        let quorum: u32 = 3;
+        let (runner, mut context, _) = Executor::timed(Duration::from_secs(60));
+        let (identity, mut shares_vec) =
+            ops::generate_shares(&mut context, None, num_validators, quorum);
+        shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
+
+        runner.start(async move {
+            // Setup network
+            let (mut oracle, validators, pks, mut registrations) = initialize_simulation(
+                context.with_label("simulation"),
+                num_validators,
+                &mut shares_vec,
+            )
+            .await;
+            let automatons = Arc::new(Mutex::new(
+                BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
+            ));
+            let mut committers =
+                BTreeMap::<PublicKey, mocks::CommitterMailbox<Ed25519, Sha256Digest>>::new();
+            let monitors = spawn_validator_engines(
+                context.with_label("validator"),
+                identity.clone(),
+                &pks,
+                &validators,
+                &mut registrations,
+                &mut automatons.lock().unwrap(),
+                &mut committers,
+                Duration::from_secs(1),
+                |_| false,
+            );
+
+            // Simulate partition by removing all links.
+            link_validators(&mut oracle, &pks, Action::Unlink, None).await;
+            context.sleep(Duration::from_secs(30)).await;
+
+            // Get the maximum tip from all committers.
+            let max_tip = get_max_tip(&mut committers).await;
+
+            // Update the epoch
+            for monitor in monitors.values() {
+                monitor.update(112);
+            }
+
+            // Heal the partition by re-adding links.
+            let link = Link {
+                latency: 10.0,
+                jitter: 1.0,
+                success_rate: 1.0,
+            };
+            link_validators(&mut oracle, &pks, Action::Link(link), None).await;
+            await_committers(context.with_label("committer"), &committers, max_tip + 100).await;
         });
     }
 }

@@ -57,6 +57,7 @@ impl<C: Scheme, D: Digest> Committer<C, D> {
             match msg {
                 Message::Acknowledged(proof, payload) => {
                     // Check proof.
+                    //
                     // The prover checks the validity of the threshold signature when deserializing
                     let prover = Prover::<C, D>::new(&self.namespace, self.public);
                     let context = match prover.deserialize_threshold(proof) {
