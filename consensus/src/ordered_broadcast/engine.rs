@@ -337,7 +337,7 @@ impl<
 
                 // Handle rebroadcast deadline
                 _ = rebroadcast => {
-                    debug!("rebroadcast");
+                    debug!(epoch = self.epoch, "rebroadcast");
                     if let Err(err) = self.rebroadcast(&mut node_sender).await {
                         info!(?err, "rebroadcast failed");
                         continue;
