@@ -64,7 +64,7 @@ impl<C: Scheme, D: Digest> Committer<C, D> {
 
                     // Update the committer
                     let digests = self.digests.entry(context.sequencer.clone()).or_default();
-                    digests.insert(context.height, payload);
+                    assert!(digests.insert(context.height, payload).is_none());
 
                     // Update the highest height
                     let highest = self.highest.get(&context.sequencer).copied().unwrap_or(0);
