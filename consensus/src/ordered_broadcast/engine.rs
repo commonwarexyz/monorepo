@@ -398,7 +398,10 @@ impl<
                         self.handle_threshold(&parent_chunk, parent.epoch, parent.threshold).await;
                     }
 
-                    // Process the new node
+                    // Process the node
+                    //
+                    // Note, this node may be a duplicate. If it is, we will attempt to verify it and vote
+                    // on it again (our original vote may have been lost).
                     self.handle_node(&node).await;
                     debug!(?sender, height=node.chunk.height, "node");
                     guard.set(Status::Success);
