@@ -6,7 +6,7 @@
 //!
 //! # Example
 //! ```rust
-//! use commonware_cryptography::{Scheme, Secp256r1};
+//! use commonware_cryptography::{Signer, Verifier, Secp256r1};
 //! use rand::rngs::OsRng;
 //!
 //! // Generate a new private key

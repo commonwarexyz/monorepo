@@ -2,7 +2,7 @@
 //!
 //! # Example
 //! ```rust
-//! use commonware_cryptography::{Bls12381, Scheme};
+//! use commonware_cryptography::{Bls12381, Signer, Verifier};
 //! use rand::rngs::OsRng;
 //!
 //! // Generate a new private key

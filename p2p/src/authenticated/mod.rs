@@ -85,7 +85,7 @@
 //!
 //! ```rust
 //! use commonware_p2p::authenticated::{self, Network};
-//! use commonware_cryptography::{Ed25519, Scheme};
+//! use commonware_cryptography::{Ed25519, Signer, Verifier};
 //! use commonware_runtime::{tokio::{self, Executor}, Spawner, Runner, Metrics};
 //! use governor::Quota;
 //! use std::net::{IpAddr, Ipv4Addr, SocketAddr};

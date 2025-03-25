@@ -13,7 +13,7 @@
 //!
 //! ```rust
 //! use commonware_p2p::simulated::{Config, Link, Network};
-//! use commonware_cryptography::{Ed25519, Scheme};
+//! use commonware_cryptography::{Ed25519, Signer, Verifier};
 //! use commonware_runtime::{deterministic::Executor, Spawner, Runner, Metrics};
 //!
 //! // Generate peers
