@@ -565,6 +565,8 @@ impl<
         threshold: group::Signature,
     ) {
         // Set the threshold signature, returning early if it already exists
+        //
+        // TODO: this prevents us from ever sending a finalization message recovered from a partial signature
         if !self
             .ack_manager
             .add_threshold(&chunk.sequencer, chunk.height, epoch, threshold)
@@ -600,6 +602,7 @@ impl<
 
         // Add the partial signature. If a new threshold is formed, handle it.
         if let Some(threshold) = self.ack_manager.add_ack(ack, quorum) {
+            debug!(epoch=ack.epoch, sequencer=?ack.chunk.sequencer, height=ack.chunk.height, "recovered threshold");
             self.metrics.threshold.inc();
             self.handle_threshold(&ack.chunk, ack.epoch, threshold)
                 .await;
