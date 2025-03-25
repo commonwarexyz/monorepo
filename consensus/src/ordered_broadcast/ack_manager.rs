@@ -136,9 +136,9 @@ impl<D: Digest, P: Array> AckManager<D, P> {
 
         // Prune all entries with height less than the parent
         //
-        // This approach ensures we don't accidentally notify the application of a threshold signatures
-        // for the parent when handling the duplicate broadcast of some node at tip after we've already
-        // recovered its threshold signature.
+        // This approach ensures we don't accidentally notify the application of a threshold signature multiple
+        // times (which could otherwise occur if we recover the threshold signature for some chunk at tip and then
+        // receive a duplicate broadcast of said chunk before a sequencer sends one at a new height).
         if let Some(m) = self.acks.get_mut(sequencer) {
             let min_height = height.saturating_sub(1);
             m.retain(|&h, _| h >= min_height);
