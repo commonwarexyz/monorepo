@@ -366,7 +366,6 @@ impl<
 
                 // Handle incoming nodes
                 msg = node_receiver.recv() => {
-                    debug!("node network");
                     // Error handling
                     let (sender, msg) = match msg {
                         Ok(r) => r,
@@ -384,7 +383,7 @@ impl<
                         }
                     };
                     if let Err(err) = self.validate_node(&node, &sender) {
-                        warn!(?err, ?node, ?sender, "node validate failed");
+                        warn!(?err, ?sender, "node validate failed");
                         continue;
                     };
 
@@ -398,12 +397,12 @@ impl<
 
                     // Process the new node
                     self.handle_node(&node).await;
+                    debug!(?sender, height=node.chunk.height, "node");
                     guard.set(Status::Success);
                 },
 
                 // Handle incoming acks
                 msg = ack_receiver.recv() => {
-                    debug!("ack network");
                     // Error handling
                     let (sender, msg) = match msg {
                         Ok(r) => r,
@@ -421,14 +420,15 @@ impl<
                         }
                     };
                     if let Err(err) = self.validate_ack(&ack, &sender) {
-                        warn!(?err, ?ack, ?sender, "ack validate failed");
+                        warn!(?err, ?sender, "ack validate failed");
                         continue;
                     };
                     if let Err(err) = self.handle_ack(&ack).await {
-                        warn!(?err, ?ack, "ack handle failed");
+                        warn!(?err, ?sender, "ack handle failed");
                         guard.set(Status::Failure);
                         continue;
                     }
+                    debug!(?sender, epoch=ack.epoch, sequencer=?ack.chunk.sequencer, height=ack.chunk.height, "ack");
                     guard.set(Status::Success);
                 },
 
@@ -438,15 +438,15 @@ impl<
                     drop(timer); // Record metric. Explicitly reference timer to avoid lint warning
                     match result {
                         Err(err) => {
-                            warn!(?err, ?context, ?payload, "verified returned error");
+                            warn!(?err, ?context, "verified returned error");
                             self.metrics.verify.inc(Status::Dropped);
                         }
                         Ok(false) => {
-                            warn!(?context, ?payload, "verified was false");
+                            warn!(?context, "verified was false");
                             self.metrics.verify.inc(Status::Failure);
                         }
                         Ok(true) => {
-                            debug!(?context, ?payload, "verified");
+                            debug!(?context, "verified");
                             self.metrics.verify.inc(Status::Success);
                             if let Err(err) = self.handle_app_verified(&context, &payload, &mut ack_sender).await {
                                 warn!(?err, ?context, ?payload, "verified handle failed");

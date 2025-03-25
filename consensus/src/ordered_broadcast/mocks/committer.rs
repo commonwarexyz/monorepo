@@ -53,13 +53,13 @@ impl<C: Scheme, D: Digest> Committer<C, D> {
     }
 
     pub async fn run(mut self) {
+        let prover = Prover::<C, D>::new(&self.namespace, self.public);
         while let Some(msg) = self.mailbox.next().await {
             match msg {
                 Message::Acknowledged(proof, payload) => {
                     // Check proof.
                     //
                     // The prover checks the validity of the threshold signature when deserializing
-                    let prover = Prover::<C, D>::new(&self.namespace, self.public);
                     let context = match prover.deserialize_threshold(proof) {
                         Some((context, _payload, _epoch, _threshold)) => context,
                         None => {
