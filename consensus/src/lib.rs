@@ -175,16 +175,22 @@ cfg_if::cfg_if! {
             fn share(&self, index: Self::Index) -> Option<&Self::Share>;
         }
 
-        /// Monitor is the interface an external actor can call to observe latest index for a consensus implementation.
+        /// Monitor is the interface an external actor can use to observe the progress of a consensus implementation.
         ///
-        /// This trait is often used to implement mechanisms that rely on consensus to drive progress but benefit
-        /// from interacting with the same active set of participants.
+        /// Monitor is used to implement mechanisms that share the same set of active participants as consensus and/or
+        /// perform some activity that occurs at some time related to consensus.
+        ///
+        /// Monitor can be implemented using [`Committer`](crate::Committer) to avoid introducing complexity
+        /// into any particular consensus implementation.
         pub trait Monitor: Clone + Send + 'static {
             /// Index is the type used to indicate the in-progress consensus decision.
             type Index;
 
             /// Latest index known by the consensus implementation.
             fn latest(&self) -> Self::Index;
+
+            /// Report that the latest index has been updated.
+            fn updated(&mut self, index: Self::Index) -> impl Future<Output = ()> + Send;
         }
     }
 }
