@@ -180,8 +180,10 @@ cfg_if::cfg_if! {
         /// This trait is often used to implement mechanisms that rely on consensus to drive progress but benefit
         /// from interacting with the same active set of participants.
         pub trait Monitor: Clone + Send + 'static {
+            /// Index is the type used to indicate the in-progress consensus decision.
             type Index;
 
+            /// Latest index known by the consensus implementation.
             fn latest(&self) -> Self::Index;
         }
     }

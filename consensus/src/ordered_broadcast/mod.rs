@@ -215,7 +215,7 @@ mod tests {
         let namespace = b"my testing namespace";
         for (validator, scheme, share) in validators.iter() {
             let context = context.with_label(&validator.to_string());
-            let epocher = mocks::Epocher::new(111);
+            let monitor = mocks::Monitor::new(111);
             let sequencers = mocks::Sequencers::<PublicKey>::new(pks.to_vec());
             let validators =
                 mocks::Validators::<PublicKey>::new(identity.clone(), pks.to_vec(), *share);
@@ -235,7 +235,7 @@ mod tests {
                     relay: automaton.clone(),
                     automaton: automaton.clone(),
                     committer: committers.get(validator).unwrap().clone(),
-                    epocher,
+                    monitor,
                     sequencers,
                     validators,
                     namespace: namespace.to_vec(),
