@@ -179,7 +179,7 @@ cfg_if::cfg_if! {
         /// Monitor is the interface an external actor can use to observe the progress of a consensus implementation.
         ///
         /// Monitor is used to implement mechanisms that share the same set of active participants as consensus and/or
-        /// perform some activity that occurs at some time related to consensus.
+        /// perform some activity that requires some synchronization with the progress of consensus.
         ///
         /// Monitor can be implemented using [`Committer`](crate::Committer) to avoid introducing complexity
         /// into any particular consensus implementation.
