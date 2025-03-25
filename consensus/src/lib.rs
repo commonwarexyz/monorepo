@@ -6,6 +6,7 @@
 //! expect breaking changes and occasional instability.
 
 use bytes::Bytes;
+use futures::channel::mpsc;
 
 pub mod ordered_broadcast;
 pub mod simplex;
@@ -189,8 +190,8 @@ cfg_if::cfg_if! {
             /// Latest index known by the consensus implementation.
             fn latest(&self) -> Self::Index;
 
-            /// Report that the latest index has been updated.
-            fn updated(&mut self, index: Self::Index) -> impl Future<Output = ()> + Send;
+            /// Create a channel that will receive updates when the latest index changes.
+            fn subscribe(&mut self) -> mpsc::Receiver<Self::Index>;
         }
     }
 }
