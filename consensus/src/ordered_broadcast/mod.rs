@@ -208,7 +208,6 @@ mod tests {
         registrations: &mut Registrations<PublicKey>,
         automatons: &mut BTreeMap<PublicKey, mocks::Automaton<PublicKey>>,
         committers: &mut BTreeMap<PublicKey, mocks::CommitterMailbox<Ed25519, Sha256Digest>>,
-        refresh_epoch_timeout: Duration,
         rebroadcast_timeout: Duration,
         invalid_when: fn(u64) -> bool,
     ) {
@@ -241,7 +240,6 @@ mod tests {
                     namespace: namespace.to_vec(),
                     epoch_bounds: (1, 1),
                     height_bound: 2,
-                    refresh_epoch_timeout,
                     rebroadcast_timeout,
                     priority_acks: false,
                     priority_proposals: false,
@@ -319,7 +317,6 @@ mod tests {
                 &mut registrations,
                 &mut automatons.lock().unwrap(),
                 &mut committers,
-                Duration::from_millis(100),
                 Duration::from_secs(5),
                 |_| false,
             );
@@ -391,7 +388,6 @@ mod tests {
                         &mut registrations,
                         &mut automatons.lock().unwrap(),
                         &mut committers,
-                        Duration::from_millis(100),
                         Duration::from_secs(5),
                         |_| false,
                     );
@@ -457,7 +453,6 @@ mod tests {
                 &mut registrations,
                 &mut automatons.lock().unwrap(),
                 &mut committers,
-                Duration::from_millis(100),
                 Duration::from_secs(1),
                 |_| false,
             );
@@ -516,7 +511,6 @@ mod tests {
                 &mut registrations,
                 &mut automatons.lock().unwrap(),
                 &mut committers,
-                Duration::from_millis(100),
                 Duration::from_millis(150),
                 |_| false,
             );
@@ -571,7 +565,6 @@ mod tests {
                 &mut registrations,
                 &mut automatons.lock().unwrap(),
                 &mut committers,
-                Duration::from_millis(100),
                 Duration::from_secs(5),
                 |i| i % 10 == 0,
             );

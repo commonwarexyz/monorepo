@@ -47,9 +47,6 @@ pub struct Config<
     /// Whether acks are sent as priority.
     pub priority_acks: bool,
 
-    /// How often the epoch is refreshed.
-    pub refresh_epoch_timeout: Duration,
-
     /// How often a proposal is rebroadcast to all validators if no threshold is reached.
     pub rebroadcast_timeout: Duration,
 

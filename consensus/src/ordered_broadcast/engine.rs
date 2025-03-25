@@ -97,10 +97,6 @@ pub struct Engine<
     // Timeouts
     ////////////////////////////////////////
 
-    // The configured timeout for refreshing the epoch
-    refresh_epoch_timeout: Duration,
-    refresh_epoch_deadline: Option<SystemTime>,
-
     // The configured timeout for rebroadcasting a chunk to all validators
     rebroadcast_timeout: Duration,
     rebroadcast_deadline: Option<SystemTime>,
@@ -231,8 +227,6 @@ impl<
             validators: cfg.validators,
             chunk_namespace: namespace::chunk(&cfg.namespace),
             ack_namespace: namespace::ack(&cfg.namespace),
-            refresh_epoch_timeout: cfg.refresh_epoch_timeout,
-            refresh_epoch_deadline: None,
             rebroadcast_timeout: cfg.rebroadcast_timeout,
             rebroadcast_deadline: None,
             epoch_bounds: cfg.epoch_bounds,
@@ -276,9 +270,14 @@ impl<
         // Tracks if there is an outstanding proposal request to the automaton.
         let mut pending: Option<(Context<C::PublicKey>, oneshot::Receiver<D>)> = None;
 
+        // Initialize the epoch
+        let epoch = self.monitor.latest();
+        assert!(epoch >= self.epoch);
+        self.epoch = epoch;
+        let mut epoch_updates = self.monitor.subscribe();
+
         // Before starting on the main loop, initialize my own sequencer journal
         // and attempt to rebroadcast if necessary.
-        self.refresh_epoch();
         self.journal_prepare(&self.crypto.public_key()).await;
         if let Err(err) = self.rebroadcast(&mut node_sender).await {
             // Rebroadcasting may return a non-critical error, so log the error and continue.
@@ -286,9 +285,6 @@ impl<
         }
 
         loop {
-            // Enter the epoch
-            self.refresh_epoch();
-
             // Request a new proposal if necessary
             if pending.is_none() {
                 if let Some(context) = self.should_propose() {
@@ -299,10 +295,6 @@ impl<
 
             // Create deadline futures.
             // If the deadline is None, the future will never resolve.
-            let refresh_epoch = match self.refresh_epoch_deadline {
-                Some(deadline) => Either::Left(self.context.sleep_until(deadline)),
-                None => Either::Right(future::pending()),
-            };
             let rebroadcast = match self.rebroadcast_deadline {
                 Some(deadline) => Either::Left(self.context.sleep_until(deadline)),
                 None => Either::Right(future::pending()),
@@ -324,9 +316,20 @@ impl<
                 },
 
                 // Handle refresh epoch deadline
-                _ = refresh_epoch => {
-                    debug!("refresh epoch");
-                    // Simply continue; the epoch will be refreshed on the next iteration.
+                epoch = epoch_updates.next() => {
+                    // Error handling
+                    let epoch = match epoch{
+                        Some(epoch) => epoch,
+                        None => {
+                            error!("epoch subscription failed");
+                            break;
+                        }
+                    };
+
+                    // Refresh the epoch
+                    debug!(current=self.epoch, new=epoch, "refresh epoch");
+                    assert!(epoch >= self.epoch);
+                    self.epoch = epoch;
                     continue;
                 },
 
@@ -1093,23 +1096,6 @@ impl<
 
         // Prune journal, ignoring errors
         let _ = journal.prune(section).await;
-    }
-
-    ////////////////////////////////////////
-    // Epoch
-    ////////////////////////////////////////
-
-    /// Updates the epoch to the value of the epocher, and sets the refresh epoch deadline.
-    fn refresh_epoch(&mut self) {
-        // Set the refresh epoch deadline
-        self.refresh_epoch_deadline = Some(self.context.current() + self.refresh_epoch_timeout);
-
-        // Ensure epoch is not before the current epoch
-        let epoch = self.monitor.latest();
-        assert!(epoch >= self.epoch);
-
-        // Update the epoch
-        self.epoch = epoch;
     }
 }
 
