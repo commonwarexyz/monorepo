@@ -175,7 +175,7 @@ mod tests {
         public_key::{Config, IncomingConnection},
         utils::codec::send_frame,
     };
-    use commonware_cryptography::{Ed25519, Scheme};
+    use commonware_cryptography::{Ed25519, Signer, Verifier};
     use commonware_runtime::{deterministic::Executor, mocks, Metrics, Runner, Spawner};
     use x25519::PublicKey;
 

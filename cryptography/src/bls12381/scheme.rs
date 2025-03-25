@@ -23,7 +23,7 @@ use super::primitives::{
     group::{self, Element, Scalar},
     ops,
 };
-use crate::{Array, Error, Scheme};
+use crate::{Array, CryptoPrimitives, Error, Signer, Verifier};
 use commonware_codec::{Codec, Error as CodecError, Reader, SizedCodec, Writer};
 use commonware_utils::hex;
 use rand::{CryptoRng, Rng};
@@ -47,11 +47,24 @@ pub struct Bls12381 {
     public: group::Public,
 }
 
-impl Scheme for Bls12381 {
+impl CryptoPrimitives for Bls12381 {
     type PrivateKey = PrivateKey;
     type PublicKey = PublicKey;
     type Signature = Signature;
+}
 
+impl Verifier for Bls12381 {
+    fn verify(
+        namespace: Option<&[u8]>,
+        message: &[u8],
+        public_key: &PublicKey,
+        signature: &Signature,
+    ) -> bool {
+        ops::verify_message(&public_key.key, namespace, message, &signature.signature).is_ok()
+    }
+}
+
+impl Signer for Bls12381 {
     fn new<R: CryptoRng + Rng>(r: &mut R) -> Self {
         let (private, public) = ops::keypair(r);
         Self { private, public }
@@ -75,15 +88,6 @@ impl Scheme for Bls12381 {
     fn sign(&mut self, namespace: Option<&[u8]>, message: &[u8]) -> Signature {
         let signature = ops::sign_message(&self.private, namespace, message);
         Signature::from(signature)
-    }
-
-    fn verify(
-        namespace: Option<&[u8]>,
-        message: &[u8],
-        public_key: &PublicKey,
-        signature: &Signature,
-    ) -> bool {
-        ops::verify_message(&public_key.key, namespace, message, &signature.signature).is_ok()
     }
 }
 
@@ -453,7 +457,7 @@ mod tests {
         for (index, test) in cases.into_iter().enumerate() {
             let (private_key, message, expected) = test;
             let mut signer =
-                <Bls12381 as Scheme>::from(private_key).expect("unable to deserialize private key");
+                <Bls12381 as Signer>::from(private_key).expect("unable to deserialize private key");
             let signature = signer.sign(None, &message);
             assert_eq!(signature, expected, "vector_sign_{}", index + 1);
         }

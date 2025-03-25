@@ -67,6 +67,8 @@ mod tests {
 
     /// Helper functions for TipManager tests.
     mod helpers {
+        use commonware_cryptography::Signer;
+
         use super::*;
 
         /// Creates a dummy link for testing.

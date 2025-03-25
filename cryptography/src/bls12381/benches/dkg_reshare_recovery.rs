@@ -1,6 +1,6 @@
 use commonware_cryptography::{
     bls12381::dkg::{Dealer, Player},
-    Ed25519, Scheme,
+    Ed25519, Signer,
 };
 use commonware_utils::quorum;
 use criterion::{criterion_group, BatchSize, Criterion};

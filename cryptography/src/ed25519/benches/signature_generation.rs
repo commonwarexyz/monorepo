@@ -1,4 +1,4 @@
-use commonware_cryptography::{Ed25519, Scheme};
+use commonware_cryptography::{Ed25519, Signer};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{thread_rng, Rng};
 use std::hint::black_box;

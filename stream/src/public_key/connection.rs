@@ -322,7 +322,7 @@ mod tests {
 
     use super::*;
     use crate::{Receiver as _, Sender as _};
-    use commonware_cryptography::Ed25519;
+    use commonware_cryptography::{Ed25519, Signer};
     use commonware_runtime::{deterministic::Executor, mocks, Metrics, Runner};
 
     #[test]

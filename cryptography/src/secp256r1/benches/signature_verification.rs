@@ -1,4 +1,4 @@
-use commonware_cryptography::{Scheme, Secp256r1};
+use commonware_cryptography::{Secp256r1, Signer, Verifier};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{thread_rng, Rng};
 use std::hint::black_box;

@@ -8,7 +8,7 @@ use commonware_cryptography::{
         group::{self, Element},
         poly::{self, Poly},
     },
-    Ed25519, Scheme, Sha256,
+    Ed25519, Sha256, Signer,
 };
 use commonware_p2p::authenticated;
 use commonware_runtime::{

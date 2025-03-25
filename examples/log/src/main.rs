@@ -49,7 +49,7 @@ mod gui;
 
 use clap::{value_parser, Arg, Command};
 use commonware_consensus::simplex::{self, Engine, Prover};
-use commonware_cryptography::{sha256::Digest as Sha256Digest, Ed25519, Scheme, Sha256};
+use commonware_cryptography::{sha256::Digest as Sha256Digest, Ed25519, Sha256, Signer};
 use commonware_p2p::authenticated::{self, Network};
 use commonware_runtime::{
     tokio::{self, Executor},

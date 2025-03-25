@@ -83,8 +83,7 @@ mod tests {
     };
     use crate::Resolver;
     use bytes::Bytes;
-    use commonware_cryptography::ed25519::PublicKey;
-    use commonware_cryptography::{Ed25519, Scheme};
+    use commonware_cryptography::{ed25519::PublicKey, Ed25519, Signer};
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::deterministic::{Context, Executor};

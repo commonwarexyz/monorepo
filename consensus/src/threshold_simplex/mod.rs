@@ -212,7 +212,7 @@ mod tests {
     use super::*;
     use commonware_cryptography::{
         bls12381::{dkg::ops, primitives::poly},
-        Ed25519, Scheme, Sha256,
+        Ed25519, Sha256, Signer,
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};

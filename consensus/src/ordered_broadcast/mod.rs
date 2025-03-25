@@ -94,7 +94,7 @@ mod tests {
         },
         ed25519::PublicKey,
         sha256::Digest as Sha256Digest,
-        Ed25519, Scheme,
+        Ed25519, Signer,
     };
     use commonware_macros::test_traced;
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};

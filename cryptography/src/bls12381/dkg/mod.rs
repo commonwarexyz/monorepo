@@ -191,7 +191,7 @@ mod tests {
         partial_sign_proof_of_possession, threshold_signature_recover, verify_proof_of_possession,
     };
     use crate::bls12381::primitives::poly::public;
-    use crate::{Ed25519, Scheme};
+    use crate::{Ed25519, Signer};
     use commonware_utils::quorum;
     use rand::rngs::StdRng;
     use rand::SeedableRng;

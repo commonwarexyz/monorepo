@@ -1,6 +1,5 @@
 use commonware_cryptography::bls12381::dkg::{Dealer, Player};
-use commonware_cryptography::Ed25519;
-use commonware_cryptography::Scheme;
+use commonware_cryptography::{Ed25519, Signer};
 use commonware_utils::quorum;
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::rngs::StdRng;

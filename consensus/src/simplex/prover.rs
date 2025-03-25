@@ -440,7 +440,9 @@ impl<C: Scheme, D: Array> Prover<C, D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::{sha256::Digest as Sha256Digest, Ed25519, Hasher, Sha256};
+    use commonware_cryptography::{
+        sha256::Digest as Sha256Digest, Ed25519, Hasher, Sha256, Signer,
+    };
     use rand::SeedableRng;
 
     fn test_digest(value: u8) -> Sha256Digest {
