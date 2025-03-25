@@ -134,10 +134,14 @@ impl<D: Digest, P: Array> AckManager<D, P> {
             return false;
         }
 
-        // Prune lower-height for this sequencer
+        // Prune all entries with height less than the parent
+        //
+        // This approach ensures we don't accidentally notify the application of a threshold signatures
+        // for the parent when handling the duplicate broadcast of some node at tip after we've already
+        // recovered its threshold signature.
         if let Some(m) = self.acks.get_mut(sequencer) {
-            // TODO: we need to keep the parent height around as well to avoid accidentally sending that to the application
-            m.retain(|&h, _| h >= height);
+            let min_height = height.saturating_sub(1);
+            m.retain(|&h, _| h >= min_height);
         }
 
         true
@@ -322,6 +326,55 @@ mod tests {
         assert_eq!(
             acks.get_threshold(&sequencer, height2),
             Some((epoch, threshold2))
+        );
+    }
+
+    /// Adding thresholds for contiguous heights prunes entries older than the immediate parent.
+    #[test]
+    fn test_sequencer_contiguous_heights() {
+        let num_validators = 4;
+        let quorum = 3;
+        let shares = helpers::setup_shares(num_validators, quorum);
+        let mut acks = AckManager::<sha256::Digest, ed25519::PublicKey>::new();
+        let sequencer = helpers::gen_public_key(1);
+        let epoch = 10;
+
+        let chunk1 = helpers::create_chunk(&sequencer, 10, sha256::hash(b"chunk1"));
+        let threshold1 =
+            helpers::generate_threshold_from_indices(&shares, &chunk1, epoch, quorum, &[0, 1, 2]);
+        assert!(acks.add_threshold(&sequencer, 10, epoch, threshold1));
+        assert_eq!(
+            acks.get_threshold(&sequencer, 10),
+            Some((epoch, threshold1))
+        );
+
+        let chunk2 = helpers::create_chunk(&sequencer, 11, sha256::hash(b"chunk2"));
+        let threshold2 =
+            helpers::generate_threshold_from_indices(&shares, &chunk2, epoch, quorum, &[0, 1, 2]);
+        assert!(acks.add_threshold(&sequencer, 11, epoch, threshold2));
+
+        assert_eq!(
+            acks.get_threshold(&sequencer, 10),
+            Some((epoch, threshold1))
+        );
+        assert_eq!(
+            acks.get_threshold(&sequencer, 11),
+            Some((epoch, threshold2))
+        );
+
+        let chunk3 = helpers::create_chunk(&sequencer, 12, sha256::hash(b"chunk3"));
+        let threshold3 =
+            helpers::generate_threshold_from_indices(&shares, &chunk3, epoch, quorum, &[0, 1, 2]);
+        assert!(acks.add_threshold(&sequencer, 12, epoch, threshold3));
+
+        assert_eq!(acks.get_threshold(&sequencer, 10), None);
+        assert_eq!(
+            acks.get_threshold(&sequencer, 11),
+            Some((epoch, threshold2))
+        );
+        assert_eq!(
+            acks.get_threshold(&sequencer, 12),
+            Some((epoch, threshold3))
         );
     }
 
