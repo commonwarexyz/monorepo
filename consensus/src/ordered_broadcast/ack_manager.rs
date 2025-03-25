@@ -136,6 +136,7 @@ impl<D: Digest, P: Array> AckManager<D, P> {
 
         // Prune lower-height for this sequencer
         if let Some(m) = self.acks.get_mut(sequencer) {
+            // TODO: we need to keep the parent height around as well to avoid accidentally sending that to the application
             m.retain(|&h, _| h >= height);
         }
 
