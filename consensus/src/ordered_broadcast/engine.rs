@@ -382,25 +382,20 @@ impl<
                             continue;
                         }
                     };
-                    if let Err(err) = self.validate_node(&node, &sender) {
-                        warn!(?err, ?sender, "node validate failed");
-                        continue;
+                    let parent_chunk = match self.validate_node(&node, &sender) {
+                        Ok(parent_chunk) => parent_chunk,
+                        Err(err) => {
+                            warn!(?err, ?sender, "node validate failed");
+                            continue;
+                        }
                     };
 
                     // Initialize journal for sequencer if it does not exist
                     self.journal_prepare(&sender).await;
 
                     // Handle the parent threshold signature
-                    if let Some(parent) = node.parent.as_ref() {
-                        let Some(parent_height) = node.chunk.height.checked_sub(1) else {
-                            warn!(?sender, height=node.chunk.height, "parent height underflow");
-                            continue;
-                        };
-                        let parent_chunk = parsed::Chunk {
-                            sequencer: node.chunk.sequencer.clone(),
-                            height: parent_height,
-                            payload: parent.payload,
-                        };
+                    if let Some(parent_chunk) = parent_chunk {
+                        let parent = node.parent.as_ref().unwrap();
                         self.handle_threshold(&parent_chunk, parent.epoch, parent.threshold).await;
                     }
 
@@ -840,7 +835,7 @@ impl<
         &mut self,
         node: &parsed::Node<C, D>,
         sender: &C::PublicKey,
-    ) -> Result<(), Error> {
+    ) -> Result<Option<parsed::Chunk<D, C::PublicKey>>, Error> {
         // Verify the sender
         if node.chunk.sequencer != *sender {
             return Err(Error::PeerMismatch);
@@ -848,23 +843,26 @@ impl<
 
         // Optimization: If the node is exactly equal to the tip,
         // don't perform any further validation.
+        let mut already_handled = false;
         if let Some(tip) = self.tip_manager.get(sender) {
             if tip == *node {
-                return Ok(());
+                already_handled = true;
             }
         }
 
-        // Validate chunk
-        self.validate_chunk(&node.chunk, self.epoch)?;
+        if !already_handled {
+            // Validate chunk
+            self.validate_chunk(&node.chunk, self.epoch)?;
 
-        // Verify the signature
-        if !C::verify(
-            Some(&self.chunk_namespace),
-            &serializer::chunk(&node.chunk),
-            sender,
-            &node.signature,
-        ) {
-            return Err(Error::InvalidNodeSignature);
+            // Verify the signature
+            if !C::verify(
+                Some(&self.chunk_namespace),
+                &serializer::chunk(&node.chunk),
+                sender,
+                &node.signature,
+            ) {
+                return Err(Error::InvalidNodeSignature);
+            }
         }
 
         // Verify no parent
@@ -872,7 +870,7 @@ impl<
             if node.parent.is_some() {
                 return Err(Error::GenesisChunkMustNotHaveParent);
             }
-            return Ok(());
+            return Ok(None);
         }
 
         // Verify parent
@@ -885,20 +883,22 @@ impl<
             payload: parent.payload,
         };
 
-        // Verify parent threshold signature
-        let Some(identity) = self.validators.identity(parent.epoch) else {
-            return Err(Error::UnknownIdentity(parent.epoch));
-        };
-        let public_key = poly::public(identity);
-        ops::verify_message(
-            public_key,
-            Some(&self.ack_namespace),
-            &serializer::ack(&parent_chunk, parent.epoch),
-            &parent.threshold,
-        )
-        .map_err(|_| Error::InvalidThresholdSignature)?;
+        if !already_handled {
+            // Verify parent threshold signature
+            let Some(identity) = self.validators.identity(parent.epoch) else {
+                return Err(Error::UnknownIdentity(parent.epoch));
+            };
+            let public_key = poly::public(identity);
+            ops::verify_message(
+                public_key,
+                Some(&self.ack_namespace),
+                &serializer::ack(&parent_chunk, parent.epoch),
+                &parent.threshold,
+            )
+            .map_err(|_| Error::InvalidThresholdSignature)?;
+        }
 
-        Ok(())
+        Ok(Some(parent_chunk))
     }
 
     /// Takes a raw ack (from sender) from the p2p network and validates it.
