@@ -346,10 +346,9 @@ impl<
 
                 // Propose a new chunk
                 receiver = propose => {
-                    debug!("propose");
-
                     // Clear the pending proposal
                     let (context, _) = pending.take().unwrap();
+                    debug!(height = context.height, "propose");
 
                     // Error handling for dropped proposals
                     let Ok(payload) = receiver else {
