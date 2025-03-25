@@ -17,7 +17,8 @@ pub struct Config<
     /// The cryptographic scheme used if the engine is a sequencer.
     pub crypto: C,
 
-    /// The monitor.
+    /// Tracks the current state of consensus (to determine which participants should
+    /// be involved in the current broadcast attempt).
     pub monitor: M,
 
     /// Manages the set of validators and the group identity.
