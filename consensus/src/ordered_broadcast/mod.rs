@@ -68,12 +68,6 @@ pub mod mocks;
 /// sequence of views in-which the set of sequencers and validators is constant.
 pub type Epoch = u64;
 
-/// Returns the current epoch to the [`Engine`].
-pub trait Epocher: Clone + Send + 'static {
-    /// Returns the current epoch.
-    fn epoch(&self) -> Epoch;
-}
-
 /// Used as the [`Automaton::Context`](crate::Automaton::Context) type.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct Context<P: Array> {

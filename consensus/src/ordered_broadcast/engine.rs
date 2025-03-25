@@ -8,10 +8,9 @@
 //! - Notifying other actors of new chunks and threshold signatures
 
 use super::{
-    metrics, namespace, parsed, serializer, AckManager, Config, Context, Epoch, Epocher, Prover,
-    TipManager,
+    metrics, namespace, parsed, serializer, AckManager, Config, Context, Epoch, Prover, TipManager,
 };
-use crate::{Automaton, Committer, Relay, Supervisor, ThresholdSupervisor};
+use crate::{Automaton, Committer, Monitor, Relay, Supervisor, ThresholdSupervisor};
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{self},
@@ -61,7 +60,7 @@ pub struct Engine<
     A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
     R: Relay<Digest = D>,
     Z: Committer<Digest = D>,
-    Ep: Epocher,
+    M: Monitor<Index = Epoch>,
     Su: Supervisor<Index = Epoch, PublicKey = C::PublicKey>,
     TSu: ThresholdSupervisor<
         Index = Epoch,
@@ -79,7 +78,7 @@ pub struct Engine<
     crypto: C,
     automaton: A,
     relay: R,
-    epocher: Ep,
+    monitor: M,
     sequencers: Su,
     validators: TSu,
     committer: Z,
@@ -205,7 +204,7 @@ impl<
         A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
         R: Relay<Digest = D>,
         Z: Committer<Digest = D>,
-        Ep: Epocher,
+        M: Monitor<Index = Epoch>,
         Su: Supervisor<Index = Epoch, PublicKey = C::PublicKey>,
         TSu: ThresholdSupervisor<
             Index = Epoch,
@@ -215,10 +214,10 @@ impl<
         >,
         NetS: Sender<PublicKey = C::PublicKey>,
         NetR: Receiver<PublicKey = C::PublicKey>,
-    > Engine<B, E, C, D, A, R, Z, Ep, Su, TSu, NetS, NetR>
+    > Engine<B, E, C, D, A, R, Z, M, Su, TSu, NetS, NetR>
 {
     /// Creates a new engine with the given context and configuration.
-    pub fn new(context: E, cfg: Config<C, D, A, R, Z, Ep, Su, TSu>) -> Self {
+    pub fn new(context: E, cfg: Config<C, D, A, R, Z, M, Su, TSu>) -> Self {
         let metrics = metrics::Metrics::init(context.clone());
 
         Self {
@@ -227,7 +226,7 @@ impl<
             automaton: cfg.automaton,
             relay: cfg.relay,
             committer: cfg.committer,
-            epocher: cfg.epocher,
+            monitor: cfg.monitor,
             sequencers: cfg.sequencers,
             validators: cfg.validators,
             chunk_namespace: namespace::chunk(&cfg.namespace),
@@ -1106,7 +1105,7 @@ impl<
         self.refresh_epoch_deadline = Some(self.context.current() + self.refresh_epoch_timeout);
 
         // Ensure epoch is not before the current epoch
-        let epoch = self.epocher.epoch();
+        let epoch = self.monitor.latest();
         assert!(epoch >= self.epoch);
 
         // Update the epoch

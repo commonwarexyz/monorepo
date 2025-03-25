@@ -150,7 +150,7 @@ cfg_if::cfg_if! {
         ///
         /// ## Synchronization
         ///
-        /// The same considerations for `Supervisor` apply here.
+        /// The same considerations for [`Supervisor`](crate::Supervisor) apply here.
         pub trait ThresholdSupervisor: Supervisor {
             /// Seed is some random value used to bias the leader selection process.
             type Seed;
@@ -173,6 +173,16 @@ cfg_if::cfg_if! {
             /// Returns share to sign with at a given index. After resharing, the share
             /// may change (and old shares may be deleted).
             fn share(&self, index: Self::Index) -> Option<&Self::Share>;
+        }
+
+        /// Monitor is the interface an external actor can call to observe latest index for a consensus implementation.
+        ///
+        /// This trait is often used to implement mechanisms that rely on consensus to drive progress but benefit
+        /// from interacting with the same active set of participants.
+        pub trait Monitor: Clone + Send + 'static {
+            type Index;
+
+            fn latest(&self) -> Self::Index;
         }
     }
 }

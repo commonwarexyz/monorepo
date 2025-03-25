@@ -115,6 +115,7 @@
 //! * Introduce message rebroadcast to continue making progress if messages from a given view are dropped (only way
 //!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
 
+use crate::Activity;
 use commonware_utils::Array;
 
 mod encoder;
@@ -141,8 +142,6 @@ pub mod mocks;
 
 /// View is a monotonically increasing counter that represents the current focus of consensus.
 pub type View = u64;
-
-use crate::Activity;
 
 /// Context is a collection of metadata from consensus about a given payload.
 #[derive(Clone)]
