@@ -834,6 +834,7 @@ impl<
     ///
     /// If valid, returns the implied parent chunk and its threshold signature.
     /// Else returns an error if the `Node` is invalid.
+    #[allow(clippy::type_complexity)]
     fn validate_node(
         &mut self,
         node: &parsed::Node<C, D>,

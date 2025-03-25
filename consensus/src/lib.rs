@@ -6,7 +6,6 @@
 //! expect breaking changes and occasional instability.
 
 use bytes::Bytes;
-use futures::channel::mpsc;
 
 pub mod ordered_broadcast;
 pub mod simplex;
@@ -27,7 +26,7 @@ cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
         use commonware_utils::Array;
         use commonware_cryptography::Digest;
-        use futures::channel::oneshot;
+        use futures::channel::{oneshot, mpsc};
         use std::future::Future;
 
         /// Histogram buckets for measuring consensus latency.
