@@ -306,12 +306,7 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
             }
 
             // If any signature is invalid, disconnect from the peer
-            if !C::verify(
-                Some(&self.ip_namespace),
-                &(peer.socket, peer.timestamp).encode(),
-                &peer.public_key,
-                &peer.signature,
-            ) {
+            if !peer.verify_signature(&self.ip_namespace) {
                 return Err(Error::InvalidSignature);
             }
 

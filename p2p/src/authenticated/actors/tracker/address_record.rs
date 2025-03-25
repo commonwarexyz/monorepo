@@ -38,7 +38,6 @@ impl<C: Scheme> AddressRecord<C> {
     /// Attempt to set the address of a discovered peer.
     ///
     /// Returns true if the update was successful.
-    /// Panics if the address is a bootstrapper.
     pub fn set_discovered(&mut self, peer_info: SignedPeerInfo<C>) -> bool {
         let count = match self {
             Self::Unknown(count) => *count,

@@ -115,6 +115,18 @@ pub struct SignedPeerInfo<C: Scheme> {
     pub signature: C::Signature,
 }
 
+impl<C: Scheme> SignedPeerInfo<C> {
+    /// Verify the signature of the peer info.
+    pub fn verify_signature(&self, namespace: &[u8]) -> bool {
+        C::verify(
+            Some(namespace),
+            &(self.socket, self.timestamp).encode(),
+            &self.public_key,
+            &self.signature,
+        )
+    }
+}
+
 impl<C: Scheme> Codec for SignedPeerInfo<C> {
     fn write(&self, writer: &mut impl Writer) {
         self.socket.write(writer);
