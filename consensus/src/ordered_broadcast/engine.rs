@@ -392,7 +392,16 @@ impl<
 
                     // Handle the parent threshold signature
                     if let Some(parent) = node.parent.as_ref() {
-                        self.handle_threshold(&node.chunk, parent.epoch, parent.threshold).await;
+                        let Some(parent_height) = node.chunk.height.checked_sub(1) else {
+                            warn!(?sender, height=node.chunk.height, "parent height underflow");
+                            continue;
+                        };
+                        let parent_chunk = parsed::Chunk {
+                            sequencer: node.chunk.sequencer.clone(),
+                            height: parent_height,
+                            payload: parent.payload,
+                        };
+                        self.handle_threshold(&parent_chunk, parent.epoch, parent.threshold).await;
                     }
 
                     // Process the new node

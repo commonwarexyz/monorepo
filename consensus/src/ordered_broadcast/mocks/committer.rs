@@ -8,7 +8,6 @@ use std::{
     cmp::max,
     collections::{BTreeMap, HashMap},
 };
-use tracing::error;
 
 enum Message<C: Scheme, D: Digest> {
     Acknowledged(Proof, D),
@@ -60,13 +59,8 @@ impl<C: Scheme, D: Digest> Committer<C, D> {
                     // Check proof.
                     //
                     // The prover checks the validity of the threshold signature when deserializing
-                    let context = match prover.deserialize_threshold(proof) {
-                        Some((context, _payload, _epoch, _threshold)) => context,
-                        None => {
-                            error!("invalid proof");
-                            continue;
-                        }
-                    };
+                    let (context, _, _, _) =
+                        prover.deserialize_threshold(proof).expect("Invalid proof");
 
                     // Update the committer
                     let digests = self.digests.entry(context.sequencer.clone()).or_default();
