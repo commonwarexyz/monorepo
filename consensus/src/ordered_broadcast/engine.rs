@@ -29,7 +29,7 @@ use commonware_runtime::{
     Blob, Clock, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::{self, variable::Journal};
-use commonware_utils::futures::Pool as FuturesPool;
+use commonware_utils::{futures::Pool as FuturesPool, Array};
 use futures::{
     channel::oneshot,
     future::{self, Either},
@@ -49,6 +49,13 @@ struct Verify<C: Scheme, D: Digest, E: Clock> {
     context: Context<C::PublicKey>,
     payload: D,
     result: Result<bool, Error>,
+}
+
+/// Result of node validation.
+enum Validated<D: Digest, P: Array> {
+    Skip,
+    Orphan,
+    Parent(parsed::Chunk<D, P>),
 }
 
 /// Instance of the engine.
@@ -381,14 +388,14 @@ impl<
                             continue;
                         }
                     };
-                    let (skip, parent_chunk) = match self.validate_node(&node, &sender) {
+                    let result = match self.validate_node(&node, &sender) {
                         Ok(result) => result,
                         Err(err) => {
                             warn!(?err, ?sender, "node validate failed");
                             continue;
                         }
                     };
-                    if skip {
+                    if let Validated::Skip = result {
                         guard.set(Status::Dropped);
                         continue;
                     }
@@ -397,7 +404,7 @@ impl<
                     self.journal_prepare(&sender).await;
 
                     // Handle the parent threshold signature
-                    if let Some(parent_chunk) = parent_chunk {
+                    if let Validated::Parent(parent_chunk) = result {
                         let parent = node.parent.as_ref().unwrap();
                         self.handle_threshold(&parent_chunk, parent.epoch, parent.threshold).await;
                     }
@@ -834,12 +841,11 @@ impl<
     ///
     /// If valid, returns the implied parent chunk and its threshold signature.
     /// Else returns an error if the `Node` is invalid.
-    #[allow(clippy::type_complexity)]
     fn validate_node(
         &mut self,
         node: &parsed::Node<C, D>,
         sender: &C::PublicKey,
-    ) -> Result<(bool, Option<parsed::Chunk<D, C::PublicKey>>), Error> {
+    ) -> Result<Validated<D, C::PublicKey>, Error> {
         // Verify the sender
         if node.chunk.sequencer != *sender {
             return Err(Error::PeerMismatch);
@@ -849,7 +855,7 @@ impl<
         // don't perform any further validation.
         if let Some(tip) = self.tip_manager.get(sender) {
             if tip == *node {
-                return Ok((true, None));
+                return Ok(Validated::Skip);
             }
         }
 
@@ -871,7 +877,7 @@ impl<
             if node.parent.is_some() {
                 return Err(Error::GenesisChunkMustNotHaveParent);
             }
-            return Ok((false, None));
+            return Ok(Validated::Orphan);
         }
 
         // Verify parent
@@ -896,8 +902,7 @@ impl<
             &parent.threshold,
         )
         .map_err(|_| Error::InvalidThresholdSignature)?;
-
-        Ok((false, Some(parent_chunk)))
+        Ok(Validated::Parent(parent_chunk))
     }
 
     /// Takes a raw ack (from sender) from the p2p network and validates it.
