@@ -26,6 +26,7 @@
 //!               |  - Security Group                 |
 //!               |    - All: Deployer IP             |
 //!               |    - 3100: Binary VPCs            |
+//!               |    - 4040: Binary VPCs            |
 //!               +-----------------------------------+
 //!                     ^                       ^
 //!           (Metrics & Logs)              (Metrics & Logs)
@@ -39,7 +40,6 @@
 //! |  - Security Group            |  |  - Security Group            |
 //! |    - All: Deployer IP        |  |    - All: Deployer IP        |
 //! |    - 9090: Monitoring IP     |  |    - 9090: Monitoring IP     |
-//! |    - 9091: Monitoring IP     |  |    - 9091: Monitoring IP     |
 //! |    - 8012: 0.0.0.0/0         |  |    - 8765: 12.3.7.9/32       |
 //! +------------------------------+  +------------------------------+
 //! ```
@@ -52,11 +52,11 @@
 //! * Runs:
 //!     * **Prometheus**: Scrapes metrics from all instances at `:9090`, configured via `/opt/prometheus/prometheus.yml`.
 //!     * **Loki**: Listens at `:3100`, storing logs in `/loki/chunks` with a TSDB index at `/loki/index`.
-//!     * **Pyroscope**: Scrapes metrics from all instances at `:9091`, configured via `/opt/pyroscope/config.yml`.
+//!     * **Pyroscope**: Listens at `:4040`, storing profiles in `/var/lib/pyroscope`.
 //!     * **Grafana**: Hosted at `:3000`, provisioned with Prometheus and Loki datasources and a custom dashboard.
-//! * Security:
+//! * Ingress:
 //!     * Allows deployer IP access (TCP 0-65535).
-//!     * Binary instance traffic to Loki (TCP 3100).
+//!     * Binary instance traffic to Loki (TCP 3100) and Pyroscope (TCP 4040).
 //!
 //! ### Binary
 //!
@@ -64,9 +64,9 @@
 //! * Run:
 //!     * **Custom Binary**: Executes with `--peers=/home/ubuntu/peers.yaml --config=/home/ubuntu/config.conf`, exposing metrics at `:9090` and profiles at `:9091`.
 //!     * **Promtail**: Forwards `/var/log/binary.log` to Loki on the monitoring instance.
-//! * Security:
+//! * Ingress:
 //!     * Deployer IP access (TCP 0-65535).
-//!     * Monitoring IP access to `:9090` for Prometheus and `:9091` for Pyroscope scraping.
+//!     * Monitoring IP access to `:9090` for Prometheus.
 //!     * User-defined ports from the configuration.
 //!
 //! ## Networking
@@ -170,10 +170,11 @@ pub mod utils;
 /// Port on binary where metrics are exposed
 pub const METRICS_PORT: u16 = 9090;
 
-/// Port on binary where profiles are exposed
-pub const PROFILES_PORT: u16 = 4040;
-
+/// Port on monitoring where logs are pushed
 pub const LOGGING_PORT: u16 = 3100;
+
+/// Port on monitoring where profiles are pushed
+pub const PROFILES_PORT: u16 = 4040;
 
 /// Name of the monitoring instance
 const MONITORING_NAME: &str = "monitoring";
