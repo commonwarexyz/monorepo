@@ -16,8 +16,8 @@ use crate::mmr::{
 };
 use commonware_cryptography::Hasher as CHasher;
 use commonware_utils::Array;
-use std::collections::HashMap;
-use tracing::error;
+use std::collections::{HashMap, VecDeque};
+use tracing::debug;
 
 /// The types of operations that change a key's state in the store.
 #[derive(Clone)]
@@ -39,22 +39,40 @@ pub struct Operation<K: Array, V: Array> {
     pub op_type: Type<V>,
 }
 
+/// A structure from which the current state of the store can be fully recovered.
+pub struct StoreState<K: Array, V: Array, H: CHasher> {
+    log: Vec<Operation<K, V>>,
+    pruned_loc: u64,
+    pinned_nodes: Vec<H::Digest>,
+}
+
 /// A mutable key-value store based on an MMR over its log of operations.
 pub struct MutableMmr<K: Array, V: Array, H: CHasher> {
     /// An MMR over digests of the operations applied to the store. The number of leaves in this MMR
-    /// always equals the number of operations in the `log`.
+    /// always equals the number of operations in the unpruned `log`.
     ops: Mmr<H>,
 
-    /// A log of all operations applied to the store in order of occurrence. The index of each
-    /// operation in this vector is called its _location_.
+    /// A (pruned) log of all operations applied to the store in order of occurrence. The position
+    /// of each operation in the log is called its _location_, which is a stable identifier. Pruning
+    /// is indicated by a non-zero value for `pruned_loc`, which provides the location of the first
+    /// operation in the log.
     ///
     /// Invariant: An operation's location is always equal to the number of the MMR leaf storing the
     /// digest of the operation.
-    log: Vec<Operation<K, V>>,
+    log: VecDeque<Operation<K, V>>,
+
+    /// The location before which all operations have been pruned.
+    pruned_loc: u64,
+
+    /// A location before which all operations are "inactive" (that is, operations before this point
+    /// are over keys that have been updated by some operation at or after this point).
+    ///
+    /// Invariant: inactivity_floor_loc >= pruned_loc.
+    inactivity_floor_loc: u64,
 
     /// A map from each key to the location in the log containing its most recent update. Only
     /// contains the keys that currently have a value (that is, deleted keys are not in the map).
-    snapshot: HashMap<K, usize>,
+    snapshot: HashMap<K, u64>,
 }
 
 impl<K: Array, V: Array, H: CHasher> Default for MutableMmr<K, V, H> {
@@ -69,21 +87,25 @@ impl<K: Array, V: Array, H: CHasher> MutableMmr<K, V, H> {
     pub fn new() -> Self {
         MutableMmr {
             ops: Mmr::new(),
-            log: Vec::<Operation<K, V>>::new(),
+            log: VecDeque::<Operation<K, V>>::new(),
             snapshot: HashMap::new(),
+            inactivity_floor_loc: 0,
+            pruned_loc: 0,
         }
     }
 
-    /// Return a store initialized to the state corresponding to the operation sequence given by
-    /// `log`.
-    ///
-    /// Performs some checks that the log constitutes a valid sequence of operations, and returns
-    /// [Error::InvalidUpdate] if an invalid sequence is encountered.
-    pub fn init_from_log(hasher: &mut H, log: Vec<Operation<K, V>>) -> Result<Self, Error> {
+    /// Return an MMR initialized from `store_state`.
+    pub fn init_from_state(
+        hasher: &mut H,
+        store_state: StoreState<K, V, H>,
+    ) -> Result<Self, Error> {
+        let oldest_retained_pos = leaf_num_to_pos(store_state.pruned_loc);
         let mut store = MutableMmr {
-            ops: Mmr::new(),
-            log,
+            ops: Mmr::<H>::init(vec![], oldest_retained_pos, store_state.pinned_nodes),
+            log: store_state.log.into(),
             snapshot: HashMap::new(),
+            inactivity_floor_loc: store_state.pruned_loc,
+            pruned_loc: store_state.pruned_loc,
         };
 
         for (i, op) in store.log.iter().enumerate() {
@@ -91,16 +113,10 @@ impl<K: Array, V: Array, H: CHasher> MutableMmr<K, V, H> {
             store.ops.add(hasher, &digest);
 
             match op.op_type {
-                Type::Deleted => {
-                    let loc = store.snapshot.remove(&op.key);
-                    if loc.is_none() {
-                        // Shouldn't be allowed to delete a key that already has no value.
-                        error!("deleted key {} not found in snapshot", op.key);
-                        return Err(Error::InvalidUpdate);
-                    }
-                }
+                Type::Deleted => store.snapshot.remove(&op.key),
                 Type::Update(_) => {
-                    store.snapshot.insert(op.key.clone(), i);
+                    let loc = store_state.pruned_loc + i as u64;
+                    store.snapshot.insert(op.key.clone(), loc)
                 }
             };
         }
@@ -128,10 +144,17 @@ impl<K: Array, V: Array, H: CHasher> MutableMmr<K, V, H> {
         hasher.finalize()
     }
 
+    /// Converts an operation's location to its index in the (pruned) log.
+    fn loc_to_op_index(&self, loc: u64) -> usize {
+        assert!(loc >= self.pruned_loc);
+        (loc - self.pruned_loc) as usize
+    }
+
     /// Get the value of `key` in the store, or None if it has no value.
     pub fn get(&self, key: &K) -> Option<&V> {
-        let pos = self.snapshot.get(key)?;
-        let op = &self.log[*pos];
+        let loc = self.snapshot.get(key)?;
+        let i = self.loc_to_op_index(*loc);
+        let op = &self.log[i];
         match &op.op_type {
             Type::Deleted => panic!("deleted key should not be in snapshot: {}", key),
             Type::Update(ref v) => Some(v),
@@ -140,17 +163,18 @@ impl<K: Array, V: Array, H: CHasher> MutableMmr<K, V, H> {
 
     /// Get the number of operations that have been applied to this store.
     pub fn op_count(&self) -> u64 {
-        self.log.len() as u64
+        self.log.len() as u64 + self.pruned_loc
     }
 
     /// Updates `key` to have value `value`.  If the key already has this same value, then this is a
     /// no-op.
     pub fn update(&mut self, hasher: &mut H, key: K, value: V) {
-        let new_loc = self.log.len();
+        let new_loc = self.log.len() as u64 + self.pruned_loc;
 
         // Update the snapshot.
         if let Some(loc) = self.snapshot.get_mut(&key) {
-            let last_value = match self.log[*loc].op_type {
+            let i = *loc - self.pruned_loc;
+            let last_value = match self.log[i as usize].op_type {
                 Type::Deleted => panic!("deleted key should not be in snapshot: {}", key),
                 Type::Update(ref v) => v,
             };
@@ -167,7 +191,23 @@ impl<K: Array, V: Array, H: CHasher> MutableMmr<K, V, H> {
         self.apply_op(hasher, key, op);
     }
 
-    /// Update the log and operations MMR with the given key and operation.
+    /// Delete `key` and its value from the store. Deleting a key that already has no value is a
+    /// no-op.
+    pub fn delete(&mut self, hasher: &mut H, key: K) {
+        // Remove the key from the snapshot.
+        if self.snapshot.remove(&key).is_none() {
+            return;
+        };
+
+        self.apply_op(hasher, key, Type::Deleted);
+    }
+
+    /// Return the root hash of the mutable MMR.
+    pub fn root(&self, hasher: &mut H) -> H::Digest {
+        self.ops.root(hasher)
+    }
+
+    /// Update the operations MMR with the given operation, and append the operation to the log.
     fn apply_op(&mut self, hasher: &mut H, key: K, op_type: Type<V>) {
         let op = Operation { key, op_type };
 
@@ -176,23 +216,7 @@ impl<K: Array, V: Array, H: CHasher> MutableMmr<K, V, H> {
         self.ops.add(hasher, &digest);
 
         // Append the operation to the log.
-        self.log.push(op);
-    }
-
-    /// Delete `key` and its value from the store. Deleting a key that already has no value is a
-    /// no-op.
-    pub fn delete(&mut self, hasher: &mut H, key: K) {
-        // Remove the key from the snapshot.
-        if self.snapshot.remove(&key).is_none() {
-            return;
-        }
-
-        self.apply_op(hasher, key, Type::Deleted);
-    }
-
-    /// Return the root hash of the mutable MMR.
-    pub fn root(&self, hasher: &mut H) -> H::Digest {
-        self.ops.root(hasher)
+        self.log.push_back(op);
     }
 
     /// Generate and return:
@@ -216,13 +240,15 @@ impl<K: Array, V: Array, H: CHasher> MutableMmr<K, V, H> {
         };
 
         let proof = self.ops.range_proof(start_pos, end_pos).await?;
-        let ops = self.log[start_loc as usize..=end_loc as usize].to_vec();
+        let start_i = self.loc_to_op_index(start_loc);
+        let end_i = self.loc_to_op_index(end_loc);
+        let ops = self.log.range(start_i..=end_i).cloned().collect();
 
         Ok((proof, ops))
     }
 
-    /// Return true if the given sequence of `ops` took place starting at location `start_loc` in
-    /// the MMR with the provided root hash.
+    /// Return true if the given sequence of `ops` were applied starting at location `start_loc` in
+    /// the store with the provided root hash.
     pub fn verify_proof(
         hasher: &mut H,
         proof: &Proof<H>,
@@ -242,10 +268,60 @@ impl<K: Array, V: Array, H: CHasher> MutableMmr<K, V, H> {
         proof.verify_range_inclusion(hasher, &digests, start_pos, end_pos, root_hash)
     }
 
-    /// Consume the store and return its log of operations, from which the state of the store can be
-    /// recovered.
-    pub fn to_log(self) -> Vec<Operation<K, V>> {
-        self.log
+    /// Consume the store and return a [StoreState] from which the current active state of the store
+    /// can be fully recovered and fully proven.
+    pub fn to_state(mut self) -> StoreState<K, V, H> {
+        self.prune_known_inactive();
+
+        let prune_to_pos = leaf_num_to_pos(self.pruned_loc);
+        let pinned_nodes = self.ops.node_digests_to_pin(prune_to_pos);
+
+        StoreState {
+            log: self.log.into(),
+            pruned_loc: self.pruned_loc,
+            pinned_nodes,
+        }
+    }
+
+    /// Raise the inactivity floor by exactly `max_steps` steps. Each step either advances over an
+    /// inactive operation, or re-applies an active operation to the tip and then advances over it.
+    ///
+    /// This method does not change the state of the store's snapshot, but it may change the root
+    /// hash of the store if some step re-applies an active operation.
+    #[allow(dead_code)] // TODO: Remove when method gets used.
+    pub fn raise_inactivity_floor(&mut self, hasher: &mut H, max_steps: u64) {
+        for _ in 0..max_steps {
+            let i = self.loc_to_op_index(self.inactivity_floor_loc);
+            if i == self.log.len() {
+                break;
+            }
+            let op = &self.log[i];
+            let op_count = self.op_count();
+            if let Some(loc) = self.snapshot.get_mut(&op.key) {
+                if *loc == self.inactivity_floor_loc {
+                    // This operation is active, move it to tip to allow us to continue raising the
+                    // inactivity floor.
+                    *loc = op_count;
+                    self.apply_op(hasher, op.key.clone(), op.op_type.clone());
+                }
+            }
+            self.inactivity_floor_loc += 1;
+        }
+    }
+
+    /// Prune any historical operations that are known to be inactive (those preceding the
+    /// inactivity floor). This does not affect the store's root or current snapshot.
+    pub fn prune_known_inactive(&mut self) {
+        let pruned_ops = self.inactivity_floor_loc - self.pruned_loc;
+        if pruned_ops == 0 {
+            return;
+        }
+
+        debug!(pruned = pruned_ops, "pruning inactive ops");
+        let prune_to_pos = leaf_num_to_pos(self.inactivity_floor_loc);
+        self.ops.prune_to_pos(prune_to_pos);
+        self.log.drain(0..pruned_ops as usize);
+        self.pruned_loc = self.inactivity_floor_loc;
     }
 }
 
@@ -254,6 +330,7 @@ mod test {
     use super::*;
     use crate::mmr::iterator::leaf_num_to_pos;
     use commonware_cryptography::{hash, sha256::Digest, Hasher as CHasher, Sha256};
+    use commonware_macros::test_traced;
     use commonware_runtime::{deterministic::Executor, Runner};
 
     /// Return an empty store for use in tests.
@@ -261,7 +338,7 @@ mod test {
         MutableMmr::new()
     }
 
-    #[test]
+    #[test_traced]
     pub fn test_mutable_mmr_build_basic() {
         // Build a store with 2 keys and make sure updates and deletions of those keys work as
         // expected.
@@ -292,14 +369,21 @@ mod test {
         store.update(&mut hasher, d2, d2);
         assert_eq!(store.get(&d2).unwrap(), &d2);
 
-        assert_eq!(store.log.len(), 5); // 4 updates, 1 deletion
+        assert_eq!(store.log.len(), 5); // 4 updates, 1 deletion.
         assert_eq!(store.snapshot.len(), 2);
+        assert_eq!(store.inactivity_floor_loc, 0);
+
+        // We should be able to advance over the 3 inactive operations.
+        store.raise_inactivity_floor(&mut hasher, 3);
+        assert_eq!(store.inactivity_floor_loc, 3);
 
         let root = store.root(&mut hasher);
 
         // multiple assignments of the same value should be a no-op.
         store.update(&mut hasher, d1, d1);
         store.update(&mut hasher, d2, d2);
+        // Log and root should be unchanged.
+        assert_eq!(store.log.len(), 5);
         assert_eq!(store.root(&mut hasher), root);
 
         // The MMR's size should always be greater than the position of the last leaf.
@@ -310,20 +394,61 @@ mod test {
         store.delete(&mut hasher, d2);
         assert!(store.get(&d1).is_none());
         assert!(store.get(&d2).is_none());
+        assert_eq!(store.log.len(), 7); // 4 updates, 3 deletions
+        assert_eq!(store.inactivity_floor_loc, 3);
 
         let root = store.root(&mut hasher);
 
         // multiple deletions of the same key should be a no-op.
         store.delete(&mut hasher, d1);
+        assert_eq!(store.log.len(), 7);
         assert_eq!(store.root(&mut hasher), root);
 
         // deletions of non-existent keys should be a no-op.
         let d3 = <Sha256 as CHasher>::Digest::try_from(&vec![2u8; 32]).unwrap();
         store.delete(&mut hasher, d3);
         assert_eq!(store.root(&mut hasher), root);
+
+        // Make sure converting to/from store_state works with a non-zero inactivity floor and no
+        // active elements.
+        let store_state: StoreState<Digest, Digest, Sha256> = store.to_state();
+        assert_eq!(store_state.pruned_loc, 3);
+        let mut store = MutableMmr::init_from_state(&mut hasher, store_state).unwrap();
+        assert_eq!(store.log.len(), 4);
+        assert_eq!(store.root(&mut hasher), root);
+
+        store.raise_inactivity_floor(&mut hasher, 10);
+        let store_state: StoreState<Digest, Digest, Sha256> = store.to_state();
+        let mut store = MutableMmr::init_from_state(&mut hasher, store_state).unwrap();
+        assert_eq!(store.log.len(), 0);
+        assert_eq!(store.root(&mut hasher), root);
+
+        // Make sure converting to/from store_state works with some active elements.
+        store.update(&mut hasher, d1, d1);
+        store.update(&mut hasher, d2, d2);
+        store.delete(&mut hasher, d1);
+        store.update(&mut hasher, d2, d1);
+        store.update(&mut hasher, d1, d2);
+        assert_eq!(store.log.len(), 5);
+        assert_eq!(store.snapshot.len(), 2);
+        let root = store.root(&mut hasher);
+
+        let store_state: StoreState<Digest, Digest, Sha256> = store.to_state();
+        assert_eq!(store_state.pruned_loc, 7);
+        let mut store = MutableMmr::init_from_state(&mut hasher, store_state).unwrap();
+        assert_eq!(store.pruned_loc, 7);
+        assert_eq!(store.root(&mut hasher), root);
+
+        // Pruning inactive ops should not affect root or current state.
+        let old_pruned_loc = store.pruned_loc;
+        store.raise_inactivity_floor(&mut hasher, 2);
+        store.prune_known_inactive();
+        assert!(old_pruned_loc < store.pruned_loc);
+        assert_eq!(store.root(&mut hasher), root);
+        assert_eq!(store.snapshot.len(), 2);
     }
 
-    #[test]
+    #[test_traced]
     pub fn test_mutable_mmr_build_and_authenticate() {
         let (executor, _, _) = Executor::default();
         // Build a store with 1000 keys, some of which we update and some of which we delete, and
@@ -331,8 +456,6 @@ mod test {
         executor.start(async move {
             let mut store = empty_store();
             let mut hasher = Sha256::new();
-            // Store the store's root for every (non-no-op) update.
-            let mut roots = Vec::new();
 
             let mut map = HashMap::<Digest, Digest>::default();
             const ELEMENTS: u64 = 1000;
@@ -340,9 +463,9 @@ mod test {
                 let k = hash(&i.to_be_bytes());
                 let v = hash(&(i * 1000).to_be_bytes());
                 store.update(&mut hasher, k, v);
-                roots.push(store.root(&mut hasher));
                 map.insert(k, v);
             }
+
             // Update every 3rd key
             for i in 0u64..ELEMENTS {
                 if i % 3 != 0 {
@@ -351,22 +474,48 @@ mod test {
                 let k = hash(&i.to_be_bytes());
                 let v = hash(&((i + 1) * 10000).to_be_bytes());
                 store.update(&mut hasher, k, v);
-                roots.push(store.root(&mut hasher));
                 map.insert(k, v);
             }
+
             // Delete every 7th key
             for i in 0u64..ELEMENTS {
-                if i % 7 != 0 {
+                if i % 7 != 1 {
                     continue;
                 }
                 let k = hash(&i.to_be_bytes());
                 store.delete(&mut hasher, k);
-                roots.push(store.root(&mut hasher));
                 map.remove(&k);
             }
 
-            // Confirm the store's state matches that of the map.
-            let root_hash = roots.last().unwrap();
+            assert_eq!(store.op_count(), 1477);
+            assert_eq!(store.pruned_loc, 0);
+            assert_eq!(store.inactivity_floor_loc, 0);
+            assert_eq!(store.log.len(), 1477); // no pruning yet
+            assert_eq!(store.snapshot.len(), 857);
+
+            // Test we can recreate the store from its store_state.
+            store.raise_inactivity_floor(&mut hasher, 100);
+            let root_hash = store.root(&mut hasher);
+            let store_state = store.to_state();
+            let mut store = MutableMmr::init_from_state(&mut hasher, store_state).unwrap();
+            assert_eq!(root_hash, store.root(&mut hasher));
+
+            // Confirm the recreated store has an operations log that was pruned of all operations
+            // preceding the last known inactivity floor.
+            assert_eq!(store.op_count(), 1533);
+            assert_eq!(store.pruned_loc, 100);
+            assert_eq!(store.inactivity_floor_loc, 100);
+            assert_eq!(store.log.len(), 1533 - 100);
+            assert_eq!(store.snapshot.len(), 857);
+
+            // Raise the inactivity floor to the point where all inactive operations can be pruned.
+            store.raise_inactivity_floor(&mut hasher, 3000);
+            assert_eq!(store.inactivity_floor_loc, 3100);
+            // Inactivity floor should be 857 operations from tip since 857 operations are active.
+            assert_eq!(store.op_count(), 3100 + 857);
+
+            // Confirm the store's state matches that of the separate map we computed independently.
+            store.prune_known_inactive();
             for i in 0u64..1000 {
                 let k = hash(&i.to_be_bytes());
                 if let Some(map_value) = map.get(&k) {
@@ -379,17 +528,12 @@ mod test {
                 }
             }
 
-            // Test we can recreate the store purely from its log.
-            let log = store.to_log();
-            let store = MutableMmr::init_from_log(&mut hasher, log).unwrap();
-            assert_eq!(*root_hash, store.root(&mut hasher));
-
-            // Make sure size-constrained batches of operations are provable from inception to tip.
-            let end = store.op_count();
-            assert_eq!(roots.len() as u64, end);
+            // Make sure size-constrained batches of operations are provable from the oldest
+            // retained op to tip.
             let max_ops = 4;
             let root = store.root(&mut hasher);
-            for i in 0..end {
+            let end = store.op_count();
+            for i in store.pruned_loc as u64..end {
                 let (proof, log) = store.proof_to_tip(i, max_ops).await.unwrap();
                 assert!(MutableMmr::verify_proof(
                     &mut hasher,
