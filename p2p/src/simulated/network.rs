@@ -695,7 +695,7 @@ impl Link {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::{CryptoPrimitives, Ed25519, Signer};
+    use commonware_cryptography::{Parametrization, Ed25519, Signer};
     use commonware_runtime::{
         deterministic::{Context, Executor},
         Runner,
@@ -755,7 +755,7 @@ mod tests {
             max_size: MAX_MESSAGE_SIZE,
         };
         let (_, context, _) = Executor::default();
-        type PublicKey = <Ed25519 as CryptoPrimitives>::PublicKey;
+        type PublicKey = <Ed25519 as Parametrization>::PublicKey;
         let (mut network, _) = Network::<Context, PublicKey>::new(context.clone(), cfg);
 
         // Test that the next socket address is incremented correctly

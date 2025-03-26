@@ -1,4 +1,4 @@
-use crate::{Array, BatchScheme, CryptoPrimitives, Error, Signer, Verifier};
+use crate::{Array, BatchScheme, Error, Parametrization, Signer, Verifier};
 use commonware_codec::{Codec, Error as CodecError, Reader, SizedCodec, Writer};
 use commonware_utils::{hex, union_unique};
 use ed25519_consensus::{self, VerificationKey};
@@ -20,8 +20,7 @@ pub struct Ed25519 {
     verifier: ed25519_consensus::VerificationKey,
 }
 
-impl CryptoPrimitives for Ed25519 {
-    type PrivateKey = PrivateKey;
+impl Parametrization for Ed25519 {
     type PublicKey = PublicKey;
     type Signature = Signature;
 }
@@ -47,6 +46,8 @@ impl Verifier for Ed25519 {
 }
 
 impl Signer for Ed25519 {
+    type PrivateKey = PrivateKey;
+
     fn new<R: CryptoRng + Rng>(r: &mut R) -> Self {
         let signer = ed25519_consensus::SigningKey::new(r);
         let verifier = signer.verification_key();
