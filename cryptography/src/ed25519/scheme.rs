@@ -1,4 +1,4 @@
-use crate::{Array, BatchScheme, Error, Parametrization, Signer, Verifier};
+use crate::{Array, BatchScheme, Error, Signer, Specification, Verifier};
 use commonware_codec::{Codec, Error as CodecError, Reader, SizedCodec, Writer};
 use commonware_utils::{hex, union_unique};
 use ed25519_consensus::{self, VerificationKey};
@@ -20,7 +20,7 @@ pub struct Ed25519 {
     verifier: ed25519_consensus::VerificationKey,
 }
 
-impl Parametrization for Ed25519 {
+impl Specification for Ed25519 {
     type PublicKey = PublicKey;
     type Signature = Signature;
 }
@@ -82,10 +82,12 @@ pub struct Ed25519Batch {
     verifier: ed25519_consensus::batch::Verifier,
 }
 
-impl BatchScheme for Ed25519Batch {
+impl Specification for Ed25519Batch {
     type PublicKey = PublicKey;
     type Signature = Signature;
+}
 
+impl BatchScheme for Ed25519Batch {
     fn new() -> Self {
         Ed25519Batch {
             verifier: ed25519_consensus::batch::Verifier::new(),

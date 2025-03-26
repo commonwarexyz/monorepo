@@ -1,5 +1,5 @@
 use crate::{
-    Array, Error, Parametrization, Signer as CommonwareSigner, Verifier as CommonowareVerifier,
+    Array, Error, Specification, Signer as CommonwareSigner, Verifier as CommonowareVerifier,
 };
 use commonware_codec::{Codec, Error as CodecError, Reader, SizedCodec, Writer};
 use commonware_utils::{hex, union_unique};
@@ -30,7 +30,7 @@ pub struct Secp256r1 {
     verifier: VerifyingKey,
 }
 
-impl Parametrization for Secp256r1 {
+impl Specification for Secp256r1 {
     type PublicKey = PublicKey;
     type Signature = Signature;
 }
@@ -609,12 +609,12 @@ mod tests {
 
         let uncompressed_public_key = parse_public_key_as_uncompressed_vector(qx_hex, qy_hex);
         let public_key =
-            <Secp256r1 as Parametrization>::PublicKey::try_from(&uncompressed_public_key);
+            <Secp256r1 as Specification>::PublicKey::try_from(&uncompressed_public_key);
         assert_eq!(public_key, Err(Error::InvalidPublicKeyLength));
 
         let compressed_public_key = parse_public_key_as_compressed_vector(qx_hex, qy_hex);
         let public_key =
-            <Secp256r1 as Parametrization>::PublicKey::try_from(&compressed_public_key);
+            <Secp256r1 as Specification>::PublicKey::try_from(&compressed_public_key);
         assert!(public_key.is_ok());
     }
 
@@ -708,7 +708,7 @@ mod tests {
 
         for (n, test) in cases.iter() {
             let (public_key, exp_valid) = test;
-            let res = <Secp256r1 as Parametrization>::PublicKey::try_from(public_key);
+            let res = <Secp256r1 as Specification>::PublicKey::try_from(public_key);
             assert_eq!(
                 *exp_valid,
                 res.is_ok(),

@@ -23,7 +23,7 @@ use super::primitives::{
     group::{self, Element, Scalar},
     ops,
 };
-use crate::{Array, Error, Parametrization, Signer, Verifier};
+use crate::{Array, Error, Specification, Signer, Verifier};
 use commonware_codec::{Codec, Error as CodecError, Reader, SizedCodec, Writer};
 use commonware_utils::hex;
 use rand::{CryptoRng, Rng};
@@ -47,7 +47,7 @@ pub struct Bls12381 {
     public: group::Public,
 }
 
-impl Parametrization for Bls12381 {
+impl Specification for Bls12381 {
     type PublicKey = PublicKey;
     type Signature = Signature;
 }
