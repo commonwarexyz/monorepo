@@ -262,8 +262,6 @@ pub struct Peer {
 /// List of peers
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Peers {
-    /// Monitoring instance
-    pub monitoring_private_ip: IpAddr,
     /// Peers deployed across all regions
     pub peers: Vec<Peer>,
 }

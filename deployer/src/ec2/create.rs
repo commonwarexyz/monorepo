@@ -517,7 +517,6 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
 
     // Generate peers.yaml
     let peers = Peers {
-        monitoring_private_ip: monitoring_private_ip.clone().parse::<IpAddr>().unwrap(),
         peers: deployments
             .iter()
             .map(|d| Peer {
