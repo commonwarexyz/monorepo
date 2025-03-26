@@ -468,7 +468,7 @@ fi
 
 # Record performance data
 echo "Recording perf data for PID ${{PID}}..."
-sudo perf record -F ${{PERF_FREQ}} -p ${{PID}} -o ${{PERF_DATA_FILE}} -g -- sleep ${{PROFILE_DURATION}}
+sudo perf record -F ${{PERF_FREQ}} -p ${{PID}} -o ${{PERF_DATA_FILE}} -g --call-graph fp -- sleep ${{PROFILE_DURATION}}
 
 # Generate folded stack report
 echo "Generating folded stack report..."
