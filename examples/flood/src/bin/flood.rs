@@ -4,7 +4,7 @@ use commonware_cryptography::{
     ed25519::{PrivateKey, PublicKey},
     Ed25519, Scheme,
 };
-use commonware_deployer::ec2::{Peers, METRICS_PORT, PROFILES_PORT};
+use commonware_deployer::ec2::{Peers, METRICS_PORT};
 use commonware_flood::Config;
 use commonware_p2p::{authenticated, Receiver, Recipients, Sender};
 use commonware_runtime::{tokio, Clock, Metrics, Network, Runner, Spawner};
@@ -47,7 +47,6 @@ fn main() {
     let peer_file = matches.get_one::<String>("peers").unwrap();
     let peers_file = std::fs::read_to_string(peer_file).expect("Could not read peers file");
     let peers: Peers = serde_yaml::from_str(&peers_file).expect("Could not parse peers file");
-    let monitoring_ip = peers.monitoring_private_ip;
     let peers: HashMap<PublicKey, IpAddr> = peers
         .peers
         .into_iter()
@@ -75,21 +74,6 @@ fn main() {
         message_size = config.message_size,
         "loaded config"
     );
-
-    // Run profiles
-    // thread::spawn({
-    //     let public_key = public_key.clone();
-    //     move || {
-    //         let profiler = PyroscopeAgent::builder(
-    //             format!("http://{}:{}", monitoring_ip, PROFILES_PORT),
-    //             public_key.to_string(),
-    //         )
-    //         .backend(pprof_backend(PprofConfig::new().sample_rate(100)))
-    //         .build()
-    //         .expect("Could not create Pyroscope agent");
-    //         profiler.start().expect("Could not start Pyroscope agent");
-    //     }
-    // });
 
     // Configure peers and bootstrappers
     let peer_keys = peers.keys().cloned().collect::<Vec<_>>();
