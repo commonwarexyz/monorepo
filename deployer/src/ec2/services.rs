@@ -467,18 +467,18 @@ fi
 
 # Record performance data
 echo "Recording perf data for PID ${{PID}}..."
-sudo perf record -F ${{PERF_FREQ}} -p ${{PID}} -g -- sleep ${{PROFILE_DURATION}}
+perf record -F ${{PERF_FREQ}} -p ${{PID}} -g -- sleep ${{PROFILE_DURATION}}
 
 # Generate folded stack report
 echo "Generating folded stack report..."
-sudo perf report --stdio --no-children -n -g folded,0,caller,count -s comm | \
+perf report --stdio --no-children -n -g folded,0,caller,count -s comm | \
     awk '/^ / {{ comm = $3 }} /^[0-9]/ {{ print comm ";" $2, $1 }}' > ${{PERF_STACK_FILE}}
 
 # Check if stack file is empty (perf might fail silently sometimes)
 if [ ! -s "${{PERF_STACK_FILE}}" ]; then
     echo "Warning: ${{PERF_STACK_FILE}} is empty. Skipping upload." >&2
     # Clean up empty perf.data
-    sudo rm -f perf.data
+    rm -f perf.data
     exit 1
 fi
 
@@ -487,14 +487,14 @@ UNTIL_TS=$(date +%s)
 FROM_TS=$((UNTIL_TS - PROFILE_DURATION))
 
 # Upload to Pyroscope
-echo "Uploading profile to Pyroscope at ${monitoring_private_ip}..."
-curl -X POST "http://${monitoring_private_ip}:4040/ingest?name=${{APP_NAME}}&format=folded&units=samples&aggregationType=sum&from=${{FROM_TS}}&until=${{UNTIL_TS}}&spyName=perf_script" \
+echo "Uploading profile to Pyroscope at {monitoring_private_ip}..."
+curl -X POST "http://{monitoring_private_ip}:4040/ingest?name=${{APP_NAME}}&format=folded&units=samples&aggregationType=sum&from=${{FROM_TS}}&until=${{UNTIL_TS}}&spyName=perf_script" \
      --data-binary "@${{PERF_STACK_FILE}}" \
      --header "Content-Type: text/plain" -v
 
 echo "Profile upload complete."
 # Clean up stack file and perf.data
-sudo rm -f ${{PERF_STACK_FILE}} perf.data
+rm -f ${{PERF_STACK_FILE}} perf.data
 "#
     )
 }
