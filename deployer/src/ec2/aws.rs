@@ -1,5 +1,6 @@
 //! AWS EC2 SDK function wrappers
 
+use super::METRICS_PORT;
 use crate::ec2::{
     utils::{exact_cidr, DEPLOYER_MAX_PORT, DEPLOYER_MIN_PORT, DEPLOYER_PROTOCOL, RETRY_INTERVAL},
     PortConfig,
@@ -264,8 +265,8 @@ pub async fn create_security_group_binary(
         .ip_permissions(
             IpPermission::builder()
                 .ip_protocol("tcp")
-                .from_port(9090)
-                .to_port(9090)
+                .from_port(METRICS_PORT as i32)
+                .to_port(METRICS_PORT as i32)
                 .ip_ranges(
                     IpRange::builder()
                         .cidr_ip(exact_cidr(monitoring_ip))

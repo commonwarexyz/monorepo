@@ -2,7 +2,7 @@
 
 use crate::ec2::{
     aws::*, deployer_directory, services::*, utils::*, Config, Error, InstanceConfig, Peer, Peers,
-    CREATED_FILE_NAME, MONITORING_NAME, MONITORING_REGION,
+    CREATED_FILE_NAME, LOGS_PORT, MONITORING_NAME, MONITORING_REGION, PROFILES_PORT,
 };
 use futures::future::try_join_all;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -390,28 +390,19 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     let deployments: Vec<Deployment> = try_join_all(launch_futures).await?;
     info!("launched binary instances");
 
-    // Generate peers.yaml
-    let peers = Peers {
-        peers: deployments
-            .iter()
-            .map(|d| Peer {
-                name: d.instance.name.clone(),
-                region: d.instance.region.clone(),
-                ip: d.ip.clone().parse::<IpAddr>().unwrap(),
-            })
-            .collect(),
-    };
-    let peers_yaml = serde_yaml::to_string(&peers)?;
-    let peers_path = temp_dir.join("peers.yaml");
-    std::fs::write(&peers_path, peers_yaml)?;
-
     // Write systemd service files
     let prometheus_service_path = temp_dir.join("prometheus.service");
     std::fs::write(&prometheus_service_path, PROMETHEUS_SERVICE)?;
-    let promtail_service_path = temp_dir.join("promtail.service");
-    std::fs::write(&promtail_service_path, PROMTAIL_SERVICE)?;
     let loki_service_path = temp_dir.join("loki.service");
     std::fs::write(&loki_service_path, LOKI_SERVICE)?;
+    let pyroscope_service_path = temp_dir.join("pyroscope.service");
+    std::fs::write(&pyroscope_service_path, PYROSCOPE_SERVICE)?;
+    let promtail_service_path = temp_dir.join("promtail.service");
+    std::fs::write(&promtail_service_path, PROMTAIL_SERVICE)?;
+    let pyroscope_agent_service_path = temp_dir.join("pyroscope-agent.service");
+    std::fs::write(&pyroscope_agent_service_path, PYROSCOPE_AGENT_SERVICE)?;
+    let pyroscope_agent_timer_path = temp_dir.join("pyroscope-agent.timer");
+    std::fs::write(&pyroscope_agent_timer_path, PYROSCOPE_AGENT_TIMER)?;
     let binary_service_path = temp_dir.join("binary.service");
     std::fs::write(&binary_service_path, BINARY_SERVICE)?;
 
@@ -445,6 +436,8 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     std::fs::write(&all_yaml_path, ALL_YML)?;
     let loki_config_path = temp_dir.join("loki.yml");
     std::fs::write(&loki_config_path, LOKI_CONFIG)?;
+    let pyroscope_config_path = temp_dir.join("pyroscope.yml");
+    std::fs::write(&pyroscope_config_path, PYROSCOPE_CONFIG)?;
     scp_file(
         private_key,
         prom_path.to_str().unwrap(),
@@ -475,16 +468,16 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     .await?;
     scp_file(
         private_key,
-        loki_config_path.to_str().unwrap(),
+        prometheus_service_path.to_str().unwrap(),
         &monitoring_ip,
-        "/home/ubuntu/loki.yml",
+        "/home/ubuntu/prometheus.service",
     )
     .await?;
     scp_file(
         private_key,
-        prometheus_service_path.to_str().unwrap(),
+        loki_config_path.to_str().unwrap(),
         &monitoring_ip,
-        "/home/ubuntu/prometheus.service",
+        "/home/ubuntu/loki.yml",
     )
     .await?;
     scp_file(
@@ -494,17 +487,52 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         "/home/ubuntu/loki.service",
     )
     .await?;
+    scp_file(
+        private_key,
+        pyroscope_config_path.to_str().unwrap(),
+        &monitoring_ip,
+        "/home/ubuntu/pyroscope.yml",
+    )
+    .await?;
+    scp_file(
+        private_key,
+        pyroscope_service_path.to_str().unwrap(),
+        &monitoring_ip,
+        "/home/ubuntu/pyroscope.service",
+    )
+    .await?;
     enable_bbr(private_key, &monitoring_ip, bbr_conf_path.to_str().unwrap()).await?;
     ssh_execute(
         private_key,
         &monitoring_ip,
-        &install_monitoring_cmd(PROMETHEUS_VERSION, GRAFANA_VERSION, LOKI_VERSION),
+        &install_monitoring_cmd(
+            PROMETHEUS_VERSION,
+            GRAFANA_VERSION,
+            LOKI_VERSION,
+            PYROSCOPE_VERSION,
+        ),
     )
     .await?;
     poll_service_active(private_key, &monitoring_ip, "prometheus").await?;
     poll_service_active(private_key, &monitoring_ip, "loki").await?;
+    poll_service_active(private_key, &monitoring_ip, "pyroscope").await?;
     poll_service_active(private_key, &monitoring_ip, "grafana-server").await?;
     info!("configured monitoring instance");
+
+    // Generate peers.yaml
+    let peers = Peers {
+        peers: deployments
+            .iter()
+            .map(|d| Peer {
+                name: d.instance.name.clone(),
+                region: d.instance.region.clone(),
+                ip: d.ip.clone().parse::<IpAddr>().unwrap(),
+            })
+            .collect(),
+    };
+    let peers_yaml = serde_yaml::to_string(&peers)?;
+    let peers_path = temp_dir.join("peers.yaml");
+    std::fs::write(&peers_path, peers_yaml)?;
 
     // Configure binary instances
     info!("configuring binary instances");
@@ -520,6 +548,8 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         let bbr_conf_path = bbr_conf_path.clone();
         let promtail_service_path = promtail_service_path.clone();
         let binary_service_path = binary_service_path.clone();
+        let pyroscope_agent_service_path = pyroscope_agent_service_path.clone();
+        let pyroscope_agent_timer_path = pyroscope_agent_timer_path.clone();
         let future = async move {
             scp_file(private_key, &instance.binary, &ip, "/home/ubuntu/binary").await?;
             scp_file(
@@ -574,10 +604,42 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                 "/home/ubuntu/logrotate.conf",
             )
             .await?;
+            scp_file(
+                private_key,
+                pyroscope_agent_service_path.to_str().unwrap(),
+                &ip,
+                "/home/ubuntu/pyroscope-agent.service",
+            )
+            .await?;
+            let pyroscope_agent_script_path =
+                temp_dir.join(format!("pyroscope-agent_{}.sh", instance.name));
+            std::fs::write(
+                &pyroscope_agent_script_path,
+                generate_pyroscope_script(
+                    &monitoring_private_ip,
+                    &instance.name,
+                    &ip,
+                    &instance.region,
+                ),
+            )?;
+            scp_file(
+                private_key,
+                pyroscope_agent_script_path.to_str().unwrap(),
+                &ip,
+                "/home/ubuntu/pyroscope-agent.sh",
+            )
+            .await?;
+            scp_file(
+                private_key,
+                pyroscope_agent_timer_path.to_str().unwrap(),
+                &ip,
+                "/home/ubuntu/pyroscope-agent.timer",
+            )
+            .await?;
             enable_bbr(private_key, &ip, bbr_conf_path.to_str().unwrap()).await?;
             ssh_execute(private_key, &ip, &setup_promtail_cmd(PROMTAIL_VERSION)).await?;
             poll_service_active(private_key, &ip, "promtail").await?;
-            ssh_execute(private_key, &ip, INSTALL_BINARY_CMD).await?;
+            ssh_execute(private_key, &ip, &install_binary_cmd(instance.profiling)).await?;
             poll_service_active(private_key, &ip, "binary").await?;
             info!(
                 ip = ip.as_str(),
@@ -605,8 +667,20 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             .ip_permissions(
                 IpPermission::builder()
                     .ip_protocol("tcp")
-                    .from_port(3100)
-                    .to_port(3100)
+                    .from_port(LOGS_PORT as i32)
+                    .to_port(LOGS_PORT as i32)
+                    .user_id_group_pairs(
+                        UserIdGroupPair::builder()
+                            .group_id(binary_sg_id.clone())
+                            .build(),
+                    )
+                    .build(),
+            )
+            .ip_permissions(
+                IpPermission::builder()
+                    .ip_protocol("tcp")
+                    .from_port(PROFILES_PORT as i32)
+                    .to_port(PROFILES_PORT as i32)
                     .user_id_group_pairs(
                         UserIdGroupPair::builder()
                             .group_id(binary_sg_id.clone())
@@ -633,8 +707,16 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                 .ip_permissions(
                     IpPermission::builder()
                         .ip_protocol("tcp")
-                        .from_port(3100)
-                        .to_port(3100)
+                        .from_port(LOGS_PORT as i32)
+                        .to_port(LOGS_PORT as i32)
+                        .ip_ranges(IpRange::builder().cidr_ip(binary_cidr).build())
+                        .build(),
+                )
+                .ip_permissions(
+                    IpPermission::builder()
+                        .ip_protocol("tcp")
+                        .from_port(PROFILES_PORT as i32)
+                        .to_port(PROFILES_PORT as i32)
                         .ip_ranges(IpRange::builder().cidr_ip(binary_cidr).build())
                         .build(),
                 )

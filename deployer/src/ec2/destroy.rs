@@ -1,7 +1,8 @@
 //! `destroy` subcommand for `ec2`
 
 use crate::ec2::{
-    aws::*, deployer_directory, Config, Error, DESTROYED_FILE_NAME, MONITORING_REGION,
+    aws::*, deployer_directory, Config, Error, DESTROYED_FILE_NAME, LOGS_PORT, MONITORING_REGION,
+    PROFILES_PORT,
 };
 use std::collections::HashSet;
 use std::fs::File;
@@ -81,25 +82,48 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
                 .unwrap();
 
             // Revoke ingress rule from monitoring security group to binary security group
-            let ip_permission = IpPermission::builder()
+            let logging_permission = IpPermission::builder()
                 .ip_protocol("tcp")
-                .from_port(3100)
-                .to_port(3100)
+                .from_port(LOGS_PORT as i32)
+                .to_port(LOGS_PORT as i32)
                 .user_id_group_pairs(UserIdGroupPair::builder().group_id(binary_sg).build())
                 .build();
             if let Err(e) = ec2_client
                 .revoke_security_group_ingress()
                 .group_id(monitoring_sg)
-                .ip_permissions(ip_permission)
+                .ip_permissions(logging_permission)
                 .send()
                 .await
             {
-                warn!(%e, "failed to revoke ingress rule between monitoring and binary security groups");
+                warn!(%e, "failed to revoke logs ingress rule between monitoring and binary security groups");
             } else {
                 info!(
                     monitoring_sg,
                     binary_sg,
-                    "revoking ingress rule between monitoring and binary security groups"
+                    "revoked logs ingress rule between monitoring and binary security groups"
+                );
+            }
+
+            // Revoke ingress rule from monitoring security group to binary security group
+            let profiling_permission = IpPermission::builder()
+                .ip_protocol("tcp")
+                .from_port(PROFILES_PORT as i32)
+                .to_port(PROFILES_PORT as i32)
+                .user_id_group_pairs(UserIdGroupPair::builder().group_id(binary_sg).build())
+                .build();
+            if let Err(e) = ec2_client
+                .revoke_security_group_ingress()
+                .group_id(monitoring_sg)
+                .ip_permissions(profiling_permission)
+                .send()
+                .await
+            {
+                warn!(%e, "failed to revoke profiles ingress rule between monitoring and binary security groups");
+            } else {
+                info!(
+                    monitoring_sg,
+                    binary_sg,
+                    "revoked profiles ingress rule between monitoring and binary security groups"
                 );
             }
         }

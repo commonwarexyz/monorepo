@@ -4,7 +4,7 @@ use commonware_cryptography::{
     ed25519::{PrivateKey, PublicKey},
     Ed25519, Signer,
 };
-use commonware_deployer::ec2::Peers;
+use commonware_deployer::ec2::{Peers, METRICS_PORT};
 use commonware_flood::Config;
 use commonware_p2p::{authenticated, Receiver, Recipients, Sender};
 use commonware_runtime::{tokio, Clock, Metrics, Network, Runner, Spawner};
@@ -26,7 +26,6 @@ use tracing::{error, info, Level};
 
 const SYSTEM_METRICS_REFRESH: Duration = Duration::from_secs(5);
 const FLOOD_NAMESPACE: &[u8] = b"_COMMONWARE_FLOOD";
-const METRICS_PORT: u16 = 9090;
 
 fn main() {
     // Parse arguments
