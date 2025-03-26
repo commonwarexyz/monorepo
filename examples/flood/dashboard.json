@@ -1195,6 +1195,41 @@
         },
         {
             "datasource": {
+                "type": "grafana-pyroscope-datasource",
+                "uid": "P02E4190217B50628"
+            },
+            "fieldConfig": {
+                "defaults": {},
+                "overrides": []
+            },
+            "gridPos": {
+                "h": 15,
+                "w": 24,
+                "x": 0,
+                "y": 37
+            },
+            "id": 16,
+            "options": {},
+            "pluginVersion": "11.5.2",
+            "targets": [
+                {
+                    "datasource": {
+                        "type": "grafana-pyroscope-datasource",
+                        "uid": "P02E4190217B50628"
+                    },
+                    "groupBy": [],
+                    "labelSelector": "process_cpu{name=~\"$Job\"}",
+                    "profileTypeId": "process_cpu:cpu:nanoseconds:cpu:nanoseconds",
+                    "queryType": "profile",
+                    "refId": "A",
+                    "spanSelector": []
+                }
+            ],
+            "title": "CPU Time",
+            "type": "flamegraph"
+        },
+        {
+            "datasource": {
                 "type": "loki",
                 "uid": "P8E80F9AEF21F6940"
             },
@@ -1206,7 +1241,7 @@
                 "h": 18,
                 "w": 24,
                 "x": 0,
-                "y": 37
+                "y": 52
             },
             "id": 6,
             "options": {
@@ -1246,6 +1281,7 @@
     "templating": {
         "list": [
             {
+                "allValue": ".*",
                 "allowCustomValue": false,
                 "current": {
                     "text": "All",
