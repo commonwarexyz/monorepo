@@ -146,6 +146,7 @@ impl<K: Array, V: Array, H: CHasher> MutableMmr<K, V, H> {
 
     /// Converts an operation's location to its index in the (pruned) log.
     fn loc_to_op_index(&self, loc: u64) -> usize {
+        assert!(loc >= self.pruned_loc);
         (loc - self.pruned_loc) as usize
     }
 
@@ -167,8 +168,6 @@ impl<K: Array, V: Array, H: CHasher> MutableMmr<K, V, H> {
 
     /// Updates `key` to have value `value`.  If the key already has this same value, then this is a
     /// no-op.
-    ///
-    /// Also move exactly one active operation to tip if at least one is movable.
     pub fn update(&mut self, hasher: &mut H, key: K, value: V) {
         let new_loc = self.log.len() as u64 + self.pruned_loc;
 
@@ -183,9 +182,6 @@ impl<K: Array, V: Array, H: CHasher> MutableMmr<K, V, H> {
                 // Trying to assign the same value is a no-op.
                 return;
             }
-            if *loc == self.inactivity_floor_loc {
-                self.inactivity_floor_loc += 1;
-            }
             *loc = new_loc;
         } else {
             self.snapshot.insert(key.clone(), new_loc);
@@ -193,28 +189,17 @@ impl<K: Array, V: Array, H: CHasher> MutableMmr<K, V, H> {
 
         let op = Type::Update(value.clone());
         self.apply_op(hasher, key, op);
-
-        // Move exactly one active operation to tip if at least one is movable.
-        self.raise_inactivity_floor(hasher, 1);
     }
 
     /// Delete `key` and its value from the store. Deleting a key that already has no value is a
     /// no-op.
-    ///
-    /// Also move exactly one active operation to tip if at least one is movable.
     pub fn delete(&mut self, hasher: &mut H, key: K) {
         // Remove the key from the snapshot.
-        let Some(loc) = self.snapshot.remove(&key) else {
+        if self.snapshot.remove(&key).is_none() {
             return;
         };
-        if loc == self.inactivity_floor_loc {
-            self.inactivity_floor_loc += 1;
-        }
 
         self.apply_op(hasher, key, Type::Deleted);
-
-        // Move exactly one active operation to tip if at least one is movable.
-        self.raise_inactivity_floor(hasher, 1);
     }
 
     /// Return the root hash of the mutable MMR.
@@ -298,29 +283,28 @@ impl<K: Array, V: Array, H: CHasher> MutableMmr<K, V, H> {
         }
     }
 
-    /// Raise the inactivity floor as high as we can without moving more than `max_moves` ops to
-    /// tip. This method does not change the state of the store's snapshot, but it does change the
-    /// root hash of the store because of the moved operations.
-    fn raise_inactivity_floor(&mut self, hasher: &mut H, mut max_moves: usize) {
-        let active_ops = self.snapshot.len() as u64;
-        while max_moves > 0 && self.inactivity_floor_loc < self.op_count() - active_ops {
+    /// Raise the inactivity floor by exactly `max_steps` steps. Each step either advances over an
+    /// inactive operation, or re-applies an active operation to the tip and then advances over it.
+    ///
+    /// This method does not change the state of the store's snapshot, but it may change the root
+    /// hash of the store if some step re-applies an active operation.
+    #[allow(dead_code)] // TODO: Remove when method gets used.
+    pub fn raise_inactivity_floor(&mut self, hasher: &mut H, max_steps: u64) {
+        for _ in 0..max_steps {
             let i = self.loc_to_op_index(self.inactivity_floor_loc);
-            let op = &self.log[i];
-            let Some(loc) = self.snapshot.get(&op.key) else {
-                // This key has been deleted by its most recent operation, no need to move to tip.
-                self.inactivity_floor_loc += 1;
-                continue;
-            };
-            if *loc != self.inactivity_floor_loc {
-                // There's a later operation that's active for this key, no need to move to tip.
-                self.inactivity_floor_loc += 1;
-                continue;
+            if i == self.log.len() {
+                break;
             }
-
-            // This operation is active, move it to tip to allow us to continue raising the
-            // inactivity floor.
-            self.apply_op(hasher, op.key.clone(), op.op_type.clone());
-            max_moves -= 1;
+            let op = &self.log[i];
+            let op_count = self.op_count();
+            if let Some(loc) = self.snapshot.get_mut(&op.key) {
+                if *loc == self.inactivity_floor_loc {
+                    // This operation is active, move it to tip to allow us to continue raising the
+                    // inactivity floor.
+                    *loc = op_count;
+                    self.apply_op(hasher, op.key.clone(), op.op_type.clone());
+                }
+            }
             self.inactivity_floor_loc += 1;
         }
     }
@@ -385,8 +369,13 @@ mod test {
         store.update(&mut hasher, d2, d2);
         assert_eq!(store.get(&d2).unwrap(), &d2);
 
-        assert_eq!(store.log.len(), 6); // 4 updates, 1 deletion, 1 move to tip.
+        assert_eq!(store.log.len(), 5); // 4 updates, 1 deletion.
         assert_eq!(store.snapshot.len(), 2);
+        assert_eq!(store.inactivity_floor_loc, 0);
+
+        // We should be able to advance over the 3 inactive operations.
+        store.raise_inactivity_floor(&mut hasher, 3);
+        assert_eq!(store.inactivity_floor_loc, 3);
 
         let root = store.root(&mut hasher);
 
@@ -394,7 +383,7 @@ mod test {
         store.update(&mut hasher, d1, d1);
         store.update(&mut hasher, d2, d2);
         // Log and root should be unchanged.
-        assert_eq!(store.log.len(), 6);
+        assert_eq!(store.log.len(), 5);
         assert_eq!(store.root(&mut hasher), root);
 
         // The MMR's size should always be greater than the position of the last leaf.
@@ -405,14 +394,14 @@ mod test {
         store.delete(&mut hasher, d2);
         assert!(store.get(&d1).is_none());
         assert!(store.get(&d2).is_none());
-        assert_eq!(store.log.len(), 9); // 4 updates, 3 deletions, 2 move to tip.
-        assert_eq!(store.inactivity_floor_loc, 9); // no more active ops.
+        assert_eq!(store.log.len(), 7); // 4 updates, 3 deletions
+        assert_eq!(store.inactivity_floor_loc, 3);
 
         let root = store.root(&mut hasher);
 
         // multiple deletions of the same key should be a no-op.
         store.delete(&mut hasher, d1);
-        assert_eq!(store.log.len(), 9);
+        assert_eq!(store.log.len(), 7);
         assert_eq!(store.root(&mut hasher), root);
 
         // deletions of non-existent keys should be a no-op.
@@ -423,7 +412,13 @@ mod test {
         // Make sure converting to/from store_state works with a non-zero inactivity floor and no
         // active elements.
         let store_state: StoreState<Digest, Digest, Sha256> = store.to_state();
-        assert_eq!(store_state.pruned_loc, 9);
+        assert_eq!(store_state.pruned_loc, 3);
+        let mut store = MutableMmr::init_from_state(&mut hasher, store_state).unwrap();
+        assert_eq!(store.log.len(), 4);
+        assert_eq!(store.root(&mut hasher), root);
+
+        store.raise_inactivity_floor(&mut hasher, 10);
+        let store_state: StoreState<Digest, Digest, Sha256> = store.to_state();
         let mut store = MutableMmr::init_from_state(&mut hasher, store_state).unwrap();
         assert_eq!(store.log.len(), 0);
         assert_eq!(store.root(&mut hasher), root);
@@ -434,25 +429,21 @@ mod test {
         store.delete(&mut hasher, d1);
         store.update(&mut hasher, d2, d1);
         store.update(&mut hasher, d1, d2);
-        assert_eq!(store.log.len(), 6);
+        assert_eq!(store.log.len(), 5);
         assert_eq!(store.snapshot.len(), 2);
         let root = store.root(&mut hasher);
 
         let store_state: StoreState<Digest, Digest, Sha256> = store.to_state();
-        assert_eq!(store_state.pruned_loc, 13);
+        assert_eq!(store_state.pruned_loc, 7);
         let mut store = MutableMmr::init_from_state(&mut hasher, store_state).unwrap();
-        assert_eq!(store.pruned_loc, 13);
+        assert_eq!(store.pruned_loc, 7);
         assert_eq!(store.root(&mut hasher), root);
 
-        // Update a few keys to force inactivity floor to rise.
-        store.update(&mut hasher, d1, d1);
-        store.update(&mut hasher, d2, d2);
-        let root = store.root(&mut hasher);
-        let pruned_loc = store.pruned_loc;
-
         // Pruning inactive ops should not affect root or current state.
+        let old_pruned_loc = store.pruned_loc;
+        store.raise_inactivity_floor(&mut hasher, 2);
         store.prune_known_inactive();
-        assert!(pruned_loc < store.pruned_loc);
+        assert!(old_pruned_loc < store.pruned_loc);
         assert_eq!(store.root(&mut hasher), root);
         assert_eq!(store.snapshot.len(), 2);
     }
@@ -496,15 +487,14 @@ mod test {
                 map.remove(&k);
             }
 
-            // Confirm we are always compacting active operations to tip allowing the inactivity
-            // floor to rise.
-            assert_eq!(store.op_count(), 1953);
+            assert_eq!(store.op_count(), 1477);
             assert_eq!(store.pruned_loc, 0);
-            assert_eq!(store.log.len(), 1953); // no pruning yet
+            assert_eq!(store.inactivity_floor_loc, 0);
+            assert_eq!(store.log.len(), 1477); // no pruning yet
             assert_eq!(store.snapshot.len(), 857);
-            assert_eq!(store.inactivity_floor_loc, 728);
 
             // Test we can recreate the store from its store_state.
+            store.raise_inactivity_floor(&mut hasher, 100);
             let root_hash = store.root(&mut hasher);
             let store_state = store.to_state();
             let mut store = MutableMmr::init_from_state(&mut hasher, store_state).unwrap();
@@ -512,20 +502,20 @@ mod test {
 
             // Confirm the recreated store has an operations log that was pruned of all operations
             // preceding the last known inactivity floor.
-            assert_eq!(store.op_count(), 1953);
-            assert_eq!(store.pruned_loc, 728);
-            assert_eq!(store.log.len(), 1953 - 728);
+            assert_eq!(store.op_count(), 1533);
+            assert_eq!(store.pruned_loc, 100);
+            assert_eq!(store.inactivity_floor_loc, 100);
+            assert_eq!(store.log.len(), 1533 - 100);
             assert_eq!(store.snapshot.len(), 857);
-            assert_eq!(store.inactivity_floor_loc, 728);
 
-            // Raise the inactivity floor as high as possible, confirm active operations are fully
-            // compacted.
-            store.raise_inactivity_floor(&mut hasher, 1000);
-            assert_eq!(store.op_count(), 2809);
+            // Raise the inactivity floor to the point where all inactive operations can be pruned.
+            store.raise_inactivity_floor(&mut hasher, 3000);
+            assert_eq!(store.inactivity_floor_loc, 3100);
             // Inactivity floor should be 857 operations from tip since 857 operations are active.
-            assert_eq!(store.inactivity_floor_loc, 2809 - 857);
+            assert_eq!(store.op_count(), 3100 + 857);
 
             // Confirm the store's state matches that of the separate map we computed independently.
+            store.prune_known_inactive();
             for i in 0u64..1000 {
                 let k = hash(&i.to_be_bytes());
                 if let Some(map_value) = map.get(&k) {
