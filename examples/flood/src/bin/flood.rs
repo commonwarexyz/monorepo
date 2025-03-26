@@ -2,7 +2,7 @@ use axum::{routing::get, serve, Extension, Router};
 use clap::{Arg, Command};
 use commonware_cryptography::{
     ed25519::{PrivateKey, PublicKey},
-    Ed25519, Scheme,
+    Ed25519, Signer,
 };
 use commonware_deployer::ec2::Peers;
 use commonware_flood::Config;
@@ -65,7 +65,7 @@ fn main() {
     let config: Config = serde_yaml::from_str(&config_file).expect("Could not parse config file");
     let key = from_hex_formatted(&config.private_key).expect("Could not parse private key");
     let key = PrivateKey::try_from(key).expect("Private key is invalid");
-    let signer = <Ed25519 as Scheme>::from(key).expect("Could not create signer");
+    let signer = <Ed25519 as Signer>::from(key).expect("Could not create signer");
     let public_key = signer.public_key();
     let ip = peers.get(&public_key).expect("Could not find self in IPs");
     info!(

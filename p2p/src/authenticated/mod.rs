@@ -85,7 +85,7 @@
 //!
 //! ```rust
 //! use commonware_p2p::authenticated::{self, Network};
-//! use commonware_cryptography::{Ed25519, Scheme};
+//! use commonware_cryptography::{Ed25519, Signer, Verifier};
 //! use commonware_runtime::{tokio::{self, Executor}, Spawner, Runner, Metrics};
 //! use governor::Quota;
 //! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -196,7 +196,7 @@ pub use network::Network;
 mod tests {
     use super::*;
     use crate::{Receiver, Recipients, Sender};
-    use commonware_cryptography::{Ed25519, Scheme};
+    use commonware_cryptography::{Ed25519, Signer};
     use commonware_macros::test_traced;
     use commonware_runtime::{
         deterministic, tokio, Clock, Listener, Metrics, Network as RNetwork, Runner, Sink, Spawner,

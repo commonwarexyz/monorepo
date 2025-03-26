@@ -242,7 +242,7 @@ impl<E: Clock + GClock + Rng + Metrics, P: Array> Requester<E, P> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::{Ed25519, Scheme};
+    use commonware_cryptography::{Ed25519, Signer};
     use commonware_runtime::deterministic::Executor;
     use commonware_runtime::Runner;
     use governor::Quota;

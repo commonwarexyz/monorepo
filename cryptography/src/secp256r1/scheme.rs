@@ -1,4 +1,6 @@
-use crate::{Array, Error, Scheme};
+use crate::{
+    Array, Error, Signer as CommonwareSigner, Specification, Verifier as CommonowareVerifier,
+};
 use commonware_codec::{Codec, Error as CodecError, Reader, SizedCodec, Writer};
 use commonware_utils::{hex, union_unique};
 use p256::{
@@ -28,10 +30,31 @@ pub struct Secp256r1 {
     verifier: VerifyingKey,
 }
 
-impl Scheme for Secp256r1 {
-    type PrivateKey = PrivateKey;
+impl Specification for Secp256r1 {
     type PublicKey = PublicKey;
     type Signature = Signature;
+}
+
+impl CommonowareVerifier for Secp256r1 {
+    fn verify(
+        namespace: Option<&[u8]>,
+        message: &[u8],
+        public_key: &PublicKey,
+        signature: &Signature,
+    ) -> bool {
+        let payload = match namespace {
+            Some(namespace) => Cow::Owned(union_unique(namespace, message)),
+            None => Cow::Borrowed(message),
+        };
+        public_key
+            .key
+            .verify(&payload, &signature.signature)
+            .is_ok()
+    }
+}
+
+impl CommonwareSigner for Secp256r1 {
+    type PrivateKey = PrivateKey;
 
     fn new<R: CryptoRng + Rng>(r: &mut R) -> Self {
         let signer = SigningKey::random(r);
@@ -63,22 +86,6 @@ impl Scheme for Secp256r1 {
             None => signature,
         };
         Signature::from(signature)
-    }
-
-    fn verify(
-        namespace: Option<&[u8]>,
-        message: &[u8],
-        public_key: &PublicKey,
-        signature: &Signature,
-    ) -> bool {
-        let payload = match namespace {
-            Some(namespace) => Cow::Owned(union_unique(namespace, message)),
-            None => Cow::Borrowed(message),
-        };
-        public_key
-            .key
-            .verify(&payload, &signature.signature)
-            .is_ok()
     }
 }
 
@@ -484,7 +491,7 @@ mod tests {
     #[test]
     fn test_codec_public_key() {
         let private_key = create_private_key();
-        let signer = <Secp256r1 as Scheme>::from(private_key).unwrap();
+        let signer = <Secp256r1 as CommonwareSigner>::from(private_key).unwrap();
         let original: PublicKey = signer.public_key();
 
         let encoded = original.encode();
@@ -497,7 +504,7 @@ mod tests {
     #[test]
     fn test_codec_signature() {
         let private_key = create_private_key();
-        let mut signer = <Secp256r1 as Scheme>::from(private_key).unwrap();
+        let mut signer = <Secp256r1 as CommonwareSigner>::from(private_key).unwrap();
         let original = signer.sign(None, "Hello World".as_bytes());
 
         let encoded = original.encode();
@@ -528,7 +535,7 @@ mod tests {
             9bd386a5e471ea7a65c17cc934a9d791e91491eb3754d03799790fe2d308d16146d5c9b0d0debd97d79ce8",
         )
         .unwrap();
-        let mut signer = <Secp256r1 as Scheme>::from(private_key).unwrap();
+        let mut signer = <Secp256r1 as CommonwareSigner>::from(private_key).unwrap();
         let signature = signer.sign(None, &message);
         assert_eq!(SIGNATURE_LENGTH, signature.len());
         assert!(Secp256r1::verify(
@@ -546,7 +553,7 @@ mod tests {
             .unwrap()
             .try_into()
             .unwrap();
-        let signer = <Secp256r1 as Scheme>::from(private_key).unwrap();
+        let signer = <Secp256r1 as CommonwareSigner>::from(private_key).unwrap();
         let exported_private_key = signer.private_key();
         assert_eq!(
             private_key_hex,
@@ -575,7 +582,7 @@ mod tests {
             )
             .unwrap(),
         );
-        let mut signer = <Secp256r1 as Scheme>::from(private_key).unwrap();
+        let mut signer = <Secp256r1 as CommonwareSigner>::from(private_key).unwrap();
         let signature = signer.sign(None, message);
         assert_eq!(signature.to_vec(), exp_sig.normalize_s().unwrap().to_vec());
 
@@ -601,11 +608,12 @@ mod tests {
         let qy_hex = "d0720dc691aa80096ba32fed1cb97c2b620690d06de0317b8618d5ce65eb728f";
 
         let uncompressed_public_key = parse_public_key_as_uncompressed_vector(qx_hex, qy_hex);
-        let public_key = <Secp256r1 as Scheme>::PublicKey::try_from(&uncompressed_public_key);
+        let public_key =
+            <Secp256r1 as Specification>::PublicKey::try_from(&uncompressed_public_key);
         assert_eq!(public_key, Err(Error::InvalidPublicKeyLength));
 
         let compressed_public_key = parse_public_key_as_compressed_vector(qx_hex, qy_hex);
-        let public_key = <Secp256r1 as Scheme>::PublicKey::try_from(&compressed_public_key);
+        let public_key = <Secp256r1 as Specification>::PublicKey::try_from(&compressed_public_key);
         assert!(public_key.is_ok());
     }
 
@@ -619,7 +627,7 @@ mod tests {
         .try_into()
         .unwrap();
         let message = b"sample";
-        let mut signer = <Secp256r1 as Scheme>::from(private_key).unwrap();
+        let mut signer = <Secp256r1 as CommonwareSigner>::from(private_key).unwrap();
         let signature = signer.sign(None, message);
         let (_, s) = signature.split_at(32);
         let mut signature: Vec<u8> = vec![0x00; 32];
@@ -639,7 +647,7 @@ mod tests {
         .try_into()
         .unwrap();
         let message = b"sample";
-        let mut signer = <Secp256r1 as Scheme>::from(private_key).unwrap();
+        let mut signer = <Secp256r1 as CommonwareSigner>::from(private_key).unwrap();
         let signature = signer.sign(None, message);
         let (r, _) = signature.split_at(32);
         let s: Vec<u8> = vec![0x00; 32];
@@ -667,7 +675,7 @@ mod tests {
 
         for (index, test) in cases.into_iter().enumerate() {
             let (private_key, exp_public_key) = test;
-            let signer = <Secp256r1 as Scheme>::from(private_key).unwrap();
+            let signer = <Secp256r1 as CommonwareSigner>::from(private_key).unwrap();
             assert_eq!(
                 exp_public_key,
                 signer.public_key(),
@@ -699,7 +707,7 @@ mod tests {
 
         for (n, test) in cases.iter() {
             let (public_key, exp_valid) = test;
-            let res = <Secp256r1 as Scheme>::PublicKey::try_from(public_key);
+            let res = <Secp256r1 as Specification>::PublicKey::try_from(public_key);
             assert_eq!(
                 *exp_valid,
                 res.is_ok(),

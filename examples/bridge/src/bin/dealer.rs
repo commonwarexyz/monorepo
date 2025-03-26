@@ -4,7 +4,7 @@ use commonware_cryptography::{
         dkg::ops,
         primitives::{group::Element, poly},
     },
-    Ed25519, Scheme,
+    Ed25519, Signer,
 };
 use commonware_utils::{hex, quorum};
 use rand::{rngs::StdRng, SeedableRng};

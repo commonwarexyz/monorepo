@@ -5,7 +5,7 @@ use commonware_consensus::threshold_simplex::Prover;
 use commonware_cryptography::{
     bls12381::primitives::group::{self, Element},
     sha256::Digest as Sha256Digest,
-    Ed25519, Hasher, Scheme, Sha256,
+    Ed25519, Hasher, Sha256, Signer,
 };
 use commonware_runtime::{tokio::Executor, Listener, Metrics, Network, Runner, Spawner};
 use commonware_stream::{

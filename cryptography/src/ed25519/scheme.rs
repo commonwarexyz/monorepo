@@ -1,4 +1,4 @@
-use crate::{Array, BatchScheme, Error, Scheme};
+use crate::{Array, BatchScheme, Error, Signer, Specification, Verifier};
 use commonware_codec::{Codec, Error as CodecError, Reader, SizedCodec, Writer};
 use commonware_utils::{hex, union_unique};
 use ed25519_consensus::{self, VerificationKey};
@@ -20,10 +20,33 @@ pub struct Ed25519 {
     verifier: ed25519_consensus::VerificationKey,
 }
 
-impl Scheme for Ed25519 {
-    type PrivateKey = PrivateKey;
+impl Specification for Ed25519 {
     type PublicKey = PublicKey;
     type Signature = Signature;
+}
+
+impl Verifier for Ed25519 {
+    fn verify(
+        namespace: Option<&[u8]>,
+        message: &[u8],
+        public_key: &Self::PublicKey,
+        signature: &Self::Signature,
+    ) -> bool {
+        match namespace {
+            Some(namespace) => {
+                let payload = union_unique(namespace, message);
+                public_key
+                    .key
+                    .verify(&signature.signature, &payload)
+                    .is_ok()
+            }
+            None => public_key.key.verify(&signature.signature, message).is_ok(),
+        }
+    }
+}
+
+impl Signer for Ed25519 {
+    type PrivateKey = PrivateKey;
 
     fn new<R: CryptoRng + Rng>(r: &mut R) -> Self {
         let signer = ed25519_consensus::SigningKey::new(r);
@@ -52,24 +75,6 @@ impl Scheme for Ed25519 {
         };
         Signature::from(sig)
     }
-
-    fn verify(
-        namespace: Option<&[u8]>,
-        message: &[u8],
-        public_key: &Self::PublicKey,
-        signature: &Self::Signature,
-    ) -> bool {
-        match namespace {
-            Some(namespace) => {
-                let payload = union_unique(namespace, message);
-                public_key
-                    .key
-                    .verify(&signature.signature, &payload)
-                    .is_ok()
-            }
-            None => public_key.key.verify(&signature.signature, message).is_ok(),
-        }
-    }
 }
 
 /// Ed25519 Batch Verifier.
@@ -77,10 +82,12 @@ pub struct Ed25519Batch {
     verifier: ed25519_consensus::batch::Verifier,
 }
 
-impl BatchScheme for Ed25519Batch {
+impl Specification for Ed25519Batch {
     type PublicKey = PublicKey;
     type Signature = Signature;
+}
 
+impl BatchScheme for Ed25519Batch {
     fn new() -> Self {
         Ed25519Batch {
             verifier: ed25519_consensus::batch::Verifier::new(),
@@ -429,7 +436,7 @@ mod tests {
         message: &[u8],
         signature: Signature,
     ) {
-        let mut signer = <Ed25519 as Scheme>::from(private_key).unwrap();
+        let mut signer = <Ed25519 as Signer>::from(private_key).unwrap();
         let computed_signature = signer.sign(None, message);
         assert_eq!(computed_signature, signature);
         assert!(Ed25519::verify(
@@ -567,7 +574,7 @@ mod tests {
     #[should_panic]
     fn bad_signature() {
         let (private_key, public_key, message, _) = vector_1();
-        let mut signer = <Ed25519 as Scheme>::new(&mut OsRng);
+        let mut signer = <Ed25519 as Signer>::new(&mut OsRng);
         let bad_signature = signer.sign(None, message.as_ref());
         test_sign_and_verify(private_key, public_key, &message, bad_signature);
     }
