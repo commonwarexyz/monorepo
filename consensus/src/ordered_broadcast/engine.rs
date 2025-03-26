@@ -320,12 +320,9 @@ impl<
                 // Handle refresh epoch deadline
                 epoch = epoch_updates.next() => {
                     // Error handling
-                    let epoch = match epoch {
-                        Some(epoch) => epoch,
-                        None => {
-                            error!("epoch subscription failed");
-                            break;
-                        }
+                    let Some(epoch) = epoch else {
+                        error!("epoch subscription failed");
+                        break;
                     };
 
                     // Refresh the epoch
