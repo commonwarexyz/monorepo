@@ -1,5 +1,5 @@
 use crate::{
-    Array, Parametrization, Error, Signer as CommonwareSigner, Verifier as CommonowareVerifier,
+    Array, Error, Parametrization, Signer as CommonwareSigner, Verifier as CommonowareVerifier,
 };
 use commonware_codec::{Codec, Error as CodecError, Reader, SizedCodec, Writer};
 use commonware_utils::{hex, union_unique};

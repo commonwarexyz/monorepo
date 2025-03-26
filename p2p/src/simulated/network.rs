@@ -695,7 +695,7 @@ impl Link {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::{Parametrization, Ed25519, Signer};
+    use commonware_cryptography::{Ed25519, Parametrization, Signer};
     use commonware_runtime::{
         deterministic::{Context, Executor},
         Runner,
