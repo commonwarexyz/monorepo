@@ -401,8 +401,8 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     std::fs::write(&pyroscope_service_path, PYROSCOPE_SERVICE)?;
     let binary_service_path = temp_dir.join("binary.service");
     std::fs::write(&binary_service_path, BINARY_SERVICE)?;
-    let pyroscope_agent_script_path = temp_dir.join("pyroscope-agent.sh");
-    std::fs::write(&pyroscope_agent_script_path, PYROSCOPE_AGENT_SCRIPT)?;
+    let pyroscope_agent_service_path = temp_dir.join("pyroscope-agent.service");
+    std::fs::write(&pyroscope_agent_service_path, PYROSCOPE_AGENT_SERVICE)?;
     let pyroscope_agent_timer_path = temp_dir.join("pyroscope-agent.timer");
     std::fs::write(&pyroscope_agent_timer_path, PYROSCOPE_AGENT_TIMER)?;
 
@@ -548,7 +548,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         let bbr_conf_path = bbr_conf_path.clone();
         let promtail_service_path = promtail_service_path.clone();
         let binary_service_path = binary_service_path.clone();
-        let pyroscope_agent_script_path = pyroscope_agent_script_path.clone();
+        let pyroscope_agent_service_path = pyroscope_agent_service_path.clone();
         let pyroscope_agent_timer_path = pyroscope_agent_timer_path.clone();
         let future = async move {
             scp_file(private_key, &instance.binary, &ip, "/home/ubuntu/binary").await?;
@@ -604,20 +604,6 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                 "/home/ubuntu/logrotate.conf",
             )
             .await?;
-            // Generate and copy Pyroscope agent service file with environment variables
-            let pyroscope_agent_service_content = format!(
-"{}\nEnvironment=MONITORING_PRIVATE_IP={}\nEnvironment=INSTANCE_NAME={}\nEnvironment=INSTANCE_IP={}\n",
-PYROSCOPE_AGENT_SERVICE,
-monitoring_private_ip,
-instance.name,
-ip
-);
-            let pyroscope_agent_service_path =
-                temp_dir.join(format!("pyroscope-agent_{}.service", instance.name));
-            std::fs::write(
-                &pyroscope_agent_service_path,
-                pyroscope_agent_service_content,
-            )?;
             scp_file(
                 private_key,
                 pyroscope_agent_service_path.to_str().unwrap(),
@@ -625,6 +611,17 @@ ip
                 "/home/ubuntu/pyroscope-agent.service",
             )
             .await?;
+            let pyroscope_agent_script_path =
+                temp_dir.join(format!("pyroscope-agent_{}.sh", instance.name));
+            std::fs::write(
+                &pyroscope_agent_script_path,
+                generate_pyroscope_script(
+                    &monitoring_private_ip,
+                    &instance.name,
+                    &ip,
+                    &instance.region,
+                ),
+            )?;
             scp_file(
                 private_key,
                 pyroscope_agent_script_path.to_str().unwrap(),
