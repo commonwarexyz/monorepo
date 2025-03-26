@@ -222,8 +222,8 @@ impl<K: Array, V: Array, H: CHasher> MutableMmr<K, V, H> {
     /// Generate and return:
     ///  1. a proof of all operations applied to the store in the range starting at (and including)
     ///     location `start_loc`, and ending at the first of either:
-    ///         - the last operation performed, or
-    ///         - the operation `max_ops` from the start.
+    ///     - the last operation performed, or
+    ///     - the operation `max_ops` from the start.
     ///  2. the operations corresponding to the leaves in this range.
     pub async fn proof_to_tip(
         &self,

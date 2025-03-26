@@ -468,7 +468,7 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
         let bits: BitVec<u8, Lsb0> = BitVec::from_vec(bit_vec.bits);
 
         // Calculate the required number of bits (padded to the nearest byte)
-        let required_bits = ((set.order.len() + 7) / 8) * 8;
+        let required_bits = set.order.len().div_ceil(8) * 8;
         if bits.len() != required_bits {
             return Err(Error::BitVecLengthMismatch(required_bits, bits.len()));
         }

@@ -128,7 +128,7 @@ impl<H: Hasher> Tree<H> {
         // Construct the tree level-by-level
         let mut current_level = levels.last().unwrap();
         while current_level.len() > 1 {
-            let mut next_level = Vec::with_capacity((current_level.len() + 1) / 2);
+            let mut next_level = Vec::with_capacity(current_level.len().div_ceil(2));
             for chunk in current_level.chunks(2) {
                 // Hash the left child
                 hasher.update(&chunk[0]);
