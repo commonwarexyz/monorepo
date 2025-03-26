@@ -479,7 +479,7 @@ if [ ! -s "${{PERF_STACK_FILE}}" ]; then
     echo "Warning: ${{PERF_STACK_FILE}} is empty. Skipping upload." >&2
     # Clean up empty perf.data
     sudo rm -f perf.data
-    exit 0
+    exit 1
 fi
 
 # Calculate timestamps
