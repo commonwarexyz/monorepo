@@ -2,7 +2,7 @@
 
 use crate::ec2::{
     aws::*, deployer_directory, services::*, utils::*, Config, Error, InstanceConfig, Peer, Peers,
-    CREATED_FILE_NAME, LOGGING_PORT, MONITORING_NAME, MONITORING_REGION, PROFILES_PORT,
+    CREATED_FILE_NAME, LOGS_PORT, MONITORING_NAME, MONITORING_REGION, PROFILES_PORT,
 };
 use futures::future::try_join_all;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -393,18 +393,18 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     // Write systemd service files
     let prometheus_service_path = temp_dir.join("prometheus.service");
     std::fs::write(&prometheus_service_path, PROMETHEUS_SERVICE)?;
-    let promtail_service_path = temp_dir.join("promtail.service");
-    std::fs::write(&promtail_service_path, PROMTAIL_SERVICE)?;
     let loki_service_path = temp_dir.join("loki.service");
     std::fs::write(&loki_service_path, LOKI_SERVICE)?;
     let pyroscope_service_path = temp_dir.join("pyroscope.service");
     std::fs::write(&pyroscope_service_path, PYROSCOPE_SERVICE)?;
-    let binary_service_path = temp_dir.join("binary.service");
-    std::fs::write(&binary_service_path, BINARY_SERVICE)?;
+    let promtail_service_path = temp_dir.join("promtail.service");
+    std::fs::write(&promtail_service_path, PROMTAIL_SERVICE)?;
     let pyroscope_agent_service_path = temp_dir.join("pyroscope-agent.service");
     std::fs::write(&pyroscope_agent_service_path, PYROSCOPE_AGENT_SERVICE)?;
     let pyroscope_agent_timer_path = temp_dir.join("pyroscope-agent.timer");
     std::fs::write(&pyroscope_agent_timer_path, PYROSCOPE_AGENT_TIMER)?;
+    let binary_service_path = temp_dir.join("binary.service");
+    std::fs::write(&binary_service_path, BINARY_SERVICE)?;
 
     // Write logrotate configuration file
     let logrotate_conf_path = temp_dir.join("logrotate.conf");
@@ -667,8 +667,8 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             .ip_permissions(
                 IpPermission::builder()
                     .ip_protocol("tcp")
-                    .from_port(LOGGING_PORT as i32)
-                    .to_port(LOGGING_PORT as i32)
+                    .from_port(LOGS_PORT as i32)
+                    .to_port(LOGS_PORT as i32)
                     .user_id_group_pairs(
                         UserIdGroupPair::builder()
                             .group_id(binary_sg_id.clone())
@@ -707,8 +707,8 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                 .ip_permissions(
                     IpPermission::builder()
                         .ip_protocol("tcp")
-                        .from_port(LOGGING_PORT as i32)
-                        .to_port(LOGGING_PORT as i32)
+                        .from_port(LOGS_PORT as i32)
+                        .to_port(LOGS_PORT as i32)
                         .ip_ranges(IpRange::builder().cidr_ip(binary_cidr).build())
                         .build(),
                 )

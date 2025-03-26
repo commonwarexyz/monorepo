@@ -63,7 +63,7 @@
 //!
 //! * Deployed in user-specified regions with configurable ARM64 instance types and storage.
 //! * Run:
-//!     * **Custom Binary**: Executes with `--peers=/home/ubuntu/peers.yaml --config=/home/ubuntu/config.conf`, exposing metrics at `:9090` and profiles at `:9091`.
+//!     * **Custom Binary**: Executes with `--peers=/home/ubuntu/peers.yaml --config=/home/ubuntu/config.conf`, exposing metrics at `:9090`.
 //!     * **Promtail**: Forwards `/var/log/binary.log` to Loki on the monitoring instance.
 //! * Ingress:
 //!     * Deployer IP access (TCP 0-65535).
@@ -172,7 +172,7 @@ pub mod utils;
 pub const METRICS_PORT: u16 = 9090;
 
 /// Port on monitoring where logs are pushed
-pub const LOGGING_PORT: u16 = 3100;
+pub const LOGS_PORT: u16 = 3100;
 
 /// Port on monitoring where profiles are pushed
 pub const PROFILES_PORT: u16 = 4040;
