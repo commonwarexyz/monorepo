@@ -292,17 +292,29 @@ sudo systemctl enable grafana-server
 
 /// Command to install the binary on binary instances
 pub const INSTALL_BINARY_CMD: &str = r#"
+# Install base tools and binary dependencies
+sudo apt-get update -y
+sudo apt-get install -y logrotate curl linux-tools-common linux-tools-generic apt-utils
+
+# Setup binary
 chmod +x /home/ubuntu/binary
 sudo touch /var/log/binary.log && sudo chown ubuntu:ubuntu /var/log/binary.log
 sudo mv /home/ubuntu/binary.service /etc/systemd/system/binary.service
-sudo apt-get update -y
-sudo apt-get install -y logrotate
+
+# Setup logrotate
 sudo mv /home/ubuntu/logrotate.conf /etc/logrotate.d/binary
 sudo chown root:root /etc/logrotate.d/binary
 echo "0 * * * * /usr/sbin/logrotate /etc/logrotate.d/binary" | crontab -
 sudo systemctl daemon-reload
 sudo systemctl start binary
 sudo systemctl enable binary
+
+# Setup pyroscope agent script and timer
+sudo mv /home/ubuntu/pyroscope-agent.sh /usr/local/bin/pyroscope-agent.sh
+sudo chmod +x /usr/local/bin/pyroscope-agent.sh
+sudo mv /home/ubuntu/pyroscope-agent.service /etc/systemd/system/pyroscope-agent.service
+sudo mv /home/ubuntu/pyroscope-agent.timer /etc/systemd/system/pyroscope-agent.timer
+sudo systemctl enable --now pyroscope-agent.timer
 "#;
 
 /// Command to set up Promtail on binary instances
@@ -424,4 +436,104 @@ StandardError=append:/var/log/binary.log
 
 [Install]
 WantedBy=multi-user.target
+"#;
+
+/// Shell script content for the Pyroscope agent (perf + curl)
+pub const PYROSCOPE_AGENT_SCRIPT: &str = r#"
+#!/bin/bash
+set -e
+
+SERVICE_NAME="binary.service"
+PERF_STACK_FILE="/tmp/perf.stack"
+PROFILE_DURATION=60 # seconds
+PERF_FREQ=100 # Hz
+
+# Check if required environment variables are set
+if [ -z "$MONITORING_PRIVATE_IP" ] || [ -z "$INSTANCE_NAME" ] || [ -z "$INSTANCE_IP" ]; then
+  echo "Error: Required environment variables (MONITORING_PRIVATE_IP, INSTANCE_NAME, INSTANCE_IP) not set." >&2
+  exit 1
+fi
+
+# Construct the Pyroscope application name with tags
+# URL-encode the instance name and IP just in case they contain special characters
+ENCODED_NAME=$(printf %s "$INSTANCE_NAME" | jq -sRr @uri)
+ENCODED_IP=$(printf %s "$INSTANCE_IP" | jq -sRr @uri)
+APP_NAME="binary{instance_name=${ENCODED_NAME},instance_ip=${ENCODED_IP}}"
+
+# Get the PID of the binary service
+PID=$(systemctl show --property MainPID ${SERVICE_NAME} | cut -d= -f2)
+if [ -z "$PID" ] || [ "$PID" -eq 0 ]; then
+  echo "Error: Could not get PID for ${SERVICE_NAME}." >&2
+  exit 1
+fi
+
+# Record performance data
+echo "Recording perf data for PID ${PID}..."
+sudo perf record -F ${PERF_FREQ} -p ${PID} -g -- sleep ${PROFILE_DURATION}
+
+# Generate folded stack report
+echo "Generating folded stack report..."
+sudo perf report --stdio --no-children -n -g folded,0,caller,count -s comm | \
+    awk '/^ / { comm = $3 } /^[0-9]/ { print comm ";" $2, $1 }' > ${PERF_STACK_FILE}
+
+# Check if stack file is empty (perf might fail silently sometimes)
+if [ ! -s "${PERF_STACK_FILE}" ]; then
+    echo "Warning: ${PERF_STACK_FILE} is empty. Skipping upload." >&2
+    # Clean up empty perf.data
+    sudo rm -f perf.data
+    exit 0
+fi
+
+# Calculate timestamps
+UNTIL_TS=$(date +%s)
+FROM_TS=$((UNTIL_TS - PROFILE_DURATION))
+
+# Upload to Pyroscope
+echo "Uploading profile to Pyroscope at ${MONITORING_PRIVATE_IP}..."
+curl -X POST "http://${MONITORING_PRIVATE_IP}:4040/ingest?name=${APP_NAME}&format=folded&units=samples&aggregationType=sum&from=${FROM_TS}&until=${UNTIL_TS}&spyName=perf_script" \
+     --data-binary "@${PERF_STACK_FILE}" \
+     --header "Content-Type: text/plain" -v
+
+echo "Profile upload complete."
+# Clean up stack file and perf.data
+sudo rm -f ${PERF_STACK_FILE} perf.data
+"#;
+
+/// Systemd service file content for the Pyroscope agent script
+pub const PYROSCOPE_AGENT_SERVICE: &str = r#"
+[Unit]
+Description=Pyroscope Agent (Perf Script Runner)
+Wants=network-online.target
+After=network-online.target binary.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+# Environment variables will be set dynamically during creation
+ExecStart=/usr/local/bin/pyroscope-agent.sh
+
+# Allow perf execution
+CapabilityBoundingSet=CAP_SYS_ADMIN
+AmbientCapabilities=CAP_SYS_ADMIN
+
+[Install]
+WantedBy=multi-user.target
+"#;
+
+/// Systemd timer file content for the Pyroscope agent service
+pub const PYROSCOPE_AGENT_TIMER: &str = r#"
+[Unit]
+Description=Run Pyroscope Agent periodically
+
+[Timer]
+# Wait a bit after boot before the first run
+OnBootSec=2min
+# Run roughly every minute after the last run finished
+# (PROFILE_DURATION is 60s, add buffer for processing/upload)
+OnUnitInactiveSec=1min
+Unit=pyroscope-agent.service
+
+[Install]
+WantedBy=timers.target
 "#;
