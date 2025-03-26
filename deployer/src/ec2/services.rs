@@ -472,8 +472,8 @@ sudo perf record -F ${{PERF_FREQ}} -p ${{PID}} -o ${{PERF_DATA_FILE}} -g --call-
 
 # Generate folded stack report
 echo "Generating folded stack report..."
-sudo perf report -i ${{PERF_DATA_FILE}} --stdio --no-children -n -g folded,0,caller,count -s comm | \
-    awk '/^ / {{ comm = $3 }} /^[0-9]/ {{ print comm ";" $2, $1 }}' > ${{PERF_STACK_FILE}}
+sudo perf report -i ${{PERF_DATA_FILE}} --stdio --no-children -g folded,0,caller,count -s comm | \
+    awk '/^[0-9]+\.[0-9]+%/ {{ comm = $2 }} /^[0-9]/ {{ print comm ";" substr($0, index($0, $2)), $1 }}' > ${{PERF_STACK_FILE}}
 
 # Check if stack file is empty (perf might fail silently sometimes)
 if [ ! -s "${{PERF_STACK_FILE}}" ]; then
@@ -491,7 +491,7 @@ FROM_TS=$((UNTIL_TS - PROFILE_DURATION))
 echo "Uploading profile to Pyroscope at {monitoring_private_ip}..."
 curl -X POST "http://{monitoring_private_ip}:4040/ingest?name=${{APP_NAME}}&format=folded&units=samples&aggregationType=sum&from=${{FROM_TS}}&until=${{UNTIL_TS}}&spyName=perf_script" \
      --data-binary "@${{PERF_STACK_FILE}}" \
-     --header "Content-Type: text/plain" -v
+     --header "Content-Type: text/plain"
 
 echo "Profile upload complete."
 # Clean up stack file and perf.data
