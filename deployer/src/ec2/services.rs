@@ -294,7 +294,7 @@ sudo systemctl enable grafana-server
 pub const INSTALL_BINARY_CMD: &str = r#"
 # Install base tools and binary dependencies
 sudo apt-get update -y
-sudo apt-get install -y logrotate curl linux-tools-common linux-tools-generic apt-utils
+sudo apt-get install -y logrotate curl linux-tools-common linux-tools-generic apt-utils jq
 
 # Setup binary
 chmod +x /home/ubuntu/binary
@@ -307,8 +307,7 @@ sudo chown root:root /etc/logrotate.d/binary
 echo "0 * * * * /usr/sbin/logrotate /etc/logrotate.d/binary" | crontab -
 
 # Setup pyroscope agent script and timer
-sudo mv /home/ubuntu/pyroscope-agent.sh /usr/local/bin/pyroscope-agent.sh
-sudo chmod +x /usr/local/bin/pyroscope-agent.sh
+sudo chmod +x /home/ubuntu/pyroscope-agent.sh
 sudo mv /home/ubuntu/pyroscope-agent.service /etc/systemd/system/pyroscope-agent.service
 sudo mv /home/ubuntu/pyroscope-agent.timer /etc/systemd/system/pyroscope-agent.timer
 
@@ -451,12 +450,14 @@ pub fn generate_pyroscope_script(
 set -e
 
 SERVICE_NAME="binary.service"
+PERF_DATA_FILE="/tmp/perf.data"
 PERF_STACK_FILE="/tmp/perf.stack"
 PROFILE_DURATION=60 # seconds
 PERF_FREQ=100 # Hz
 
 # Construct the Pyroscope application name with tags
-APP_NAME="binary{{name={name},ip={ip}, region={region}}}"
+RAW_APP_NAME="binary{{name={name},ip={ip}, region={region}}}"
+APP_NAME=$(jq -nr --arg str "$RAW_APP_NAME" '$str | @uri')
 
 # Get the PID of the binary service
 PID=$(systemctl show --property MainPID ${{SERVICE_NAME}} | cut -d= -f2)
@@ -467,18 +468,18 @@ fi
 
 # Record performance data
 echo "Recording perf data for PID ${{PID}}..."
-perf record -F ${{PERF_FREQ}} -p ${{PID}} -g -- sleep ${{PROFILE_DURATION}}
+sudo perf record -F ${{PERF_FREQ}} -p ${{PID}} -o ${{PERF_DATA_FILE}} -g -- sleep ${{PROFILE_DURATION}}
 
 # Generate folded stack report
 echo "Generating folded stack report..."
-perf report --stdio --no-children -n -g folded,0,caller,count -s comm | \
+sudo perf report -i ${{PERF_DATA_FILE}} --stdio --no-children -n -g folded,0,caller,count -s comm | \
     awk '/^ / {{ comm = $3 }} /^[0-9]/ {{ print comm ";" $2, $1 }}' > ${{PERF_STACK_FILE}}
 
 # Check if stack file is empty (perf might fail silently sometimes)
 if [ ! -s "${{PERF_STACK_FILE}}" ]; then
     echo "Warning: ${{PERF_STACK_FILE}} is empty. Skipping upload." >&2
     # Clean up empty perf.data
-    rm -f perf.data
+    sudo rm -f ${{PERF_DATA_FILE}} ${{PERF_STACK_FILE}}
     exit 1
 fi
 
@@ -494,7 +495,7 @@ curl -X POST "http://{monitoring_private_ip}:4040/ingest?name=${{APP_NAME}}&form
 
 echo "Profile upload complete."
 # Clean up stack file and perf.data
-rm -f ${{PERF_STACK_FILE}} perf.data
+sudo rm -f ${{PERF_DATA_FILE}} ${{PERF_STACK_FILE}}
 "#
     )
 }
@@ -508,13 +509,8 @@ After=network-online.target binary.service
 
 [Service]
 Type=oneshot
-User=root
-Group=root
-ExecStart=/usr/local/bin/pyroscope-agent.sh
-
-# Allow perf execution
-CapabilityBoundingSet=CAP_SYS_ADMIN CAP_DAC_OVERRIDE CAP_SYSLOG
-AmbientCapabilities=CAP_SYS_ADMIN CAP_DAC_OVERRIDE CAP_SYSLOG
+User=ubuntu
+ExecStart=/home/ubuntu/pyroscope-agent.sh
 
 [Install]
 WantedBy=multi-user.target
