@@ -7,7 +7,7 @@
 //!
 //! * Automated creation, update, and destruction of EC2 instances across multiple regions
 //! * Provide a unique name, instance type, region, binary, and configuration for each deployed instance
-//! * Collect metrics, profiles (optionally), and logs from all deployed instances on a long-lived monitoring instance
+//! * Collect metrics, profiles (when enabled), and logs from all deployed instances on a long-lived monitoring instance
 //!   (accessible only to the deployer's IP)
 //!
 //! # Architecture
