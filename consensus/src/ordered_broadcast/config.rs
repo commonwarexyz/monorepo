@@ -1,5 +1,5 @@
-use super::{Context, Epoch, Epocher};
-use crate::{Automaton, Committer, Relay, Supervisor, ThresholdSupervisor};
+use super::{Context, Epoch};
+use crate::{Automaton, Committer, Monitor, Relay, Supervisor, ThresholdSupervisor};
 use commonware_cryptography::{Digest, Scheme};
 use std::time::Duration;
 
@@ -10,15 +10,16 @@ pub struct Config<
     A: Automaton<Context = Context<C::PublicKey>, Digest = D>,
     R: Relay<Digest = D>,
     Z: Committer<Digest = D>,
-    Ep: Epocher,
+    M: Monitor<Index = Epoch>,
     Su: Supervisor<Index = Epoch, PublicKey = C::PublicKey>,
     TSu: ThresholdSupervisor<Index = Epoch, PublicKey = C::PublicKey>,
 > {
     /// The cryptographic scheme used if the engine is a sequencer.
     pub crypto: C,
 
-    /// The epocher.
-    pub epocher: Ep,
+    /// Tracks the current state of consensus (to determine which participants should
+    /// be involved in the current broadcast attempt).
+    pub monitor: M,
 
     /// Manages the set of validators and the group identity.
     /// Also manages the cryptographic partial share if the engine is a validator.
@@ -45,9 +46,6 @@ pub struct Config<
 
     /// Whether acks are sent as priority.
     pub priority_acks: bool,
-
-    /// How often the epoch is refreshed.
-    pub refresh_epoch_timeout: Duration,
 
     /// How often a proposal is rebroadcast to all validators if no threshold is reached.
     pub rebroadcast_timeout: Duration,

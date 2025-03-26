@@ -8,10 +8,9 @@
 //! - Notifying other actors of new chunks and threshold signatures
 
 use super::{
-    metrics, namespace, parsed, serializer, AckManager, Config, Context, Epoch, Epocher, Prover,
-    TipManager,
+    metrics, namespace, parsed, serializer, AckManager, Config, Context, Epoch, Prover, TipManager,
 };
-use crate::{Automaton, Committer, Relay, Supervisor, ThresholdSupervisor};
+use crate::{Automaton, Committer, Monitor, Relay, Supervisor, ThresholdSupervisor};
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{self},
@@ -61,7 +60,7 @@ pub struct Engine<
     A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
     R: Relay<Digest = D>,
     Z: Committer<Digest = D>,
-    Ep: Epocher,
+    M: Monitor<Index = Epoch>,
     Su: Supervisor<Index = Epoch, PublicKey = C::PublicKey>,
     TSu: ThresholdSupervisor<
         Index = Epoch,
@@ -79,7 +78,7 @@ pub struct Engine<
     crypto: C,
     automaton: A,
     relay: R,
-    epocher: Ep,
+    monitor: M,
     sequencers: Su,
     validators: TSu,
     committer: Z,
@@ -97,10 +96,6 @@ pub struct Engine<
     ////////////////////////////////////////
     // Timeouts
     ////////////////////////////////////////
-
-    // The configured timeout for refreshing the epoch
-    refresh_epoch_timeout: Duration,
-    refresh_epoch_deadline: Option<SystemTime>,
 
     // The configured timeout for rebroadcasting a chunk to all validators
     rebroadcast_timeout: Duration,
@@ -205,7 +200,7 @@ impl<
         A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
         R: Relay<Digest = D>,
         Z: Committer<Digest = D>,
-        Ep: Epocher,
+        M: Monitor<Index = Epoch>,
         Su: Supervisor<Index = Epoch, PublicKey = C::PublicKey>,
         TSu: ThresholdSupervisor<
             Index = Epoch,
@@ -215,10 +210,10 @@ impl<
         >,
         NetS: Sender<PublicKey = C::PublicKey>,
         NetR: Receiver<PublicKey = C::PublicKey>,
-    > Engine<B, E, C, D, A, R, Z, Ep, Su, TSu, NetS, NetR>
+    > Engine<B, E, C, D, A, R, Z, M, Su, TSu, NetS, NetR>
 {
     /// Creates a new engine with the given context and configuration.
-    pub fn new(context: E, cfg: Config<C, D, A, R, Z, Ep, Su, TSu>) -> Self {
+    pub fn new(context: E, cfg: Config<C, D, A, R, Z, M, Su, TSu>) -> Self {
         let metrics = metrics::Metrics::init(context.clone());
 
         Self {
@@ -227,13 +222,11 @@ impl<
             automaton: cfg.automaton,
             relay: cfg.relay,
             committer: cfg.committer,
-            epocher: cfg.epocher,
+            monitor: cfg.monitor,
             sequencers: cfg.sequencers,
             validators: cfg.validators,
             chunk_namespace: namespace::chunk(&cfg.namespace),
             ack_namespace: namespace::ack(&cfg.namespace),
-            refresh_epoch_timeout: cfg.refresh_epoch_timeout,
-            refresh_epoch_deadline: None,
             rebroadcast_timeout: cfg.rebroadcast_timeout,
             rebroadcast_deadline: None,
             epoch_bounds: cfg.epoch_bounds,
@@ -277,9 +270,14 @@ impl<
         // Tracks if there is an outstanding proposal request to the automaton.
         let mut pending: Option<(Context<C::PublicKey>, oneshot::Receiver<D>)> = None;
 
+        // Initialize the epoch
+        let epoch = self.monitor.latest();
+        assert!(epoch >= self.epoch);
+        self.epoch = epoch;
+        let mut epoch_updates = self.monitor.subscribe();
+
         // Before starting on the main loop, initialize my own sequencer journal
         // and attempt to rebroadcast if necessary.
-        self.refresh_epoch();
         self.journal_prepare(&self.crypto.public_key()).await;
         if let Err(err) = self.rebroadcast(&mut node_sender).await {
             // Rebroadcasting may return a non-critical error, so log the error and continue.
@@ -287,9 +285,6 @@ impl<
         }
 
         loop {
-            // Enter the epoch
-            self.refresh_epoch();
-
             // Request a new proposal if necessary
             if pending.is_none() {
                 if let Some(context) = self.should_propose() {
@@ -299,11 +294,8 @@ impl<
             }
 
             // Create deadline futures.
+            //
             // If the deadline is None, the future will never resolve.
-            let refresh_epoch = match self.refresh_epoch_deadline {
-                Some(deadline) => Either::Left(self.context.sleep_until(deadline)),
-                None => Either::Right(future::pending()),
-            };
             let rebroadcast = match self.rebroadcast_deadline {
                 Some(deadline) => Either::Left(self.context.sleep_until(deadline)),
                 None => Either::Right(future::pending()),
@@ -313,27 +305,32 @@ impl<
                 None => Either::Right(futures::future::pending()),
             };
 
+            // Process the next event
             select! {
                 // Handle shutdown signal
                 _ = &mut shutdown => {
                     debug!("shutdown");
-                    self.pending_verifies.cancel_all();
-                    while let Some((_, journal)) = self.journals.pop_first() {
-                        journal.close().await.expect("unable to close journal");
-                    }
-                    return;
+                    break;
                 },
 
                 // Handle refresh epoch deadline
-                _ = refresh_epoch => {
-                    debug!("refresh epoch");
-                    // Simply continue; the epoch will be refreshed on the next iteration.
+                epoch = epoch_updates.next() => {
+                    // Error handling
+                    let Some(epoch) = epoch else {
+                        error!("epoch subscription failed");
+                        break;
+                    };
+
+                    // Refresh the epoch
+                    debug!(current=self.epoch, new=epoch, "refresh epoch");
+                    assert!(epoch >= self.epoch);
+                    self.epoch = epoch;
                     continue;
                 },
 
                 // Handle rebroadcast deadline
                 _ = rebroadcast => {
-                    debug!("rebroadcast");
+                    debug!(epoch = self.epoch, sender=?self.crypto.public_key(), "rebroadcast");
                     if let Err(err) = self.rebroadcast(&mut node_sender).await {
                         info!(?err, "rebroadcast failed");
                         continue;
@@ -342,10 +339,9 @@ impl<
 
                 // Propose a new chunk
                 receiver = propose => {
-                    debug!("propose");
-
                     // Clear the pending proposal
                     let (context, _) = pending.take().unwrap();
+                    debug!(height = context.height, "propose");
 
                     // Error handling for dropped proposals
                     let Ok(payload) = receiver else {
@@ -362,7 +358,6 @@ impl<
 
                 // Handle incoming nodes
                 msg = node_receiver.recv() => {
-                    debug!("node network");
                     // Error handling
                     let (sender, msg) = match msg {
                         Ok(r) => r,
@@ -379,27 +374,34 @@ impl<
                             continue;
                         }
                     };
-                    if let Err(err) = self.validate_node(&node, &sender) {
-                        warn!(?err, ?node, ?sender, "node validate failed");
-                        continue;
+                    let result = match self.validate_node(&node, &sender) {
+                        Ok(result) => result,
+                        Err(err) => {
+                            warn!(?err, ?sender, "node validate failed");
+                            continue;
+                        }
                     };
 
                     // Initialize journal for sequencer if it does not exist
                     self.journal_prepare(&sender).await;
 
                     // Handle the parent threshold signature
-                    if let Some(parent) = node.parent.as_ref() {
-                        self.handle_threshold(&node.chunk, parent.epoch, parent.threshold).await;
+                    if let Some(parent_chunk) = result {
+                        let parent = node.parent.as_ref().unwrap();
+                        self.handle_threshold(&parent_chunk, parent.epoch, parent.threshold).await;
                     }
 
-                    // Process the new node
+                    // Process the node
+                    //
+                    // Note, this node may be a duplicate. If it is, we will attempt to verify it and vote
+                    // on it again (our original vote may have been lost).
                     self.handle_node(&node).await;
+                    debug!(?sender, height=node.chunk.height, "node");
                     guard.set(Status::Success);
                 },
 
                 // Handle incoming acks
                 msg = ack_receiver.recv() => {
-                    debug!("ack network");
                     // Error handling
                     let (sender, msg) = match msg {
                         Ok(r) => r,
@@ -417,14 +419,15 @@ impl<
                         }
                     };
                     if let Err(err) = self.validate_ack(&ack, &sender) {
-                        warn!(?err, ?ack, ?sender, "ack validate failed");
+                        warn!(?err, ?sender, "ack validate failed");
                         continue;
                     };
                     if let Err(err) = self.handle_ack(&ack).await {
-                        warn!(?err, ?ack, "ack handle failed");
+                        warn!(?err, ?sender, "ack handle failed");
                         guard.set(Status::Failure);
                         continue;
                     }
+                    debug!(?sender, epoch=ack.epoch, sequencer=?ack.chunk.sequencer, height=ack.chunk.height, "ack");
                     guard.set(Status::Success);
                 },
 
@@ -434,15 +437,15 @@ impl<
                     drop(timer); // Record metric. Explicitly reference timer to avoid lint warning
                     match result {
                         Err(err) => {
-                            warn!(?err, ?context, ?payload, "verified returned error");
+                            warn!(?err, ?context, "verified returned error");
                             self.metrics.verify.inc(Status::Dropped);
                         }
                         Ok(false) => {
-                            warn!(?context, ?payload, "verified was false");
+                            warn!(?context, "verified was false");
                             self.metrics.verify.inc(Status::Failure);
                         }
                         Ok(true) => {
-                            debug!(?context, ?payload, "verified");
+                            debug!(?context, "verified");
                             self.metrics.verify.inc(Status::Success);
                             if let Err(err) = self.handle_app_verified(&context, &payload, &mut ack_sender).await {
                                 warn!(?err, ?context, ?payload, "verified handle failed");
@@ -451,6 +454,12 @@ impl<
                     }
                 },
             }
+        }
+
+        // Close all journals, regardless of how we exit the loop
+        self.pending_verifies.cancel_all();
+        while let Some((_, journal)) = self.journals.pop_first() {
+            journal.close().await.expect("unable to close journal");
         }
     }
 
@@ -582,6 +591,7 @@ impl<
 
         // Add the partial signature. If a new threshold is formed, handle it.
         if let Some(threshold) = self.ack_manager.add_ack(ack, quorum) {
+            debug!(epoch=ack.epoch, sequencer=?ack.chunk.sequencer, height=ack.chunk.height, "recovered threshold");
             self.metrics.threshold.inc();
             self.handle_threshold(&ack.chunk, ack.epoch, threshold)
                 .await;
@@ -821,23 +831,24 @@ impl<
 
     /// Takes a raw `Node` (from sender) from the p2p network and validates it.
     ///
-    /// If valid, returns the implied parent chunk and its threshold signature.
+    /// If valid (and not already the tracked tip for the sender), returns the implied
+    /// parent chunk and its threshold signature.
     /// Else returns an error if the `Node` is invalid.
     fn validate_node(
         &mut self,
         node: &parsed::Node<C, D>,
         sender: &C::PublicKey,
-    ) -> Result<(), Error> {
+    ) -> Result<Option<parsed::Chunk<D, C::PublicKey>>, Error> {
         // Verify the sender
         if node.chunk.sequencer != *sender {
             return Err(Error::PeerMismatch);
         }
 
         // Optimization: If the node is exactly equal to the tip,
-        // don't perform any further validation.
+        // don't perform further validation.
         if let Some(tip) = self.tip_manager.get(sender) {
             if tip == *node {
-                return Ok(());
+                return Ok(None);
             }
         }
 
@@ -859,7 +870,7 @@ impl<
             if node.parent.is_some() {
                 return Err(Error::GenesisChunkMustNotHaveParent);
             }
-            return Ok(());
+            return Ok(None);
         }
 
         // Verify parent
@@ -884,8 +895,7 @@ impl<
             &parent.threshold,
         )
         .map_err(|_| Error::InvalidThresholdSignature)?;
-
-        Ok(())
+        Ok(Some(parent_chunk))
     }
 
     /// Takes a raw ack (from sender) from the p2p network and validates it.
@@ -1094,23 +1104,6 @@ impl<
 
         // Prune journal, ignoring errors
         let _ = journal.prune(section).await;
-    }
-
-    ////////////////////////////////////////
-    // Epoch
-    ////////////////////////////////////////
-
-    /// Updates the epoch to the value of the epocher, and sets the refresh epoch deadline.
-    fn refresh_epoch(&mut self) {
-        // Set the refresh epoch deadline
-        self.refresh_epoch_deadline = Some(self.context.current() + self.refresh_epoch_timeout);
-
-        // Ensure epoch is not before the current epoch
-        let epoch = self.epocher.epoch();
-        assert!(epoch >= self.epoch);
-
-        // Update the epoch
-        self.epoch = epoch;
     }
 }
 

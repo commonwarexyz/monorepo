@@ -26,7 +26,7 @@ cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
         use commonware_utils::Array;
         use commonware_cryptography::Digest;
-        use futures::channel::oneshot;
+        use futures::channel::{oneshot, mpsc};
         use std::future::Future;
 
         /// Histogram buckets for measuring consensus latency.
@@ -150,7 +150,7 @@ cfg_if::cfg_if! {
         ///
         /// ## Synchronization
         ///
-        /// The same considerations for `Supervisor` apply here.
+        /// The same considerations for [`Supervisor`](crate::Supervisor) apply here.
         pub trait ThresholdSupervisor: Supervisor {
             /// Seed is some random value used to bias the leader selection process.
             type Seed;
@@ -173,6 +173,24 @@ cfg_if::cfg_if! {
             /// Returns share to sign with at a given index. After resharing, the share
             /// may change (and old shares may be deleted).
             fn share(&self, index: Self::Index) -> Option<&Self::Share>;
+        }
+
+        /// Monitor is the interface an external actor can use to observe the progress of a consensus implementation.
+        ///
+        /// Monitor is used to implement mechanisms that share the same set of active participants as consensus and/or
+        /// perform some activity that requires some synchronization with the progress of consensus.
+        ///
+        /// Monitor can be implemented using [`Committer`](crate::Committer) to avoid introducing complexity
+        /// into any particular consensus implementation.
+        pub trait Monitor: Clone + Send + 'static {
+            /// Index is the type used to indicate the in-progress consensus decision.
+            type Index;
+
+            /// Latest index known by the consensus implementation.
+            fn latest(&self) -> Self::Index;
+
+            /// Create a channel that will receive updates when the latest index changes.
+            fn subscribe(&mut self) -> mpsc::Receiver<Self::Index>;
         }
     }
 }
