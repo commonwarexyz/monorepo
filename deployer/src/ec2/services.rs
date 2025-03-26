@@ -294,7 +294,7 @@ sudo systemctl enable grafana-server
 pub const INSTALL_BINARY_CMD: &str = r#"
 # Install base tools and binary dependencies
 sudo apt-get update -y
-sudo apt-get install -y logrotate curl linux-tools-common linux-tools-generic apt-utils jq
+sudo apt-get install -y logrotate wget jq
 
 # Setup binary
 chmod +x /home/ubuntu/binary
@@ -334,6 +334,7 @@ for i in {{1..5}}; do
   sleep 10
 done
 
+# Install Promtail
 sudo mkdir -p /opt/promtail
 unzip /home/ubuntu/promtail.zip -d /home/ubuntu
 sudo mv /home/ubuntu/promtail-linux-arm64 /opt/promtail/promtail
@@ -342,6 +343,8 @@ sudo mkdir -p /etc/promtail
 sudo mv /home/ubuntu/promtail.yml /etc/promtail/promtail.yml
 sudo mv /home/ubuntu/promtail.service /etc/systemd/system/promtail.service
 sudo chown root:root /etc/promtail/promtail.yml
+
+# Start service
 sudo systemctl daemon-reload
 sudo systemctl start promtail
 sudo systemctl enable promtail
@@ -438,7 +441,7 @@ StandardError=append:/var/log/binary.log
 WantedBy=multi-user.target
 "#;
 
-/// Shell script content for the Pyroscope agent (perf + curl)
+/// Shell script content for the Pyroscope agent (perf + wget)
 pub fn generate_pyroscope_script(
     monitoring_private_ip: &str,
     name: &str,
@@ -489,9 +492,10 @@ FROM_TS=$((UNTIL_TS - PROFILE_DURATION))
 
 # Upload to Pyroscope
 echo "Uploading profile to Pyroscope at {monitoring_private_ip}..."
-curl -X POST "http://{monitoring_private_ip}:4040/ingest?name=${{APP_NAME}}&format=folded&units=samples&aggregationType=sum&from=${{FROM_TS}}&until=${{UNTIL_TS}}&spyName=perf_script" \
-     --data-binary "@${{PERF_STACK_FILE}}" \
-     --header "Content-Type: text/plain"
+wget --post-file="${{PERF_STACK_FILE}}" \
+    --header="Content-Type: text/plain" \
+    --quiet \
+    "http://{monitoring_private_ip}:4040/ingest?name=${{APP_NAME}}&format=folded&units=samples&aggregationType=sum&from=${{FROM_TS}}&until=${{UNTIL_TS}}&spyName=perf_script"
 
 echo "Profile upload complete."
 # Clean up stack file and perf.data
