@@ -80,7 +80,7 @@ pub struct Context<P: Array> {
 
 #[cfg(test)]
 mod tests {
-    use super::{mocks, Config, Engine};
+    use super::{mocks, Config, Engine, Epoch};
     use commonware_cryptography::{
         bls12381::{
             dkg::ops,
@@ -263,7 +263,7 @@ mod tests {
     async fn await_committers(
         context: Context,
         committers: &BTreeMap<PublicKey, mocks::CommitterMailbox<Ed25519, Sha256Digest>>,
-        threshold: u64,
+        threshold: (u64, Epoch),
     ) {
         let mut receivers = Vec::new();
         for (sequencer, mailbox) in committers.iter() {
@@ -277,9 +277,10 @@ mod tests {
                 let mut mailbox = mailbox.clone();
                 move |context| async move {
                     loop {
-                        let tip = mailbox.get_tip(sequencer.clone()).await.unwrap_or(0);
-                        debug!(tip, ?sequencer, "committer");
-                        if tip >= threshold {
+                        let (height, epoch) =
+                            mailbox.get_tip(sequencer.clone()).await.unwrap_or((0, 0));
+                        debug!(height, epoch, ?sequencer, "committer");
+                        if height >= threshold.0 && epoch >= threshold.1 {
                             let _ = tx.send(sequencer.clone());
                             break;
                         }
@@ -294,17 +295,17 @@ mod tests {
         assert_eq!(results.len(), committers.len());
     }
 
-    async fn get_max_tip(
+    async fn get_max_height(
         committers: &mut BTreeMap<PublicKey, mocks::CommitterMailbox<Ed25519, Sha256Digest>>,
     ) -> u64 {
-        let mut max_tip = 0;
+        let mut max_height = 0;
         for (sequencer, mailbox) in committers.iter_mut() {
-            let tip = mailbox.get_tip(sequencer.clone()).await.unwrap_or(0);
-            if tip > max_tip {
-                max_tip = tip;
+            let (height, _) = mailbox.get_tip(sequencer.clone()).await.unwrap_or((0, 0));
+            if height > max_height {
+                max_height = height;
             }
         }
-        max_tip
+        max_height
     }
 
     #[test_traced]
@@ -339,7 +340,7 @@ mod tests {
                 Duration::from_secs(5),
                 |_| false,
             );
-            await_committers(context.with_label("committer"), &committers, 100).await;
+            await_committers(context.with_label("committer"), &committers, (100, 111)).await;
         });
     }
 
@@ -424,8 +425,9 @@ mod tests {
                             .with_label("committer_unclean")
                             .spawn(|context| async move {
                                 loop {
-                                    let tip = mailbox.get_tip(validator.clone()).await.unwrap_or(0);
-                                    if tip >= 100 {
+                                    let (height, _) =
+                                        mailbox.get_tip(validator.clone()).await.unwrap_or((0, 0));
+                                    if height >= 100 {
                                         completed_clone.lock().unwrap().insert(validator.clone());
                                         break;
                                     }
@@ -481,8 +483,8 @@ mod tests {
             link_validators(&mut oracle, &pks, Action::Unlink, None).await;
             context.sleep(Duration::from_secs(30)).await;
 
-            // Get the maximum tip from all committers.
-            let max_tip = get_max_tip(&mut committers).await;
+            // Get the maximum height from all committers.
+            let max_height = get_max_height(&mut committers).await;
 
             // Heal the partition by re-adding links.
             let link = Link {
@@ -491,7 +493,12 @@ mod tests {
                 success_rate: 1.0,
             };
             link_validators(&mut oracle, &pks, Action::Link(link), None).await;
-            await_committers(context.with_label("committer"), &committers, max_tip + 100).await;
+            await_committers(
+                context.with_label("committer"),
+                &committers,
+                (max_height + 100, 111),
+            )
+            .await;
         });
     }
 
@@ -540,7 +547,7 @@ mod tests {
                 |_| false,
             );
 
-            await_committers(context.with_label("committer"), &committers, 40).await;
+            await_committers(context.with_label("committer"), &committers, (40, 111)).await;
         });
         auditor.state()
     }
@@ -594,7 +601,7 @@ mod tests {
                 |i| i % 10 == 0,
             );
 
-            await_committers(context.with_label("committer"), &committers, 100).await;
+            await_committers(context.with_label("committer"), &committers, (100, 111)).await;
         });
     }
 
@@ -636,8 +643,8 @@ mod tests {
             link_validators(&mut oracle, &pks, Action::Unlink, None).await;
             context.sleep(Duration::from_secs(30)).await;
 
-            // Get the maximum tip from all committers.
-            let max_tip = get_max_tip(&mut committers).await;
+            // Get the maximum height from all committers.
+            let max_height = get_max_height(&mut committers).await;
 
             // Update the epoch
             for monitor in monitors.values() {
@@ -651,7 +658,12 @@ mod tests {
                 success_rate: 1.0,
             };
             link_validators(&mut oracle, &pks, Action::Link(link), None).await;
-            await_committers(context.with_label("committer"), &committers, max_tip + 100).await;
+            await_committers(
+                context.with_label("committer"),
+                &committers,
+                (max_height + 100, 112),
+            )
+            .await;
         });
     }
 }

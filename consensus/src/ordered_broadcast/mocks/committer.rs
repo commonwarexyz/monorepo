@@ -1,17 +1,17 @@
-use crate::{ordered_broadcast::prover::Prover, Committer as Z, Proof};
+use crate::{
+    ordered_broadcast::{prover::Prover, Epoch},
+    Committer as Z, Proof,
+};
 use commonware_cryptography::{bls12381::primitives::group, Digest, Scheme};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
 };
-use std::{
-    cmp::max,
-    collections::{BTreeMap, HashMap},
-};
+use std::collections::{BTreeMap, HashMap};
 
 enum Message<C: Scheme, D: Digest> {
     Acknowledged(Proof, D),
-    GetTip(C::PublicKey, oneshot::Sender<Option<u64>>),
+    GetTip(C::PublicKey, oneshot::Sender<Option<(u64, Epoch)>>),
     GetContiguousTip(C::PublicKey, oneshot::Sender<Option<u64>>),
     Get(C::PublicKey, u64, oneshot::Sender<Option<D>>),
 }
@@ -31,8 +31,8 @@ pub struct Committer<C: Scheme, D: Digest> {
     // Highest contiguous known height for each sequencer
     contiguous: HashMap<C::PublicKey, u64>,
 
-    // Highest known height for each sequencer
-    highest: HashMap<C::PublicKey, u64>,
+    // Highest known height (and epoch) for each sequencer
+    highest: HashMap<C::PublicKey, (u64, Epoch)>,
 }
 
 impl<C: Scheme, D: Digest> Committer<C, D> {
@@ -59,7 +59,7 @@ impl<C: Scheme, D: Digest> Committer<C, D> {
                     // Check proof.
                     //
                     // The prover checks the validity of the threshold signature when deserializing
-                    let (context, _, _, _) =
+                    let (context, _, epoch, _) =
                         prover.deserialize_threshold(proof).expect("Invalid proof");
 
                     // Update the committer
@@ -67,9 +67,15 @@ impl<C: Scheme, D: Digest> Committer<C, D> {
                     assert!(digests.insert(context.height, payload).is_none());
 
                     // Update the highest height
-                    let highest = self.highest.get(&context.sequencer).copied().unwrap_or(0);
-                    self.highest
-                        .insert(context.sequencer.clone(), max(highest, context.height));
+                    let highest = self
+                        .highest
+                        .get(&context.sequencer)
+                        .copied()
+                        .unwrap_or((0, 0));
+                    if context.height > highest.0 {
+                        self.highest
+                            .insert(context.sequencer.clone(), (context.height, epoch));
+                    }
 
                     // Update the highest contiguous height
                     let highest = self.contiguous.get(&context.sequencer);
@@ -124,7 +130,7 @@ impl<C: Scheme, D: Digest> Z for Mailbox<C, D> {
 }
 
 impl<C: Scheme, D: Digest> Mailbox<C, D> {
-    pub async fn get_tip(&mut self, sequencer: C::PublicKey) -> Option<u64> {
+    pub async fn get_tip(&mut self, sequencer: C::PublicKey) -> Option<(u64, Epoch)> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Message::GetTip(sequencer, sender))
