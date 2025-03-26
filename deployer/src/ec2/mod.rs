@@ -7,7 +7,8 @@
 //!
 //! * Automated creation, update, and destruction of EC2 instances across multiple regions
 //! * Provide a unique name, instance type, region, binary, and configuration for each deployed instance
-//! * Collect metrics, profiles, and logs from all deployed instances on a long-lived monitoring instance (accessible only to the deployer's IP)
+//! * Collect metrics, profiles (optionally), and logs from all deployed instances on a long-lived monitoring instance
+//!   (accessible only to the deployer's IP)
 //!
 //! # Architecture
 //!
@@ -303,6 +304,9 @@ pub struct InstanceConfig {
 
     /// Path to the binary configuration file
     pub config: String,
+
+    /// Whether to enable profiling
+    pub profiling: bool,
 }
 
 /// Monitoring configuration

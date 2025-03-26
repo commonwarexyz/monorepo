@@ -291,7 +291,9 @@ sudo systemctl enable grafana-server
 }
 
 /// Command to install the binary on binary instances
-pub const INSTALL_BINARY_CMD: &str = r#"
+pub fn install_binary_cmd(profiling: bool) -> String {
+    let mut script = String::from(
+        r#"
 # Install base tools and binary dependencies
 sudo apt-get update -y
 sudo apt-get install -y logrotate wget jq
@@ -314,8 +316,17 @@ sudo mv /home/ubuntu/pyroscope-agent.timer /etc/systemd/system/pyroscope-agent.t
 # Start services
 sudo systemctl daemon-reload
 sudo systemctl enable --now binary
+"#,
+    );
+    if profiling {
+        script.push_str(
+            r#"
 sudo systemctl enable --now pyroscope-agent.timer
-"#;
+"#,
+        );
+    }
+    script
+}
 
 /// Command to set up Promtail on binary instances
 pub fn setup_promtail_cmd(promtail_version: &str) -> String {

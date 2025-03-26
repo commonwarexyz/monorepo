@@ -639,7 +639,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             enable_bbr(private_key, &ip, bbr_conf_path.to_str().unwrap()).await?;
             ssh_execute(private_key, &ip, &setup_promtail_cmd(PROMTAIL_VERSION)).await?;
             poll_service_active(private_key, &ip, "promtail").await?;
-            ssh_execute(private_key, &ip, INSTALL_BINARY_CMD).await?;
+            ssh_execute(private_key, &ip, &install_binary_cmd(instance.profiling)).await?;
             poll_service_active(private_key, &ip, "binary").await?;
             info!(
                 ip = ip.as_str(),
