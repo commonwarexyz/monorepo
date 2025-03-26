@@ -1,5 +1,5 @@
 use crate::{
-    Array, Error, Specification, Signer as CommonwareSigner, Verifier as CommonowareVerifier,
+    Array, Error, Signer as CommonwareSigner, Specification, Verifier as CommonowareVerifier,
 };
 use commonware_codec::{Codec, Error as CodecError, Reader, SizedCodec, Writer};
 use commonware_utils::{hex, union_unique};
@@ -613,8 +613,7 @@ mod tests {
         assert_eq!(public_key, Err(Error::InvalidPublicKeyLength));
 
         let compressed_public_key = parse_public_key_as_compressed_vector(qx_hex, qy_hex);
-        let public_key =
-            <Secp256r1 as Specification>::PublicKey::try_from(&compressed_public_key);
+        let public_key = <Secp256r1 as Specification>::PublicKey::try_from(&compressed_public_key);
         assert!(public_key.is_ok());
     }
 

@@ -23,7 +23,7 @@ use super::primitives::{
     group::{self, Element, Scalar},
     ops,
 };
-use crate::{Array, Error, Specification, Signer, Verifier};
+use crate::{Array, Error, Signer, Specification, Verifier};
 use commonware_codec::{Codec, Error as CodecError, Reader, SizedCodec, Writer};
 use commonware_utils::hex;
 use rand::{CryptoRng, Rng};
