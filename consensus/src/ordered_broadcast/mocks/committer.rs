@@ -7,13 +7,13 @@ use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
 };
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{btree_map::Entry, BTreeMap, HashMap};
 
 enum Message<C: Scheme, D: Digest> {
     Acknowledged(Proof, D),
     GetTip(C::PublicKey, oneshot::Sender<Option<(u64, Epoch)>>),
     GetContiguousTip(C::PublicKey, oneshot::Sender<Option<u64>>),
-    Get(C::PublicKey, u64, oneshot::Sender<Option<D>>),
+    Get(C::PublicKey, u64, oneshot::Sender<Option<(D, Epoch)>>),
 }
 
 pub struct Committer<C: Scheme, D: Digest> {
@@ -26,7 +26,7 @@ pub struct Committer<C: Scheme, D: Digest> {
     public: group::Public,
 
     // All known digests
-    digests: HashMap<C::PublicKey, BTreeMap<u64, D>>,
+    digests: HashMap<C::PublicKey, BTreeMap<u64, (D, Epoch)>>,
 
     // Highest contiguous known height for each sequencer
     contiguous: HashMap<C::PublicKey, u64>,
@@ -64,7 +64,24 @@ impl<C: Scheme, D: Digest> Committer<C, D> {
 
                     // Update the committer
                     let digests = self.digests.entry(context.sequencer.clone()).or_default();
-                    assert!(digests.insert(context.height, payload).is_none());
+                    let entry = digests.entry(context.height);
+                    match entry {
+                        Entry::Occupied(mut entry) => {
+                            // It should never be possible to get a conflicting payload
+                            let (existing_payload, existing_epoch) = entry.get();
+                            assert_eq!(*existing_payload, payload);
+
+                            // We may hear about a commitment again, however, this should
+                            // only occur if the epoch has changed.
+                            assert_ne!(*existing_epoch, epoch);
+                            if epoch > *existing_epoch {
+                                entry.insert((payload, epoch));
+                            }
+                        }
+                        Entry::Vacant(entry) => {
+                            entry.insert((payload, epoch));
+                        }
+                    }
 
                     // Update the highest height
                     let highest = self
@@ -148,7 +165,7 @@ impl<C: Scheme, D: Digest> Mailbox<C, D> {
         receiver.await.unwrap()
     }
 
-    pub async fn get(&mut self, sequencer: C::PublicKey, height: u64) -> Option<D> {
+    pub async fn get(&mut self, sequencer: C::PublicKey, height: u64) -> Option<(D, Epoch)> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Message::Get(sequencer, height, sender))

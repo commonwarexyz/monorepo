@@ -639,6 +639,9 @@ mod tests {
                 |_| false,
             );
 
+            // Perform some work
+            await_committers(context.with_label("committer"), &committers, (100, 111)).await;
+
             // Simulate partition by removing all links.
             link_validators(&mut oracle, &pks, Action::Unlink, None).await;
             context.sleep(Duration::from_secs(30)).await;
