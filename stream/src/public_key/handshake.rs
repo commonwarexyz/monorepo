@@ -1,6 +1,7 @@
 use super::x25519;
 use crate::Error;
-use commonware_codec::{Codec, Error as CodecError, Reader, SizedCodec, Writer};
+use bytes::{Buf, BufMut};
+use commonware_codec::{Codec, Error as CodecError, SizedCodec};
 use commonware_cryptography::Scheme;
 use commonware_runtime::Clock;
 use commonware_utils::SystemTimeExt;
@@ -28,16 +29,16 @@ impl<C: Scheme> Info<C> {
 }
 
 impl<C: Scheme> Codec for Info<C> {
-    fn write(&self, writer: &mut impl Writer) {
-        self.recipient.write(writer);
-        self.ephemeral_public_key.write(writer);
-        self.timestamp.write(writer);
+    fn write<B: BufMut>(&self, buf: &mut B) {
+        self.recipient.write(buf);
+        self.ephemeral_public_key.write(buf);
+        self.timestamp.write(buf);
     }
 
-    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
-        let recipient = C::PublicKey::read(reader)?;
-        let ephemeral_public_key = x25519::PublicKey::read(reader)?;
-        let timestamp = u64::read(reader)?;
+    fn read<B: Buf>(buf: &mut B) -> Result<Self, CodecError> {
+        let recipient = C::PublicKey::read(buf)?;
+        let ephemeral_public_key = x25519::PublicKey::read(buf)?;
+        let timestamp = u64::read(buf)?;
         Ok(Info {
             recipient,
             ephemeral_public_key,
@@ -141,16 +142,16 @@ impl<C: Scheme> Signed<C> {
 }
 
 impl<C: Scheme> Codec for Signed<C> {
-    fn write(&self, writer: &mut impl Writer) {
-        self.info.write(writer);
-        self.signer.write(writer);
-        self.signature.write(writer);
+    fn write<B: BufMut>(&self, buf: &mut B) {
+        self.info.write(buf);
+        self.signer.write(buf);
+        self.signature.write(buf);
     }
 
-    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
-        let info = Info::<C>::read(reader)?;
-        let signer = C::PublicKey::read(reader)?;
-        let signature = C::Signature::read(reader)?;
+    fn read<B: Buf>(buf: &mut B) -> Result<Self, CodecError> {
+        let info = Info::<C>::read(buf)?;
+        let signer = C::PublicKey::read(buf)?;
+        let signature = C::Signature::read(buf)?;
         Ok(Self {
             info,
             signer,
@@ -175,6 +176,7 @@ mod tests {
         public_key::{Config, IncomingConnection},
         utils::codec::send_frame,
     };
+    use bytes::Bytes;
     use commonware_cryptography::{Ed25519, Scheme};
     use commonware_runtime::{deterministic::Executor, mocks, Metrics, Runner, Spawner};
     use x25519::PublicKey;
@@ -205,8 +207,8 @@ mod tests {
             );
 
             // Decode the handshake message
-            let handshake =
-                Signed::<Ed25519>::decode(handshake.encode()).expect("failed to decode handshake");
+            let handshake = Signed::<Ed25519>::decode::<Bytes>(handshake.encode())
+                .expect("failed to decode handshake");
 
             // Verify the timestamp
             let synchrony_bound = Duration::from_secs(5);
@@ -417,7 +419,7 @@ mod tests {
 
             // Tamper with the handshake to make the signature invalid
             let mut handshake =
-                Signed::decode(handshake.encode()).expect("failed to decode handshake");
+                Signed::decode::<Bytes>(handshake.encode()).expect("failed to decode handshake");
             handshake.info.timestamp += 1;
 
             // Verify the handshake
