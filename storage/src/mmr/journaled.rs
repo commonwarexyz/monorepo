@@ -61,7 +61,7 @@ pub struct Mmr<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> {
 
 impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Storage<H::Digest> for Mmr<B, E, H> {
     async fn size(&self) -> Result<u64, Error> {
-        Ok(self.mem_mmr.size())
+        Ok(self.size())
     }
 
     async fn get_node(&self, position: u64) -> Result<Option<H::Digest>, Error> {
@@ -189,6 +189,12 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
         Ok(s)
     }
 
+    /// Return the total number of nodes in the MMR, irrespective of any pruning. The next added
+    /// element's position will have this value.
+    pub fn size(&self) -> u64 {
+        self.mem_mmr.size()
+    }
+
     /// Attempt to get a node from the metadata, with fallback to journal lookup if it fails.
     /// Assumes the node should exist in at least one of these sources and returns a `MissingNode`
     /// error otherwise.
@@ -237,23 +243,23 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
 
     /// Sync any new elements to disk.
     pub async fn sync(&mut self) -> Result<(), Error> {
-        if self.mem_mmr.size() == 0 {
+        if self.size() == 0 {
             return Ok(());
         }
 
         // Write the nodes cached in the memory-resident MMR to the journal.
-        for i in self.journal_size..self.mem_mmr.size() {
+        for i in self.journal_size..self.size() {
             let node = *self.mem_mmr.get_node_unchecked(i);
             self.journal.append(node).await?;
         }
-        self.journal_size = self.mem_mmr.size();
+        self.journal_size = self.size();
         self.journal.sync().await?;
         assert_eq!(self.journal_size, self.journal.size().await?);
 
         // Recompute pinned nodes since we'll need to repopulate the cache after it is cleared by
         // pruning the mem_mmr.
         let mut pinned_nodes = HashMap::new();
-        let required_positions = Proof::<H>::nodes_to_pin(self.mem_mmr.size(), self.pruned_to_pos);
+        let required_positions = Proof::<H>::nodes_to_pin(self.size(), self.pruned_to_pos);
         for pos in required_positions.into_iter() {
             let digest = self.mem_mmr.get_node_unchecked(pos);
             pinned_nodes.insert(pos, *digest);
@@ -280,7 +286,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
         prune_to_pos: u64,
     ) -> Result<HashMap<u64, H::Digest>, Error> {
         let mut pinned_nodes = HashMap::new();
-        let required_positions = Proof::<H>::nodes_to_pin(self.mem_mmr.size(), prune_to_pos);
+        let required_positions = Proof::<H>::nodes_to_pin(self.size(), prune_to_pos);
         for pos in required_positions.into_iter() {
             let digest = self.get_node(pos).await?.unwrap();
             self.metadata.put(
@@ -327,8 +333,8 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
     /// Prune as many nodes as possible, leaving behind at most items_per_blob nodes in the current
     /// blob.
     pub async fn prune_all(&mut self) -> Result<(), Error> {
-        if self.mem_mmr.size() != 0 {
-            self.prune_to_pos(self.mem_mmr.size()).await?;
+        if self.size() != 0 {
+            self.prune_to_pos(self.size()).await?;
             return Ok(());
         }
         Ok(())
@@ -338,8 +344,8 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
     ///
     /// This implementation ensures that no failure can leave the MMR in an unrecoverable state.
     pub async fn prune_to_pos(&mut self, pos: u64) -> Result<(), Error> {
-        assert!(pos <= self.mem_mmr.size());
-        if self.mem_mmr.size() == 0 {
+        assert!(pos <= self.size());
+        if self.size() == 0 {
             return Ok(());
         }
 
@@ -359,7 +365,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
 
     /// Return the position of the oldest retained node in the MMR, not including pinned nodes.
     pub fn oldest_retained_pos(&self) -> Option<u64> {
-        if self.pruned_to_pos == self.mem_mmr.size() {
+        if self.pruned_to_pos == self.size() {
             return None;
         }
 
@@ -377,7 +383,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
         // Write the nodes cached in the memory-resident MMR to the journal, aborting after
         // write_count nodes have been written.
         let mut written_count = 0usize;
-        for i in self.journal_size..self.mem_mmr.size() {
+        for i in self.journal_size..self.size() {
             let node = *self.mem_mmr.get_node_unchecked(i);
             self.journal.append(node).await?;
             written_count += 1;
@@ -392,7 +398,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
 
     #[cfg(test)]
     pub async fn simulate_pruning_failure(mut self, prune_to_pos: u64) -> Result<(), Error> {
-        assert!(prune_to_pos <= self.mem_mmr.size());
+        assert!(prune_to_pos <= self.size());
 
         // Flush items cached in the mem_mmr to disk to ensure the current state is recoverable.
         self.sync().await?;
@@ -429,7 +435,7 @@ mod tests {
             let mut mmr = Mmr::<_, _, Sha256>::init(context.clone(), cfg.clone())
                 .await
                 .unwrap();
-            assert_eq!(mmr.size().await.unwrap(), 0);
+            assert_eq!(mmr.size(), 0);
             assert!(mmr.get_node(0).await.is_err());
             assert_eq!(mmr.oldest_retained_pos(), None);
             assert!(mmr.prune_all().await.is_ok());
@@ -461,7 +467,7 @@ mod tests {
                 let pos = mmr.add(&mut hasher, leaves.last().unwrap());
                 positions.push(pos);
             }
-            assert_eq!(mmr.size().await.unwrap(), 502);
+            assert_eq!(mmr.size(), 502);
             assert_eq!(mmr.journal_size, 0);
 
             // Generate & verify proof from element that is not yet flushed to the journal.
@@ -519,7 +525,7 @@ mod tests {
             let mut mmr = Mmr::<_, _, Sha256>::init(context.clone(), cfg.clone())
                 .await
                 .unwrap();
-            assert_eq!(mmr.size().await.unwrap(), 0);
+            assert_eq!(mmr.size(), 0);
 
             // Build a test MMR with 252 leaves
             const LEAF_COUNT: usize = 252;
@@ -532,7 +538,7 @@ mod tests {
                 let pos = mmr.add(&mut hasher, leaves.last().unwrap());
                 positions.push(pos);
             }
-            assert_eq!(mmr.size().await.unwrap(), 498);
+            assert_eq!(mmr.size(), 498);
             mmr.close().await.unwrap();
 
             // The very last element we added (pos=495) resulted in new parents at positions 496 &
@@ -557,14 +563,14 @@ mod tests {
                 .unwrap();
             // Since we didn't corrupt the leaf, the MMR is able to replay the leaf and recover to
             // the previous state.
-            assert_eq!(mmr.size().await.unwrap(), 498);
+            assert_eq!(mmr.size(), 498);
 
             // Make sure closing it and re-opening it persists the recovered state.
             mmr.close().await.unwrap();
             let mmr = Mmr::<_, _, Sha256>::init(context.clone(), cfg.clone())
                 .await
                 .unwrap();
-            assert_eq!(mmr.size().await.unwrap(), 498);
+            assert_eq!(mmr.size(), 498);
             mmr.close().await.unwrap();
 
             // Repeat partial write test though this time truncate the leaf itself not just some
@@ -592,7 +598,7 @@ mod tests {
                 .unwrap();
             // Since the leaf was corrupted, it should not have been recovered, and the journal's
             // size will be the last-valid size.
-            assert_eq!(mmr.size().await.unwrap(), 495);
+            assert_eq!(mmr.size(), 495);
         });
     }
 
@@ -631,8 +637,8 @@ mod tests {
                 positions.push(pos);
                 pruned_mmr.add(&mut hasher, last_leaf);
             }
-            assert_eq!(mmr.size().await.unwrap(), 3994);
-            assert_eq!(pruned_mmr.size().await.unwrap(), 3994);
+            assert_eq!(mmr.size(), 3994);
+            assert_eq!(pruned_mmr.size(), 3994);
 
             // Prune the MMR in increments of 10 making sure the journal is still able to compute
             // roots and accept new elements.
@@ -669,7 +675,7 @@ mod tests {
             // on reopening.
             mmr.add(&mut hasher, &test_digest(LEAF_COUNT));
             pruned_mmr.add(&mut hasher, &test_digest(LEAF_COUNT));
-            assert!(pruned_mmr.size().await.unwrap() % cfg.items_per_blob != 0);
+            assert!(pruned_mmr.size() % cfg.items_per_blob != 0);
             pruned_mmr.close().await.unwrap();
             let mut pruned_mmr = Mmr::<_, _, Sha256>::init(context.clone(), cfg.clone())
                 .await
@@ -678,7 +684,7 @@ mod tests {
 
             // Add nodes until we are on a blob boundary, and confirm prune_all still removes all
             // retained nodes.
-            while pruned_mmr.size().await.unwrap() % cfg.items_per_blob != 0 {
+            while pruned_mmr.size() % cfg.items_per_blob != 0 {
                 pruned_mmr.add(&mut hasher, &test_digest(LEAF_COUNT));
             }
             pruned_mmr.prune_all().await.unwrap();
@@ -712,7 +718,7 @@ mod tests {
                 let pos = mmr.add(&mut hasher, last_leaf);
                 positions.push(pos);
             }
-            assert_eq!(mmr.size().await.unwrap(), 3994);
+            assert_eq!(mmr.size(), 3994);
             mmr.close().await.unwrap();
 
             // Prune the MMR in increments of 50, simulating a partial write after each prune.
@@ -721,7 +727,7 @@ mod tests {
                 let mut mmr = Mmr::<_, _, Sha256>::init(context.clone(), cfg.clone())
                     .await
                     .unwrap();
-                let start_size = mmr.size().await.unwrap();
+                let start_size = mmr.size();
                 let prune_pos = std::cmp::min(i as u64 * 50, start_size);
                 if i % 5 == 0 {
                     mmr.simulate_pruning_failure(prune_pos).await.unwrap();
@@ -745,7 +751,7 @@ mod tests {
                     positions.push(pos);
                     mmr.add(&mut hasher, last_leaf);
                 }
-                let end_size = mmr.size().await.unwrap();
+                let end_size = mmr.size();
                 let total_to_write = (end_size - start_size) as usize;
                 let partial_write_limit = i % total_to_write;
                 mmr.simulate_partial_sync(partial_write_limit)
