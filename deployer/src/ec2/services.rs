@@ -495,6 +495,7 @@ echo "Uploading profile to Pyroscope at {monitoring_private_ip}..."
 wget --post-file="${{PERF_STACK_FILE}}" \
     --header="Content-Type: text/plain" \
     --quiet \
+    -O /dev/null \
     "http://{monitoring_private_ip}:4040/ingest?name=${{APP_NAME}}&format=folded&units=samples&aggregationType=sum&from=${{FROM_TS}}&until=${{UNTIL_TS}}&spyName=perf_script"
 
 echo "Profile upload complete."
