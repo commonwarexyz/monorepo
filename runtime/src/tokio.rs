@@ -23,7 +23,11 @@
 //! });
 //! ```
 
-use crate::{utils::Signaler, Clock, Error, Handle, Metrics as _, Network, Signal, METRICS_PREFIX};
+use crate::{
+    utils::Signaler, Blob as RBlob, Clock, Error, Handle, Listener as RListener,
+    Metrics as RMetrics, Network as RNetwork, Runner as RRunner, Signal, Sink as RSink,
+    Spawner as RSpawner, Storage as RStorage, Stream as RStream, METRICS_PREFIX,
+};
 use axum::{routing::get, serve, Extension, Router};
 use commonware_utils::{from_hex, hex};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
@@ -294,7 +298,7 @@ pub struct Runner {
     executor: Arc<Executor>,
 }
 
-impl crate::Runner for Runner {
+impl RRunner for Runner {
     fn start<F>(self, f: F) -> F::Output
     where
         F: Future + Send + 'static,
@@ -342,7 +346,7 @@ impl Clone for Context {
     }
 }
 
-impl crate::Spawner for Context {
+impl RSpawner for Context {
     fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
@@ -456,7 +460,7 @@ impl crate::Spawner for Context {
     }
 }
 
-impl crate::Metrics for Context {
+impl RMetrics for Context {
     fn with_label(&self, label: &str) -> Self {
         let label = {
             let prefix = self.label.clone();
@@ -535,7 +539,7 @@ impl GClock for Context {
 
 impl ReasonablyRealtime for Context {}
 
-impl Network<Listener, Sink, Stream> for Context {
+impl RNetwork<Listener, Sink, Stream> for Context {
     async fn bind(&self, socket: SocketAddr) -> Result<Listener, Error> {
         TcpListener::bind(socket)
             .await
@@ -579,7 +583,7 @@ pub struct Listener {
     listener: TcpListener,
 }
 
-impl crate::Listener<Sink, Stream> for Listener {
+impl RListener<Sink, Stream> for Listener {
     async fn accept(&mut self) -> Result<(SocketAddr, Sink, Stream), Error> {
         // Accept a new TCP stream
         let (stream, addr) = self.listener.accept().await.map_err(|_| Error::Closed)?;
@@ -626,7 +630,7 @@ pub struct Sink {
     sink: OwnedWriteHalf,
 }
 
-impl crate::Sink for Sink {
+impl RSink for Sink {
     async fn send(&mut self, msg: &[u8]) -> Result<(), Error> {
         let len = msg.len();
         timeout(
@@ -651,7 +655,7 @@ pub struct Stream {
     stream: OwnedReadHalf,
 }
 
-impl crate::Stream for Stream {
+impl RStream for Stream {
     async fn recv(&mut self, buf: &mut [u8]) -> Result<(), Error> {
         // Wait for the stream to be readable
         timeout(
@@ -740,7 +744,7 @@ impl Clone for Blob {
     }
 }
 
-impl crate::Storage<Blob> for Context {
+impl RStorage<Blob> for Context {
     async fn open(&self, partition: &str, name: &[u8]) -> Result<Blob, Error> {
         // Acquire the filesystem lock
         let _guard = self.executor.fs.lock().await;
@@ -831,7 +835,7 @@ impl crate::Storage<Blob> for Context {
     }
 }
 
-impl crate::Blob for Blob {
+impl RBlob for Blob {
     async fn len(&self) -> Result<u64, Error> {
         let (_, len) = *self.file.lock().await;
         Ok(len)
