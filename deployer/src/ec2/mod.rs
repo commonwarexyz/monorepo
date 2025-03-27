@@ -196,6 +196,9 @@ cfg_if::cfg_if! {
         /// Port on monitoring where profiles are pushed
         const PROFILES_PORT: u16 = 4040;
 
+        /// Port on monitoring where traces are pushed
+        const TRACES_PORT: u16 = 4318;
+
         /// Subcommand name
         pub const CMD: &str = "ec2";
 

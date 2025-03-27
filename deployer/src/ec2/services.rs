@@ -12,6 +12,9 @@ pub const NODE_EXPORTER_VERSION: &str = "1.9.0";
 /// Version of Loki to download and install
 pub const LOKI_VERSION: &str = "3.4.2";
 
+/// Version of Tempo to download and install
+pub const TEMPO_VERSION: &str = "2.7.1";
+
 /// Version of Pyroscope to download and install
 pub const PYROSCOPE_VERSION: &str = "1.12.0";
 
@@ -30,6 +33,11 @@ datasources:
   - name: Loki
     type: loki
     url: http://localhost:3100
+    access: proxy
+    isDefault: false
+  - name: Tempo
+    type: tempo
+    url: http://localhost:3200
     access: proxy
     isDefault: false
   - name: Pyroscope
@@ -108,6 +116,7 @@ auth_enabled: false
 target: all
 server:
   http_listen_port: 3100
+  grpc_listen_port: 9095
 common:
   ring:
     kvstore:
@@ -168,12 +177,54 @@ LimitNOFILE=infinity
 WantedBy=multi-user.target
 "#;
 
+/// Systemd service file content for Tempo
+pub const TEMPO_SERVICE: &str = r#"
+[Unit]
+Description=Tempo Tracing Service
+After=network.target
+[Service]
+ExecStart=/opt/tempo/tempo -config.file=/etc/tempo/tempo.yml
+TimeoutStopSec=60
+Restart=always
+User=ubuntu
+LimitNOFILE=infinity
+[Install]
+WantedBy=multi-user.target
+"#;
+
+/// YAML configuration for Tempo
+pub const TEMPO_CONFIG: &str = r#"
+server:
+  grpc_listen_port: 9096
+  http_listen_port: 3200
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        http:
+          endpoint: "0.0.0.0:4318"
+storage:
+  trace:
+    backend: local
+    local:
+      path: /tempo/traces
+    wal:
+      path: /tempo/wal
+ingester:
+  max_block_duration: 1h
+compactor:
+  compaction:
+    block_retention: 1h
+    compaction_cycle: 1h
+"#;
+
 /// Command to install monitoring services (Prometheus, Loki, Grafana) on the monitoring instance
 pub fn install_monitoring_cmd(
     prometheus_version: &str,
     grafana_version: &str,
     loki_version: &str,
     pyroscope_version: &str,
+    tempo_version: &str,
 ) -> String {
     let prometheus_url = format!(
     "https://github.com/prometheus/prometheus/releases/download/v{}/prometheus-{}.linux-arm64.tar.gz",
@@ -191,6 +242,10 @@ pub fn install_monitoring_cmd(
       "https://github.com/grafana/pyroscope/releases/download/v{}/pyroscope_{}_linux_arm64.tar.gz",
       pyroscope_version, pyroscope_version
   );
+    let tempo_url = format!(
+        "https://github.com/grafana/tempo/releases/download/v{}/tempo_{}_linux_arm64.tar.gz",
+        tempo_version, tempo_version
+    );
     format!(
         r#"
 sudo apt-get update -y
@@ -220,6 +275,12 @@ for i in {{1..5}}; do
   sleep 10
 done
 
+# Download Tempo with retries
+for i in {{1..5}}; do
+  wget -O /home/ubuntu/tempo.tar.gz {} && break
+  sleep 10
+done
+
 # Install Prometheus
 sudo mkdir -p /opt/prometheus /opt/prometheus/data
 sudo chown -R ubuntu:ubuntu /opt/prometheus
@@ -245,6 +306,13 @@ tar xvfz /home/ubuntu/pyroscope.tar.gz -C /home/ubuntu
 sudo mv /home/ubuntu/pyroscope /opt/pyroscope/pyroscope
 sudo chmod +x /opt/pyroscope/pyroscope
 
+# Install Tempo
+sudo mkdir -p /opt/tempo /tempo/traces /tempo/wal
+sudo chown -R ubuntu:ubuntu /tempo
+tar xvfz /home/ubuntu/tempo.tar.gz -C /home/ubuntu
+sudo mv /home/ubuntu/tempo /opt/tempo/tempo
+sudo chmod +x /opt/tempo/tempo
+
 # Configure Grafana
 sudo sed -i '/^\[auth.anonymous\]$/,/^\[/ {{ /^; *enabled = /s/.*/enabled = true/; /^; *org_role = /s/.*/org_role = Admin/ }}' /etc/grafana/grafana.ini
 sudo mkdir -p /etc/grafana/provisioning/datasources /etc/grafana/provisioning/dashboards /var/lib/grafana/dashboards
@@ -263,11 +331,15 @@ sudo chown root:root /etc/loki/loki.yml
 sudo mkdir -p /etc/pyroscope
 sudo mv /home/ubuntu/pyroscope.yml /etc/pyroscope/pyroscope.yml
 sudo chown root:root /etc/pyroscope/pyroscope.yml
+sudo mkdir -p /etc/tempo
+sudo mv /home/ubuntu/tempo.yml /etc/tempo/tempo.yml
+sudo chown root:root /etc/tempo/tempo.yml
 
 # Move service files
 sudo mv /home/ubuntu/prometheus.service /etc/systemd/system/prometheus.service
 sudo mv /home/ubuntu/loki.service /etc/systemd/system/loki.service
 sudo mv /home/ubuntu/pyroscope.service /etc/systemd/system/pyroscope.service
+sudo mv /home/ubuntu/tempo.service /etc/systemd/system/tempo.service
 
 # Set ownership
 sudo chown -R grafana:grafana /etc/grafana /var/lib/grafana
@@ -280,6 +352,8 @@ sudo systemctl start loki
 sudo systemctl enable loki
 sudo systemctl start pyroscope
 sudo systemctl enable pyroscope
+sudo systemctl start tempo
+sudo systemctl enable tempo
 sudo systemctl restart grafana-server
 sudo systemctl enable grafana-server
 "#,
@@ -287,6 +361,7 @@ sudo systemctl enable grafana-server
         grafana_url,
         loki_url,
         pyroscope_url,
+        tempo_url,
         prometheus_version,
         prometheus_version,
         prometheus_version
