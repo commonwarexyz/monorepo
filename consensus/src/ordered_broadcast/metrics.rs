@@ -1,5 +1,5 @@
 use commonware_runtime::{
-    telemetry::{histogram, status},
+    telemetry::metrics::{histogram, status},
     Clock, Metrics as RuntimeMetrics,
 };
 use commonware_utils::Array;

@@ -1,4 +1,4 @@
-use commonware_runtime::{telemetry::status, Metrics as RuntimeMetrics};
+use commonware_runtime::{telemetry::metrics::status, Metrics as RuntimeMetrics};
 use commonware_utils::Array;
 use prometheus_client::{
     encoding::EncodeLabelSet,

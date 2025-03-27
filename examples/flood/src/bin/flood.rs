@@ -6,7 +6,7 @@ use commonware_cryptography::{
 use commonware_deployer::ec2::{Peers, METRICS_PORT};
 use commonware_flood::Config;
 use commonware_p2p::{authenticated, Receiver, Recipients, Sender};
-use commonware_runtime::{tokio, Metrics, Runner, Spawner};
+use commonware_runtime::{telemetry::metrics, tokio, Metrics, Runner, Spawner};
 use commonware_utils::{from_hex_formatted, union};
 use futures::future::try_join_all;
 use governor::Quota;
@@ -166,7 +166,7 @@ fn main() {
         // Serve metrics
         let metrics = context.with_label("metrics").spawn(|context| async move {
             let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), METRICS_PORT);
-            context.serve_metrics(addr).await;
+            metrics::server::serve(context, addr).await;
         });
 
         // Wait for any task to error

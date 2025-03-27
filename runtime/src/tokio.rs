@@ -23,12 +23,7 @@
 //! });
 //! ```
 
-use crate::{
-    utils::Signaler, Blob as RBlob, Clock, Error, Handle, Listener as RListener,
-    Metrics as RMetrics, Network as RNetwork, Runner as RRunner, Signal, Sink as RSink,
-    Spawner as RSpawner, Storage as RStorage, Stream as RStream, METRICS_PREFIX,
-};
-use axum::{routing::get, serve, Extension, Router};
+use crate::{utils::Signaler, Clock, Error, Handle, Signal, METRICS_PREFIX};
 use commonware_utils::{from_hex, hex};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
@@ -298,7 +293,7 @@ pub struct Runner {
     executor: Arc<Executor>,
 }
 
-impl RRunner for Runner {
+impl crate::Runner for Runner {
     fn start<F>(self, f: F) -> F::Output
     where
         F: Future + Send + 'static,
@@ -317,25 +312,6 @@ pub struct Context {
     executor: Arc<Executor>,
 }
 
-impl Context {
-    /// Serve metrics on the provided socket using axum.
-    pub async fn serve_metrics(self, addr: SocketAddr) {
-        let listener = self
-            .bind(addr)
-            .await
-            .expect("Could not bind to metrics address");
-        let app = Router::new()
-            .route(
-                "/metrics",
-                get(|extension: Extension<Self>| async move { extension.0.encode() }),
-            )
-            .layer(Extension(self));
-        serve(listener, app.into_make_service())
-            .await
-            .expect("Could not serve metrics");
-    }
-}
-
 impl Clone for Context {
     fn clone(&self) -> Self {
         Self {
@@ -346,7 +322,7 @@ impl Clone for Context {
     }
 }
 
-impl RSpawner for Context {
+impl crate::Spawner for Context {
     fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
@@ -460,7 +436,7 @@ impl RSpawner for Context {
     }
 }
 
-impl RMetrics for Context {
+impl crate::Metrics for Context {
     fn with_label(&self, label: &str) -> Self {
         let label = {
             let prefix = self.label.clone();
@@ -539,7 +515,7 @@ impl GClock for Context {
 
 impl ReasonablyRealtime for Context {}
 
-impl RNetwork<Listener, Sink, Stream> for Context {
+impl crate::Network<Listener, Sink, Stream> for Context {
     async fn bind(&self, socket: SocketAddr) -> Result<Listener, Error> {
         TcpListener::bind(socket)
             .await
@@ -583,7 +559,7 @@ pub struct Listener {
     listener: TcpListener,
 }
 
-impl RListener<Sink, Stream> for Listener {
+impl crate::Listener<Sink, Stream> for Listener {
     async fn accept(&mut self) -> Result<(SocketAddr, Sink, Stream), Error> {
         // Accept a new TCP stream
         let (stream, addr) = self.listener.accept().await.map_err(|_| Error::Closed)?;
@@ -630,7 +606,7 @@ pub struct Sink {
     sink: OwnedWriteHalf,
 }
 
-impl RSink for Sink {
+impl crate::Sink for Sink {
     async fn send(&mut self, msg: &[u8]) -> Result<(), Error> {
         let len = msg.len();
         timeout(
@@ -655,7 +631,7 @@ pub struct Stream {
     stream: OwnedReadHalf,
 }
 
-impl RStream for Stream {
+impl crate::Stream for Stream {
     async fn recv(&mut self, buf: &mut [u8]) -> Result<(), Error> {
         // Wait for the stream to be readable
         timeout(
@@ -744,7 +720,7 @@ impl Clone for Blob {
     }
 }
 
-impl RStorage<Blob> for Context {
+impl crate::Storage<Blob> for Context {
     async fn open(&self, partition: &str, name: &[u8]) -> Result<Blob, Error> {
         // Acquire the filesystem lock
         let _guard = self.executor.fs.lock().await;
@@ -835,7 +811,7 @@ impl RStorage<Blob> for Context {
     }
 }
 
-impl RBlob for Blob {
+impl crate::Blob for Blob {
     async fn len(&self) -> Result<u64, Error> {
         let (_, len) = *self.file.lock().await;
         Ok(len)
