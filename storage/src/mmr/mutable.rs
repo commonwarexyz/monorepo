@@ -11,6 +11,7 @@
 use crate::mmr::{
     iterator::{leaf_num_to_pos, leaf_pos_to_num},
     mem::Mmr,
+    operation::{Operation, Type},
     verification::Proof,
     Error,
 };
@@ -18,26 +19,6 @@ use commonware_cryptography::Hasher as CHasher;
 use commonware_utils::Array;
 use std::collections::{HashMap, VecDeque};
 use tracing::debug;
-
-/// The types of operations that change a key's state in the store.
-#[derive(Clone)]
-pub enum Type<V: Array> {
-    /// Indicates the key no longer has a value.
-    Deleted,
-
-    /// Indicates the key now has the wrapped value.
-    Update(V),
-}
-
-/// An operation applied to the store.
-#[derive(Clone)]
-pub struct Operation<K: Array, V: Array> {
-    /// The key whose state is changed by this operation.
-    pub key: K,
-
-    /// The new state of the key.
-    pub op_type: Type<V>,
-}
 
 /// A structure from which the current state of the store can be fully recovered.
 pub struct StoreState<K: Array, V: Array, H: CHasher> {
@@ -112,11 +93,11 @@ impl<K: Array, V: Array, H: CHasher> MutableMmr<K, V, H> {
             let digest = Self::op_digest(hasher, op);
             store.ops.add(hasher, &digest);
 
-            match op.op_type {
-                Type::Deleted => store.snapshot.remove(&op.key),
+            match op.to_type() {
+                Type::Deleted => store.snapshot.remove(&op.to_key()),
                 Type::Update(_) => {
                     let loc = store_state.pruned_loc + i as u64;
-                    store.snapshot.insert(op.key.clone(), loc)
+                    store.snapshot.insert(op.to_key(), loc)
                 }
             };
         }
@@ -124,23 +105,9 @@ impl<K: Array, V: Array, H: CHasher> MutableMmr<K, V, H> {
         Ok(store)
     }
 
-    const DELETE_CONTEXT: u8 = 0;
-    const UPDATE_CONTEXT: u8 = 1;
-
     /// Return a digest of the operation.
-    ///
-    /// The first byte of the digest material is an operation type byte: 0 for Delete and 1 for
-    /// Update. For an update, the value is appended next, followed by the key. For deletion, the
-    /// key is appended without any value.
     pub fn op_digest(hasher: &mut H, op: &Operation<K, V>) -> H::Digest {
-        match op.op_type {
-            Type::Deleted => hasher.update(&[Self::DELETE_CONTEXT]),
-            Type::Update(ref value) => {
-                hasher.update(&[Self::UPDATE_CONTEXT]);
-                hasher.update(value);
-            }
-        }
-        hasher.update(&op.key);
+        hasher.update(op);
         hasher.finalize()
     }
 
@@ -151,13 +118,13 @@ impl<K: Array, V: Array, H: CHasher> MutableMmr<K, V, H> {
     }
 
     /// Get the value of `key` in the store, or None if it has no value.
-    pub fn get(&self, key: &K) -> Option<&V> {
+    pub fn get(&self, key: &K) -> Option<V> {
         let loc = self.snapshot.get(key)?;
         let i = self.loc_to_op_index(*loc);
-        let op = &self.log[i];
-        match &op.op_type {
+        let op_type = self.log[i].to_type();
+        match op_type {
             Type::Deleted => panic!("deleted key should not be in snapshot: {}", key),
-            Type::Update(ref v) => Some(v),
+            Type::Update(v) => Some(v),
         }
     }
 
@@ -174,7 +141,8 @@ impl<K: Array, V: Array, H: CHasher> MutableMmr<K, V, H> {
         // Update the snapshot.
         if let Some(loc) = self.snapshot.get_mut(&key) {
             let i = *loc - self.pruned_loc;
-            let last_value = match self.log[i as usize].op_type {
+            let op_type = self.log[i as usize].to_type();
+            let last_value = match op_type {
                 Type::Deleted => panic!("deleted key should not be in snapshot: {}", key),
                 Type::Update(ref v) => v,
             };
@@ -209,7 +177,7 @@ impl<K: Array, V: Array, H: CHasher> MutableMmr<K, V, H> {
 
     /// Update the operations MMR with the given operation, and append the operation to the log.
     fn apply_op(&mut self, hasher: &mut H, key: K, op_type: Type<V>) {
-        let op = Operation { key, op_type };
+        let op = Operation::new(key, op_type);
 
         // Update the ops MMR.
         let digest = Self::op_digest(hasher, &op);
@@ -297,12 +265,13 @@ impl<K: Array, V: Array, H: CHasher> MutableMmr<K, V, H> {
             }
             let op = &self.log[i];
             let op_count = self.op_count();
-            if let Some(loc) = self.snapshot.get_mut(&op.key) {
+            let key = op.to_key();
+            if let Some(loc) = self.snapshot.get_mut(&key) {
                 if *loc == self.inactivity_floor_loc {
                     // This operation is active, move it to tip to allow us to continue raising the
                     // inactivity floor.
                     *loc = op_count;
-                    self.apply_op(hasher, op.key.clone(), op.op_type.clone());
+                    self.apply_op(hasher, key, op.to_type());
                 }
             }
             self.inactivity_floor_loc += 1;
@@ -352,22 +321,22 @@ mod test {
         assert!(store.get(&d2).is_none());
 
         store.update(&mut hasher, d1, d2);
-        assert_eq!(store.get(&d1).unwrap(), &d2);
+        assert_eq!(store.get(&d1).unwrap(), d2);
         assert!(store.get(&d2).is_none());
 
         store.update(&mut hasher, d2, d1);
-        assert_eq!(store.get(&d1).unwrap(), &d2);
-        assert_eq!(store.get(&d2).unwrap(), &d1);
+        assert_eq!(store.get(&d1).unwrap(), d2);
+        assert_eq!(store.get(&d2).unwrap(), d1);
 
         store.delete(&mut hasher, d1);
         assert!(store.get(&d1).is_none());
-        assert_eq!(store.get(&d2).unwrap(), &d1);
+        assert_eq!(store.get(&d2).unwrap(), d1);
 
         store.update(&mut hasher, d1, d1);
-        assert_eq!(store.get(&d1).unwrap(), &d1);
+        assert_eq!(store.get(&d1).unwrap(), d1);
 
         store.update(&mut hasher, d2, d2);
-        assert_eq!(store.get(&d2).unwrap(), &d2);
+        assert_eq!(store.get(&d2).unwrap(), d2);
 
         assert_eq!(store.log.len(), 5); // 4 updates, 1 deletion.
         assert_eq!(store.snapshot.len(), 2);
@@ -522,7 +491,7 @@ mod test {
                     let Some(store_value) = store.get(&k) else {
                         panic!("key not found in store: {}", k);
                     };
-                    assert_eq!(map_value, store_value);
+                    assert_eq!(*map_value, store_value);
                 } else {
                     assert!(store.get(&k).is_none());
                 }

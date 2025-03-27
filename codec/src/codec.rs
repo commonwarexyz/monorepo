@@ -22,7 +22,7 @@ pub trait Codec: Sized {
         let len = self.len_encoded();
         let mut buffer = WriteBuffer::new(len);
         self.write(&mut buffer);
-        assert!(buffer.len() == len);
+        assert_eq!(buffer.len(), len);
         buffer.into()
     }
 
