@@ -1,6 +1,7 @@
 //! Peer
 
 use crate::authenticated::metrics;
+use commonware_codec::Error as CodecError;
 use governor::Quota;
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::time::Duration;
@@ -33,6 +34,8 @@ pub enum Error {
     PeerDisconnected,
     #[error("receive failed: {0}")]
     ReceiveFailed(commonware_stream::Error),
+    #[error("decode failed: {0}")]
+    DecodeFailed(CodecError),
     #[error("unexpected failure: {0}")]
     UnexpectedFailure(commonware_runtime::Error),
     #[error("message dropped")]

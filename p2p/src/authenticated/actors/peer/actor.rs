@@ -174,7 +174,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Sch
                             self.received_messages
                                 .get_or_create(&metrics::Message::new_invalid(&peer))
                                 .inc();
-                            continue;
+                            return Err(Error::DecodeFailed(err));
                         }
                     };
                     match msg {

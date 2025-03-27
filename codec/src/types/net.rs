@@ -1,10 +1,10 @@
-use crate::{types::primitives::Fixed, Codec, Error, Reader, SizedCodec, Writer};
+use crate::{Codec, Error, Reader, SizedCodec, Writer};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
 impl Codec for Ipv4Addr {
     #[inline]
     fn write(&self, writer: &mut impl Writer) {
-        self.octets().write(writer);
+        self.to_bits().write(writer);
     }
 
     #[inline]
@@ -14,8 +14,8 @@ impl Codec for Ipv4Addr {
 
     #[inline]
     fn read(reader: &mut impl Reader) -> Result<Self, Error> {
-        let octets = <Fixed<{ Self::LEN_ENCODED }>>::read(reader)?;
-        Ok(Ipv4Addr::from(octets))
+        let bits = <u32>::read(reader)?;
+        Ok(Ipv4Addr::from_bits(bits))
     }
 }
 
@@ -26,7 +26,7 @@ impl SizedCodec for Ipv4Addr {
 impl Codec for Ipv6Addr {
     #[inline]
     fn write(&self, writer: &mut impl Writer) {
-        self.octets().write(writer);
+        self.to_bits().write(writer);
     }
 
     #[inline]
@@ -36,8 +36,8 @@ impl Codec for Ipv6Addr {
 
     #[inline]
     fn read(reader: &mut impl Reader) -> Result<Self, Error> {
-        let octets = <Fixed<{ Self::LEN_ENCODED }>>::read(reader)?;
-        Ok(Ipv6Addr::from(octets))
+        let bits = <u128>::read(reader)?;
+        Ok(Ipv6Addr::from_bits(bits))
     }
 }
 

@@ -57,9 +57,11 @@ impl<P: Array> PeerSet<P> {
     }
 
     pub fn update_msg(&mut self) {
+        let mut k = self.knowledge.clone();
+        k.set_uninitialized(false);
         self.msg = types::BitVec {
             index: self.index,
-            bits: self.knowledge.clone().into(),
+            bits: k.into_vec(),
         };
     }
 

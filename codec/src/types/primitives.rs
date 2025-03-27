@@ -65,9 +65,7 @@ impl Codec for Bytes {
 }
 
 // Constant-size array implementation
-pub type Fixed<const N: usize> = [u8; N];
-
-impl<const N: usize> Codec for Fixed<N> {
+impl<const N: usize> Codec for [u8; N] {
     #[inline]
     fn write(&self, writer: &mut impl Writer) {
         writer.write_fixed(self);
@@ -84,7 +82,7 @@ impl<const N: usize> Codec for Fixed<N> {
     }
 }
 
-impl<const N: usize> SizedCodec for Fixed<N> {
+impl<const N: usize> SizedCodec for [u8; N] {
     const LEN_ENCODED: usize = N;
 }
 
