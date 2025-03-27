@@ -94,10 +94,10 @@ impl<K: Array, V: Array, H: CHasher> MutableMmr<K, V, H> {
             store.ops.add(hasher, &digest);
 
             match op.to_type() {
-                Type::Deleted => store.snapshot.remove(&op.to_key()),
-                Type::Update(_) => {
+                Type::Deleted(key) => store.snapshot.remove(&key),
+                Type::Update(key, _) => {
                     let loc = store_state.pruned_loc + i as u64;
-                    store.snapshot.insert(op.to_key(), loc)
+                    store.snapshot.insert(key, loc)
                 }
             };
         }
@@ -121,11 +121,14 @@ impl<K: Array, V: Array, H: CHasher> MutableMmr<K, V, H> {
     pub fn get(&self, key: &K) -> Option<V> {
         let loc = self.snapshot.get(key)?;
         let i = self.loc_to_op_index(*loc);
-        let op_type = self.log[i].to_type();
-        match op_type {
-            Type::Deleted => panic!("deleted key should not be in snapshot: {}", key),
-            Type::Update(v) => Some(v),
-        }
+        let v = self.log[i].to_value();
+        assert!(
+            v.is_some(),
+            "deleted key should not be in snapshot: {:?}",
+            key
+        );
+
+        v
     }
 
     /// Get the number of operations that have been applied to this store.
@@ -141,12 +144,13 @@ impl<K: Array, V: Array, H: CHasher> MutableMmr<K, V, H> {
         // Update the snapshot.
         if let Some(loc) = self.snapshot.get_mut(&key) {
             let i = *loc - self.pruned_loc;
-            let op_type = self.log[i as usize].to_type();
-            let last_value = match op_type {
-                Type::Deleted => panic!("deleted key should not be in snapshot: {}", key),
-                Type::Update(ref v) => v,
-            };
-            if value == *last_value {
+            let last_value = self.log[i as usize].to_value();
+            assert!(
+                last_value.is_some(),
+                "deleted key should not be in snapshot: {:?}",
+                key
+            );
+            if value == last_value.unwrap() {
                 // Trying to assign the same value is a no-op.
                 return;
             }
@@ -155,8 +159,8 @@ impl<K: Array, V: Array, H: CHasher> MutableMmr<K, V, H> {
             self.snapshot.insert(key.clone(), new_loc);
         }
 
-        let op = Type::Update(value.clone());
-        self.apply_op(hasher, key, op);
+        let op = Operation::update(key, value);
+        self.apply_op(hasher, op);
     }
 
     /// Delete `key` and its value from the store. Deleting a key that already has no value is a
@@ -167,7 +171,7 @@ impl<K: Array, V: Array, H: CHasher> MutableMmr<K, V, H> {
             return;
         };
 
-        self.apply_op(hasher, key, Type::Deleted);
+        self.apply_op(hasher, Operation::delete(key));
     }
 
     /// Return the root hash of the mutable MMR.
@@ -176,9 +180,7 @@ impl<K: Array, V: Array, H: CHasher> MutableMmr<K, V, H> {
     }
 
     /// Update the operations MMR with the given operation, and append the operation to the log.
-    fn apply_op(&mut self, hasher: &mut H, key: K, op_type: Type<V>) {
-        let op = Operation::new(key, op_type);
-
+    fn apply_op(&mut self, hasher: &mut H, op: Operation<K, V>) {
         // Update the ops MMR.
         let digest = Self::op_digest(hasher, &op);
         self.ops.add(hasher, &digest);
@@ -271,7 +273,7 @@ impl<K: Array, V: Array, H: CHasher> MutableMmr<K, V, H> {
                     // This operation is active, move it to tip to allow us to continue raising the
                     // inactivity floor.
                     *loc = op_count;
-                    self.apply_op(hasher, key, op.to_type());
+                    self.apply_op(hasher, op.clone());
                 }
             }
             self.inactivity_floor_loc += 1;
