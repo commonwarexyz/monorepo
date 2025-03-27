@@ -21,6 +21,7 @@ pub fn init(
     let fmt_layer = tracing_subscriber::fmt::layer()
         .json()
         .with_line_number(true)
+        .with_thread_ids(true)
         .with_file(true);
 
     // Create a filter layer to set the maximum level to INFO
