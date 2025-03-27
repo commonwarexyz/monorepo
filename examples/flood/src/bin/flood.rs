@@ -3,7 +3,7 @@ use commonware_cryptography::{
     ed25519::{PrivateKey, PublicKey},
     Ed25519, Signer,
 };
-use commonware_deployer::ec2::{Peers, METRICS_PORT};
+use commonware_deployer::ec2::{Hosts, METRICS_PORT};
 use commonware_flood::Config;
 use commonware_p2p::{authenticated, Receiver, Recipients, Sender};
 use commonware_runtime::{telemetry, tokio, Metrics, Runner, Spawner};
@@ -27,21 +27,21 @@ fn main() {
     // Parse arguments
     let matches = Command::new("runner")
         .about("Spam peers with random messages.")
-        .arg(Arg::new("peers").long("peers").required(true))
+        .arg(Arg::new("hosts").long("hosts").required(true))
         .arg(Arg::new("config").long("config").required(true))
         .get_matches();
 
-    // Load peers
-    let peer_file = matches.get_one::<String>("peers").unwrap();
-    let peers_file = std::fs::read_to_string(peer_file).expect("Could not read peers file");
-    let peers: Peers = serde_yaml::from_str(&peers_file).expect("Could not parse peers file");
-    let peers: HashMap<PublicKey, IpAddr> = peers
-        .peers
+    // Load hosts
+    let hosts_file = matches.get_one::<String>("hosts").unwrap();
+    let hosts_file = std::fs::read_to_string(hosts_file).expect("Could not read hosts file");
+    let hosts: Hosts = serde_yaml::from_str(&hosts_file).expect("Could not parse hosts file");
+    let peers: HashMap<PublicKey, IpAddr> = hosts
+        .hosts
         .into_iter()
-        .map(|peer| {
-            let key = from_hex_formatted(&peer.name).expect("Could not parse peer key");
+        .map(|host| {
+            let key = from_hex_formatted(&host.name).expect("Could not parse host key");
             let key = PublicKey::try_from(key).expect("Peer key is invalid");
-            (key, peer.ip)
+            (key, host.ip)
         })
         .collect();
 
@@ -68,7 +68,7 @@ fn main() {
                 METRICS_PORT,
             )),
             Some(telemetry::traces::exporter::Config {
-                endpoint: format!("http://{}:4318/v1/traces", peers.private_monitoring_ip),
+                endpoint: format!("http://{}:4318/v1/traces", hosts.monitoring),
                 name: "flood".to_string(),
                 rate: 0.001,
             }),

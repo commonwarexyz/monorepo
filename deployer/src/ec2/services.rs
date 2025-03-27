@@ -505,7 +505,7 @@ Description=Deployed Binary Service
 After=network.target
 
 [Service]
-ExecStart=/home/ubuntu/binary --peers=/home/ubuntu/peers.yaml --config=/home/ubuntu/config.conf
+ExecStart=/home/ubuntu/binary --hosts=/home/ubuntu/hosts.yaml --config=/home/ubuntu/config.conf
 TimeoutStopSec=60
 Restart=always
 User=ubuntu
