@@ -450,8 +450,8 @@ WantedBy=multi-user.target
 "#;
 
 /// Generates Prometheus configuration with scrape targets for all instance IPs
-pub fn generate_prometheus_config(monitoring_ip: &str, instances: &[(&str, &str, &str)]) -> String {
-    let mut config = format!(
+pub fn generate_prometheus_config(instances: &[(&str, &str, &str)]) -> String {
+    let mut config = String::from(
         r#"
 global:
   scrape_interval: 15s
@@ -459,12 +459,7 @@ scrape_configs:
   - job_name: 'monitoring_system'
     static_configs:
       - targets: ['localhost:9100']
-        labels:
-          name: 'monitoring'
-          ip: '{}'
-          region: 'us-east-1'
 "#,
-        monitoring_ip,
     );
     for (name, ip, region) in instances {
         config.push_str(&format!(
