@@ -6,10 +6,7 @@ use commonware_cryptography::{
 use commonware_deployer::ec2::{Peers, METRICS_PORT};
 use commonware_flood::Config;
 use commonware_p2p::{authenticated, Receiver, Recipients, Sender};
-use commonware_runtime::{
-    telemetry::{self, metrics, traces::exporter},
-    tokio, Metrics, Runner, Spawner,
-};
+use commonware_runtime::{telemetry, tokio, Metrics, Runner, Spawner};
 use commonware_utils::{from_hex_formatted, union};
 use futures::future::try_join_all;
 use governor::Quota;
@@ -70,7 +67,7 @@ fn main() {
                 IpAddr::V4(Ipv4Addr::UNSPECIFIED),
                 METRICS_PORT,
             )),
-            Some(exporter::Config {
+            Some(telemetry::traces::exporter::Config {
                 endpoint: format!("http://{}:4318/v1/traces", peers.private_monitoring_ip),
                 name: "flood".to_string(),
                 rate: 0.001,
