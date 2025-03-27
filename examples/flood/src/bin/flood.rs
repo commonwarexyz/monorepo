@@ -70,7 +70,7 @@ fn main() {
             Some(telemetry::traces::exporter::Config {
                 endpoint: format!("http://{}:4318/v1/traces", hosts.monitoring),
                 name: "flood".to_string(),
-                rate: 0.001,
+                rate: 1.0,
             }),
         );
 

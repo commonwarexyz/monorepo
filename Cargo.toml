@@ -62,6 +62,8 @@ uuid = "1.15.1"
 serde = "1.0.218"
 serde_yaml = "0.9.34"
 either = "1.13.0"
+tracing-opentelemetry = "0.29.0"
+opentelemetry = "0.28.0"
 
 [profile.bench]
 # Because we enable overflow checks in "release," we should benchmark with them.

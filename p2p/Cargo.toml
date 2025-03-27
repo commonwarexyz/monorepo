@@ -28,6 +28,8 @@ governor = { workspace = true }
 prometheus-client = { workspace = true }
 zstd = { workspace = true }
 either = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+opentelemetry = { workspace = true }
 bitvec = "1.0.1"
 
 [build-dependencies]

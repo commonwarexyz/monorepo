@@ -1132,6 +1132,7 @@ dependencies = [
  "either",
  "futures",
  "governor",
+ "opentelemetry",
  "prometheus-client",
  "prost",
  "prost-build",
@@ -1139,6 +1140,7 @@ dependencies = [
  "rand_distr",
  "thiserror 2.0.12",
  "tracing",
+ "tracing-opentelemetry",
  "tracing-subscriber",
  "zstd",
 ]

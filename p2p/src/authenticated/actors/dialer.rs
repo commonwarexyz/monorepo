@@ -13,11 +13,13 @@ use governor::{
     state::{InMemoryState, NotKeyed},
     Quota, RateLimiter,
 };
+use opentelemetry::trace::Status;
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use rand::{CryptoRng, Rng};
 use std::{marker::PhantomData, time::Duration};
 use tracing::{debug, debug_span, info_span, Instrument};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 pub struct Config<C: Scheme> {
     pub stream_cfg: StreamConfig<C>,
@@ -95,7 +97,7 @@ impl<
                 let mut supervisor = supervisor.clone();
                 move |context| async move {
                     // Create span
-                    let span = info_span!("dial", ?peer, ?address, success = false);
+                    let span = info_span!("dial", ?peer, ?address);
                     let guard = span.enter();
 
                     // Attempt to dial peer
@@ -103,6 +105,7 @@ impl<
                         match context.dial(address).instrument(debug_span!("dial")).await {
                             Ok(stream) => stream,
                             Err(e) => {
+                                span.set_status(Status::error("failed to dial peer"));
                                 debug!(?peer, error = ?e, "failed to dial peer");
                                 return;
                             }
@@ -122,6 +125,7 @@ impl<
                     {
                         Ok(instance) => instance,
                         Err(e) => {
+                            span.set_status(Status::error("failed to upgrade connection"));
                             debug!(?peer, error = ?e, "failed to upgrade connection");
                             return;
                         }
@@ -129,7 +133,7 @@ impl<
                     debug!(?peer, "upgraded connection");
 
                     // Drop guard
-                    span.record("success", true);
+                    span.set_status(Status::Ok);
                     drop(guard);
 
                     // Start peer to handle messages
