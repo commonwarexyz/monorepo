@@ -76,6 +76,11 @@ overflow-checks = true
 # "release" although they incur some performance penalty.
 overflow-checks = true
 
+[profile.release-with-debug]
+inherits = "release"
+# Setting debug to true instructs cargo to include debug symbols in the release binary (not to disable optimizations)
+debug = true
+
 [profile.test]
 # Although overflow checks are enabled by default in "test", we explicitly
 # enable them here for clarity.
