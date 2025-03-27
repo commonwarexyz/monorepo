@@ -457,6 +457,11 @@ pub fn generate_prometheus_config(instances: &[(&str, &str, &str)]) -> String {
 global:
   scrape_interval: 15s
 scrape_configs:
+  - job_name: 'monitoring_system'
+    static_configs:
+      - targets: ['localhost:9100']
+        labels:
+          region: 'us-east-1'
 "#,
     );
     for (name, ip, region) in instances {
@@ -467,8 +472,13 @@ scrape_configs:
       - targets: ['{}:9090']
         labels:
           region: '{}'
+  - job_name: '{}_system'
+    static_configs:
+      - targets: ['{}:9100']
+        labels:
+          region: '{}'
 "#,
-            name, ip, region
+            name, ip, region, name, ip, region
         ));
     }
     config

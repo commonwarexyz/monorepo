@@ -171,6 +171,9 @@ pub mod utils;
 /// Port on binary where metrics are exposed
 pub const METRICS_PORT: u16 = 9090;
 
+/// Port on instance where node metrics are exposed
+pub const NODE_METRICS_PORT: u16 = 9100;
+
 /// Port on monitoring where logs are pushed
 pub const LOGS_PORT: u16 = 3100;
 
