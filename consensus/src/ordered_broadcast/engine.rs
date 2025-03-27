@@ -271,10 +271,8 @@ impl<
         let mut pending: Option<(Context<C::PublicKey>, oneshot::Receiver<D>)> = None;
 
         // Initialize the epoch
-        let epoch = self.monitor.latest();
-        assert!(epoch >= self.epoch);
-        self.epoch = epoch;
-        let mut epoch_updates = self.monitor.subscribe();
+        let (latest, mut epoch_updates) = self.monitor.subscribe().await;
+        self.epoch = latest;
 
         // Before starting on the main loop, initialize my own sequencer journal
         // and attempt to rebroadcast if necessary.

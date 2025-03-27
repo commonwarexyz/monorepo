@@ -1,9 +1,7 @@
-use std::sync::{Arc, Mutex};
-
-use futures::channel::mpsc;
-
 use crate::ordered_broadcast::Epoch;
 use crate::Monitor as M;
+use futures::channel::mpsc;
+use std::sync::{Arc, Mutex};
 
 struct Inner {
     epoch: Epoch,
@@ -25,14 +23,10 @@ impl Inner {
         }
     }
 
-    fn latest(&self) -> Epoch {
-        self.epoch
-    }
-
-    fn subscribe(&mut self) -> mpsc::Receiver<Epoch> {
+    fn subscribe(&mut self) -> (Epoch, mpsc::Receiver<Epoch>) {
         let (tx, rx) = mpsc::channel(1);
         self.subscribers.push(tx);
-        rx
+        (self.epoch, rx)
     }
 }
 
@@ -57,11 +51,7 @@ impl Monitor {
 impl M for Monitor {
     type Index = Epoch;
 
-    fn latest(&self) -> Self::Index {
-        self.inner.lock().unwrap().latest()
-    }
-
-    fn subscribe(&mut self) -> mpsc::Receiver<Self::Index> {
+    async fn subscribe(&mut self) -> (Self::Index, mpsc::Receiver<Self::Index>) {
         self.inner.lock().unwrap().subscribe()
     }
 }

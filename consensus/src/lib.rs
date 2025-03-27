@@ -186,11 +186,8 @@ cfg_if::cfg_if! {
             /// Index is the type used to indicate the in-progress consensus decision.
             type Index;
 
-            /// Latest index known by the consensus implementation.
-            fn latest(&self) -> Self::Index;
-
-            /// Create a channel that will receive updates when the latest index changes.
-            fn subscribe(&mut self) -> mpsc::Receiver<Self::Index>;
+            /// Create a channel that will receive updates when the latest index (also provided) changes.
+            fn subscribe(&mut self) -> impl Future<Output = (Self::Index, mpsc::Receiver<Self::Index>)> + Send;
         }
     }
 }
