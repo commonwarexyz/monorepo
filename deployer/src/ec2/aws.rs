@@ -21,7 +21,7 @@ use tokio::time::sleep;
 
 /// Creates an EC2 client for the specified AWS region
 pub async fn create_ec2_client(region: Region) -> Ec2Client {
-    let config = aws_config::defaults(BehaviorVersion::v2024_03_28())
+    let config = aws_config::defaults(BehaviorVersion::v2025_01_17())
         .region(region)
         .load()
         .await;
