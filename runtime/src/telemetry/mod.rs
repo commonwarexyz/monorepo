@@ -4,7 +4,7 @@ pub mod metrics;
 pub mod traces;
 
 use crate::tokio::Context;
-use crate::Spawner;
+use crate::{Metrics, Spawner};
 use std::net::SocketAddr;
 use traces::exporter;
 use tracing_subscriber::layer::SubscriberExt;
@@ -28,7 +28,9 @@ pub fn init(
 
     // Expose metrics over HTTP
     if let Some(cfg) = metrics {
-        context.spawn(move |context| async move { metrics::server::serve(context, cfg).await });
+        context
+            .with_label("metrics")
+            .spawn(move |context| async move { metrics::server::serve(context, cfg).await });
     }
 
     // Combine layers into a single subscriber

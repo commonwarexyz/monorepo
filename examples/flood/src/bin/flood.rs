@@ -6,7 +6,10 @@ use commonware_cryptography::{
 use commonware_deployer::ec2::{Peers, METRICS_PORT};
 use commonware_flood::Config;
 use commonware_p2p::{authenticated, Receiver, Recipients, Sender};
-use commonware_runtime::{telemetry::metrics, tokio, Metrics, Runner, Spawner};
+use commonware_runtime::{
+    telemetry::{self, metrics, traces::exporter},
+    tokio, Metrics, Runner, Spawner,
+};
 use commonware_utils::{from_hex_formatted, union};
 use futures::future::try_join_all;
 use governor::Quota;
@@ -31,14 +34,6 @@ fn main() {
         .arg(Arg::new("config").long("config").required(true))
         .get_matches();
 
-    // Create logger
-    tracing_subscriber::fmt()
-        .json()
-        .with_max_level(Level::DEBUG)
-        .with_line_number(true)
-        .with_file(true)
-        .init();
-
     // Load peers
     let peer_file = matches.get_one::<String>("peers").unwrap();
     let peers_file = std::fs::read_to_string(peer_file).expect("Could not read peers file");
@@ -52,37 +47,11 @@ fn main() {
             (key, peer.ip)
         })
         .collect();
-    info!(peers = peers.len(), "loaded peers");
 
     // Load config
     let config_file = matches.get_one::<String>("config").unwrap();
     let config_file = std::fs::read_to_string(config_file).expect("Could not read config file");
     let config: Config = serde_yaml::from_str(&config_file).expect("Could not parse config file");
-    let key = from_hex_formatted(&config.private_key).expect("Could not parse private key");
-    let key = PrivateKey::try_from(key).expect("Private key is invalid");
-    let signer = <Ed25519 as Signer>::from(key).expect("Could not create signer");
-    let public_key = signer.public_key();
-    let ip = peers.get(&public_key).expect("Could not find self in IPs");
-    info!(
-        ?public_key,
-        ?ip,
-        port = config.port,
-        message_size = config.message_size,
-        "loaded config"
-    );
-
-    // Configure peers and bootstrappers
-    let peer_keys = peers.keys().cloned().collect::<Vec<_>>();
-    let mut bootstrappers = Vec::new();
-    for bootstrapper in &config.bootstrappers {
-        let key = from_hex_formatted(bootstrapper).expect("Could not parse bootstrapper key");
-        let key = PublicKey::try_from(key).expect("Bootstrapper key is invalid");
-        let ip = peers.get(&key).expect("Could not find bootstrapper in IPs");
-        let bootstrapper_socket = format!("{}:{}", ip, config.port);
-        let bootstrapper_socket = SocketAddr::from_str(&bootstrapper_socket)
-            .expect("Could not parse bootstrapper socket");
-        bootstrappers.push((key, bootstrapper_socket));
-    }
 
     // Initialize runtime
     let cfg = tokio::Config {
@@ -91,19 +60,62 @@ fn main() {
     };
     let (executor, context) = tokio::Executor::init(cfg);
 
-    // Configure network
-    let mut p2p_cfg = authenticated::Config::aggressive(
-        signer.clone(),
-        &union(FLOOD_NAMESPACE, b"_P2P"),
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), config.port),
-        SocketAddr::new(*ip, config.port),
-        bootstrappers,
-        config.message_size,
-    );
-    p2p_cfg.mailbox_size = config.mailbox_size;
-
     // Start runtime
     executor.start(async move {
+        // Configure telemetry
+        telemetry::init(
+            context.with_label("telemetry"),
+            Level::DEBUG.as_str(),
+            Some(SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                METRICS_PORT,
+            )),
+            Some(exporter::Config {
+                endpoint: format!("http://{}:4318/v1/traces", peers.private_monitoring_ip),
+                name: "flood".to_string(),
+                rate: 0.001,
+            }),
+        );
+
+        // Parse config
+        info!(peers = peers.len(), "loaded peers");
+        let key = from_hex_formatted(&config.private_key).expect("Could not parse private key");
+        let key = PrivateKey::try_from(key).expect("Private key is invalid");
+        let signer = <Ed25519 as Signer>::from(key).expect("Could not create signer");
+        let public_key = signer.public_key();
+        let ip = peers.get(&public_key).expect("Could not find self in IPs");
+        info!(
+            ?public_key,
+            ?ip,
+            port = config.port,
+            message_size = config.message_size,
+            "loaded config"
+        );
+
+        // Configure peers and bootstrappers
+        let peer_keys = peers.keys().cloned().collect::<Vec<_>>();
+        let mut bootstrappers = Vec::new();
+        for bootstrapper in &config.bootstrappers {
+            let key = from_hex_formatted(bootstrapper).expect("Could not parse bootstrapper key");
+            let key = PublicKey::try_from(key).expect("Bootstrapper key is invalid");
+            let ip = peers.get(&key).expect("Could not find bootstrapper in IPs");
+            let bootstrapper_socket = format!("{}:{}", ip, config.port);
+            let bootstrapper_socket = SocketAddr::from_str(&bootstrapper_socket)
+                .expect("Could not parse bootstrapper socket");
+            bootstrappers.push((key, bootstrapper_socket));
+        }
+
+        // Configure network
+        let mut p2p_cfg = authenticated::Config::aggressive(
+            signer.clone(),
+            &union(FLOOD_NAMESPACE, b"_P2P"),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), config.port),
+            SocketAddr::new(*ip, config.port),
+            bootstrappers,
+            config.message_size,
+        );
+        p2p_cfg.mailbox_size = config.mailbox_size;
+
         // Start p2p
         let (mut network, mut oracle) =
             authenticated::Network::new(context.with_label("network"), p2p_cfg);
@@ -163,14 +175,8 @@ fn main() {
                     }
                 });
 
-        // Serve metrics
-        let metrics = context.with_label("metrics").spawn(|context| async move {
-            let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), METRICS_PORT);
-            metrics::server::serve(context, addr).await;
-        });
-
         // Wait for any task to error
-        if let Err(e) = try_join_all(vec![p2p, flood_sender, flood_receiver, metrics]).await {
+        if let Err(e) = try_join_all(vec![p2p, flood_sender, flood_receiver]).await {
             error!(?e, "task failed");
         }
     });
