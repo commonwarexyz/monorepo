@@ -316,6 +316,7 @@ mod tests {
     use std::str::FromStr;
     use std::sync::Mutex;
     use telemetry::metrics;
+    use tracing::error;
     use utils::reschedule;
 
     fn test_error_future(runner: impl Runner) {
@@ -924,7 +925,7 @@ mod tests {
 
     fn test_metrics_serve<L, Si, St>(
         runner: impl Runner,
-        context: impl Spawner + Metrics + Network<L, Si, St>,
+        context: impl Clock + Spawner + Metrics + Network<L, Si, St>,
     ) where
         L: Listener<Si, St>,
         Si: Sink,
@@ -993,7 +994,16 @@ mod tests {
             let client_handle = context
                 .with_label("client")
                 .spawn(move |context| async move {
-                    let (_sink, mut stream) = context.dial(address).await.unwrap();
+                    let (_, mut stream) = loop {
+                        match context.dial(address).await {
+                            Ok((sink, stream)) => break (sink, stream),
+                            Err(e) => {
+                                // The client may be polled before the server is ready, that's alright!
+                                error!(err =?e, "failed to connect");
+                                context.sleep(Duration::from_millis(10)).await;
+                            }
+                        }
+                    };
 
                     // Read and verify the HTTP status line
                     let status_line = read_line(&mut stream).await.unwrap();
