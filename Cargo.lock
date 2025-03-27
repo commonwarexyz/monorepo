@@ -958,7 +958,6 @@ dependencies = [
 name = "commonware-flood"
 version = "0.0.43"
 dependencies = [
- "axum",
  "clap",
  "commonware-cryptography",
  "commonware-deployer",

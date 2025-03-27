@@ -23,7 +23,6 @@ tracing-subscriber = { workspace = true, features = ["fmt", "json"] }
 serde = { workspace = true, features = ["derive"] }
 serde_yaml = { workspace = true }
 governor = { workspace = true }
-axum = { workspace = true }
 rand = { workspace = true }
 futures = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }

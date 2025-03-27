@@ -23,7 +23,8 @@
 //! });
 //! ```
 
-use crate::{utils::Signaler, Clock, Error, Handle, Signal, METRICS_PREFIX};
+use crate::{utils::Signaler, Clock, Error, Handle, Metrics as _, Network, Signal, METRICS_PREFIX};
+use axum::{routing::get, serve, Extension, Router};
 use commonware_utils::{from_hex, hex};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
@@ -312,6 +313,25 @@ pub struct Context {
     executor: Arc<Executor>,
 }
 
+impl Context {
+    /// Serve metrics on the provided socket using axum.
+    pub async fn serve_metrics(self, addr: SocketAddr) {
+        let listener = self
+            .bind(addr)
+            .await
+            .expect("Could not bind to metrics address");
+        let app = Router::new()
+            .route(
+                "/metrics",
+                get(|extension: Extension<Self>| async move { extension.0.encode() }),
+            )
+            .layer(Extension(self));
+        serve(listener, app.into_make_service())
+            .await
+            .expect("Could not serve metrics");
+    }
+}
+
 impl Clone for Context {
     fn clone(&self) -> Self {
         Self {
@@ -515,7 +535,7 @@ impl GClock for Context {
 
 impl ReasonablyRealtime for Context {}
 
-impl crate::Network<Listener, Sink, Stream> for Context {
+impl Network<Listener, Sink, Stream> for Context {
     async fn bind(&self, socket: SocketAddr) -> Result<Listener, Error> {
         TcpListener::bind(socket)
             .await

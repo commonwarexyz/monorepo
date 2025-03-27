@@ -1,4 +1,3 @@
-use axum::{routing::get, serve, Extension, Router};
 use clap::{Arg, Command};
 use commonware_cryptography::{
     ed25519::{PrivateKey, PublicKey},
@@ -7,7 +6,7 @@ use commonware_cryptography::{
 use commonware_deployer::ec2::{Peers, METRICS_PORT};
 use commonware_flood::Config;
 use commonware_p2p::{authenticated, Receiver, Recipients, Sender};
-use commonware_runtime::{tokio, Metrics, Network, Runner, Spawner};
+use commonware_runtime::{tokio, Metrics, Runner, Spawner};
 use commonware_utils::{from_hex_formatted, union};
 use futures::future::try_join_all;
 use governor::Quota;
@@ -167,19 +166,7 @@ fn main() {
         // Serve metrics
         let metrics = context.with_label("metrics").spawn(|context| async move {
             let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), METRICS_PORT);
-            let listener = context
-                .bind(addr)
-                .await
-                .expect("Could not bind to metrics address");
-            let app = Router::new()
-                .route(
-                    "/metrics",
-                    get(|extension: Extension<tokio::Context>| async move { extension.0.encode() }),
-                )
-                .layer(Extension(context));
-            serve(listener, app.into_make_service())
-                .await
-                .expect("Could not serve metrics");
+            context.serve_metrics(addr).await;
         });
 
         // Wait for any task to error
