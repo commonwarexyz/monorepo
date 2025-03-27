@@ -6,6 +6,9 @@ pub const PROMETHEUS_VERSION: &str = "3.2.0";
 /// Version of Promtail to download and install
 pub const PROMTAIL_VERSION: &str = "3.4.2";
 
+/// Version of Node Exporter to download and install
+pub const NODE_EXPORTER_VERSION: &str = "1.9.0";
+
 /// Version of Loki to download and install
 pub const LOKI_VERSION: &str = "3.4.2";
 
@@ -395,6 +398,57 @@ scrape_configs:
         monitoring_private_ip, instance_name, ip, region
     )
 }
+
+/// Command to install Node Exporter on instances
+pub fn setup_node_exporter_cmd(node_exporter_version: &str) -> String {
+    let node_exporter_url = format!(
+      "https://github.com/prometheus/node_exporter/releases/download/v{}/node_exporter-{}.linux-arm64.tar.gz",
+      node_exporter_version, node_exporter_version
+  );
+    format!(
+        r#"
+sudo apt-get update -y
+sudo apt-get install -y wget tar
+
+# Download Node Exporter with retries
+for i in {{1..5}}; do
+  wget -O /home/ubuntu/node_exporter.tar.gz {} && break
+  sleep 10
+done
+
+# Install Node Exporter
+sudo mkdir -p /opt/node_exporter
+tar xvfz /home/ubuntu/node_exporter.tar.gz -C /home/ubuntu
+sudo mv /home/ubuntu/node_exporter-{}.linux-arm64 /opt/node_exporter/node_exporter-{}.linux-arm64
+sudo ln -s /opt/node_exporter/node_exporter-{}.linux-arm64/node_exporter /opt/node_exporter/node_exporter
+sudo chmod +x /opt/node_exporter/node_exporter
+sudo mv /home/ubuntu/node_exporter.service /etc/systemd/system/node_exporter.service
+
+# Start service
+sudo systemctl daemon-reload
+sudo systemctl start node_exporter
+sudo systemctl enable node_exporter
+"#,
+        node_exporter_url, node_exporter_version, node_exporter_version, node_exporter_version
+    )
+}
+
+/// Systemd service file content for Node Exporter
+pub const NODE_EXPORTER_SERVICE: &str = r#"
+[Unit]
+Description=Node Exporter
+After=network.target
+
+[Service]
+ExecStart=/opt/node_exporter/node_exporter
+TimeoutStopSec=60
+Restart=always
+User=ubuntu
+LimitNOFILE=infinity
+
+[Install]
+WantedBy=multi-user.target
+"#;
 
 /// Generates Prometheus configuration with scrape targets for all instance IPs
 pub fn generate_prometheus_config(instances: &[(&str, &str, &str)]) -> String {
