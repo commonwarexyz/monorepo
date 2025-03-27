@@ -389,9 +389,9 @@ scrape_configs:
       - targets:
           - localhost
         labels:
-          name: {}
-          ip: {}
-          region: {}
+          deployer_name: {}
+          deployer_ip: {}
+          deployer_region: {}
           __path__: /var/log/binary.log
       "#,
         monitoring_private_ip, instance_name, ip, region
@@ -468,16 +468,16 @@ scrape_configs:
     static_configs:
       - targets: ['{}:9090']
         labels:
-          name: '{}'
-          ip: '{}'
-          region: '{}'
+          deployer_name: '{}'
+          deployer_ip: '{}'
+          deployer_region: '{}'
   - job_name: '{}_system'
     static_configs:
       - targets: ['{}:9100']
         labels:
-          name: '{}'
-          ip: '{}'
-          region: '{}'
+          deployer_name: '{}'
+          deployer_ip: '{}'
+          deployer_region: '{}'
 "#,
             name, ip, name, ip, region, name, ip, name, ip, region
         ));
