@@ -26,14 +26,14 @@ pub enum Error<K: Array, V: Array> {
     InvalidDeleteOp,
 }
 
-/// The types of operations that change a key's state in the store.
+/// The types of operations that can change the state of the store.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-pub enum Type<V: Array> {
+pub enum Type<K: Array, V: Array> {
     /// Indicates the key no longer has a value.
-    Deleted,
+    Deleted(K),
 
     /// Indicates the key now has the wrapped value.
-    Update(V),
+    Update(K, V),
 }
 
 /// An `Array` implementation for operations applied to a `MutableMmr` K/V store.
@@ -48,20 +48,32 @@ impl<K: Array, V: Array> Operation<K, V> {
     const DELETE_CONTEXT: u8 = 0;
     const UPDATE_CONTEXT: u8 = 1;
 
-    /// Create a new operation from `key` and `op_type`.
-    pub fn new(key: K, op_type: Type<V>) -> Self {
-        let mut data = Vec::with_capacity(Self::LEN_ENCODED);
-        data.extend_from_slice(&key);
-        match op_type {
-            Type::Deleted => {
-                data.push(Self::DELETE_CONTEXT);
-                data.resize(Self::LEN_ENCODED, 0);
-            }
-            Type::Update(value) => {
-                data.push(Self::UPDATE_CONTEXT);
-                data.extend_from_slice(&value);
-            }
+    /// Create a new operation of the given type.
+    pub fn new(t: Type<K, V>) -> Self {
+        match t {
+            Type::Deleted(key) => Self::delete(key),
+            Type::Update(key, value) => Self::update(key, value),
         }
+    }
+
+    /// Create a new update operation from `key` and `value`.
+    pub fn update(key: K, value: V) -> Self {
+        let mut data = Vec::with_capacity(Self::LEN_ENCODED);
+        data.push(Self::UPDATE_CONTEXT);
+        data.extend_from_slice(&key);
+        data.extend_from_slice(&value);
+
+        Self {
+            data,
+            _phantom: std::marker::PhantomData,
+        }
+    }
+
+    pub fn delete(key: K) -> Self {
+        let mut data = Vec::with_capacity(Self::LEN_ENCODED);
+        data.push(Self::DELETE_CONTEXT);
+        data.extend_from_slice(&key);
+        data.resize(Self::LEN_ENCODED, 0);
 
         Self {
             data,
@@ -70,21 +82,26 @@ impl<K: Array, V: Array> Operation<K, V> {
     }
 
     pub fn to_key(&self) -> K {
-        K::try_from(&self.data[..K::LEN_ENCODED]).unwrap()
+        K::try_from(&self.data[1..K::LEN_ENCODED + 1]).unwrap()
     }
 
-    pub fn to_type(&self) -> Type<V> {
-        if self.data[K::LEN_ENCODED] == 0 {
-            return Type::Deleted;
+    pub fn to_type(&self) -> Type<K, V> {
+        let key = K::try_from(&self.data[1..K::LEN_ENCODED + 1]).unwrap();
+        match self.data[0] {
+            Self::DELETE_CONTEXT => Type::Deleted(key),
+            Self::UPDATE_CONTEXT => {
+                let value = V::try_from(&self.data[K::LEN_ENCODED + 1..]).unwrap();
+                Type::Update(key, value)
+            }
+            _ => unreachable!(),
         }
-
-        Type::Update(V::try_from(&self.data[K::LEN_ENCODED + 1..]).unwrap())
     }
 
     pub fn to_value(&self) -> Option<V> {
-        match self.to_type() {
-            Type::Deleted => None,
-            Type::Update(v) => Some(v),
+        match self.data[0] {
+            Self::DELETE_CONTEXT => None,
+            Self::UPDATE_CONTEXT => Some(V::try_from(&self.data[K::LEN_ENCODED + 1..]).unwrap()),
+            _ => unreachable!(),
         }
     }
 }
@@ -120,9 +137,9 @@ impl<K: Array, V: Array> TryFrom<&[u8]> for Operation<K, V> {
             return Err(Error::InvalidLength);
         }
 
-        let _ = K::try_from(&value[..K::LEN_ENCODED]).map_err(|e| Error::InvalidKey(e))?;
+        let _ = K::try_from(&value[1..K::LEN_ENCODED + 1]).map_err(|e| Error::InvalidKey(e))?;
 
-        match value[K::LEN_ENCODED] {
+        match value[0] {
             Self::UPDATE_CONTEXT => {
                 let _ = V::try_from(&value[K::LEN_ENCODED + 1..])
                     .map_err(|e| Error::InvalidValue(e))?;
@@ -177,8 +194,8 @@ impl<K: Array, V: Array> Deref for Operation<K, V> {
 impl<K: Array, V: Array> Display for Operation<K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.to_type() {
-            Type::Deleted => write!(f, "[key:{} <deleted>]", self.to_key()),
-            Type::Update(value) => write!(f, "[key:{} value:{}]", self.to_key(), value),
+            Type::Deleted(key) => write!(f, "[key:{} <deleted>]", key),
+            Type::Update(key, value) => write!(f, "[key:{} value:{}]", key, value),
         }
     }
 }
@@ -192,37 +209,41 @@ mod tests {
     fn test_operation_array_basic() {
         let key = U64::new(1234);
         let value = U64::new(56789);
-        let update_op = Operation::new(key.clone(), Type::Update(value.clone()));
+        let update_op = Operation::update(key.clone(), value.clone());
 
-        let try_from = Operation::try_from(update_op.as_ref()).unwrap();
-        assert_eq!(key, try_from.to_key());
-        assert_eq!(Type::Update(value.clone()), try_from.to_type());
-        assert_eq!(try_from.to_value().unwrap(), value);
+        let from = Operation::try_from(update_op.as_ref()).unwrap();
+        assert_eq!(key, from.to_key());
+        assert_eq!(value, from.to_value().unwrap());
+        assert_eq!(update_op, from);
 
         let vec = update_op.to_vec();
 
-        let from_vec_ref = Operation::<U64, U64>::try_from(&vec).unwrap();
-        assert_eq!(Type::Update(value.clone()), from_vec_ref.to_type());
+        let from = Operation::<U64, U64>::try_from(&vec).unwrap();
+        assert_eq!(key, from.to_key());
+        assert_eq!(value, from.to_value().unwrap());
+        assert_eq!(update_op, from);
 
-        let from_vec = Operation::<U64, U64>::try_from(vec).unwrap();
-        assert_eq!(Type::Update(value.clone()), from_vec.to_type());
+        let from = Operation::<U64, U64>::try_from(vec).unwrap();
+        assert_eq!(key, from.to_key());
+        assert_eq!(value, from.to_value().unwrap());
+        assert_eq!(update_op, from);
 
         let key2 = U64::new(42);
-        let delete_op = Operation::<U64, U64>::new(key2.clone(), Type::Deleted);
-        let try_from = Operation::<U64, U64>::try_from(delete_op.as_ref()).unwrap();
-        assert_eq!(key2, try_from.to_key());
-        assert_eq!(Type::Deleted, try_from.to_type());
-        assert_eq!(try_from.to_value(), None);
+        let delete_op = Operation::<U64, U64>::delete(key2.clone());
+        let from = Operation::<U64, U64>::try_from(delete_op.as_ref()).unwrap();
+        assert_eq!(key2, from.to_key());
+        assert_eq!(None, from.to_value());
+        assert_eq!(delete_op, from);
 
-        // test extra byte detection in delete operation
+        // test non-zero byte detection in delete operation
         let mut invalid = delete_op.to_vec();
-        invalid[U64::LEN_ENCODED + 2] = 0xFF;
+        invalid[U64::LEN_ENCODED + 4] = 0xFF;
         let try_from = Operation::<U64, U64>::try_from(&invalid);
         assert!(matches!(try_from.unwrap_err(), Error::InvalidDeleteOp));
 
         // test invalid context byte detection
-        let mut invalid = update_op.to_vec();
-        invalid[U64::LEN_ENCODED] = 2;
+        let mut invalid = delete_op.to_vec();
+        invalid[0] = 0xFF;
         let try_from = Operation::<U64, U64>::try_from(&invalid);
         assert!(matches!(try_from.unwrap_err(), Error::InvalidContextByte));
 
@@ -237,14 +258,14 @@ mod tests {
     fn test_operation_array_display() {
         let key = U64::new(1234);
         let value = U64::new(56789);
-        let update_op = Operation::new(key.clone(), Type::Update(value.clone()));
+        let update_op = Operation::update(key.clone(), value.clone());
         assert_eq!(
             format!("{}", update_op),
             format!("[key:{} value:{}]", key, value)
         );
 
         let key2 = U64::new(42);
-        let delete_op = Operation::<U64, U64>::new(key2.clone(), Type::Deleted);
+        let delete_op = Operation::<U64, U64>::delete(key2.clone());
         assert_eq!(
             format!("{}", delete_op),
             format!("[key:{} <deleted>]", key2)
@@ -255,7 +276,7 @@ mod tests {
     fn test_operation_array_codec() {
         let key = U64::new(1234);
         let value = U64::new(5678);
-        let update_op = Operation::new(key, Type::Update(value));
+        let update_op = Operation::update(key, value);
 
         let encoded = update_op.encode();
         assert_eq!(encoded.len(), Operation::<U64, U64>::LEN_ENCODED);
