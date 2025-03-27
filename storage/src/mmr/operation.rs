@@ -20,6 +20,10 @@ pub enum Error<K: Array, V: Array> {
     InvalidKey(<K as Array>::Error),
     #[error("invalid value: {0}")]
     InvalidValue(<V as Array>::Error),
+    #[error("invalid context byte")]
+    InvalidContextByte,
+    #[error("delete operation as non-zero value")]
+    InvalidDeleteOp,
 }
 
 /// The types of operations that change a key's state in the store.
@@ -51,7 +55,7 @@ impl<K: Array, V: Array> Operation<K, V> {
         match op_type {
             Type::Deleted => {
                 data.push(Self::DELETE_CONTEXT);
-                data.extend(vec![0u8; V::LEN_ENCODED]);
+                data.resize(Self::LEN_ENCODED, 0);
             }
             Type::Update(value) => {
                 data.push(Self::UPDATE_CONTEXT);
@@ -77,10 +81,10 @@ impl<K: Array, V: Array> Operation<K, V> {
         Type::Update(V::try_from(&self.data[K::LEN_ENCODED + 1..]).unwrap())
     }
 
-    pub fn to_op(&self) -> V {
+    pub fn to_value(&self) -> Option<V> {
         match self.to_type() {
-            Type::Deleted => panic!("No value for delete operation"),
-            Type::Update(v) => v,
+            Type::Deleted => None,
+            Type::Update(v) => Some(v),
         }
     }
 }
@@ -115,22 +119,27 @@ impl<K: Array, V: Array> TryFrom<&[u8]> for Operation<K, V> {
         if value.len() != Self::LEN_ENCODED {
             return Err(Error::InvalidLength);
         }
-        let mut data = Vec::with_capacity(Self::LEN_ENCODED);
-        data.extend_from_slice(&value[..K::LEN_ENCODED]);
-        let _ = K::try_from(data.as_slice()).map_err(|e| Error::InvalidKey(e))?;
 
-        if value[K::LEN_ENCODED] == 0 {
-            // Delete op_type
-            data.push(Self::DELETE_CONTEXT);
-        } else {
-            data.push(Self::UPDATE_CONTEXT);
-            let value_vec = value[K::LEN_ENCODED + 1..].to_vec();
-            let _ = V::try_from(value_vec).map_err(|e| Error::InvalidValue(e))?;
+        let _ = K::try_from(&value[..K::LEN_ENCODED]).map_err(|e| Error::InvalidKey(e))?;
+
+        match value[K::LEN_ENCODED] {
+            Self::UPDATE_CONTEXT => {
+                let _ = V::try_from(&value[K::LEN_ENCODED + 1..])
+                    .map_err(|e| Error::InvalidValue(e))?;
+            }
+            Self::DELETE_CONTEXT => {
+                // Check if the remaining bytes are all zeros
+                if !value[K::LEN_ENCODED + 1..].iter().all(|&b| b == 0) {
+                    return Err(Error::InvalidDeleteOp);
+                }
+            }
+            _ => {
+                return Err(Error::InvalidContextByte);
+            }
         }
-        data.extend_from_slice(&value[K::LEN_ENCODED + 1..]);
 
         Ok(Self {
-            data,
+            data: value.to_vec(),
             _phantom: std::marker::PhantomData,
         })
     }
@@ -168,8 +177,8 @@ impl<K: Array, V: Array> Deref for Operation<K, V> {
 impl<K: Array, V: Array> Display for Operation<K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.to_type() {
-            Type::Deleted => write!(f, "[Key:{} <deleted>]", self.to_key()),
-            Type::Update(value) => write!(f, "[Key:{} Value:{}]", self.to_key(), value),
+            Type::Deleted => write!(f, "[key:{} <deleted>]", self.to_key()),
+            Type::Update(value) => write!(f, "[key:{} value:{}]", self.to_key(), value),
         }
     }
 }
@@ -188,6 +197,7 @@ mod tests {
         let try_from = Operation::try_from(update_op.as_ref()).unwrap();
         assert_eq!(key, try_from.to_key());
         assert_eq!(Type::Update(value.clone()), try_from.to_type());
+        assert_eq!(try_from.to_value().unwrap(), value);
 
         let vec = update_op.to_vec();
 
@@ -202,6 +212,43 @@ mod tests {
         let try_from = Operation::<U64, U64>::try_from(delete_op.as_ref()).unwrap();
         assert_eq!(key2, try_from.to_key());
         assert_eq!(Type::Deleted, try_from.to_type());
+        assert_eq!(try_from.to_value(), None);
+
+        // test extra byte detection in delete operation
+        let mut invalid = delete_op.to_vec();
+        invalid[U64::LEN_ENCODED + 2] = 0xFF;
+        let try_from = Operation::<U64, U64>::try_from(&invalid);
+        assert!(matches!(try_from.unwrap_err(), Error::InvalidDeleteOp));
+
+        // test invalid context byte detection
+        let mut invalid = update_op.to_vec();
+        invalid[U64::LEN_ENCODED] = 2;
+        let try_from = Operation::<U64, U64>::try_from(&invalid);
+        assert!(matches!(try_from.unwrap_err(), Error::InvalidContextByte));
+
+        // test invalid length detection
+        let mut invalid = update_op.to_vec();
+        invalid.pop();
+        let try_from = Operation::<U64, U64>::try_from(&invalid);
+        assert!(matches!(try_from.unwrap_err(), Error::InvalidLength));
+    }
+
+    #[test]
+    fn test_operation_array_display() {
+        let key = U64::new(1234);
+        let value = U64::new(56789);
+        let update_op = Operation::new(key.clone(), Type::Update(value.clone()));
+        assert_eq!(
+            format!("{}", update_op),
+            format!("[key:{} value:{}]", key, value)
+        );
+
+        let key2 = U64::new(42);
+        let delete_op = Operation::<U64, U64>::new(key2.clone(), Type::Deleted);
+        assert_eq!(
+            format!("{}", delete_op),
+            format!("[key:{} <deleted>]", key2)
+        );
     }
 
     #[test]

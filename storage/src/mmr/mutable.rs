@@ -11,7 +11,7 @@
 use crate::mmr::{
     iterator::{leaf_num_to_pos, leaf_pos_to_num},
     mem::Mmr,
-    operation_array::{Operation, Type},
+    operation::{Operation, Type},
     verification::Proof,
     Error,
 };
