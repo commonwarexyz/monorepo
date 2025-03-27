@@ -1218,7 +1218,7 @@
                         "uid": "P02E4190217B50628"
                     },
                     "groupBy": [],
-                    "labelSelector": "process_cpu{deployer_name=~\"$Name\"}",
+                    "labelSelector": "process_cpu{deployer_name=~\"${Name:pipe}\"}",
                     "profileTypeId": "process_cpu:cpu:nanoseconds:cpu:nanoseconds",
                     "queryType": "profile",
                     "refId": "A",
@@ -1281,7 +1281,7 @@
     "templating": {
         "list": [
             {
-                "allValue": ".*",
+                "allValue": "",
                 "allowCustomValue": false,
                 "current": {
                     "text": "All",
