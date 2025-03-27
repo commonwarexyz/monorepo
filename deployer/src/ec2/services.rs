@@ -389,8 +389,7 @@ scrape_configs:
       - targets:
           - localhost
         labels:
-          job: binary
-          instance: {}
+          name: {}
           ip: {}
           region: {}
           __path__: /var/log/binary.log
