@@ -23,14 +23,12 @@ struct Location {
     len: u32,
 }
 
-/// In the case there are multiple records with the same key, we store them in a linked list.
+/// In the case there are multiple records with the same key, we store them in a vector.
 ///
-/// To minimize memory usage, we store the corresponding index of a particular item to determine
-/// its storage position.
+/// Using a vector instead of a linked list improves cache locality and reduces allocations
 struct Record {
-    index: u64,
-
-    next: Option<Box<Record>>,
+    // Store indices in descending order (newest first) for efficient access
+    indices: Vec<u64>,
 }
 
 /// Implementation of `Archive` storage.
@@ -100,14 +98,13 @@ impl<T: Translator, K: Array, B: Blob, E: Storage<B> + Metrics> Archive<T, K, B,
                 match keys.entry(translated_key.clone()) {
                     Entry::Occupied(entry) => {
                         let entry: &mut Record = entry.into_mut();
-                        entry.next = Some(Box::new(Record {
-                            index,
-                            next: entry.next.take(),
-                        }));
+                        entry.indices.push(index);
                         overlaps += 1;
                     }
                     Entry::Vacant(entry) => {
-                        entry.insert(Record { index, next: None });
+                        entry.insert(Record {
+                            indices: vec![index],
+                        });
                     }
                 };
 
@@ -202,60 +199,24 @@ impl<T: Translator, K: Array, B: Blob, E: Storage<B> + Metrics> Archive<T, K, B,
     /// Cleanup keys in-memory that are no longer valid.
     fn cleanup(&mut self, translated_key: &T::Key) {
         // Find new head (first valid key)
-        let head = match self.keys.get_mut(translated_key) {
+        let records = match self.keys.get_mut(translated_key) {
             Some(head) => head,
             None => return,
         };
+
         let oldest_allowed = self.oldest_allowed.unwrap_or(0);
-        let found = loop {
-            if head.index < oldest_allowed {
-                self.keys_pruned.inc();
-                match head.next {
-                    Some(ref mut next) => {
-                        // Update invalid head in-place
-                        head.index = next.index;
-                        head.next = next.next.take();
-                    }
-                    None => {
-                        // No valid entries remaining
-                        break false;
-                    }
-                }
-            } else {
-                // Found valid head
-                break true;
-            }
-        };
 
-        // If there are no valid entries remaining (there is no head), remove key.
-        //
-        // In practice, we never expect to hit this when `cleanup` is called because we are
-        // always inserting a value at this `translated_key` but include for completeness.
-        if !found {
-            self.keys.remove(translated_key);
-            return;
-        }
+        // Filter out indices that are too old
+        records.indices.retain(|&index| index >= oldest_allowed);
 
-        // Keep valid post-head entries
-        let mut cursor = head;
-        loop {
-            // Set next and continue
-            if let Some(next) = cursor.next.as_ref().map(|next| next.index) {
-                // If next is invalid, skip it
-                if next < oldest_allowed {
-                    cursor.next = cursor.next.as_mut().unwrap().next.take();
-                    self.keys_pruned.inc();
-                    continue;
-                }
+        // // If all indices were pruned, remove the key entirely
+        // if records.indices.is_empty() {
+        //     self.keys.remove(translated_key);
+        // }
 
-                // If next is valid, set current to next
-                cursor = cursor.next.as_mut().unwrap();
-                continue;
-            }
-
-            // There is no next, we are done
-            return;
-        }
+        // Update pruning metrics
+        self.keys_pruned
+            .inc_by((records.indices.capacity() - records.indices.len()) as u64);
     }
 
     /// Store an item in `Archive`. Both indices and keys are assumed to both be globally unique.
@@ -317,13 +278,13 @@ impl<T: Translator, K: Array, B: Blob, E: Storage<B> + Metrics> Archive<T, K, B,
         match entry {
             Entry::Occupied(entry) => {
                 let entry: &mut Record = entry.into_mut();
-                entry.next = Some(Box::new(Record {
-                    index,
-                    next: entry.next.take(),
-                }));
+
+                entry.indices.push(index);
             }
             Entry::Vacant(entry) => {
-                entry.insert(Record { index, next: None });
+                entry.insert(Record {
+                    indices: vec![index],
+                });
             }
         }
 
@@ -396,42 +357,59 @@ impl<T: Translator, K: Array, B: Blob, E: Storage<B> + Metrics> Archive<T, K, B,
         let translated_key = self.cfg.translator.transform(key);
 
         // Fetch index
-        let mut record = self.keys.get(&translated_key);
+        let records = match self.keys.get(&translated_key) {
+            Some(records) => records,
+            None => return Ok(None),
+        };
         let min_allowed = self.oldest_allowed.unwrap_or(0);
-        while let Some(head) = record {
-            // Check for data if section is valid
-            if head.index >= min_allowed {
-                // Fetch item from disk
-                let location = self
-                    .indices
-                    .get(&head.index)
-                    .ok_or(Error::RecordCorrupted)?;
-                let section = self.cfg.section_mask & head.index;
-                let item = self
-                    .journal
-                    .get(section, location.offset, Some(location.len))
-                    .await?
-                    .ok_or(Error::RecordCorrupted)?;
-
-                // Get key from item
-                let (disk_key, value) = Self::parse_item(item)?;
-                if disk_key.as_ref() == key.as_ref() {
-                    // If compression is enabled, decompress the data before returning.
-                    if self.cfg.compression.is_some() {
-                        return Ok(Some(
-                            decompress(&value, u32::MAX as usize)
-                                .map_err(|_| Error::DecompressionFailed)?
-                                .into(),
-                        ));
-                    }
-                    return Ok(Some(value));
-                }
-                self.unnecessary_reads.inc();
+        // Iterate through indices (newest first)
+        for &index in &records.indices {
+            // Skip indices that are too old
+            if index < min_allowed {
+                continue;
             }
 
-            // Move to next index
-            record = head.next.as_deref();
+            // Fetch item from disk
+            let location = match self.indices.get(&index) {
+                Some(location) => location,
+                None => {
+                    continue;
+                }
+            };
+
+            let section = self.cfg.section_mask & index;
+            let item = match self
+                .journal
+                .get(section, location.offset, Some(location.len))
+                .await?
+            {
+                Some(item) => item,
+                None => {
+                    // Record was corrupted or missing
+                    continue;
+                }
+            };
+
+            // Get key from item
+            let (disk_key, value) = Self::parse_item(item)?;
+
+            // Verify key match (hash collisions can occur)
+            if disk_key.as_ref() == key.as_ref() {
+                // If compression is enabled, decompress the data before returning
+                if self.cfg.compression.is_some() {
+                    return Ok(Some(
+                        decompress(&value, u32::MAX as usize)
+                            .map_err(|_| Error::DecompressionFailed)?
+                            .into(),
+                    ));
+                }
+                return Ok(Some(value));
+            }
+
+            self.unnecessary_reads.inc();
         }
+
+        // No matching record found
         Ok(None)
     }
 
@@ -454,33 +432,30 @@ impl<T: Translator, K: Array, B: Blob, E: Storage<B> + Metrics> Archive<T, K, B,
         let translated_key = self.cfg.translator.transform(key);
 
         // Fetch index
-        let mut record = self.keys.get(&translated_key);
+        let records = match self.keys.get(&translated_key) {
+            Some(records) => records,
+            None => return Err(Error::RecordCorrupted),
+        };
         let min_allowed = self.oldest_allowed.unwrap_or(0);
-        while let Some(head) = record {
-            // Check for data if section is valid
-            if head.index >= min_allowed {
-                // Fetch item from disk
-                let section = self.cfg.section_mask & head.index;
-                let location = self
-                    .indices
-                    .get(&head.index)
-                    .ok_or(Error::RecordCorrupted)?;
-                let item = self
-                    .journal
-                    .get_prefix(section, location.offset, Self::PREFIX_LEN)
-                    .await?
-                    .ok_or(Error::RecordCorrupted)?;
 
-                // Get key from item
-                let (_, item_key) = Self::parse_prefix(item)?;
-                if key == item_key {
-                    return Ok(true);
-                }
-                self.unnecessary_reads.inc();
+        for &index in &records.indices {
+            if index < min_allowed {
+                continue;
             }
+            let section = self.cfg.section_mask & index;
+            let location = self.indices.get(&index).ok_or(Error::RecordCorrupted)?;
+            let item = self
+                .journal
+                .get_prefix(section, location.offset, Self::PREFIX_LEN)
+                .await?
+                .ok_or(Error::RecordCorrupted)?;
 
-            // Move to next index
-            record = head.next.as_deref();
+            // Get key from item
+            let (_, item_key) = Self::parse_prefix(item)?;
+            if key == item_key {
+                return Ok(true);
+            }
+            self.unnecessary_reads.inc();
         }
         Ok(false)
     }
