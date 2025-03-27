@@ -1,3 +1,5 @@
+//! Utilities to serve metrics over HTTP.
+
 use crate::{Listener, Metrics, Network, Sink, Spawner, Stream};
 use std::net::SocketAddr;
 use tracing::{debug, error};
