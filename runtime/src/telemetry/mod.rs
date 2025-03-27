@@ -1,19 +1,20 @@
 //! Utilities for collecting and reporting telemetry data.
 
+pub mod metrics;
+pub mod traces;
+
 use crate::tokio::Context;
 use crate::Spawner;
-use metrics::server;
+use std::net::SocketAddr;
 use traces::exporter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::Registry;
 
-pub mod metrics;
-pub mod traces;
-
+/// Initialize telemetry with the given configuration.
 pub fn init(
     context: Context,
     level: &str,
-    metrics: Option<server::Config>,
+    metrics: Option<SocketAddr>,
     traces: Option<exporter::Config>,
 ) {
     // Create fmt layer for logging

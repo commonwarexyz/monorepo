@@ -4,10 +4,6 @@ use crate::{Listener, Metrics, Network, Sink, Stream};
 use std::net::SocketAddr;
 use tracing::{debug, error};
 
-pub struct Config {
-    pub address: SocketAddr,
-}
-
 /// Handles a single connection by sending back the current metrics.
 /// Ignores any data sent by the client.
 async fn encode<C, Si>(context: &C, mut sink: Si)
@@ -35,10 +31,10 @@ where
 /// Serve metrics over HTTP (on all methods and paths) for the given address.
 pub async fn serve<Si: Sink, St: Stream, L: Listener<Si, St>, C: Metrics + Network<L, Si, St>>(
     context: C,
-    cfg: Config,
+    address: SocketAddr,
 ) {
     let mut listener = context
-        .bind(cfg.address)
+        .bind(address)
         .await
         .expect("Could not bind to metrics address");
     while let Ok((peer, sink, _)) = listener.accept().await {

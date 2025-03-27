@@ -10,19 +10,22 @@ use opentelemetry_sdk::{
     Resource,
 };
 
+/// Configuration for exporting traces to an OTLP endpoint.
 pub struct Config {
+    /// The OTLP endpoint to export traces to.
     pub endpoint: String,
+    /// The service name to use for the traces.
     pub name: String,
+    /// The sampling rate to use for the traces.
     pub rate: f64,
 }
 
 /// Export traces to an OTLP endpoint.
 pub fn export(cfg: Config) -> Result<Tracer, TraceError> {
     // Create the OTLP HTTP exporter
-    let endpoint = format!("{}/v1/traces", cfg.endpoint);
     let exporter = SpanExporter::builder()
         .with_http()
-        .with_endpoint(endpoint)
+        .with_endpoint(cfg.endpoint)
         .build()?;
 
     // Configure the batch processor
