@@ -41,6 +41,7 @@
 //! |  - Security Group            |  |  - Security Group            |
 //! |    - All: Deployer IP        |  |    - All: Deployer IP        |
 //! |    - 9090: Monitoring IP     |  |    - 9090: Monitoring IP     |
+//! |    - 9100: Monitoring IP     |  |    - 9100: Monitoring IP     |
 //! |    - 8012: 0.0.0.0/0         |  |    - 8765: 12.3.7.9/32       |
 //! +------------------------------+  +------------------------------+
 //! ```
@@ -51,7 +52,7 @@
 //!
 //! * Deployed in `us-east-1` with a configurable ARM64 instance type (e.g., `t4g.small`) and storage (e.g., 10GB gp2).
 //! * Runs:
-//!     * **Prometheus**: Scrapes metrics from all instances at `:9090`, configured via `/opt/prometheus/prometheus.yml`.
+//!     * **Prometheus**: Scrapes binary metrics from all instances at `:9090` and system metrics from all instances at `:9100`.
 //!     * **Loki**: Listens at `:3100`, storing logs in `/loki/chunks` with a TSDB index at `/loki/index`.
 //!     * **Pyroscope**: Listens at `:4040`, storing profiles in `/var/lib/pyroscope`.
 //!     * **Grafana**: Hosted at `:3000`, provisioned with Prometheus and Loki datasources and a custom dashboard.
@@ -67,7 +68,7 @@
 //!     * **Promtail**: Forwards `/var/log/binary.log` to Loki on the monitoring instance.
 //! * Ingress:
 //!     * Deployer IP access (TCP 0-65535).
-//!     * Monitoring IP access to `:9090` for Prometheus.
+//!     * Monitoring IP access to `:9090` and `:9100` for Prometheus.
 //!     * User-defined ports from the configuration.
 //!
 //! ## Networking
@@ -139,6 +140,7 @@
 //!     storage_class: gp2
 //!     binary: /path/to/binary
 //!     config: /path/to/config.conf
+//!     profiling: true
 //!   - name: node2
 //!     region: us-west-2
 //!     instance_type: t4g.small
@@ -146,6 +148,7 @@
 //!     storage_class: gp2
 //!     binary: /path/to/binary2
 //!     config: /path/to/config2.conf
+//!     profiling: false
 //! ports:
 //!   - protocol: tcp
 //!     port: 4545
