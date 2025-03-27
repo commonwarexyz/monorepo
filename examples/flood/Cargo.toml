@@ -23,11 +23,9 @@ tracing-subscriber = { workspace = true, features = ["fmt", "json"] }
 serde = { workspace = true, features = ["derive"] }
 serde_yaml = { workspace = true }
 governor = { workspace = true }
-axum = { workspace = true }
 rand = { workspace = true }
 futures = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
-sysinfo = "0.33.1"
 
 [[bin]]
 name = "flood"
@@ -38,7 +36,3 @@ bench = false
 name = "setup"
 path = "src/bin/setup.rs"
 bench = false
-
-[profile.release]
-# Setting debug to true instructs cargo to include debug symbols in the release binary (not to disable optimizations).
-debug = true

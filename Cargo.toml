@@ -24,7 +24,7 @@ commonware-broadcast = { version = "0.0.43", path = "broadcast" }
 commonware-codec = { version = "0.0.43", path = "codec" }
 commonware-consensus = { version = "0.0.43", path = "consensus" }
 commonware-cryptography = { version = "0.0.43", path = "cryptography" }
-commonware-deployer = { version = "0.0.43", path = "deployer" }
+commonware-deployer = { version = "0.0.43", path = "deployer", default-features = false }
 commonware-macros = { version = "0.0.43", path = "macros" }
 commonware-p2p = { version = "0.0.43", path = "p2p" }
 commonware-resolver = { version = "0.0.43", path = "resolver" }
@@ -75,6 +75,12 @@ overflow-checks = true
 # To guard against unexpected behavior in production, we enable overflow checks in
 # "release" although they incur some performance penalty.
 overflow-checks = true
+
+[profile.release-with-debug]
+inherits = "release"
+# Setting debug to true instructs cargo to include debug symbols in the release
+# binary (not to disable optimizations).
+debug = true
 
 [profile.test]
 # Although overflow checks are enabled by default in "test", we explicitly

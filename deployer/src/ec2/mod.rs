@@ -41,6 +41,7 @@
 //! |  - Security Group            |  |  - Security Group            |
 //! |    - All: Deployer IP        |  |    - All: Deployer IP        |
 //! |    - 9090: Monitoring IP     |  |    - 9090: Monitoring IP     |
+//! |    - 9100: Monitoring IP     |  |    - 9100: Monitoring IP     |
 //! |    - 8012: 0.0.0.0/0         |  |    - 8765: 12.3.7.9/32       |
 //! +------------------------------+  +------------------------------+
 //! ```
@@ -51,7 +52,7 @@
 //!
 //! * Deployed in `us-east-1` with a configurable ARM64 instance type (e.g., `t4g.small`) and storage (e.g., 10GB gp2).
 //! * Runs:
-//!     * **Prometheus**: Scrapes metrics from all instances at `:9090`, configured via `/opt/prometheus/prometheus.yml`.
+//!     * **Prometheus**: Scrapes binary metrics from all instances at `:9090` and system metrics from all instances at `:9100`.
 //!     * **Loki**: Listens at `:3100`, storing logs in `/loki/chunks` with a TSDB index at `/loki/index`.
 //!     * **Pyroscope**: Listens at `:4040`, storing profiles in `/var/lib/pyroscope`.
 //!     * **Grafana**: Hosted at `:3000`, provisioned with Prometheus and Loki datasources and a custom dashboard.
@@ -67,7 +68,7 @@
 //!     * **Promtail**: Forwards `/var/log/binary.log` to Loki on the monitoring instance.
 //! * Ingress:
 //!     * Deployer IP access (TCP 0-65535).
-//!     * Monitoring IP access to `:9090` for Prometheus.
+//!     * Monitoring IP access to `:9090` and `:9100` for Prometheus.
 //!     * User-defined ports from the configuration.
 //!
 //! ## Networking
@@ -139,6 +140,7 @@
 //!     storage_class: gp2
 //!     binary: /path/to/binary
 //!     config: /path/to/config.conf
+//!     profiling: true
 //!   - name: node2
 //!     region: us-west-2
 //!     instance_type: t4g.small
@@ -146,6 +148,7 @@
 //!     storage_class: gp2
 //!     binary: /path/to/binary2
 //!     config: /path/to/config2.conf
+//!     profiling: false
 //! ports:
 //!   - protocol: tcp
 //!     port: 4545
@@ -153,100 +156,109 @@
 //! ```
 
 use serde::{Deserialize, Serialize};
-use std::{net::IpAddr, path::PathBuf};
-use thiserror::Error;
+use std::net::IpAddr;
 
-pub mod aws;
-mod create;
-pub mod services;
-pub use create::create;
-mod update;
-pub use update::update;
-mod authorize;
-pub use authorize::authorize;
-mod destroy;
-pub use destroy::destroy;
-pub mod utils;
+cfg_if::cfg_if! {
+    if #[cfg(feature="aws")] {
+        use thiserror::Error;
+        use std::path::PathBuf;
+
+        pub mod aws;
+        mod create;
+        pub mod services;
+        pub use create::create;
+        mod update;
+        pub use update::update;
+        mod authorize;
+        pub use authorize::authorize;
+        mod destroy;
+        pub use destroy::destroy;
+        pub mod utils;
+
+        /// Name of the monitoring instance
+        const MONITORING_NAME: &str = "monitoring";
+
+        /// AWS region where monitoring instances are deployed
+        const MONITORING_REGION: &str = "us-east-1";
+
+        /// File name that indicates the deployment completed
+        const CREATED_FILE_NAME: &str = "created";
+
+        /// File name that indicates the deployment was destroyed
+        const DESTROYED_FILE_NAME: &str = "destroyed";
+
+        /// Port on instance where system metrics are exposed
+        const SYSTEM_METRICS_PORT: u16 = 9100;
+
+        /// Port on monitoring where logs are pushed
+        const LOGS_PORT: u16 = 3100;
+
+        /// Port on monitoring where profiles are pushed
+        const PROFILES_PORT: u16 = 4040;
+
+        /// Subcommand name
+        pub const CMD: &str = "ec2";
+
+        /// Create subcommand name
+        pub const CREATE_CMD: &str = "create";
+
+        /// Update subcommand name
+        pub const UPDATE_CMD: &str = "update";
+
+        /// Authorize subcommand name
+        pub const AUTHORIZE_CMD: &str = "authorize";
+
+        /// Destroy subcommand name
+        pub const DESTROY_CMD: &str = "destroy";
+
+        /// Directory where deployer files are stored
+        fn deployer_directory(tag: &str) -> PathBuf {
+            PathBuf::from(format!("/tmp/deployer-{}", tag))
+        }
+
+        /// Errors that can occur when deploying infrastructure on AWS
+        #[derive(Error, Debug)]
+        pub enum Error {
+            #[error("AWS EC2 error: {0}")]
+            AwsEc2(#[from] aws_sdk_ec2::Error),
+            #[error("AWS security group ingress error: {0}")]
+            AwsSecurityGroupIngress(#[from] aws_sdk_ec2::operation::authorize_security_group_ingress::AuthorizeSecurityGroupIngressError),
+            #[error("AWS describe instances error: {0}")]
+            AwsDescribeInstances(#[from] aws_sdk_ec2::operation::describe_instances::DescribeInstancesError),
+            #[error("IO error: {0}")]
+            Io(#[from] std::io::Error),
+            #[error("YAML error: {0}")]
+            Yaml(#[from] serde_yaml::Error),
+            #[error("creation already attempted")]
+            CreationAttempted,
+            #[error("invalid instance name: {0}")]
+            InvalidInstanceName(String),
+            #[error("reqwest error: {0}")]
+            Reqwest(#[from] reqwest::Error),
+            #[error("SCP failed")]
+            ScpFailed,
+            #[error("SSH failed")]
+            SshFailed,
+            #[error("keygen failed")]
+            KeygenFailed,
+            #[error("service timeout({0}): {1}")]
+            ServiceTimeout(String, String),
+            #[error("deployment does not exist: {0}")]
+            DeploymentDoesNotExist(String),
+            #[error("deployment is not complete: {0}")]
+            DeploymentNotComplete(String),
+            #[error("deployment already destroyed: {0}")]
+            DeploymentAlreadyDestroyed(String),
+            #[error("private key not found")]
+            PrivateKeyNotFound,
+            #[error("invalid IP address: {0}")]
+            InvalidIpAddress(String),
+        }
+    }
+}
 
 /// Port on binary where metrics are exposed
 pub const METRICS_PORT: u16 = 9090;
-
-/// Port on monitoring where logs are pushed
-pub const LOGS_PORT: u16 = 3100;
-
-/// Port on monitoring where profiles are pushed
-pub const PROFILES_PORT: u16 = 4040;
-
-/// Name of the monitoring instance
-const MONITORING_NAME: &str = "monitoring";
-
-/// AWS region where monitoring instances are deployed
-const MONITORING_REGION: &str = "us-east-1";
-
-/// Subcommand name
-pub const CMD: &str = "ec2";
-
-/// Create subcommand name
-pub const CREATE_CMD: &str = "create";
-
-/// Update subcommand name
-pub const UPDATE_CMD: &str = "update";
-
-/// Authorize subcommand name
-pub const AUTHORIZE_CMD: &str = "authorize";
-
-/// Destroy subcommand name
-pub const DESTROY_CMD: &str = "destroy";
-
-/// File name that indicates the deployment completed
-const CREATED_FILE_NAME: &str = "created";
-
-/// File name that indicates the deployment was destroyed
-const DESTROYED_FILE_NAME: &str = "destroyed";
-
-/// Directory where deployer files are stored
-fn deployer_directory(tag: &str) -> PathBuf {
-    PathBuf::from(format!("/tmp/deployer-{}", tag))
-}
-
-/// Errors that can occur when deploying infrastructure on AWS
-#[derive(Error, Debug)]
-pub enum Error {
-    #[error("AWS EC2 error: {0}")]
-    AwsEc2(#[from] aws_sdk_ec2::Error),
-    #[error("AWS security group ingress error: {0}")]
-    AwsSecurityGroupIngress(#[from] aws_sdk_ec2::operation::authorize_security_group_ingress::AuthorizeSecurityGroupIngressError),
-    #[error("AWS describe instances error: {0}")]
-    AwsDescribeInstances(#[from] aws_sdk_ec2::operation::describe_instances::DescribeInstancesError),
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("YAML error: {0}")]
-    Yaml(#[from] serde_yaml::Error),
-    #[error("creation already attempted")]
-    CreationAttempted,
-    #[error("invalid instance name: {0}")]
-    InvalidInstanceName(String),
-    #[error("reqwest error: {0}")]
-    Reqwest(#[from] reqwest::Error),
-    #[error("SCP failed")]
-    ScpFailed,
-    #[error("SSH failed")]
-    SshFailed,
-    #[error("keygen failed")]
-    KeygenFailed,
-    #[error("service timeout({0}): {1}")]
-    ServiceTimeout(String, String),
-    #[error("deployment does not exist: {0}")]
-    DeploymentDoesNotExist(String),
-    #[error("deployment is not complete: {0}")]
-    DeploymentNotComplete(String),
-    #[error("deployment already destroyed: {0}")]
-    DeploymentAlreadyDestroyed(String),
-    #[error("private key not found")]
-    PrivateKeyNotFound,
-    #[error("invalid IP address: {0}")]
-    InvalidIpAddress(String),
-}
 
 /// Peer deployment information
 #[derive(Serialize, Deserialize, Clone)]

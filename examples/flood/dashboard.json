@@ -109,11 +109,11 @@
                         "uid": "PBFA97CFB590B2093"
                     },
                     "disableTextWrap": false,
-                    "editorMode": "builder",
-                    "expr": "system_cpu_usage{job=~\"$Job\"}",
+                    "editorMode": "code",
+                    "expr": "avg by (deployer_name,deployer_ip) (1 - rate(node_cpu_seconds_total{mode=\"idle\", deployer_name=~\"$Name\"}[1m])) * 100",
                     "fullMetaSearch": false,
                     "includeNullMetadata": true,
-                    "legendFormat": "{{job}} ({{instance}})",
+                    "legendFormat": "{{deployer_name}} ({{deployer_ip}})",
                     "range": true,
                     "refId": "A",
                     "useBackend": false
@@ -207,11 +207,11 @@
             "targets": [
                 {
                     "disableTextWrap": false,
-                    "editorMode": "builder",
-                    "expr": "system_memory_used{job=~\"$Job\"}",
+                    "editorMode": "code",
+                    "expr": "node_memory_MemTotal_bytes{deployer_name=~\"$Name\"} - node_memory_MemFree_bytes{deployer_name=~\"$Name\"} - node_memory_Buffers_bytes{deployer_name=~\"$Name\"} - node_memory_Cached_bytes{deployer_name=~\"$Name\"}",
                     "fullMetaSearch": false,
                     "includeNullMetadata": true,
-                    "legendFormat": "{{job}} ({{instance}})",
+                    "legendFormat": "{{deployer_name}} ({{deployer_ip}})",
                     "range": true,
                     "refId": "A",
                     "useBackend": false
@@ -305,11 +305,11 @@
             "targets": [
                 {
                     "disableTextWrap": false,
-                    "editorMode": "builder",
-                    "expr": "system_memory_free{job=~\"$Job\"}",
+                    "editorMode": "code",
+                    "expr": "node_memory_MemFree_bytes{deployer_name=~\"$Name\"}",
                     "fullMetaSearch": false,
                     "includeNullMetadata": true,
-                    "legendFormat": "{{job}} ({{instance}})",
+                    "legendFormat": "{{deployer_name}} ({{deployer_ip}})",
                     "range": true,
                     "refId": "A",
                     "useBackend": false
@@ -404,10 +404,10 @@
                 {
                     "disableTextWrap": false,
                     "editorMode": "code",
-                    "expr": "irate(runtime_inbound_bandwidth_total{job=~\"$Job\"}[1m])",
+                    "expr": "irate(runtime_inbound_bandwidth_total{deployer_name=~\"$Name\"}[1m])",
                     "fullMetaSearch": false,
                     "includeNullMetadata": true,
-                    "legendFormat": "{{job}} ({{instance}})",
+                    "legendFormat": "{{deployer_name}} ({{deployer_ip}})",
                     "range": true,
                     "refId": "A",
                     "useBackend": false
@@ -502,10 +502,10 @@
                 {
                     "disableTextWrap": false,
                     "editorMode": "builder",
-                    "expr": "irate(runtime_outbound_bandwidth_total{job=~\"$Job\"}[1m])",
+                    "expr": "irate(runtime_outbound_bandwidth_total{deployer_name=~\"$Name\"}[1m])",
                     "fullMetaSearch": false,
                     "includeNullMetadata": true,
-                    "legendFormat": "{{job}} ({{instance}})",
+                    "legendFormat": "{{deployer_name}} ({{deployer_ip}})",
                     "range": true,
                     "refId": "A",
                     "useBackend": false
@@ -599,10 +599,10 @@
                 {
                     "disableTextWrap": false,
                     "editorMode": "builder",
-                    "expr": "sum by(job, instance) (runtime_tasks_running{job=~\"$Job\"})",
+                    "expr": "sum by(deployer_name, deployer_ip) (runtime_tasks_running{deployer_name=~\"$Name\"})",
                     "fullMetaSearch": false,
                     "includeNullMetadata": false,
-                    "legendFormat": "{{job}} ({{instance}})",
+                    "legendFormat": "{{deployer_name}} ({{deployer_ip}})",
                     "range": true,
                     "refId": "A",
                     "useBackend": false
@@ -696,10 +696,10 @@
                 {
                     "disableTextWrap": false,
                     "editorMode": "builder",
-                    "expr": "network_spawner_connections{job=~\"$Job\"}",
+                    "expr": "network_spawner_connections{deployer_name=~\"$Name\"}",
                     "fullMetaSearch": false,
                     "includeNullMetadata": true,
-                    "legendFormat": "{{job}} ({{instance}})",
+                    "legendFormat": "{{deployer_name}} ({{deployer_ip}})",
                     "range": true,
                     "refId": "A",
                     "useBackend": false
@@ -793,10 +793,10 @@
                 {
                     "disableTextWrap": false,
                     "editorMode": "builder",
-                    "expr": "network_tracker_tracked_peers{job=~\"$Job\"}",
+                    "expr": "network_tracker_tracked_peers{deployer_name=~\"$Name\"}",
                     "fullMetaSearch": false,
                     "includeNullMetadata": true,
-                    "legendFormat": "{{job}} ({{instance}})",
+                    "legendFormat": "{{deployer_name}} ({{deployer_ip}})",
                     "range": true,
                     "refId": "A",
                     "useBackend": false
@@ -890,10 +890,10 @@
                 {
                     "disableTextWrap": false,
                     "editorMode": "builder",
-                    "expr": "network_dialer_dial_attempts_total{job=~\"$Job\"}",
+                    "expr": "network_dialer_dial_attempts_total{deployer_name=~\"$Name\"}",
                     "fullMetaSearch": false,
                     "includeNullMetadata": true,
-                    "legendFormat": "{{job}} ({{instance}})",
+                    "legendFormat": "{{deployer_name}} ({{deployer_ip}})",
                     "range": true,
                     "refId": "A",
                     "useBackend": false
@@ -987,10 +987,10 @@
                 {
                     "disableTextWrap": false,
                     "editorMode": "code",
-                    "expr": "irate(flood_sender_messages_total{job=~\"$Job\"}[1m])",
+                    "expr": "irate(flood_sender_messages_total{deployer_name=~\"$Name\"}[1m])",
                     "fullMetaSearch": false,
                     "includeNullMetadata": true,
-                    "legendFormat": "{{job}} ({{instance}})",
+                    "legendFormat": "{{deployer_name}} ({{deployer_ip}})",
                     "range": true,
                     "refId": "A",
                     "useBackend": false
@@ -1084,10 +1084,10 @@
                 {
                     "disableTextWrap": false,
                     "editorMode": "code",
-                    "expr": "sum(irate(network_router_messages_dropped_total{job=~\"$Job\"}[1m])) by (job, instance)",
+                    "expr": "sum(irate(network_router_messages_dropped_total{deployer_name=~\"$Name\"}[1m])) by (deployer_name, deployer_ip)",
                     "fullMetaSearch": false,
                     "includeNullMetadata": true,
-                    "legendFormat": "{{job}} ({{instance}})",
+                    "legendFormat": "{{deployer_name}} ({{deployer_ip}})",
                     "range": true,
                     "refId": "A",
                     "useBackend": false
@@ -1181,10 +1181,10 @@
                 {
                     "disableTextWrap": false,
                     "editorMode": "code",
-                    "expr": "irate(flood_receiver_messages_total{job=~\"$Job\"}[1m])",
+                    "expr": "irate(flood_receiver_messages_total{deployer_name=~\"$Name\"}[1m])",
                     "fullMetaSearch": false,
                     "includeNullMetadata": true,
-                    "legendFormat": "{{job}} ({{instance}})",
+                    "legendFormat": "{{deployer_name}} ({{deployer_ip}})",
                     "range": true,
                     "refId": "A",
                     "useBackend": false
@@ -1218,7 +1218,7 @@
                         "uid": "P02E4190217B50628"
                     },
                     "groupBy": [],
-                    "labelSelector": "process_cpu{name=~\"$Job\"}",
+                    "labelSelector": "process_cpu{deployer_name=~\"${Name:pipe}\"}",
                     "profileTypeId": "process_cpu:cpu:nanoseconds:cpu:nanoseconds",
                     "queryType": "profile",
                     "refId": "A",
@@ -1264,7 +1264,7 @@
                     },
                     "direction": "backward",
                     "editorMode": "builder",
-                    "expr": "{filename=\"/var/log/binary.log\", instance=~\"$Job\"} | json | line_format ` [{{.detected_level}}] {{.target}} {{.fields_message}}`",
+                    "expr": "{filename=\"/var/log/binary.log\", deployer_name=~\"$Name\"} | json | line_format ` [{{.detected_level}}] {{.target}} {{.fields_message}}`",
                     "legendFormat": "",
                     "queryType": "range",
                     "refId": "A"
@@ -1281,7 +1281,7 @@
     "templating": {
         "list": [
             {
-                "allValue": ".*",
+                "allValue": "",
                 "allowCustomValue": false,
                 "current": {
                     "text": "All",
@@ -1289,20 +1289,20 @@
                         "$__all"
                     ]
                 },
-                "definition": "label_values(job)",
+                "definition": "label_values(deployer_name)",
                 "description": "",
                 "hide": 1,
                 "includeAll": true,
                 "multi": true,
-                "name": "Job",
+                "name": "Name",
                 "options": [],
                 "query": {
                     "qryType": 1,
-                    "query": "label_values(job)",
+                    "query": "label_values(deployer_name)",
                     "refId": "PrometheusVariableQueryEditor-VariableQuery"
                 },
                 "refresh": 2,
-                "regex": "^(?!.*prometheus).*$",
+                "regex": "",
                 "type": "query"
             }
         ]

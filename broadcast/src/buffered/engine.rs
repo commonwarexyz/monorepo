@@ -6,7 +6,7 @@ use commonware_cryptography::{Digest, Digestible};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{
-    telemetry::status::{CounterExt, Status},
+    telemetry::metrics::status::{CounterExt, Status},
     Clock, Handle, Metrics, Spawner,
 };
 use commonware_utils::Array;

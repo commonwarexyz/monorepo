@@ -6,6 +6,9 @@ pub const PROMETHEUS_VERSION: &str = "3.2.0";
 /// Version of Promtail to download and install
 pub const PROMTAIL_VERSION: &str = "3.4.2";
 
+/// Version of Node Exporter to download and install
+pub const NODE_EXPORTER_VERSION: &str = "1.9.0";
+
 /// Version of Loki to download and install
 pub const LOKI_VERSION: &str = "3.4.2";
 
@@ -386,15 +389,65 @@ scrape_configs:
       - targets:
           - localhost
         labels:
-          job: binary
-          instance: {}
-          ip: {}
-          region: {}
+          deployer_name: {}
+          deployer_ip: {}
+          deployer_region: {}
           __path__: /var/log/binary.log
       "#,
         monitoring_private_ip, instance_name, ip, region
     )
 }
+
+/// Command to install Node Exporter on instances
+pub fn setup_node_exporter_cmd(node_exporter_version: &str) -> String {
+    let node_exporter_url = format!(
+      "https://github.com/prometheus/node_exporter/releases/download/v{}/node_exporter-{}.linux-arm64.tar.gz",
+      node_exporter_version, node_exporter_version
+  );
+    format!(
+        r#"
+sudo apt-get update -y
+sudo apt-get install -y wget tar
+
+# Download Node Exporter with retries
+for i in {{1..5}}; do
+  wget -O /home/ubuntu/node_exporter.tar.gz {} && break
+  sleep 10
+done
+
+# Install Node Exporter
+sudo mkdir -p /opt/node_exporter
+tar xvfz /home/ubuntu/node_exporter.tar.gz -C /home/ubuntu
+sudo mv /home/ubuntu/node_exporter-{}.linux-arm64 /opt/node_exporter/node_exporter-{}.linux-arm64
+sudo ln -s /opt/node_exporter/node_exporter-{}.linux-arm64/node_exporter /opt/node_exporter/node_exporter
+sudo chmod +x /opt/node_exporter/node_exporter
+sudo mv /home/ubuntu/node_exporter.service /etc/systemd/system/node_exporter.service
+
+# Start service
+sudo systemctl daemon-reload
+sudo systemctl start node_exporter
+sudo systemctl enable node_exporter
+"#,
+        node_exporter_url, node_exporter_version, node_exporter_version, node_exporter_version
+    )
+}
+
+/// Systemd service file content for Node Exporter
+pub const NODE_EXPORTER_SERVICE: &str = r#"
+[Unit]
+Description=Node Exporter
+After=network.target
+
+[Service]
+ExecStart=/opt/node_exporter/node_exporter
+TimeoutStopSec=60
+Restart=always
+User=ubuntu
+LimitNOFILE=infinity
+
+[Install]
+WantedBy=multi-user.target
+"#;
 
 /// Generates Prometheus configuration with scrape targets for all instance IPs
 pub fn generate_prometheus_config(instances: &[(&str, &str, &str)]) -> String {
@@ -403,18 +456,30 @@ pub fn generate_prometheus_config(instances: &[(&str, &str, &str)]) -> String {
 global:
   scrape_interval: 15s
 scrape_configs:
+  - job_name: 'monitoring_system'
+    static_configs:
+      - targets: ['localhost:9100']
 "#,
     );
     for (name, ip, region) in instances {
         config.push_str(&format!(
             r#"
-  - job_name: '{}'
+  - job_name: '{}_binary'
     static_configs:
       - targets: ['{}:9090']
         labels:
-          region: '{}'
+          deployer_name: '{}'
+          deployer_ip: '{}'
+          deployer_region: '{}'
+  - job_name: '{}_system'
+    static_configs:
+      - targets: ['{}:9100']
+        labels:
+          deployer_name: '{}'
+          deployer_ip: '{}'
+          deployer_region: '{}'
 "#,
-            name, ip, region
+            name, ip, name, ip, region, name, ip, name, ip, region
         ));
     }
     config
@@ -470,7 +535,7 @@ PROFILE_DURATION=60 # seconds
 PERF_FREQ=100 # Hz
 
 # Construct the Pyroscope application name with tags
-RAW_APP_NAME="binary{{name={name},ip={ip}, region={region}}}"
+RAW_APP_NAME="binary{{deployer_name={name},deployer_ip={ip},deployer_region={region}}}"
 APP_NAME=$(jq -nr --arg str "$RAW_APP_NAME" '$str | @uri')
 
 # Get the PID of the binary service

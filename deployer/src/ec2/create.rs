@@ -399,6 +399,8 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     std::fs::write(&pyroscope_service_path, PYROSCOPE_SERVICE)?;
     let promtail_service_path = temp_dir.join("promtail.service");
     std::fs::write(&promtail_service_path, PROMTAIL_SERVICE)?;
+    let node_exporter_service_path = temp_dir.join("node_exporter.service");
+    std::fs::write(&node_exporter_service_path, NODE_EXPORTER_SERVICE)?;
     let pyroscope_agent_service_path = temp_dir.join("pyroscope-agent.service");
     std::fs::write(&pyroscope_agent_service_path, PYROSCOPE_AGENT_SERVICE)?;
     let pyroscope_agent_timer_path = temp_dir.join("pyroscope-agent.timer");
@@ -489,6 +491,13 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     .await?;
     scp_file(
         private_key,
+        node_exporter_service_path.to_str().unwrap(),
+        &monitoring_ip,
+        "/home/ubuntu/node_exporter.service",
+    )
+    .await?;
+    scp_file(
+        private_key,
         pyroscope_config_path.to_str().unwrap(),
         &monitoring_ip,
         "/home/ubuntu/pyroscope.yml",
@@ -502,6 +511,13 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     )
     .await?;
     enable_bbr(private_key, &monitoring_ip, bbr_conf_path.to_str().unwrap()).await?;
+    ssh_execute(
+        private_key,
+        &monitoring_ip,
+        &setup_node_exporter_cmd(NODE_EXPORTER_VERSION),
+    )
+    .await?;
+    poll_service_active(private_key, &monitoring_ip, "node_exporter").await?;
     ssh_execute(
         private_key,
         &monitoring_ip,
@@ -547,6 +563,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         let logrotate_conf_path = logrotate_conf_path.clone();
         let bbr_conf_path = bbr_conf_path.clone();
         let promtail_service_path = promtail_service_path.clone();
+        let node_exporter_service_path = node_exporter_service_path.clone();
         let binary_service_path = binary_service_path.clone();
         let pyroscope_agent_service_path = pyroscope_agent_service_path.clone();
         let pyroscope_agent_timer_path = pyroscope_agent_timer_path.clone();
@@ -588,6 +605,13 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                 promtail_service_path.to_str().unwrap(),
                 &ip,
                 "/home/ubuntu/promtail.service",
+            )
+            .await?;
+            scp_file(
+                private_key,
+                node_exporter_service_path.to_str().unwrap(),
+                &ip,
+                "/home/ubuntu/node_exporter.service",
             )
             .await?;
             scp_file(
@@ -639,6 +663,13 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             enable_bbr(private_key, &ip, bbr_conf_path.to_str().unwrap()).await?;
             ssh_execute(private_key, &ip, &setup_promtail_cmd(PROMTAIL_VERSION)).await?;
             poll_service_active(private_key, &ip, "promtail").await?;
+            ssh_execute(
+                private_key,
+                &ip,
+                &setup_node_exporter_cmd(NODE_EXPORTER_VERSION),
+            )
+            .await?;
+            poll_service_active(private_key, &ip, "node_exporter").await?;
             ssh_execute(private_key, &ip, &install_binary_cmd(instance.profiling)).await?;
             poll_service_active(private_key, &ip, "binary").await?;
             info!(

@@ -1,3 +1,5 @@
+//! Utilities for working with histograms.
+
 use crate::Clock;
 use prometheus_client::metrics::histogram::Histogram;
 use std::{sync::Arc, time::SystemTime};
