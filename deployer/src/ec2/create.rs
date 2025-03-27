@@ -429,7 +429,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             )
         })
         .collect();
-    let prom_config = generate_prometheus_config(&instances);
+    let prom_config = generate_prometheus_config(&monitoring_ip, &instances);
     let prom_path = temp_dir.join("prometheus.yml");
     std::fs::write(&prom_path, prom_config)?;
     let datasources_path = temp_dir.join("datasources.yml");
