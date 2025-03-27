@@ -485,7 +485,7 @@ scrape_configs:
           ip: '{}'
           region: '{}'
 "#,
-            name, name, ip, ip, region, name, name, ip, ip, region
+            name, ip, name, ip, region, name, ip, name, ip, region
         ));
     }
     config
