@@ -535,7 +535,7 @@ PROFILE_DURATION=60 # seconds
 PERF_FREQ=100 # Hz
 
 # Construct the Pyroscope application name with tags
-RAW_APP_NAME="binary{{name={name},ip={ip}, region={region}}}"
+RAW_APP_NAME="binary{{deployer_name={name},deployer_ip={ip},deployer_region={region}}}"
 APP_NAME=$(jq -nr --arg str "$RAW_APP_NAME" '$str | @uri')
 
 # Get the PID of the binary service

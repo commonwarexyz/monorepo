@@ -10,6 +10,10 @@ homepage = "https://commonware.xyz"
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/deployer"
 documentation = "https://docs.rs/commonware-deployer"
 
+[features]
+default = ["aws"]
+aws = ["aws-config", "aws-sdk-ec2"]
+
 [dependencies]
 clap = { workspace = true }
 futures = { workspace = true }
@@ -21,13 +25,15 @@ uuid = { workspace = true, features = ["v4"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 thiserror = { workspace = true }
-aws-config = "1.6.0"
-aws-sdk-ec2 = "1.118.1"
+cfg-if = { workspace = true }
+aws-config = { version = "1.6.0", optional = true }
+aws-sdk-ec2 = { version = "1.118.1", optional = true }
 
 [[bin]]
 name = "deployer"
 path = "src/main.rs"
 bench = false
+required-features = ["aws"]
 
 [lib]
 bench = false

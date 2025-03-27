@@ -1034,6 +1034,7 @@ version = "0.0.43"
 dependencies = [
  "aws-config",
  "aws-sdk-ec2",
+ "cfg-if",
  "clap",
  "futures",
  "reqwest",

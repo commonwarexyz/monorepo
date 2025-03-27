@@ -14,7 +14,7 @@ documentation = "https://docs.rs/commonware-flood"
 commonware-cryptography = { workspace = true }
 commonware-runtime = { workspace = true }
 commonware-p2p = { workspace = true }
-commonware-deployer = { workspace = true }
+commonware-deployer = { workspace = true, default-features = false }
 commonware-utils = { workspace = true }
 clap = { workspace = true }
 prometheus-client = { workspace = true }
