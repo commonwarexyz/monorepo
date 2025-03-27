@@ -1,10 +1,10 @@
 use crate::authenticated::actors::tracker;
-use commonware_cryptography::Scheme;
+use commonware_cryptography::Verifier;
 use commonware_runtime::{Clock, Metrics, Sink, Spawner, Stream};
 use commonware_stream::public_key::Connection;
 use futures::{channel::mpsc, SinkExt};
 
-pub enum Message<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, C: Scheme> {
+pub enum Message<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, C: Verifier> {
     Spawn {
         peer: C::PublicKey,
         connection: Connection<Si, St>,
@@ -12,11 +12,11 @@ pub enum Message<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, C: Scheme> 
     },
 }
 
-pub struct Mailbox<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, C: Scheme> {
+pub struct Mailbox<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, C: Verifier> {
     sender: mpsc::Sender<Message<E, Si, St, C>>,
 }
 
-impl<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, C: Scheme> Mailbox<E, Si, St, C> {
+impl<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, C: Verifier> Mailbox<E, Si, St, C> {
     pub fn new(sender: mpsc::Sender<Message<E, Si, St, C>>) -> Self {
         Self { sender }
     }
@@ -38,7 +38,7 @@ impl<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, C: Scheme> Mailbox<E, S
     }
 }
 
-impl<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, C: Scheme> Clone
+impl<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, C: Verifier> Clone
     for Mailbox<E, Si, St, C>
 {
     /// Clone the mailbox.

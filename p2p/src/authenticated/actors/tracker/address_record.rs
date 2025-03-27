@@ -1,10 +1,10 @@
 use crate::authenticated::types::SignedPeerInfo;
-use commonware_cryptography::Scheme;
+use commonware_cryptography::Verifier;
 use std::net::SocketAddr;
 
 /// Represents information known about a peer's address.
 #[derive(Clone)]
-pub enum AddressRecord<C: Scheme> {
+pub enum AddressRecord<C: Verifier> {
     /// Peer address is not yet known.
     /// Can be upgraded to `Discovered`.
     /// Tracks the number of peer sets this peer is part of.
@@ -23,7 +23,7 @@ pub enum AddressRecord<C: Scheme> {
     Persistent(SignedPeerInfo<C>),
 }
 
-impl<C: Scheme> AddressRecord<C> {
+impl<C: Verifier> AddressRecord<C> {
     /// Get the address of the peer.
     ///
     /// Returns None if the address is unknown.

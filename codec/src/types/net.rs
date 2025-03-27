@@ -20,7 +20,7 @@ impl Codec for Ipv4Addr {
 }
 
 impl SizedCodec for Ipv4Addr {
-    const LEN_ENCODED: usize = 4;
+    const LEN_ENCODED: usize = u32::LEN_ENCODED;
 }
 
 impl Codec for Ipv6Addr {
@@ -42,7 +42,7 @@ impl Codec for Ipv6Addr {
 }
 
 impl SizedCodec for Ipv6Addr {
-    const LEN_ENCODED: usize = 16;
+    const LEN_ENCODED: usize = u128::LEN_ENCODED;
 }
 
 impl Codec for SocketAddrV4 {
@@ -54,7 +54,7 @@ impl Codec for SocketAddrV4 {
 
     #[inline]
     fn len_encoded(&self) -> usize {
-        <[u8; 4]>::LEN_ENCODED + u16::LEN_ENCODED
+        Self::LEN_ENCODED
     }
 
     #[inline]
@@ -66,7 +66,7 @@ impl Codec for SocketAddrV4 {
 }
 
 impl SizedCodec for SocketAddrV4 {
-    const LEN_ENCODED: usize = 6;
+    const LEN_ENCODED: usize = Ipv4Addr::LEN_ENCODED + u16::LEN_ENCODED;
 }
 
 impl Codec for SocketAddrV6 {
@@ -90,7 +90,7 @@ impl Codec for SocketAddrV6 {
 }
 
 impl SizedCodec for SocketAddrV6 {
-    const LEN_ENCODED: usize = 18;
+    const LEN_ENCODED: usize = Ipv6Addr::LEN_ENCODED + u16::LEN_ENCODED;
 }
 
 // SocketAddr implementation

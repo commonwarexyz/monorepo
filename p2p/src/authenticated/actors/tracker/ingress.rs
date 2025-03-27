@@ -1,5 +1,5 @@
 use crate::authenticated::{actors::peer, types};
-use commonware_cryptography::Scheme;
+use commonware_cryptography::Verifier;
 use commonware_runtime::{Metrics, Spawner};
 use futures::{
     channel::{mpsc, oneshot},
@@ -7,7 +7,7 @@ use futures::{
 };
 use std::net::SocketAddr;
 
-pub enum Message<E: Spawner + Metrics, C: Scheme> {
+pub enum Message<E: Spawner + Metrics, C: Verifier> {
     // Used by oracle
     Register {
         index: u64,
@@ -47,11 +47,11 @@ pub enum Message<E: Spawner + Metrics, C: Scheme> {
 }
 
 #[derive(Clone)]
-pub struct Mailbox<E: Spawner + Metrics, C: Scheme> {
+pub struct Mailbox<E: Spawner + Metrics, C: Verifier> {
     sender: mpsc::Sender<Message<E, C>>,
 }
 
-impl<E: Spawner + Metrics, C: Scheme> Mailbox<E, C> {
+impl<E: Spawner + Metrics, C: Verifier> Mailbox<E, C> {
     pub(super) fn new(sender: mpsc::Sender<Message<E, C>>) -> Self {
         Self { sender }
     }
@@ -108,11 +108,11 @@ impl<E: Spawner + Metrics, C: Scheme> Mailbox<E, C> {
 /// Peers that are not explicitly authorized
 /// will be blocked by commonware-p2p.
 #[derive(Clone)]
-pub struct Oracle<E: Spawner + Metrics, C: Scheme> {
+pub struct Oracle<E: Spawner + Metrics, C: Verifier> {
     sender: mpsc::Sender<Message<E, C>>,
 }
 
-impl<E: Spawner + Metrics, C: Scheme> Oracle<E, C> {
+impl<E: Spawner + Metrics, C: Verifier> Oracle<E, C> {
     pub(super) fn new(sender: mpsc::Sender<Message<E, C>>) -> Self {
         Self { sender }
     }
@@ -133,12 +133,12 @@ impl<E: Spawner + Metrics, C: Scheme> Oracle<E, C> {
     }
 }
 
-pub struct Reservation<E: Spawner + Metrics, C: Scheme> {
+pub struct Reservation<E: Spawner + Metrics, C: Verifier> {
     context: E,
     closer: Option<(C::PublicKey, Mailbox<E, C>)>,
 }
 
-impl<E: Spawner + Metrics, C: Scheme> Reservation<E, C> {
+impl<E: Spawner + Metrics, C: Verifier> Reservation<E, C> {
     pub fn new(context: E, peer: C::PublicKey, mailbox: Mailbox<E, C>) -> Self {
         Self {
             context,
@@ -147,7 +147,7 @@ impl<E: Spawner + Metrics, C: Scheme> Reservation<E, C> {
     }
 }
 
-impl<E: Spawner + Metrics, C: Scheme> Drop for Reservation<E, C> {
+impl<E: Spawner + Metrics, C: Verifier> Drop for Reservation<E, C> {
     fn drop(&mut self) {
         let (peer, mut mailbox) = self.closer.take().unwrap();
         self.context

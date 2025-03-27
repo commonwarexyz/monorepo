@@ -6,7 +6,7 @@ use crate::authenticated::{
     actors::{peer, router, tracker},
     metrics,
 };
-use commonware_cryptography::Scheme;
+use commonware_cryptography::Verifier;
 use commonware_runtime::{Clock, Handle, Metrics, Sink, Spawner, Stream};
 use futures::{channel::mpsc, StreamExt};
 use governor::{clock::ReasonablyRealtime, Quota};
@@ -19,7 +19,7 @@ pub struct Actor<
     E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics,
     Si: Sink,
     St: Stream,
-    C: Scheme,
+    C: Verifier,
 > {
     context: E,
 
@@ -40,7 +40,7 @@ impl<
         E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics,
         Si: Sink,
         St: Stream,
-        C: Scheme,
+        C: Verifier,
     > Actor<E, Si, St, C>
 {
     pub fn new(context: E, cfg: Config) -> (Self, Mailbox<E, Si, St, C>) {

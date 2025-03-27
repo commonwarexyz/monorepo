@@ -1,11 +1,11 @@
 use bytes::Bytes;
 use commonware_codec::{Codec, Error, Reader, Writer};
-use commonware_cryptography::Scheme;
+use commonware_cryptography::Verifier;
 use std::net::SocketAddr;
 
 // Payload is the only allowed message format that can be sent between peers.
 #[derive(Clone, Debug, PartialEq)]
-pub enum Payload<C: Scheme> {
+pub enum Payload<C: Verifier> {
     /// Bit vector that represents the peers a peer knows about.
     ///
     /// Also used as a ping message to keep the connection alive.
@@ -18,7 +18,7 @@ pub enum Payload<C: Scheme> {
     Data(Data),
 }
 
-impl<C: Scheme> Codec for Payload<C> {
+impl<C: Verifier> Codec for Payload<C> {
     fn write(&self, writer: &mut impl Writer) {
         match self {
             Payload::BitVec(bitvec) => {
@@ -101,7 +101,7 @@ impl Codec for BitVec {
 /// This is used to share the peer's socket address and public key with other peers in a verified
 /// manner.
 #[derive(Clone, Debug, PartialEq)]
-pub struct SignedPeerInfo<C: Scheme> {
+pub struct SignedPeerInfo<C: Verifier> {
     /// The socket address of the peer.
     pub socket: SocketAddr,
 
@@ -115,7 +115,7 @@ pub struct SignedPeerInfo<C: Scheme> {
     pub signature: C::Signature,
 }
 
-impl<C: Scheme> SignedPeerInfo<C> {
+impl<C: Verifier> SignedPeerInfo<C> {
     /// Verify the signature of the peer info.
     pub fn verify_signature(&self, namespace: &[u8]) -> bool {
         C::verify(
@@ -127,7 +127,7 @@ impl<C: Scheme> SignedPeerInfo<C> {
     }
 }
 
-impl<C: Scheme> Codec for SignedPeerInfo<C> {
+impl<C: Verifier> Codec for SignedPeerInfo<C> {
     fn write(&self, writer: &mut impl Writer) {
         self.socket.write(writer);
         self.timestamp.write(writer);
@@ -188,7 +188,7 @@ impl Codec for Data {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::Secp256r1;
+    use commonware_cryptography::{Secp256r1, Signer};
 
     fn signed_peer_info() -> SignedPeerInfo<Secp256r1> {
         let mut rng = rand::thread_rng();

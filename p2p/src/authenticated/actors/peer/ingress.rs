@@ -1,10 +1,10 @@
 use super::Error;
 use crate::{authenticated::types, Channel};
 use bytes::Bytes;
-use commonware_cryptography::Scheme;
+use commonware_cryptography::Verifier;
 use futures::{channel::mpsc, SinkExt};
 
-pub enum Message<C: Scheme> {
+pub enum Message<C: Verifier> {
     BitVec {
         bit_vec: types::BitVec,
     },
@@ -15,11 +15,11 @@ pub enum Message<C: Scheme> {
 }
 
 #[derive(Clone)]
-pub struct Mailbox<C: Scheme> {
+pub struct Mailbox<C: Verifier> {
     sender: mpsc::Sender<Message<C>>,
 }
 
-impl<C: Scheme> Mailbox<C> {
+impl<C: Verifier> Mailbox<C> {
     pub(super) fn new(sender: mpsc::Sender<Message<C>>) -> Self {
         Self { sender }
     }

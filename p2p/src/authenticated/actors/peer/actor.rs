@@ -1,7 +1,7 @@
 use super::{Config, Error, Mailbox, Message, Relay};
 use crate::authenticated::{actors::tracker, channels::Channels, metrics, types};
 use commonware_codec::Codec;
-use commonware_cryptography::Scheme;
+use commonware_cryptography::Verifier;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Metrics, Sink, Spawner, Stream};
 use commonware_stream::{
@@ -15,7 +15,7 @@ use rand::{CryptoRng, Rng};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tracing::{debug, info};
 
-pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: Scheme> {
+pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: Verifier> {
     context: E,
 
     gossip_bit_vec_frequency: Duration,
@@ -35,7 +35,7 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: Scheme> {
     _reservation: tracker::Reservation<E, C>,
 }
 
-impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Scheme> Actor<E, C> {
+impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Verifier> Actor<E, C> {
     pub fn new(context: E, cfg: Config, reservation: tracker::Reservation<E, C>) -> (Self, Relay) {
         let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
