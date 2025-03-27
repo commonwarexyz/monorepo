@@ -17,7 +17,7 @@ use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use rand::{CryptoRng, Rng};
 use std::{marker::PhantomData, time::Duration};
-use tracing::debug;
+use tracing::{debug, debug_span, info_span, Instrument};
 
 pub struct Config<C: Scheme> {
     pub stream_cfg: StreamConfig<C>,
@@ -94,14 +94,19 @@ impl<
                 let config = self.stream_cfg.clone();
                 let mut supervisor = supervisor.clone();
                 move |context| async move {
+                    // Create span
+                    let span = info_span!("dial", ?peer, ?address, success = false);
+                    let guard = span.enter();
+
                     // Attempt to dial peer
-                    let (sink, stream) = match context.dial(address).await {
-                        Ok(stream) => stream,
-                        Err(e) => {
-                            debug!(?peer, error = ?e, "failed to dial peer");
-                            return;
-                        }
-                    };
+                    let (sink, stream) =
+                        match context.dial(address).instrument(debug_span!("dial")).await {
+                            Ok(stream) => stream,
+                            Err(e) => {
+                                debug!(?peer, error = ?e, "failed to dial peer");
+                                return;
+                            }
+                        };
                     debug!(?peer, address = address.to_string(), "dialed peer");
 
                     // Upgrade connection
@@ -112,6 +117,7 @@ impl<
                         stream,
                         peer.clone(),
                     )
+                    .instrument(debug_span!("upgrade"))
                     .await
                     {
                         Ok(instance) => instance,
@@ -121,6 +127,10 @@ impl<
                         }
                     };
                     debug!(?peer, "upgraded connection");
+
+                    // Drop guard
+                    span.record("success", true);
+                    drop(guard);
 
                     // Start peer to handle messages
                     supervisor.spawn(peer, instance, reservation).await;
