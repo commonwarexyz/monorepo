@@ -22,8 +22,10 @@ pub enum Error<K: Array, V: Array> {
     InvalidValue(<V as Array>::Error),
     #[error("invalid context byte")]
     InvalidContextByte,
-    #[error("delete operation as non-zero value")]
+    #[error("delete operation has non-zero value")]
     InvalidDeleteOp,
+    #[error("floor operation has non-zero bytes after location")]
+    InvalidFloorOp,
 }
 
 /// The types of operations that can change the state of the store.
@@ -34,6 +36,9 @@ pub enum Type<K: Array, V: Array> {
 
     /// Indicates the key now has the wrapped value.
     Update(K, V),
+
+    /// Indicates the floor on inactive operations has been raised.
+    Floor(u64),
 }
 
 /// An `Array` implementation for operations applied to a `MutableMmr` K/V store.
@@ -47,16 +52,18 @@ pub struct Operation<K: Array, V: Array> {
 impl<K: Array, V: Array> Operation<K, V> {
     const DELETE_CONTEXT: u8 = 0;
     const UPDATE_CONTEXT: u8 = 1;
+    const FLOOR_CONTEXT: u8 = 2;
 
     /// Create a new operation of the given type.
     pub fn new(t: Type<K, V>) -> Self {
         match t {
             Type::Deleted(key) => Self::delete(key),
             Type::Update(key, value) => Self::update(key, value),
+            Type::Floor(loc) => Self::floor(loc),
         }
     }
 
-    /// Create a new update operation from `key` and `value`.
+    /// Create a new update operation that makes `key` have value `value`.
     pub fn update(key: K, value: V) -> Self {
         let mut data = Vec::with_capacity(Self::LEN_ENCODED);
         data.push(Self::UPDATE_CONTEXT);
@@ -69,10 +76,25 @@ impl<K: Array, V: Array> Operation<K, V> {
         }
     }
 
+    /// Create a new delete operation that removes any value assigned to `key`.
     pub fn delete(key: K) -> Self {
         let mut data = Vec::with_capacity(Self::LEN_ENCODED);
         data.push(Self::DELETE_CONTEXT);
         data.extend_from_slice(&key);
+        data.resize(Self::LEN_ENCODED, 0);
+
+        Self {
+            data,
+            _phantom: std::marker::PhantomData,
+        }
+    }
+
+    /// Create a new floor operation that raises the floor on inactive operations to `loc`. This
+    /// operation is not supported for stores whose operations encode to less than 9 bytes.
+    pub fn floor(loc: u64) -> Self {
+        let mut data = Vec::with_capacity(Self::LEN_ENCODED);
+        data.push(Self::FLOOR_CONTEXT);
+        data.extend_from_slice(&loc.to_be_bytes());
         data.resize(Self::LEN_ENCODED, 0);
 
         Self {
@@ -93,6 +115,10 @@ impl<K: Array, V: Array> Operation<K, V> {
                 let value = V::try_from(&self.data[K::LEN_ENCODED + 1..]).unwrap();
                 Type::Update(key, value)
             }
+            Self::FLOOR_CONTEXT => {
+                let loc = u64::from_be_bytes(self.data[1..9].try_into().unwrap());
+                Type::Floor(loc)
+            }
             _ => unreachable!(),
         }
     }
@@ -101,9 +127,17 @@ impl<K: Array, V: Array> Operation<K, V> {
         match self.data[0] {
             Self::DELETE_CONTEXT => None,
             Self::UPDATE_CONTEXT => Some(V::try_from(&self.data[K::LEN_ENCODED + 1..]).unwrap()),
+            Self::FLOOR_CONTEXT => None,
             _ => unreachable!(),
         }
     }
+
+    // Assert that the encoded operation is at least 9 bytes long to ensure there is room for floor
+    // operation.
+    const _ASSERT: () = assert!(
+        Self::LEN_ENCODED >= 9,
+        "operation too small for floor operation"
+    );
 }
 
 impl<K: Array, V: Array> Codec for Operation<K, V> {
@@ -148,6 +182,12 @@ impl<K: Array, V: Array> TryFrom<&[u8]> for Operation<K, V> {
                 // Check if the remaining bytes are all zeros
                 if !value[K::LEN_ENCODED + 1..].iter().all(|&b| b == 0) {
                     return Err(Error::InvalidDeleteOp);
+                }
+            }
+            Self::FLOOR_CONTEXT => {
+                // Check if the remaining bytes are all zeros
+                if !value[9..].iter().all(|&b| b == 0) {
+                    return Err(Error::InvalidFloorOp);
                 }
             }
             _ => {
@@ -196,6 +236,7 @@ impl<K: Array, V: Array> Display for Operation<K, V> {
         match self.to_type() {
             Type::Deleted(key) => write!(f, "[key:{} <deleted>]", key),
             Type::Update(key, value) => write!(f, "[key:{} value:{}]", key, value),
+            Type::Floor(loc) => write!(f, "[floor:{}]", loc),
         }
     }
 }
@@ -234,6 +275,12 @@ mod tests {
         assert_eq!(key2, from.to_key());
         assert_eq!(None, from.to_value());
         assert_eq!(delete_op, from);
+
+        let floor_op = Operation::<U64, U64>::new(Type::Floor(42));
+        let from = Operation::<U64, U64>::try_from(floor_op.as_ref()).unwrap();
+        assert_eq!(None, from.to_value());
+        assert!(matches!(from.to_type(), Type::Floor(42)));
+        assert_eq!(floor_op, from);
 
         // test non-zero byte detection in delete operation
         let mut invalid = delete_op.to_vec();
