@@ -1,44 +1,42 @@
 use super::{Config, Error, Mailbox, Message, Relay};
-use crate::authenticated::{
-    actors::tracker, channels::Channels, metrics, wire, wire::message::Payload,
-};
+use crate::authenticated::{actors::tracker, channels::Channels, metrics, types};
+use commonware_codec::Codec;
+use commonware_cryptography::Verifier;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Metrics, Sink, Spawner, Stream};
 use commonware_stream::{
     public_key::{Connection, Sender},
     Receiver as _, Sender as _,
 };
-use commonware_utils::Array;
 use futures::{channel::mpsc, SinkExt, StreamExt};
 use governor::{clock::ReasonablyRealtime, Quota, RateLimiter};
 use prometheus_client::metrics::{counter::Counter, family::Family};
-use prost::Message as _;
 use rand::{CryptoRng, Rng};
 use std::{collections::HashMap, sync::Arc, time::Duration};
-use tracing::debug;
+use tracing::{debug, info};
 
-pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, P: Array> {
+pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: Verifier> {
     context: E,
 
     gossip_bit_vec_frequency: Duration,
     allowed_bit_vec_rate: Quota,
     allowed_peers_rate: Quota,
 
-    mailbox: Mailbox,
-    control: mpsc::Receiver<Message>,
-    high: mpsc::Receiver<wire::Data>,
-    low: mpsc::Receiver<wire::Data>,
+    mailbox: Mailbox<C>,
+    control: mpsc::Receiver<Message<C>>,
+    high: mpsc::Receiver<types::Data>,
+    low: mpsc::Receiver<types::Data>,
 
     sent_messages: Family<metrics::Message, Counter>,
     received_messages: Family<metrics::Message, Counter>,
     rate_limited: Family<metrics::Message, Counter>,
 
     // When reservation goes out-of-scope, the tracker will be notified.
-    _reservation: tracker::Reservation<E, P>,
+    _reservation: tracker::Reservation<E, C>,
 }
 
-impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, P: Array> Actor<E, P> {
-    pub fn new(context: E, cfg: Config, reservation: tracker::Reservation<E, P>) -> (Self, Relay) {
+impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Verifier> Actor<E, C> {
+    pub fn new(context: E, cfg: Config, reservation: tracker::Reservation<E, C>) -> (Self, Relay) {
         let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
         let (low_sender, low_receiver) = mpsc::channel(cfg.mailbox_size);
@@ -64,9 +62,9 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, P: Arr
 
     /// Unpack `msg` and verify the underlying `channel` is registered.
     fn validate_msg<V>(
-        msg: Option<wire::Data>,
+        msg: Option<types::Data>,
         rate_limits: &HashMap<u32, V>,
-    ) -> Result<wire::Data, Error> {
+    ) -> Result<types::Data, Error> {
         let data = match msg {
             Some(data) => data,
             None => return Err(Error::PeerDisconnected),
@@ -82,12 +80,9 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, P: Arr
         sender: &mut Sender<Si>,
         sent_messages: &Family<metrics::Message, Counter>,
         metric: metrics::Message,
-        payload: Payload,
+        payload: types::Payload<C>,
     ) -> Result<(), Error> {
-        let msg = wire::Message {
-            payload: Some(payload),
-        }
-        .encode_to_vec();
+        let msg = payload.encode();
         sender.send(&msg).await.map_err(Error::SendFailed)?;
         sent_messages.get_or_create(&metric).inc();
         Ok(())
@@ -95,10 +90,10 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, P: Arr
 
     pub async fn run<Si: Sink, St: Stream>(
         mut self,
-        peer: P,
+        peer: C::PublicKey,
         connection: Connection<Si, St>,
-        mut tracker: tracker::Mailbox<E, P>,
-        channels: Channels<P>,
+        mut tracker: tracker::Mailbox<E, C>,
+        channels: Channels<C::PublicKey>,
     ) -> Error {
         // Instantiate rate limiters for each message type
         let mut rate_limits = HashMap::new();
@@ -135,9 +130,9 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, P: Arr
                             };
                             let (metric, payload) = match msg {
                                 Message::BitVec { bit_vec } =>
-                                    (metrics::Message::new_bit_vec(&peer), Payload::BitVec(bit_vec)),
+                                    (metrics::Message::new_bit_vec(&peer), types::Payload::BitVec(bit_vec)),
                                 Message::Peers { peers: msg } =>
-                                    (metrics::Message::new_peers(&peer), Payload::Peers(msg)),
+                                    (metrics::Message::new_peers(&peer), types::Payload::Peers(msg)),
                                 Message::Kill => {
                                     return Err(Error::PeerKilled(peer.to_string()))
                                 }
@@ -147,12 +142,12 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, P: Arr
                         },
                         msg_high = self.high.next() => {
                             let msg = Self::validate_msg(msg_high, &rate_limits)?;
-                            Self::send(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, msg.channel), Payload::Data(msg))
+                            Self::send(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, msg.channel), types::Payload::Data(msg))
                                 .await?;
                         },
                         msg_low = self.low.next() => {
                             let msg = Self::validate_msg(msg_low, &rate_limits)?;
-                            Self::send(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, msg.channel), Payload::Data(msg))
+                            Self::send(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, msg.channel), types::Payload::Data(msg))
                                 .await?;
                         }
                     }
@@ -172,9 +167,18 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, P: Arr
                         .receive()
                         .await
                         .map_err(Error::ReceiveFailed)?;
-                    let msg = wire::Message::decode(msg).map_err(Error::DecodeFailed)?;
-                    match msg.payload {
-                        Some(wire::message::Payload::BitVec(bit_vec)) => {
+                    let msg = match types::Payload::decode(msg) {
+                        Ok(msg) => msg,
+                        Err(err) => {
+                            info!(?err, ?peer, "failed to decode message");
+                            self.received_messages
+                                .get_or_create(&metrics::Message::new_invalid(&peer))
+                                .inc();
+                            return Err(Error::DecodeFailed(err));
+                        }
+                    };
+                    match msg {
+                        types::Payload::BitVec(bit_vec) => {
                             self.received_messages
                                 .get_or_create(&metrics::Message::new_bit_vec(&peer))
                                 .inc();
@@ -194,7 +198,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, P: Arr
                             // Gather useful peers
                             tracker.bit_vec(bit_vec, self.mailbox.clone()).await;
                         }
-                        Some(wire::message::Payload::Peers(peers)) => {
+                        types::Payload::Peers(peers) => {
                             self.received_messages
                                 .get_or_create(&metrics::Message::new_peers(&peer))
                                 .inc();
@@ -214,7 +218,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, P: Arr
                             // Send peers to tracker
                             tracker.peers(peers, self.mailbox.clone()).await;
                         }
-                        Some(wire::message::Payload::Data(data)) => {
+                        types::Payload::Data(data) => {
                             self.received_messages
                                 .get_or_create(&metrics::Message::new_data(&peer, data.channel))
                                 .inc();
@@ -253,15 +257,6 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, P: Arr
                             {
                                 debug!(err=?e, "failed to send message to client");
                             }
-                        }
-                        _ => {
-                            self.received_messages
-                                .get_or_create(&metrics::Message::new_unknown(&peer))
-                                .inc();
-
-                            // We permit unknown messages to be received in case
-                            // peers are on a newer version than us
-                            continue;
                         }
                     }
                 }

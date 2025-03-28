@@ -23,15 +23,11 @@ rand_distr = { workspace = true }
 thiserror = { workspace = true }
 futures = { workspace = true }
 tracing = { workspace = true }
-prost = { workspace = true }
 governor = { workspace = true }
 prometheus-client = { workspace = true }
 zstd = { workspace = true }
 bitvec = "1.0.1"
 either = "1.13.0"
-
-[build-dependencies]
-prost-build = { workspace = true }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }

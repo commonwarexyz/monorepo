@@ -24,7 +24,7 @@ pub struct Message {
 impl Message {
     const BIT_VEC_TYPE: i32 = -1;
     const PEERS_TYPE: i32 = -2;
-    const UNKNOWN_TYPE: i32 = i32::MIN;
+    const INVALID_TYPE: i32 = i32::MIN;
 
     pub fn new_bit_vec(peer: &impl Array) -> Self {
         Self {
@@ -44,10 +44,10 @@ impl Message {
             message: channel as i32,
         }
     }
-    pub fn new_unknown(peer: &impl Array) -> Self {
+    pub fn new_invalid(peer: &impl Array) -> Self {
         Self {
             peer: peer.to_string(),
-            message: Self::UNKNOWN_TYPE,
+            message: Self::INVALID_TYPE,
         }
     }
 }

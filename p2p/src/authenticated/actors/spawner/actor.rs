@@ -6,8 +6,8 @@ use crate::authenticated::{
     actors::{peer, router, tracker},
     metrics,
 };
+use commonware_cryptography::Verifier;
 use commonware_runtime::{Clock, Handle, Metrics, Sink, Spawner, Stream};
-use commonware_utils::Array;
 use futures::{channel::mpsc, StreamExt};
 use governor::{clock::ReasonablyRealtime, Quota};
 use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
@@ -19,7 +19,7 @@ pub struct Actor<
     E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics,
     Si: Sink,
     St: Stream,
-    P: Array,
+    C: Verifier,
 > {
     context: E,
 
@@ -28,7 +28,7 @@ pub struct Actor<
     allowed_bit_vec_rate: Quota,
     allowed_peers_rate: Quota,
 
-    receiver: mpsc::Receiver<Message<E, Si, St, P>>,
+    receiver: mpsc::Receiver<Message<E, Si, St, C>>,
 
     connections: Gauge,
     sent_messages: Family<metrics::Message, Counter>,
@@ -40,10 +40,10 @@ impl<
         E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics,
         Si: Sink,
         St: Stream,
-        P: Array,
-    > Actor<E, Si, St, P>
+        C: Verifier,
+    > Actor<E, Si, St, C>
 {
-    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<E, Si, St, P>) {
+    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<E, Si, St, C>) {
         let connections = Gauge::default();
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();
@@ -85,13 +85,13 @@ impl<
 
     pub fn start(
         mut self,
-        tracker: tracker::Mailbox<E, P>,
-        router: router::Mailbox<P>,
+        tracker: tracker::Mailbox<E, C>,
+        router: router::Mailbox<C::PublicKey>,
     ) -> Handle<()> {
         self.context.spawn_ref()(self.run(tracker, router))
     }
 
-    async fn run(mut self, tracker: tracker::Mailbox<E, P>, router: router::Mailbox<P>) {
+    async fn run(mut self, tracker: tracker::Mailbox<E, C>, router: router::Mailbox<C::PublicKey>) {
         while let Some(msg) = self.receiver.next().await {
             match msg {
                 Message::Spawn {
