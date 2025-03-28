@@ -729,15 +729,15 @@ sudo timeout $((PROFILE_DURATION + 10)) memleak-bpfcc -p ${{PID}} ${{PROFILE_DUR
 # Parse memleak output into Pyroscope folded format (targeting inuse_space)
 echo "Parsing memleak output..."
 awk '
-BEGIN {{ in_block = 0; stack = ""; inuse_bytes = 0; inuse_objects = 0; }}
+BEGIN {{ in_block = 0; stack = ""; inuse_objects = 0; inuse_space = 0; }}
 
 /^\s*[0-9]+ bytes in [0-9]+ allocations/ {{ # Match summary line with optional leading whitespace
     if (in_block && stack != "") {{
-        # Output the previous block if it exists
-        printf "0 0 %d %d @ %s\n", inuse_objects, inuse_bytes, stack;
+        # Output the previous block
+        printf "%s 0 0 %d %d\n", stack, inuse_objects, inuse_space;
     }}
     # Start a new block
-    inuse_bytes = $1;         # Capture bytes (e.g., 40)
+    inuse_space = $1;         # Capture bytes (e.g., 40)
     inuse_objects = $4;       # Capture objects (e.g., 1)
     stack = "";               # Reset stack trace
     in_block = 1;             # Indicate we’re in a block
@@ -751,6 +751,8 @@ BEGIN {{ in_block = 0; stack = ""; inuse_bytes = 0; inuse_objects = 0; }}
         # Trim leading whitespace
         frame = $0;
         gsub(/^\s+/, "", frame);
+        # Replace spaces with underscores to avoid parsing issues
+        gsub(/ /, "_", frame);
         # Append frame to stack with semicolon separator
         stack = stack ? stack ";" frame : frame;
     }}
@@ -759,7 +761,7 @@ BEGIN {{ in_block = 0; stack = ""; inuse_bytes = 0; inuse_objects = 0; }}
 END {{
     # Output the final block if it exists
     if (in_block && stack != "") {{
-        printf "0 0 %d %d @ %s\n", inuse_objects, inuse_bytes, stack;
+        printf "%s 0 0 %d %d\n", stack, inuse_objects, inuse_space;
     }}
 }}
 ' ${{MEMLEAK_OUTPUT_FILE}} > ${{MEMLEAK_FOLDED_FILE}}
