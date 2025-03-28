@@ -653,10 +653,9 @@ wget --post-file="${{PERF_STACK_FILE}}" \
     --header="Content-Type: text/plain" \
     --quiet \
     -O /dev/null \
-    "http://{monitoring_private_ip}:4040/ingest?name=${{APP_NAME}}&format=folded&units=samples&aggregationType=sum&sampleType=cpu&from=${{FROM_TS}}&until=${{UNTIL_TS}}&spyName=perf_script"
+    "http://{monitoring_private_ip}:4040/ingest?name=${{APP_NAME}}&format=folded&units=samples&aggregationType=sum&sampleType=cpu&from=${{FROM_TS}}&until=${{UNTIL_TS}}&spyName=perf"
 
 echo "Profile upload complete."
-# Clean up stack file and perf.data
 sudo rm -f ${{PERF_DATA_FILE}} ${{PERF_STACK_FILE}}
 "#
     )
@@ -706,84 +705,73 @@ pub fn generate_memleak_script(
 ) -> String {
     format!(
         r#"#!/bin/bash
-  set -e
+set -e
 
-  SERVICE_NAME="binary.service"
-  MEMLEAK_OUTPUT_FILE="/tmp/memleak.raw"
-  MEMLEAK_FOLDED_FILE="/tmp/memleak.folded"
-  PROFILE_DURATION=60 # seconds
+SERVICE_NAME="binary.service"
+MEMLEAK_OUTPUT_FILE="/tmp/memleak.raw"
+MEMLEAK_FOLDED_FILE="/tmp/memleak.folded"
+PROFILE_DURATION=60 # seconds
 
-  # Construct the Pyroscope application name with tags
-  RAW_APP_NAME="binary{{deployer_name={name},deployer_ip={ip},deployer_region={region}}}"
-  APP_NAME=$(jq -nr --arg str "$RAW_APP_NAME" '$str | @uri')
+# Construct the Pyroscope application name with tags
+RAW_APP_NAME="binary{{deployer_name={name},deployer_ip={ip},deployer_region={region}}}"
+APP_NAME=$(jq -nr --arg str "$RAW_APP_NAME" '$str | @uri')
 
-  # Check if BCC tools are installed
-  if ! command -v memleak &> /dev/null
-  then
-      echo "Error: /usr/share/bcc/tools/memleak could not be found. Is bcc-tools installed?" >&2
-      exit 1
-  fi
+# Get the PID of the binary service
+PID=$(systemctl show --property MainPID ${{SERVICE_NAME}} | cut -d= -f2)
+if [ -z "$PID" ] || [ "$PID" -eq 0 ]; then
+    echo "Error: Could not get PID for ${{SERVICE_NAME}}." >&2
+    exit 1
+fi
 
-  # Get the PID of the binary service
-  PID=$(systemctl show --property MainPID ${{SERVICE_NAME}} | cut -d= -f2)
-  if [ -z "$PID" ] || [ "$PID" -eq 0 ]; then
-      echo "Error: Could not get PID for ${{SERVICE_NAME}}." >&2
-      exit 1
-  fi
+# Run memleak
+echo "Running memleak for PID ${{PID}} for ${{PROFILE_DURATION}} seconds..."
+sudo timeout $((PROFILE_DURATION + 10)) memleak-bpfcc -p ${{PID}} ${{PROFILE_DURATION}} 1 -a -O > ${{MEMLEAK_OUTPUT_FILE}}
 
-  # Run memleak
-  echo "Running memleak for PID ${{PID}} for ${{PROFILE_DURATION}} seconds..."
-  # timeout is used in case memleak hangs
-  # Use -a to show allocations, -O to show objects count
-  # Run with sudo as BCC requires root privileges
-  sudo timeout $((PROFILE_DURATION + 10)) /usr/share/bcc/tools/memleak -p ${{PID}} ${{PROFILE_DURATION}} 1 -a -O > ${{MEMLEAK_OUTPUT_FILE}} || echo "memleak finished or timed out"
+# Parse memleak output into Pyroscope folded format (targeting inuse_space)
+echo "Parsing memleak output..."
+awk '
+BEGIN {{ stack = ""; inuse_bytes = 0; inuse_objects = 0; }}
+/^\s*\[.*\]$/ {{ # Line with stack trace address
+    gsub(/\[|\]|\+0x[0-9a-f]+/, "", $1); # Clean up address part if present
+    stack = stack ? $1 ";" stack : $1; # Prepend function address/offset
+}}
+/^\s*[0-9]+ bytes in [0-9]+ allocations/ {{ # Line with bytes/allocations
+    inuse_bytes = $1;
+    inuse_objects = $4;
+    if (stack != "" && inuse_bytes > 0) {{
+        # Format: <alloc_objects> <alloc_bytes> <inuse_objects> <inuse_bytes> @ <stack>
+        # We only have inuse info from memleak, approximating others as 0
+        printf "0 0 %d %d @ %s\n", inuse_objects, inuse_bytes, stack;
+    }}
+    # Reset for next block
+    stack = "";
+    inuse_bytes = 0;
+    inuse_objects = 0;
+}}
+' ${{MEMLEAK_OUTPUT_FILE}} > ${{MEMLEAK_FOLDED_FILE}}
 
-  # Parse memleak output into Pyroscope folded format (targeting inuse_space)
-  # This is a basic parser and might need refinement based on actual memleak output nuances
-  echo "Parsing memleak output..."
-  awk '
-  BEGIN {{ stack = ""; inuse_bytes = 0; inuse_objects = 0; }}
-  /^\s*\[.*\]$/ {{ # Line with stack trace address
-      gsub(/\[|\]|\+0x[0-9a-f]+/, "", $1); # Clean up address part if present
-      stack = stack ? $1 ";" stack : $1; # Prepend function address/offset
-  }}
-  /^\s*[0-9]+ bytes in [0-9]+ allocations/ {{ # Line with bytes/allocations
-      inuse_bytes = $1;
-      inuse_objects = $4;
-      if (stack != "" && inuse_bytes > 0) {{
-          # Format: <alloc_objects> <alloc_bytes> <inuse_objects> <inuse_bytes> @ <stack>
-          # We only have inuse info from memleak, approximating others as 0
-          printf "0 0 %d %d @ %s\n", inuse_objects, inuse_bytes, stack;
-      }}
-      # Reset for next block
-      stack = "";
-      inuse_bytes = 0;
-      inuse_objects = 0;
-  }}
-  ' ${{MEMLEAK_OUTPUT_FILE}} > ${{MEMLEAK_FOLDED_FILE}}
+# Check if folded file is empty
+if [ ! -s "${{MEMLEAK_FOLDED_FILE}}" ]; then
+    echo "Warning: ${{MEMLEAK_FOLDED_FILE}} is empty or parsing failed. Skipping upload." >&2
+    sudo rm -f ${{MEMLEAK_OUTPUT_FILE}} ${{MEMLEAK_FOLDED_FILE}}
+    exit 0 # Exit gracefully
+fi
 
-  # Check if folded file is empty
-  if [ ! -s "${{MEMLEAK_FOLDED_FILE}}" ]; then
-      echo "Warning: ${{MEMLEAK_FOLDED_FILE}} is empty or parsing failed. Skipping upload." >&2
-      sudo rm -f ${{MEMLEAK_OUTPUT_FILE}} ${{MEMLEAK_FOLDED_FILE}}
-      exit 0 # Exit gracefully
-  fi
+# Calculate timestamps
+UNTIL_TS=$(date +%s)
+FROM_TS=$((UNTIL_TS - PROFILE_DURATION))
 
-  # Calculate timestamps
-  UNTIL_TS=$(date +%s)
-  FROM_TS=$((UNTIL_TS - PROFILE_DURATION))
+# Upload to Pyroscope
+echo "Uploading memleak profile to Pyroscope at {monitoring_private_ip}..."
+wget --post-file="${{MEMLEAK_FOLDED_FILE}}" \
+    --header="Content-Type: text/plain" \
+    --quiet \
+    -O /dev/null \
+    "http://{monitoring_private_ip}:4040/ingest?name=${{APP_NAME}}&format=folded&units=bytes&aggregationType=sum&sampleType=inuse_space&from=${{FROM_TS}}&until=${{UNTIL_TS}}&spyName=memleak"
 
-  # Upload to Pyroscope
-  echo "Uploading memleak profile to Pyroscope at {monitoring_private_ip}..."
-  wget --post-file="${{MEMLEAK_FOLDED_FILE}}" \
-      --header="Content-Type: text/plain" \
-      --quiet \
-      -O /dev/null \
-      "http://{monitoring_private_ip}:4040/ingest?name=${{APP_NAME}}&format=folded&units=bytes&aggregationType=sum&sampleType=inuse_space&from=${{FROM_TS}}&until=${{UNTIL_TS}}&spyName=memleak"
-
-  echo "Memleak profile upload complete."
-  sudo rm -f ${{MEMLEAK_OUTPUT_FILE}} ${{MEMLEAK_FOLDED_FILE}}
-  "#
+echo "Memleak profile upload complete."
+sudo rm -f ${{MEMLEAK_OUTPUT_FILE}} ${{MEMLEAK_FOLDED_FILE}}
+"#
     )
 }
 
@@ -796,7 +784,7 @@ After=network-online.target binary.service
 
 [Service]
 Type=oneshot
-User=root # BCC requires root
+User=ubuntu
 ExecStart=/home/ubuntu/memleak-agent.sh
 
 [Install]
