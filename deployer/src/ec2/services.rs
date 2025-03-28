@@ -724,28 +724,43 @@ fi
 
 # Run memleak
 echo "Running memleak for PID ${{PID}} for ${{PROFILE_DURATION}} seconds..."
-sudo timeout $((PROFILE_DURATION + 10)) memleak-bpfcc -p ${{PID}} ${{PROFILE_DURATION}} 1 -a -O > ${{MEMLEAK_OUTPUT_FILE}}
+sudo timeout $((PROFILE_DURATION + 10)) memleak-bpfcc -p ${{PID}} ${{PROFILE_DURATION}} 1 > ${{MEMLEAK_OUTPUT_FILE}}
 
 # Parse memleak output into Pyroscope folded format (targeting inuse_space)
 echo "Parsing memleak output..."
 awk '
-BEGIN {{ stack = ""; inuse_bytes = 0; inuse_objects = 0; }}
-/^\s*\[.*\]$/ {{ # Line with stack trace address
-    gsub(/\[|\]|\+0x[0-9a-f]+/, "", $1); # Clean up address part if present
-    stack = stack ? $1 ";" stack : $1; # Prepend function address/offset
-}}
-/^\s*[0-9]+ bytes in [0-9]+ allocations/ {{ # Line with bytes/allocations
-    inuse_bytes = $1;
-    inuse_objects = $4;
-    if (stack != "" && inuse_bytes > 0) {{
-        # Format: <alloc_objects> <alloc_bytes> <inuse_objects> <inuse_bytes> @ <stack>
-        # We only have inuse info from memleak, approximating others as 0
+BEGIN {{ in_block = 0; stack = ""; inuse_bytes = 0; inuse_objects = 0; }}
+
+/^\s*[0-9]+ bytes in [0-9]+ allocations/ {{ # Match summary line with optional leading whitespace
+    if (in_block && stack != "") {{
+        # Output the previous block if it exists
         printf "0 0 %d %d @ %s\n", inuse_objects, inuse_bytes, stack;
     }}
-    # Reset for next block
-    stack = "";
-    inuse_bytes = 0;
-    inuse_objects = 0;
+    # Start a new block
+    inuse_bytes = $1;         # Capture bytes (e.g., 40)
+    inuse_objects = $4;       # Capture objects (e.g., 1)
+    stack = "";               # Reset stack trace
+    in_block = 1;             # Indicate we’re in a block
+    next;                     # Skip this line, don’t treat it as a stack frame
+}}
+
+/^\s+\S+/ {{ # Match stack frame lines (indented)
+    if (in_block) {{
+        # Clean the line: remove offset and [binary] parts
+        gsub(/\+0x[0-9a-f]+ \[[^\]]+\]/, "", $0);
+        # Trim leading whitespace
+        frame = $0;
+        gsub(/^\s+/, "", frame);
+        # Append frame to stack with semicolon separator
+        stack = stack ? stack ";" frame : frame;
+    }}
+}}
+
+END {{
+    # Output the final block if it exists
+    if (in_block && stack != "") {{
+        printf "0 0 %d %d @ %s\n", inuse_objects, inuse_bytes, stack;
+    }}
 }}
 ' ${{MEMLEAK_OUTPUT_FILE}} > ${{MEMLEAK_FOLDED_FILE}}
 
