@@ -97,7 +97,7 @@ impl<
         // IncomingConnection limits how long we will wait for the peer to send us their public key
         // to ensure an adversary can't force us to hold many pending connections open.
         let incoming = match IncomingConnection::verify(&context, stream_cfg, sink, stream)
-            .instrument(debug_span!(parent:&span, "verify"))
+            .instrument(debug_span!(parent: &span, "verify"))
             .await
         {
             Ok(partial) => partial,
@@ -115,7 +115,7 @@ impl<
         let peer = incoming.peer();
         let reservation = match tracker
             .reserve(peer.clone())
-            .instrument(debug_span!(parent:&span, "reserve"))
+            .instrument(debug_span!(parent: &span, "reserve"))
             .await
         {
             Some(reservation) => reservation,
@@ -128,7 +128,7 @@ impl<
 
         // Perform handshake
         let stream = match Connection::upgrade_listener(context, incoming)
-            .instrument(debug_span!(parent:&span, "upgrade"))
+            .instrument(debug_span!(parent: &span, "upgrade"))
             .await
         {
             Ok(connection) => connection,

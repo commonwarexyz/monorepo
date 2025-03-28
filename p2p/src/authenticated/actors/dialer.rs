@@ -103,7 +103,7 @@ impl<
                     // Attempt to dial peer
                     let (sink, stream) = match context
                         .dial(address)
-                        .instrument(debug_span!(parent:&span, "dial"))
+                        .instrument(debug_span!(parent: &span, "dial"))
                         .await
                     {
                         Ok(stream) => stream,
@@ -123,7 +123,7 @@ impl<
                         stream,
                         peer.clone(),
                     )
-                    .instrument(debug_span!(parent:&span, "upgrade"))
+                    .instrument(debug_span!(parent: &span, "upgrade"))
                     .await
                     {
                         Ok(instance) => instance,
