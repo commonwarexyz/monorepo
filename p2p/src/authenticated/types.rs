@@ -117,7 +117,7 @@ pub struct SignedPeerInfo<C: Verifier> {
 
 impl<C: Verifier> SignedPeerInfo<C> {
     /// Verify the signature of the peer info.
-    pub fn verify_signature(&self, namespace: &[u8]) -> bool {
+    pub fn verify(&self, namespace: &[u8]) -> bool {
         C::verify(
             Some(namespace),
             &(self.socket, self.timestamp).encode(),

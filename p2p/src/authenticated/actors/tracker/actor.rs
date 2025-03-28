@@ -1,7 +1,7 @@
 pub use super::{
-    address_record::AddressRecord,
     ingress::{Mailbox, Message, Oracle, Reservation},
-    peer_set::PeerSet,
+    record::Record,
+    set::Set,
     Config, Error,
 };
 use crate::authenticated::{
@@ -47,8 +47,8 @@ pub struct Actor<E: Spawner + Rng + GClock + Metrics, C: Scheme> {
 
     sender: mpsc::Sender<Message<E, C>>,
     receiver: mpsc::Receiver<Message<E, C>>,
-    peers: BTreeMap<C::PublicKey, AddressRecord<C>>,
-    sets: BTreeMap<u64, PeerSet<C::PublicKey>>,
+    peers: BTreeMap<C::PublicKey, Record<C>>,
+    sets: BTreeMap<u64, Set<C::PublicKey>>,
     #[allow(clippy::type_complexity)]
     connections_rate_limiter:
         RateLimiter<C::PublicKey, HashMapStateStore<C::PublicKey>, E, NoOpMiddleware<E::Instant>>,
@@ -85,7 +85,7 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
             if peer == cfg.crypto.public_key() {
                 continue;
             }
-            peers.insert(peer, AddressRecord::Bootstrapper(address));
+            peers.insert(peer, Record::Bootstrapper(address));
         }
 
         // Configure peer set
@@ -93,7 +93,7 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
         if tracked_peer_sets == 0 {
             tracked_peer_sets = 1
         };
-        let sets: BTreeMap<u64, PeerSet<C::PublicKey>> = BTreeMap::new();
+        let sets: BTreeMap<u64, Set<C::PublicKey>> = BTreeMap::new();
 
         // Construct channels
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
@@ -188,16 +188,13 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
         }
 
         // Create and store new peer set
-        let set = PeerSet::new(index, peers.clone());
+        let set = Set::new(index, peers.clone());
         self.sets.insert(index, set);
 
         // Update stored counters
         let set = self.sets.get_mut(&index).unwrap();
         for peer in peers.iter() {
-            let address = self
-                .peers
-                .entry(peer.clone())
-                .or_insert(AddressRecord::Unknown(0));
+            let address = self.peers.entry(peer.clone()).or_insert(Record::Unknown(0));
             address.increment();
             if address.is_discovered() {
                 set.found(peer.clone());
@@ -306,7 +303,7 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
             }
 
             // If any signature is invalid, disconnect from the peer
-            if !peer.verify_signature(&self.ip_namespace) {
+            if !peer.verify(&self.ip_namespace) {
                 return Err(Error::InvalidSignature);
             }
 

@@ -4,7 +4,7 @@ use commonware_utils::Array;
 use std::collections::HashMap;
 
 /// Represents a set of peers and their knowledge of each other.
-pub struct PeerSet<P: Array> {
+pub struct Set<P: Array> {
     /// The index at which this peer set applies.
     pub index: u64,
 
@@ -21,7 +21,7 @@ pub struct PeerSet<P: Array> {
     pub msg: types::BitVec,
 }
 
-impl<P: Array> PeerSet<P> {
+impl<P: Array> Set<P> {
     pub fn new(index: u64, mut peers: Vec<P>) -> Self {
         // Insert peers in sorted order
         peers.sort();
@@ -31,7 +31,8 @@ impl<P: Array> PeerSet<P> {
         }
 
         // Create bit vector
-        let knowledge = BitVec::repeat(false, peers.len());
+        let mut knowledge = BitVec::repeat(false, peers.len());
+        knowledge.set_uninitialized(false);
 
         // Create message
         let msg = types::BitVec {

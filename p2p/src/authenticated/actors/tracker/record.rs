@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 
 /// Represents information known about a peer's address.
 #[derive(Clone)]
-pub enum AddressRecord<C: Verifier> {
+pub enum Record<C: Verifier> {
     /// Peer address is not yet known.
     /// Can be upgraded to `Discovered`.
     /// Tracks the number of peer sets this peer is part of.
@@ -23,7 +23,7 @@ pub enum AddressRecord<C: Verifier> {
     Persistent(SignedPeerInfo<C>),
 }
 
-impl<C: Verifier> AddressRecord<C> {
+impl<C: Verifier> Record<C> {
     /// Get the address of the peer.
     ///
     /// Returns None if the address is unknown.
