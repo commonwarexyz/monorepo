@@ -734,7 +734,8 @@ BEGIN {{ in_block = 0; stack = ""; inuse_objects = 0; inuse_space = 0; }}
 /^\s*[0-9]+ bytes in [0-9]+ allocations/ {{ # Match summary line with optional leading whitespace
     if (in_block && stack != "") {{
         # Output the previous block
-        printf "%s 0 0 %d %d\n", stack, inuse_objects, inuse_space;
+        # printf "%s 0 0 %d %d\n", stack, inuse_objects, inuse_space;
+        printf "%s %d\n", stack, inuse_space;
     }}
     # Start a new block
     inuse_space = $1;         # Capture bytes (e.g., 40)
@@ -761,7 +762,8 @@ BEGIN {{ in_block = 0; stack = ""; inuse_objects = 0; inuse_space = 0; }}
 END {{
     # Output the final block if it exists
     if (in_block && stack != "") {{
-        printf "%s 0 0 %d %d\n", stack, inuse_objects, inuse_space;
+        # printf "%s 0 0 %d %d\n", stack, inuse_objects, inuse_space;
+        printf "%s %d\n", stack, inuse_space;
     }}
 }}
 ' ${{MEMLEAK_OUTPUT_FILE}} > ${{MEMLEAK_FOLDED_FILE}}
