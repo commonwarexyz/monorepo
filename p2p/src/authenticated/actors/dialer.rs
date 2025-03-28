@@ -97,7 +97,7 @@ impl<
                 let mut supervisor = supervisor.clone();
                 move |context| async move {
                     // Create span
-                    let span = info_span!(parent: None, "dial_peer", ?peer, ?address);
+                    let span = info_span!(parent: None, "dialer", ?peer, ?address);
                     let guard = span.enter();
 
                     // Attempt to dial peer

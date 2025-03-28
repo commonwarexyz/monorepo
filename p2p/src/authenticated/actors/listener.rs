@@ -10,10 +10,12 @@ use governor::{
     state::{InMemoryState, NotKeyed},
     Quota, RateLimiter,
 };
+use opentelemetry::trace::Status;
 use prometheus_client::metrics::counter::Counter;
 use rand::{CryptoRng, Rng};
 use std::{marker::PhantomData, net::SocketAddr};
 use tracing::{debug, debug_span, info_span, Instrument};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 /// Configuration for the listener actor.
 pub struct Config<C: Scheme> {
@@ -87,7 +89,7 @@ impl<
         mut supervisor: spawner::Mailbox<E, Si, St, C::PublicKey>,
     ) {
         // Create span
-        let span = info_span!("listen", ?address);
+        let span = info_span!(parent: None, "listener", ?address);
         let guard = span.enter();
 
         // Wait for the peer to send us their public key
@@ -100,6 +102,7 @@ impl<
         {
             Ok(partial) => partial,
             Err(e) => {
+                span.set_status(Status::error("failed to verify incoming handshake"));
                 debug!(error = ?e, "failed to verify incoming handshake");
                 return;
             }
@@ -117,6 +120,7 @@ impl<
         {
             Some(reservation) => reservation,
             None => {
+                span.set_status(Status::error("unable to reserve connection to peer"));
                 debug!(?peer, "unable to reserve connection to peer");
                 return;
             }
@@ -129,6 +133,7 @@ impl<
         {
             Ok(connection) => connection,
             Err(e) => {
+                span.set_status(Status::error("failed to upgrade connection"));
                 debug!(error = ?e, ?peer, "failed to upgrade connection");
                 return;
             }
@@ -136,7 +141,7 @@ impl<
         debug!(?peer, "upgraded connection");
 
         // Drop guard
-        span.record("success", true);
+        span.set_status(Status::Ok);
         drop(guard);
 
         // Start peer to handle messages
