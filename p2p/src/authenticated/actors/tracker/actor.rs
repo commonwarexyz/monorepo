@@ -383,9 +383,9 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
                 peers.push(self.ip_signature.clone());
                 continue;
             }
-            let peer_info = match self.peers.get(peer) {
-                Some(AddressRecord::Discovered(_, peer_info)) => peer_info,
-                _ => continue,
+            let Some(peer_info) = self.peers.get(peer).and_then(|r| r.get_peer_info()) else {
+                debug!(?peer, "peer address not known");
+                continue;
             };
             peers.push(peer_info.clone());
         }

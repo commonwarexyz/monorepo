@@ -36,6 +36,16 @@ impl<C: Verifier> AddressRecord<C> {
         }
     }
 
+    /// Get the peer information if available.
+    pub fn get_peer_info(&self) -> Option<&SignedPeerInfo<C>> {
+        match &self {
+            Self::Unknown(_) => None,
+            Self::Bootstrapper(_) => None,
+            Self::Discovered(_, peer_info) => Some(peer_info),
+            Self::Persistent(peer_info) => Some(peer_info),
+        }
+    }
+
     /// Attempt to set the address of a discovered peer.
     ///
     /// Returns true if the update was successful.
