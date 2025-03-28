@@ -101,18 +101,15 @@ impl<
                     let guard = span.enter();
 
                     // Attempt to dial peer
-                    let (sink, stream) = match context
-                        .dial(address)
-                        .instrument(debug_span!("dial").or_current())
-                        .await
-                    {
-                        Ok(stream) => stream,
-                        Err(e) => {
-                            span.set_status(Status::error("failed to dial peer"));
-                            debug!(?peer, error = ?e, "failed to dial peer");
-                            return;
-                        }
-                    };
+                    let (sink, stream) =
+                        match context.dial(address).instrument(debug_span!("dial")).await {
+                            Ok(stream) => stream,
+                            Err(e) => {
+                                span.set_status(Status::error("failed to dial peer"));
+                                debug!(?peer, error = ?e, "failed to dial peer");
+                                return;
+                            }
+                        };
                     debug!(?peer, address = address.to_string(), "dialed peer");
 
                     // Upgrade connection
