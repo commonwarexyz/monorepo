@@ -1,6 +1,6 @@
 //! Utilities to serve metrics over HTTP.
 
-use crate::{Listener, Metrics, Network, Sink, Spawner, Stream};
+use crate::{Listener, Metrics, Network, Sink, Stream};
 use std::net::SocketAddr;
 use tracing::{debug, error};
 
@@ -29,12 +29,7 @@ where
 }
 
 /// Serve metrics over HTTP (on all methods and paths) for the given address.
-pub async fn serve<
-    Si: Sink,
-    St: Stream,
-    L: Listener<Si, St>,
-    C: Metrics + Network<L, Si, St> + Spawner,
->(
+pub async fn serve<Si: Sink, St: Stream, L: Listener<Si, St>, C: Metrics + Network<L, Si, St>>(
     context: C,
     address: SocketAddr,
 ) {

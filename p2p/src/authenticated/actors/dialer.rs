@@ -13,11 +13,13 @@ use governor::{
     state::{InMemoryState, NotKeyed},
     Quota, RateLimiter,
 };
+use opentelemetry::trace::Status;
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use rand::{CryptoRng, Rng};
 use std::{marker::PhantomData, time::Duration};
-use tracing::debug;
+use tracing::{debug, info_span, Instrument};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 pub struct Config<C: Scheme> {
     pub stream_cfg: StreamConfig<C>,
@@ -94,14 +96,20 @@ impl<
                 let config = self.stream_cfg.clone();
                 let mut supervisor = supervisor.clone();
                 move |context| async move {
+                    // Create span
+                    let span = info_span!(parent: None, "dialer", ?peer, ?address);
+                    let guard = span.enter();
+
                     // Attempt to dial peer
-                    let (sink, stream) = match context.dial(address).await {
-                        Ok(stream) => stream,
-                        Err(e) => {
-                            debug!(?peer, error = ?e, "failed to dial peer");
-                            return;
-                        }
-                    };
+                    let (sink, stream) =
+                        match context.dial(address).instrument(info_span!("dial")).await {
+                            Ok(stream) => stream,
+                            Err(e) => {
+                                span.set_status(Status::error("failed to dial peer"));
+                                debug!(?peer, error = ?e, "failed to dial peer");
+                                return;
+                            }
+                        };
                     debug!(?peer, address = address.to_string(), "dialed peer");
 
                     // Upgrade connection
@@ -112,15 +120,21 @@ impl<
                         stream,
                         peer.clone(),
                     )
+                    .instrument(info_span!("upgrade"))
                     .await
                     {
                         Ok(instance) => instance,
                         Err(e) => {
+                            span.set_status(Status::error("failed to upgrade connection"));
                             debug!(?peer, error = ?e, "failed to upgrade connection");
                             return;
                         }
                     };
                     debug!(?peer, "upgraded connection");
+
+                    // Set status to OK
+                    span.set_status(Status::Ok);
+                    drop(guard);
 
                     // Start peer to handle messages
                     supervisor.spawn(peer, instance, reservation).await;

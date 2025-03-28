@@ -26,8 +26,10 @@ tracing = { workspace = true }
 governor = { workspace = true }
 prometheus-client = { workspace = true }
 zstd = { workspace = true }
+either = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+opentelemetry = { workspace = true }
 bitvec = "1.0.1"
-either = "1.13.0"
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }

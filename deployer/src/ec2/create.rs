@@ -1,8 +1,8 @@
 //! `create` subcommand for `ec2`
 
 use crate::ec2::{
-    aws::*, deployer_directory, services::*, utils::*, Config, Error, InstanceConfig, Peer, Peers,
-    CREATED_FILE_NAME, LOGS_PORT, MONITORING_NAME, MONITORING_REGION, PROFILES_PORT,
+    aws::*, deployer_directory, services::*, utils::*, Config, Error, Host, Hosts, InstanceConfig,
+    CREATED_FILE_NAME, LOGS_PORT, MONITORING_NAME, MONITORING_REGION, PROFILES_PORT, TRACES_PORT,
 };
 use futures::future::try_join_all;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -397,6 +397,8 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     std::fs::write(&loki_service_path, LOKI_SERVICE)?;
     let pyroscope_service_path = temp_dir.join("pyroscope.service");
     std::fs::write(&pyroscope_service_path, PYROSCOPE_SERVICE)?;
+    let tempo_service_path = temp_dir.join("tempo.service");
+    std::fs::write(&tempo_service_path, TEMPO_SERVICE)?;
     let promtail_service_path = temp_dir.join("promtail.service");
     std::fs::write(&promtail_service_path, PROMTAIL_SERVICE)?;
     let node_exporter_service_path = temp_dir.join("node_exporter.service");
@@ -440,6 +442,8 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     std::fs::write(&loki_config_path, LOKI_CONFIG)?;
     let pyroscope_config_path = temp_dir.join("pyroscope.yml");
     std::fs::write(&pyroscope_config_path, PYROSCOPE_CONFIG)?;
+    let tempo_yml_path = temp_dir.join("tempo.yml");
+    std::fs::write(&tempo_yml_path, TEMPO_CONFIG)?;
     scp_file(
         private_key,
         prom_path.to_str().unwrap(),
@@ -510,6 +514,20 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         "/home/ubuntu/pyroscope.service",
     )
     .await?;
+    scp_file(
+        private_key,
+        tempo_yml_path.to_str().unwrap(),
+        &monitoring_ip,
+        "/home/ubuntu/tempo.yml",
+    )
+    .await?;
+    scp_file(
+        private_key,
+        tempo_service_path.to_str().unwrap(),
+        &monitoring_ip,
+        "/home/ubuntu/tempo.service",
+    )
+    .await?;
     enable_bbr(private_key, &monitoring_ip, bbr_conf_path.to_str().unwrap()).await?;
     ssh_execute(
         private_key,
@@ -526,29 +544,32 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             GRAFANA_VERSION,
             LOKI_VERSION,
             PYROSCOPE_VERSION,
+            TEMPO_VERSION,
         ),
     )
     .await?;
     poll_service_active(private_key, &monitoring_ip, "prometheus").await?;
     poll_service_active(private_key, &monitoring_ip, "loki").await?;
     poll_service_active(private_key, &monitoring_ip, "pyroscope").await?;
+    poll_service_active(private_key, &monitoring_ip, "tempo").await?;
     poll_service_active(private_key, &monitoring_ip, "grafana-server").await?;
     info!("configured monitoring instance");
 
-    // Generate peers.yaml
-    let peers = Peers {
-        peers: deployments
+    // Generate hosts.yaml
+    let hosts = Hosts {
+        monitoring: monitoring_private_ip.clone().parse::<IpAddr>().unwrap(),
+        hosts: deployments
             .iter()
-            .map(|d| Peer {
+            .map(|d| Host {
                 name: d.instance.name.clone(),
                 region: d.instance.region.clone(),
                 ip: d.ip.clone().parse::<IpAddr>().unwrap(),
             })
             .collect(),
     };
-    let peers_yaml = serde_yaml::to_string(&peers)?;
-    let peers_path = temp_dir.join("peers.yaml");
-    std::fs::write(&peers_path, peers_yaml)?;
+    let hosts_yaml = serde_yaml::to_string(&hosts)?;
+    let hosts_path = temp_dir.join("hosts.yaml");
+    std::fs::write(&hosts_path, hosts_yaml)?;
 
     // Configure binary instances
     info!("configuring binary instances");
@@ -559,7 +580,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         wait_for_instances_ready(&ec2_clients[&instance.region], &[deployment.id.clone()]).await?;
         let ip = deployment.ip.clone();
         let monitoring_private_ip = monitoring_private_ip.clone();
-        let peers_path = peers_path.clone();
+        let hosts_path = hosts_path.clone();
         let logrotate_conf_path = logrotate_conf_path.clone();
         let bbr_conf_path = bbr_conf_path.clone();
         let promtail_service_path = promtail_service_path.clone();
@@ -578,9 +599,9 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             .await?;
             scp_file(
                 private_key,
-                peers_path.to_str().unwrap(),
+                hosts_path.to_str().unwrap(),
                 &ip,
-                "/home/ubuntu/peers.yaml",
+                "/home/ubuntu/hosts.yaml",
             )
             .await?;
             let promtail_config_path = temp_dir.join(format!("promtail_{}.yml", instance.name));
@@ -719,6 +740,18 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                     )
                     .build(),
             )
+            .ip_permissions(
+                IpPermission::builder()
+                    .ip_protocol("tcp")
+                    .from_port(TRACES_PORT as i32)
+                    .to_port(TRACES_PORT as i32)
+                    .user_id_group_pairs(
+                        UserIdGroupPair::builder()
+                            .group_id(binary_sg_id.clone())
+                            .build(),
+                    )
+                    .build(),
+            )
             .send()
             .await
             .map_err(|err| err.into_service_error())?;
@@ -748,6 +781,14 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                         .ip_protocol("tcp")
                         .from_port(PROFILES_PORT as i32)
                         .to_port(PROFILES_PORT as i32)
+                        .ip_ranges(IpRange::builder().cidr_ip(binary_cidr).build())
+                        .build(),
+                )
+                .ip_permissions(
+                    IpPermission::builder()
+                        .ip_protocol("tcp")
+                        .from_port(TRACES_PORT as i32)
+                        .to_port(TRACES_PORT as i32)
                         .ip_ranges(IpRange::builder().cidr_ip(binary_cidr).build())
                         .build(),
                 )

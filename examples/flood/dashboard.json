@@ -1225,8 +1225,121 @@
                     "spanSelector": []
                 }
             ],
-            "title": "CPU Time",
+            "title": "Profiles",
             "type": "flamegraph"
+        },
+        {
+            "datasource": {
+                "uid": "P214B5B846CF3925F"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "color": {
+                        "mode": "thresholds"
+                    },
+                    "custom": {
+                        "align": "auto",
+                        "cellOptions": {
+                            "type": "auto",
+                            "wrapText": false
+                        },
+                        "filterable": true,
+                        "inspect": false
+                    },
+                    "mappings": [],
+                    "thresholds": {
+                        "mode": "absolute",
+                        "steps": [
+                            {
+                                "color": "green",
+                                "value": null
+                            }
+                        ]
+                    }
+                },
+                "overrides": [
+                    {
+                        "matcher": {
+                            "id": "byName",
+                            "options": "Trace Name"
+                        },
+                        "properties": [
+                            {
+                                "id": "custom.width",
+                                "value": 123
+                            }
+                        ]
+                    },
+                    {
+                        "matcher": {
+                            "id": "byName",
+                            "options": "status"
+                        },
+                        "properties": [
+                            {
+                                "id": "custom.width",
+                                "value": 85
+                            }
+                        ]
+                    }
+                ]
+            },
+            "gridPos": {
+                "h": 17,
+                "w": 12,
+                "x": 0,
+                "y": 52
+            },
+            "id": 17,
+            "options": {
+                "cellHeight": "sm",
+                "footer": {
+                    "countRows": false,
+                    "enablePagination": true,
+                    "fields": "",
+                    "reducer": [
+                        "sum"
+                    ],
+                    "show": false
+                },
+                "showHeader": true,
+                "sortBy": [
+                    {
+                        "desc": true,
+                        "displayName": "Duration"
+                    }
+                ]
+            },
+            "pluginVersion": "11.5.2",
+            "targets": [
+                {
+                    "limit": 20,
+                    "query": "{resource.service.name = \"flood\" && trace:rootName != \"\" && span:status != unset }",
+                    "queryType": "traceql",
+                    "refId": "A",
+                    "tableType": "spans"
+                }
+            ],
+            "title": "Traces",
+            "transformations": [
+                {
+                    "id": "filterFieldsByName",
+                    "options": {
+                        "include": {
+                            "names": [
+                                "traceIdHidden",
+                                "Trace Name",
+                                "Span ID",
+                                "Start time",
+                                "Name",
+                                "status",
+                                "Duration"
+                            ]
+                        }
+                    }
+                }
+            ],
+            "type": "table"
         },
         {
             "datasource": {
@@ -1238,9 +1351,9 @@
                 "overrides": []
             },
             "gridPos": {
-                "h": 18,
-                "w": 24,
-                "x": 0,
+                "h": 17,
+                "w": 12,
+                "x": 12,
                 "y": 52
             },
             "id": 6,
@@ -1281,7 +1394,6 @@
     "templating": {
         "list": [
             {
-                "allValue": "",
                 "allowCustomValue": false,
                 "current": {
                     "text": "All",
