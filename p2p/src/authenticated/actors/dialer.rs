@@ -18,7 +18,7 @@ use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use rand::{CryptoRng, Rng};
 use std::{marker::PhantomData, time::Duration};
-use tracing::{debug, debug_span, info_span, Instrument};
+use tracing::{debug, info_span, Instrument};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 pub struct Config<C: Scheme> {
@@ -102,7 +102,7 @@ impl<
 
                     // Attempt to dial peer
                     let (sink, stream) =
-                        match context.dial(address).instrument(debug_span!("dial")).await {
+                        match context.dial(address).instrument(info_span!("dial")).await {
                             Ok(stream) => stream,
                             Err(e) => {
                                 span.set_status(Status::error("failed to dial peer"));
@@ -120,7 +120,7 @@ impl<
                         stream,
                         peer.clone(),
                     )
-                    .instrument(debug_span!("upgrade"))
+                    .instrument(info_span!("upgrade"))
                     .await
                     {
                         Ok(instance) => instance,

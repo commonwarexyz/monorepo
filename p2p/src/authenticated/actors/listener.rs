@@ -14,7 +14,7 @@ use opentelemetry::trace::Status;
 use prometheus_client::metrics::counter::Counter;
 use rand::{CryptoRng, Rng};
 use std::{marker::PhantomData, net::SocketAddr};
-use tracing::{debug, debug_span, info_span, Instrument};
+use tracing::{debug, info_span, Instrument};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 /// Configuration for the listener actor.
@@ -97,7 +97,7 @@ impl<
         // IncomingConnection limits how long we will wait for the peer to send us their public key
         // to ensure an adversary can't force us to hold many pending connections open.
         let incoming = match IncomingConnection::verify(&context, stream_cfg, sink, stream)
-            .instrument(debug_span!("verify"))
+            .instrument(info_span!("verify"))
             .await
         {
             Ok(partial) => partial,
@@ -115,7 +115,7 @@ impl<
         let peer = incoming.peer();
         let reservation = match tracker
             .reserve(peer.clone())
-            .instrument(debug_span!("reserve"))
+            .instrument(info_span!("reserve"))
             .await
         {
             Some(reservation) => reservation,
@@ -128,7 +128,7 @@ impl<
 
         // Perform handshake
         let stream = match Connection::upgrade_listener(context, incoming)
-            .instrument(debug_span!("upgrade"))
+            .instrument(info_span!("upgrade"))
             .await
         {
             Ok(connection) => connection,
