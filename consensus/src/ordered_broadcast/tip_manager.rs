@@ -57,12 +57,11 @@ impl<C: Scheme, D: Digest> TipManager<C, D> {
 mod tests {
     use super::{super::parsed, *};
     use bytes::Bytes;
-    use commonware_codec::SizedCodec;
+    use commonware_codec::{SizedCodec, SliceCodec};
     use commonware_cryptography::{
         ed25519::{self, Ed25519, PublicKey, Signature},
         sha256::{self, Digest},
     };
-    use commonware_utils::Array;
     use rand::SeedableRng;
 
     /// Helper functions for TipManager tests.
@@ -77,7 +76,7 @@ mod tests {
         ) -> parsed::Node<Ed25519, Digest> {
             let signature = {
                 let mut data = Bytes::from(vec![3u8; Signature::LEN_ENCODED]);
-                Signature::read_from(&mut data).unwrap()
+                Signature::read_from_slice(&mut data).unwrap()
             };
             parsed::Node::<Ed25519, Digest> {
                 chunk: parsed::Chunk {

@@ -25,7 +25,7 @@ use super::primitives::{
 };
 use crate::{Array, Error, Scheme};
 use bytes::{Buf, BufMut};
-use commonware_codec::{Codec, Error as CodecError, SizedCodec};
+use commonware_codec::{Codec, Error as CodecError, SizedCodec, SliceCodec};
 use commonware_utils::hex;
 use rand::{CryptoRng, Rng};
 use std::{
@@ -101,7 +101,7 @@ impl Codec for PrivateKey {
     }
 
     fn read<B: Buf>(buf: &mut B) -> Result<Self, CodecError> {
-        Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
+        Self::read_from_slice(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
     }
 
     fn len_encoded(&self) -> usize {
@@ -113,9 +113,7 @@ impl SizedCodec for PrivateKey {
     const LEN_ENCODED: usize = group::PRIVATE_KEY_LENGTH;
 }
 
-impl Array for PrivateKey {
-    type Error = Error;
-}
+impl Array for PrivateKey {}
 
 impl Hash for PrivateKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
@@ -205,7 +203,7 @@ impl Codec for PublicKey {
     }
 
     fn read<B: Buf>(buf: &mut B) -> Result<Self, CodecError> {
-        Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
+        Self::read_from_slice(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
     }
 
     fn len_encoded(&self) -> usize {
@@ -217,9 +215,7 @@ impl SizedCodec for PublicKey {
     const LEN_ENCODED: usize = group::PUBLIC_KEY_LENGTH;
 }
 
-impl Array for PublicKey {
-    type Error = Error;
-}
+impl Array for PublicKey {}
 
 impl Hash for PublicKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
@@ -309,7 +305,7 @@ impl Codec for Signature {
     }
 
     fn read<B: Buf>(buf: &mut B) -> Result<Self, CodecError> {
-        Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
+        Self::read_from_slice(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
     }
 
     fn len_encoded(&self) -> usize {
@@ -321,9 +317,7 @@ impl SizedCodec for Signature {
     const LEN_ENCODED: usize = group::SIGNATURE_LENGTH;
 }
 
-impl Array for Signature {
-    type Error = Error;
-}
+impl Array for Signature {}
 
 impl Hash for Signature {
     fn hash<H: Hasher>(&self, state: &mut H) {

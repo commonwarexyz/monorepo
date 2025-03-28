@@ -139,7 +139,7 @@ impl<B: Blob, E: Clock + Storage<B> + Metrics, K: Array> Metadata<B, E, K> {
         while cursor < checksum_index {
             // Read key
             let next_cursor = cursor + K::LEN_ENCODED;
-            let key = K::read_from(&mut buf[cursor..next_cursor].as_ref()).unwrap();
+            let key = K::read_from_slice(&mut buf[cursor..next_cursor].as_ref()).unwrap();
             cursor = next_cursor;
 
             // Read value length

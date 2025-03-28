@@ -7,7 +7,7 @@ use super::{
 };
 use crate::Proof;
 use bytes::{Buf, BufMut};
-use commonware_codec::SizedCodec;
+use commonware_codec::{SizedCodec, SliceCodec};
 use commonware_cryptography::Scheme;
 use commonware_utils::Array;
 use std::{collections::HashSet, marker::PhantomData};
@@ -83,9 +83,9 @@ impl<C: Scheme, D: Array> Prover<C, D> {
         // Decode proof
         let view = proof.get_u64();
         let parent = proof.get_u64();
-        let payload = D::read_from(&mut proof).ok()?;
-        let public_key = C::PublicKey::read_from(&mut proof).ok()?;
-        let signature = C::Signature::read_from(&mut proof).ok()?;
+        let payload = D::read_from_slice(&mut proof).ok()?;
+        let public_key = C::PublicKey::read_from_slice(&mut proof).ok()?;
+        let signature = C::Signature::read_from_slice(&mut proof).ok()?;
 
         // Verify signature
         let proposal_message = proposal_message(view, parent, &payload);
@@ -138,7 +138,7 @@ impl<C: Scheme, D: Array> Prover<C, D> {
         // Decode proof prefix
         let view = proof.get_u64();
         let parent = proof.get_u64();
-        let payload = D::read_from(&mut proof).ok()?;
+        let payload = D::read_from_slice(&mut proof).ok()?;
         let count = proof.get_u32();
         if count > max {
             return None;
@@ -157,14 +157,14 @@ impl<C: Scheme, D: Array> Prover<C, D> {
         let mut seen = HashSet::with_capacity(count);
         for _ in 0..count {
             // Check if already saw public key
-            let public_key = C::PublicKey::read_from(&mut proof).ok()?;
+            let public_key = C::PublicKey::read_from_slice(&mut proof).ok()?;
             if seen.contains(&public_key) {
                 return None;
             }
             seen.insert(public_key.clone());
 
             // Read signature
-            let signature = C::Signature::read_from(&mut proof).ok()?;
+            let signature = C::Signature::read_from_slice(&mut proof).ok()?;
 
             // Verify signature
             if check_sigs && !C::verify(Some(namespace), &message, &public_key, &signature) {
@@ -267,13 +267,13 @@ impl<C: Scheme, D: Array> Prover<C, D> {
 
         // Decode proof
         let view = proof.get_u64();
-        let public_key = C::PublicKey::read_from(&mut proof).ok()?;
+        let public_key = C::PublicKey::read_from_slice(&mut proof).ok()?;
         let parent_1 = proof.get_u64();
-        let payload_1 = D::read_from(&mut proof).ok()?;
-        let signature_1 = C::Signature::read_from(&mut proof).ok()?;
+        let payload_1 = D::read_from_slice(&mut proof).ok()?;
+        let signature_1 = C::Signature::read_from_slice(&mut proof).ok()?;
         let parent_2 = proof.get_u64();
-        let payload_2 = D::read_from(&mut proof).ok()?;
-        let signature_2 = C::Signature::read_from(&mut proof).ok()?;
+        let payload_2 = D::read_from_slice(&mut proof).ok()?;
+        let signature_2 = C::Signature::read_from_slice(&mut proof).ok()?;
 
         // Verify signatures
         if check_sig {
@@ -409,11 +409,11 @@ impl<C: Scheme, D: Array> Prover<C, D> {
 
         // Decode proof
         let view = proof.get_u64();
-        let public_key = C::PublicKey::read_from(&mut proof).ok()?;
+        let public_key = C::PublicKey::read_from_slice(&mut proof).ok()?;
         let parent = proof.get_u64();
-        let payload = D::read_from(&mut proof).ok()?;
-        let signature_finalize = C::Signature::read_from(&mut proof).ok()?;
-        let signature_null = C::Signature::read_from(&mut proof).ok()?;
+        let payload = D::read_from_slice(&mut proof).ok()?;
+        let signature_finalize = C::Signature::read_from_slice(&mut proof).ok()?;
+        let signature_null = C::Signature::read_from_slice(&mut proof).ok()?;
 
         // Verify signatures
         if check_sig {

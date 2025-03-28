@@ -103,7 +103,7 @@ impl<D: Digest> Prover<D> {
         // Decode proof
         let view = proof.get_u64();
         let parent = proof.get_u64();
-        let payload = D::read_from(&mut proof).ok()?;
+        let payload = D::read_from_slice(&mut proof).ok()?;
         let signature = proof.copy_to_bytes(poly::PARTIAL_SIGNATURE_LENGTH);
         let signature = poly::Eval::deserialize(&signature)?;
 
@@ -164,7 +164,7 @@ impl<D: Digest> Prover<D> {
         // Verify signature
         let view = proof.get_u64();
         let parent = proof.get_u64();
-        let payload = D::read_from(&mut proof).ok()?;
+        let payload = D::read_from_slice(&mut proof).ok()?;
         let message = proposal_message(view, parent, &payload);
         let signature = proof.copy_to_bytes(group::SIGNATURE_LENGTH);
         let signature = group::Signature::deserialize(&signature)?;
@@ -259,11 +259,11 @@ impl<D: Digest> Prover<D> {
         // Decode proof
         let view = proof.get_u64();
         let parent_1 = proof.get_u64();
-        let payload_1 = D::read_from(&mut proof).ok()?;
+        let payload_1 = D::read_from_slice(&mut proof).ok()?;
         let signature_1 = proof.copy_to_bytes(poly::PARTIAL_SIGNATURE_LENGTH);
         let signature_1 = Eval::deserialize(&signature_1)?;
         let parent_2 = proof.get_u64();
-        let payload_2 = D::read_from(&mut proof).ok()?;
+        let payload_2 = D::read_from_slice(&mut proof).ok()?;
         let signature_2 = proof.copy_to_bytes(poly::PARTIAL_SIGNATURE_LENGTH);
         let signature_2 = Eval::deserialize(&signature_2)?;
         if signature_1.index != signature_2.index {
@@ -392,7 +392,7 @@ impl<D: Digest> Prover<D> {
         // Decode proof
         let view = proof.get_u64();
         let parent = proof.get_u64();
-        let payload = D::read_from(&mut proof).ok()?;
+        let payload = D::read_from_slice(&mut proof).ok()?;
         let signature_finalize = proof.copy_to_bytes(poly::PARTIAL_SIGNATURE_LENGTH);
         let signature_finalize = Eval::deserialize(&signature_finalize)?;
         let signature_null = proof.copy_to_bytes(poly::PARTIAL_SIGNATURE_LENGTH);

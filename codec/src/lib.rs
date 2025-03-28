@@ -60,5 +60,5 @@ pub mod util;
 pub mod varint;
 
 // Re-export main types and traits
-pub use codec::{Codec, SizedCodec};
+pub use codec::{Codec, SizedCodec, SliceCodec};
 pub use error::Error;

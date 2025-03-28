@@ -45,9 +45,9 @@ impl<D: Digest, P: Array> Chunk<D, P> {
     /// Returns a `Chunk` from a `wire::Chunk`.
     pub fn from_wire(chunk: wire::Chunk) -> Result<Self, Error> {
         Ok(Self {
-            sequencer: P::try_from(chunk.sequencer).map_err(|_| Error::InvalidSequencer)?,
+            sequencer: P::try_from(&chunk.sequencer).map_err(|_| Error::InvalidSequencer)?,
             height: chunk.height,
-            payload: D::try_from(chunk.payload).map_err(|_| Error::InvalidPayload)?,
+            payload: D::try_from(&chunk.payload).map_err(|_| Error::InvalidPayload)?,
         })
     }
 
@@ -73,7 +73,7 @@ impl<D: Digest> Parent<D> {
     /// Returns a `Parent` from a `wire::Parent`.
     pub fn from_wire(parent: wire::Parent) -> Result<Self, Error> {
         Ok(Self {
-            payload: D::try_from(parent.payload).map_err(|_| Error::InvalidPayload)?,
+            payload: D::try_from(&parent.payload).map_err(|_| Error::InvalidPayload)?,
             epoch: parent.epoch,
             threshold: ThresholdSignature::deserialize(&parent.threshold)
                 .ok_or(Error::InvalidThreshold)?,
@@ -111,7 +111,7 @@ impl<C: Scheme, D: Digest> Node<C, D> {
             return Err(Error::ParentMissing);
         }
         let signature =
-            C::Signature::try_from(node.signature).map_err(|_| Error::InvalidSignature)?;
+            C::Signature::try_from(&node.signature).map_err(|_| Error::InvalidSignature)?;
         Ok(Self {
             chunk,
             signature,

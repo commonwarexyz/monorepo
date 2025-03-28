@@ -69,9 +69,7 @@ impl SizedCodec for Key {
     const LEN_ENCODED: usize = u8::LEN_ENCODED;
 }
 
-impl Array for Key {
-    type Error = Error;
-}
+impl Array for Key {}
 
 /// Error type for the Array trait
 #[derive(Error, Debug, PartialEq)]

@@ -2,6 +2,7 @@
 
 use crate::error::Error;
 use bytes::{Buf, BufMut, BytesMut};
+use std::error::Error as StdError;
 
 /// Trait for types that can be encoded to and decoded from bytes
 pub trait Codec: Sized {
@@ -69,6 +70,35 @@ pub trait SizedCodec: Codec {
         array
     }
 }
+
+pub trait SliceCodec: SizedCodec + for<'a> TryFrom<&'a [u8], Error: StdError> {
+    /// Reads a value from a slice, returning an error if there is an error while reading.
+    fn read_from_slice<B: Buf>(buf: &mut B) -> Result<Self, Error> {
+        let len = Self::LEN_ENCODED;
+        if buf.remaining() < len {
+            return Err(Error::EndOfBuffer);
+        }
+
+        let chunk = buf.chunk();
+        if chunk.len() >= len {
+            let array = Self::try_from(&chunk[..len])
+                .map_err(|err| Error::Wrapped("Decode", err.to_string().into()))?;
+
+            buf.advance(len);
+            return Ok(array);
+        }
+
+        let mut temp = vec![0u8; len];
+        buf.copy_to_slice(&mut temp);
+        buf.advance(len);
+        let res = Self::try_from(temp.as_slice())
+            .map_err(|err| Error::Wrapped("Decode", err.to_string().into()))?;
+        Ok(res)
+    }
+}
+
+/// Blanket implementation for all types that implement [`SizedCodec`] and `TryFrom<&[u8]>`.
+impl<T> SliceCodec for T where T: SizedCodec + for<'a> TryFrom<&'a [u8], Error: StdError> {}
 
 #[cfg(test)]
 mod tests {

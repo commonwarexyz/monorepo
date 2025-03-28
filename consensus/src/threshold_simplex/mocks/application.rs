@@ -1,7 +1,7 @@
 use super::relay::Relay;
 use crate::{threshold_simplex::Context, Automaton as Au, Committer as Co, Proof, Relay as Re};
 use bytes::{Buf, BufMut, Bytes};
-use commonware_codec::SizedCodec;
+use commonware_codec::{SizedCodec, SliceCodec};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Spawner};
@@ -269,7 +269,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: Array> Application<E, H, P> {
                 parsed_view, context.view
             ));
         }
-        let Ok(parent) = H::Digest::read_from(&mut contents) else {
+        let Ok(parent) = H::Digest::read_from_slice(&mut contents) else {
             self.panic("invalid parent");
         };
         if parent != context.parent.1 {

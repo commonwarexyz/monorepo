@@ -49,9 +49,7 @@ impl SizedCodec for U64 {
     const LEN_ENCODED: usize = u64::LEN_ENCODED;
 }
 
-impl Array for U64 {
-    type Error = Error;
-}
+impl Array for U64 {}
 
 impl From<[u8; U64::LEN_ENCODED]> for U64 {
     fn from(value: [u8; U64::LEN_ENCODED]) -> Self {

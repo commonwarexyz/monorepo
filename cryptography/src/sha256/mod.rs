@@ -22,7 +22,7 @@
 
 use crate::{Array, Error, Hasher};
 use bytes::{Buf, BufMut};
-use commonware_codec::{Codec, Error as CodecError, SizedCodec};
+use commonware_codec::{Codec, Error as CodecError, SizedCodec, SliceCodec};
 use commonware_utils::hex;
 use rand::{CryptoRng, Rng};
 use sha2::{Digest as _, Sha256 as ISha256};
@@ -99,7 +99,7 @@ impl Codec for Digest {
     }
 
     fn read<B: Buf>(buf: &mut B) -> Result<Self, CodecError> {
-        Self::read_from(buf).map_err(|err| CodecError::Wrapped("Digest", err.into()))
+        Self::read_from_slice(buf).map_err(|err| CodecError::Wrapped("Digest", err.into()))
     }
 
     fn len_encoded(&self) -> usize {
@@ -111,9 +111,7 @@ impl SizedCodec for Digest {
     const LEN_ENCODED: usize = DIGEST_LENGTH;
 }
 
-impl Array for Digest {
-    type Error = Error;
-}
+impl Array for Digest {}
 
 impl From<[u8; DIGEST_LENGTH]> for Digest {
     fn from(value: [u8; DIGEST_LENGTH]) -> Self {

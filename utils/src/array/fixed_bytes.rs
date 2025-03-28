@@ -46,9 +46,7 @@ impl<const N: usize> SizedCodec for FixedBytes<N> {
     const LEN_ENCODED: usize = N;
 }
 
-impl<const N: usize> Array for FixedBytes<N> {
-    type Error = Error;
-}
+impl<const N: usize> Array for FixedBytes<N> {}
 
 impl<const N: usize> TryFrom<&[u8]> for FixedBytes<N> {
     type Error = Error;
@@ -102,8 +100,9 @@ impl<const N: usize> Display for FixedBytes<N> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::array::Error as ArrayError;
+
     use bytes::{Buf, Bytes, BytesMut};
+    use commonware_codec::{codec::SliceCodec, Error as CodecError};
 
     #[test]
     fn test_codec() {
@@ -152,16 +151,16 @@ mod tests {
     #[test]
     fn test_read_from() {
         let mut buf = BytesMut::from(&[1, 2, 3, 4][..]);
-        let bytes = FixedBytes::<4>::read_from(&mut buf).unwrap();
+        let bytes = FixedBytes::<4>::read_from_slice(&mut buf).unwrap();
         assert_eq!(bytes.as_ref(), &[1, 2, 3, 4]);
         assert_eq!(buf.remaining(), 0);
 
         let mut buf = BytesMut::from(&[1, 2, 3][..]);
-        let result = FixedBytes::<4>::read_from(&mut buf);
-        assert_eq!(result, Err(ArrayError::InsufficientBytes));
+        let result = FixedBytes::<4>::read_from_slice(&mut buf).expect_err("Should fail");
+        assert!(matches!(result, CodecError::EndOfBuffer));
 
         let mut buf = BytesMut::from(&[1, 2, 3, 4, 5][..]);
-        let bytes = FixedBytes::<4>::read_from(&mut buf).unwrap();
+        let bytes = FixedBytes::<4>::read_from_slice(&mut buf).unwrap();
         assert_eq!(bytes.as_ref(), &[1, 2, 3, 4]);
         assert_eq!(buf.remaining(), 1);
         assert_eq!(buf[0], 5);

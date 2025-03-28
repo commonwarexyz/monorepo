@@ -1,5 +1,6 @@
 //! Error types for codec operations
 
+use std::error::Error as StdError;
 use thiserror::Error;
 
 /// Error type for codec operations
@@ -18,5 +19,5 @@ pub enum Error {
     #[error("Invalid. Context({0}), Message({1})")]
     Invalid(&'static str, &'static str),
     #[error("Invalid. Context({0}), Error({1})")]
-    Wrapped(&'static str, Box<dyn std::error::Error + Send + Sync>),
+    Wrapped(&'static str, Box<dyn StdError + Send + Sync>),
 }

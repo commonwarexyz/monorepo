@@ -5,7 +5,7 @@
 use super::{namespace, parsed, serializer, Context, Epoch};
 use crate::Proof;
 use bytes::{Buf, BufMut};
-use commonware_codec::SizedCodec;
+use commonware_codec::{SizedCodec, SliceCodec};
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{self, Element},
@@ -13,7 +13,6 @@ use commonware_cryptography::{
     },
     Digest, Scheme,
 };
-use commonware_utils::Array;
 use std::marker::PhantomData;
 
 /// Encode and decode proofs of broadcast.
@@ -80,9 +79,9 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
         }
 
         // Decode proof
-        let sequencer = C::PublicKey::read_from(&mut proof).ok()?;
+        let sequencer = C::PublicKey::read_from_slice(&mut proof).ok()?;
         let height = proof.get_u64();
-        let Ok(payload) = D::read_from(&mut proof) else {
+        let Ok(payload) = D::read_from_slice(&mut proof) else {
             return None;
         };
         let epoch = proof.get_u64();

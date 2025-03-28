@@ -323,7 +323,7 @@ impl<
     /// Handle a network request from a peer.
     async fn handle_network_request(&mut self, peer: P, id: u64, request: Bytes) {
         // Parse request
-        let Ok(key) = Key::try_from(request.to_vec()) else {
+        let Ok(key) = Key::try_from(request.as_ref()) else {
             trace!(?peer, ?id, "peer invalid request");
             self.metrics.serve.inc(Status::Invalid);
             return;
