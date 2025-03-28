@@ -686,7 +686,6 @@ Description=Run Pyroscope Agent periodically
 # Wait a bit after boot before the first run
 OnBootSec=2min
 # Run roughly every minute after the last run finished
-# (PROFILE_DURATION is 60s, add buffer for processing/upload)
 OnUnitInactiveSec=1min
 Unit=pyroscope-agent.service
 # Randomize the delay to avoid thundering herd
@@ -797,9 +796,12 @@ pub const MEMLEAK_AGENT_TIMER: &str = r#"
 Description=Run Memleak Agent periodically
 
 [Timer]
-OnBootSec=5min # Start later than perf agent
-OnUnitInactiveSec=5min # Run less frequently than perf
+# Wait a bit after boot before the first run
+OnBootSec=2min
+# Run roughly every 5 minutes after the last run finished
+OnUnitInactiveSec=5min
 Unit=memleak-agent.service
+# Randomize the delay to avoid thundering herd
 RandomizedDelaySec=30s
 
 [Install]
