@@ -70,3 +70,54 @@ impl<P: Array> Set<P> {
         self.msg.clone()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bitvec::bitvec;
+    use commonware_utils::array::U64;
+
+    #[test]
+    fn test_set_initialization() {
+        let peers = vec![U64::new(3), U64::new(1), U64::new(2)];
+        let set = Set::new(0, peers);
+        assert_eq!(set.sorted, vec![U64::new(1), U64::new(2), U64::new(3)]);
+        assert_eq!(set.order.get(&U64::new(1)), Some(&0));
+        assert_eq!(set.order.get(&U64::new(2)), Some(&1));
+        assert_eq!(set.order.get(&U64::new(3)), Some(&2));
+        assert_eq!(set.knowledge, bitvec![u8, Lsb0; 0; 3]);
+        assert_eq!(set.msg.bits, vec![0]); // Initial message is all zeros
+    }
+
+    #[test]
+    fn test_found() {
+        let peers = vec![U64::new(1), U64::new(2), U64::new(3)];
+        let mut set = Set::new(0, peers);
+        assert!(set.found(U64::new(2)));
+        assert_eq!(set.knowledge, bitvec![u8, Lsb0; 0, 1, 0]);
+        assert!(!set.found(U64::new(4))); // Peer not in set
+        assert_eq!(set.knowledge, bitvec![u8, Lsb0; 0, 1, 0]);
+    }
+
+    #[test]
+    fn test_update_msg() {
+        let peers = vec![U64::new(1), U64::new(2), U64::new(3)];
+        let mut set = Set::new(0, peers);
+        set.found(U64::new(1));
+        set.found(U64::new(3));
+        set.update_msg();
+        assert_eq!(set.msg.index, 0);
+        assert_eq!(set.msg.bits, vec![0b101]); // Bits 0 and 2 set (LSB first)
+    }
+
+    #[test]
+    fn test_msg() {
+        let peers = vec![U64::new(1), U64::new(2)];
+        let mut set = Set::new(1, peers);
+        set.found(U64::new(2));
+        set.update_msg();
+        let msg = set.msg();
+        assert_eq!(msg.index, 1);
+        assert_eq!(msg.bits, vec![0b10]); // Bit 1 set (LSB first)
+    }
+}

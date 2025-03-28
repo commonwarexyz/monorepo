@@ -108,3 +108,120 @@ impl<C: Verifier> Record<C> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_codec::Codec;
+    use commonware_cryptography::{Secp256r1, Signer};
+    use std::net::SocketAddr;
+
+    // Helper function to create signed peer info
+    fn create_signed_peer_info(timestamp: u64) -> SignedPeerInfo<Secp256r1> {
+        let mut rng = rand::thread_rng();
+        let mut c = Secp256r1::new(&mut rng);
+        let socket = SocketAddr::from(([127, 0, 0, 1], 8080));
+        let signature = c.sign(None, &(socket, timestamp).encode());
+        SignedPeerInfo {
+            socket,
+            timestamp,
+            public_key: c.public_key(),
+            signature,
+        }
+    }
+
+    #[test]
+    fn test_unknown_to_discovered() {
+        let mut record = Record::<Secp256r1>::Unknown(1);
+        let peer_info = create_signed_peer_info(1000);
+        assert!(record.set_discovered(peer_info.clone()));
+        match record {
+            Record::Discovered(count, info) => {
+                assert_eq!(count, 1);
+                assert_eq!(info.timestamp, 1000);
+                assert_eq!(info.socket, peer_info.socket);
+            }
+            _ => panic!("Expected Discovered state"),
+        }
+    }
+
+    #[test]
+    fn test_bootstrapper_to_persistent() {
+        let socket = SocketAddr::from(([127, 0, 0, 1], 8080));
+        let mut record = Record::<Secp256r1>::Bootstrapper(socket);
+        let peer_info = create_signed_peer_info(1000);
+        assert!(record.set_discovered(peer_info.clone()));
+        match record {
+            Record::Persistent(info) => {
+                assert_eq!(info.timestamp, 1000);
+                assert_eq!(info.socket, socket);
+            }
+            _ => panic!("Expected Persistent state"),
+        }
+    }
+
+    #[test]
+    fn test_discovered_update_newer_timestamp() {
+        let peer_info_old = create_signed_peer_info(1000);
+        let mut record = Record::<Secp256r1>::Discovered(1, peer_info_old);
+        let peer_info_new = create_signed_peer_info(2000);
+        assert!(record.set_discovered(peer_info_new.clone()));
+        match record {
+            Record::Discovered(count, info) => {
+                assert_eq!(count, 1);
+                assert_eq!(info.timestamp, 2000);
+            }
+            _ => panic!("Expected Discovered state"),
+        }
+    }
+
+    #[test]
+    fn test_discovered_no_update_older_timestamp() {
+        let peer_info_old = create_signed_peer_info(1000);
+        let mut record = Record::<Secp256r1>::Discovered(1, peer_info_old.clone());
+        let peer_info_older = create_signed_peer_info(500);
+        assert!(!record.set_discovered(peer_info_older));
+        match record {
+            Record::Discovered(count, info) => {
+                assert_eq!(count, 1);
+                assert_eq!(info.timestamp, 1000);
+            }
+            _ => panic!("Expected Discovered state"),
+        }
+    }
+
+    #[test]
+    fn test_increment_decrement() {
+        // Test Unknown state
+        let mut record = Record::<Secp256r1>::Unknown(0);
+        record.increment();
+        assert!(matches!(record, Record::Unknown(1)));
+        assert!(record.decrement());
+        assert!(matches!(record, Record::Unknown(0)));
+
+        // Test Discovered state
+        let peer_info = create_signed_peer_info(1000);
+        let mut record = Record::<Secp256r1>::Discovered(1, peer_info);
+        record.increment();
+        assert!(matches!(record, Record::Discovered(2, _)));
+        assert!(!record.decrement());
+        assert!(matches!(record, Record::Discovered(1, _)));
+        assert!(record.decrement());
+        assert!(matches!(record, Record::Discovered(0, _)));
+    }
+
+    #[test]
+    fn test_get_address() {
+        let socket = SocketAddr::from(([127, 0, 0, 1], 8080));
+
+        let record = Record::<Secp256r1>::Bootstrapper(socket);
+        assert_eq!(record.get_address(), Some(socket));
+
+        let peer_info = create_signed_peer_info(1000);
+        let record = Record::<Secp256r1>::Discovered(1, peer_info.clone());
+        assert_eq!(record.get_address(), Some(peer_info.socket));
+
+        let record = Record::<Secp256r1>::Unknown(1);
+        assert_eq!(record.get_address(), None);
+    }
+}
