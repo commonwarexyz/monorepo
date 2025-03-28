@@ -22,6 +22,9 @@ ENV PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig
 RUN rustup default stable
 RUN rustup target add aarch64-unknown-linux-gnu
 
+# Set RUSTFLAGS to force frame pointers
+ENV RUSTFLAGS="-C force-frame-pointers=yes"
+
 # Set the working directory
 WORKDIR /monorepo
 
