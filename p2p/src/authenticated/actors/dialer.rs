@@ -123,7 +123,7 @@ impl<
                         stream,
                         peer.clone(),
                     )
-                    .instrument(debug_span!("upgrade").or_current())
+                    .instrument(debug_span!("upgrade"))
                     .await
                     {
                         Ok(instance) => instance,
