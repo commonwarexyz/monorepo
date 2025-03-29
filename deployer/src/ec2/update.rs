@@ -130,8 +130,8 @@ async fn update_instance(
     ssh_execute(private_key, ip, "rm -f /home/ubuntu/config.conf").await?;
 
     // Push the latest binary and config
-    scp_file(private_key, binary_path, ip, "/home/ubuntu/binary").await?;
-    scp_file(private_key, config_path, ip, "/home/ubuntu/config.conf").await?;
+    rsync_file(private_key, binary_path, ip, "/home/ubuntu/binary").await?;
+    rsync_file(private_key, config_path, ip, "/home/ubuntu/config.conf").await?;
 
     // Ensure the binary is executable
     ssh_execute(private_key, ip, "chmod +x /home/ubuntu/binary").await?;

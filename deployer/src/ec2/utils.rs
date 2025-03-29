@@ -35,21 +35,21 @@ pub async fn get_public_ip() -> Result<String, Error> {
     Ok(result)
 }
 
-/// Copies a local file to a remote instance via SCP with retries
-pub async fn scp_file(
+/// Copies a local file to a remote instance via rsync with retries
+pub async fn rsync_file(
     key_file: &str,
     local_path: &str,
     ip: &str,
     remote_path: &str,
 ) -> Result<(), Error> {
     for _ in 0..MAX_SSH_ATTEMPTS {
-        let output = Command::new("scp")
-            .arg("-i")
-            .arg(key_file)
-            .arg("-o")
-            .arg("ServerAliveInterval=600")
-            .arg("-o")
-            .arg("StrictHostKeyChecking=no")
+        let output = Command::new("rsync")
+            .arg("-az")
+            .arg("-e")
+            .arg(format!(
+                "ssh -i {} -o ServerAliveInterval=600 -o StrictHostKeyChecking=no",
+                key_file
+            ))
             .arg(local_path)
             .arg(format!("ubuntu@{}:{}", ip, remote_path))
             .output()
@@ -146,7 +146,7 @@ pub async fn poll_service_inactive(key_file: &str, ip: &str, service: &str) -> R
 
 /// Enables BBR on a remote instance by copying and applying sysctl settings.
 pub async fn enable_bbr(key_file: &str, ip: &str, bbr_conf_local_path: &str) -> Result<(), Error> {
-    scp_file(
+    rsync_file(
         key_file,
         bbr_conf_local_path,
         ip,

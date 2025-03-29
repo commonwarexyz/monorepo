@@ -374,7 +374,7 @@ pub fn install_binary_cmd(profiling: bool) -> String {
         r#"
 # Install base tools and binary dependencies
 sudo apt-get update -y
-sudo apt-get install -y logrotate wget jq
+sudo apt-get install -y logrotate wget jq bpfcc-tools linux-headers-$(uname -r)
 
 # Setup binary
 chmod +x /home/ubuntu/binary
@@ -391,6 +391,11 @@ sudo chmod +x /home/ubuntu/pyroscope-agent.sh
 sudo mv /home/ubuntu/pyroscope-agent.service /etc/systemd/system/pyroscope-agent.service
 sudo mv /home/ubuntu/pyroscope-agent.timer /etc/systemd/system/pyroscope-agent.timer
 
+# Setup memleak agent script and timer
+sudo chmod +x /home/ubuntu/memleak-agent.sh
+sudo mv /home/ubuntu/memleak-agent.service /etc/systemd/system/memleak-agent.service
+sudo mv /home/ubuntu/memleak-agent.timer /etc/systemd/system/memleak-agent.timer
+
 # Start services
 sudo systemctl daemon-reload
 sudo systemctl enable --now binary
@@ -400,6 +405,7 @@ sudo systemctl enable --now binary
         script.push_str(
             r#"
 sudo systemctl enable --now pyroscope-agent.timer
+sudo systemctl enable --now memleak-agent.timer
 "#,
         );
     }
@@ -634,7 +640,7 @@ if [ ! -s "${{PERF_STACK_FILE}}" ]; then
     echo "Warning: ${{PERF_STACK_FILE}} is empty. Skipping upload." >&2
     # Clean up empty perf.data
     sudo rm -f ${{PERF_DATA_FILE}} ${{PERF_STACK_FILE}}
-    exit 1
+    exit 0
 fi
 
 # Calculate timestamps
@@ -647,10 +653,9 @@ wget --post-file="${{PERF_STACK_FILE}}" \
     --header="Content-Type: text/plain" \
     --quiet \
     -O /dev/null \
-    "http://{monitoring_private_ip}:4040/ingest?name=${{APP_NAME}}&format=folded&units=samples&aggregationType=sum&from=${{FROM_TS}}&until=${{UNTIL_TS}}&spyName=perf_script"
+    "http://{monitoring_private_ip}:4040/ingest?name=${{APP_NAME}}&format=folded&units=samples&aggregationType=sum&sampleType=cpu&from=${{FROM_TS}}&until=${{UNTIL_TS}}&spyName=perf"
 
 echo "Profile upload complete."
-# Clean up stack file and perf.data
 sudo rm -f ${{PERF_DATA_FILE}} ${{PERF_STACK_FILE}}
 "#
     )
@@ -681,11 +686,142 @@ Description=Run Pyroscope Agent periodically
 # Wait a bit after boot before the first run
 OnBootSec=2min
 # Run roughly every minute after the last run finished
-# (PROFILE_DURATION is 60s, add buffer for processing/upload)
 OnUnitInactiveSec=1min
 Unit=pyroscope-agent.service
 # Randomize the delay to avoid thundering herd
 RandomizedDelaySec=10s
+
+[Install]
+WantedBy=timers.target
+"#;
+
+/// Shell script content for the Memleak agent (bcc memleak + wget)
+pub fn generate_memleak_script(
+    monitoring_private_ip: &str,
+    name: &str,
+    ip: &str,
+    region: &str,
+) -> String {
+    format!(
+        r#"#!/bin/bash
+set -e
+
+SERVICE_NAME="binary.service"
+MEMLEAK_OUTPUT_FILE="/tmp/memleak.raw"
+MEMLEAK_FOLDED_FILE="/tmp/memleak.folded"
+PROFILE_DURATION=60 # seconds
+
+# Construct the Pyroscope application name with tags
+RAW_APP_NAME="binary{{deployer_name={name},deployer_ip={ip},deployer_region={region}}}"
+APP_NAME=$(jq -nr --arg str "$RAW_APP_NAME" '$str | @uri')
+
+# Get the PID of the binary service
+PID=$(systemctl show --property MainPID ${{SERVICE_NAME}} | cut -d= -f2)
+if [ -z "$PID" ] || [ "$PID" -eq 0 ]; then
+    echo "Error: Could not get PID for ${{SERVICE_NAME}}." >&2
+    exit 1
+fi
+
+# Run memleak
+echo "Running memleak for PID ${{PID}} for ${{PROFILE_DURATION}} seconds..."
+sudo timeout $((PROFILE_DURATION + 10)) memleak-bpfcc -p ${{PID}} ${{PROFILE_DURATION}} 1 > ${{MEMLEAK_OUTPUT_FILE}}
+
+# Parse memleak output into Pyroscope folded format (targeting inuse_space)
+echo "Parsing memleak output..."
+awk '
+BEGIN {{ in_block = 0; stack = ""; inuse_objects = 0; inuse_space = 0; }}
+
+/^\s*[0-9]+ bytes in [0-9]+ allocations/ {{ # Match summary line with optional leading whitespace
+    if (in_block && stack != "") {{
+        # Output the previous block
+        # printf "%s 0 0 %d %d\n", stack, inuse_objects, inuse_space;
+        printf "%s %d\n", stack, inuse_space;
+    }}
+    # Start a new block
+    inuse_space = $1;         # Capture bytes (e.g., 40)
+    inuse_objects = $4;       # Capture objects (e.g., 1)
+    stack = "";               # Reset stack trace
+    in_block = 1;             # Indicate we’re in a block
+    next;                     # Skip this line, don’t treat it as a stack frame
+}}
+
+/^\s+\S+/ {{ # Match stack frame lines (indented)
+    if (in_block) {{
+        # Clean the line: remove offset and [binary] parts
+        gsub(/\+0x[0-9a-f]+ \[[^\]]+\]/, "", $0);
+        # Trim leading whitespace
+        frame = $0;
+        gsub(/^\s+/, "", frame);
+        # Replace spaces with underscores to avoid parsing issues
+        gsub(/ /, "_", frame);
+        # Append frame to stack with semicolon separator
+        stack = stack ? stack ";" frame : frame;
+    }}
+}}
+
+END {{
+    # Output the final block if it exists
+    if (in_block && stack != "") {{
+        # printf "%s 0 0 %d %d\n", stack, inuse_objects, inuse_space;
+        printf "%s %d\n", stack, inuse_space;
+    }}
+}}
+' ${{MEMLEAK_OUTPUT_FILE}} > ${{MEMLEAK_FOLDED_FILE}}
+
+# Check if folded file is empty
+if [ ! -s "${{MEMLEAK_FOLDED_FILE}}" ]; then
+    echo "Warning: ${{MEMLEAK_FOLDED_FILE}} is empty or parsing failed. Skipping upload." >&2
+    sudo rm -f ${{MEMLEAK_OUTPUT_FILE}} ${{MEMLEAK_FOLDED_FILE}}
+    exit 0 # Exit gracefully
+fi
+
+# Calculate timestamps
+UNTIL_TS=$(date +%s)
+FROM_TS=$((UNTIL_TS - PROFILE_DURATION))
+
+# Upload to Pyroscope
+echo "Uploading memleak profile to Pyroscope at {monitoring_private_ip}..."
+wget --post-file="${{MEMLEAK_FOLDED_FILE}}" \
+    --header="Content-Type: text/plain" \
+    --quiet \
+    -O /dev/null \
+    "http://{monitoring_private_ip}:4040/ingest?name=${{APP_NAME}}&format=folded&units=bytes&aggregationType=sum&sampleType=inuse_space&from=${{FROM_TS}}&until=${{UNTIL_TS}}&spyName=memleak"
+
+echo "Memleak profile upload complete."
+sudo rm -f ${{MEMLEAK_OUTPUT_FILE}} ${{MEMLEAK_FOLDED_FILE}}
+"#
+    )
+}
+
+/// Systemd service file content for the Memleak agent script
+pub const MEMLEAK_AGENT_SERVICE: &str = r#"
+[Unit]
+Description=Memleak Agent (BCC Script Runner)
+Wants=network-online.target
+After=network-online.target binary.service
+
+[Service]
+Type=oneshot
+User=ubuntu
+ExecStart=/home/ubuntu/memleak-agent.sh
+
+[Install]
+WantedBy=multi-user.target
+"#;
+
+/// Systemd timer file content for the Memleak agent service
+pub const MEMLEAK_AGENT_TIMER: &str = r#"
+[Unit]
+Description=Run Memleak Agent periodically
+
+[Timer]
+# Wait a bit after boot before the first run
+OnBootSec=2min
+# Run roughly every 5 minutes after the last run finished
+OnUnitInactiveSec=5min
+Unit=memleak-agent.service
+# Randomize the delay to avoid thundering herd
+RandomizedDelaySec=30s
 
 [Install]
 WantedBy=timers.target
