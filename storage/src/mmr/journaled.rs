@@ -195,6 +195,12 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
         self.mem_mmr.size()
     }
 
+    /// Return the position of the last leaf in an MMR with this MMR's size, or None if the MMR is
+    /// empty.
+    pub fn last_leaf_pos(&self) -> Option<u64> {
+        self.mem_mmr.last_leaf_pos()
+    }
+
     /// Attempt to get a node from the metadata, with fallback to journal lookup if it fails.
     /// Assumes the node should exist in at least one of these sources and returns a `MissingNode`
     /// error otherwise.

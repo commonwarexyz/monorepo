@@ -54,6 +54,11 @@ impl<K: Array, V: Array> Operation<K, V> {
     const UPDATE_CONTEXT: u8 = 1;
     const FLOOR_CONTEXT: u8 = 2;
 
+    // A compile-time assertion that operation's array size is large enough to handle the floor
+    // operation, which requires 9 bytes.
+    const _FLOOR_OP_ASSERT: () =
+        assert!(Self::LEN_ENCODED >= 9, "array size too small for floor op");
+
     /// Create a new operation of the given type.
     pub fn new(t: Type<K, V>) -> Self {
         match t {
@@ -131,13 +136,6 @@ impl<K: Array, V: Array> Operation<K, V> {
             _ => unreachable!(),
         }
     }
-
-    // Assert that the encoded operation is at least 9 bytes long to ensure there is room for floor
-    // operation.
-    const _ASSERT: () = assert!(
-        Self::LEN_ENCODED >= 9,
-        "operation too small for floor operation"
-    );
 }
 
 impl<K: Array, V: Array> Codec for Operation<K, V> {
