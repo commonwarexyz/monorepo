@@ -150,22 +150,27 @@ impl<H: CHasher> Mmr<H> {
 
     /// Add an element to the MMR and return its position in the MMR.
     pub fn add(&mut self, hasher: &mut H, element: &H::Digest) -> u64 {
-        let peaks = nodes_needing_parents(self.peak_iterator());
         let element_pos = self.index_to_pos(self.nodes.len());
+        let hash = Hasher::new(hasher).leaf_hash(element_pos, element);
+        self.add_leaf_digest(hasher, hash);
 
-        // Insert the element into the MMR as a leaf.
-        let mut h = Hasher::new(hasher);
-        let mut hash = h.leaf_hash(element_pos, element);
-        self.nodes.push_back(hash);
+        element_pos
+    }
+
+    /// Add a leaf's `digest` to the MMR, generating the necessary parent nodes to maintain the
+    /// MMR's structure.
+    pub(crate) fn add_leaf_digest(&mut self, hasher: &mut H, mut digest: H::Digest) {
+        let peaks = nodes_needing_parents(self.peak_iterator());
+        self.nodes.push_back(digest);
 
         // Compute the new parent nodes if any, and insert them into the MMR.
+        let mut h = Hasher::new(hasher);
         for sibling_pos in peaks.into_iter().rev() {
             let parent_pos = self.index_to_pos(self.nodes.len());
             let sibling_hash = self.get_node_unchecked(sibling_pos);
-            hash = h.node_hash(parent_pos, sibling_hash, &hash);
-            self.nodes.push_back(hash);
+            digest = h.node_hash(parent_pos, sibling_hash, &digest);
+            self.nodes.push_back(digest);
         }
-        element_pos
     }
 
     /// Pop the most recent leaf element out of the MMR if it exists, returning Empty or

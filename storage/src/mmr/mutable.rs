@@ -7,6 +7,9 @@
 //! applied to the store to modify the state of a specific key. A key that has a value can change to
 //! one without a value through the _delete_ operation. The _update_ operation gives a key a
 //! specific value whether it previously had no value or had a different value.
+//!
+//! Keys with values are called _active_, and an operation is called _active_ if (1) its key is
+//! active, (2) it is an update operation, and (3) it is the most recent operation for that key.
 
 use crate::journal::fixed::{Config as JConfig, Journal};
 use crate::mmr::{
@@ -91,24 +94,24 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
         .await?;
 
         let log_size = log.size().await?;
-        let mut last_leaf_num = leaf_pos_to_num(mmr.size()).unwrap();
-        if log_size != last_leaf_num {
+        let mut next_leaf_num = leaf_pos_to_num(mmr.size()).unwrap();
+        if log_size != next_leaf_num {
             // Because we always sync the log of operations before the ops MMR, the number of log
             // elements should always be at least that as the number of leaves in the MMR.
             assert!(
-                last_leaf_num < log_size,
+                next_leaf_num < log_size,
                 "mmr should never have more leafs than there are log operations"
             );
             warn!(
                 log_size,
-                last_leaf_num, "recovering missing mmr leaves from log"
+                next_leaf_num, "recovering missing mmr leaves from log"
             );
             // Recover from any log/mmr inconsistencies by inserting the missing operations.
-            while last_leaf_num < log_size {
-                let op = log.read(last_leaf_num).await?;
+            while next_leaf_num < log_size {
+                let op = log.read(next_leaf_num).await?;
                 let digest = Self::op_digest(&mut H::new(), &op);
                 mmr.add(hasher, &digest);
-                last_leaf_num += 1;
+                next_leaf_num += 1;
             }
         }
 
@@ -120,7 +123,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
         let oldest_retained_pos = mmr.oldest_retained_pos().unwrap_or(mmr.size());
         let start_leaf_num = leaf_pos_to_num(oldest_retained_pos).unwrap();
 
-        for i in start_leaf_num..last_leaf_num {
+        for i in start_leaf_num..next_leaf_num {
             let op: Operation<K, V> = log.read(i).await?;
             match op.to_type() {
                 Type::Deleted(key) => {
@@ -172,6 +175,13 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
     /// Get the number of operations that have been applied to this store.
     pub fn op_count(&self) -> u64 {
         leaf_pos_to_num(self.ops.size()).unwrap()
+    }
+
+    /// Return the oldest location that remains readable & provable.
+    pub fn oldest_retained_loc(&self) -> Option<u64> {
+        self.ops
+            .oldest_retained_pos()
+            .map(|pos| leaf_pos_to_num(pos).unwrap())
     }
 
     /// Updates `key` to have value `value`.  If the key already has this same value, then this is a
@@ -286,13 +296,13 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
         proof.verify_range_inclusion(hasher, &digests, start_pos, end_pos, root_hash)
     }
 
+    /// Sync the store to disk ensuring the current state is persisted.
     pub async fn sync(&mut self) -> Result<(), Error> {
         // Always sync the log first to ensure ability to recover should the mmr sync fail (by
         // replaying the log items).
         self.log.sync().await?;
-        self.ops.sync().await?;
 
-        Ok(())
+        self.ops.sync().await
     }
 
     /// Close the store, syncing all data to disk.
@@ -300,9 +310,8 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
         // Always sync the log first to ensure ability to recover should the mmr sync fail (by
         // replaying the log items).
         self.log.close().await?;
-        self.ops.close().await?;
 
-        Ok(())
+        self.ops.close().await
     }
 
     /// Raise the inactivity floor by exactly `max_steps` steps. Each step either advances over an
@@ -310,7 +319,6 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
     ///
     /// This method does not change the state of the store's snapshot, but it always changes the
     /// root since it applies at least one (floor) operation.
-    #[allow(dead_code)] // TODO: Remove when method gets used.
     pub async fn raise_inactivity_floor(
         &mut self,
         hasher: &mut H,
@@ -364,25 +372,26 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
         Ok(())
     }
 
-    /// Close the store but without syncing the MMR's cached elements to simulate an interrupted
-    /// close for recovery testing.
+    /// Close the store but without fully syncing the MMR's cached elements to simulate an
+    /// interrupted close for recovery testing.  At most `write_limit` of the cached MMR nodes will
+    /// be written.
     #[cfg(test)]
-    pub async fn simulate_failed_close(self) -> Result<(), Error> {
+    pub async fn simulate_failed_close(self, write_limit: usize) -> Result<(), Error> {
         self.log.close().await?;
-        self.ops.simulate_partial_sync(0).await
+        self.ops.simulate_partial_sync(write_limit).await
     }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::mmr::iterator::leaf_num_to_pos;
+    use crate::mmr::mem::Mmr as MemMmr;
     use commonware_cryptography::{hash, sha256::Digest, Hasher as CHasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic::Context, deterministic::Executor, Runner};
 
-    /// Return an empty store for use in tests.
-    async fn new_store<B: Blob, E: RStorage<B> + Clock + Metrics>(
+    /// Return a store initialized with a fixed config.
+    async fn open_store<B: Blob, E: RStorage<B> + Clock + Metrics>(
         context: E,
         hasher: &mut Sha256,
     ) -> MutableMmr<B, E, Digest, Digest, Sha256> {
@@ -399,13 +408,37 @@ mod test {
     }
 
     #[test_traced]
+    pub fn test_mutable_mmr_empty() {
+        let (executor, context, _) = Executor::default();
+        executor.start(async move {
+            let mut hasher = Sha256::new();
+            let mut store = open_store(context.clone(), &mut hasher).await;
+            assert_eq!(store.op_count(), 0);
+            assert_eq!(store.oldest_retained_loc(), None);
+            assert!(matches!(store.prune_known_inactive().await, Ok(())));
+            assert_eq!(store.root(&mut hasher), MemMmr::default().root(&mut hasher));
+            assert!(matches!(
+                store.raise_inactivity_floor(&mut hasher, 10).await,
+                Ok(())
+            ));
+            assert_eq!(store.op_count(), 1); // floor op added
+            let root = store.root(&mut hasher);
+
+            // Make sure closing/reopening gets us back to the same state.
+            store.close().await.unwrap();
+            let store = open_store(context.clone(), &mut hasher).await;
+            assert_eq!(store.root(&mut hasher), root);
+        });
+    }
+
+    #[test_traced]
     pub fn test_mutable_mmr_build_basic() {
         let (executor, context, _) = Executor::default();
         executor.start(async move {
             // Build a store with 2 keys and make sure updates and deletions of those keys work as
             // expected.
             let mut hasher = Sha256::new();
-            let mut store = new_store(context.clone(), &mut hasher).await;
+            let mut store = open_store(context.clone(), &mut hasher).await;
 
             let d1 = <Sha256 as CHasher>::Digest::try_from(&vec![1u8; 32]).unwrap();
             let d2 = <Sha256 as CHasher>::Digest::try_from(&vec![2u8; 32]).unwrap();
@@ -436,24 +469,21 @@ mod test {
             assert_eq!(store.inactivity_floor_loc, 0);
             store.sync().await.unwrap();
 
-            // We should be able to advance over the 3 inactive operations.
+            // Advance over 3 inactive operations.
             store.raise_inactivity_floor(&mut hasher, 3).await.unwrap();
             assert_eq!(store.inactivity_floor_loc, 3);
             assert_eq!(store.log.size().await.unwrap(), 6); // 4 updates, 1 deletion, 1 floor
 
             let root = store.root(&mut hasher);
 
-            // multiple assignments of the same value should be a no-op.
+            // Multiple assignments of the same value should be a no-op.
             store.update(&mut hasher, d1, d1).await.unwrap();
             store.update(&mut hasher, d2, d2).await.unwrap();
             // Log and root should be unchanged.
             assert_eq!(store.log.size().await.unwrap(), 6);
             assert_eq!(store.root(&mut hasher), root);
 
-            // The MMR's size should always be greater than the position of the last leaf.
-            let last_leaf_pos = leaf_num_to_pos(4);
-            assert!(store.ops.size() > last_leaf_pos);
-
+            // Delete all keys.
             store.delete(&mut hasher, d1).await.unwrap();
             store.delete(&mut hasher, d2).await.unwrap();
             assert!(store.get(&d1).await.unwrap().is_none());
@@ -463,42 +493,59 @@ mod test {
 
             let root = store.root(&mut hasher);
 
-            // multiple deletions of the same key should be a no-op.
+            // Multiple deletions of the same key should be a no-op.
             store.delete(&mut hasher, d1).await.unwrap();
             assert_eq!(store.log.size().await.unwrap(), 8);
             assert_eq!(store.root(&mut hasher), root);
 
-            // deletions of non-existent keys should be a no-op.
+            // Deletions of non-existent keys should be a no-op.
             let d3 = <Sha256 as CHasher>::Digest::try_from(&vec![2u8; 32]).unwrap();
             store.delete(&mut hasher, d3).await.unwrap();
+            assert_eq!(store.log.size().await.unwrap(), 8);
             assert_eq!(store.root(&mut hasher), root);
 
             // Make sure closing/reopening gets us back to the same state.
             store.close().await.unwrap();
-            let mut store = new_store(context.clone(), &mut hasher).await;
+            let mut store = open_store(context.clone(), &mut hasher).await;
             assert_eq!(store.log.size().await.unwrap(), 8);
             assert_eq!(store.root(&mut hasher), root);
 
-            // Make sure closing/reopening works with some active elements.
-            store.raise_inactivity_floor(&mut hasher, 10).await.unwrap();
+            // Since this store no longer has any active keys, we should be able to raise the
+            // inactivity floor to the tip (only the inactive floor op remains).
+            store
+                .raise_inactivity_floor(&mut hasher, 100)
+                .await
+                .unwrap();
+            assert_eq!(store.inactivity_floor_loc, store.op_count() - 1);
+
+            // Re-activate the keys by updating them.
             store.update(&mut hasher, d1, d1).await.unwrap();
             store.update(&mut hasher, d2, d2).await.unwrap();
             store.delete(&mut hasher, d1).await.unwrap();
             store.update(&mut hasher, d2, d1).await.unwrap();
             store.update(&mut hasher, d1, d2).await.unwrap();
             assert_eq!(store.snapshot.len(), 2);
-            let root = store.root(&mut hasher);
 
+            // Confirm close/reopen gets us back to the same state.
+            let root = store.root(&mut hasher);
             store.close().await.unwrap();
-            let mut store = new_store(context, &mut hasher).await;
+            let mut store = open_store(context, &mut hasher).await;
             assert_eq!(store.root(&mut hasher), root);
 
-            // Pruning inactive ops should not affect root or current state.
+            // Raising inactivity floor won't affect state but will affect the root.
             store.raise_inactivity_floor(&mut hasher, 2).await.unwrap();
+            assert_eq!(store.snapshot.len(), 2);
+            assert!(store.root(&mut hasher) != root);
+
+            // Pruning inactive ops should not affect current state or root
             let root = store.root(&mut hasher);
             store.prune_known_inactive().await.unwrap();
-            assert_eq!(store.root(&mut hasher), root);
             assert_eq!(store.snapshot.len(), 2);
+            assert_eq!(store.root(&mut hasher), root);
+            assert_eq!(
+                store.inactivity_floor_loc,
+                store.oldest_retained_loc().unwrap()
+            );
         });
     }
 
@@ -509,7 +556,7 @@ mod test {
         // confirm that the end state of the store matches that of an identically updated hashmap.
         executor.start(async move {
             let mut hasher = Sha256::new();
-            let mut store = new_store(context.clone(), &mut hasher).await;
+            let mut store = open_store(context.clone(), &mut hasher).await;
 
             let mut map = HashMap::<Digest, Digest>::default();
             const ELEMENTS: u64 = 1000;
@@ -543,24 +590,25 @@ mod test {
 
             assert_eq!(store.op_count(), 1477);
             assert_eq!(store.inactivity_floor_loc, 0);
-            assert_eq!(store.log.size().await.unwrap(), 1477); // no pruning yet
+            assert_eq!(store.log.size().await.unwrap(), 1477);
+            assert_eq!(store.oldest_retained_loc().unwrap(), 0); // no pruning yet
             assert_eq!(store.snapshot.len(), 857);
 
-            // Test we close & reopen store to its last state after raising the inactivity floor by
-            // 100 and pruning.
+            // Test raising the inactivity floor by 100 and pruning known inactive ops.
             store
                 .raise_inactivity_floor(&mut hasher, 100)
                 .await
                 .unwrap();
             store.prune_known_inactive().await.unwrap();
+            assert_eq!(store.op_count(), 1534);
+            assert_eq!(store.oldest_retained_loc().unwrap(), 100);
+            assert_eq!(store.snapshot.len(), 857);
+
+            // Close & reopen the store, making sure the re-opened store has exactly the same state.
             let root_hash = store.root(&mut hasher);
             store.close().await.unwrap();
-
-            let mut store = new_store(context.clone(), &mut hasher).await;
+            let mut store = open_store(context.clone(), &mut hasher).await;
             assert_eq!(root_hash, store.root(&mut hasher));
-
-            // Confirm the recreated store has an operations log that was pruned of all operations
-            // preceding the last known inactivity floor.
             assert_eq!(store.op_count(), 1534);
             assert_eq!(store.inactivity_floor_loc, 100);
             assert_eq!(store.snapshot.len(), 857);
@@ -570,6 +618,7 @@ mod test {
                 .raise_inactivity_floor(&mut hasher, 3000)
                 .await
                 .unwrap();
+            store.prune_known_inactive().await.unwrap();
             assert_eq!(store.inactivity_floor_loc, 3100);
             // Inactivity floor should be 858 operations from tip since 858 operations are active
             // (counting the floor op itself).
@@ -577,7 +626,6 @@ mod test {
             assert_eq!(store.snapshot.len(), 857);
 
             // Confirm the store's state matches that of the separate map we computed independently.
-            store.prune_known_inactive().await.unwrap();
             for i in 0u64..1000 {
                 let k = hash(&i.to_be_bytes());
                 if let Some(map_value) = map.get(&k) {
@@ -615,7 +663,7 @@ mod test {
         let (executor, context, _) = Executor::default();
         executor.start(async move {
             let mut hasher = Sha256::new();
-            let mut store = new_store(context.clone(), &mut hasher).await;
+            let mut store = open_store(context.clone(), &mut hasher).await;
 
             // Insert 1000 keys then sync.
             const ELEMENTS: u64 = 1000;
@@ -634,9 +682,13 @@ mod test {
             }
             let root = store.root(&mut hasher);
 
-            store.simulate_failed_close().await.unwrap();
+            // We partially write 101 of the cached MMR nodes to simulate a failure that leaves the
+            // MMR in a state with an orphaned leaf.
+            store.simulate_failed_close(101).await.unwrap();
 
-            let store = new_store(context.clone(), &mut hasher).await;
+            // Journaled MMR recovery should restore the orphaned leaf & its parents, then log
+            // replaying will restore the rest.
+            let store = open_store(context.clone(), &mut hasher).await;
             assert_eq!(store.root(&mut hasher), root);
         });
     }

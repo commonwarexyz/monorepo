@@ -56,8 +56,11 @@ impl<K: Array, V: Array> Operation<K, V> {
 
     // A compile-time assertion that operation's array size is large enough to handle the floor
     // operation, which requires 9 bytes.
-    const _FLOOR_OP_ASSERT: () =
-        assert!(Self::LEN_ENCODED >= 9, "array size too small for floor op");
+    const _MIN_OPERATION_LEN: usize = 9;
+    const _FLOOR_OP_ASSERT: () = assert!(
+        Self::LEN_ENCODED >= Self::_MIN_OPERATION_LEN,
+        "array size too small for floor op"
+    );
 
     /// Create a new operation of the given type.
     pub fn new(t: Type<K, V>) -> Self {
