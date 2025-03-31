@@ -1225,7 +1225,7 @@
                     "spanSelector": []
                 }
             ],
-            "title": "Profiles",
+            "title": "CPU Time",
             "type": "flamegraph"
         },
         {
@@ -1307,16 +1307,18 @@
                 {
                     "disableTextWrap": false,
                     "editorMode": "code",
+                    "exemplar": false,
                     "expr": "sum(inuse_bytes{deployer_name=~\"$Name\"}) by (stack)",
                     "fullMetaSearch": false,
                     "includeNullMetadata": true,
+                    "instant": false,
                     "legendFormat": "{{stack}}",
                     "range": true,
                     "refId": "A",
                     "useBackend": false
                 }
             ],
-            "title": "Memory Allocated",
+            "title": "Heap Usage",
             "type": "barchart"
         },
         {
@@ -1406,7 +1408,7 @@
                     "useBackend": false
                 }
             ],
-            "title": "Objects Allocated",
+            "title": "Heap Objects",
             "type": "barchart"
         },
         {
