@@ -710,7 +710,6 @@ METRICS_PORT=9200
 METRICS_PATH="/metrics"
 FIFO_PATH="/tmp/memleak_fifo"
 METRICS_FILE="/tmp/memleak_metrics"
-LEAK_THRESHOLD=1024 # bytes, minimum leak size to report (1KB)
 MEMLEAK_REPORT_INTERVAL=60 # seconds between leak reports
 
 # Ensure we have a clean environment
@@ -765,7 +764,7 @@ start_memleak() {
   echo "Starting continuous memleak monitoring for PID $pid..."
 
   # Start memleak in background with continuous monitoring
-  sudo memleak-bpfcc -z $LEAK_THRESHOLD -p $pid $MEMLEAK_REPORT_INTERVAL > "$FIFO_PATH" 2>/dev/null &
+  sudo memleak-bpfcc -p $pid $MEMLEAK_REPORT_INTERVAL > "$FIFO_PATH" 2>/dev/null &
   MEMLEAK_PID=$!
   echo "Memleak started with PID $MEMLEAK_PID"
 }
@@ -805,48 +804,86 @@ start_parser() {
   echo "Parser started with PID $PARSER_PID"
 }
 
-# Process a complete memleak snapshot and update metrics
 process_snapshot() {
   local snapshot="$1"
 
-  # Use awk to parse the snapshot and extract metrics
+  # Use awk to parse the snapshot, demangle function names, and extract metrics
   awk '
   BEGIN {
     in_leak_section = 0;
   }
 
-  /Top [0-9]+ stacks with outstanding allocations/ { in_leak_section = 1; next; }
+  # Start processing when we hit the leak section
+  /Top [0-9]+ stacks with outstanding allocations/ {
+    in_leak_section = 1;
+    next;
+  }
 
-  /^\s*([0-9]+) bytes in ([0-9]+) allocations.*/ {
+  # Match allocation summary lines
+  /^\s*([0-9]+) bytes in ([0-9]+) allocations/ {
     if (!in_leak_section) next;
 
+    # Capture bytes and objects
     bytes = $1;
     objects = $4;
 
-    # Extract stack trace and clean it up
-    stack = "";
-    getline; # Move to first stack frame line
-    while ($0 ~ /^\s+\S+/) {
-      frame = $0;
-      gsub(/\+0x[0-9a-f]+ \[[^\]]+\]/, "", frame);
-      gsub(/^\s+/, "", frame);
-      # Replace spaces and special chars with underscores
-      gsub(/[^a-zA-Z0-9_]/, "_", frame);
+    # Get indentation level of the summary line
+    if (match($0, /^(\s+)/, arr)) {
+      summary_indent = length(arr[1]);
+    } else {
+      summary_indent = 0;
+    }
 
+    # Reset stack for this allocation
+    stack = "";
+    getline; # Move to the next line (should be a stack frame or something else)
+
+    # Collect stack frames with greater indentation
+    while (match($0, /^(\s+)/, arr) && length(arr[1]) > summary_indent) {
+      frame = $0;
+      sub(/^\s+/, "", frame); # Remove leading whitespace
+      gsub(/\+0x[0-9a-f]+ \[[^\]]+\]/, "", frame); # Remove offsets and addresses
+
+      # Demangle Rust names
+      gsub(/\$LT\$/, "<", frame);           # Replace $LT$ with < for generics
+      gsub(/\$GT\$/, ">", frame);           # Replace $GT$ with > for generics
+      gsub(/\$u20\$/, " ", frame);          # Replace $u20$ with space
+      gsub(/\.\./, "::", frame);            # Replace .. with :: for namespace separation
+      gsub(/\$u7b\$/, "{", frame);          # Replace $u7b$ with { for closures
+      gsub(/\$u7d\$/, "}", frame);          # Replace $u7d$ with } for closures
+      gsub(/\$C\$/, ",", frame);            # Replace $C$ with , for type parameters
+      sub(/^_/, "", frame);                # Remove leading underscore
+      sub(/{{vtable.shim}}/, "[vtable]", frame); # Simplify vtable shim notation
+      sub(/\.llvm\.[0-9]+/, "", frame);     # Remove .llvm. followed by numbers
+      sub(/::h[0-9a-f]{16}$/, "", frame);   # Remove trailing hash (e.g., h29386cbb7d39e082)
+      gsub(/_</, "<", frame);               # Remove underscore before < for impl/trait
+      gsub(/_{{closure}}/, "[closure]", frame); # Remove underscore before {{closure}}
+
+      # Handle C++-style mangled names (basic simplification)
+      if (frame ~ /^_ZN/) {
+        sub(/^_ZN/, "", frame);             # Remove _ZN prefix
+        gsub(/[0-9]+/, "", frame);          # Remove numbers (length prefixes)
+        gsub(/_/, "::", frame);             # Replace underscores with ::
+      }
+
+      # Build the stack string
       if (stack == "") {
         stack = frame;
       } else {
         stack = stack ";" frame;
       }
 
-      if (getline <= 0) break;
+      if (getline <= 0) break; # Exit if no more lines
     }
 
-    # Create metric with stack as label
+    # Output metrics if we have a stack
     if (stack != "") {
       printf("inuse_bytes{stack=\"%s\"} %d\n", stack, bytes);
       printf("inuse_objects{stack=\"%s\"} %d\n", stack, objects);
     }
+
+    # Note: After the while loop, awk continues with the next line,
+    # which should be the next allocation summary or end of input
   }
   ' <<< "$snapshot" > "$METRICS_FILE.new"
 
