@@ -22,7 +22,10 @@ use crate::mmr::{
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{Blob, Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
-use futures::future::try_join_all;
+use futures::{
+    future::{try_join_all, TryFutureExt},
+    try_join,
+};
 use std::collections::HashMap;
 use tracing::{debug, warn};
 
@@ -67,12 +70,16 @@ pub struct MutableMmr<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Ar
     /// A map from each key to the location in the log containing its most recent update. Only
     /// contains the keys that currently have a value (that is, deleted keys are not in the map).
     snapshot: HashMap<K, u64>,
+
+    /// The number of operations that are pending commit.
+    uncommitted_ops: u64,
 }
 
 impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
     MutableMmr<B, E, K, V, H>
 {
-    /// Return an MMR initialized from `cfg`.
+    /// Return an MMR initialized from `cfg`. Any uncommitted operations in the log will be
+    /// discarded and the state of the store will be as of the last committed operation.
     pub async fn init(context: E, hasher: &mut H, cfg: Config) -> Result<Self, Error> {
         let mut mmr = Mmr::init(
             context.clone(),
@@ -84,7 +91,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
         )
         .await?;
 
-        let log = Journal::init(
+        let mut log = Journal::init(
             context,
             JConfig {
                 partition: cfg.log_journal_partition,
@@ -93,27 +100,50 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
         )
         .await?;
 
-        let log_size = log.size().await?;
-        let mut next_leaf_num = leaf_pos_to_num(mmr.size()).unwrap();
-        if log_size != next_leaf_num {
-            // Because we always sync the log of operations before the ops MMR, the number of log
-            // elements should always be at least that as the number of leaves in the MMR.
-            assert!(
-                next_leaf_num < log_size,
-                "mmr should never have more leafs than there are log operations"
-            );
-            warn!(
-                log_size,
-                next_leaf_num, "recovering missing mmr leaves from log"
-            );
-            // Recover from any log/mmr inconsistencies by inserting the missing operations.
-            while next_leaf_num < log_size {
-                let op = log.read(next_leaf_num).await?;
-                let digest = Self::op_digest(&mut H::new(), &op);
-                mmr.add(hasher, &digest);
-                next_leaf_num += 1;
+        // Back up over / discard any uncommitted operations in the log.
+        let mut log_size = log.size().await?;
+        let mut rewind_leaf_num = log_size;
+        while rewind_leaf_num > 0 {
+            let op: Operation<K, V> = log.read(rewind_leaf_num - 1).await?;
+            match op.to_type() {
+                Type::Commit(_) => {
+                    break; // floor is our commit indicator
+                }
+                _other => {
+                    rewind_leaf_num -= 1;
+                }
             }
         }
+        if rewind_leaf_num != log_size {
+            let op_count = log_size - rewind_leaf_num;
+            warn!(op_count, "rewinding over uncommitted log operations");
+            log.rewind(rewind_leaf_num).await?;
+            log_size = rewind_leaf_num;
+        }
+
+        // Pop any MMR elements that are ahead of the last log commit point.
+        let mut next_mmr_leaf_num = leaf_pos_to_num(mmr.size()).unwrap();
+        if next_mmr_leaf_num > log_size {
+            let op_count = next_mmr_leaf_num - log_size;
+            warn!(op_count, "popping uncommitted MMR operations");
+            mmr.pop(op_count as usize).await?;
+            next_mmr_leaf_num = log_size;
+        }
+
+        // If the MMR is behind, replay log operations to catch up.
+        if next_mmr_leaf_num < log_size {
+            let op_count = log_size - next_mmr_leaf_num;
+            warn!(op_count, "MMR lags behind log, replaying log to catch up");
+            while next_mmr_leaf_num < log_size {
+                let op = log.read(next_mmr_leaf_num).await?;
+                let digest = Self::op_digest(&mut H::new(), &op);
+                mmr.add(hasher, &digest);
+                next_mmr_leaf_num += 1;
+            }
+        }
+
+        // At this point the MMR and log should be consistent.
+        assert_eq!(log.size().await?, leaf_pos_to_num(mmr.size()).unwrap());
 
         // Replay the log to generate the snapshot. TODO: Because all operations are idempotent, we
         // could parallelize this via replay_all by keeping track of the location of each operation
@@ -123,7 +153,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
         let oldest_retained_pos = mmr.oldest_retained_pos().unwrap_or(mmr.size());
         let start_leaf_num = leaf_pos_to_num(oldest_retained_pos).unwrap();
 
-        for i in start_leaf_num..next_leaf_num {
+        for i in start_leaf_num..log_size {
             let op: Operation<K, V> = log.read(i).await?;
             match op.to_type() {
                 Type::Deleted(key) => {
@@ -132,7 +162,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
                 Type::Update(key, _) => {
                     snapshot.insert(key, i);
                 }
-                Type::Floor(loc) => {
+                Type::Commit(loc) => {
                     inactivity_floor_loc = loc;
                 }
             }
@@ -143,6 +173,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
             log,
             snapshot,
             inactivity_floor_loc,
+            uncommitted_ops: 0,
         };
 
         Ok(store)
@@ -172,7 +203,8 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
         Ok(v)
     }
 
-    /// Get the number of operations that have been applied to this store.
+    /// Get the number of operations that have been applied to this store, including those that are
+    /// not yet committed.
     pub fn op_count(&self) -> u64 {
         leaf_pos_to_num(self.ops.size()).unwrap()
     }
@@ -185,7 +217,8 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
     }
 
     /// Updates `key` to have value `value`.  If the key already has this same value, then this is a
-    /// no-op.
+    /// no-op. The operation is reflected in the snapshot, but will be subject to rollback until the
+    /// next successful `commit`.
     pub async fn update(&mut self, hasher: &mut H, key: K, value: V) -> Result<(), Error> {
         let new_loc = self.op_count();
 
@@ -214,7 +247,8 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
     }
 
     /// Delete `key` and its value from the store. Deleting a key that already has no value is a
-    /// no-op.
+    /// no-op. The operation is reflected in the snapshot, but will be subject to rollback until the
+    /// next successful `commit`.
     pub async fn delete(&mut self, hasher: &mut H, key: K) -> Result<(), Error> {
         if self.snapshot.remove(&key).is_none() {
             return Ok(());
@@ -230,7 +264,8 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
         self.ops.root(hasher)
     }
 
-    /// Update the operations MMR with the given operation, and append the operation to the log.
+    /// Update the operations MMR with the given operation, and append the operation to the log. The
+    /// `commit` method must be called to make any applied operation persistent & recoverable.
     async fn apply_op(&mut self, hasher: &mut H, op: Operation<K, V>) -> Result<(), Error> {
         // Update the ops MMR.
         let digest = Self::op_digest(hasher, &op);
@@ -238,6 +273,8 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
 
         // Append the operation to the log.
         self.log.append(op).await?;
+
+        self.uncommitted_ops += 1;
 
         Ok(())
     }
@@ -248,7 +285,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
     ///     - the last operation performed, or
     ///     - the operation `max_ops` from the start.
     ///  2. the operations corresponding to the leaves in this range.
-    pub async fn proof_to_tip(
+    pub async fn proof(
         &self,
         start_loc: u64,
         max_ops: u64,
@@ -296,22 +333,46 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
         proof.verify_range_inclusion(hasher, &digests, start_pos, end_pos, root_hash)
     }
 
-    /// Sync the store to disk ensuring the current state is persisted.
-    pub async fn sync(&mut self) -> Result<(), Error> {
-        // Always sync the log first to ensure ability to recover should the mmr sync fail (by
-        // replaying the log items).
-        self.log.sync().await?;
+    /// Commit any pending operations to the store, ensuring they are persisted to disk &
+    /// recoverable upon return from this function.
+    pub async fn commit(&mut self, hasher: &mut H) -> Result<(), Error> {
+        // Raise the inactivity floor by the # of uncommitted operations, plus 1 to account for the
+        // floor op that will be appended.
+        self.raise_inactivity_floor(hasher, self.uncommitted_ops + 1)
+            .await?;
+        self.uncommitted_ops = 0;
+        self.sync().await?;
 
-        self.ops.sync().await
+        // TODO: Make the frequency with which we prune known inactive items configurable in case
+        // this turns out to be a significant part of commit overhead, or the user wants to ensure
+        // the log is backed up externally before discarding.
+        self.prune_inactive().await
     }
 
-    /// Close the store, syncing all data to disk.
-    pub async fn close(self) -> Result<(), Error> {
-        // Always sync the log first to ensure ability to recover should the mmr sync fail (by
-        // replaying the log items).
-        self.log.close().await?;
+    /// Sync the store to disk ensuring the current state is persisted.
+    async fn sync(&mut self) -> Result<(), Error> {
+        try_join!(
+            self.log.sync().map_err(Error::JournalError),
+            self.ops.sync()
+        )?;
 
-        self.ops.close().await
+        Ok(())
+    }
+
+    /// Close the store. Operations that have not been committed will be lost.
+    pub async fn close(self) -> Result<(), Error> {
+        if self.uncommitted_ops > 0 {
+            warn!(
+                op_count = self.uncommitted_ops,
+                "closing store with uncommitted operations"
+            );
+        }
+        try_join!(
+            self.log.close().map_err(Error::JournalError),
+            self.ops.close()
+        )?;
+
+        Ok(())
     }
 
     /// Raise the inactivity floor by exactly `max_steps` steps. Each step either advances over an
@@ -319,7 +380,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
     ///
     /// This method does not change the state of the store's snapshot, but it always changes the
     /// root since it applies at least one (floor) operation.
-    pub async fn raise_inactivity_floor(
+    async fn raise_inactivity_floor(
         &mut self,
         hasher: &mut H,
         max_steps: u64,
@@ -342,7 +403,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
             }
             self.inactivity_floor_loc += 1;
         }
-        self.apply_op(hasher, Operation::floor(self.inactivity_floor_loc))
+        self.apply_op(hasher, Operation::commit(self.inactivity_floor_loc))
             .await?;
 
         Ok(())
@@ -350,7 +411,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
 
     /// Prune any historical operations that are known to be inactive (those preceding the
     /// inactivity floor). This does not affect the store's root or current snapshot.
-    pub async fn prune_known_inactive(&mut self) -> Result<(), Error> {
+    async fn prune_inactive(&mut self) -> Result<(), Error> {
         let Some(oldest_retained_loc) = self.log.oldest_retained_pos().await? else {
             return Ok(());
         };
@@ -372,13 +433,36 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
         Ok(())
     }
 
-    /// Close the store but without fully syncing the MMR's cached elements to simulate an
-    /// interrupted close for recovery testing.  At most `write_limit` of the cached MMR nodes will
-    /// be written.
+    /// Simulate a failed commit that successfully writes the log to the commit point, but without
+    /// fully committing the MMR's cached elements to trigger MMR node recovery on reopening. The
+    /// root hash of the store at the point of a successful commit will be returned in the result.
     #[cfg(test)]
-    pub async fn simulate_failed_close(self, write_limit: usize) -> Result<(), Error> {
+    pub async fn simulate_failed_commit_mmr(
+        mut self,
+        hasher: &mut H,
+        write_limit: usize,
+    ) -> Result<H::Digest, Error> {
+        self.apply_op(hasher, Operation::commit(self.inactivity_floor_loc))
+            .await?;
+        let root = self.root(hasher);
         self.log.close().await?;
-        self.ops.simulate_partial_sync(write_limit).await
+        self.ops.simulate_partial_sync(write_limit).await?;
+
+        Ok(root)
+    }
+
+    /// Simulate a failed commit that successfully writes the MMR to the commit point, but without
+    /// fully committing the log, requiring rollback of the MMR and log upon reopening.
+    #[cfg(test)]
+    pub async fn simulate_failed_commit_log(mut self, hasher: &mut H) -> Result<(), Error> {
+        self.apply_op(hasher, Operation::commit(self.inactivity_floor_loc))
+            .await?;
+        self.ops.close().await?;
+        // Rewind the operation log over the commit op to force rollback to the previous commit.
+        self.log.rewind(self.log.size().await? - 1).await?;
+        self.log.close().await?;
+
+        Ok(())
     }
 }
 
@@ -415,23 +499,36 @@ mod test {
             let mut store = open_store(context.clone(), &mut hasher).await;
             assert_eq!(store.op_count(), 0);
             assert_eq!(store.oldest_retained_loc(), None);
-            assert!(matches!(store.prune_known_inactive().await, Ok(())));
+            assert!(matches!(store.prune_inactive().await, Ok(())));
             assert_eq!(store.root(&mut hasher), MemMmr::default().root(&mut hasher));
-            assert!(matches!(
-                store.raise_inactivity_floor(&mut hasher, 10).await,
-                Ok(())
-            ));
+
+            // Make sure closing/reopening gets us back to the same state, even after adding an uncommitted op.
+            let d1 = <Sha256 as CHasher>::Digest::try_from(&vec![1u8; 32]).unwrap();
+            let d2 = <Sha256 as CHasher>::Digest::try_from(&vec![2u8; 32]).unwrap();
+            let root = store.root(&mut hasher);
+            store.update(&mut hasher, d1, d2).await.unwrap();
+            store.close().await.unwrap();
+            let mut store = open_store(context.clone(), &mut hasher).await;
+            assert_eq!(store.root(&mut hasher), root);
+            assert_eq!(store.op_count(), 0);
+
+            // Test calling commit on an empty store which should make it (durably) non-empty.
+            store.commit(&mut hasher).await.unwrap();
             assert_eq!(store.op_count(), 1); // floor op added
             let root = store.root(&mut hasher);
-
-            // Make sure closing/reopening gets us back to the same state.
-            store.close().await.unwrap();
-            let store = open_store(context.clone(), &mut hasher).await;
+            assert!(matches!(store.prune_inactive().await, Ok(())));
+            let mut store = open_store(context.clone(), &mut hasher).await;
             assert_eq!(store.root(&mut hasher), root);
+
+            // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits.
+            for _ in 1..100 {
+                store.commit(&mut hasher).await.unwrap();
+                assert_eq!(store.op_count() - 1, store.inactivity_floor_loc);
+            }
         });
     }
 
-    #[test_traced]
+    #[test_traced("WARN")]
     pub fn test_mutable_mmr_build_basic() {
         let (executor, context, _) = Executor::default();
         executor.start(async move {
@@ -472,7 +569,7 @@ mod test {
             // Advance over 3 inactive operations.
             store.raise_inactivity_floor(&mut hasher, 3).await.unwrap();
             assert_eq!(store.inactivity_floor_loc, 3);
-            assert_eq!(store.log.size().await.unwrap(), 6); // 4 updates, 1 deletion, 1 floor
+            assert_eq!(store.log.size().await.unwrap(), 6); // 4 updates, 1 deletion, 1 commit
 
             let root = store.root(&mut hasher);
 
@@ -488,7 +585,7 @@ mod test {
             store.delete(&mut hasher, d2).await.unwrap();
             assert!(store.get(&d1).await.unwrap().is_none());
             assert!(store.get(&d2).await.unwrap().is_none());
-            assert_eq!(store.log.size().await.unwrap(), 8); // 4 updates, 3 deletions, 1 floor
+            assert_eq!(store.log.size().await.unwrap(), 8); // 4 updates, 3 deletions, 1 commit
             assert_eq!(store.inactivity_floor_loc, 3);
 
             let root = store.root(&mut hasher);
@@ -505,13 +602,16 @@ mod test {
             assert_eq!(store.root(&mut hasher), root);
 
             // Make sure closing/reopening gets us back to the same state.
+            store.commit(&mut hasher).await.unwrap();
+            assert_eq!(store.log.size().await.unwrap(), 9);
+            let root = store.root(&mut hasher);
             store.close().await.unwrap();
             let mut store = open_store(context.clone(), &mut hasher).await;
-            assert_eq!(store.log.size().await.unwrap(), 8);
+            assert_eq!(store.log.size().await.unwrap(), 9);
             assert_eq!(store.root(&mut hasher), root);
 
             // Since this store no longer has any active keys, we should be able to raise the
-            // inactivity floor to the tip (only the inactive floor op remains).
+            // inactivity floor to the tip (only the inactive commit op remains).
             store
                 .raise_inactivity_floor(&mut hasher, 100)
                 .await
@@ -527,19 +627,21 @@ mod test {
             assert_eq!(store.snapshot.len(), 2);
 
             // Confirm close/reopen gets us back to the same state.
+            store.commit(&mut hasher).await.unwrap();
             let root = store.root(&mut hasher);
             store.close().await.unwrap();
             let mut store = open_store(context, &mut hasher).await;
             assert_eq!(store.root(&mut hasher), root);
 
-            // Raising inactivity floor won't affect state but will affect the root.
-            store.raise_inactivity_floor(&mut hasher, 2).await.unwrap();
+            // Commit will raise the inactivity floor, which won't affect state but will affect the
+            // root.
+            store.commit(&mut hasher).await.unwrap();
             assert_eq!(store.snapshot.len(), 2);
             assert!(store.root(&mut hasher) != root);
 
             // Pruning inactive ops should not affect current state or root
             let root = store.root(&mut hasher);
-            store.prune_known_inactive().await.unwrap();
+            store.prune_inactive().await.unwrap();
             assert_eq!(store.snapshot.len(), 2);
             assert_eq!(store.root(&mut hasher), root);
             assert_eq!(
@@ -594,14 +696,10 @@ mod test {
             assert_eq!(store.oldest_retained_loc().unwrap(), 0); // no pruning yet
             assert_eq!(store.snapshot.len(), 857);
 
-            // Test raising the inactivity floor by 100 and pruning known inactive ops.
-            store
-                .raise_inactivity_floor(&mut hasher, 100)
-                .await
-                .unwrap();
-            store.prune_known_inactive().await.unwrap();
-            assert_eq!(store.op_count(), 1534);
-            assert_eq!(store.oldest_retained_loc().unwrap(), 100);
+            // Test that commit will raise the activity floor.
+            store.commit(&mut hasher).await.unwrap();
+            assert_eq!(store.op_count(), 2336);
+            assert_eq!(store.oldest_retained_loc().unwrap(), 1478);
             assert_eq!(store.snapshot.len(), 857);
 
             // Close & reopen the store, making sure the re-opened store has exactly the same state.
@@ -609,8 +707,8 @@ mod test {
             store.close().await.unwrap();
             let mut store = open_store(context.clone(), &mut hasher).await;
             assert_eq!(root_hash, store.root(&mut hasher));
-            assert_eq!(store.op_count(), 1534);
-            assert_eq!(store.inactivity_floor_loc, 100);
+            assert_eq!(store.op_count(), 2336);
+            assert_eq!(store.inactivity_floor_loc, 1478);
             assert_eq!(store.snapshot.len(), 857);
 
             // Raise the inactivity floor to the point where all inactive operations can be pruned.
@@ -618,11 +716,11 @@ mod test {
                 .raise_inactivity_floor(&mut hasher, 3000)
                 .await
                 .unwrap();
-            store.prune_known_inactive().await.unwrap();
-            assert_eq!(store.inactivity_floor_loc, 3100);
+            store.prune_inactive().await.unwrap();
+            assert_eq!(store.inactivity_floor_loc, 4478);
             // Inactivity floor should be 858 operations from tip since 858 operations are active
             // (counting the floor op itself).
-            assert_eq!(store.op_count(), 3100 + 858);
+            assert_eq!(store.op_count(), 4478 + 858);
             assert_eq!(store.snapshot.len(), 857);
 
             // Confirm the store's state matches that of the separate map we computed independently.
@@ -641,12 +739,18 @@ mod test {
             // Make sure size-constrained batches of operations are provable from the oldest
             // retained op to tip.
             let max_ops = 4;
-            let root = store.root(&mut hasher);
             let end_loc = store.op_count();
             let start_pos = store.ops.oldest_retained_pos().unwrap_or(store.ops.size());
             let start_loc = leaf_pos_to_num(start_pos).unwrap();
+            // Raise the inactivity floor and make sure historical inactive operations are still provable.
+            store
+                .raise_inactivity_floor(&mut hasher, 100)
+                .await
+                .unwrap();
+            let root = store.root(&mut hasher);
+            assert!(start_loc < store.inactivity_floor_loc);
             for i in start_loc..end_loc {
-                let (proof, log) = store.proof_to_tip(i, max_ops).await.unwrap();
+                let (proof, log) = store.proof(i, max_ops).await.unwrap();
                 assert!(MutableMmr::<_, Context, _, _, _>::verify_proof(
                     &mut hasher,
                     &proof,
@@ -680,14 +784,26 @@ mod test {
                 let v = hash(&((i + 1) * 10000).to_be_bytes());
                 store.update(&mut hasher, k, v).await.unwrap();
             }
-            let root = store.root(&mut hasher);
 
             // We partially write 101 of the cached MMR nodes to simulate a failure that leaves the
             // MMR in a state with an orphaned leaf.
-            store.simulate_failed_close(101).await.unwrap();
+            let root = store
+                .simulate_failed_commit_mmr(&mut hasher, 101)
+                .await
+                .unwrap();
 
             // Journaled MMR recovery should restore the orphaned leaf & its parents, then log
             // replaying will restore the rest.
+            let mut store = open_store(context.clone(), &mut hasher).await;
+            assert_eq!(store.root(&mut hasher), root);
+
+            // Write some additional nodes, simulate failed log commit, and test we recover to the previous commit point.
+            for i in 0u64..100 {
+                let k = hash(&i.to_be_bytes());
+                let v = hash(&((i + 2) * 10000).to_be_bytes());
+                store.update(&mut hasher, k, v).await.unwrap();
+            }
+            store.simulate_failed_commit_log(&mut hasher).await.unwrap();
             let store = open_store(context.clone(), &mut hasher).await;
             assert_eq!(store.root(&mut hasher), root);
         });
