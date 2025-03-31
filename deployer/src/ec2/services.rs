@@ -695,103 +695,265 @@ RandomizedDelaySec=10s
 WantedBy=timers.target
 "#;
 
-/// Shell script content for the Memleak agent (bcc memleak + wget)
-pub fn generate_memleak_script(
-    monitoring_private_ip: &str,
-    name: &str,
-    ip: &str,
-    region: &str,
-) -> String {
-    format!(
-        r#"#!/bin/bash
+/// Expose memory usage via Prometheus metrics
+pub const MEMLEAK_AGENT_SCRIPT: &str = r#"#!/bin/bash
 set -e
 
 SERVICE_NAME="binary.service"
-MEMLEAK_OUTPUT_FILE="/tmp/memleak.raw"
-MEMLEAK_FOLDED_FILE="/tmp/memleak.folded"
-PROFILE_DURATION=60 # seconds
+METRICS_PORT=9099
+METRICS_PATH="/metrics"
+FIFO_PATH="/tmp/memleak_fifo"
+METRICS_FILE="/tmp/memleak_metrics"
+LEAK_THRESHOLD=1024 # bytes, minimum leak size to report (1KB)
+MEMLEAK_REPORT_INTERVAL=60 # seconds between leak reports
 
-# Construct the Pyroscope application name with tags
-RAW_APP_NAME="binary{{deployer_name={name},deployer_ip={ip},deployer_region={region}}}"
-APP_NAME=$(jq -nr --arg str "$RAW_APP_NAME" '$str | @uri')
+# Ensure we have a clean environment
+cleanup() {
+  echo "Cleaning up..."
+  # Kill the HTTP server if running
+  if [ -n "$HTTP_PID" ]; then
+    kill $HTTP_PID 2>/dev/null || true
+  fi
+  # Kill memleak if running
+  if [ -n "$MEMLEAK_PID" ]; then
+    sudo kill $MEMLEAK_PID 2>/dev/null || true
+  fi
+  # Kill parser if running
+  if [ -n "$PARSER_PID" ]; then
+    kill $PARSER_PID 2>/dev/null || true
+  fi
+  # Remove temporary files
+  rm -f "$METRICS_FILE"
+  rm -f "$FIFO_PATH"
+  exit 0
+}
+
+trap cleanup SIGINT SIGTERM EXIT
+
+# Create a named pipe for memleak output
+[ -p "$FIFO_PATH" ] || mkfifo "$FIFO_PATH"
+
+# Start a simple HTTP server to expose metrics
+start_http_server() {
+  echo "Starting HTTP server on port $METRICS_PORT..."
+  # Use netcat to create a simple HTTP server
+  while true; do
+    echo -e "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n$(cat $METRICS_FILE)" | nc -l -p $METRICS_PORT -q 1
+  done
+}
+
+# Initialize metrics file with metadata
+init_metrics() {
+  cat > "$METRICS_FILE" << EOF
+# HELP inuse_bytes Total memory inuse in bytes
+# TYPE inuse_bytes gauge
+# HELP inuse_objects Number of inuse objects
+# TYPE inuse_objects gauge
+EOF
+}
+
+# Start memleak in continuous mode with output to a named pipe
+start_memleak() {
+  local pid=$1
+
+  echo "Starting continuous memleak monitoring for PID $pid..."
+
+  # Start memleak in background with continuous monitoring
+  sudo memleak-bpfcc -p $pid -i $MEMLEAK_REPORT_INTERVAL > "$FIFO_PATH" 2>/dev/null &
+  MEMLEAK_PID=$!
+  echo "Memleak started with PID $MEMLEAK_PID"
+}
+
+# Start the output parser
+start_parser() {
+  echo "Starting parser process to watch memleak output..."
+
+  # This function runs as a separate process to read from the FIFO
+  # and update metrics whenever a new complete report is available
+  (
+    # Variables to track parsing state
+    CURRENT_SNAPSHOT=""
+    IN_SNAPSHOT=0
+
+    # Read the FIFO line by line
+    while IFS= read -r line; do
+      # Look for timestamp marker that indicates the start of a new report
+      if [[ "$line" =~ \[([0-9]{2}:[0-9]{2}:[0-9]{2})\] ]]; then
+        # If we were already in a snapshot, this means we've finished one
+        # and are starting a new one, so process the completed snapshot
+        if [ $IN_SNAPSHOT -eq 1 ] && [ -n "$CURRENT_SNAPSHOT" ]; then
+          process_snapshot "$CURRENT_SNAPSHOT"
+        fi
+
+        # Start a new snapshot
+        CURRENT_SNAPSHOT="$line"
+        IN_SNAPSHOT=1
+      elif [ $IN_SNAPSHOT -eq 1 ]; then
+        # Add line to current snapshot
+        CURRENT_SNAPSHOT="$CURRENT_SNAPSHOT
+  $line"
+      fi
+    done < "$FIFO_PATH"
+  ) &
+  PARSER_PID=$!
+  echo "Parser started with PID $PARSER_PID"
+}
+
+# Process a complete memleak snapshot and update metrics
+process_snapshot() {
+  local snapshot="$1"
+
+  # Use awk to parse the snapshot and extract metrics
+  awk -v threshold="$LEAK_THRESHOLD" '
+  BEGIN {
+    in_leak_section = 0;
+  }
+
+  /Top [0-9]+ stacks with outstanding allocations/ { in_leak_section = 1; next; }
+
+  /^\s*([0-9]+) bytes in ([0-9]+) allocations.*/ {
+    if (!in_leak_section) next;
+
+    bytes = $1;
+    objects = $4;
+
+    if (bytes >= threshold) {
+      # Extract stack trace and clean it up
+      stack = "";
+      getline; # Move to first stack frame line
+      while ($0 ~ /^\s+\S+/) {
+        frame = $0;
+        gsub(/\+0x[0-9a-f]+ \[[^\]]+\]/, "", frame);
+        gsub(/^\s+/, "", frame);
+        # Replace spaces and special chars with underscores
+        gsub(/[^a-zA-Z0-9_]/, "_", frame);
+
+        if (stack == "") {
+          stack = frame;
+        } else {
+          stack = stack ";" frame;
+        }
+
+        if (getline <= 0) break;
+      }
+
+      # Create metric with stack as label
+      if (stack != "") {
+        printf("binary_memory_leak_stack{stack=\"%s\"} %d\n", stack, bytes);
+        printf("binary_memory_leak_objects{stack=\"%s\"} %d\n", stack, objects);
+      }
+    }
+  }
+  ' <<< "$snapshot" > "$METRICS_FILE.new"
+
+  # Add metadata back to the beginning of the file
+  init_metrics > "$METRICS_FILE.tmp"
+  cat "$METRICS_FILE.new" >> "$METRICS_FILE.tmp"
+  mv "$METRICS_FILE.tmp" "$METRICS_FILE"
+  rm -f "$METRICS_FILE.new"
+
+  # Log that we've processed a new snapshot
+  echo "Processed new memleak snapshot at $(date)"
+}
+
+# Function to check if memleak is still running
+check_memleak() {
+  if [ -n "$MEMLEAK_PID" ] && ! ps -p $MEMLEAK_PID > /dev/null; then
+    echo "Memleak process $MEMLEAK_PID is no longer running. Restarting..." >&2
+    MEMLEAK_PID=""
+    return 1
+  fi
+  return 0
+}
+
+# Function to check if parser is still running
+check_parser() {
+  if [ -n "$PARSER_PID" ] && ! ps -p $PARSER_PID > /dev/null; then
+    echo "Parser process $PARSER_PID is no longer running. Restarting..." >&2
+    PARSER_PID=""
+    return 1
+  fi
+  return 0
+}
+
+# Function to check if binary is still running
+check_binary() {
+  if ! ps -p $BINARY_PID > /dev/null; then
+    echo "Binary process $BINARY_PID is no longer running. Getting new PID..." >&2
+    BINARY_PID=$(systemctl show --property MainPID ${SERVICE_NAME} | cut -d= -f2)
+    if [ -z "$BINARY_PID" ] || [ "$BINARY_PID" -eq 0 ]; then
+      echo "Error: Could not get PID for ${SERVICE_NAME}. Waiting..." >&2
+      return 1
+    fi
+    echo "New binary PID: $BINARY_PID" >&2
+    # If binary changed, restart memleak
+    if [ -n "$MEMLEAK_PID" ]; then
+      sudo kill $MEMLEAK_PID 2>/dev/null || true
+      MEMLEAK_PID=""
+    fi
+    return 1
+  fi
+  return 0
+}
+
+# Main execution
+echo "Starting continuous memory leak monitoring on port $METRICS_PORT..."
+
+# Initialize metrics file
+init_metrics
+
+# Start HTTP server in background
+start_http_server &
+HTTP_PID=$!
+echo "HTTP server started with PID $HTTP_PID"
 
 # Get the PID of the binary service
-PID=$(systemctl show --property MainPID ${{SERVICE_NAME}} | cut -d= -f2)
-if [ -z "$PID" ] || [ "$PID" -eq 0 ]; then
-    echo "Error: Could not get PID for ${{SERVICE_NAME}}." >&2
-    exit 1
+BINARY_PID=$(systemctl show --property MainPID ${SERVICE_NAME} | cut -d= -f2)
+if [ -z "$BINARY_PID" ] || [ "$BINARY_PID" -eq 0 ]; then
+  echo "Error: Could not get PID for ${SERVICE_NAME}. Waiting for service to start..." >&2
+
+  # Wait for service to start, checking every 10 seconds
+  while true; do
+    BINARY_PID=$(systemctl show --property MainPID ${SERVICE_NAME} | cut -d= -f2)
+    if [ -n "$BINARY_PID" ] && [ "$BINARY_PID" -ne 0 ]; then
+      echo "Service started with PID $BINARY_PID"
+      break
+    fi
+    sleep 10
+  done
 fi
 
-# Run memleak
-echo "Running memleak for PID ${{PID}} for ${{PROFILE_DURATION}} seconds..."
-sudo timeout $((PROFILE_DURATION + 10)) memleak-bpfcc -p ${{PID}} ${{PROFILE_DURATION}} 1 > ${{MEMLEAK_OUTPUT_FILE}}
+# Start the parser process
+start_parser
 
-# Parse memleak output into Pyroscope folded format (targeting inuse_space)
-echo "Parsing memleak output..."
-awk '
-BEGIN {{ in_block = 0; stack = ""; inuse_objects = 0; inuse_space = 0; }}
+# Start memleak with the binary PID
+start_memleak $BINARY_PID
 
-/^\s*[0-9]+ bytes in [0-9]+ allocations/ {{ # Match summary line with optional leading whitespace
-    if (in_block && stack != "") {{
-        # Output the previous block
-        # printf "%s 0 0 %d %d\n", stack, inuse_objects, inuse_space;
-        printf "%s %d\n", stack, inuse_space;
-    }}
-    # Start a new block
-    inuse_space = $1;         # Capture bytes (e.g., 40)
-    inuse_objects = $4;       # Capture objects (e.g., 1)
-    stack = "";               # Reset stack trace
-    in_block = 1;             # Indicate we’re in a block
-    next;                     # Skip this line, don’t treat it as a stack frame
-}}
+# Main monitoring loop - check status and restart processes if needed
+echo "Continuous monitoring active. Checking process health every 30 seconds..."
+while true; do
+  # Check binary status
+  check_binary || {
+    # If binary PID changed, restart memleak
+    if [ -n "$BINARY_PID" ]; then
+      start_memleak $BINARY_PID
+    fi
+  }
 
-/^\s+\S+/ {{ # Match stack frame lines (indented)
-    if (in_block) {{
-        # Clean the line: remove offset and [binary] parts
-        gsub(/\+0x[0-9a-f]+ \[[^\]]+\]/, "", $0);
-        # Trim leading whitespace
-        frame = $0;
-        gsub(/^\s+/, "", frame);
-        # Replace spaces with underscores to avoid parsing issues
-        gsub(/ /, "_", frame);
-        # Append frame to stack with semicolon separator
-        stack = stack ? stack ";" frame : frame;
-    }}
-}}
+  # Make sure memleak is running
+  check_memleak || {
+    if [ -n "$BINARY_PID" ]; then
+      start_memleak $BINARY_PID
+    fi
+  }
 
-END {{
-    # Output the final block if it exists
-    if (in_block && stack != "") {{
-        # printf "%s 0 0 %d %d\n", stack, inuse_objects, inuse_space;
-        printf "%s %d\n", stack, inuse_space;
-    }}
-}}
-' ${{MEMLEAK_OUTPUT_FILE}} > ${{MEMLEAK_FOLDED_FILE}}
+  # Make sure parser is running
+  check_parser || start_parser
 
-# Check if folded file is empty
-if [ ! -s "${{MEMLEAK_FOLDED_FILE}}" ]; then
-    echo "Warning: ${{MEMLEAK_FOLDED_FILE}} is empty or parsing failed. Skipping upload." >&2
-    sudo rm -f ${{MEMLEAK_OUTPUT_FILE}} ${{MEMLEAK_FOLDED_FILE}}
-    exit 0 # Exit gracefully
-fi
-
-# Calculate timestamps
-UNTIL_TS=$(date +%s)
-FROM_TS=$((UNTIL_TS - PROFILE_DURATION))
-
-# Upload to Pyroscope
-echo "Uploading memleak profile to Pyroscope at {monitoring_private_ip}..."
-wget --post-file="${{MEMLEAK_FOLDED_FILE}}" \
-    --header="Content-Type: text/plain" \
-    --quiet \
-    -O /dev/null \
-    "http://{monitoring_private_ip}:4040/ingest?name=${{APP_NAME}}&format=folded&units=bytes&aggregationType=sum&sampleType=inuse_space&from=${{FROM_TS}}&until=${{UNTIL_TS}}&spyName=memleak"
-
-echo "Memleak profile upload complete."
-sudo rm -f ${{MEMLEAK_OUTPUT_FILE}} ${{MEMLEAK_FOLDED_FILE}}
-"#
-    )
-}
+  # Wait before next check
+  sleep 30
+done
+"#;
 
 /// Systemd service file content for the Memleak agent script
 pub const MEMLEAK_AGENT_SERVICE: &str = r#"
@@ -801,28 +963,12 @@ Wants=network-online.target
 After=network-online.target binary.service
 
 [Service]
-Type=oneshot
-User=ubuntu
 ExecStart=/home/ubuntu/memleak-agent.sh
+TimeoutStopSec=60
+Restart=always
+User=ubuntu
+LimitNOFILE=infinity
 
 [Install]
 WantedBy=multi-user.target
-"#;
-
-/// Systemd timer file content for the Memleak agent service
-pub const MEMLEAK_AGENT_TIMER: &str = r#"
-[Unit]
-Description=Run Memleak Agent periodically
-
-[Timer]
-# Wait a bit after boot before the first run
-OnBootSec=2min
-# Run roughly every 5 minutes after the last run finished
-OnUnitInactiveSec=5min
-Unit=memleak-agent.service
-# Randomize the delay to avoid thundering herd
-RandomizedDelaySec=30s
-
-[Install]
-WantedBy=timers.target
 "#;
