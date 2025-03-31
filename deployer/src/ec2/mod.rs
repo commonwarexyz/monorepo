@@ -195,7 +195,10 @@ cfg_if::cfg_if! {
         const DESTROYED_FILE_NAME: &str = "destroyed";
 
         /// Port on instance where system metrics are exposed
-        const SYSTEM_METRICS_PORT: u16 = 9100;
+        const SYSTEM_PORT: u16 = 9100;
+
+        /// Port on instance where memleak metrics are exposed
+        const MEMLEAK_PORT: u16 = 9200;
 
         /// Port on monitoring where logs are pushed
         const LOGS_PORT: u16 = 3100;
