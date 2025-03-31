@@ -1236,6 +1236,96 @@
             "fieldConfig": {
                 "defaults": {
                     "color": {
+                        "mode": "thresholds"
+                    },
+                    "custom": {
+                        "align": "auto",
+                        "cellOptions": {
+                            "type": "auto"
+                        },
+                        "filterable": true,
+                        "inspect": false
+                    },
+                    "mappings": [],
+                    "thresholds": {
+                        "mode": "absolute",
+                        "steps": [
+                            {
+                                "color": "green",
+                                "value": null
+                            }
+                        ]
+                    },
+                    "unit": "bytes"
+                },
+                "overrides": [
+                    {
+                        "matcher": {
+                            "id": "byName",
+                            "options": "Time"
+                        },
+                        "properties": [
+                            {
+                                "id": "custom.hidden",
+                                "value": true
+                            }
+                        ]
+                    }
+                ]
+            },
+            "gridPos": {
+                "h": 16,
+                "w": 12,
+                "x": 0,
+                "y": 52
+            },
+            "id": 20,
+            "options": {
+                "cellHeight": "sm",
+                "footer": {
+                    "countRows": false,
+                    "fields": "",
+                    "reducer": [
+                        "sum"
+                    ],
+                    "show": false
+                },
+                "showHeader": true,
+                "sortBy": [
+                    {
+                        "desc": true,
+                        "displayName": "Value"
+                    }
+                ]
+            },
+            "pluginVersion": "11.5.2",
+            "targets": [
+                {
+                    "disableTextWrap": false,
+                    "editorMode": "code",
+                    "exemplar": false,
+                    "expr": "sum(inuse_bytes{deployer_name=~\"$Name\"}) by (stack)",
+                    "format": "table",
+                    "fullMetaSearch": false,
+                    "includeNullMetadata": true,
+                    "instant": true,
+                    "legendFormat": "{{stack}}",
+                    "range": false,
+                    "refId": "A",
+                    "useBackend": false
+                }
+            ],
+            "title": "Heap Usage",
+            "type": "table"
+        },
+        {
+            "datasource": {
+                "type": "prometheus",
+                "uid": "PBFA97CFB590B2093"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "color": {
                         "mode": "palette-classic"
                     },
                     "custom": {
@@ -1276,7 +1366,7 @@
             "gridPos": {
                 "h": 16,
                 "w": 12,
-                "x": 0,
+                "x": 12,
                 "y": 52
             },
             "id": 18,
@@ -1329,6 +1419,95 @@
             "fieldConfig": {
                 "defaults": {
                     "color": {
+                        "mode": "thresholds"
+                    },
+                    "custom": {
+                        "align": "auto",
+                        "cellOptions": {
+                            "type": "auto"
+                        },
+                        "filterable": true,
+                        "inspect": false
+                    },
+                    "mappings": [],
+                    "thresholds": {
+                        "mode": "absolute",
+                        "steps": [
+                            {
+                                "color": "green",
+                                "value": null
+                            }
+                        ]
+                    }
+                },
+                "overrides": [
+                    {
+                        "matcher": {
+                            "id": "byName",
+                            "options": "Time"
+                        },
+                        "properties": [
+                            {
+                                "id": "custom.hidden",
+                                "value": true
+                            }
+                        ]
+                    }
+                ]
+            },
+            "gridPos": {
+                "h": 16,
+                "w": 12,
+                "x": 0,
+                "y": 68
+            },
+            "id": 21,
+            "options": {
+                "cellHeight": "sm",
+                "footer": {
+                    "countRows": false,
+                    "fields": "",
+                    "reducer": [
+                        "sum"
+                    ],
+                    "show": false
+                },
+                "showHeader": true,
+                "sortBy": [
+                    {
+                        "desc": true,
+                        "displayName": "Value"
+                    }
+                ]
+            },
+            "pluginVersion": "11.5.2",
+            "targets": [
+                {
+                    "disableTextWrap": false,
+                    "editorMode": "code",
+                    "exemplar": false,
+                    "expr": "sum(inuse_objects{deployer_name=~\"$Name\"}) by (stack)",
+                    "format": "table",
+                    "fullMetaSearch": false,
+                    "includeNullMetadata": true,
+                    "instant": true,
+                    "legendFormat": "{{stack}}",
+                    "range": false,
+                    "refId": "A",
+                    "useBackend": false
+                }
+            ],
+            "title": "Heap Objects",
+            "type": "table"
+        },
+        {
+            "datasource": {
+                "type": "prometheus",
+                "uid": "PBFA97CFB590B2093"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "color": {
                         "mode": "palette-classic"
                     },
                     "custom": {
@@ -1369,7 +1548,7 @@
                 "h": 16,
                 "w": 12,
                 "x": 12,
-                "y": 52
+                "y": 68
             },
             "id": 19,
             "options": {
@@ -1444,24 +1623,12 @@
                     {
                         "matcher": {
                             "id": "byName",
-                            "options": "Trace Name"
+                            "options": "Start time"
                         },
                         "properties": [
                             {
-                                "id": "custom.width",
-                                "value": 123
-                            }
-                        ]
-                    },
-                    {
-                        "matcher": {
-                            "id": "byName",
-                            "options": "status"
-                        },
-                        "properties": [
-                            {
-                                "id": "custom.width",
-                                "value": 85
+                                "id": "custom.hidden",
+                                "value": true
                             }
                         ]
                     }
@@ -1471,7 +1638,7 @@
                 "h": 17,
                 "w": 12,
                 "x": 0,
-                "y": 68
+                "y": 84
             },
             "id": 17,
             "options": {
@@ -1537,7 +1704,7 @@
                 "h": 17,
                 "w": 12,
                 "x": 12,
-                "y": 68
+                "y": 84
             },
             "id": 6,
             "options": {

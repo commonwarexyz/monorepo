@@ -852,7 +852,6 @@ process_snapshot() {
       gsub(/\$u7b\$/, "{", frame);          # Replace $u7b$ with { for closures
       gsub(/\$u7d\$/, "}", frame);          # Replace $u7d$ with } for closures
       gsub(/\$C\$/, ",", frame);            # Replace $C$ with , for type parameters
-      sub(/^_/, "", frame);                # Remove leading underscore
       sub(/{{vtable.shim}}/, "[vtable]", frame); # Simplify vtable shim notation
       sub(/\.llvm\.[0-9]+/, "", frame);     # Remove .llvm. followed by numbers
       sub(/::h[0-9a-f]{16}$/, "", frame);   # Remove trailing hash (e.g., h29386cbb7d39e082)
@@ -866,6 +865,9 @@ process_snapshot() {
         gsub(/_/, "::", frame);             # Replace underscores with ::
       }
 
+      # Remove any remaining leading underscores
+      sub(/^_/, "", frame);
+
       # Build the stack string
       if (stack == "") {
         stack = frame;
@@ -878,8 +880,8 @@ process_snapshot() {
 
     # Output metrics if we have a stack
     if (stack != "") {
-      printf("inuse_bytes{stack=\"%s\"} %d\n", stack, bytes);
-      printf("inuse_objects{stack=\"%s\"} %d\n", stack, objects);
+      printf("inuse_bytes{source=\"%s\"} %d\n", stack, bytes);
+      printf("inuse_objects{source=\"%s\"} %d\n", stack, objects);
     }
 
     # Note: After the while loop, awk continues with the next line,
