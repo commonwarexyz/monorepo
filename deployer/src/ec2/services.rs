@@ -751,9 +751,9 @@ start_http_server() {
 # Initialize metrics file with metadata
 init_metrics() {
   cat > "$METRICS_FILE" << EOF
-# HELP inuse_bytes Total memory used in bytes
+# HELP inuse_bytes Memory allocated on the heap
 # TYPE inuse_bytes gauge
-# HELP inuse_objects Number of objects used
+# HELP inuse_objects Number of objects allocated on the heap
 # TYPE inuse_objects gauge
 EOF
 }
