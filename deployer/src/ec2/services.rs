@@ -374,7 +374,7 @@ pub fn install_binary_cmd(profiling: bool) -> String {
         r#"
 # Install base tools and binary dependencies
 sudo apt-get update -y
-sudo apt-get install -y logrotate wget jq bpfcc-tools linux-headers-$(uname -r)
+sudo apt-get install -y logrotate wget bpfcc-tools linux-headers-$(uname -r)
 
 # Setup binary
 chmod +x /home/ubuntu/binary
@@ -394,7 +394,6 @@ sudo mv /home/ubuntu/pyroscope-agent.timer /etc/systemd/system/pyroscope-agent.t
 # Setup memleak agent script and timer
 sudo chmod +x /home/ubuntu/memleak-agent.sh
 sudo mv /home/ubuntu/memleak-agent.service /etc/systemd/system/memleak-agent.service
-sudo mv /home/ubuntu/memleak-agent.timer /etc/systemd/system/memleak-agent.timer
 
 # Start services
 sudo systemctl daemon-reload
@@ -405,7 +404,7 @@ sudo systemctl enable --now binary
         script.push_str(
             r#"
 sudo systemctl enable --now pyroscope-agent.timer
-sudo systemctl enable --now memleak-agent.timer
+sudo systemctl enable --now memleak-agent
 "#,
         );
     }

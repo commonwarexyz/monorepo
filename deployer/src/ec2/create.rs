@@ -411,8 +411,8 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     std::fs::write(&binary_service_path, BINARY_SERVICE)?;
     let memleak_agent_service_path = temp_dir.join("memleak-agent.service");
     std::fs::write(&memleak_agent_service_path, MEMLEAK_AGENT_SERVICE)?;
-    let memleak_agent_timer_path = temp_dir.join("memleak-agent.timer");
-    std::fs::write(&memleak_agent_timer_path, MEMLEAK_AGENT_TIMER)?;
+    let memleak_agent_script_path = temp_dir.join("memleak-agent.sh");
+    std::fs::write(&memleak_agent_script_path, MEMLEAK_AGENT_SCRIPT)?;
 
     // Write logrotate configuration file
     let logrotate_conf_path = temp_dir.join("logrotate.conf");
@@ -593,7 +593,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         let pyroscope_agent_service_path = pyroscope_agent_service_path.clone();
         let pyroscope_agent_timer_path = pyroscope_agent_timer_path.clone();
         let memleak_agent_service_path = memleak_agent_service_path.clone();
-        let memleak_agent_timer_path = memleak_agent_timer_path.clone();
+        let memleak_agent_script_path = memleak_agent_script_path.clone();
         let future = async move {
             rsync_file(private_key, &instance.binary, &ip, "/home/ubuntu/binary").await?;
             rsync_file(
@@ -694,29 +694,11 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                 "/home/ubuntu/memleak-agent.service",
             )
             .await?;
-            let memleak_agent_script_path =
-                temp_dir.join(format!("memleak-agent_{}.sh", instance.name));
-            std::fs::write(
-                &memleak_agent_script_path,
-                generate_memleak_script(
-                    &monitoring_private_ip,
-                    &instance.name,
-                    &ip,
-                    &instance.region,
-                ),
-            )?;
             rsync_file(
                 private_key,
                 memleak_agent_script_path.to_str().unwrap(),
                 &ip,
                 "/home/ubuntu/memleak-agent.sh",
-            )
-            .await?;
-            rsync_file(
-                private_key,
-                memleak_agent_timer_path.to_str().unwrap(),
-                &ip,
-                "/home/ubuntu/memleak-agent.timer",
             )
             .await?;
             enable_bbr(private_key, &ip, bbr_conf_path.to_str().unwrap()).await?;
