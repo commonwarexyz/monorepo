@@ -765,7 +765,7 @@ start_memleak() {
   echo "Starting continuous memleak monitoring for PID $pid..."
 
   # Start memleak in background with continuous monitoring
-  sudo memleak-bpfcc -p $pid -i $MEMLEAK_REPORT_INTERVAL > "$FIFO_PATH" 2>/dev/null &
+  sudo memleak-bpfcc -z $LEAK_THRESHOLD -p $pid $MEMLEAK_REPORT_INTERVAL > "$FIFO_PATH" 2>/dev/null &
   MEMLEAK_PID=$!
   echo "Memleak started with PID $MEMLEAK_PID"
 }
@@ -810,7 +810,7 @@ process_snapshot() {
   local snapshot="$1"
 
   # Use awk to parse the snapshot and extract metrics
-  awk -v threshold="$LEAK_THRESHOLD" '
+  awk '
   BEGIN {
     in_leak_section = 0;
   }
@@ -823,31 +823,29 @@ process_snapshot() {
     bytes = $1;
     objects = $4;
 
-    if (bytes >= threshold) {
-      # Extract stack trace and clean it up
-      stack = "";
-      getline; # Move to first stack frame line
-      while ($0 ~ /^\s+\S+/) {
-        frame = $0;
-        gsub(/\+0x[0-9a-f]+ \[[^\]]+\]/, "", frame);
-        gsub(/^\s+/, "", frame);
-        # Replace spaces and special chars with underscores
-        gsub(/[^a-zA-Z0-9_]/, "_", frame);
+    # Extract stack trace and clean it up
+    stack = "";
+    getline; # Move to first stack frame line
+    while ($0 ~ /^\s+\S+/) {
+      frame = $0;
+      gsub(/\+0x[0-9a-f]+ \[[^\]]+\]/, "", frame);
+      gsub(/^\s+/, "", frame);
+      # Replace spaces and special chars with underscores
+      gsub(/[^a-zA-Z0-9_]/, "_", frame);
 
-        if (stack == "") {
-          stack = frame;
-        } else {
-          stack = stack ";" frame;
-        }
-
-        if (getline <= 0) break;
+      if (stack == "") {
+        stack = frame;
+      } else {
+        stack = stack ";" frame;
       }
 
-      # Create metric with stack as label
-      if (stack != "") {
-        printf("inuse_bytes{stack=\"%s\"} %d\n", stack, bytes);
-        printf("inuse_objects{stack=\"%s\"} %d\n", stack, objects);
-      }
+      if (getline <= 0) break;
+    }
+
+    # Create metric with stack as label
+    if (stack != "") {
+      printf("inuse_bytes{stack=\"%s\"} %d\n", stack, bytes);
+      printf("inuse_objects{stack=\"%s\"} %d\n", stack, objects);
     }
   }
   ' <<< "$snapshot" > "$METRICS_FILE.new"
