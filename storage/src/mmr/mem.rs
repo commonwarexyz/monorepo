@@ -168,7 +168,8 @@ impl<H: CHasher> Mmr<H> {
         element_pos
     }
 
-    /// Pop the most recent leaf element out of the MMR (if it exists).
+    /// Pop the most recent leaf element out of the MMR if it exists, returning Empty or
+    /// ElementPruned errors otherwise.
     pub fn pop(&mut self) -> Result<u64, Error> {
         if self.size() == 0 {
             return Err(Empty);
@@ -176,7 +177,7 @@ impl<H: CHasher> Mmr<H> {
 
         let mut new_size = self.size() - 1;
         loop {
-            if new_size != 0 && new_size == self.oldest_retained_pos {
+            if new_size < self.oldest_retained_pos {
                 return Err(ElementPruned(new_size));
             }
             if PeakIterator::check_validity(new_size) {
@@ -341,7 +342,8 @@ impl<H: CHasher> Mmr<H> {
 
 #[cfg(test)]
 mod tests {
-    use super::{nodes_needing_parents, Error::*, Hasher, Mmr, PeakIterator};
+    use super::*;
+    use crate::mmr::iterator::leaf_num_to_pos;
     use commonware_cryptography::{Hasher as CHasher, Sha256};
     use commonware_runtime::{deterministic::Executor, Runner};
     use commonware_utils::hex;
@@ -361,6 +363,7 @@ mod tests {
             assert_eq!(mmr.last_leaf_pos(), None);
             assert_eq!(mmr.oldest_retained_pos(), None);
             assert_eq!(mmr.get_node(0), None);
+            assert!(matches!(mmr.pop(), Err(Empty)));
             mmr.prune_all();
             assert_eq!(mmr.size(), 0, "prune_all on empty MMR should do nothing");
 
@@ -810,17 +813,21 @@ mod tests {
             "pop on empty MMR should fail"
         );
 
-        // Test popping over a prune boundary.
+        // Test that we can pop all elements up to and including the oldest retained leaf.
         for i in 0u64..199 {
             hasher.update(&i.to_be_bytes());
             let element = hasher.finalize();
             mmr.add(&mut hasher, &element);
         }
-        mmr.prune_to_pos(100);
-        while mmr.size() - 1 > 100 {
+
+        let leaf_pos = leaf_num_to_pos(100);
+        mmr.prune_to_pos(leaf_pos);
+        while mmr.size() > leaf_pos {
             assert!(mmr.pop().is_ok());
         }
+        assert_eq!(hex(&mmr.root(&mut hasher)), ROOTS[100]);
         assert!(matches!(mmr.pop().unwrap_err(), ElementPruned(_)));
+        assert_eq!(mmr.oldest_retained_pos(), None);
     }
 
     #[test]
