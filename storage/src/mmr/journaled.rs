@@ -236,6 +236,57 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
         self.mem_mmr.add(h, element)
     }
 
+    /// Pop the given number of elements from the tip of the MMR assuming they exist, and otherwise
+    /// return Empty or ElementPruned errors.
+    pub async fn pop(&mut self, mut leaves_to_pop: usize) -> Result<(), Error> {
+        // See if the elements are still cached in which case we can just pop them from the in-mem
+        // MMR.
+        while leaves_to_pop > 0 {
+            match self.mem_mmr.pop() {
+                Ok(_) => {
+                    leaves_to_pop -= 1;
+                }
+                Err(Error::ElementPruned(_)) => break,
+                Err(Error::Empty) => {
+                    return Err(Error::Empty);
+                }
+                _ => unreachable!(),
+            }
+        }
+        if leaves_to_pop == 0 {
+            return Ok(());
+        }
+
+        let mut new_size = self.size();
+        while leaves_to_pop > 0 {
+            if new_size == 0 {
+                return Err(Error::Empty);
+            }
+            new_size -= 1;
+            if new_size < self.pruned_to_pos {
+                return Err(Error::ElementPruned(new_size));
+            }
+            if PeakIterator::check_validity(new_size) {
+                leaves_to_pop -= 1;
+            }
+        }
+
+        self.journal.rewind(new_size).await?;
+        self.journal_size = new_size;
+
+        // Reset the mem_mmr to one of the new_size in the "prune_all" state.
+        let mut pinned_nodes = Vec::new();
+        for pos in Proof::<H>::nodes_to_pin(new_size, new_size) {
+            let digest =
+                Mmr::<B, E, H>::get_from_metadata_or_journal(&self.metadata, &self.journal, pos)
+                    .await?;
+            pinned_nodes.push(digest);
+        }
+        self.mem_mmr = MemMmr::init(vec![], new_size, pinned_nodes);
+
+        Ok(())
+    }
+
     /// Return the root hash of the MMR.
     pub fn root(&self, h: &mut H) -> H::Digest {
         self.mem_mmr.root(h)
@@ -414,10 +465,12 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Blob, Config, Mmr, RStorage, Storage};
+    use super::*;
+    use crate::mmr::{iterator::leaf_num_to_pos, mem::tests::ROOTS};
     use commonware_cryptography::{hash, sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic::Executor, Runner};
+    use commonware_utils::hex;
 
     fn test_digest(v: usize) -> Digest {
         hash(&v.to_be_bytes())
@@ -441,6 +494,75 @@ mod tests {
             assert!(mmr.prune_all().await.is_ok());
             assert!(mmr.prune_to_pos(0).await.is_ok());
             assert!(mmr.sync().await.is_ok());
+            assert!(matches!(mmr.pop(1).await, Err(Error::Empty)));
+        });
+    }
+
+    #[test_traced]
+    fn test_journaled_mmr_pop() {
+        let (executor, context, _) = Executor::default();
+        executor.start(async move {
+            let cfg = Config {
+                journal_partition: "journal_partition".into(),
+                metadata_partition: "metadata_partition".into(),
+                items_per_blob: 7,
+            };
+
+            let mut hasher = Sha256::new();
+            let mut mmr = Mmr::<_, _, Sha256>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            for i in 0u64..199 {
+                hasher.update(&i.to_be_bytes());
+                let element = hasher.finalize();
+                mmr.add(&mut hasher, &element);
+            }
+            assert_eq!(ROOTS[199], hex(&mmr.root(&mut hasher)));
+
+            // Pop off one node at a time without syncing until empty, confirming the root hash is
+            // still is as expected.
+            for i in (0..199u64).rev() {
+                assert!(mmr.pop(1).await.is_ok());
+                let root = mmr.root(&mut hasher);
+                let expected_root = ROOTS[i as usize];
+                assert_eq!(hex(&root), expected_root);
+            }
+            assert!(matches!(mmr.pop(1).await, Err(Error::Empty)));
+            assert!(mmr.pop(0).await.is_ok());
+
+            // Repeat the test though sync part of the way to tip to test crossing the boundary from
+            // cached to uncached leaves, and pop 2 at a time instead of just 1.
+            for i in 0u64..199 {
+                hasher.update(&i.to_be_bytes());
+                let element = hasher.finalize();
+                mmr.add(&mut hasher, &element);
+                if i == 101 {
+                    mmr.sync().await.unwrap();
+                }
+            }
+            for i in (0..198u64).rev().step_by(2) {
+                assert!(mmr.pop(2).await.is_ok());
+                let root = mmr.root(&mut hasher);
+                let expected_root = ROOTS[i as usize];
+                assert_eq!(hex(&root), expected_root);
+            }
+            assert_eq!(mmr.size(), 1);
+            assert!(mmr.pop(1).await.is_ok()); // pop the last element
+            assert!(matches!(mmr.pop(99).await, Err(Error::Empty)));
+
+            // Repeat one more time only after pruning the MMR first.
+            for i in 0u64..199 {
+                hasher.update(&i.to_be_bytes());
+                let element = hasher.finalize();
+                mmr.add(&mut hasher, &element);
+            }
+            let leaf_pos = leaf_num_to_pos(50);
+            mmr.prune_to_pos(leaf_pos).await.unwrap();
+            while mmr.size() > leaf_pos {
+                assert!(mmr.pop(1).await.is_ok());
+            }
+            assert!(matches!(mmr.pop(1).await, Err(Error::ElementPruned(_))));
         });
     }
 

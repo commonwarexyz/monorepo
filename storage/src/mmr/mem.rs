@@ -340,8 +340,10 @@ impl<H: CHasher> Mmr<H> {
     }
 }
 
+// We make this tests module pub(crate) so other mmr types (such as the journaled MMR) can use the
+// same precomputed ROOTS.
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::mmr::iterator::leaf_num_to_pos;
     use commonware_cryptography::{Hasher as CHasher, Sha256};
@@ -555,7 +557,7 @@ mod tests {
     ///
     /// We use these pre-generated roots to ensure that we don't silently change the tree hashing
     /// algorithm.
-    const ROOTS: [&str; 200] = [
+    pub(crate) const ROOTS: [&str; 200] = [
         "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
         "7676407563b96f8f78658b5b6fd523b190634cf5435393a66d62986a35cdd838",
         "ea9fecf8f1137ea087d15b8877a06e64029a2d2e7d8b8c2220213c8c590ad52a",
