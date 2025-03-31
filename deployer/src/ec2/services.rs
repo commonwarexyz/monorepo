@@ -751,9 +751,9 @@ start_http_server() {
 # Initialize metrics file with metadata
 init_metrics() {
   cat > "$METRICS_FILE" << EOF
-# HELP inuse_bytes Total memory inuse in bytes
+# HELP inuse_bytes Total memory used in bytes
 # TYPE inuse_bytes gauge
-# HELP inuse_objects Number of inuse objects
+# HELP inuse_objects Number of objects used
 # TYPE inuse_objects gauge
 EOF
 }
@@ -845,8 +845,8 @@ process_snapshot() {
 
       # Create metric with stack as label
       if (stack != "") {
-        printf("binary_memory_leak_stack{stack=\"%s\"} %d\n", stack, bytes);
-        printf("binary_memory_leak_objects{stack=\"%s\"} %d\n", stack, objects);
+        printf("inuse_bytes{stack=\"%s\"} %d\n", stack, bytes);
+        printf("inuse_objects{stack=\"%s\"} %d\n", stack, objects);
       }
     }
   }
