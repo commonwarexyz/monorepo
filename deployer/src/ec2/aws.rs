@@ -1,6 +1,6 @@
 //! AWS EC2 SDK function wrappers
 
-use super::{METRICS_PORT, SYSTEM_METRICS_PORT};
+use super::{MEMLEAK_PORT, METRICS_PORT, SYSTEM_PORT};
 use crate::ec2::{
     utils::{exact_cidr, DEPLOYER_MAX_PORT, DEPLOYER_MIN_PORT, DEPLOYER_PROTOCOL, RETRY_INTERVAL},
     PortConfig,
@@ -277,8 +277,20 @@ pub async fn create_security_group_binary(
         .ip_permissions(
             IpPermission::builder()
                 .ip_protocol("tcp")
-                .from_port(SYSTEM_METRICS_PORT as i32)
-                .to_port(SYSTEM_METRICS_PORT as i32)
+                .from_port(SYSTEM_PORT as i32)
+                .to_port(SYSTEM_PORT as i32)
+                .ip_ranges(
+                    IpRange::builder()
+                        .cidr_ip(exact_cidr(monitoring_ip))
+                        .build(),
+                )
+                .build(),
+        )
+        .ip_permissions(
+            IpPermission::builder()
+                .ip_protocol("tcp")
+                .from_port(MEMLEAK_PORT as i32)
+                .to_port(MEMLEAK_PORT as i32)
                 .ip_ranges(
                     IpRange::builder()
                         .cidr_ip(exact_cidr(monitoring_ip))

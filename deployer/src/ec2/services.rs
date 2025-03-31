@@ -558,8 +558,15 @@ scrape_configs:
           deployer_name: '{}'
           deployer_ip: '{}'
           deployer_region: '{}'
+  - job_name: '{}_memleak'
+    static_configs:
+      - targets: ['{}:9200']
+        labels:
+          deployer_name: '{}'
+          deployer_ip: '{}'
+          deployer_region: '{}'
 "#,
-            name, ip, name, ip, region, name, ip, name, ip, region
+            name, ip, name, ip, region, name, ip, name, ip, region, name, ip, name, ip, region
         ));
     }
     config
@@ -699,7 +706,7 @@ pub const MEMLEAK_AGENT_SCRIPT: &str = r#"#!/bin/bash
 set -e
 
 SERVICE_NAME="binary.service"
-METRICS_PORT=9099
+METRICS_PORT=9200
 METRICS_PATH="/metrics"
 FIFO_PATH="/tmp/memleak_fifo"
 METRICS_FILE="/tmp/memleak_metrics"
