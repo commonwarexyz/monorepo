@@ -50,6 +50,13 @@ fn main() {
     let config_file = std::fs::read_to_string(config_file).expect("Could not read config file");
     let config: Config = serde_yaml::from_str(&config_file).expect("Could not parse config file");
 
+    // Parse config
+    info!(peers = peers.len(), "loaded peers");
+    let key = from_hex_formatted(&config.private_key).expect("Could not parse private key");
+    let key = PrivateKey::try_from(key).expect("Private key is invalid");
+    let signer = <Ed25519 as Signer>::from(key).expect("Could not create signer");
+    let public_key = signer.public_key();
+
     // Initialize runtime
     let cfg = tokio::Config {
         worker_threads: config.worker_threads,
@@ -69,17 +76,12 @@ fn main() {
             )),
             Some(telemetry::traces::exporter::Config {
                 endpoint: format!("http://{}:4318/v1/traces", hosts.monitoring),
-                name: "flood".to_string(),
+                name: public_key.to_string(),
                 rate: 1.0,
             }),
         );
 
-        // Parse config
-        info!(peers = peers.len(), "loaded peers");
-        let key = from_hex_formatted(&config.private_key).expect("Could not parse private key");
-        let key = PrivateKey::try_from(key).expect("Private key is invalid");
-        let signer = <Ed25519 as Signer>::from(key).expect("Could not create signer");
-        let public_key = signer.public_key();
+        // Log configuration
         let ip = peers.get(&public_key).expect("Could not find self in IPs");
         info!(
             ?public_key,
