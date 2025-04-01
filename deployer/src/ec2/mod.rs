@@ -23,14 +23,16 @@
 //!               |    - Prometheus                   |
 //!               |    - Loki                         |
 //!               |    - Pyroscope                    |
+//!               |    - Tempo                        |
 //!               |    - Grafana                      |
 //!               |  - Security Group                 |
 //!               |    - All: Deployer IP             |
 //!               |    - 3100: Binary VPCs            |
 //!               |    - 4040: Binary VPCs            |
+//!               |    - 4318: Binary VPCs            |
 //!               +-----------------------------------+
 //!                     ^                       ^
-//!           (Metrics & Logs)              (Metrics & Logs)
+//!                (Telemetry)             (Telemetry)
 //!                     |                       |
 //!                     |                       |
 //! +------------------------------+  +------------------------------+
@@ -38,10 +40,14 @@
 //! |  - Binary Instance           |  |  - Binary Instance           |
 //! |    - Binary A                |  |    - Binary B                |
 //! |    - Promtail                |  |    - Promtail                |
+//! |    - Node Exporter           |  |    - Node Exporter           |
+//! |    - Pyroscope Agent         |  |    - Pyroscope Agent         |
+//! |    - Memleak Agent           |  |    - Memleak Agent           |
 //! |  - Security Group            |  |  - Security Group            |
 //! |    - All: Deployer IP        |  |    - All: Deployer IP        |
 //! |    - 9090: Monitoring IP     |  |    - 9090: Monitoring IP     |
 //! |    - 9100: Monitoring IP     |  |    - 9100: Monitoring IP     |
+//! |    - 9200: Monitoring IP     |  |    - 9200: Monitoring IP     |
 //! |    - 8012: 0.0.0.0/0         |  |    - 8765: 12.3.7.9/32       |
 //! +------------------------------+  +------------------------------+
 //! ```
@@ -55,20 +61,24 @@
 //!     * **Prometheus**: Scrapes binary metrics from all instances at `:9090` and system metrics from all instances at `:9100`.
 //!     * **Loki**: Listens at `:3100`, storing logs in `/loki/chunks` with a TSDB index at `/loki/index`.
 //!     * **Pyroscope**: Listens at `:4040`, storing profiles in `/var/lib/pyroscope`.
+//!     * **Tempo**: Listens at `:4318`, storing traces in `/var/lib/tempo`.
 //!     * **Grafana**: Hosted at `:3000`, provisioned with Prometheus and Loki datasources and a custom dashboard.
 //! * Ingress:
 //!     * Allows deployer IP access (TCP 0-65535).
-//!     * Binary instance traffic to Loki (TCP 3100) and Pyroscope (TCP 4040).
+//!     * Binary instance traffic to Loki (TCP 3100), Pyroscope (TCP 4040), and Tempo (TCP 4318).
 //!
 //! ### Binary
 //!
 //! * Deployed in user-specified regions with configurable ARM64 instance types and storage.
 //! * Run:
-//!     * **Custom Binary**: Executes with `--peers=/home/ubuntu/peers.yaml --config=/home/ubuntu/config.conf`, exposing metrics at `:9090`.
+//!     * **Custom Binary**: Executes with `--hosts=/home/ubuntu/hosts.yaml --config=/home/ubuntu/config.conf`, exposing metrics at `:9090`.
 //!     * **Promtail**: Forwards `/var/log/binary.log` to Loki on the monitoring instance.
+//!     * **Node Exporter**: Exposes system metrics at `:9100`.
+//!     * **Pyroscope Agent**: Forwards `perf` profiles to Pyroscope on the monitoring instance.
+//!     * **Memleak Agent**: Exposes `memleak` metrics at `:9200`.
 //! * Ingress:
 //!     * Deployer IP access (TCP 0-65535).
-//!     * Monitoring IP access to `:9090` and `:9100` for Prometheus.
+//!     * Monitoring IP access to `:9090`, `:9100`, and `:9200` for Prometheus.
 //!     * User-defined ports from the configuration.
 //!
 //! ## Networking
@@ -97,7 +107,7 @@
 //! 2. Creates VPCs, subnets, internet gateways, route tables, and security groups per region.
 //! 3. Establishes VPC peering between the monitoring region and binary regions.
 //! 4. Launches the monitoring instance, uploads service files, and installs Prometheus, Grafana, Loki, and Pyroscope.
-//! 5. Launches binary instances, uploads binaries, configurations, and peers.yaml, and installs Promtail and the binary.
+//! 5. Launches binary instances, uploads binaries, configurations, and hosts.yaml, and installs Promtail and the binary.
 //! 6. Configures BBR on all instances and updates the monitoring security group for Loki traffic.
 //! 7. Marks completion with `/tmp/deployer-{tag}/created`.
 //!
@@ -188,13 +198,19 @@ cfg_if::cfg_if! {
         const DESTROYED_FILE_NAME: &str = "destroyed";
 
         /// Port on instance where system metrics are exposed
-        const SYSTEM_METRICS_PORT: u16 = 9100;
+        const SYSTEM_PORT: u16 = 9100;
+
+        /// Port on instance where memleak metrics are exposed
+        const MEMLEAK_PORT: u16 = 9200;
 
         /// Port on monitoring where logs are pushed
         const LOGS_PORT: u16 = 3100;
 
         /// Port on monitoring where profiles are pushed
         const PROFILES_PORT: u16 = 4040;
+
+        /// Port on monitoring where traces are pushed
+        const TRACES_PORT: u16 = 4318;
 
         /// Subcommand name
         pub const CMD: &str = "ec2";
@@ -260,24 +276,27 @@ cfg_if::cfg_if! {
 /// Port on binary where metrics are exposed
 pub const METRICS_PORT: u16 = 9090;
 
-/// Peer deployment information
+/// Host deployment information
 #[derive(Serialize, Deserialize, Clone)]
-pub struct Peer {
-    /// Name of the peer
+pub struct Host {
+    /// Name of the host
     pub name: String,
 
-    /// Region where the peer is deployed
+    /// Region where the host is deployed
     pub region: String,
 
-    /// Public IP address of the peer
+    /// Public IP address of the host
     pub ip: IpAddr,
 }
 
-/// List of peers
+/// List of hosts
 #[derive(Serialize, Deserialize, Clone)]
-pub struct Peers {
-    /// Peers deployed across all regions
-    pub peers: Vec<Peer>,
+pub struct Hosts {
+    /// Private IP address of the monitoring instance
+    pub monitoring: IpAddr,
+
+    /// Hosts deployed across all regions
+    pub hosts: Vec<Host>,
 }
 
 /// Port configuration

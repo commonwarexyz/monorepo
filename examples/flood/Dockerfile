@@ -22,9 +22,12 @@ ENV PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig
 RUN rustup default stable
 RUN rustup target add aarch64-unknown-linux-gnu
 
+# Set RUSTFLAGS to force frame pointers
+ENV RUSTFLAGS="-C force-frame-pointers=yes"
+
 # Set the working directory
 WORKDIR /monorepo
 
 # Build the binary
 ENTRYPOINT ["/bin/bash", "-c"]
-CMD ["cd examples/flood && cargo build --profile release-with-debug --bin flood --target aarch64-unknown-linux-gnu && cp ../../target/aarch64-unknown-linux-gnu/release/flood assets"]
+CMD ["cd examples/flood && cargo build --profile release-with-debug --bin flood --target aarch64-unknown-linux-gnu && cp ../../target/aarch64-unknown-linux-gnu/release-with-debug/flood assets"]

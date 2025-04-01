@@ -118,6 +118,7 @@ pub fn test_traced(attr: TokenStream, item: TokenStream) -> TokenStream {
                 .with_test_writer()
                 .with_max_level(#log_level)
                 .with_line_number(true)
+                .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
                 .finish();
             let dispatcher = tracing::Dispatch::new(subscriber);
 

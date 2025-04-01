@@ -22,6 +22,10 @@ bytes = { workspace = true }
 sha2 = { workspace = true }
 governor = { workspace = true }
 prometheus-client = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["fmt", "json", "env-filter"] }
+opentelemetry = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+
 
 # Enable "js" feature when WASM is target
 [target.'cfg(target_arch = "wasm32")'.dependencies.getrandom]
@@ -31,9 +35,8 @@ features = ["js"]
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true, features = ["full"] }
 axum = { workspace = true }
-
-[dev-dependencies]
-tracing-subscriber = { workspace = true }
+opentelemetry_sdk = { workspace = true, features = ["rt-tokio"] }
+opentelemetry-otlp = { workspace = true, features = ["http-proto"] }
 
 [lib]
 bench = false

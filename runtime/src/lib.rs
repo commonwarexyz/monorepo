@@ -158,6 +158,9 @@ pub trait Spawner: Clone + Send + Sync + 'static {
 
 /// Interface to register and encode metrics.
 pub trait Metrics: Clone + Send + Sync + 'static {
+    /// Get the current label of the context.
+    fn label(&self) -> String;
+
     /// Create a new instance of `Metrics` with the given label appended to the end
     /// of the current `Metrics` label.
     ///
@@ -167,8 +170,21 @@ pub trait Metrics: Clone + Send + Sync + 'static {
     /// label (reserved for metrics for the runtime).
     fn with_label(&self, label: &str) -> Self;
 
-    /// Get the current label of the context.
-    fn label(&self) -> String;
+    /// Prefix the given label with the current context's label.
+    ///
+    /// Unlike `with_label`, this method does not create a new context.
+    fn scoped_label(&self, label: &str) -> String {
+        let label = if self.label().is_empty() {
+            label.to_string()
+        } else {
+            format!("{}_{}", self.label(), label)
+        };
+        assert!(
+            !label.starts_with(METRICS_PREFIX),
+            "using runtime label is not allowed"
+        );
+        label
+    }
 
     /// Register a metric with the runtime.
     ///
