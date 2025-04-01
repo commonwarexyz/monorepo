@@ -2,14 +2,12 @@ use super::{Config, Mailbox, Message};
 use crate::{
     threshold_simplex::{
         actors::resolver,
-        encoder::{
-            finalize_namespace, notarize_namespace, nullify_message, nullify_namespace,
-            proposal_message, seed_message, seed_namespace,
-        },
-        metrics,
+        finalize_namespace, metrics, notarize_namespace, nullify_namespace,
         prover::Prover,
+        seed_namespace,
+        types::{Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, Proposal},
         verifier::{verify_finalization, verify_notarization, verify_nullification},
-        wire, Context, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE, NOTARIZE,
+        Context, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE, NOTARIZE,
         NULLIFY_AND_FINALIZE,
     },
     Automaton, Committer, Parsed, Relay, ThresholdSupervisor, LATENCY,
@@ -23,9 +21,7 @@ use commonware_cryptography::{
         },
         poly::{self, Eval},
     },
-    hash,
-    sha256::Digest as Sha256Digest,
-    Digest, Scheme,
+    hash, sha256, Digest, Scheme,
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
@@ -74,27 +70,27 @@ struct Round<
     nullify_retry: Option<SystemTime>,
 
     // Track one proposal per view (only matters prior to notarization)
-    proposal: Option<(Sha256Digest /* proposal */, Parsed<wire::Proposal, D>)>,
+    proposal: Option<Proposal<D>>,
     requested_proposal: bool,
     verified_proposal: bool,
 
     // Track notarizes for all proposals (ensuring any participant only has one recorded notarize)
-    notaries: HashMap<u32, Sha256Digest>,
-    notarizes: HashMap<Sha256Digest, HashMap<u32, Parsed<wire::Notarize, D>>>,
-    notarization: Option<Parsed<wire::Notarization, D>>,
+    notaries: HashMap<u32, sha256::Digest>,
+    notarizes: HashMap<sha256::Digest, HashMap<u32, Notarize<D>>>,
+    notarization: Option<Notarization<D>>,
     broadcast_notarize: bool,
     broadcast_notarization: bool,
 
     // Track nullifies (ensuring any participant only has one recorded nullify)
-    nullifies: HashMap<u32, wire::Nullify>,
-    nullification: Option<wire::Nullification>,
+    nullifies: HashMap<u32, Nullify>,
+    nullification: Option<Nullification>,
     broadcast_nullify: bool,
     broadcast_nullification: bool,
 
     // Track finalizes for all proposals (ensuring any participant only has one recorded finalize)
-    finalizers: HashMap<u32, Sha256Digest>,
-    finalizes: HashMap<Sha256Digest, HashMap<u32, Parsed<wire::Finalize, D>>>,
-    finalization: Option<Parsed<wire::Finalization, D>>,
+    finalizers: HashMap<u32, sha256::Digest>,
+    finalizes: HashMap<sha256::Digest, HashMap<u32, Finalize<D>>>,
+    finalization: Option<Finalization<D>>,
     broadcast_finalize: bool,
     broadcast_finalization: bool,
 }
@@ -151,26 +147,21 @@ impl<
         self.leader = Some(leader);
     }
 
-    fn add_verified_proposal(&mut self, proposal: Parsed<wire::Proposal, D>) {
-        let message = proposal_message(
-            proposal.message.view,
-            proposal.message.parent,
-            &proposal.digest,
-        );
-        let proposal_digest = hash(&message);
+    fn add_verified_proposal(&mut self, proposal: Proposal<D>) {
+        let digest = proposal.digest();
         if self.proposal.is_none() {
             debug!(
-                view = proposal.message.view,
-                digest = ?proposal_digest,
+                view = proposal.view,
+                ?digest,
                 "setting unverified proposal in notarization"
             );
-            self.proposal = Some((proposal_digest, proposal));
-        } else if let Some((previous_digest, _)) = &self.proposal {
-            if proposal_digest != *previous_digest {
+            self.proposal = Some(proposal);
+        } else if let Some(previous) = &self.proposal {
+            if proposal != *previous {
                 warn!(
-                    view = proposal.message.view,
-                    ?previous_digest,
-                    digest = ?proposal_digest,
+                    view = proposal.view,
+                    previous = ?previous.digest(),
+                    ?digest,
                     "proposal in notarization does not match stored proposal"
                 );
             }
@@ -180,16 +171,10 @@ impl<
     async fn add_verified_notarize(
         &mut self,
         public_key_index: u32,
-        notarize: Parsed<wire::Notarize, D>,
+        notarize: Notarize<D>,
     ) -> bool {
-        // Get proposal
-        let proposal = notarize.message.proposal.as_ref().unwrap();
-
-        // Compute proposal digest
-        let message = proposal_message(proposal.view, proposal.parent, &notarize.digest);
-        let proposal_digest = hash(&message);
-
         // Check if already notarized
+        let proposal_digest = notarize.proposal.digest();
         if let Some(previous_notarize) = self.notaries.get(&public_key_index) {
             if previous_notarize == &proposal_digest {
                 trace!(
@@ -208,7 +193,7 @@ impl<
                 .unwrap()
                 .get(&public_key_index)
                 .unwrap();
-            let previous_proposal = previous_notarize.message.proposal.as_ref().unwrap();
+            let previous_proposal = &previous_notarize.proposal;
             let proof = Prover::<D>::serialize_conflicting_notarize(
                 self.view,
                 previous_proposal.parent,

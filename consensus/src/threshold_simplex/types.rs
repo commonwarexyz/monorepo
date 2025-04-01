@@ -1,10 +1,9 @@
+use super::View;
 use commonware_codec::{Codec, Error, Reader, SizedCodec, Writer};
 use commonware_cryptography::{
     bls12381::primitives::{group::Signature, poly::PartialSignature},
-    Digest,
+    hash, sha256, Digest, Hasher, Sha256,
 };
-
-use super::View;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Voter<D: Digest> {
@@ -97,6 +96,12 @@ pub struct Proposal<D: Digest> {
     pub view: u64,
     pub parent: u64,
     pub payload: D,
+}
+
+impl<D: Digest> Proposal<D> {
+    pub fn digest(&self) -> sha256::Digest {
+        hash(&self.encode())
+    }
 }
 
 impl<D: Digest> Codec for Proposal<D> {
