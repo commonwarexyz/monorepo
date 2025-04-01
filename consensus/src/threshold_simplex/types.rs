@@ -15,6 +15,7 @@ pub enum Voter<D: Digest> {
     Finalization(Finalization<D>),
 }
 
+// TODO: add versioning to Voter and all other types?
 impl<D: Digest> Codec for Voter<D> {
     fn write(&self, writer: &mut impl Writer) {
         match self {
