@@ -89,7 +89,7 @@ impl<
         mut supervisor: spawner::Mailbox<E, Si, St, C::PublicKey>,
     ) {
         // Create span
-        let span = debug_span!(parent: None, "listener", ?address);
+        let span = debug_span!("listener", ?address);
         let guard = span.enter();
 
         // Wait for the peer to send us their public key
