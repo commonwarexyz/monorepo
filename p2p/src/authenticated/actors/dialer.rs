@@ -5,7 +5,9 @@ use crate::authenticated::{
     metrics,
 };
 use commonware_cryptography::Scheme;
-use commonware_runtime::{Clock, Handle, Listener, Metrics, Network, Sink, Spawner, Stream};
+use commonware_runtime::{
+    telemetry::traces::status, Clock, Handle, Listener, Metrics, Network, Sink, Spawner, Stream,
+};
 use commonware_stream::public_key::{Config as StreamConfig, Connection};
 use governor::{
     clock::Clock as GClock,
@@ -13,13 +15,11 @@ use governor::{
     state::{InMemoryState, NotKeyed},
     Quota, RateLimiter,
 };
-use opentelemetry::trace::Status;
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use rand::{CryptoRng, Rng};
 use std::{marker::PhantomData, time::Duration};
-use tracing::{debug, info_span, Instrument};
-use tracing_opentelemetry::OpenTelemetrySpanExt;
+use tracing::{debug, debug_span, Instrument};
 
 pub struct Config<C: Scheme> {
     pub stream_cfg: StreamConfig<C>,
@@ -97,20 +97,19 @@ impl<
                 let mut supervisor = supervisor.clone();
                 move |context| async move {
                     // Create span
-                    let span = info_span!(parent: None, "dialer", ?peer, ?address);
+                    let span = debug_span!(parent: None, "dialer", ?peer, ?address);
                     let guard = span.enter();
 
                     // Attempt to dial peer
                     let (sink, stream) =
-                        match context.dial(address).instrument(info_span!("dial")).await {
+                        match context.dial(address).instrument(debug_span!("dial")).await {
                             Ok(stream) => stream,
                             Err(e) => {
-                                span.set_status(Status::error("failed to dial peer"));
-                                debug!(?peer, error = ?e, "failed to dial peer");
+                                status::wrapped_error(&span, &e, "failed to dial peer");
                                 return;
                             }
                         };
-                    debug!(?peer, address = address.to_string(), "dialed peer");
+                    debug!("dialed peer");
 
                     // Upgrade connection
                     let instance = match Connection::upgrade_dialer(
@@ -120,20 +119,19 @@ impl<
                         stream,
                         peer.clone(),
                     )
-                    .instrument(info_span!("upgrade"))
+                    .instrument(debug_span!("upgrade"))
                     .await
                     {
                         Ok(instance) => instance,
                         Err(e) => {
-                            span.set_status(Status::error("failed to upgrade connection"));
-                            debug!(?peer, error = ?e, "failed to upgrade connection");
+                            status::wrapped_error(&span, &e, "failed to upgrade connection");
                             return;
                         }
                     };
-                    debug!(?peer, "upgraded connection");
+                    debug!("upgraded connection");
 
                     // Set status to OK
-                    span.set_status(Status::Ok);
+                    status::ok(&span);
                     drop(guard);
 
                     // Start peer to handle messages

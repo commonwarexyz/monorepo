@@ -2,7 +2,9 @@
 
 use crate::authenticated::actors::{spawner, tracker};
 use commonware_cryptography::Scheme;
-use commonware_runtime::{Clock, Handle, Listener, Metrics, Network, Sink, Spawner, Stream};
+use commonware_runtime::{
+    telemetry::traces::status, Clock, Handle, Listener, Metrics, Network, Sink, Spawner, Stream,
+};
 use commonware_stream::public_key::{Config as StreamConfig, Connection, IncomingConnection};
 use governor::{
     clock::ReasonablyRealtime,
@@ -10,12 +12,10 @@ use governor::{
     state::{InMemoryState, NotKeyed},
     Quota, RateLimiter,
 };
-use opentelemetry::trace::Status;
 use prometheus_client::metrics::counter::Counter;
 use rand::{CryptoRng, Rng};
 use std::{marker::PhantomData, net::SocketAddr};
-use tracing::{debug, info_span, Instrument};
-use tracing_opentelemetry::OpenTelemetrySpanExt;
+use tracing::{debug, debug_span, Instrument};
 
 /// Configuration for the listener actor.
 pub struct Config<C: Scheme> {
@@ -89,7 +89,7 @@ impl<
         mut supervisor: spawner::Mailbox<E, Si, St, C::PublicKey>,
     ) {
         // Create span
-        let span = info_span!(parent: None, "listener", ?address);
+        let span = debug_span!(parent: None, "listener", ?address);
         let guard = span.enter();
 
         // Wait for the peer to send us their public key
@@ -97,13 +97,12 @@ impl<
         // IncomingConnection limits how long we will wait for the peer to send us their public key
         // to ensure an adversary can't force us to hold many pending connections open.
         let incoming = match IncomingConnection::verify(&context, stream_cfg, sink, stream)
-            .instrument(info_span!("verify"))
+            .instrument(debug_span!("verify"))
             .await
         {
             Ok(partial) => partial,
             Err(e) => {
-                span.set_status(Status::error("failed to verify incoming handshake"));
-                debug!(error = ?e, "failed to verify incoming handshake");
+                status::wrapped_error(&span, &e, "failed to verify incoming handshake");
                 return;
             }
         };
@@ -115,33 +114,31 @@ impl<
         let peer = incoming.peer();
         let reservation = match tracker
             .reserve(peer.clone())
-            .instrument(info_span!("reserve"))
+            .instrument(debug_span!("reserve"))
             .await
         {
             Some(reservation) => reservation,
             None => {
-                span.set_status(Status::error("unable to reserve connection to peer"));
-                debug!(?peer, "unable to reserve connection to peer");
+                status::error(&span, "unable to reserve connection to peer");
                 return;
             }
         };
 
         // Perform handshake
         let stream = match Connection::upgrade_listener(context, incoming)
-            .instrument(info_span!("upgrade"))
+            .instrument(debug_span!("upgrade"))
             .await
         {
             Ok(connection) => connection,
             Err(e) => {
-                span.set_status(Status::error("failed to upgrade connection"));
-                debug!(error = ?e, ?peer, "failed to upgrade connection");
+                status::wrapped_error(&span, &e, "failed to upgrade connection");
                 return;
             }
         };
         debug!(?peer, "upgraded connection");
 
         // Drop guard
-        span.set_status(Status::Ok);
+        status::ok(&span);
         drop(guard);
 
         // Start peer to handle messages

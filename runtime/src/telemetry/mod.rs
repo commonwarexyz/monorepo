@@ -23,7 +23,8 @@ pub fn init(
         .json()
         .with_line_number(true)
         .with_thread_ids(true)
-        .with_file(true);
+        .with_file(true)
+        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE);
 
     // Create a filter layer to set the maximum level to INFO
     let filter = tracing_subscriber::EnvFilter::new(level.to_string());
