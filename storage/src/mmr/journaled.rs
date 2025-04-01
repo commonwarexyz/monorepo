@@ -179,11 +179,13 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
 
         if let Some(leaf) = orphaned_leaf {
             // Recover the orphaned leaf and any missing parents.
+            let pos = s.mem_mmr.size();
+            warn!(pos, "recovering orphaned leaf");
             let mut hasher = H::new();
-            let pos = s.add(&mut hasher, &leaf);
-            assert!(pos == journal_size);
+            s.mem_mmr.add_leaf_digest(&mut hasher, leaf);
+            assert_eq!(pos, journal_size);
             s.sync().await?;
-            warn!(pos, "recovered orphaned leaf");
+            assert_eq!(s.size(), s.journal.size().await?);
         }
 
         Ok(s)
@@ -193,6 +195,12 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
     /// element's position will have this value.
     pub fn size(&self) -> u64 {
         self.mem_mmr.size()
+    }
+
+    /// Return the position of the last leaf in an MMR with this MMR's size, or None if the MMR is
+    /// empty.
+    pub fn last_leaf_pos(&self) -> Option<u64> {
+        self.mem_mmr.last_leaf_pos()
     }
 
     /// Attempt to get a node from the metadata, with fallback to journal lookup if it fails.
@@ -661,6 +669,7 @@ mod tests {
                 positions.push(pos);
             }
             assert_eq!(mmr.size(), 498);
+            let root = mmr.root(&mut hasher);
             mmr.close().await.unwrap();
 
             // The very last element we added (pos=495) resulted in new parents at positions 496 &
@@ -686,6 +695,7 @@ mod tests {
             // Since we didn't corrupt the leaf, the MMR is able to replay the leaf and recover to
             // the previous state.
             assert_eq!(mmr.size(), 498);
+            assert_eq!(mmr.root(&mut hasher), root);
 
             // Make sure closing it and re-opening it persists the recovered state.
             mmr.close().await.unwrap();

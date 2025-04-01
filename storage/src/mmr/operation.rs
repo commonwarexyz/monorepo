@@ -24,8 +24,8 @@ pub enum Error<K: Array, V: Array> {
     InvalidContextByte,
     #[error("delete operation has non-zero value")]
     InvalidDeleteOp,
-    #[error("floor operation has non-zero bytes after location")]
-    InvalidFloorOp,
+    #[error("commit operation has non-zero bytes after location")]
+    InvalidCommitOp,
 }
 
 /// The types of operations that can change the state of the store.
@@ -37,8 +37,9 @@ pub enum Type<K: Array, V: Array> {
     /// Indicates the key now has the wrapped value.
     Update(K, V),
 
-    /// Indicates the floor on inactive operations has been raised.
-    Floor(u64),
+    /// Indicates all prior operations are no longer subject to rollback, and the floor on inactive
+    /// operations has been raised to the wrapped value.
+    Commit(u64),
 }
 
 /// An `Array` implementation for operations applied to a `MutableMmr` K/V store.
@@ -52,14 +53,22 @@ pub struct Operation<K: Array, V: Array> {
 impl<K: Array, V: Array> Operation<K, V> {
     const DELETE_CONTEXT: u8 = 0;
     const UPDATE_CONTEXT: u8 = 1;
-    const FLOOR_CONTEXT: u8 = 2;
+    const COMMIT_CONTEXT: u8 = 2;
+
+    // A compile-time assertion that operation's array size is large enough to handle the commit
+    // operation, which requires 9 bytes.
+    const _MIN_OPERATION_LEN: usize = 9;
+    const _COMMIT_OP_ASSERT: () = assert!(
+        Self::LEN_ENCODED >= Self::_MIN_OPERATION_LEN,
+        "array size too small for commit op"
+    );
 
     /// Create a new operation of the given type.
     pub fn new(t: Type<K, V>) -> Self {
         match t {
             Type::Deleted(key) => Self::delete(key),
             Type::Update(key, value) => Self::update(key, value),
-            Type::Floor(loc) => Self::floor(loc),
+            Type::Commit(loc) => Self::commit(loc),
         }
     }
 
@@ -89,11 +98,11 @@ impl<K: Array, V: Array> Operation<K, V> {
         }
     }
 
-    /// Create a new floor operation that raises the floor on inactive operations to `loc`. This
-    /// operation is not supported for stores whose operations encode to less than 9 bytes.
-    pub fn floor(loc: u64) -> Self {
+    /// Create a new commit operation that indicates the current floor on inactive operations is
+    /// `loc`.
+    pub fn commit(loc: u64) -> Self {
         let mut data = Vec::with_capacity(Self::LEN_ENCODED);
-        data.push(Self::FLOOR_CONTEXT);
+        data.push(Self::COMMIT_CONTEXT);
         data.extend_from_slice(&loc.to_be_bytes());
         data.resize(Self::LEN_ENCODED, 0);
 
@@ -115,9 +124,9 @@ impl<K: Array, V: Array> Operation<K, V> {
                 let value = V::try_from(&self.data[K::LEN_ENCODED + 1..]).unwrap();
                 Type::Update(key, value)
             }
-            Self::FLOOR_CONTEXT => {
+            Self::COMMIT_CONTEXT => {
                 let loc = u64::from_be_bytes(self.data[1..9].try_into().unwrap());
-                Type::Floor(loc)
+                Type::Commit(loc)
             }
             _ => unreachable!(),
         }
@@ -127,17 +136,10 @@ impl<K: Array, V: Array> Operation<K, V> {
         match self.data[0] {
             Self::DELETE_CONTEXT => None,
             Self::UPDATE_CONTEXT => Some(V::try_from(&self.data[K::LEN_ENCODED + 1..]).unwrap()),
-            Self::FLOOR_CONTEXT => None,
+            Self::COMMIT_CONTEXT => None,
             _ => unreachable!(),
         }
     }
-
-    // Assert that the encoded operation is at least 9 bytes long to ensure there is room for floor
-    // operation.
-    const _ASSERT: () = assert!(
-        Self::LEN_ENCODED >= 9,
-        "operation too small for floor operation"
-    );
 }
 
 impl<K: Array, V: Array> Codec for Operation<K, V> {
@@ -184,10 +186,10 @@ impl<K: Array, V: Array> TryFrom<&[u8]> for Operation<K, V> {
                     return Err(Error::InvalidDeleteOp);
                 }
             }
-            Self::FLOOR_CONTEXT => {
+            Self::COMMIT_CONTEXT => {
                 // Check if the remaining bytes are all zeros
                 if !value[9..].iter().all(|&b| b == 0) {
-                    return Err(Error::InvalidFloorOp);
+                    return Err(Error::InvalidCommitOp);
                 }
             }
             _ => {
@@ -236,7 +238,7 @@ impl<K: Array, V: Array> Display for Operation<K, V> {
         match self.to_type() {
             Type::Deleted(key) => write!(f, "[key:{} <deleted>]", key),
             Type::Update(key, value) => write!(f, "[key:{} value:{}]", key, value),
-            Type::Floor(loc) => write!(f, "[floor:{}]", loc),
+            Type::Commit(loc) => write!(f, "[commit with inactivity floor: {}]", loc),
         }
     }
 }
@@ -276,11 +278,11 @@ mod tests {
         assert_eq!(None, from.to_value());
         assert_eq!(delete_op, from);
 
-        let floor_op = Operation::<U64, U64>::new(Type::Floor(42));
-        let from = Operation::<U64, U64>::try_from(floor_op.as_ref()).unwrap();
+        let commit_op = Operation::<U64, U64>::new(Type::Commit(42));
+        let from = Operation::<U64, U64>::try_from(commit_op.as_ref()).unwrap();
         assert_eq!(None, from.to_value());
-        assert!(matches!(from.to_type(), Type::Floor(42)));
-        assert_eq!(floor_op, from);
+        assert!(matches!(from.to_type(), Type::Commit(42)));
+        assert_eq!(commit_op, from);
 
         // test non-zero byte detection in delete operation
         let mut invalid = delete_op.to_vec();
