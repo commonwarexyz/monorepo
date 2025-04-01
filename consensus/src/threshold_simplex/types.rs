@@ -329,16 +329,35 @@ impl<D: Digest> SizedCodec for Finalization<D> {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum Backfiller<D: Digest> {
-    Request(Request),
-    Response(Response<D>),
-}
-
-#[derive(Clone, Debug, PartialEq)]
 pub struct Request {
     pub id: u64,
     pub notarizations: Vec<u64>,
     pub nullifications: Vec<u64>,
+}
+
+impl Codec for Request {
+    fn write(&self, writer: &mut impl Writer) {
+        self.id.write(writer);
+        self.notarizations.write(writer);
+        self.nullifications.write(writer);
+    }
+
+    fn len_encoded(&self) -> usize {
+        Codec::len_encoded(&self.id)
+            + self.notarizations.len_encoded()
+            + self.nullifications.len_encoded()
+    }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, Error> {
+        let id = u64::read(reader)?;
+        let notarizations = Vec::<u64>::read(reader)?;
+        let nullifications = Vec::<u64>::read(reader)?;
+        Ok(Request {
+            id,
+            notarizations,
+            nullifications,
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -346,4 +365,29 @@ pub struct Response<D: Digest> {
     pub id: u64,
     pub notarizations: Vec<Notarization<D>>,
     pub nullifications: Vec<Nullification>,
+}
+
+impl<D: Digest> Codec for Response<D> {
+    fn write(&self, writer: &mut impl Writer) {
+        self.id.write(writer);
+        self.notarizations.write(writer);
+        self.nullifications.write(writer);
+    }
+
+    fn len_encoded(&self) -> usize {
+        Codec::len_encoded(&self.id)
+            + self.notarizations.len_encoded()
+            + self.nullifications.len_encoded()
+    }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, Error> {
+        let id = u64::read(reader)?;
+        let notarizations = Vec::<Notarization<D>>::read(reader)?;
+        let nullifications = Vec::<Nullification>::read(reader)?;
+        Ok(Response {
+            id,
+            notarizations,
+            nullifications,
+        })
+    }
 }
