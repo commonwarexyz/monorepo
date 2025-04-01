@@ -4,6 +4,8 @@ use commonware_cryptography::{
     Digest,
 };
 
+use super::View;
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Voter<D: Digest> {
     Notarize(Notarize<D>),
@@ -390,4 +392,8 @@ impl<D: Digest> Codec for Response<D> {
             nullifications,
         })
     }
+}
+
+pub fn view_message(view: View) -> Vec<u8> {
+    View::encode(&view)
 }

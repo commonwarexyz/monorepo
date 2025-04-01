@@ -147,9 +147,9 @@
 //!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
 
 use crate::Activity;
-use commonware_utils::Array;
+use commonware_cryptography::Digest;
+use commonware_utils::union;
 
-mod encoder;
 mod prover;
 pub use prover::Prover;
 pub mod types;
@@ -174,7 +174,7 @@ pub type View = u64;
 
 /// Context is a collection of metadata from consensus about a given payload.
 #[derive(Clone)]
-pub struct Context<D: Array> {
+pub struct Context<D: Digest> {
     /// Current view of consensus.
     pub view: View,
 
@@ -204,6 +204,27 @@ pub const CONFLICTING_FINALIZE: Activity = 3;
 /// Nullify and finalize in the same view.
 pub const NULLIFY_AND_FINALIZE: Activity = 4;
 
+pub const SEED_SUFFIX: &[u8] = b"_SEED";
+pub const NOTARIZE_SUFFIX: &[u8] = b"_NOTARIZE";
+pub const NULLIFY_SUFFIX: &[u8] = b"_NULLIFY";
+pub const FINALIZE_SUFFIX: &[u8] = b"_FINALIZE";
+
+pub fn seed_namespace(namespace: &[u8]) -> Vec<u8> {
+    union(namespace, SEED_SUFFIX)
+}
+
+pub fn notarize_namespace(namespace: &[u8]) -> Vec<u8> {
+    union(namespace, NOTARIZE_SUFFIX)
+}
+
+pub fn nullify_namespace(namespace: &[u8]) -> Vec<u8> {
+    union(namespace, NULLIFY_SUFFIX)
+}
+
+pub fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
+    union(namespace, FINALIZE_SUFFIX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,7 +239,7 @@ mod tests {
         Clock, Metrics, Runner, Spawner,
     };
     use commonware_storage::journal::variable::{Config as JConfig, Journal};
-    use commonware_utils::quorum;
+    use commonware_utils::{quorum, Array};
     use engine::Engine;
     use futures::{channel::mpsc, StreamExt};
     use governor::Quota;
