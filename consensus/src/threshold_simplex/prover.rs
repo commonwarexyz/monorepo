@@ -1,10 +1,4 @@
-use super::{
-    encoder::{
-        finalize_namespace, notarize_namespace, nullify_message, nullify_namespace,
-        proposal_message, seed_message, seed_namespace,
-    },
-    wire, View,
-};
+use super::{finalize_namespace, notarize_namespace, nullify_namespace, seed_namespace, View};
 use crate::Proof;
 use bytes::{Buf, BufMut};
 use commonware_codec::SizedCodec;
