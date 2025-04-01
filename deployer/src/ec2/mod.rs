@@ -41,11 +41,13 @@
 //! |    - Binary A                |  |    - Binary B                |
 //! |    - Promtail                |  |    - Promtail                |
 //! |    - Node Exporter           |  |    - Node Exporter           |
-//! |    - Pryoscope Agent         |  |    - Pyroscope Agent         |
+//! |    - Pyroscope Agent         |  |    - Pyroscope Agent         |
+//! |    - Memleak Agent           |  |    - Memleak Agent           |
 //! |  - Security Group            |  |  - Security Group            |
 //! |    - All: Deployer IP        |  |    - All: Deployer IP        |
 //! |    - 9090: Monitoring IP     |  |    - 9090: Monitoring IP     |
 //! |    - 9100: Monitoring IP     |  |    - 9100: Monitoring IP     |
+//! |    - 9200: Monitoring IP     |  |    - 9200: Monitoring IP     |
 //! |    - 8012: 0.0.0.0/0         |  |    - 8765: 12.3.7.9/32       |
 //! +------------------------------+  +------------------------------+
 //! ```
@@ -73,9 +75,10 @@
 //!     * **Promtail**: Forwards `/var/log/binary.log` to Loki on the monitoring instance.
 //!     * **Node Exporter**: Exposes system metrics at `:9100`.
 //!     * **Pyroscope Agent**: Forwards `perf` profiles to Pyroscope on the monitoring instance.
+//!     * **Memleak Agent**: Exposes `memleak` metrics at `:9200`.
 //! * Ingress:
 //!     * Deployer IP access (TCP 0-65535).
-//!     * Monitoring IP access to `:9090` and `:9100` for Prometheus.
+//!     * Monitoring IP access to `:9090`, `:9100`, and `:9200` for Prometheus.
 //!     * User-defined ports from the configuration.
 //!
 //! ## Networking
