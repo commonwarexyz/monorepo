@@ -23,9 +23,6 @@ sha2 = { workspace = true }
 governor = { workspace = true }
 prometheus-client = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["fmt", "json", "env-filter"] }
-opentelemetry_sdk = { version = "0.28.0", features = ["rt-tokio"] }
-opentelemetry-otlp = { version = "0.28.0", features = ["http-proto"] }
-tracing-opentelemetry = { workspace = true }
 opentelemetry = { workspace = true }
 
 
@@ -37,6 +34,9 @@ features = ["js"]
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true, features = ["full"] }
 axum = { workspace = true }
+opentelemetry_sdk = { workspace = true, features = ["rt-tokio"] }
+opentelemetry-otlp = { workspace = true, features = ["http-proto"] }
+tracing-opentelemetry = { workspace = true }
 
 [lib]
 bench = false

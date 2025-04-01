@@ -6,7 +6,7 @@ use commonware_cryptography::{
 use commonware_deployer::ec2::{Hosts, METRICS_PORT};
 use commonware_flood::Config;
 use commonware_p2p::{authenticated, Receiver, Recipients, Sender};
-use commonware_runtime::{telemetry, tokio, Metrics, Runner, Spawner};
+use commonware_runtime::{tokio, Metrics, Runner, Spawner};
 use commonware_utils::{from_hex_formatted, union};
 use futures::future::try_join_all;
 use governor::Quota;
@@ -67,14 +67,14 @@ fn main() {
     // Start runtime
     executor.start(async move {
         // Configure telemetry
-        telemetry::init(
+        tokio::telemetry::init(
             context.with_label("telemetry"),
             Level::INFO,
             Some(SocketAddr::new(
                 IpAddr::V4(Ipv4Addr::UNSPECIFIED),
                 METRICS_PORT,
             )),
-            Some(telemetry::traces::exporter::Config {
+            Some(tokio::tracing::Config {
                 endpoint: format!("http://{}:4318/v1/traces", hosts.monitoring),
                 name: public_key.to_string(),
                 rate: 1.0,
