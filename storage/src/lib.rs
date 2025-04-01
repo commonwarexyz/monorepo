@@ -7,6 +7,7 @@
 
 pub mod archive;
 pub mod bmt;
+pub mod index;
 pub mod journal;
 pub mod metadata;
 pub mod mmr;

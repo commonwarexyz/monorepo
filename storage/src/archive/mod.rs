@@ -119,8 +119,11 @@
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, deterministic::Executor};
 //! use commonware_cryptography::hash;
-//! use commonware_storage::archive::{Archive, Config, translator::FourCap};
-//! use commonware_storage::journal::{Error, variable::{Config as JConfig, Journal}};
+//! use commonware_storage::{
+//!     index::translator::FourCap,
+//!     archive::{Archive, Config},
+//!     journal::{Error, variable::{Config as JConfig, Journal}},
+//! };
 //!
 //! let (executor, context, _) = Executor::default();
 //! executor.start(async move {
@@ -150,9 +153,8 @@
 
 mod storage;
 pub use storage::{Archive, Identifier};
-pub mod translator;
 
-use std::hash::Hash;
+use crate::index::Translator;
 use thiserror::Error;
 
 /// Errors that can occur when interacting with the archive.
@@ -170,18 +172,6 @@ pub enum Error {
     CompressionFailed,
     #[error("decompression failed")]
     DecompressionFailed,
-}
-
-/// Translate keys into an internal representation used in `Archive`'s
-/// in-memory index.
-///
-/// If invoking `transform` on keys results in many conflicts, the performance
-/// of `Archive` will degrade substantially.
-pub trait Translator: Clone {
-    type Key: Eq + Hash + Send + Sync + Clone;
-
-    /// Transform a key into its internal representation.
-    fn transform(&self, key: &[u8]) -> Self::Key;
 }
 
 /// Configuration for `Archive` storage.
@@ -213,16 +203,17 @@ pub struct Config<T: Translator> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::journal::variable::{Config as JConfig, Journal};
-    use crate::journal::Error as JournalError;
+    use crate::index::translator::{FourCap, TwoCap};
+    use crate::journal::{
+        variable::{Config as JConfig, Journal},
+        Error as JournalError,
+    };
     use bytes::Bytes;
     use commonware_macros::test_traced;
-    use commonware_runtime::Metrics;
-    use commonware_runtime::{deterministic::Executor, Blob, Runner, Storage};
+    use commonware_runtime::{deterministic::Executor, Blob, Metrics, Runner, Storage};
     use commonware_utils::array::FixedBytes;
     use rand::Rng;
     use std::collections::BTreeMap;
-    use translator::{FourCap, TwoCap};
 
     const DEFAULT_SECTION_MASK: u64 = 0xffff_ffff_ffff_0000u64;
 
@@ -614,7 +605,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_archive_overlapping_key() {
+    fn test_archive_overlapping_key_basic() {
         // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
         executor.start(async move {
@@ -879,6 +870,7 @@ mod tests {
                 let mut data = [0u8; 1024];
                 context.fill(&mut data);
                 let data = Bytes::from(data.to_vec());
+
                 archive
                     .put(index, key.clone(), data.clone())
                     .await
