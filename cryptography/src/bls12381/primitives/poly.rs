@@ -11,7 +11,7 @@ use crate::bls12381::primitives::{
     Error,
 };
 use bytes::BufMut;
-use commonware_codec::SizedCodec;
+use commonware_codec::{Codec, Reader, SizedCodec, Writer};
 use rand::{rngs::OsRng, RngCore};
 use std::collections::BTreeMap;
 
@@ -54,6 +54,27 @@ impl<C: Element> Eval<C> {
         let value = C::deserialize(&bytes[u32::LEN_ENCODED..])?;
         Some(Self { index, value })
     }
+}
+
+impl<C: Element> Codec for Eval<C> {
+    fn write(&self, writer: &mut impl Writer) {
+        self.index.write(writer);
+        self.value.write(writer);
+    }
+
+    fn len_encoded(&self) -> usize {
+        Self::LEN_ENCODED
+    }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, commonware_codec::Error> {
+        let index = u32::read(reader)?;
+        let value = C::read(reader)?;
+        Ok(Self { index, value })
+    }
+}
+
+impl<C: Element> SizedCodec for Eval<C> {
+    const LEN_ENCODED: usize = u32::LEN_ENCODED + C::LEN_ENCODED;
 }
 
 /// A polynomial that is using a scalar for the variable x and a generic

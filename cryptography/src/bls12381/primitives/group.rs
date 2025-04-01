@@ -20,7 +20,7 @@ use blst::{
     blst_p2_uncompress, blst_scalar, blst_scalar_from_bendian, blst_scalar_from_fr, blst_sk_check,
     Pairing, BLS12_381_G1, BLS12_381_G2, BLS12_381_NEG_G1, BLST_ERROR,
 };
-use commonware_codec::SizedCodec;
+use commonware_codec::{Codec, Reader, SizedCodec, Writer};
 use rand::RngCore;
 use std::ptr;
 use zeroize::Zeroize;
@@ -31,7 +31,7 @@ use zeroize::Zeroize;
 pub type DST = &'static [u8];
 
 /// An element of a group.
-pub trait Element: Clone + Eq + PartialEq + Send + Sync {
+pub trait Element: Clone + Eq + PartialEq + Send + Sync + Codec + SizedCodec {
     /// Returns the additive identity.
     fn zero() -> Self;
 
@@ -325,6 +325,26 @@ impl Element for Scalar {
     }
 }
 
+impl Codec for Scalar {
+    fn write(&self, writer: &mut impl Writer) {
+        let bytes = self.serialize();
+        writer.write_fixed(&bytes);
+    }
+
+    fn len_encoded(&self) -> usize {
+        Self::size()
+    }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, commonware_codec::Error> {
+        let bytes: [u8; SCALAR_LENGTH] = reader.read_fixed()?;
+        Self::deserialize(&bytes).ok_or(commonware_codec::Error::Invalid("Scalar", "deserialize"))
+    }
+}
+
+impl SizedCodec for Scalar {
+    const LEN_ENCODED: usize = SCALAR_LENGTH;
+}
+
 impl Element for G1 {
     fn zero() -> Self {
         Self(blst_p1::default())
@@ -406,6 +426,26 @@ impl Point for G1 {
     }
 }
 
+impl Codec for G1 {
+    fn write(&self, writer: &mut impl Writer) {
+        let bytes = self.serialize();
+        writer.write_fixed(&bytes);
+    }
+
+    fn len_encoded(&self) -> usize {
+        Self::size()
+    }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, commonware_codec::Error> {
+        let bytes: [u8; G1_ELEMENT_BYTE_LENGTH] = reader.read_fixed()?;
+        Self::deserialize(&bytes).ok_or(commonware_codec::Error::Invalid("G1", "deserialize"))
+    }
+}
+
+impl SizedCodec for G1 {
+    const LEN_ENCODED: usize = G1_ELEMENT_BYTE_LENGTH;
+}
+
 impl Element for G2 {
     fn zero() -> Self {
         Self(blst_p2::default())
@@ -469,6 +509,26 @@ impl Element for G2 {
     fn size() -> usize {
         G2_ELEMENT_BYTE_LENGTH
     }
+}
+
+impl Codec for G2 {
+    fn write(&self, writer: &mut impl Writer) {
+        let bytes = self.serialize();
+        writer.write_fixed(&bytes);
+    }
+
+    fn len_encoded(&self) -> usize {
+        Self::size()
+    }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, commonware_codec::Error> {
+        let bytes: [u8; G2_ELEMENT_BYTE_LENGTH] = reader.read_fixed()?;
+        Self::deserialize(&bytes).ok_or(commonware_codec::Error::Invalid("G2", "deserialize"))
+    }
+}
+
+impl SizedCodec for G2 {
+    const LEN_ENCODED: usize = G2_ELEMENT_BYTE_LENGTH;
 }
 
 impl Point for G2 {

@@ -152,9 +152,7 @@ use commonware_utils::Array;
 mod encoder;
 mod prover;
 pub use prover::Prover;
-mod wire {
-    include!(concat!(env!("OUT_DIR"), "/threshold_simplex.wire.rs"));
-}
+pub mod types;
 
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
