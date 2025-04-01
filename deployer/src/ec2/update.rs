@@ -94,7 +94,6 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
             let private_key = private_key_path.to_str().unwrap();
             let binary_path = instance_config.binary.clone();
             let config_path = instance_config.config.clone();
-            let ip = ip.clone();
             let future = async move {
                 update_instance(private_key, &ip, &binary_path, &config_path).await?;
                 info!(name, ip, "updated instance");
