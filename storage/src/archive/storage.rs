@@ -31,12 +31,12 @@ pub struct Archive<T: Translator, K: Array, B: Blob, E: Storage<B> + Metrics> {
     // Oldest allowed section to read from. This is updated when `prune` is called.
     oldest_allowed: Option<u64>,
 
+    // To efficiently serve `get` and `has` requests, we map a truncated representation of each key
+    // to its corresponding index. To avoid iterating over this keys map during pruning, we map said
+    // indexes to their locations in the journal.
     indices: BTreeMap<u64, Location>,
     intervals: RangeInclusiveSet<u64>,
-
-    // Memory efficient map of each key to its potential (due to collisions) locations in the
-    // journal.
-    keys: Index<T>,
+    keys: Index<T, u64>,
 
     // Track the number of writes pending for a section to determine when to sync.
     pending_writes: BTreeMap<u64, usize>,
@@ -65,7 +65,7 @@ impl<T: Translator, K: Array, B: Blob, E: Storage<B> + Metrics> Archive<T, K, B,
     ) -> Result<Self, Error> {
         // Initialize keys and run corruption check
         let mut indices = BTreeMap::new();
-        let mut keys = Index::init(context.with_label("archive"), cfg.translator.clone());
+        let mut keys = Index::init(context.with_label("index"), cfg.translator.clone());
         let mut intervals = RangeInclusiveSet::new();
         {
             debug!("initializing archive");
@@ -229,7 +229,7 @@ impl<T: Translator, K: Array, B: Blob, E: Storage<B> + Metrics> Archive<T, K, B,
         //
         // We call this after insertion to avoid unnecessary underlying map
         // operations.
-        self.keys.remove(&key, |index| index < oldest_allowed);
+        self.keys.remove(&key, |index| *index < oldest_allowed);
 
         // Update pending writes
         let pending_writes = self.pending_writes.entry(section).or_default();

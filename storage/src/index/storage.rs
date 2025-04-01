@@ -3,36 +3,36 @@ use commonware_runtime::Metrics;
 use prometheus_client::metrics::counter::Counter;
 use std::collections::{hash_map::Entry, HashMap};
 
-/// Each key is mapped to a `Record` that contains a potential location of the requested value in
-/// the journal, and an optional link to another potential location to allow for collisions.
+/// Each key is mapped to a `Record` that contains a linked list of potential values for the key.
 ///
 /// The `Index` uses a `Translator` to transform keys into a compressed representation, resulting in
 /// non-negligible probability of collisions. Collision resolution is the responsibility of the
 /// user.
-struct Record {
-    location: u64,
+struct Record<V: Clone> {
+    value: V,
 
-    next: Option<Box<Record>>,
+    next: Option<Box<Record<V>>>,
 }
 
-pub struct LocationIterator<'a> {
-    next: Option<&'a Record>,
+/// An iterator over all values associated with a translated key.
+pub struct ValueIterator<'a, V: Clone> {
+    next: Option<&'a Record<V>>,
 }
 
-impl LocationIterator<'_> {
-    /// Create a `LocationIterator` that returns no items.
+impl<V: Clone> ValueIterator<'_, V> {
+    /// Create a `ValueIterator` that returns no items.
     fn empty() -> Self {
-        LocationIterator { next: None }
+        ValueIterator { next: None }
     }
 }
 
-impl Iterator for LocationIterator<'_> {
-    type Item = u64;
+impl<V: Clone> Iterator for ValueIterator<'_, V> {
+    type Item = V;
 
     fn next(&mut self) -> Option<Self::Item> {
         match self.next {
             Some(next) => {
-                let loc = next.location;
+                let loc = next.value.clone();
                 self.next = next.next.as_deref();
                 Some(loc)
             }
@@ -41,22 +41,25 @@ impl Iterator for LocationIterator<'_> {
     }
 }
 
-impl Record {
-    fn iter(&self) -> LocationIterator {
-        LocationIterator { next: Some(self) }
+impl<V: Clone> Record<V> {
+    fn iter(&self) -> ValueIterator<V> {
+        ValueIterator { next: Some(self) }
     }
 }
 
-pub struct Index<T: Translator> {
+pub struct Index<T: Translator, V: Clone> {
     translator: T,
 
-    map: HashMap<T::Key, Record>,
+    // A map of translated keys to linked lists of values. For the common case of a single value
+    // associated with a key, the value is stored within the HashMap entry and can be read without
+    // additional indirection.
+    map: HashMap<T::Key, Record<V>>,
 
     collisions: Counter,
     keys_pruned: Counter,
 }
 
-impl<T: Translator> Index<T> {
+impl<T: Translator, V: Clone> Index<T, V> {
     /// Create a new index.
     pub fn init(context: impl Metrics, translator: T) -> Self {
         let s = Self {
@@ -79,46 +82,46 @@ impl<T: Translator> Index<T> {
         s
     }
 
+    /// The number of unique keys in the index after translation (so two keys that collide after translation will only
+    /// be counted as one).
     pub fn len(&self) -> usize {
         self.map.len()
     }
 
+    /// Returns if the index currently holds no values.
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
     }
 
     /// Insert a new record into the index.
-    pub fn insert(&mut self, key: &[u8], location: u64) {
+    pub fn insert(&mut self, key: &[u8], value: V) {
         let translated_key = self.translator.transform(key);
 
         match self.map.entry(translated_key) {
             Entry::Occupied(entry) => {
-                let entry: &mut Record = entry.into_mut();
+                let entry: &mut Record<V> = entry.into_mut();
                 entry.next = Some(Box::new(Record {
-                    location,
+                    value,
                     next: entry.next.take(),
                 }));
                 self.collisions.inc();
             }
             Entry::Vacant(entry) => {
-                entry.insert(Record {
-                    location,
-                    next: None,
-                });
+                entry.insert(Record { value, next: None });
             }
         };
     }
 
-    pub fn get(&self, key: &[u8]) -> LocationIterator {
+    pub fn get(&self, key: &[u8]) -> ValueIterator<V> {
         let translated_key = self.translator.transform(key);
         match self.map.get(&translated_key) {
             Some(head) => head.iter(),
-            None => LocationIterator::empty(),
+            None => ValueIterator::empty(),
         }
     }
 
-    /// Remove locations associated with the key that match the `prune` predicate.
-    pub fn remove(&mut self, key: &[u8], prune: impl Fn(u64) -> bool) {
+    /// Remove values associated with the key that match the `prune` predicate.
+    pub fn remove(&mut self, key: &[u8], prune: impl Fn(&V) -> bool) {
         let translated_key = self.translator.transform(key);
         let head = match self.map.get_mut(&translated_key) {
             Some(head) => head,
@@ -127,13 +130,13 @@ impl<T: Translator> Index<T> {
 
         // Advance the head of the linked list to the first entry that will be retained, if any.
         loop {
-            if !prune(head.location) {
+            if !prune(&head.value) {
                 break;
             }
             self.keys_pruned.inc();
             match head.next {
                 Some(ref mut next) => {
-                    head.location = next.location;
+                    head.value = next.value.clone();
                     head.next = next.next.take();
                 }
                 None => {
@@ -146,8 +149,8 @@ impl<T: Translator> Index<T> {
 
         // Prune the remainder of the list.
         let mut cursor = head;
-        while let Some(location) = cursor.next.as_ref().map(|next| next.location) {
-            if prune(location) {
+        while let Some(value) = cursor.next.as_ref().map(|next| &next.value) {
+            if prune(value) {
                 cursor.next = cursor.next.as_mut().unwrap().next.take();
                 self.keys_pruned.inc();
                 continue;

@@ -1,7 +1,11 @@
-//! A memory-efficient index for mapping large keys to u64 values.
+//! A memory-efficient index for mapping large keys to values.
+//!
+//! Keys are transformed into a compressed, fixed size representation using a `Translator`, which
+//! can result in collisions even if the original keys are collision free. As a result, a get call
+//! can return multiple values for a key, and it's up to the application to disambiguate them.
 
 mod storage;
-pub use storage::{Index, LocationIterator};
+pub use storage::{Index, ValueIterator};
 pub mod translator;
 
 use std::hash::Hash;
@@ -43,11 +47,15 @@ mod tests {
         // Make sure we can remove keys with a predicate
         index.insert(key, 3);
         index.insert(key, 4);
-        index.remove(key, |i| i == 3);
+        index.remove(key, |i| *i == 3);
         assert_eq!(index.get(key).collect::<Vec<_>>(), vec![1, 4, 2]);
         index.remove(key, |_| true);
         // Try removing all of a keys values.
         assert_eq!(index.get(key).collect::<Vec<_>>(), Vec::<u64>::new());
+        assert!(index.is_empty());
+
+        // Removing a key that doesn't exist should be a no-op.
+        index.remove(key, |_| true);
         assert!(index.is_empty());
     }
 
@@ -56,8 +64,8 @@ mod tests {
         let (_, mut context, _) = Executor::default();
         let mut index = Index::init(context.clone(), TwoCap);
 
-        // Insert enough keys to generate some collisions, then confirm each
-        // value we inserted remains retrievable.
+        // Insert enough keys to generate some collisions, then confirm each value we inserted
+        // remains retrievable.
         let mut expected = HashMap::new();
         const NUM_KEYS: usize = 2000; // enough to generate some collisions
         while expected.len() < NUM_KEYS {
@@ -71,8 +79,8 @@ mod tests {
         }
 
         for (key, loc) in expected.iter() {
-            let mut locations = index.get(key);
-            let res = locations.find(|i| i == loc);
+            let mut values = index.get(key);
+            let res = values.find(|i| i == loc);
             assert!(res.is_some());
         }
     }
