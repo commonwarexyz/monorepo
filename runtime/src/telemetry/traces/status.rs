@@ -1,4 +1,4 @@
-//! Record the OTEL status of a span.
+//! Record the OTLP status of a span.
 
 use opentelemetry::trace::Status;
 use std::fmt::Debug;
