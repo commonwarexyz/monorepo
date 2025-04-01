@@ -102,7 +102,7 @@ impl<
         {
             Ok(partial) => partial,
             Err(e) => {
-                status::wrapped_error(&span, &e, "failed to verify incoming handshake");
+                status::error(&span, "failed to verify incoming handshake", Some(&e));
                 return;
             }
         };
@@ -119,7 +119,7 @@ impl<
         {
             Some(reservation) => reservation,
             None => {
-                status::error(&span, "unable to reserve connection to peer");
+                status::error(&span, "unable to reserve connection to peer", None);
                 return;
             }
         };
@@ -131,7 +131,7 @@ impl<
         {
             Ok(connection) => connection,
             Err(e) => {
-                status::wrapped_error(&span, &e, "failed to upgrade connection");
+                status::error(&span, "failed to upgrade connection", Some(&e));
                 return;
             }
         };

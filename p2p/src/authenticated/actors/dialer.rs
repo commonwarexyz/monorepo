@@ -97,7 +97,7 @@ impl<
                 let mut supervisor = supervisor.clone();
                 move |context| async move {
                     // Create span
-                    let span = debug_span!(parent: None, "dialer", ?peer, ?address);
+                    let span = debug_span!("dialer", ?peer, ?address);
                     let guard = span.enter();
 
                     // Attempt to dial peer
@@ -105,7 +105,7 @@ impl<
                         match context.dial(address).instrument(debug_span!("dial")).await {
                             Ok(stream) => stream,
                             Err(e) => {
-                                status::wrapped_error(&span, &e, "failed to dial peer");
+                                status::error(&span, "failed to dial peer", Some(&e));
                                 return;
                             }
                         };
@@ -124,7 +124,7 @@ impl<
                     {
                         Ok(instance) => instance,
                         Err(e) => {
-                            status::wrapped_error(&span, &e, "failed to upgrade connection");
+                            status::error(&span, "failed to upgrade connection", Some(&e));
                             return;
                         }
                     };
