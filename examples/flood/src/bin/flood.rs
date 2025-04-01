@@ -62,7 +62,7 @@ fn main() {
         // Configure telemetry
         telemetry::init(
             context.with_label("telemetry"),
-            Level::INFO.as_str(),
+            Level::INFO,
             Some(SocketAddr::new(
                 IpAddr::V4(Ipv4Addr::UNSPECIFIED),
                 METRICS_PORT,

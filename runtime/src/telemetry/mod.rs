@@ -7,13 +7,14 @@ use crate::tokio::Context;
 use crate::{Metrics, Spawner};
 use std::net::SocketAddr;
 use traces::exporter;
+use tracing::Level;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::Registry;
 
 /// Initialize telemetry with the given configuration.
 pub fn init(
     context: Context,
-    level: &str,
+    level: Level,
     metrics: Option<SocketAddr>,
     traces: Option<exporter::Config>,
 ) {
@@ -25,7 +26,7 @@ pub fn init(
         .with_file(true);
 
     // Create a filter layer to set the maximum level to INFO
-    let filter = tracing_subscriber::EnvFilter::new(level);
+    let filter = tracing_subscriber::EnvFilter::new(level.to_string());
 
     // Expose metrics over HTTP
     if let Some(cfg) = metrics {
