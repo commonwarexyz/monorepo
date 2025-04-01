@@ -9,6 +9,10 @@ use opentelemetry_sdk::{
     trace::{BatchSpanProcessor, Sampler, SdkTracerProvider, Tracer},
     Resource,
 };
+use std::time::Duration;
+
+/// Timeout for the OTLP HTTP exporter.
+const TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Configuration for exporting traces to an OTLP endpoint.
 pub struct Config {
@@ -26,13 +30,14 @@ pub fn export(cfg: Config) -> Result<Tracer, TraceError> {
     let exporter = SpanExporter::builder()
         .with_http()
         .with_endpoint(cfg.endpoint)
+        .with_timeout(TIMEOUT)
         .build()?;
 
     // Configure the batch processor
     let batch_processor = BatchSpanProcessor::builder(exporter).build();
 
     // Define the resource with service name
-    let resource = Resource::builder()
+    let resource = Resource::builder_empty()
         .with_service_name(cfg.name.clone())
         .build();
 
