@@ -1,7 +1,7 @@
 //! A memory-efficient index for mapping large keys to values.
 //!
-//! Keys are transformed into a compressed, fixed size representation using a `Translator`, which
-//! can result in collisions even if the original keys are collision free. As a result, a get call
+//! Keys are transformed into a compressed, fixed-size representation using a `Translator`, which
+//! can result in collisions even if the original keys are collision-free. As a result, a get call
 //! can return multiple values for a key, and it's up to the application to disambiguate them.
 
 mod storage;

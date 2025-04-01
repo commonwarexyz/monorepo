@@ -5,9 +5,8 @@ use std::collections::{hash_map::Entry, HashMap};
 
 /// Each key is mapped to a `Record` that contains a linked list of potential values for the key.
 ///
-/// The `Index` uses a `Translator` to transform keys into a compressed representation, resulting in
-/// non-negligible probability of collisions. Collision resolution is the responsibility of the
-/// user.
+/// In the common case of a single value associated with a key, the value is stored within the HashMap
+/// entry and can be read without additional indirection (heap jumping).
 struct Record<V: Clone> {
     value: V,
 
@@ -47,12 +46,12 @@ impl<V: Clone> Record<V> {
     }
 }
 
+/// An index that maps truncated keys to values.
 pub struct Index<T: Translator, V: Clone> {
     translator: T,
 
-    // A map of translated keys to linked lists of values. For the common case of a single value
-    // associated with a key, the value is stored within the HashMap entry and can be read without
-    // additional indirection.
+    // A map of translated keys to linked lists of associated
+    // `Records`.
     map: HashMap<T::Key, Record<V>>,
 
     collisions: Counter,
@@ -112,6 +111,7 @@ impl<T: Translator, V: Clone> Index<T, V> {
         };
     }
 
+    /// Retrieve all values associated with a truncated key.
     pub fn get(&self, key: &[u8]) -> ValueIterator<V> {
         let translated_key = self.translator.transform(key);
         match self.map.get(&translated_key) {

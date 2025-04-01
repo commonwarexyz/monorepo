@@ -34,9 +34,9 @@ pub struct Archive<T: Translator, K: Array, B: Blob, E: Storage<B> + Metrics> {
     // To efficiently serve `get` and `has` requests, we map a truncated representation of each key
     // to its corresponding index. To avoid iterating over this keys map during pruning, we map said
     // indexes to their locations in the journal.
+    keys: Index<T, u64>,
     indices: BTreeMap<u64, Location>,
     intervals: RangeInclusiveSet<u64>,
-    keys: Index<T, u64>,
 
     // Track the number of writes pending for a section to determine when to sync.
     pending_writes: BTreeMap<u64, usize>,
@@ -294,10 +294,11 @@ impl<T: Translator, K: Array, B: Blob, E: Storage<B> + Metrics> Archive<T, K, B,
         let iter = self.keys.get(key);
         let min_allowed = self.oldest_allowed.unwrap_or(0);
         for index in iter {
+            // Continue if index is no longer allowed due to pruning.
             if index < min_allowed {
-                // Continue if index is no longer allowed due to pruning.
                 continue;
             }
+
             // Fetch item from disk
             let location = self.indices.get(&index).ok_or(Error::RecordCorrupted)?;
             let section = self.cfg.section_mask & index;
@@ -344,10 +345,11 @@ impl<T: Translator, K: Array, B: Blob, E: Storage<B> + Metrics> Archive<T, K, B,
         let iter = self.keys.get(key);
         let min_allowed = self.oldest_allowed.unwrap_or(0);
         for index in iter {
+            // Continue if index is no longer allowed due to pruning.
             if index < min_allowed {
-                // Continue if index is no longer allowed due to pruning.
                 continue;
             }
+
             // Fetch item from disk
             let section = self.cfg.section_mask & index;
             let location = self.indices.get(&index).ok_or(Error::RecordCorrupted)?;
