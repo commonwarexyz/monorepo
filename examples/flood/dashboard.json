@@ -1664,7 +1664,7 @@
             "targets": [
                 {
                     "limit": 20,
-                    "query": "{resource.service.name = \"flood\" && trace:rootName != \"\" && span:status != unset }",
+                    "query": "{resource.service.name =~ \"$Name\" && trace:rootName != \"\" && span:status != unset }",
                     "queryType": "traceql",
                     "refId": "A",
                     "tableType": "spans"
