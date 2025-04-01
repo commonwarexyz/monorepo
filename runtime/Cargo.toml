@@ -24,6 +24,7 @@ governor = { workspace = true }
 prometheus-client = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["fmt", "json", "env-filter"] }
 opentelemetry = { workspace = true }
+tracing-opentelemetry = { workspace = true }
 
 
 # Enable "js" feature when WASM is target
@@ -36,7 +37,6 @@ tokio = { workspace = true, features = ["full"] }
 axum = { workspace = true }
 opentelemetry_sdk = { workspace = true, features = ["rt-tokio"] }
 opentelemetry-otlp = { workspace = true, features = ["http-proto"] }
-tracing-opentelemetry = { workspace = true }
 
 [lib]
 bench = false
