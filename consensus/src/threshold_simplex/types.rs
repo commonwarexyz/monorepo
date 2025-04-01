@@ -2,7 +2,7 @@ use super::View;
 use commonware_codec::{Codec, Error, Reader, SizedCodec, Writer};
 use commonware_cryptography::{
     bls12381::primitives::{group::Signature, poly::PartialSignature},
-    hash, sha256, Digest, Hasher, Sha256,
+    hash, sha256, Digest,
 };
 
 #[derive(Clone, Debug, PartialEq)]
