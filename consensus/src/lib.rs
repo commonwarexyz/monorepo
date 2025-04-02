@@ -5,22 +5,9 @@
 //! `commonware-consensus` is **ALPHA** software and is not yet recommended for production use. Developers should
 //! expect breaking changes and occasional instability.
 
-use bytes::Bytes;
-
 pub mod ordered_broadcast;
 pub mod simplex;
 pub mod threshold_simplex;
-
-/// Activity is specified by the underlying consensus implementation and can be interpreted if desired.
-///
-/// Examples of activity would be "vote", "finalize", or "fault". Various consensus implementations may
-/// want to reward (or penalize) participation in different ways and in different places. For example,
-/// validators could be required to send multiple types of messages (i.e. vote and finalize) and rewarding
-/// both equally may better align incentives with desired behavior.
-pub type Activity = u8;
-
-/// Proof is a blob that attests to some data.
-pub type Proof = Bytes;
 
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
@@ -34,16 +21,6 @@ cfg_if::cfg_if! {
             0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.6, 0.7, 0.8,
             0.9, 1.0, 1.25, 1.5, 1.75, 2.0, 3.0,
         ];
-
-        /// Parsed is a wrapper around a message that has a parsable digest.
-        #[derive(Clone)]
-        struct Parsed<Message, Digest> {
-            /// Raw message that has some field that can be parsed into a digest.
-            pub message: Message,
-
-            /// Parsed digest.
-            pub digest: Digest,
-        }
 
         /// Automaton is the interface responsible for driving the consensus forward by proposing new payloads
         /// and verifying payloads proposed by other participants.
@@ -97,17 +74,17 @@ cfg_if::cfg_if! {
         }
 
         /// Committer is the interface responsible for handling notifications of payload status.
-        pub trait Committer: Clone + Send + 'static {
-            /// Hash of an arbitrary payload.
-            type Digest: Digest;
-
-            /// Event that a payload has made some progress towards finalization but is not yet finalized.
+        pub trait Reporter: Clone + Send + 'static {
+            /// Activity is specified by the underlying consensus implementation and can be interpreted if desired.
             ///
-            /// This is often used to provide an early ("best guess") confirmation to users.
-            fn prepared(&mut self, proof: Proof, payload: Self::Digest) -> impl Future<Output = ()> + Send;
+            /// Examples of activity would be "vote", "finalize", or "fault". Various consensus implementations may
+            /// want to reward (or penalize) participation in different ways and in different places. For example,
+            /// validators could be required to send multiple types of messages (i.e. vote and finalize) and rewarding
+            /// both equally may better align incentives with desired behavior.
+            type Activity;
 
-            /// Event indicating the container has been finalized.
-            fn finalized(&mut self, proof: Proof, payload: Self::Digest) -> impl Future<Output = ()> + Send;
+            /// Report some activity observed by the consensus implementation.
+            fn report(&self, activity: Self::Activity) -> impl Future<Output = ()> + Send;
         }
 
         /// Supervisor is the interface responsible for managing which participants are active at a given time.
@@ -140,9 +117,6 @@ cfg_if::cfg_if! {
 
             // Indicate whether some candidate is a participant at the given view.
             fn is_participant(&self, index: Self::Index, candidate: &Self::PublicKey) -> Option<u32>;
-
-            /// Report some activity observed by the consensus implementation.
-            fn report(&self, activity: Activity, proof: Proof) -> impl Future<Output = ()> + Send;
         }
 
         /// ThresholdSupervisor is the interface responsible for managing which `identity` (typically a group polynomial with

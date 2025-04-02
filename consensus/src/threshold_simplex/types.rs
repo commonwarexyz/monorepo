@@ -663,3 +663,12 @@ impl<D: Digest> Codec for Response<D> {
 pub fn view_message(view: View) -> Vec<u8> {
     View::encode(&view)
 }
+
+pub enum Proof<D: Digest> {
+    Notarize(Notarize<D>),
+    Notarization(Notarization<D>),
+    Nullify(Nullify),
+    Nullification(Nullification),
+    Finalize(Finalize<D>),
+    Finalization(Finalization<D>),
+}
