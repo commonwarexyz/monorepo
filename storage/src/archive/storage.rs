@@ -295,12 +295,12 @@ impl<T: Translator, K: Array, B: Blob, E: Storage<B> + Metrics> Archive<T, K, B,
         let min_allowed = self.oldest_allowed.unwrap_or(0);
         for index in iter {
             // Continue if index is no longer allowed due to pruning.
-            if index < min_allowed {
+            if *index < min_allowed {
                 continue;
             }
 
             // Fetch item from disk
-            let location = self.indices.get(&index).ok_or(Error::RecordCorrupted)?;
+            let location = self.indices.get(index).ok_or(Error::RecordCorrupted)?;
             let section = self.cfg.section_mask & index;
             let item = self
                 .journal
@@ -346,13 +346,13 @@ impl<T: Translator, K: Array, B: Blob, E: Storage<B> + Metrics> Archive<T, K, B,
         let min_allowed = self.oldest_allowed.unwrap_or(0);
         for index in iter {
             // Continue if index is no longer allowed due to pruning.
-            if index < min_allowed {
+            if *index < min_allowed {
                 continue;
             }
 
             // Fetch item from disk
             let section = self.cfg.section_mask & index;
-            let location = self.indices.get(&index).ok_or(Error::RecordCorrupted)?;
+            let location = self.indices.get(index).ok_or(Error::RecordCorrupted)?;
             let item = self
                 .journal
                 .get_prefix(section, location.offset, Self::PREFIX_LEN)

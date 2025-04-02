@@ -5,33 +5,33 @@ use std::collections::{hash_map::Entry, HashMap};
 
 /// Each key is mapped to a `Record` that contains a linked list of potential values for the key.
 ///
-/// In the common case of a single value associated with a key, the value is stored within the HashMap
-/// entry and can be read without additional indirection (heap jumping).
-struct Record<V: Clone> {
+/// In the common case of a single value associated with a key, the value is stored within the
+/// HashMap entry and can be read without additional indirection (heap jumping).
+struct Record<V> {
     value: V,
 
     next: Option<Box<Record<V>>>,
 }
 
 /// An iterator over all values associated with a translated key.
-pub struct ValueIterator<'a, V: Clone> {
+pub struct ValueIterator<'a, V> {
     next: Option<&'a Record<V>>,
 }
 
-impl<V: Clone> ValueIterator<'_, V> {
+impl<V> ValueIterator<'_, V> {
     /// Create a `ValueIterator` that returns no items.
     fn empty() -> Self {
         ValueIterator { next: None }
     }
 }
 
-impl<V: Clone> Iterator for ValueIterator<'_, V> {
-    type Item = V;
+impl<'a, V> Iterator for ValueIterator<'a, V> {
+    type Item = &'a V;
 
     fn next(&mut self) -> Option<Self::Item> {
         match self.next {
             Some(next) => {
-                let loc = next.value.clone();
+                let loc = &next.value;
                 self.next = next.next.as_deref();
                 Some(loc)
             }
@@ -40,14 +40,14 @@ impl<V: Clone> Iterator for ValueIterator<'_, V> {
     }
 }
 
-impl<V: Clone> Record<V> {
+impl<V> Record<V> {
     fn iter(&self) -> ValueIterator<V> {
         ValueIterator { next: Some(self) }
     }
 }
 
 /// An index that maps translated keys to values.
-pub struct Index<T: Translator, V: Clone> {
+pub struct Index<T: Translator, V> {
     translator: T,
     map: HashMap<T::Key, Record<V>>,
 
@@ -55,7 +55,7 @@ pub struct Index<T: Translator, V: Clone> {
     keys_pruned: Counter,
 }
 
-impl<T: Translator, V: Clone> Index<T, V> {
+impl<T: Translator, V> Index<T, V> {
     /// Create a new index.
     pub fn init(context: impl Metrics, translator: T) -> Self {
         let s = Self {
@@ -130,10 +130,9 @@ impl<T: Translator, V: Clone> Index<T, V> {
                 break;
             }
             self.keys_pruned.inc();
-            match head.next {
-                Some(ref mut next) => {
-                    head.value = next.value.clone();
-                    head.next = next.next.take();
+            match head.next.take() {
+                Some(next) => {
+                    *head = *next;
                 }
                 None => {
                     // No retained entries, so remove the key from the map.
