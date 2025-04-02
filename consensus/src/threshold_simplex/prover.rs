@@ -1,7 +1,11 @@
-use super::{finalize_namespace, notarize_namespace, nullify_namespace, seed_namespace, View};
+use super::{
+    finalize_namespace, notarize_namespace, nullify_namespace, seed_namespace,
+    types::{view_message, Notarization, Notarize, Proposal},
+    View,
+};
 use crate::Proof;
 use bytes::{Buf, BufMut};
-use commonware_codec::SizedCodec;
+use commonware_codec::{Codec, SizedCodec};
 use commonware_cryptography::bls12381::primitives::{
     group::{self, Element},
     ops,
@@ -30,6 +34,8 @@ impl Verifier {
         (self.callback)(identity)
     }
 }
+
+/// TODO: we only need prover for malicious proofs (should just use types)?
 
 /// Encode and decode proofs of activity.
 ///
@@ -67,7 +73,7 @@ impl<D: Digest> Prover<D> {
     }
 
     /// Serialize a proposal proof.
-    pub fn serialize_proposal(proposal: &wire::Proposal, partial_signature: &[u8]) -> Proof {
+    pub fn serialize_proposal(proposal: &Proposal<D>, partial_signature: &[u8]) -> Proof {
         // Setup proof
         let len =
             u64::LEN_ENCODED + u64::LEN_ENCODED + D::LEN_ENCODED + poly::PARTIAL_SIGNATURE_LENGTH;
@@ -86,7 +92,7 @@ impl<D: Digest> Prover<D> {
         &self,
         mut proof: Proof,
         namespace: &[u8],
-    ) -> Option<(View, View, D, Verifier)> {
+    ) -> Option<(Proposal<D>, Verifier)> {
         // Ensure proof is big enough
         let expected_len =
             u64::LEN_ENCODED + u64::LEN_ENCODED + D::LEN_ENCODED + poly::PARTIAL_SIGNATURE_LENGTH;
@@ -98,11 +104,12 @@ impl<D: Digest> Prover<D> {
         let view = proof.get_u64();
         let parent = proof.get_u64();
         let payload = D::read_from(&mut proof).ok()?;
+        let proposal = Proposal::new(view, parent, payload);
         let signature = proof.copy_to_bytes(poly::PARTIAL_SIGNATURE_LENGTH);
         let signature = poly::Eval::deserialize(&signature)?;
 
         // Create callback
-        let proposal_message = proposal_message(view, parent, &payload);
+        let proposal_message = proposal.encode();
         let namespace = namespace.to_vec();
         let callback = move |identity: &poly::Poly<group::Public>| -> Option<u32> {
             if ops::partial_verify_message(
@@ -117,11 +124,11 @@ impl<D: Digest> Prover<D> {
             }
             Some(signature.index)
         };
-        Some((view, parent, payload, Verifier::new(callback)))
+        Some((proposal, Verifier::new(callback)))
     }
 
     /// Serialize an aggregation proof.
-    pub fn serialize_threshold(proposal: &wire::Proposal, signature: &[u8], seed: &[u8]) -> Proof {
+    pub fn serialize_threshold(proposal: &Proposal<D>, signature: &[u8], seed: &[u8]) -> Proof {
         // Setup proof
         let len = u64::LEN_ENCODED
             + u64::LEN_ENCODED
@@ -144,7 +151,7 @@ impl<D: Digest> Prover<D> {
         &self,
         mut proof: Proof,
         namespace: &[u8],
-    ) -> Option<(View, View, D, group::Signature, group::Signature)> {
+    ) -> Option<(Proposal<D>, group::Signature, group::Signature)> {
         // Ensure proof prefix is big enough
         let expected_len = u64::LEN_ENCODED
             + u64::LEN_ENCODED
@@ -159,46 +166,47 @@ impl<D: Digest> Prover<D> {
         let view = proof.get_u64();
         let parent = proof.get_u64();
         let payload = D::read_from(&mut proof).ok()?;
-        let message = proposal_message(view, parent, &payload);
+        let proposal = Proposal::new(view, parent, payload);
         let signature = proof.copy_to_bytes(group::SIGNATURE_LENGTH);
         let signature = group::Signature::deserialize(&signature)?;
+        let message = proposal.encode();
         if ops::verify_message(&self.public, Some(namespace), &message, &signature).is_err() {
             return None;
         }
 
         // Verify seed
-        let message = seed_message(view);
+        let message = view_message(view);
         let seed = proof.copy_to_bytes(group::SIGNATURE_LENGTH);
         let seed = group::Signature::deserialize(&seed)?;
         if ops::verify_message(&self.public, Some(&self.seed_namespace), &message, &seed).is_err() {
             return None;
         }
-        Some((view, parent, payload, signature, seed))
+        Some((proposal, signature, seed))
     }
 
     /// Deserialize a notarize proof.
-    pub fn deserialize_notarize(&self, proof: Proof) -> Option<(View, View, D, Verifier)> {
+    pub fn deserialize_notarize(&self, proof: Proof) -> Option<(Proposal<D>, Verifier)> {
         Self::deserialize_proposal(self, proof, &self.notarize_namespace)
     }
 
     /// Deserialize a notarization proof.
-    pub fn deserialize_notarization(
-        &self,
-        proof: Proof,
-    ) -> Option<(View, View, D, group::Signature, group::Signature)> {
-        self.deserialize_threshold(proof, &self.notarize_namespace)
+    pub fn deserialize_notarization(&self, proof: Proof) -> Option<Notarization<D>> {
+        let (proposal, proposal_signature, seed_signature) =
+            self.deserialize_threshold(proof, &self.notarize_namespace)?;
+        Some(Notarization::new(
+            proposal,
+            proposal_signature,
+            seed_signature,
+        ))
     }
 
     /// Deserialize a finalize proof.
-    pub fn deserialize_finalize(&self, proof: Proof) -> Option<(View, View, D, Verifier)> {
+    pub fn deserialize_finalize(&self, proof: Proof) -> Option<(Proposal<D>, Verifier)> {
         self.deserialize_proposal(proof, &self.finalize_namespace)
     }
 
     /// Deserialize a finalization proof.
-    pub fn deserialize_finalization(
-        &self,
-        proof: Proof,
-    ) -> Option<(View, View, D, group::Signature, group::Signature)> {
+    pub fn deserialize_finalization(&self, proof: Proof) -> Option<Notarization<D>> {
         self.deserialize_threshold(proof, &self.finalize_namespace)
     }
 

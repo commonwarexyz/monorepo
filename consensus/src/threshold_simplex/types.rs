@@ -1,7 +1,11 @@
-use super::View;
+use super::{notarize_namespace, View};
 use commonware_codec::{Codec, Error, Reader, SizedCodec, Writer};
 use commonware_cryptography::{
-    bls12381::primitives::{group::Signature, poly::PartialSignature},
+    bls12381::primitives::{
+        group::{Public, Signature},
+        ops::partial_verify_multiple_messages,
+        poly::{PartialSignature, Poly},
+    },
     hash, sha256, Digest,
 };
 
@@ -100,6 +104,14 @@ pub struct Proposal<D: Digest> {
 }
 
 impl<D: Digest> Proposal<D> {
+    pub fn new(view: u64, parent: u64, payload: D) -> Self {
+        Proposal {
+            view,
+            parent,
+            payload,
+        }
+    }
+
     pub fn digest(&self) -> sha256::Digest {
         hash(&self.encode())
     }
@@ -139,6 +151,41 @@ pub struct Notarize<D: Digest> {
     pub seed_signature: PartialSignature,
 }
 
+impl<D: Digest> Notarize<D> {
+    pub fn new(
+        proposal: Proposal<D>,
+        proposal_signature: PartialSignature,
+        seed_signature: PartialSignature,
+    ) -> Self {
+        Notarize {
+            proposal,
+            proposal_signature,
+            seed_signature,
+        }
+    }
+
+    pub fn verify(
+        &self,
+        identity: &Poly<Public>,
+        public_key_index: Option<u32>,
+        notarize_namespace: &[u8],
+        seed_namespace: &[u8],
+    ) -> bool {
+        let public_key_index = public_key_index.unwrap_or(self.proposal_signature.index);
+        let notarize_message = self.encode();
+        let notarize_message = (Some(notarize_namespace), notarize_message.as_ref());
+        let seed_message = view_message(self.proposal.view);
+        let seed_message = (Some(seed_namespace), seed_message.as_ref());
+        partial_verify_multiple_messages(
+            identity,
+            public_key_index,
+            &[notarize_message, seed_message],
+            &[self.proposal_signature.clone(), self.seed_signature.clone()],
+        )
+        .is_ok()
+    }
+}
+
 impl<D: Digest> Codec for Notarize<D> {
     fn write(&self, writer: &mut impl Writer) {
         self.proposal.write(writer);
@@ -172,6 +219,20 @@ pub struct Notarization<D: Digest> {
     pub proposal: Proposal<D>,
     pub proposal_signature: Signature,
     pub seed_signature: Signature,
+}
+
+impl<D: Digest> Notarization<D> {
+    pub fn new(
+        proposal: Proposal<D>,
+        proposal_signature: Signature,
+        seed_signature: Signature,
+    ) -> Self {
+        Notarization {
+            proposal,
+            proposal_signature,
+            seed_signature,
+        }
+    }
 }
 
 impl<D: Digest> Codec for Notarization<D> {
