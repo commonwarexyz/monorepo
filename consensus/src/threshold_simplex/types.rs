@@ -1,4 +1,4 @@
-use super::{notarize_namespace, View};
+use super::View;
 use commonware_codec::{Codec, Error, Reader, SizedCodec, Writer};
 use commonware_cryptography::{
     bls12381::primitives::{
@@ -858,4 +858,126 @@ impl<D: Digest> SizedCodec for ConflictingNotarize<D> {
         + PartialSignature::LEN_ENCODED
         + Proposal::<D>::LEN_ENCODED
         + PartialSignature::LEN_ENCODED;
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConflictingFinalize<D: Digest> {
+    pub proposal_1: Proposal<D>,
+    pub signature_1: PartialSignature,
+    pub proposal_2: Proposal<D>,
+    pub signature_2: PartialSignature,
+}
+
+impl<D: Digest> ConflictingFinalize<D> {
+    pub fn new(
+        proposal_1: Proposal<D>,
+        signature_1: PartialSignature,
+        proposal_2: Proposal<D>,
+        signature_2: PartialSignature,
+    ) -> Self {
+        ConflictingFinalize {
+            proposal_1,
+            signature_1,
+            proposal_2,
+            signature_2,
+        }
+    }
+
+    pub fn verify(
+        &self,
+        identity: &Poly<Public>,
+        public_key_index: Option<u32>,
+        finalize_namespace: &[u8],
+    ) -> bool {
+        let public_key_index = public_key_index.unwrap_or(self.signature_1.index);
+        if self.proposal_1.view != self.proposal_2.view {
+            return false;
+        }
+        let finalize_message_1 = self.proposal_1.encode();
+        let finalize_message_1 = (Some(finalize_namespace), finalize_message_1.as_ref());
+        let finalize_message_2 = self.proposal_2.encode();
+        let finalize_message_2 = (Some(finalize_namespace), finalize_message_2.as_ref());
+        partial_verify_multiple_messages(
+            identity,
+            public_key_index,
+            &[finalize_message_1, finalize_message_2],
+            &[self.signature_1.clone(), self.signature_2.clone()],
+        )
+        .is_ok()
+    }
+}
+
+impl<D: Digest> Codec for ConflictingFinalize<D> {
+    fn write(&self, writer: &mut impl Writer) {
+        self.proposal_1.write(writer);
+        self.signature_1.write(writer);
+        self.proposal_2.write(writer);
+        self.signature_2.write(writer);
+    }
+
+    fn len_encoded(&self) -> usize {
+        Self::LEN_ENCODED
+    }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, Error> {
+        let proposal_1 = Proposal::read(reader)?;
+        let signature_1 = PartialSignature::read(reader)?;
+        let proposal_2 = Proposal::read(reader)?;
+        let signature_2 = PartialSignature::read(reader)?;
+        Ok(ConflictingFinalize {
+            proposal_1,
+            signature_1,
+            proposal_2,
+            signature_2,
+        })
+    }
+}
+
+impl<D: Digest> SizedCodec for ConflictingFinalize<D> {
+    const LEN_ENCODED: usize = Proposal::<D>::LEN_ENCODED
+        + PartialSignature::LEN_ENCODED
+        + Proposal::<D>::LEN_ENCODED
+        + PartialSignature::LEN_ENCODED;
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct NullifyFinalize<D: Digest> {
+    pub proposal: Proposal<D>,
+    pub view_signature: PartialSignature,
+    pub finalize_signature: PartialSignature,
+}
+
+impl<D: Digest> NullifyFinalize<D> {
+    pub fn new(
+        proposal: Proposal<D>,
+        view_signature: PartialSignature,
+        finalize_signature: PartialSignature,
+    ) -> Self {
+        NullifyFinalize {
+            proposal,
+            view_signature,
+            finalize_signature,
+        }
+    }
+
+    pub fn verify(
+        &self,
+        identity: &Poly<Public>,
+        public_key_index: Option<u32>,
+        nullify_namespace: &[u8],
+        finalize_namespace: &[u8],
+    ) -> bool {
+        let public_key_index = public_key_index.unwrap_or(self.view_signature.index);
+        let nullify_message = view_message(self.proposal.view);
+        let nullify_message = (Some(nullify_namespace), nullify_message.as_ref());
+        let finalize_message = self.proposal.encode();
+        let finalize_message = (Some(finalize_namespace), finalize_message.as_ref());
+        partial_verify_multiple_messages(
+            identity,
+            public_key_index,
+            &[nullify_message, finalize_message],
+            &[self.view_signature.clone(), self.finalize_signature.clone()],
+        )
+        .is_ok()
+    }
 }
