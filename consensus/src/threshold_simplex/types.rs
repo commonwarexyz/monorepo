@@ -1,4 +1,3 @@
-use super::View;
 use commonware_codec::{Codec, Error, Reader, SizedCodec, Writer};
 use commonware_cryptography::{
     bls12381::primitives::{
@@ -11,6 +10,46 @@ use commonware_cryptography::{
     },
     hash, sha256, Digest,
 };
+use commonware_utils::union;
+
+/// View is a monotonically increasing counter that represents the current focus of consensus.
+pub type View = u64;
+
+/// Context is a collection of metadata from consensus about a given payload.
+#[derive(Clone)]
+pub struct Context<D: Digest> {
+    /// Current view of consensus.
+    pub view: View,
+
+    /// Parent the payload is built on.
+    ///
+    /// If there is a gap between the current view and the parent view, the participant
+    /// must possess a nullification for each discarded view to safely vote on the proposed
+    /// payload (any view without a nullification may eventually be finalized and skipping
+    /// it would result in a fork).
+    pub parent: (View, D),
+}
+
+pub const SEED_SUFFIX: &[u8] = b"_SEED";
+pub const NOTARIZE_SUFFIX: &[u8] = b"_NOTARIZE";
+pub const NULLIFY_SUFFIX: &[u8] = b"_NULLIFY";
+pub const FINALIZE_SUFFIX: &[u8] = b"_FINALIZE";
+
+pub fn seed_namespace(namespace: &[u8]) -> Vec<u8> {
+    union(namespace, SEED_SUFFIX)
+}
+
+pub fn notarize_namespace(namespace: &[u8]) -> Vec<u8> {
+    union(namespace, NOTARIZE_SUFFIX)
+}
+
+pub fn nullify_namespace(namespace: &[u8]) -> Vec<u8> {
+    union(namespace, NULLIFY_SUFFIX)
+}
+
+pub fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
+    union(namespace, FINALIZE_SUFFIX)
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Voter<D: Digest> {
