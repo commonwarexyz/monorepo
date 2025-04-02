@@ -4,7 +4,7 @@ use commonware_cryptography::{
     bls12381::primitives::{
         group::{Public, Signature},
         ops::{
-            aggregate_signatures, aggregate_verify_multiple_messages,
+            aggregate_signatures, aggregate_verify_multiple_messages, partial_verify_message,
             partial_verify_multiple_messages,
         },
         poly::{PartialSignature, Poly},
@@ -290,14 +290,48 @@ impl<D: Digest> SizedCodec for Notarization<D> {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Nullify {
     pub view: u64,
-    pub proposal_signature: PartialSignature,
+    pub view_signature: PartialSignature,
     pub seed_signature: PartialSignature,
+}
+
+impl Nullify {
+    pub fn new(
+        view: u64,
+        view_signature: PartialSignature,
+        seed_signature: PartialSignature,
+    ) -> Self {
+        Nullify {
+            view,
+            view_signature,
+            seed_signature,
+        }
+    }
+
+    pub fn verify(
+        &self,
+        identity: &Poly<Public>,
+        public_key_index: Option<u32>,
+        nullify_namespace: &[u8],
+        seed_namespace: &[u8],
+    ) -> bool {
+        let public_key_index = public_key_index.unwrap_or(self.view_signature.index);
+        let view_message = view_message(self.view);
+        let nullify_message = (Some(nullify_namespace), view_message.as_ref());
+        let seed_message = (Some(seed_namespace), view_message.as_ref());
+        partial_verify_multiple_messages(
+            identity,
+            public_key_index,
+            &[nullify_message, seed_message],
+            &[self.view_signature.clone(), self.seed_signature.clone()],
+        )
+        .is_ok()
+    }
 }
 
 impl Codec for Nullify {
     fn write(&self, writer: &mut impl Writer) {
         self.view.write(writer);
-        self.proposal_signature.write(writer);
+        self.view_signature.write(writer);
         self.seed_signature.write(writer);
     }
 
@@ -307,11 +341,11 @@ impl Codec for Nullify {
 
     fn read(reader: &mut impl Reader) -> Result<Self, Error> {
         let view = u64::read(reader)?;
-        let proposal_signature = PartialSignature::read(reader)?;
+        let view_signature = PartialSignature::read(reader)?;
         let seed_signature = PartialSignature::read(reader)?;
         Ok(Nullify {
             view,
-            proposal_signature,
+            view_signature,
             seed_signature,
         })
     }
@@ -327,6 +361,35 @@ pub struct Nullification {
     pub view: u64,
     pub view_signature: Signature,
     pub seed_signature: Signature,
+}
+
+impl Nullification {
+    pub fn new(view: u64, view_signature: Signature, seed_signature: Signature) -> Self {
+        Nullification {
+            view,
+            view_signature,
+            seed_signature,
+        }
+    }
+
+    pub fn verify(
+        &self,
+        public_key: &Public,
+        nullify_namespace: &[u8],
+        seed_namespace: &[u8],
+    ) -> bool {
+        let view_message = view_message(self.view);
+        let nullify_message = (Some(nullify_namespace), view_message.as_ref());
+        let seed_message = (Some(seed_namespace), view_message.as_ref());
+        let signature = aggregate_signatures(&[self.view_signature, self.seed_signature]);
+        aggregate_verify_multiple_messages(
+            public_key,
+            &[nullify_message, seed_message],
+            &signature,
+            1,
+        )
+        .is_ok()
+    }
 }
 
 impl Codec for Nullification {
@@ -359,7 +422,37 @@ impl SizedCodec for Nullification {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Finalize<D: Digest> {
     pub proposal: Proposal<D>,
-    pub proposal_signature: Signature,
+    pub proposal_signature: PartialSignature,
+}
+
+impl<D: Digest> Finalize<D> {
+    pub fn new(proposal: Proposal<D>, proposal_signature: PartialSignature) -> Self {
+        Finalize {
+            proposal,
+            proposal_signature,
+        }
+    }
+
+    pub fn verify(
+        &self,
+        identity: &Poly<Public>,
+        public_key_index: Option<u32>,
+        finalize_namespace: &[u8],
+    ) -> bool {
+        if let Some(public_key_index) = public_key_index {
+            if public_key_index != self.proposal_signature.index {
+                return false;
+            }
+        }
+        let message = self.proposal.encode();
+        partial_verify_message(
+            identity,
+            Some(finalize_namespace),
+            &message,
+            &self.proposal_signature,
+        )
+        .is_ok()
+    }
 }
 
 impl<D: Digest> Codec for Finalize<D> {
@@ -374,7 +467,7 @@ impl<D: Digest> Codec for Finalize<D> {
 
     fn read(reader: &mut impl Reader) -> Result<Self, Error> {
         let proposal = Proposal::read(reader)?;
-        let proposal_signature = Signature::read(reader)?;
+        let proposal_signature = PartialSignature::read(reader)?;
         Ok(Finalize {
             proposal,
             proposal_signature,
@@ -391,6 +484,40 @@ pub struct Finalization<D: Digest> {
     pub proposal: Proposal<D>,
     pub proposal_signature: Signature,
     pub seed_signature: Signature,
+}
+
+impl<D: Digest> Finalization<D> {
+    pub fn new(
+        proposal: Proposal<D>,
+        proposal_signature: Signature,
+        seed_signature: Signature,
+    ) -> Self {
+        Finalization {
+            proposal,
+            proposal_signature,
+            seed_signature,
+        }
+    }
+
+    pub fn verify(
+        &self,
+        public_key: &Public,
+        finalize_namespace: &[u8],
+        seed_namespace: &[u8],
+    ) -> bool {
+        let finalize_message = self.proposal.encode();
+        let finalize_message = (Some(finalize_namespace), finalize_message.as_ref());
+        let seed_message = view_message(self.proposal.view);
+        let seed_message = (Some(seed_namespace), seed_message.as_ref());
+        let signature = aggregate_signatures(&[self.proposal_signature, self.seed_signature]);
+        aggregate_verify_multiple_messages(
+            public_key,
+            &[finalize_message, seed_message],
+            &signature,
+            1,
+        )
+        .is_ok()
+    }
 }
 
 impl<D: Digest> Codec for Finalization<D> {
@@ -428,6 +555,16 @@ pub struct Request {
     pub nullifications: Vec<u64>,
 }
 
+impl Request {
+    pub fn new(id: u64, notarizations: Vec<u64>, nullifications: Vec<u64>) -> Self {
+        Request {
+            id,
+            notarizations,
+            nullifications,
+        }
+    }
+}
+
 impl Codec for Request {
     fn write(&self, writer: &mut impl Writer) {
         self.id.write(writer);
@@ -458,6 +595,20 @@ pub struct Response<D: Digest> {
     pub id: u64,
     pub notarizations: Vec<Notarization<D>>,
     pub nullifications: Vec<Nullification>,
+}
+
+impl<D: Digest> Response<D> {
+    pub fn new(
+        id: u64,
+        notarizations: Vec<Notarization<D>>,
+        nullifications: Vec<Nullification>,
+    ) -> Self {
+        Response {
+            id,
+            notarizations,
+            nullifications,
+        }
+    }
 }
 
 impl<D: Digest> Codec for Response<D> {
