@@ -106,7 +106,7 @@ pub async fn poll_service_active(key_file: &str, ip: &str, service: &str) -> Res
             return Ok(());
         }
         if service == "binary" && parsed == "failed" {
-            warn!(service, "service failed to start (check logs and update)");
+            warn!(service = service, "service failed to start (check logs and update)");
             return Ok(());
         }
         warn!(error = ?String::from_utf8_lossy(&output.stderr), service, "active status check failed");
