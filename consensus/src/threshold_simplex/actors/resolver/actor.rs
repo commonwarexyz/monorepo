@@ -5,13 +5,15 @@ use super::{
 use crate::{
     threshold_simplex::{
         actors::voter,
-        encoder::{notarize_namespace, nullify_namespace, seed_namespace},
-        verifier::{verify_notarization, verify_nullification},
-        wire, View,
+        types::{
+            notarize_namespace, nullify_namespace, seed_namespace, Backfiller, Notarization,
+            Nullification, Request, Response, View,
+        },
     },
-    Parsed, ThresholdSupervisor,
+    ThresholdSupervisor,
 };
-use commonware_cryptography::{bls12381::primitives::poly, Scheme};
+use commonware_codec::Codec;
+use commonware_cryptography::{bls12381::primitives::poly, Digest, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{utils::requester, Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Metrics, Spawner};
@@ -99,7 +101,7 @@ impl Inflight {
 pub struct Actor<
     E: Clock + GClock + Rng + Metrics + Spawner,
     C: Scheme,
-    D: Array,
+    D: Digest,
     S: ThresholdSupervisor<Index = View, Identity = poly::Public, PublicKey = C::PublicKey>,
 > {
     context: E,
@@ -110,8 +112,8 @@ pub struct Actor<
     notarize_namespace: Vec<u8>,
     nullify_namespace: Vec<u8>,
 
-    notarizations: BTreeMap<View, wire::Notarization>,
-    nullifications: BTreeMap<View, wire::Nullification>,
+    notarizations: BTreeMap<View, Notarization<D>>,
+    nullifications: BTreeMap<View, Nullification>,
     activity_timeout: u64,
 
     required: BTreeSet<Entry>,
@@ -244,13 +246,7 @@ impl<
             }
 
             // Select next recipient
-            let mut msg = wire::Backfiller {
-                id: 0, // set once we have a request ID
-                payload: Some(wire::backfiller::Payload::Request(wire::Request {
-                    notarizations: notarizations.clone(),
-                    nullifications: nullifications.clone(),
-                })),
-            };
+            let mut msg = Request::new(0, notarizations, nullifications);
             loop {
                 // Get next best
                 let Some((recipient, request)) = self.requester.request(shuffle) else {
@@ -271,7 +267,7 @@ impl<
 
                 // Create new message
                 msg.id = request;
-                let encoded = msg.encode_to_vec().into();
+                let encoded = msg.encode();
 
                 // Try to send
                 if sender
@@ -440,17 +436,10 @@ impl<
                 },
                 network = receiver.recv() => {
                     let (s, msg) = network.unwrap();
-                    let msg = match wire::Backfiller::decode(msg) {
+                    let msg = match Backfiller::decode(msg) {
                         Ok(msg) => msg,
                         Err(err) => {
                             warn!(?err, sender = ?s, "failed to decode message");
-                            continue;
-                        },
-                    };
-                    let payload = match msg.payload {
-                        Some(payload) => payload,
-                        None => {
-                            warn!(sender = ?s, "missing payload");
                             continue;
                         },
                     };

@@ -588,6 +588,52 @@ impl<D: Digest> SizedCodec for Finalization<D> {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub enum Backfiller<D: Digest> {
+    Request(Request),
+    Response(Response<D>),
+}
+
+impl<D: Digest> Codec for Backfiller<D> {
+    fn write(&self, writer: &mut impl Writer) {
+        match self {
+            Backfiller::Request(v) => {
+                writer.write_u8(0);
+                v.write(writer);
+            }
+            Backfiller::Response(v) => {
+                writer.write_u8(1);
+                v.write(writer);
+            }
+        }
+    }
+
+    fn len_encoded(&self) -> usize {
+        (match self {
+            Backfiller::Request(v) => Codec::len_encoded(v),
+            Backfiller::Response(v) => Codec::len_encoded(v),
+        }) + 1
+    }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, Error> {
+        let tag = reader.read_u8()?;
+        match tag {
+            0 => {
+                let v = Request::read(reader)?;
+                Ok(Backfiller::Request(v))
+            }
+            1 => {
+                let v = Response::<D>::read(reader)?;
+                Ok(Backfiller::Response(v))
+            }
+            _ => Err(Error::Invalid(
+                "consensus::threshold_simplex::Backfiller",
+                "Invalid type",
+            )),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct Request {
     pub id: View,
     pub notarizations: Vec<View>,
