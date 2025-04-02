@@ -648,6 +648,7 @@ impl<D: Digest> Codec for Response<D> {
 
     fn read(reader: &mut impl Reader) -> Result<Self, Error> {
         let id = u64::read(reader)?;
+        // TODO: limit size of notarizations and nullifications read (to avoid runaway memory allocation)
         let notarizations = Vec::<Notarization<D>>::read(reader)?;
         let nullifications = Vec::<Nullification>::read(reader)?;
         Ok(Response {
