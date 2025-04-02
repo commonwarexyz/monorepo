@@ -46,7 +46,7 @@ impl<V: Clone> Record<V> {
     }
 }
 
-/// An index that maps transformed keys to values.
+/// An index that maps translated keys to values.
 pub struct Index<T: Translator, V: Clone> {
     translator: T,
     map: HashMap<T::Key, Record<V>>,
@@ -67,7 +67,7 @@ impl<T: Translator, V: Clone> Index<T, V> {
         context.register("pruned", "Number of keys pruned", s.keys_pruned.clone());
         context.register(
             "collisions",
-            "Number of transformed key collisions",
+            "Number of translated key collisions",
             s.collisions.clone(),
         );
 
@@ -104,7 +104,7 @@ impl<T: Translator, V: Clone> Index<T, V> {
         };
     }
 
-    /// Retrieve all values associated with a transformed key.
+    /// Retrieve all values associated with a translated key.
     pub fn get(&self, key: &[u8]) -> ValueIterator<V> {
         let translated_key = self.translator.transform(key);
         match self.map.get(&translated_key) {

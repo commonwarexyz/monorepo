@@ -4,7 +4,7 @@
 //! uniquely associated with both an `index` and a `key`.
 //!
 //! Data is stored in `Journal` (an append-only log) and the location of written data is stored
-//! in-memory by both index and key (truncated representation using a caller-provided `Translator`)
+//! in-memory by both index and key (translated representation using a caller-provided `Translator`)
 //! to enable **single-read lookups** for both query patterns over all archived data.
 //!
 //! _Notably, `Archive` does not make use of compaction nor on-disk indexes (and thus has no read
@@ -36,11 +36,11 @@
 //!
 //! ## Conflicts
 //!
-//! Because a truncated representation of a key is only ever stored in memory, it is possible (and
-//! expected) that two keys will eventually be represented by the same truncated key. To handle this
+//! Because a translated representation of a key is only ever stored in memory, it is possible (and
+//! expected) that two keys will eventually be represented by the same translated key. To handle this
 //! case, `Archive` must check the persisted form of all conflicting keys to ensure data from the
 //! correct key is returned. To support efficient checks, `Archive` (via [Index](crate::index::Index))
-//! keeps a linked list of all keys with the same truncated prefix:
+//! keeps a linked list of all keys with the same translated prefix:
 //!
 //! ```rust
 //! struct Record {
@@ -65,14 +65,14 @@
 //! ```
 //!
 //! _If the `Translator` provided by the caller does not uniformly distribute keys across the key
-//! space or uses a truncated representation that means keys on average have many conflicts,
+//! space or uses a translated representation that means keys on average have many conflicts,
 //! performance will degrade._
 //!
 //! ## Memory Overhead
 //!
 //! `Archive` uses two maps to enable lookups by both index and key. The memory used to track each
 //! index item is `8 + 4 + 4` (where `8` is the index, `4` is the offset, and `4` is the length).
-//! The memory used to track each key item is `~truncated(key).len() + 16` bytes (where `16` is the
+//! The memory used to track each key item is `~translated(key).len() + 16` bytes (where `16` is the
 //! size of the `Record` struct). This means that an `Archive` employing a `Translator` that uses
 //! the first `8` bytes of a key will use `~40` bytes to index each key.
 //!
@@ -92,7 +92,7 @@
 //!
 //! Instead of performing a full iteration of the in-memory index, storing an additional in-memory
 //! index per `section`, or replaying a `section` of `Journal`, `Archive` lazily cleans up the
-//! in-memory index after pruning. When a new key is stored that overlaps (same truncated value)
+//! in-memory index after pruning. When a new key is stored that overlaps (same translated value)
 //! with a pruned key, the pruned key is removed from the in-memory index.
 //!
 //! # Single Operation Reads

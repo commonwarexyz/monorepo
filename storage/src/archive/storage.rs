@@ -31,7 +31,7 @@ pub struct Archive<T: Translator, K: Array, B: Blob, E: Storage<B> + Metrics> {
     // Oldest allowed section to read from. This is updated when `prune` is called.
     oldest_allowed: Option<u64>,
 
-    // To efficiently serve `get` and `has` requests, we map a truncated representation of each key
+    // To efficiently serve `get` and `has` requests, we map a translated representation of each key
     // to its corresponding index. To avoid iterating over this keys map during pruning, we map said
     // indexes to their locations in the journal.
     keys: Index<T, u64>,

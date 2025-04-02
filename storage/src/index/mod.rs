@@ -1,14 +1,14 @@
 //! A memory-efficient index for mapping keys to values.
 //!
-//! Keys are transformed into a compressed, fixed-size representation using a `Translator`. Depending
+//! Keys are translated into a compressed, fixed-size representation using a `Translator`. Depending
 //! on the size of the representation, this can lead to a non-negligible number of collisions (even
 //! if the original keys are collision-free). To workaround this issue, `get` returns all values
-//! that map to the same transformed key. If the same key is inserted multiple times (and old values
+//! that map to the same translated key. If the same key is inserted multiple times (and old values
 //! are not `removed`), all values will be returned.
 //!
 //! # Warning
 //!
-//! If the `Translator` maps many keys to the same transformed key, the performance of `Index` will
+//! If the `Translator` maps many keys to the same translated key, the performance of `Index` will
 //! degrade substantially (each conflicting key may contain the desired value).
 
 mod storage;
