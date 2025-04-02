@@ -4,7 +4,7 @@
 //! uniquely associated with both an `index` and a `key`.
 //!
 //! Data is stored in `Journal` (an append-only log) and the location of written data is stored
-//! in-memory by both index and key (truncated representation using a caller-provided `Translator`)
+//! in-memory by both index and key (translated representation using a caller-provided `Translator`)
 //! to enable **single-read lookups** for both query patterns over all archived data.
 //!
 //! _Notably, `Archive` does not make use of compaction nor on-disk indexes (and thus has no read
@@ -36,11 +36,11 @@
 //!
 //! ## Conflicts
 //!
-//! Because a truncated representation of a key is only ever stored in memory, it is possible (and
-//! expected) that two keys will eventually be represented by the same truncated key. To handle this
+//! Because a translated representation of a key is only ever stored in memory, it is possible (and
+//! expected) that two keys will eventually be represented by the same translated key. To handle this
 //! case, `Archive` must check the persisted form of all conflicting keys to ensure data from the
-//! correct key is returned. To support efficient checks, `Archive` keeps a linked list of all keys
-//! with the same truncated prefix:
+//! correct key is returned. To support efficient checks, `Archive` (via [Index](crate::index::Index))
+//! keeps a linked list of all keys with the same translated prefix:
 //!
 //! ```rust
 //! struct Record {
@@ -65,14 +65,14 @@
 //! ```
 //!
 //! _If the `Translator` provided by the caller does not uniformly distribute keys across the key
-//! space or uses a truncated representation that means keys on average have many conflicts,
+//! space or uses a translated representation that means keys on average have many conflicts,
 //! performance will degrade._
 //!
 //! ## Memory Overhead
 //!
 //! `Archive` uses two maps to enable lookups by both index and key. The memory used to track each
 //! index item is `8 + 4 + 4` (where `8` is the index, `4` is the offset, and `4` is the length).
-//! The memory used to track each key item is `~truncated(key).len() + 16` bytes (where `16` is the
+//! The memory used to track each key item is `~translated(key).len() + 16` bytes (where `16` is the
 //! size of the `Record` struct). This means that an `Archive` employing a `Translator` that uses
 //! the first `8` bytes of a key will use `~40` bytes to index each key.
 //!
@@ -92,7 +92,7 @@
 //!
 //! Instead of performing a full iteration of the in-memory index, storing an additional in-memory
 //! index per `section`, or replaying a `section` of `Journal`, `Archive` lazily cleans up the
-//! in-memory index after pruning. When a new key is stored that overlaps (same truncated value)
+//! in-memory index after pruning. When a new key is stored that overlaps (same translated value)
 //! with a pruned key, the pruned key is removed from the in-memory index.
 //!
 //! # Single Operation Reads
@@ -119,8 +119,11 @@
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, deterministic::Executor};
 //! use commonware_cryptography::hash;
-//! use commonware_storage::archive::{Archive, Config, translator::FourCap};
-//! use commonware_storage::journal::{Error, variable::{Config as JConfig, Journal}};
+//! use commonware_storage::{
+//!     index::translator::FourCap,
+//!     archive::{Archive, Config},
+//!     journal::{Error, variable::{Config as JConfig, Journal}},
+//! };
 //!
 //! let (executor, context, _) = Executor::default();
 //! executor.start(async move {
@@ -150,9 +153,8 @@
 
 mod storage;
 pub use storage::{Archive, Identifier};
-pub mod translator;
 
-use std::hash::Hash;
+use crate::index::Translator;
 use thiserror::Error;
 
 /// Errors that can occur when interacting with the archive.
@@ -170,18 +172,6 @@ pub enum Error {
     CompressionFailed,
     #[error("decompression failed")]
     DecompressionFailed,
-}
-
-/// Translate keys into an internal representation used in `Archive`'s
-/// in-memory index.
-///
-/// If invoking `transform` on keys results in many conflicts, the performance
-/// of `Archive` will degrade substantially.
-pub trait Translator: Clone {
-    type Key: Eq + Hash + Send + Sync + Clone;
-
-    /// Transform a key into its internal representation.
-    fn transform(&self, key: &[u8]) -> Self::Key;
 }
 
 /// Configuration for `Archive` storage.
@@ -213,16 +203,17 @@ pub struct Config<T: Translator> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::journal::variable::{Config as JConfig, Journal};
-    use crate::journal::Error as JournalError;
+    use crate::index::translator::{FourCap, TwoCap};
+    use crate::journal::{
+        variable::{Config as JConfig, Journal},
+        Error as JournalError,
+    };
     use bytes::Bytes;
     use commonware_macros::test_traced;
-    use commonware_runtime::Metrics;
-    use commonware_runtime::{deterministic::Executor, Blob, Runner, Storage};
+    use commonware_runtime::{deterministic::Executor, Blob, Metrics, Runner, Storage};
     use commonware_utils::array::FixedBytes;
     use rand::Rng;
     use std::collections::BTreeMap;
-    use translator::{FourCap, TwoCap};
 
     const DEFAULT_SECTION_MASK: u64 = 0xffff_ffff_ffff_0000u64;
 
@@ -614,7 +605,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_archive_overlapping_key() {
+    fn test_archive_overlapping_key_basic() {
         // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
         executor.start(async move {
@@ -814,7 +805,7 @@ mod tests {
             let buffer = context.encode();
             assert!(buffer.contains("items_tracked 3"));
             assert!(buffer.contains("indices_pruned_total 2"));
-            assert!(buffer.contains("keys_pruned_total 0")); // no lazy cleanup yet
+            assert!(buffer.contains("pruned_total 0")); // no lazy cleanup yet
 
             // Try to prune older section
             archive.prune(2).await.expect("Failed to prune");
@@ -838,7 +829,7 @@ mod tests {
             let buffer = context.encode();
             assert!(buffer.contains("items_tracked 4")); // lazily remove one, add one
             assert!(buffer.contains("indices_pruned_total 2"));
-            assert!(buffer.contains("keys_pruned_total 1"));
+            assert!(buffer.contains("pruned_total 1"));
         });
     }
 
@@ -879,6 +870,7 @@ mod tests {
                 let mut data = [0u8; 1024];
                 context.fill(&mut data);
                 let data = Bytes::from(data.to_vec());
+
                 archive
                     .put(index, key.clone(), data.clone())
                     .await
@@ -906,7 +898,7 @@ mod tests {
             let buffer = context.encode();
             let tracked = format!("items_tracked {:?}", num_keys);
             assert!(buffer.contains(&tracked));
-            assert!(buffer.contains("keys_pruned_total 0"));
+            assert!(buffer.contains("pruned_total 0"));
 
             // Close the archive
             archive.close().await.expect("Failed to close archive");
@@ -988,7 +980,7 @@ mod tests {
             assert!(buffer.contains(&tracked));
             let pruned = format!("indices_pruned_total {}", removed);
             assert!(buffer.contains(&pruned));
-            assert!(buffer.contains("keys_pruned_total 0")); // have not lazily removed keys yet
+            assert!(buffer.contains("pruned_total 0")); // have not lazily removed keys yet
         });
         auditor.state()
     }
