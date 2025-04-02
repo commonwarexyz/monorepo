@@ -205,4 +205,24 @@ mod tests {
         values.sort();
         assert_eq!(values, vec![0, 2]);
     }
+
+    #[test_traced]
+    fn test_index_mutate_through_iterator() {
+        let (_, context, _) = Executor::default();
+        let mut index = Index::init(context.clone(), TwoCap);
+
+        index.insert(b"key", 1);
+        index.insert(b"key", 2);
+        index.insert(b"key", 3);
+
+        for value in index.get_mut(b"key") {
+            // Mutate the value
+            *value += 10;
+        }
+
+        assert_eq!(
+            index.get(b"key").copied().collect::<Vec<_>>(),
+            vec![11, 13, 12]
+        );
+    }
 }
