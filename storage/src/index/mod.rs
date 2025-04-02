@@ -57,10 +57,13 @@ mod tests {
         index.insert(key, 3);
         index.insert(key, 4);
         index.remove(key, |i| *i == 3);
-        assert_eq!(index.get(key).collect::<Vec<_>>(), vec![1, 4, 2]);
+        assert_eq!(index.get(key).copied().collect::<Vec<_>>(), vec![1, 4, 2]);
         index.remove(key, |_| true);
         // Try removing all of a keys values.
-        assert_eq!(index.get(key).collect::<Vec<_>>(), Vec::<u64>::new());
+        assert_eq!(
+            index.get(key).copied().collect::<Vec<_>>(),
+            Vec::<u64>::new()
+        );
         assert!(index.is_empty());
 
         // Removing a key that doesn't exist should be a no-op.
@@ -89,7 +92,7 @@ mod tests {
 
         for (key, loc) in expected.iter() {
             let mut values = index.get(key);
-            let res = values.find(|i| i == loc);
+            let res = values.find(|i| *i == loc);
             assert!(res.is_some());
         }
     }
@@ -105,33 +108,36 @@ mod tests {
         index.insert(b"abc", 3); // Longer than cap (3 bytes -> "ab")
 
         // Check that "a" maps to "a\0"
-        assert_eq!(index.get(b"a").collect::<Vec<_>>(), vec![1]);
+        assert_eq!(index.get(b"a").copied().collect::<Vec<_>>(), vec![1]);
 
         // Check that "ab" and "abc" map to "ab" due to TwoCap truncation
-        let mut values = index.get(b"ab").collect::<Vec<_>>();
+        let mut values = index.get(b"ab").copied().collect::<Vec<_>>();
         values.sort();
         assert_eq!(values, vec![2, 3]);
 
-        let mut values = index.get(b"abc").collect::<Vec<_>>();
+        let mut values = index.get(b"abc").copied().collect::<Vec<_>>();
         values.sort();
         assert_eq!(values, vec![2, 3]);
 
         // Insert another value for "ab"
         index.insert(b"ab", 4);
         // Expected order: head=2 (first "ab"), then 4 (new "ab"), then 3 (from "abc")
-        assert_eq!(index.get(b"ab").collect::<Vec<_>>(), vec![2, 4, 3]);
+        assert_eq!(index.get(b"ab").copied().collect::<Vec<_>>(), vec![2, 4, 3]);
 
         // Remove a specific value
         index.remove(b"ab", |v| *v == 4);
-        assert_eq!(index.get(b"ab").collect::<Vec<_>>(), vec![2, 3]);
+        assert_eq!(index.get(b"ab").copied().collect::<Vec<_>>(), vec![2, 3]);
 
         // Remove all values for "ab"
         index.remove(b"ab", |_| true);
-        assert_eq!(index.get(b"ab").collect::<Vec<_>>(), Vec::<u64>::new());
+        assert_eq!(
+            index.get(b"ab").copied().collect::<Vec<_>>(),
+            Vec::<u64>::new()
+        );
         assert_eq!(index.len(), 1); // Only "a" remains
 
         // Check that "a" is still present
-        assert_eq!(index.get(b"a").collect::<Vec<_>>(), vec![1]);
+        assert_eq!(index.get(b"a").copied().collect::<Vec<_>>(), vec![1]);
     }
 
     #[test_traced]
@@ -147,7 +153,10 @@ mod tests {
         //
         // While we make no guarantees about the order of values to external clients, we should
         // take note if the internal order is different than expected (as it may be indicative of some bug).
-        assert_eq!(index.get(b"key").collect::<Vec<_>>(), vec![1, 3, 2]);
+        assert_eq!(
+            index.get(b"key").copied().collect::<Vec<_>>(),
+            vec![1, 3, 2]
+        );
     }
 
     #[test_traced]
@@ -161,11 +170,11 @@ mod tests {
 
         // Remove value 2
         index.remove(b"key", |v| *v == 2);
-        assert_eq!(index.get(b"key").collect::<Vec<_>>(), vec![1, 3]);
+        assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![1, 3]);
 
         // Remove head value 1
         index.remove(b"key", |v| *v == 1);
-        assert_eq!(index.get(b"key").collect::<Vec<_>>(), vec![3]);
+        assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![3]);
     }
 
     #[test_traced]
@@ -178,21 +187,21 @@ mod tests {
         index.insert(b"\0\0", 2); // Maps to [0, 0]
 
         // All keys map to [0, 0], so all values should be returned
-        let mut values = index.get(b"").collect::<Vec<_>>();
+        let mut values = index.get(b"").copied().collect::<Vec<_>>();
         values.sort();
         assert_eq!(values, vec![0, 1, 2]);
 
-        let mut values = index.get(b"\0").collect::<Vec<_>>();
+        let mut values = index.get(b"\0").copied().collect::<Vec<_>>();
         values.sort();
         assert_eq!(values, vec![0, 1, 2]);
 
-        let mut values = index.get(b"\0\0").collect::<Vec<_>>();
+        let mut values = index.get(b"\0\0").copied().collect::<Vec<_>>();
         values.sort();
         assert_eq!(values, vec![0, 1, 2]);
 
         // Remove a specific value
         index.remove(b"", |v| *v == 1);
-        let mut values = index.get(b"").collect::<Vec<_>>();
+        let mut values = index.get(b"").copied().collect::<Vec<_>>();
         values.sort();
         assert_eq!(values, vec![0, 2]);
     }
