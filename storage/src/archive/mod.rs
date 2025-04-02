@@ -39,8 +39,8 @@
 //! Because a truncated representation of a key is only ever stored in memory, it is possible (and
 //! expected) that two keys will eventually be represented by the same truncated key. To handle this
 //! case, `Archive` must check the persisted form of all conflicting keys to ensure data from the
-//! correct key is returned. To support efficient checks, `Archive` keeps a linked list of all keys
-//! with the same truncated prefix:
+//! correct key is returned. To support efficient checks, `Archive` (via [Index](crate::index::Index))
+//! keeps a linked list of all keys with the same truncated prefix:
 //!
 //! ```rust
 //! struct Record {
