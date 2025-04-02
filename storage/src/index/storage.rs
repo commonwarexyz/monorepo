@@ -13,6 +13,53 @@ struct Record<V> {
     next: Option<Box<Record<V>>>,
 }
 
+pub struct ValuesMut<'a, V> {
+    record: &'a mut Record<V>,
+}
+
+impl<'a, V> ValuesMut<'a, V> {
+    pub fn insert(&mut self, value: V) {
+        self.record.next = Some(Box::new(Record {
+            value,
+            next: self.record.next.take(),
+        }));
+    }
+
+    pub fn remove(&mut self, prune: impl Fn(&V) -> bool) {
+        // Start with a direct mutable reference to the head
+        let head = &mut *self.record; // Dereference to &mut Record<V>
+
+        // Handle pruning at the head
+        while prune(&head.value) {
+            if let Some(next) = head.next.take() {
+                let next_record = *next; // Unbox the next record
+                head.value = next_record.value;
+                head.next = next_record.next;
+            } else {
+                break; // List is empty after head
+            }
+        }
+
+        // Traverse and prune the rest of the list
+        let mut current = &mut head.next; // &mut Option<Box<Record<V>>>
+        loop {
+            if let Some(next_box) = current {
+                if prune(&next_box.value) {
+                    // Prune the current node
+                    *current = next_box.next.take();
+                    continue;
+                }
+            } else {
+                break;
+            }
+            // Advance to the next node
+            if let Some(next_box) = current {
+                current = &mut next_box.next;
+            }
+        }
+    }
+}
+
 /// An iterator over all values associated with a translated key.
 pub struct ValueIterator<'a, V> {
     next: Option<&'a Record<V>>,
@@ -151,6 +198,13 @@ impl<T: Translator, V> Index<T, V> {
             Some(head) => head.iter_mut(),
             None => MutableValueIterator::empty(),
         }
+    }
+
+    pub fn values_mut(&mut self, key: &[u8]) -> Option<ValuesMut<'_, V>> {
+        let translated_key = self.translator.transform(key);
+        self.map
+            .get_mut(&translated_key)
+            .map(|record| ValuesMut { record })
     }
 
     /// Remove values associated with the key that match the `prune` predicate.
