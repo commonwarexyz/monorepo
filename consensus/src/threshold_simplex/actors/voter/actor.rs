@@ -3,8 +3,8 @@ use crate::{
     threshold_simplex::{
         actors::resolver,
         types::{
-            Activity, ConflictingNotarize, Context, Finalization, Finalize, Notarization, Notarize,
-            Nullification, Nullify, Proposal, View,
+            Activity, ConflictingFinalize, ConflictingNotarize, Context, Finalization, Finalize,
+            Notarization, Notarize, Nullification, Nullify, NullifyFinalize, Proposal, View,
         },
     },
     Automaton, Relay, Reporter, ThresholdSupervisor, LATENCY,
@@ -226,11 +226,7 @@ impl<
         true
     }
 
-    async fn add_verified_nullify(
-        &mut self,
-        public_key_index: u32,
-        nullify: wire::Nullify,
-    ) -> bool {
+    async fn add_verified_nullify(&mut self, public_key_index: u32, nullify: Nullify) -> bool {
         // Check if already issued finalize
         let finalize = self.finalizers.get(&public_key_index);
         if finalize.is_none() {
@@ -247,18 +243,17 @@ impl<
             .get(&public_key_index)
             .unwrap();
         let finalize_proposal = finalize.message.proposal.as_ref().unwrap();
-        let proof = Prover::<D>::serialize_nullify_finalize(
-            self.view,
-            finalize_proposal.parent,
-            &finalize.digest,
-            &finalize.message.proposal_signature,
-            &nullify.view_signature,
+        let activity = NullifyFinalize::new(
+            finalize_proposal,
+            finalize.message.proposal_signature,
+            nullify.view_signature,
         );
-        self.supervisor.report(NULLIFY_AND_FINALIZE, proof).await;
+        self.reporter
+            .report(Activity::NullifyFinalize(activity))
+            .await;
         warn!(
             view = self.view,
             signer = public_key_index,
-            activity = NULLIFY_AND_FINALIZE,
             "recorded fault"
         );
         false
@@ -267,32 +262,30 @@ impl<
     async fn add_verified_finalize(
         &mut self,
         public_key_index: u32,
-        finalize: Parsed<wire::Finalize, D>,
+        finalize: Finalize<D>,
     ) -> bool {
         // Check if also issued nullify
-        let proposal = finalize.message.proposal.as_ref().unwrap();
+        let proposal = finalize.proposal;
         let null = self.nullifies.get(&public_key_index);
         if let Some(null) = null {
             // Create fault
-            let proof = Prover::<D>::serialize_nullify_finalize(
-                self.view,
-                proposal.parent,
-                &finalize.digest,
-                &finalize.message.proposal_signature,
-                &null.view_signature,
+            let activity = NullifyFinalize::new(
+                proposal,
+                finalize.message.proposal_signature,
+                null.view_signature,
             );
-            self.supervisor.report(NULLIFY_AND_FINALIZE, proof).await;
+            self.reporter
+                .report(Activity::NullifyFinalize(activity))
+                .await;
             warn!(
                 view = self.view,
                 signer = public_key_index,
-                activity = NULLIFY_AND_FINALIZE,
                 "recorded fault"
             );
             return false;
         }
         // Compute proposal digest
-        let message = proposal_message(proposal.view, proposal.parent, &finalize.digest);
-        let proposal_digest = hash(&message);
+        let proposal_digest = proposal.digest();
 
         // Check if already finalized
         if let Some(previous_finalize) = self.finalizers.get(&public_key_index) {
@@ -314,20 +307,18 @@ impl<
                 .get(&public_key_index)
                 .unwrap();
             let previous_proposal = previous_finalize.message.proposal.as_ref().unwrap();
-            let proof = Prover::<D>::serialize_conflicting_finalize(
-                self.view,
-                previous_proposal.parent,
-                &previous_finalize.digest,
-                &previous_finalize.message.proposal_signature,
-                proposal.parent,
-                &finalize.digest,
-                &finalize.message.proposal_signature,
+            let activity = ConflictingFinalize::new(
+                previous_proposal,
+                previous_finalize.message.proposal_signature,
+                proposal,
+                finalize.message.proposal_signature,
             );
-            self.supervisor.report(CONFLICTING_FINALIZE, proof).await;
+            self.reporter
+                .report(Activity::ConflictingFinalize(activity))
+                .await;
             warn!(
                 view = self.view,
                 signer = public_key_index,
-                activity = CONFLICTING_FINALIZE,
                 "recorded fault"
             );
             return false;
@@ -343,13 +334,12 @@ impl<
         }
         let entry = self.finalizes.entry(proposal_digest).or_default();
         let signature = &finalize.message.proposal_signature;
-        let proof = Prover::<D>::serialize_proposal(proposal, signature);
         entry.insert(public_key_index, finalize);
-        self.supervisor.report(FINALIZE, proof).await;
+        self.supervisor.report(Activity::Finalize(finalize)).await;
         true
     }
 
-    fn add_verified_notarization(&mut self, notarization: Parsed<wire::Notarization, D>) -> bool {
+    fn add_verified_notarization(&mut self, notarization: Notarization<D>) -> bool {
         // If already have notarization, ignore
         if self.notarization.is_some() {
             return false;
@@ -361,17 +351,14 @@ impl<
 
         // If proposal is missing, set it
         let proposal = notarization.message.proposal.as_ref().unwrap().clone();
-        self.add_verified_proposal(Parsed {
-            message: proposal,
-            digest: notarization.digest,
-        });
+        self.add_verified_proposal(proposal);
 
         // Store the notarization
         self.notarization = Some(notarization);
         true
     }
 
-    fn add_verified_nullification(&mut self, nullification: wire::Nullification) -> bool {
+    fn add_verified_nullification(&mut self, nullification: Nullification) -> bool {
         // If already have nullification, ignore
         if self.nullification.is_some() {
             return false;
@@ -386,7 +373,7 @@ impl<
         true
     }
 
-    fn add_verified_finalization(&mut self, finalization: Parsed<wire::Finalization, D>) -> bool {
+    fn add_verified_finalization(&mut self, finalization: Finalization<D>) -> bool {
         // If already have finalization, ignore
         if self.finalization.is_some() {
             return false;
@@ -398,21 +385,14 @@ impl<
 
         // If proposal is missing, set it
         let proposal = finalization.message.proposal.as_ref().unwrap().clone();
-        self.add_verified_proposal(Parsed {
-            message: proposal,
-            digest: finalization.digest,
-        });
+        self.add_verified_proposal(proposal);
 
         // Store the finalization
         self.finalization = Some(finalization);
         true
     }
 
-    async fn notarizable(
-        &mut self,
-        threshold: u32,
-        force: bool,
-    ) -> Option<Parsed<wire::Notarization, D>> {
+    async fn notarizable(&mut self, threshold: u32, force: bool) -> Option<Notarization<D>> {
         // Ensure we haven't already broadcast
         if !force && (self.broadcast_notarization || self.broadcast_nullification) {
             // We want to broadcast a notarization, even if we haven't yet verified a proposal.
