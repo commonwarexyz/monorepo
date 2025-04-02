@@ -3,7 +3,10 @@ use commonware_codec::{Codec, Error, Reader, SizedCodec, Writer};
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{Public, Signature},
-        ops::partial_verify_multiple_messages,
+        ops::{
+            aggregate_signatures, aggregate_verify_multiple_messages,
+            partial_verify_multiple_messages,
+        },
         poly::{PartialSignature, Poly},
     },
     hash, sha256, Digest,
@@ -232,6 +235,27 @@ impl<D: Digest> Notarization<D> {
             proposal_signature,
             seed_signature,
         }
+    }
+
+    // TODO: modify threshold funcs to allow references
+    pub fn verify(
+        &self,
+        public_key: &Public,
+        notarize_namespace: &[u8],
+        seed_namespace: &[u8],
+    ) -> bool {
+        let notarize_message = self.proposal.encode();
+        let notarize_message = (Some(notarize_namespace), notarize_message.as_ref());
+        let seed_message = view_message(self.proposal.view);
+        let seed_message = (Some(seed_namespace), seed_message.as_ref());
+        let signature = aggregate_signatures(&[self.proposal_signature, self.seed_signature]);
+        aggregate_verify_multiple_messages(
+            public_key,
+            &[notarize_message, seed_message],
+            &signature,
+            1,
+        )
+        .is_ok()
     }
 }
 

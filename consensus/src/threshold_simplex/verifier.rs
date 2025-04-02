@@ -13,6 +13,8 @@ use commonware_cryptography::{
 };
 use tracing::debug;
 
+// TODO: remove and unify with types
+
 pub fn verify_notarization<
     D: Digest,
     S: ThresholdSupervisor<Index = View, Identity = poly::Public>,
