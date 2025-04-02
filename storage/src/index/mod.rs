@@ -93,4 +93,107 @@ mod tests {
             assert!(res.is_some());
         }
     }
+
+    #[test_traced]
+    fn test_index_key_lengths_and_collisions() {
+        let (_, context, _) = Executor::default();
+        let mut index = Index::init(context.clone(), TwoCap);
+
+        // Insert keys of different lengths
+        index.insert(b"a", 1); // Shorter than cap (1 byte -> "a\0")
+        index.insert(b"ab", 2); // Equal to cap (2 bytes -> "ab")
+        index.insert(b"abc", 3); // Longer than cap (3 bytes -> "ab")
+
+        // Check that "a" maps to "a\0"
+        assert_eq!(index.get(b"a").collect::<Vec<_>>(), vec![1]);
+
+        // Check that "ab" and "abc" map to "ab" due to TwoCap truncation
+        let mut values = index.get(b"ab").collect::<Vec<_>>();
+        values.sort();
+        assert_eq!(values, vec![2, 3]);
+
+        let mut values = index.get(b"abc").collect::<Vec<_>>();
+        values.sort();
+        assert_eq!(values, vec![2, 3]);
+
+        // Insert another value for "ab"
+        index.insert(b"ab", 4);
+        // Expected order: head=2 (first "ab"), then 4 (new "ab"), then 3 (from "abc")
+        assert_eq!(index.get(b"ab").collect::<Vec<_>>(), vec![2, 4, 3]);
+
+        // Remove a specific value
+        index.remove(b"ab", |v| *v == 4);
+        assert_eq!(index.get(b"ab").collect::<Vec<_>>(), vec![2, 3]);
+
+        // Remove all values for "ab"
+        index.remove(b"ab", |_| true);
+        assert_eq!(index.get(b"ab").collect::<Vec<_>>(), Vec::<u64>::new());
+        assert_eq!(index.len(), 1); // Only "a" remains
+
+        // Check that "a" is still present
+        assert_eq!(index.get(b"a").collect::<Vec<_>>(), vec![1]);
+    }
+
+    #[test_traced]
+    fn test_index_value_order() {
+        let (_, context, _) = Executor::default();
+        let mut index = Index::init(context.clone(), TwoCap);
+
+        index.insert(b"key", 1);
+        index.insert(b"key", 2);
+        index.insert(b"key", 3);
+
+        // Values should be: head=1 (first insertion), then 3 (last insertion), then 2 (middle insertion)
+        //
+        // While we make no guarantees about the order of values to external clients, we should
+        // take note if the internal order is different than expected (as it may be indicative of some bug).
+        assert_eq!(index.get(b"key").collect::<Vec<_>>(), vec![1, 3, 2]);
+    }
+
+    #[test_traced]
+    fn test_index_remove_specific() {
+        let (_, context, _) = Executor::default();
+        let mut index = Index::init(context.clone(), TwoCap);
+
+        index.insert(b"key", 1);
+        index.insert(b"key", 2);
+        index.insert(b"key", 3);
+
+        // Remove value 2
+        index.remove(b"key", |v| *v == 2);
+        assert_eq!(index.get(b"key").collect::<Vec<_>>(), vec![1, 3]);
+
+        // Remove head value 1
+        index.remove(b"key", |v| *v == 1);
+        assert_eq!(index.get(b"key").collect::<Vec<_>>(), vec![3]);
+    }
+
+    #[test_traced]
+    fn test_index_empty_key() {
+        let (_, context, _) = Executor::default();
+        let mut index = Index::init(context.clone(), TwoCap);
+
+        index.insert(b"", 0); // Maps to [0, 0]
+        index.insert(b"\0", 1); // Maps to [0, 0]
+        index.insert(b"\0\0", 2); // Maps to [0, 0]
+
+        // All keys map to [0, 0], so all values should be returned
+        let mut values = index.get(b"").collect::<Vec<_>>();
+        values.sort();
+        assert_eq!(values, vec![0, 1, 2]);
+
+        let mut values = index.get(b"\0").collect::<Vec<_>>();
+        values.sort();
+        assert_eq!(values, vec![0, 1, 2]);
+
+        let mut values = index.get(b"\0\0").collect::<Vec<_>>();
+        values.sort();
+        assert_eq!(values, vec![0, 1, 2]);
+
+        // Remove a specific value
+        index.remove(b"", |v| *v == 1);
+        let mut values = index.get(b"").collect::<Vec<_>>();
+        values.sort();
+        assert_eq!(values, vec![0, 2]);
+    }
 }
