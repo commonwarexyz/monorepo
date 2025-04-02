@@ -694,28 +694,6 @@ impl<D: Digest> Response<D> {
             nullifications,
         }
     }
-
-    pub fn verify(
-        &self,
-        public_key: &Public,
-        notarize_namespace: &[u8],
-        seed_namespace: &[u8],
-    ) -> bool {
-        // TODO: ensure notarizations and nullifications are unique
-        // TODO: use single aggregate signature for all notarizations and nullifications verification (need to be
-        // sure to only include unique notarizations and nullifications and seeds to avoid attack)
-        for notarization in &self.notarizations {
-            if !notarization.verify(public_key, notarize_namespace, seed_namespace) {
-                return false;
-            }
-        }
-        for nullification in &self.nullifications {
-            if !nullification.verify(public_key, notarize_namespace, seed_namespace) {
-                return false;
-            }
-        }
-        true
-    }
 }
 
 impl<D: Digest> Codec for Response<D> {

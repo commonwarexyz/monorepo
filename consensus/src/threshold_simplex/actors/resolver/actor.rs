@@ -443,8 +443,8 @@ impl<
                             continue;
                         },
                     };
-                    match payload {
-                        wire::backfiller::Payload::Request(request) => {
+                    match msg{
+                        Backfiller::Request(request) => {
                             let mut populated_bytes = 0;
                             let mut notarizations = Vec::new();
                             let mut missing_notarizations = Vec::new();
@@ -494,21 +494,14 @@ impl<
 
                             // Send response
                             debug!(sender = ?s, ?notarizations, ?missing_notarizations, ?nullifications, ?missing_nullifications, "sending response");
-                            let response = wire::Backfiller {
-                                id: msg.id,
-                                payload: Some(wire::backfiller::Payload::Response(wire::Response {
-                                    notarizations: notarizations_found,
-                                    nullifications: nullifications_found,
-                                })),
-                            }
-                            .encode_to_vec()
-                            .into();
+                            let response = Response::new(msg.id, notarizations_found, nullifications_found);
+                            let response = Backfiller::Response(response);
                             sender
                                 .send(Recipients::One(s), response, false)
                                 .await
                                 .unwrap();
                         },
-                        wire::backfiller::Payload::Response(response) => {
+                        Backfiller::Response(response) => {
                             // Ensure we were waiting for this response
                             let Some(request) = self.requester.handle(&s, msg.id) else {
                                 debug!(sender = ?s, "unexpected message");
@@ -550,17 +543,19 @@ impl<
                                     debug!(view, sender = ?s, "unnecessary notarization");
                                     continue;
                                 }
-                                if !verify_notarization::<D, S>(&self.supervisor, &self.notarize_namespace, &self.seed_namespace, &notarization) {
+                                let Some(identity) = self.supervisor.identity(view) else {
+                                    warn!(view, sender = ?s, "missing identity");
+                                    continue;
+                                };
+                                let public_key = poly::public(identity);
+                                if !notarization.verify(public_key, &self.notarize_namespace, &self.seed_namespace) {
                                     warn!(view, sender = ?s, "invalid notarization");
                                     self.requester.block(s.clone());
                                     continue;
                                 }
                                 self.required.remove(&entry);
                                 self.notarizations.insert(view, notarization.clone());
-                                voter.notarization(Parsed{
-                                    message: notarization,
-                                    digest: payload,
-                                }).await;
+                                voter.notarization(notarization).await;
                                 notarizations_found.insert(view);
                             }
 
@@ -572,7 +567,12 @@ impl<
                                     debug!(view, sender = ?s, "unnecessary nullification");
                                     continue;
                                 }
-                                if !verify_nullification::<S>(&self.supervisor, &self.nullify_namespace, &self.seed_namespace, &nullification) {
+                                let Some(identity) = self.supervisor.identity(view) else {
+                                    warn!(view, sender = ?s, "missing identity");
+                                    continue;
+                                };
+                                let public_key = poly::public(identity);
+                                if !nullification.verify(public_key, &self.nullify_namespace, &self.seed_namespace) {
                                     warn!(view, sender = ?s, "invalid nullification");
                                     self.requester.block(s.clone());
                                     continue;
