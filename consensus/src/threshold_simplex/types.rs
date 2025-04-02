@@ -101,13 +101,13 @@ impl<D: Digest> Codec for Voter<D> {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Proposal<D: Digest> {
-    pub view: u64,
-    pub parent: u64,
+    pub view: View,
+    pub parent: View,
     pub payload: D,
 }
 
 impl<D: Digest> Proposal<D> {
-    pub fn new(view: u64, parent: u64, payload: D) -> Self {
+    pub fn new(view: View, parent: View, payload: D) -> Self {
         Proposal {
             view,
             parent,
@@ -132,8 +132,8 @@ impl<D: Digest> Codec for Proposal<D> {
     }
 
     fn read(reader: &mut impl Reader) -> Result<Self, Error> {
-        let view = u64::read(reader)?;
-        let parent = u64::read(reader)?;
+        let view = View::read(reader)?;
+        let parent = View::read(reader)?;
         let payload = D::read(reader)?;
         Ok(Proposal {
             view,
@@ -144,7 +144,7 @@ impl<D: Digest> Codec for Proposal<D> {
 }
 
 impl<D: Digest> SizedCodec for Proposal<D> {
-    const LEN_ENCODED: usize = u64::LEN_ENCODED + u64::LEN_ENCODED + D::LEN_ENCODED;
+    const LEN_ENCODED: usize = View::LEN_ENCODED + View::LEN_ENCODED + D::LEN_ENCODED;
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -289,14 +289,14 @@ impl<D: Digest> SizedCodec for Notarization<D> {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Nullify {
-    pub view: u64,
+    pub view: View,
     pub view_signature: PartialSignature,
     pub seed_signature: PartialSignature,
 }
 
 impl Nullify {
     pub fn new(
-        view: u64,
+        view: View,
         view_signature: PartialSignature,
         seed_signature: PartialSignature,
     ) -> Self {
@@ -340,7 +340,7 @@ impl Codec for Nullify {
     }
 
     fn read(reader: &mut impl Reader) -> Result<Self, Error> {
-        let view = u64::read(reader)?;
+        let view = View::read(reader)?;
         let view_signature = PartialSignature::read(reader)?;
         let seed_signature = PartialSignature::read(reader)?;
         Ok(Nullify {
@@ -353,18 +353,18 @@ impl Codec for Nullify {
 
 impl SizedCodec for Nullify {
     const LEN_ENCODED: usize =
-        u64::LEN_ENCODED + PartialSignature::LEN_ENCODED + PartialSignature::LEN_ENCODED;
+        View::LEN_ENCODED + PartialSignature::LEN_ENCODED + PartialSignature::LEN_ENCODED;
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Nullification {
-    pub view: u64,
+    pub view: View,
     pub view_signature: Signature,
     pub seed_signature: Signature,
 }
 
 impl Nullification {
-    pub fn new(view: u64, view_signature: Signature, seed_signature: Signature) -> Self {
+    pub fn new(view: View, view_signature: Signature, seed_signature: Signature) -> Self {
         Nullification {
             view,
             view_signature,
@@ -404,7 +404,7 @@ impl Codec for Nullification {
     }
 
     fn read(reader: &mut impl Reader) -> Result<Self, Error> {
-        let view = u64::read(reader)?;
+        let view = View::read(reader)?;
         let view_signature = Signature::read(reader)?;
         let seed_signature = Signature::read(reader)?;
         Ok(Nullification {
@@ -416,7 +416,7 @@ impl Codec for Nullification {
 }
 
 impl SizedCodec for Nullification {
-    const LEN_ENCODED: usize = u64::LEN_ENCODED + Signature::LEN_ENCODED + Signature::LEN_ENCODED;
+    const LEN_ENCODED: usize = View::LEN_ENCODED + Signature::LEN_ENCODED + Signature::LEN_ENCODED;
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -550,13 +550,13 @@ impl<D: Digest> SizedCodec for Finalization<D> {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Request {
-    pub id: u64,
-    pub notarizations: Vec<u64>,
-    pub nullifications: Vec<u64>,
+    pub id: View,
+    pub notarizations: Vec<View>,
+    pub nullifications: Vec<View>,
 }
 
 impl Request {
-    pub fn new(id: u64, notarizations: Vec<u64>, nullifications: Vec<u64>) -> Self {
+    pub fn new(id: View, notarizations: Vec<View>, nullifications: Vec<View>) -> Self {
         Request {
             id,
             notarizations,
@@ -579,9 +579,9 @@ impl Codec for Request {
     }
 
     fn read(reader: &mut impl Reader) -> Result<Self, Error> {
-        let id = u64::read(reader)?;
-        let notarizations = Vec::<u64>::read(reader)?;
-        let nullifications = Vec::<u64>::read(reader)?;
+        let id = View::read(reader)?;
+        let notarizations = Vec::<View>::read(reader)?;
+        let nullifications = Vec::<View>::read(reader)?;
         Ok(Request {
             id,
             notarizations,
@@ -592,14 +592,14 @@ impl Codec for Request {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Response<D: Digest> {
-    pub id: u64,
+    pub id: View,
     pub notarizations: Vec<Notarization<D>>,
     pub nullifications: Vec<Nullification>,
 }
 
 impl<D: Digest> Response<D> {
     pub fn new(
-        id: u64,
+        id: View,
         notarizations: Vec<Notarization<D>>,
         nullifications: Vec<Nullification>,
     ) -> Self {
@@ -647,7 +647,7 @@ impl<D: Digest> Codec for Response<D> {
     }
 
     fn read(reader: &mut impl Reader) -> Result<Self, Error> {
-        let id = u64::read(reader)?;
+        let id = View::read(reader)?;
         // TODO: limit size of notarizations and nullifications read (to avoid runaway memory allocation for improerly
         // provide "len" encoding)
         let notarizations = Vec::<Notarization<D>>::read(reader)?;
@@ -778,4 +778,84 @@ impl<D: Digest> Codec for Activity<D> {
             )),
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConflictingNotarize<D: Digest> {
+    pub proposal_1: Proposal<D>,
+    pub signature_1: PartialSignature,
+    pub proposal_2: Proposal<D>,
+    pub signature_2: PartialSignature,
+}
+
+impl<D: Digest> ConflictingNotarize<D> {
+    pub fn new(
+        proposal_1: Proposal<D>,
+        signature_1: PartialSignature,
+        proposal_2: Proposal<D>,
+        signature_2: PartialSignature,
+    ) -> Self {
+        ConflictingNotarize {
+            proposal_1,
+            signature_1,
+            proposal_2,
+            signature_2,
+        }
+    }
+
+    pub fn verify(
+        &self,
+        identity: &Poly<Public>,
+        public_key_index: Option<u32>,
+        notarize_namespace: &[u8],
+    ) -> bool {
+        let public_key_index = public_key_index.unwrap_or(self.signature_1.index);
+        if self.proposal_1.view != self.proposal_2.view {
+            return false;
+        }
+        let notarize_message_1 = self.proposal_1.encode();
+        let notarize_message_1 = (Some(notarize_namespace), notarize_message_1.as_ref());
+        let notarize_message_2 = self.proposal_2.encode();
+        let notarize_message_2 = (Some(notarize_namespace), notarize_message_2.as_ref());
+        partial_verify_multiple_messages(
+            identity,
+            public_key_index,
+            &[notarize_message_1, notarize_message_2],
+            &[self.signature_1.clone(), self.signature_2.clone()],
+        )
+        .is_ok()
+    }
+}
+
+impl<D: Digest> Codec for ConflictingNotarize<D> {
+    fn write(&self, writer: &mut impl Writer) {
+        self.proposal_1.write(writer);
+        self.signature_1.write(writer);
+        self.proposal_2.write(writer);
+        self.signature_2.write(writer);
+    }
+
+    fn len_encoded(&self) -> usize {
+        Self::LEN_ENCODED
+    }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, Error> {
+        let proposal_1 = Proposal::read(reader)?;
+        let signature_1 = PartialSignature::read(reader)?;
+        let proposal_2 = Proposal::read(reader)?;
+        let signature_2 = PartialSignature::read(reader)?;
+        Ok(ConflictingNotarize {
+            proposal_1,
+            signature_1,
+            proposal_2,
+            signature_2,
+        })
+    }
+}
+
+impl<D: Digest> SizedCodec for ConflictingNotarize<D> {
+    const LEN_ENCODED: usize = Proposal::<D>::LEN_ENCODED
+        + PartialSignature::LEN_ENCODED
+        + Proposal::<D>::LEN_ENCODED
+        + PartialSignature::LEN_ENCODED;
 }
