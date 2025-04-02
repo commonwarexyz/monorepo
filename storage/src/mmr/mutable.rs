@@ -11,13 +11,16 @@
 //! Keys with values are called _active_, and an operation is called _active_ if (1) its key is
 //! active, (2) it is an update operation, and (3) it is the most recent operation for that key.
 
-use crate::journal::fixed::{Config as JConfig, Journal};
-use crate::mmr::{
-    iterator::{leaf_num_to_pos, leaf_pos_to_num},
-    journaled::{Config as MmrConfig, Mmr},
-    operation::{Operation, Type},
-    verification::Proof,
-    Error,
+use crate::{
+    index::{translator::EightCap, Index},
+    journal::fixed::{Config as JConfig, Journal},
+    mmr::{
+        iterator::{leaf_num_to_pos, leaf_pos_to_num},
+        journaled::{Config as MmrConfig, Mmr},
+        operation::{Operation, Type},
+        verification::Proof,
+        Error,
+    },
 };
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{Blob, Clock, Metrics, Storage as RStorage};
@@ -26,7 +29,6 @@ use futures::{
     future::{try_join_all, TryFutureExt},
     try_join,
 };
-use std::collections::HashMap;
 use tracing::{debug, warn};
 
 /// Configuration for a Mutable MMR.
@@ -69,7 +71,7 @@ pub struct MutableMmr<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Ar
 
     /// A map from each key to the location in the log containing its most recent update. Only
     /// contains the keys that currently have a value (that is, deleted keys are not in the map).
-    snapshot: HashMap<K, u64>,
+    snapshot: Index<EightCap, u64>,
 
     /// The number of operations that are pending commit.
     uncommitted_ops: u64,
@@ -82,7 +84,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
     /// discarded and the state of the store will be as of the last committed operation.
     pub async fn init(context: E, hasher: &mut H, cfg: Config) -> Result<Self, Error> {
         let mut mmr = Mmr::init(
-            context.clone(),
+            context.with_label("mmr"),
             MmrConfig {
                 journal_partition: cfg.mmr_journal_partition,
                 metadata_partition: cfg.mmr_metadata_partition,
@@ -92,7 +94,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
         .await?;
 
         let mut log = Journal::init(
-            context,
+            context.with_label("log"),
             JConfig {
                 partition: cfg.log_journal_partition,
                 items_per_blob: cfg.log_items_per_blob,
@@ -148,7 +150,8 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
         // Replay the log to generate the snapshot. TODO: Because all operations are idempotent, we
         // could parallelize this via replay_all by keeping track of the location of each operation
         // and only applying it if it is more recent than the last operation for the same key.
-        let mut snapshot = HashMap::new();
+        let mut snapshot: Index<EightCap, u64> =
+            Index::init(context.with_label("snapshot"), EightCap);
         let mut inactivity_floor_loc = 0;
         let oldest_retained_pos = mmr.oldest_retained_pos().unwrap_or(mmr.size());
         let start_leaf_num = leaf_pos_to_num(oldest_retained_pos).unwrap();
@@ -157,10 +160,23 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
             let op: Operation<K, V> = log.read(i).await?;
             match op.to_type() {
                 Type::Deleted(key) => {
-                    snapshot.remove(&key);
+                    snapshot.remove(&key, |loc| *loc == i);
                 }
                 Type::Update(key, _) => {
-                    snapshot.insert(key, i);
+                    // If the key is already in the snapshot, then update its location.
+                    let mut snapshot_updated = false;
+                    for loc in snapshot.get_mut(&key) {
+                        let op = log.read(*loc).await?;
+                        if op.to_key() == key {
+                            snapshot_updated = true;
+                            *loc = i;
+                            break;
+                        }
+                    }
+                    if !snapshot_updated {
+                        // The key was not already in the snapshot, so add it.
+                        snapshot.insert(&key, i);
+                    }
                 }
                 Type::Commit(loc) => {
                     inactivity_floor_loc = loc;
@@ -187,20 +203,26 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
 
     /// Get the value of `key` in the store, or None if it has no value.
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
-        let loc = match self.snapshot.get(key) {
-            Some(loc) => loc,
-            None => return Ok(None),
-        };
+        let loc_iter = self.snapshot.get(key);
 
-        let op = self.log.read(*loc).await?;
-        let v = op.to_value();
-        assert!(
-            v.is_some(),
-            "snapshot should only reference non-empty values {:?}",
-            key
-        );
+        for loc in loc_iter {
+            let op = self.log.read(*loc).await?;
+            match op.to_type() {
+                Type::Update(k, v) => {
+                    if k == *key {
+                        return Ok(Some(v));
+                    }
+                }
+                _ => {
+                    panic!(
+                        "snapshot should only reference update operations. key={}",
+                        key
+                    );
+                }
+            }
+        }
 
-        Ok(v)
+        Ok(None)
     }
 
     /// Get the number of operations that have been applied to this store, including those that are
@@ -222,24 +244,36 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
     pub async fn update(&mut self, hasher: &mut H, key: K, value: V) -> Result<(), Error> {
         let new_loc = self.op_count();
 
-        // Update the snapshot.
-        if let Some(loc) = self.snapshot.get_mut(&key) {
+        // Update the snapshot if the key is already in it.
+        let mut snapshot_updated = false;
+        let loc_iter = self.snapshot.get_mut(&key);
+        for loc in loc_iter {
             let op = self.log.read(*loc).await?;
-            let last_value = op.to_value();
-            assert!(
-                last_value.is_some(),
-                "snapshot should only reference non-empty values {:?}",
-                key
-            );
-            if value == last_value.unwrap() {
-                // Trying to assign the same value is a no-op.
-                return Ok(());
+            match op.to_type() {
+                Type::Update(k, v) => {
+                    if k == key {
+                        if v == value {
+                            // Trying to assign the same value is a no-op.
+                            return Ok(());
+                        }
+                        *loc = new_loc;
+                        snapshot_updated = true;
+                        break;
+                    }
+                }
+                _ => {
+                    panic!(
+                        "snapshot should only reference update operations. key={}",
+                        key
+                    );
+                }
             }
-            *loc = new_loc;
-        } else {
-            self.snapshot.insert(key.clone(), new_loc);
         }
 
+        if !snapshot_updated {
+            // The key was not already in the snapshot, so add it.
+            self.snapshot.insert(&key, new_loc);
+        }
         let op = Operation::update(key, value);
         self.apply_op(hasher, op).await?;
 
@@ -250,10 +284,31 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
     /// no-op. The operation is reflected in the snapshot, but will be subject to rollback until the
     /// next successful `commit`.
     pub async fn delete(&mut self, hasher: &mut H, key: K) -> Result<(), Error> {
-        if self.snapshot.remove(&key).is_none() {
+        let mut old_loc: Option<u64> = None;
+        for loc in self.snapshot.get(&key) {
+            let op = self.log.read(*loc).await?;
+            match op.to_type() {
+                Type::Update(k, _) => {
+                    if k == key {
+                        old_loc = Some(*loc);
+                        break;
+                    }
+                }
+                _ => {
+                    panic!(
+                        "snapshot should only reference update operations. key={}",
+                        key
+                    );
+                }
+            }
+        }
+
+        let Some(old_loc) = old_loc else {
+            // The key wasn't in the snapshot, so this is a no-op.
             return Ok(());
         };
 
+        self.snapshot.remove(&key, |loc| *loc == old_loc);
         self.apply_op(hasher, Operation::delete(key)).await?;
 
         Ok(())
@@ -266,17 +321,14 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
 
     /// Update the operations MMR with the given operation, and append the operation to the log. The
     /// `commit` method must be called to make any applied operation persistent & recoverable.
-    async fn apply_op(&mut self, hasher: &mut H, op: Operation<K, V>) -> Result<(), Error> {
+    async fn apply_op(&mut self, hasher: &mut H, op: Operation<K, V>) -> Result<u64, Error> {
         // Update the ops MMR.
         let digest = Self::op_digest(hasher, &op);
         self.ops.add(hasher, &digest);
-
-        // Append the operation to the log.
-        self.log.append(op).await?;
-
         self.uncommitted_ops += 1;
 
-        Ok(())
+        // Append the operation to the log.
+        self.log.append(op).await.map_err(Error::JournalError)
     }
 
     /// Generate and return:
@@ -375,6 +427,35 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
         Ok(())
     }
 
+    // Moves the given operation to the tip of the log if it is active, rendering its old location
+    // inactive. If the operation was not active, then this is a no-op.
+    async fn move_op_if_active(
+        &mut self,
+        hasher: &mut H,
+        op: Operation<K, V>,
+        old_loc: u64,
+    ) -> Result<(), Error> {
+        let key = op.to_key();
+        let new_loc = self.op_count();
+        let iter = self.snapshot.get_mut(&key);
+        let mut loc_found = false;
+        for loc in iter {
+            if *loc == old_loc {
+                loc_found = true;
+                *loc = new_loc;
+                break;
+            }
+        }
+        if !loc_found {
+            // The operation wasn't active, so no need to move it to the tip.
+            return Ok(());
+        };
+
+        self.apply_op(hasher, op).await?;
+
+        Ok(())
+    }
+
     /// Raise the inactivity floor by exactly `max_steps` steps. Each step either advances over an
     /// inactive operation, or re-applies an active operation to the tip and then advances over it.
     ///
@@ -389,20 +470,12 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
             if self.inactivity_floor_loc == self.op_count() {
                 break;
             }
-
             let op = self.log.read(self.inactivity_floor_loc).await?;
-            let op_count = self.op_count();
-            let key = op.to_key();
-            if let Some(loc) = self.snapshot.get_mut(&key) {
-                if *loc == self.inactivity_floor_loc {
-                    // This operation is active, move it to tip to allow us to continue raising the
-                    // inactivity floor.
-                    *loc = op_count;
-                    self.apply_op(hasher, op.clone()).await?;
-                }
-            }
+            self.move_op_if_active(hasher, op, self.inactivity_floor_loc)
+                .await?;
             self.inactivity_floor_loc += 1;
         }
+
         self.apply_op(hasher, Operation::commit(self.inactivity_floor_loc))
             .await?;
 
@@ -473,6 +546,7 @@ mod test {
     use commonware_cryptography::{hash, sha256::Digest, Hasher as CHasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic::Context, deterministic::Executor, Runner};
+    use std::collections::HashMap;
 
     /// Return a store initialized with a fixed config.
     async fn open_store<B: Blob, E: RStorage<B> + Clock + Metrics>(
@@ -805,6 +879,34 @@ mod test {
             }
             store.simulate_failed_commit_log(&mut hasher).await.unwrap();
             let store = open_store(context.clone(), &mut hasher).await;
+            assert_eq!(store.root(&mut hasher), root);
+        });
+    }
+
+    // Test that replaying multiple updates of the same key on startup doesn't leave behind old data
+    // in the snapshot.
+    #[test_traced("WARN")]
+    pub fn test_mutable_mmr_log_replay() {
+        let (executor, context, _) = Executor::default();
+        executor.start(async move {
+            let mut hasher = Sha256::new();
+            let mut store = open_store(context.clone(), &mut hasher).await;
+
+            // Update the same key many times.
+            const UPDATES: u64 = 100;
+            let k = hash(&UPDATES.to_be_bytes());
+            for i in 0u64..UPDATES {
+                let v = hash(&(i * 1000).to_be_bytes());
+                store.update(&mut hasher, k, v).await.unwrap();
+            }
+            store.commit(&mut hasher).await.unwrap();
+            let root = store.root(&mut hasher);
+            store.close().await.unwrap();
+
+            // Simulate a failed commit and test that the log replay doesn't leave behind old data.
+            let store = open_store(context.clone(), &mut hasher).await;
+            let iter = store.snapshot.get(&k);
+            assert_eq!(iter.cloned().collect::<Vec<_>>().len(), 1);
             assert_eq!(store.root(&mut hasher), root);
         });
     }
