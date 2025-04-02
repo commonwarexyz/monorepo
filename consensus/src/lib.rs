@@ -73,7 +73,7 @@ cfg_if::cfg_if! {
             fn broadcast(&mut self, payload: Self::Digest) -> impl Future<Output = ()> + Send;
         }
 
-        /// Committer is the interface responsible for handling notifications of payload status.
+        /// Reporter is the interface responsible for reporting activity to some external actor.
         pub trait Reporter: Clone + Send + 'static {
             /// Activity is specified by the underlying consensus implementation and can be interpreted if desired.
             ///

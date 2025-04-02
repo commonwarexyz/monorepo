@@ -664,11 +664,118 @@ pub fn view_message(view: View) -> Vec<u8> {
     View::encode(&view)
 }
 
-pub enum Proof<D: Digest> {
+#[derive(Clone, Debug, PartialEq)]
+pub enum Activity<D: Digest> {
     Notarize(Notarize<D>),
     Notarization(Notarization<D>),
     Nullify(Nullify),
     Nullification(Nullification),
     Finalize(Finalize<D>),
     Finalization(Finalization<D>),
+    ConflictingNotarize(ConflictingNotarize<D>),
+    ConflictingFinalize(ConflictingFinalize<D>),
+    NullifyFinalize(NullifyFinalize),
+}
+
+impl<D: Digest> Codec for Activity<D> {
+    fn write(&self, writer: &mut impl Writer) {
+        match self {
+            Activity::Notarize(v) => {
+                writer.write_u8(0);
+                v.write(writer);
+            }
+            Activity::Notarization(v) => {
+                writer.write_u8(1);
+                v.write(writer);
+            }
+            Activity::Nullify(v) => {
+                writer.write_u8(2);
+                v.write(writer);
+            }
+            Activity::Nullification(v) => {
+                writer.write_u8(3);
+                v.write(writer);
+            }
+            Activity::Finalize(v) => {
+                writer.write_u8(4);
+                v.write(writer);
+            }
+            Activity::Finalization(v) => {
+                writer.write_u8(5);
+                v.write(writer);
+            }
+            Activity::ConflictingNotarize(v) => {
+                writer.write_u8(6);
+                v.write(writer);
+            }
+            Activity::ConflictingFinalize(v) => {
+                writer.write_u8(7);
+                v.write(writer);
+            }
+            Activity::NullifyFinalize(v) => {
+                writer.write_u8(8);
+                v.write(writer);
+            }
+        }
+    }
+
+    fn len_encoded(&self) -> usize {
+        (match self {
+            Activity::Notarize(v) => Codec::len_encoded(v),
+            Activity::Notarization(v) => Codec::len_encoded(v),
+            Activity::Nullify(v) => Codec::len_encoded(v),
+            Activity::Nullification(v) => Codec::len_encoded(v),
+            Activity::Finalize(v) => Codec::len_encoded(v),
+            Activity::Finalization(v) => Codec::len_encoded(v),
+            Activity::ConflictingNotarize(v) => Codec::len_encoded(v),
+            Activity::ConflictingFinalize(v) => Codec::len_encoded(v),
+            Activity::NullifyFinalize(v) => Codec::len_encoded(v),
+        }) + 1
+    }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, Error> {
+        let tag = reader.read_u8()?;
+        match tag {
+            0 => {
+                let v = Notarize::read(reader)?;
+                Ok(Activity::Notarize(v))
+            }
+            1 => {
+                let v = Notarization::read(reader)?;
+                Ok(Activity::Notarization(v))
+            }
+            2 => {
+                let v = Nullify::read(reader)?;
+                Ok(Activity::Nullify(v))
+            }
+            3 => {
+                let v = Nullification::read(reader)?;
+                Ok(Activity::Nullification(v))
+            }
+            4 => {
+                let v = Finalize::read(reader)?;
+                Ok(Activity::Finalize(v))
+            }
+            5 => {
+                let v = Finalization::read(reader)?;
+                Ok(Activity::Finalization(v))
+            }
+            6 => {
+                let v = ConflictingNotarize::read(reader)?;
+                Ok(Activity::ConflictingNotarize(v))
+            }
+            7 => {
+                let v = ConflictingFinalize::read(reader)?;
+                Ok(Activity::ConflictingFinalize(v))
+            }
+            8 => {
+                let v = NullifyFinalize::read(reader)?;
+                Ok(Activity::NullifyFinalize(v))
+            }
+            _ => Err(Error::Invalid(
+                "consensus::threshold_simplex::Activity",
+                "Invalid type",
+            )),
+        }
+    }
 }
