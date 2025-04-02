@@ -18,10 +18,22 @@ pub struct ValueIterator<'a, V> {
     next: Option<&'a Record<V>>,
 }
 
+// An iterator over all values associated with a translated key, allowing for mutation.
+pub struct MutableValueIterator<'a, V> {
+    next: Option<&'a mut Record<V>>,
+}
+
 impl<V> ValueIterator<'_, V> {
     /// Create a `ValueIterator` that returns no items.
     fn empty() -> Self {
         ValueIterator { next: None }
+    }
+}
+
+impl<V> MutableValueIterator<'_, V> {
+    /// Create a `MutableValueIterator` that returns no items.
+    fn empty() -> Self {
+        MutableValueIterator { next: None }
     }
 }
 
@@ -40,9 +52,28 @@ impl<'a, V> Iterator for ValueIterator<'a, V> {
     }
 }
 
+impl<'a, V> Iterator for MutableValueIterator<'a, V> {
+    type Item = &'a mut V;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.next.take() {
+            Some(next) => {
+                let loc = &mut next.value;
+                self.next = next.next.as_deref_mut();
+                Some(loc)
+            }
+            None => None,
+        }
+    }
+}
+
 impl<V> Record<V> {
     fn iter(&self) -> ValueIterator<V> {
         ValueIterator { next: Some(self) }
+    }
+
+    fn iter_mut(&mut self) -> MutableValueIterator<V> {
+        MutableValueIterator { next: Some(self) }
     }
 }
 
@@ -110,6 +141,15 @@ impl<T: Translator, V> Index<T, V> {
         match self.map.get(&translated_key) {
             Some(head) => head.iter(),
             None => ValueIterator::empty(),
+        }
+    }
+
+    /// Retrieve all values associated with a translated key, allowing for mutation.
+    pub fn get_mut(&mut self, key: &[u8]) -> MutableValueIterator<V> {
+        let translated_key = self.translator.transform(key);
+        match self.map.get_mut(&translated_key) {
+            Some(head) => head.iter_mut(),
+            None => MutableValueIterator::empty(),
         }
     }
 
