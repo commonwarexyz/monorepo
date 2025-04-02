@@ -1,8 +1,15 @@
-//! A memory-efficient index for mapping large keys to values.
+//! A memory-efficient index for mapping keys to values.
 //!
-//! Keys are transformed into a compressed, fixed-size representation using a `Translator`, which
-//! can result in collisions even if the original keys are collision-free. As a result, a get call
-//! can return multiple values for a key, and it's up to the application to disambiguate them.
+//! Keys are transformed into a compressed, fixed-size representation using a `Translator`. Depending
+//! on the size of the representation, this can lead to a non-negligible number of collisions (even
+//! if the original keys are collision-free). To workaround this issue, `get` returns all values
+//! that map to the same transformed key. If the same key is inserted multiple times (and old values
+//! are not `removed`), all values will be returned.
+//!
+//! # Warning
+//!
+//! If the `Translator` maps many keys to the same transformed key, the performance of `Index` will
+//! degrade substantially (each conflicting key may contain the desired value).
 
 mod storage;
 pub use storage::{Index, ValueIterator};
@@ -11,6 +18,8 @@ pub mod translator;
 use std::hash::Hash;
 
 /// Translate keys into an internal representation used by `Index`.
+///
+/// # Warning
 ///
 /// If invoking `transform` on keys results in many conflicts, the performance of `Index` will
 /// degrade substantially.

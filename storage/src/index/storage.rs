@@ -46,12 +46,9 @@ impl<V: Clone> Record<V> {
     }
 }
 
-/// An index that maps truncated keys to values.
+/// An index that maps transformed keys to values.
 pub struct Index<T: Translator, V: Clone> {
     translator: T,
-
-    // A map of translated keys to linked lists of associated
-    // `Records`.
     map: HashMap<T::Key, Record<V>>,
 
     collisions: Counter,
@@ -67,11 +64,7 @@ impl<T: Translator, V: Clone> Index<T, V> {
             collisions: Counter::default(),
             keys_pruned: Counter::default(),
         };
-        context.register(
-            "keys_pruned",
-            "Number of keys pruned",
-            s.keys_pruned.clone(),
-        );
+        context.register("pruned", "Number of keys pruned", s.keys_pruned.clone());
         context.register(
             "collisions",
             "Number of transformed key collisions",
@@ -111,7 +104,7 @@ impl<T: Translator, V: Clone> Index<T, V> {
         };
     }
 
-    /// Retrieve all values associated with a truncated key.
+    /// Retrieve all values associated with a transformed key.
     pub fn get(&self, key: &[u8]) -> ValueIterator<V> {
         let translated_key = self.translator.transform(key);
         match self.map.get(&translated_key) {
@@ -121,6 +114,9 @@ impl<T: Translator, V: Clone> Index<T, V> {
     }
 
     /// Remove values associated with the key that match the `prune` predicate.
+    ///
+    /// If this function is never called, the amount of memory used by old values will grow
+    /// unbounded.
     pub fn remove(&mut self, key: &[u8], prune: impl Fn(&V) -> bool) {
         let translated_key = self.translator.transform(key);
         let head = match self.map.get_mut(&translated_key) {
