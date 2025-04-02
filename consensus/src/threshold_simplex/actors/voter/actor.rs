@@ -2,15 +2,12 @@ use super::{Config, Mailbox, Message};
 use crate::{
     threshold_simplex::{
         actors::resolver,
-        finalize_namespace, metrics, notarize_namespace, nullify_namespace,
-        prover::Prover,
-        seed_namespace,
-        types::{Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, Proposal},
-        verifier::{verify_finalization, verify_notarization, verify_nullification},
-        Context, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE, NOTARIZE,
-        NULLIFY_AND_FINALIZE,
+        types::{
+            Activity, ConflictingNotarize, Context, Finalization, Finalize, Notarization, Notarize,
+            Nullification, Nullify, Proposal, View,
+        },
     },
-    Automaton, Committer, Parsed, Relay, ThresholdSupervisor, LATENCY,
+    Automaton, Relay, Reporter, ThresholdSupervisor, LATENCY,
 };
 use commonware_cryptography::{
     bls12381::primitives::{
@@ -51,6 +48,7 @@ struct Round<
     C: Scheme,
     D: Digest,
     E: Spawner + Metrics + Clock,
+    R: Reporter<Activity = Activity<D>>,
     S: ThresholdSupervisor<
         Seed = group::Signature,
         Index = View,
@@ -60,6 +58,7 @@ struct Round<
 > {
     start: SystemTime,
     context: E,
+    reporter: R,
     supervisor: S,
 
     leader: Option<C::PublicKey>,
@@ -99,18 +98,20 @@ impl<
         C: Scheme,
         D: Digest,
         E: Spawner + Metrics + Clock,
+        R: Reporter<Activity = Activity<D>>,
         S: ThresholdSupervisor<
             Seed = group::Signature,
             Index = View,
             Share = group::Share,
             PublicKey = C::PublicKey,
         >,
-    > Round<C, D, E, S>
+    > Round<C, D, E, R, S>
 {
-    pub fn new(ctx: E, supervisor: S, view: View) -> Self {
+    pub fn new(ctx: E, reporter: R, supervisor: S, view: View) -> Self {
         Self {
             start: ctx.current(),
             context: ctx,
+            reporter,
             supervisor,
 
             view,
@@ -194,20 +195,18 @@ impl<
                 .get(&public_key_index)
                 .unwrap();
             let previous_proposal = &previous_notarize.proposal;
-            let proof = Prover::<D>::serialize_conflicting_notarize(
-                self.view,
-                previous_proposal.parent,
-                &previous_notarize.digest,
-                &previous_notarize.message.proposal_signature,
-                proposal.parent,
-                &notarize.digest,
-                &notarize.message.proposal_signature,
+            let activity = ConflictingNotarize::new(
+                previous_proposal,
+                previous_notarize.proposal_signature,
+                notarize.proposal,
+                notarize.proposal_signature,
             );
-            self.supervisor.report(CONFLICTING_NOTARIZE, proof).await;
+            self.reporter
+                .report(Activity::ConflictingNotarize(activity))
+                .await;
             warn!(
                 view = self.view,
                 signer = public_key_index,
-                activity = CONFLICTING_NOTARIZE,
                 "recorded fault"
             );
             return false;
@@ -222,9 +221,8 @@ impl<
             return false;
         }
         let entry = self.notarizes.entry(proposal_digest).or_default();
-        let proof = Prover::<D>::serialize_proposal(proposal, &notarize.message.proposal_signature);
         entry.insert(public_key_index, notarize);
-        self.supervisor.report(NOTARIZE, proof).await;
+        self.reporter.report(Activity::Notarize(notarize)).await;
         true
     }
 
