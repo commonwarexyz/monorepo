@@ -653,7 +653,7 @@ pub struct Actor<
 
     last_finalized: View,
     view: View,
-    views: BTreeMap<View, Round<C, D, E, S>>,
+    views: BTreeMap<View, Round<C, D, E, R, S>>,
 
     current_view: Gauge,
     tracked_views: Gauge,
@@ -858,7 +858,7 @@ impl<
     #[allow(clippy::question_mark)]
     async fn propose(
         &mut self,
-        backfiller: &mut resolver::Mailbox,
+        backfiller: &mut resolver::Mailbox<D>,
     ) -> Option<(Context<D>, oneshot::Receiver<D>)> {
         // Check if we are leader
         {
@@ -1348,7 +1348,7 @@ impl<
         }
     }
 
-    async fn notarize(&mut self, sender: &C::PublicKey, notarize: Notarize) {
+    async fn notarize(&mut self, sender: &C::PublicKey, notarize: Notarize<D>) {
         // Extract proposal
         let Some(proposal) = notarize.proposal.as_ref() else {
             return;
@@ -1386,7 +1386,7 @@ impl<
         self.handle_notarize(public_key_index, notarize).await;
     }
 
-    async fn handle_notarize(&mut self, public_key_index: u32, notarize: Notarize) {
+    async fn handle_notarize(&mut self, public_key_index: u32, notarize: Notarize<D>) {
         // Check to see if notarize is for proposal in view
         let view = notarize.message.proposal.as_ref().unwrap().view;
         let round = self.views.entry(view).or_insert_with(|| {
@@ -1414,7 +1414,7 @@ impl<
         }
     }
 
-    async fn notarization(&mut self, notarization: Notarization) {
+    async fn notarization(&mut self, notarization: Notarization<D>) {
         // Extract proposal
         let Some(proposal) = &notarization.proposal else {
             return;
@@ -1538,7 +1538,7 @@ impl<
         self.enter_view(view + 1, seed);
     }
 
-    async fn finalize(&mut self, sender: &C::PublicKey, finalize: Finalize) {
+    async fn finalize(&mut self, sender: &C::PublicKey, finalize: Finalize<D>) {
         // Extract proposal
         let Some(proposal) = finalize.proposal.as_ref() else {
             return;
@@ -1571,7 +1571,7 @@ impl<
         self.handle_finalize(public_key_index, finalize).await;
     }
 
-    async fn handle_finalize(&mut self, public_key_index: u32, finalize: Finalize) {
+    async fn handle_finalize(&mut self, public_key_index: u32, finalize: Finalize<D>) {
         // Get view for finalize
         let view = finalize.message.proposal.as_ref().unwrap().view;
         let round = self.views.entry(view).or_insert_with(|| {
@@ -1599,7 +1599,7 @@ impl<
         }
     }
 
-    async fn finalization(&mut self, finalization: Finalization) {
+    async fn finalization(&mut self, finalization: Finalization<D>) {
         // Extract proposal
         let Some(proposal) = &finalization.proposal else {
             return;
@@ -1729,7 +1729,7 @@ impl<
         round.nullifiable(threshold, force).await
     }
 
-    fn construct_finalize(&mut self, view: u64) -> Option<Finalize> {
+    fn construct_finalize(&mut self, view: u64) -> Option<Finalize<D>> {
         let round = match self.views.get_mut(&view) {
             Some(view) => view,
             None => {
@@ -1780,7 +1780,7 @@ impl<
 
     async fn notify(
         &mut self,
-        backfiller: &mut resolver::Mailbox,
+        backfiller: &mut resolver::Mailbox<D>,
         sender: &mut impl Sender,
         view: u64,
     ) {
@@ -1994,7 +1994,7 @@ impl<
 
     pub fn start(
         self,
-        backfiller: resolver::Mailbox,
+        backfiller: resolver::Mailbox<D>,
         sender: impl Sender<PublicKey = C::PublicKey>,
         receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) -> Handle<()> {
@@ -2005,7 +2005,7 @@ impl<
 
     async fn run(
         mut self,
-        mut backfiller: resolver::Mailbox,
+        mut backfiller: resolver::Mailbox<D>,
         mut sender: impl Sender<PublicKey = C::PublicKey>,
         mut receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) {

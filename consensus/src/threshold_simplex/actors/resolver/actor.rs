@@ -120,7 +120,7 @@ pub struct Actor<
     inflight: Inflight,
     retry: Option<SystemTime>,
 
-    mailbox_receiver: mpsc::Receiver<Message>,
+    mailbox_receiver: mpsc::Receiver<Message<D>>,
 
     fetch_timeout: Duration,
     max_fetch_count: usize,
@@ -140,7 +140,7 @@ impl<
         S: ThresholdSupervisor<Index = View, Identity = poly::Public, PublicKey = C::PublicKey>,
     > Actor<E, C, D, S>
 {
-    pub fn new(context: E, cfg: Config<C, S>) -> (Self, Mailbox) {
+    pub fn new(context: E, cfg: Config<C, S>) -> (Self, Mailbox<D>) {
         // Initialize requester
         let config = requester::Config {
             public_key: cfg.crypto.public_key(),

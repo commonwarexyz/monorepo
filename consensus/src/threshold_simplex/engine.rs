@@ -38,7 +38,7 @@ pub struct Engine<
     voter: voter::Actor<B, E, C, D, A, R, F, S>,
     voter_mailbox: voter::Mailbox<D>,
     resolver: resolver::Actor<E, C, D, S>,
-    resolver_mailbox: resolver::Mailbox,
+    resolver_mailbox: resolver::Mailbox<D>,
 }
 
 impl<
