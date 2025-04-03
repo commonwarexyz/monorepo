@@ -1,12 +1,9 @@
 //! Byzantine participant that sends nullify and finalize messages for the same view.
 
 use crate::{
-    threshold_simplex::{
-        encoder::{
-            finalize_namespace, nullify_message, nullify_namespace, proposal_message, seed_message,
-            seed_namespace,
-        },
-        wire, View,
+    threshold_simplex::types::{
+        finalize_namespace, nullify_namespace, seed_namespace, view_message, Finalize, Nullify,
+        Proposal, View, Voter,
     },
     ThresholdSupervisor,
 };
@@ -67,7 +64,7 @@ impl<
         let (mut sender, mut receiver) = voter_network;
         while let Ok((s, msg)) = receiver.recv().await {
             // Parse message
-            let msg = match wire::Voter::decode(msg) {
+            let msg = match Voter::decode(msg) {
                 Ok(msg) => msg,
                 Err(err) => {
                     debug!(?err, sender = ?s, "failed to decode message");
@@ -84,7 +81,7 @@ impl<
 
             // Process message
             match payload {
-                wire::voter::Payload::Notarize(notarize) => {
+                Voter::Notarize(notarize) => {
                     // Get our index
                     let proposal = match notarize.proposal {
                         Some(proposal) => proposal,
@@ -101,40 +98,25 @@ impl<
 
                     // Nullify
                     let share = self.supervisor.share(view).unwrap();
-                    let message = nullify_message(view);
+                    let message = view_message(view);
                     let view_signature =
                         ops::partial_sign_message(share, Some(&self.nullify_namespace), &message)
                             .serialize();
-                    let message = seed_message(view);
                     let seed_signature =
                         ops::partial_sign_message(share, Some(&self.seed_namespace), &message)
                             .serialize();
-                    let n = wire::Nullify {
-                        view,
-                        view_signature,
-                        seed_signature,
-                    };
-                    let msg = wire::Voter {
-                        payload: Some(wire::voter::Payload::Nullify(n)),
-                    }
-                    .encode_to_vec()
-                    .into();
+                    let n = Nullify::new(view, view_signature, seed_signature);
+                    let msg = Voter::Nullify(n).encode_to_vec().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
 
                     // Finalize digest
-                    let message = proposal_message(view, proposal.parent, &payload);
+                    let proposal = Proposal::new(view, proposal.parent, &payload);
+                    let message = proposal.digest();
                     let proposal_signature =
                         ops::partial_sign_message(share, Some(&self.finalize_namespace), &message)
                             .serialize();
-                    let f = wire::Finalize {
-                        proposal: Some(proposal.clone()),
-                        proposal_signature,
-                    };
-                    let msg = wire::Voter {
-                        payload: Some(wire::voter::Payload::Finalize(f)),
-                    }
-                    .encode_to_vec()
-                    .into();
+                    let f = Finalize::new(proposal, proposal_signature);
+                    let msg = Voter::Finalize(f).encode_to_vec().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
                 _ => continue,

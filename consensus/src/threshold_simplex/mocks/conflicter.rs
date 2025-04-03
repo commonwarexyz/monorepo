@@ -1,11 +1,8 @@
 //! Byzantine participant that sends conflicting notarize/finalize messages.
 
 use crate::{
-    threshold_simplex::{
-        encoder::{
-            finalize_namespace, notarize_namespace, proposal_message, seed_message, seed_namespace,
-        },
-        wire, View,
+    threshold_simplex::types::{
+        finalize_namespace, notarize_namespace, seed_namespace, View, Voter,
     },
     ThresholdSupervisor,
 };
@@ -68,24 +65,17 @@ impl<
         let (mut sender, mut receiver) = voter_network;
         while let Ok((s, msg)) = receiver.recv().await {
             // Parse message
-            let msg = match wire::Voter::decode(msg) {
+            let msg = match Voter::decode(msg) {
                 Ok(msg) => msg,
                 Err(err) => {
                     debug!(?err, sender = ?s, "failed to decode message");
                     continue;
                 }
             };
-            let payload = match msg.payload {
-                Some(payload) => payload,
-                None => {
-                    debug!(sender = ?s, "message missing payload");
-                    continue;
-                }
-            };
 
             // Process message
-            match payload {
-                wire::voter::Payload::Notarize(notarize) => {
+            match msg {
+                Voter::Notarize(notarize) => {
                     // Get our index
                     let proposal = match notarize.proposal {
                         Some(proposal) => proposal,
@@ -146,7 +136,7 @@ impl<
                     .into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
-                wire::voter::Payload::Finalize(finalize) => {
+                Voter::Finalize(finalize) => {
                     // Get our index
                     let proposal = match finalize.proposal {
                         Some(proposal) => proposal,
