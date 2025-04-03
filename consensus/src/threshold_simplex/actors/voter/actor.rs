@@ -262,12 +262,14 @@ impl<
         finalize: Finalize<D>,
     ) -> bool {
         // Check if also issued nullify
-        let proposal = finalize.proposal;
         let null = self.nullifies.get(&public_key_index);
         if let Some(null) = null {
             // Create fault
-            let activity =
-                NullifyFinalize::new(proposal, finalize.proposal_signature, null.view_signature);
+            let activity = NullifyFinalize::new(
+                finalize.proposal.clone(),
+                finalize.proposal_signature.clone(),
+                null.view_signature.clone(),
+            );
             self.reporter
                 .report(Activity::NullifyFinalize(activity))
                 .await;
@@ -279,7 +281,7 @@ impl<
             return false;
         }
         // Compute proposal digest
-        let proposal_digest = proposal.digest();
+        let proposal_digest = finalize.proposal.digest();
 
         // Check if already finalized
         if let Some(previous_finalize) = self.finalizers.get(&public_key_index) {
@@ -300,12 +302,11 @@ impl<
                 .unwrap()
                 .get(&public_key_index)
                 .unwrap();
-            let previous_proposal = previous_finalize.message.proposal.as_ref().unwrap();
             let activity = ConflictingFinalize::new(
-                previous_proposal,
-                previous_finalize.message.proposal_signature,
-                proposal,
-                finalize.message.proposal_signature,
+                previous_finalize.proposal.clone(),
+                previous_finalize.proposal_signature.clone(),
+                finalize.proposal.clone(),
+                finalize.proposal_signature.clone(),
             );
             self.reporter
                 .report(Activity::ConflictingFinalize(activity))
@@ -327,9 +328,8 @@ impl<
             return false;
         }
         let entry = self.finalizes.entry(proposal_digest).or_default();
-        let signature = &finalize.message.proposal_signature;
-        entry.insert(public_key_index, finalize);
-        self.supervisor.report(Activity::Finalize(finalize)).await;
+        entry.insert(public_key_index, finalize.clone());
+        self.reporter.report(Activity::Finalize(finalize)).await;
         true
     }
 
@@ -344,8 +344,7 @@ impl<
         self.advance_deadline = None;
 
         // If proposal is missing, set it
-        let proposal = notarization.message.proposal.as_ref().unwrap().clone();
-        self.add_verified_proposal(proposal);
+        self.add_verified_proposal(notarization.proposal.clone());
 
         // Store the notarization
         self.notarization = Some(notarization);
@@ -378,8 +377,7 @@ impl<
         self.advance_deadline = None;
 
         // If proposal is missing, set it
-        let proposal = finalization.message.proposal.as_ref().unwrap().clone();
-        self.add_verified_proposal(proposal);
+        self.add_verified_proposal(finalization.proposal.clone());
 
         // Store the finalization
         self.finalization = Some(finalization);
@@ -416,38 +414,34 @@ impl<
 
             // Grab the proposal (all will be the same)
             let notarize = notarizes.values().next().unwrap();
-            let proposal = notarize.message.proposal.as_ref().unwrap().clone();
+            let proposal = notarize.proposal.clone();
 
             // Recover threshold signature
             let mut notarization = Vec::new();
             let mut seed = Vec::new();
             for notarize in notarizes.values() {
-                let eval = Eval::deserialize(&notarize.message.proposal_signature).unwrap();
-                notarization.push(eval);
-                let eval = Eval::deserialize(&notarize.message.seed_signature).unwrap();
-                seed.push(eval);
+                notarization.push(notarize.proposal_signature.clone());
+                seed.push(notarize.seed_signature.clone());
             }
             let proposal_signature = self
                 .context
                 .with_label("notarization_recovery")
                 .spawn_blocking(move || {
-                    threshold_signature_recover(threshold, notarization)
-                        .unwrap()
-                        .serialize()
+                    threshold_signature_recover(threshold, notarization).unwrap()
                 });
-            let seed_signature =
-                self.context
-                    .with_label("seed_recovery")
-                    .spawn_blocking(move || {
-                        threshold_signature_recover(threshold, seed)
-                            .unwrap()
-                            .serialize()
-                    });
+            let seed_signature = self
+                .context
+                .with_label("seed_recovery")
+                .spawn_blocking(move || threshold_signature_recover(threshold, seed).unwrap());
             let (proposal_signature, seed_signature) =
                 join(proposal_signature, seed_signature).await;
 
             // Construct notarization
-            let notarization = Notarization::new(proposal, proposal_signature, seed_signature);
+            let notarization = Notarization::new(
+                proposal,
+                proposal_signature.unwrap(),
+                seed_signature.unwrap(),
+            );
             self.broadcast_notarization = true;
             return Some(notarization);
         }
@@ -476,27 +470,17 @@ impl<
         let mut nullification = Vec::new();
         let mut seed = Vec::new();
         for nullify in self.nullifies.values() {
-            let eval = Eval::deserialize(&nullify.view_signature).unwrap();
-            nullification.push(eval);
-            let eval = Eval::deserialize(&nullify.seed_signature).unwrap();
-            seed.push(eval);
+            nullification.push(nullify.view_signature.clone());
+            seed.push(nullify.seed_signature.clone());
         }
         let view_signature = self
             .context
             .with_label("nullification_recovery")
-            .spawn_blocking(move || {
-                threshold_signature_recover(threshold, nullification)
-                    .unwrap()
-                    .serialize()
-            });
+            .spawn_blocking(move || threshold_signature_recover(threshold, nullification).unwrap());
         let seed_signature = self
             .context
             .with_label("seed_recovery")
-            .spawn_blocking(move || {
-                threshold_signature_recover(threshold, seed)
-                    .unwrap()
-                    .serialize()
-            });
+            .spawn_blocking(move || threshold_signature_recover(threshold, seed).unwrap());
         let (view_signature, seed_signature) = join(view_signature, seed_signature).await;
 
         // Construct nullification
@@ -529,7 +513,7 @@ impl<
             let Some(notarization) = &self.notarization else {
                 continue;
             };
-            let seed_signature = notarization.message.seed_signature.clone();
+            let seed_signature = notarization.seed_signature.clone();
 
             // Check notarization and finalization proposal match
             let notarization_digest = notarization.proposal.digest();
@@ -553,21 +537,18 @@ impl<
 
             // Grab the proposal
             let finalize = finalizes.values().next().unwrap();
-            let proposal = finalize.message.proposal.as_ref().unwrap().clone();
+            let proposal = finalize.proposal.clone();
 
             // Recover threshold signature
             let mut finalization = Vec::new();
             for finalize in finalizes.values() {
-                let eval = Eval::deserialize(&finalize.message.proposal_signature).unwrap();
-                finalization.push(eval);
+                finalization.push(finalize.proposal_signature.clone());
             }
             let proposal_signature = self
                 .context
                 .with_label("finalization_recovery")
                 .spawn_blocking(move || {
-                    threshold_signature_recover(threshold, finalization)
-                        .unwrap()
-                        .serialize()
+                    threshold_signature_recover(threshold, finalization).unwrap()
                 })
                 .await;
 
@@ -590,15 +571,7 @@ impl<
             if notarizes.len() < at_least_one_honest as usize {
                 continue;
             }
-            let parent = notarizes
-                .values()
-                .next()
-                .unwrap()
-                .message
-                .proposal
-                .as_ref()
-                .unwrap()
-                .parent;
+            let parent = notarizes.values().next().unwrap().proposal.parent;
             return Some(parent);
         }
         None
@@ -648,7 +621,7 @@ pub struct Actor<
 
     last_finalized: View,
     view: View,
-    views: BTreeMap<View, Round<C, D, E, R, S>>,
+    views: BTreeMap<View, Round<C, D, E, F, S>>,
 
     current_view: Gauge,
     tracked_views: Gauge,
