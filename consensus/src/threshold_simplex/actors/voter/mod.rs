@@ -2,8 +2,8 @@ mod actor;
 mod ingress;
 
 use crate::{
-    threshold_simplex::{Context, View},
-    Automaton, Committer, Relay, ThresholdSupervisor,
+    threshold_simplex::types::{Activity, Context, View},
+    Automaton, Relay, Reporter, ThresholdSupervisor,
 };
 pub use actor::Actor;
 use commonware_cryptography::bls12381::primitives::group;
@@ -17,7 +17,7 @@ pub struct Config<
     D: Array,
     A: Automaton<Context = Context<D>>,
     R: Relay<Digest = D>,
-    F: Committer<Digest = D>,
+    F: Reporter<Activity = Activity<D>>,
     S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
 > {
     pub crypto: C,
