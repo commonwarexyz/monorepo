@@ -137,7 +137,7 @@ impl<H: CHasher> Bitmap<H> {
     pub fn append(&mut self, hasher: &mut H, bit: bool) {
         if bit {
             let chunk_byte = self.next_bit / 8;
-            self.last_chunk_mut()[chunk_byte] |= Self::mask_for(self.next_bit as u64);
+            self.last_chunk_mut()[chunk_byte] |= Self::chunk_byte_bit_mask(self.next_bit as u64);
         }
         self.next_bit += 1;
         assert!(self.next_bit <= Self::CHUNK_SIZE * 8);
@@ -147,13 +147,22 @@ impl<H: CHasher> Bitmap<H> {
         }
     }
 
-    /// Convert a bit offset into a bit mask.
-    fn mask_for(bit_offset: u64) -> u8 {
+    /// Convert a bit offset into a bit mask for the byte containing that bit.
+    #[inline]
+    pub(crate) fn chunk_byte_bit_mask(bit_offset: u64) -> u8 {
         1 << (bit_offset % 8)
     }
 
+    /// Convert a bit offset into the offset of the byte within a chunk containing the bit.
+    #[allow(dead_code)] // Remove when we start using this outside the test module.
+    #[inline]
+    pub(crate) fn chunk_byte_offset(bit_offset: u64) -> usize {
+        (bit_offset as usize / 8) % Self::CHUNK_SIZE
+    }
+
     /// Convert a bit offset into the position of the Merkle tree leaf it belongs to.
-    fn leaf_pos(bit_offset: u64) -> u64 {
+    #[inline]
+    pub(crate) fn leaf_pos(bit_offset: u64) -> u64 {
         let leaf_num = bit_offset / 8 / Self::CHUNK_SIZE as u64;
         leaf_num_to_pos(leaf_num)
     }
@@ -163,7 +172,7 @@ impl<H: CHasher> Bitmap<H> {
         assert!(bit_offset < self.bit_count(), "out of bounds");
 
         let byte_offset = bit_offset as usize / 8;
-        self.bitmap[byte_offset] & Self::mask_for(bit_offset) != 0
+        self.bitmap[byte_offset] & Self::chunk_byte_bit_mask(bit_offset) != 0
     }
 
     /// Set the value of an existing bit.
@@ -171,7 +180,7 @@ impl<H: CHasher> Bitmap<H> {
         assert!(bit_offset < self.bit_count(), "out of bounds");
 
         let byte_offset = bit_offset as usize / 8;
-        let mask = Self::mask_for(bit_offset);
+        let mask = Self::chunk_byte_bit_mask(bit_offset);
         if bit {
             self.bitmap[byte_offset] |= mask;
         } else {
@@ -422,8 +431,8 @@ mod tests {
                 );
 
                 // Flip the bit in the chunk and make sure the proof fails.
-                let mask: u8 = 1 << (i % 8);
-                let byte_offset = (i as usize / 8) % Bitmap::<Sha256>::CHUNK_SIZE;
+                let mask: u8 = Bitmap::<Sha256>::chunk_byte_bit_mask(i);
+                let byte_offset = Bitmap::<Sha256>::chunk_byte_offset(i);
                 let corrupted = {
                     let mut tmp = chunk.as_ref().to_vec();
                     tmp[byte_offset] ^= mask;
