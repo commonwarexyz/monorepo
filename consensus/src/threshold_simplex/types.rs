@@ -226,6 +226,10 @@ impl<D: Digest> Notarize<D> {
         )
         .is_ok()
     }
+
+    pub fn signer(&self) -> u32 {
+        self.proposal_signature.index
+    }
 }
 
 impl<D: Digest> Codec for Notarize<D> {
@@ -365,6 +369,10 @@ impl Nullify {
         )
         .is_ok()
     }
+
+    pub fn signer(&self) -> u32 {
+        self.view_signature.index
+    }
 }
 
 impl Codec for Nullify {
@@ -491,6 +499,10 @@ impl<D: Digest> Finalize<D> {
             &self.proposal_signature,
         )
         .is_ok()
+    }
+
+    pub fn signer(&self) -> u32 {
+        self.proposal_signature.index
     }
 }
 
@@ -737,7 +749,7 @@ pub enum Activity<D: Digest> {
     Finalization(Finalization<D>),
     ConflictingNotarize(ConflictingNotarize<D>),
     ConflictingFinalize(ConflictingFinalize<D>),
-    NullifyFinalize(NullifyFinalize),
+    NullifyFinalize(NullifyFinalize<D>),
 }
 
 impl<D: Digest> Codec for Activity<D> {
@@ -888,6 +900,14 @@ impl<D: Digest> ConflictingNotarize<D> {
         )
         .is_ok()
     }
+
+    pub fn signer(&self) -> u32 {
+        self.signature_1.index
+    }
+
+    pub fn view(&self) -> View {
+        self.proposal_1.view
+    }
 }
 
 impl<D: Digest> Codec for ConflictingNotarize<D> {
@@ -968,6 +988,14 @@ impl<D: Digest> ConflictingFinalize<D> {
         )
         .is_ok()
     }
+
+    pub fn signer(&self) -> u32 {
+        self.signature_1.index
+    }
+
+    pub fn view(&self) -> View {
+        self.proposal_1.view
+    }
 }
 
 impl<D: Digest> Codec for ConflictingFinalize<D> {
@@ -1042,5 +1070,13 @@ impl<D: Digest> NullifyFinalize<D> {
             &[self.view_signature.clone(), self.finalize_signature.clone()],
         )
         .is_ok()
+    }
+
+    pub fn view(&self) -> View {
+        self.proposal.view
+    }
+
+    pub fn signer(&self) -> u32 {
+        self.view_signature.index
     }
 }
