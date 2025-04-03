@@ -94,11 +94,11 @@ impl Hasher for Sha256 {
 pub struct Digest([u8; DIGEST_LENGTH]);
 
 impl Codec for Digest {
-    fn write<B: BufMut>(&self, buf: &mut B) {
+    fn write(&self, buf: &mut impl BufMut) {
         self.0.write(buf);
     }
 
-    fn read<B: Buf>(buf: &mut B) -> Result<Self, CodecError> {
+    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
         Self::read_from(buf).map_err(|err| CodecError::Wrapped("Digest", err.into()))
     }
 

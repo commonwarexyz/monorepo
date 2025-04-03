@@ -19,7 +19,7 @@ pub enum Payload<C: Verifier> {
 }
 
 impl<C: Verifier> Codec for Payload<C> {
-    fn write<B: BufMut>(&self, buf: &mut B) {
+    fn write(&self, buf: &mut impl BufMut) {
         match self {
             Payload::BitVec(bitvec) => {
                 0u8.write(buf);
@@ -44,7 +44,7 @@ impl<C: Verifier> Codec for Payload<C> {
         }) + 1
     }
 
-    fn read<B: Buf>(buf: &mut B) -> Result<Self, Error> {
+    fn read(buf: &mut impl Buf) -> Result<Self, Error> {
         let payload_type = <u8>::read(buf)?;
         match payload_type {
             0 => {
@@ -80,7 +80,7 @@ pub struct BitVec {
 }
 
 impl Codec for BitVec {
-    fn write<B: BufMut>(&self, buf: &mut B) {
+    fn write(&self, buf: &mut impl BufMut) {
         self.index.write(buf);
         self.bits.write(buf);
     }
@@ -89,7 +89,7 @@ impl Codec for BitVec {
         self.index.len_encoded() + self.bits.len_encoded()
     }
 
-    fn read<B: Buf>(buf: &mut B) -> Result<Self, Error> {
+    fn read(buf: &mut impl Buf) -> Result<Self, Error> {
         let index = u64::read(buf)?;
         let bits = Vec::<u8>::read(buf)?;
         Ok(BitVec { index, bits })
@@ -128,7 +128,7 @@ impl<C: Verifier> SignedPeerInfo<C> {
 }
 
 impl<C: Verifier> Codec for SignedPeerInfo<C> {
-    fn write<B: BufMut>(&self, buf: &mut B) {
+    fn write(&self, buf: &mut impl BufMut) {
         self.socket.write(buf);
         self.timestamp.write(buf);
         self.public_key.write(buf);
@@ -142,7 +142,7 @@ impl<C: Verifier> Codec for SignedPeerInfo<C> {
             + self.signature.len_encoded()
     }
 
-    fn read<B: Buf>(buf: &mut B) -> Result<Self, Error> {
+    fn read(buf: &mut impl Buf) -> Result<Self, Error> {
         let socket = SocketAddr::read(buf)?;
         let timestamp = u64::read(buf)?;
         let public_key = C::PublicKey::read(buf)?;
@@ -169,7 +169,7 @@ pub struct Data {
 }
 
 impl Codec for Data {
-    fn write<B: BufMut>(&self, buf: &mut B) {
+    fn write(&self, buf: &mut impl BufMut) {
         self.channel.write(buf);
         self.message.write(buf);
     }
@@ -178,7 +178,7 @@ impl Codec for Data {
         self.channel.len_encoded() + self.message.len_encoded()
     }
 
-    fn read<B: Buf>(buf: &mut B) -> Result<Self, Error> {
+    fn read(buf: &mut impl Buf) -> Result<Self, Error> {
         let channel = u32::read(buf)?;
         let message = Bytes::read(buf)?;
         Ok(Data { channel, message })

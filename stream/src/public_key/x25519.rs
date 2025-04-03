@@ -30,10 +30,10 @@ impl AsRef<x25519_dalek::PublicKey> for PublicKey {
 }
 
 impl Codec for PublicKey {
-    fn write<B: BufMut>(&self, buf: &mut B) {
+    fn write(&self, buf: &mut impl BufMut) {
         self.inner.as_bytes().write(buf);
     }
-    fn read<B: Buf>(buf: &mut B) -> Result<Self, CodecError> {
+    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
         let public_key = <[u8; Self::LEN_ENCODED]>::read(buf)?;
         Ok(PublicKey {
             inner: X25519PublicKey::from(public_key),
