@@ -154,7 +154,7 @@ impl<D: Digest> Proposal<D> {
         }
     }
 
-    pub fn digest(&self) -> sha256::Digest {
+    pub fn hash(&self) -> sha256::Digest {
         hash(&self.encode())
     }
 }

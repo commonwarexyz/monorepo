@@ -6,15 +6,14 @@ use crate::{
     Automaton, Relay, Reporter, ThresholdSupervisor,
 };
 pub use actor::Actor;
-use commonware_cryptography::bls12381::primitives::group;
 use commonware_cryptography::Scheme;
-use commonware_utils::Array;
+use commonware_cryptography::{bls12381::primitives::group, Digest};
 pub use ingress::{Mailbox, Message};
 use std::time::Duration;
 
 pub struct Config<
     C: Scheme,
-    D: Array,
+    D: Digest,
     A: Automaton<Context = Context<D>>,
     R: Relay<Digest = D>,
     F: Reporter<Activity = Activity<D>>,
@@ -23,7 +22,7 @@ pub struct Config<
     pub crypto: C,
     pub automaton: A,
     pub relay: R,
-    pub committer: F,
+    pub reporter: F,
     pub supervisor: S,
 
     pub namespace: Vec<u8>,
