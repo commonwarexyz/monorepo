@@ -32,11 +32,11 @@ impl Digestible<Sha256Digest> for TestMessage {
 }
 
 impl Codec for TestMessage {
-    fn write<B: BufMut>(&self, buf: &mut B) {
+    fn write(&self, buf: &mut impl BufMut) {
         self.content.write(buf);
     }
 
-    fn read<B: Buf>(buf: &mut B) -> Result<Self, CodecError> {
+    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
         let content = Vec::<u8>::read(buf)?;
         Ok(Self { content })
     }

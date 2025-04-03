@@ -98,11 +98,11 @@ pub struct PrivateKey {
 }
 
 impl Codec for PrivateKey {
-    fn write<B: BufMut>(&self, buf: &mut B) {
+    fn write(&self, buf: &mut impl BufMut) {
         self.raw.write(buf);
     }
 
-    fn read<B: Buf>(buf: &mut B) -> Result<Self, CodecError> {
+    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
         Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
     }
 
@@ -202,11 +202,11 @@ pub struct PublicKey {
 }
 
 impl Codec for PublicKey {
-    fn write<B: BufMut>(&self, buf: &mut B) {
+    fn write(&self, buf: &mut impl BufMut) {
         self.raw.write(buf);
     }
 
-    fn read<B: Buf>(buf: &mut B) -> Result<Self, CodecError> {
+    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
         Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
     }
 
@@ -295,11 +295,11 @@ pub struct Signature {
 }
 
 impl Codec for Signature {
-    fn write<B: BufMut>(&self, buf: &mut B) {
+    fn write(&self, buf: &mut impl BufMut) {
         self.raw.write(buf);
     }
 
-    fn read<B: Buf>(buf: &mut B) -> Result<Self, CodecError> {
+    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
         Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
     }
 

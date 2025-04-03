@@ -29,11 +29,11 @@ impl<const N: usize> FixedBytes<N> {
 }
 
 impl<const N: usize> Codec for FixedBytes<N> {
-    fn write<B: BufMut>(&self, buf: &mut B) {
+    fn write(&self, buf: &mut impl BufMut) {
         self.0.write(buf);
     }
 
-    fn read<B: Buf>(buf: &mut B) -> Result<Self, CodecError> {
+    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
         Ok(Self(<[u8; N]>::read(buf)?))
     }
 

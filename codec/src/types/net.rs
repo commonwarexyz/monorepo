@@ -4,7 +4,7 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
 impl Codec for Ipv4Addr {
     #[inline]
-    fn write<B: BufMut>(&self, buf: &mut B) {
+    fn write(&self, buf: &mut impl BufMut) {
         self.to_bits().write(buf);
     }
 
@@ -14,7 +14,7 @@ impl Codec for Ipv4Addr {
     }
 
     #[inline]
-    fn read<B: Buf>(buf: &mut B) -> Result<Self, Error> {
+    fn read(buf: &mut impl Buf) -> Result<Self, Error> {
         let bits = <u32>::read(buf)?;
         Ok(Ipv4Addr::from_bits(bits))
     }
@@ -26,7 +26,7 @@ impl SizedCodec for Ipv4Addr {
 
 impl Codec for Ipv6Addr {
     #[inline]
-    fn write<B: BufMut>(&self, buf: &mut B) {
+    fn write(&self, buf: &mut impl BufMut) {
         self.to_bits().write(buf);
     }
 
@@ -36,7 +36,7 @@ impl Codec for Ipv6Addr {
     }
 
     #[inline]
-    fn read<B: Buf>(buf: &mut B) -> Result<Self, Error> {
+    fn read(buf: &mut impl Buf) -> Result<Self, Error> {
         let bits = <u128>::read(buf)?;
         Ok(Ipv6Addr::from_bits(bits))
     }
@@ -48,7 +48,7 @@ impl SizedCodec for Ipv6Addr {
 
 impl Codec for SocketAddrV4 {
     #[inline]
-    fn write<B: BufMut>(&self, buf: &mut B) {
+    fn write(&self, buf: &mut impl BufMut) {
         self.ip().write(buf);
         self.port().write(buf);
     }
@@ -59,7 +59,7 @@ impl Codec for SocketAddrV4 {
     }
 
     #[inline]
-    fn read<B: Buf>(buf: &mut B) -> Result<Self, Error> {
+    fn read(buf: &mut impl Buf) -> Result<Self, Error> {
         let ip = Ipv4Addr::read(buf)?;
         let port = u16::read(buf)?;
         Ok(Self::new(ip, port))
@@ -72,7 +72,7 @@ impl SizedCodec for SocketAddrV4 {
 
 impl Codec for SocketAddrV6 {
     #[inline]
-    fn write<B: BufMut>(&self, buf: &mut B) {
+    fn write(&self, buf: &mut impl BufMut) {
         self.ip().write(buf);
         self.port().write(buf);
     }
@@ -83,7 +83,7 @@ impl Codec for SocketAddrV6 {
     }
 
     #[inline]
-    fn read<B: Buf>(buf: &mut B) -> Result<Self, Error> {
+    fn read(buf: &mut impl Buf) -> Result<Self, Error> {
         let address = Ipv6Addr::read(buf)?;
         let port = u16::read(buf)?;
         Ok(SocketAddrV6::new(address, port, 0, 0))
@@ -97,7 +97,7 @@ impl SizedCodec for SocketAddrV6 {
 // SocketAddr implementation
 impl Codec for SocketAddr {
     #[inline]
-    fn write<B: BufMut>(&self, buf: &mut B) {
+    fn write(&self, buf: &mut impl BufMut) {
         match self {
             SocketAddr::V4(v4) => {
                 u8::write(&4, buf);
@@ -119,7 +119,7 @@ impl Codec for SocketAddr {
     }
 
     #[inline]
-    fn read<B: Buf>(buf: &mut B) -> Result<Self, Error> {
+    fn read(buf: &mut impl Buf) -> Result<Self, Error> {
         let version = u8::read(buf)?;
         match version {
             4 => Ok(SocketAddr::V4(SocketAddrV4::read(buf)?)),

@@ -29,13 +29,13 @@ impl<C: Scheme> Info<C> {
 }
 
 impl<C: Scheme> Codec for Info<C> {
-    fn write<B: BufMut>(&self, buf: &mut B) {
+    fn write(&self, buf: &mut impl BufMut) {
         self.recipient.write(buf);
         self.ephemeral_public_key.write(buf);
         self.timestamp.write(buf);
     }
 
-    fn read<B: Buf>(buf: &mut B) -> Result<Self, CodecError> {
+    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
         let recipient = C::PublicKey::read(buf)?;
         let ephemeral_public_key = x25519::PublicKey::read(buf)?;
         let timestamp = u64::read(buf)?;
@@ -142,13 +142,13 @@ impl<C: Scheme> Signed<C> {
 }
 
 impl<C: Scheme> Codec for Signed<C> {
-    fn write<B: BufMut>(&self, buf: &mut B) {
+    fn write(&self, buf: &mut impl BufMut) {
         self.info.write(buf);
         self.signer.write(buf);
         self.signature.write(buf);
     }
 
-    fn read<B: Buf>(buf: &mut B) -> Result<Self, CodecError> {
+    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
         let info = Info::<C>::read(buf)?;
         let signer = C::PublicKey::read(buf)?;
         let signature = C::Signature::read(buf)?;

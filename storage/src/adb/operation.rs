@@ -146,12 +146,12 @@ impl<K: Array, V: Array> Operation<K, V> {
 }
 
 impl<K: Array, V: Array> Codec for Operation<K, V> {
-    fn write<B: BufMut>(&self, buf: &mut B) {
+    fn write(&self, buf: &mut impl BufMut) {
         assert!(self.data.len() == Self::LEN_ENCODED);
         buf.put(&self.data[..]);
     }
 
-    fn read<B: Buf>(buf: &mut B) -> Result<Self, CodecError> {
+    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
         commonware_codec::util::at_least(buf, Self::LEN_ENCODED)?;
         let mut value = vec![0; Self::LEN_ENCODED];
         buf.copy_to_slice(&mut value);

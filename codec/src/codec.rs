@@ -6,7 +6,7 @@ use bytes::{Buf, BufMut, BytesMut};
 /// Trait for types that can be encoded to and decoded from bytes
 pub trait Codec: Sized {
     /// Encodes this value to a writer.
-    fn write<B: BufMut>(&self, buf: &mut B);
+    fn write(&self, buf: &mut impl BufMut);
 
     /// Returns the encoded length of this value.
     fn len_encoded(&self) -> usize;
@@ -21,7 +21,7 @@ pub trait Codec: Sized {
     }
 
     /// Reads a value from a buffer, returning an error if there is an error while reading.
-    fn read<B: Buf>(buf: &mut B) -> Result<Self, Error>;
+    fn read(buf: &mut impl Buf) -> Result<Self, Error>;
 
     /// Decodes a value from a buffer.
     ///
