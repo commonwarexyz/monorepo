@@ -312,7 +312,6 @@ mod tests {
             // Derive threshold
             let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
             let pk = poly::public(&public);
-            let prover = Prover::new(*pk, &namespace);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -327,10 +326,7 @@ mod tests {
                 let validator = scheme.public_key();
                 let mut participants = BTreeMap::new();
                 participants.insert(0, (public.clone(), validators.clone(), shares[idx]));
-                let supervisor_config = mocks::supervisor::Config {
-                    prover: prover.clone(),
-                    participants,
-                };
+                let supervisor_config = mocks::supervisor::Config { participants };
                 let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
                 supervisors.push(supervisor.clone());
                 let application_cfg = mocks::application::Config {
@@ -549,7 +545,6 @@ mod tests {
 
                 // Create engines
                 let pk = poly::public(&public);
-                let prover = Prover::new(*pk, &namespace);
                 let relay = Arc::new(mocks::relay::Relay::new());
                 let mut supervisors = HashMap::new();
                 let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -565,7 +560,6 @@ mod tests {
                     let mut participants = BTreeMap::new();
                     participants.insert(0, (public.clone(), validators.clone(), shares[idx]));
                     let supervisor_config = mocks::supervisor::Config {
-                        prover: prover.clone(),
                         participants,
                     };
                     let supervisor =
