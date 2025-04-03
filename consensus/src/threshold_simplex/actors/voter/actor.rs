@@ -193,10 +193,9 @@ impl<
                 .unwrap()
                 .get(&public_key_index)
                 .unwrap();
-            let previous_proposal = &previous_notarize.proposal;
             let activity = ConflictingNotarize::new(
-                previous_proposal,
-                previous_notarize.proposal_signature,
+                previous_notarize.proposal.clone(),
+                previous_notarize.proposal_signature.clone(),
                 notarize.proposal,
                 notarize.proposal_signature,
             );
@@ -220,7 +219,7 @@ impl<
             return false;
         }
         let entry = self.notarizes.entry(proposal_digest).or_default();
-        entry.insert(public_key_index, notarize);
+        entry.insert(public_key_index, notarize.clone());
         self.reporter.report(Activity::Notarize(notarize)).await;
         true
     }
@@ -241,10 +240,9 @@ impl<
             .unwrap()
             .get(&public_key_index)
             .unwrap();
-        let finalize_proposal = finalize.message.proposal.as_ref().unwrap();
         let activity = NullifyFinalize::new(
-            finalize_proposal,
-            finalize.message.proposal_signature,
+            finalize.proposal.clone(),
+            finalize.proposal_signature.clone(),
             nullify.view_signature,
         );
         self.reporter
@@ -268,11 +266,8 @@ impl<
         let null = self.nullifies.get(&public_key_index);
         if let Some(null) = null {
             // Create fault
-            let activity = NullifyFinalize::new(
-                proposal,
-                finalize.message.proposal_signature,
-                null.view_signature,
-            );
+            let activity =
+                NullifyFinalize::new(proposal, finalize.proposal_signature, null.view_signature);
             self.reporter
                 .report(Activity::NullifyFinalize(activity))
                 .await;

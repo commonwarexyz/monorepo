@@ -17,11 +17,9 @@ use commonware_cryptography::{bls12381::primitives::poly, Digest, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{utils::requester, Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Metrics, Spawner};
-use commonware_utils::Array;
 use futures::{channel::mpsc, future::Either, StreamExt};
 use governor::clock::Clock as GClock;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
-use prost::Message as _;
 use rand::{seq::IteratorRandom, Rng};
 use std::{
     cmp::Ordering,
@@ -136,7 +134,7 @@ pub struct Actor<
 impl<
         E: Clock + GClock + Rng + Metrics + Spawner,
         C: Scheme,
-        D: Array,
+        D: Digest,
         S: ThresholdSupervisor<Index = View, Identity = poly::Public, PublicKey = C::PublicKey>,
     > Actor<E, C, D, S>
 {
@@ -246,7 +244,7 @@ impl<
             }
 
             // Select next recipient
-            let mut msg = Request::new(0, notarizations, nullifications);
+            let mut msg = Request::new(0, notarizations.clone(), nullifications.clone());
             loop {
                 // Get next best
                 let Some((recipient, request)) = self.requester.request(shuffle) else {
@@ -271,7 +269,7 @@ impl<
 
                 // Try to send
                 if sender
-                    .send(Recipients::One(recipient.clone()), encoded, false)
+                    .send(Recipients::One(recipient.clone()), encoded.into(), false)
                     .await
                     .unwrap()
                     .is_empty()
@@ -369,7 +367,7 @@ impl<
                         }
                         Message::Notarized { notarization } => {
                             // Update current view
-                            let view = notarization.proposal.as_ref().unwrap().view;
+                            let view = notarization.view();
                             if view > current_view {
                                 current_view = view;
                             } else {
@@ -463,7 +461,7 @@ impl<
                             // Populate notarizations first
                             for view in request.notarizations {
                                 if let Some(notarization) = self.notarizations.get(&view) {
-                                    let size = notarization.encoded_len();
+                                    let size = notarization.len_encoded();
                                     if populated_bytes + size > self.max_fetch_size {
                                         break;
                                     }
@@ -479,7 +477,7 @@ impl<
                             // Populate nullifications next
                             for view in request.nullifications {
                                 if let Some(nullification) = self.nullifications.get(&view) {
-                                    let size = nullification.encoded_len();
+                                    let size = nullification.len_encoded();
                                     if populated_bytes + size > self.max_fetch_size {
                                         break;
                                     }
@@ -494,8 +492,8 @@ impl<
 
                             // Send response
                             debug!(sender = ?s, ?notarizations, ?missing_notarizations, ?nullifications, ?missing_nullifications, "sending response");
-                            let response = Response::new(msg.id, notarizations_found, nullifications_found);
-                            let response = Backfiller::Response(response);
+                            let response = Response::new(request.id, notarizations_found, nullifications_found);
+                            let response = Backfiller::Response(response).encode().into();
                             sender
                                 .send(Recipients::One(s), response, false)
                                 .await
@@ -503,7 +501,7 @@ impl<
                         },
                         Backfiller::Response(response) => {
                             // Ensure we were waiting for this response
-                            let Some(request) = self.requester.handle(&s, msg.id) else {
+                            let Some(request) = self.requester.handle(&s, response.id) else {
                                 debug!(sender = ?s, "unexpected message");
                                 continue;
                             };
@@ -524,20 +522,7 @@ impl<
                             let mut notarizations_found = BTreeSet::new();
                             let mut nullifications_found = BTreeSet::new();
                             for notarization in response.notarizations {
-                                let proposal = match notarization.proposal.as_ref() {
-                                    Some(proposal) => proposal,
-                                    None => {
-                                        warn!(sender = ?s, "missing proposal");
-                                        self.requester.block(s.clone());
-                                        continue;
-                                    },
-                                };
-                                let view = proposal.view;
-                                let Ok(payload) = D::try_from(&proposal.payload) else {
-                                    warn!(view, sender = ?s, "invalid proposal");
-                                    self.requester.block(s.clone());
-                                    continue;
-                                };
+                                let view = notarization.view();
                                 let entry = Entry { task: Task::Notarization, view };
                                 if !self.required.contains(&entry) {
                                     debug!(view, sender = ?s, "unnecessary notarization");

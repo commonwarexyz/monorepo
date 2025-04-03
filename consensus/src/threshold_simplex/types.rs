@@ -300,6 +300,10 @@ impl<D: Digest> Notarization<D> {
         )
         .is_ok()
     }
+
+    pub fn view(&self) -> View {
+        self.proposal.view
+    }
 }
 
 impl<D: Digest> Codec for Notarization<D> {
@@ -373,6 +377,10 @@ impl Nullify {
     pub fn signer(&self) -> u32 {
         self.view_signature.index
     }
+
+    pub fn view(&self) -> View {
+        self.view
+    }
 }
 
 impl Codec for Nullify {
@@ -436,6 +444,10 @@ impl Nullification {
             1,
         )
         .is_ok()
+    }
+
+    pub fn view(&self) -> View {
+        self.view
     }
 }
 
@@ -568,6 +580,10 @@ impl<D: Digest> Finalization<D> {
             1,
         )
         .is_ok()
+    }
+
+    pub fn view(&self) -> View {
+        self.proposal.view
     }
 }
 
@@ -1079,4 +1095,32 @@ impl<D: Digest> NullifyFinalize<D> {
     pub fn signer(&self) -> u32 {
         self.view_signature.index
     }
+}
+
+impl<D: Digest> Codec for NullifyFinalize<D> {
+    fn write(&self, writer: &mut impl Writer) {
+        self.proposal.write(writer);
+        self.view_signature.write(writer);
+        self.finalize_signature.write(writer);
+    }
+
+    fn len_encoded(&self) -> usize {
+        Self::LEN_ENCODED
+    }
+
+    fn read(reader: &mut impl Reader) -> Result<Self, Error> {
+        let proposal = Proposal::read(reader)?;
+        let view_signature = PartialSignature::read(reader)?;
+        let finalize_signature = PartialSignature::read(reader)?;
+        Ok(NullifyFinalize {
+            proposal,
+            view_signature,
+            finalize_signature,
+        })
+    }
+}
+
+impl<D: Digest> SizedCodec for NullifyFinalize<D> {
+    const LEN_ENCODED: usize =
+        Proposal::<D>::LEN_ENCODED + PartialSignature::LEN_ENCODED + PartialSignature::LEN_ENCODED;
 }
