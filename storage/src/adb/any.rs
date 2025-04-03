@@ -1,25 +1,33 @@
-//! An authenticatable & mutable key-value store based on an MMR over the log of state-change
-//! operations.
+//! An authenticated database (ADB) that provides succinct proofs of _any_ value ever associated
+//! with a key. Its implementation is based on an [Mmr] over a log of state-change operations backed
+//! by a [Journal].
 //!
 //! # Terminology
 //!
-//! A _key_ in the store either has a _value_ or it doesn't. Two types of _operations_ can be
-//! applied to the store to modify the state of a specific key. A key that has a value can change to
-//! one without a value through the _delete_ operation. The _update_ operation gives a key a
-//! specific value whether it previously had no value or had a different value.
+//! A _key_ in the db either has a _value_ or it doesn't. Two types of _operations_ can be applied
+//! to the db to modify the state of a specific key. A key that has a value can change to one
+//! without a value through the _delete_ operation. The _update_ operation gives a key a specific
+//! value whether it previously had no value or had a different value.
 //!
 //! Keys with values are called _active_, and an operation is called _active_ if (1) its key is
 //! active, (2) it is an update operation, and (3) it is the most recent operation for that key.
+//!
+//! In the [Any] db, it is not possible to prove whether the value of a key is the currently active
+//! one, only that it was associated with the key at some point in the past. This type of
+//! authenticated database is most useful for applications involving keys that are given values once
+//! and cannot be updated after.
 
 use crate::{
+    adb::{
+        operation::{Operation, Type},
+        Error,
+    },
     index::{translator::EightCap, Index},
     journal::fixed::{Config as JConfig, Journal},
     mmr::{
         iterator::{leaf_num_to_pos, leaf_pos_to_num},
         journaled::{Config as MmrConfig, Mmr},
-        operation::{Operation, Type},
         verification::Proof,
-        Error,
     },
 };
 use commonware_cryptography::Hasher as CHasher;
@@ -31,7 +39,7 @@ use futures::{
 };
 use tracing::{debug, warn};
 
-/// Configuration for a Mutable MMR.
+/// Configuration for an `Any` authenticated db.
 #[derive(Clone)]
 pub struct Config {
     /// The name of the `Storage` partition used for the MMR's backing journal.
@@ -50,13 +58,14 @@ pub struct Config {
     pub log_items_per_blob: u64,
 }
 
-/// A mutable key-value store based on an MMR over its log of operations.
-pub struct MutableMmr<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher> {
-    /// An MMR over digests of the operations applied to the store. The number of leaves in this MMR
+/// A key-value ADB based on an MMR over its log of operations, supporting authentication of any
+/// value ever associated with a key.
+pub struct Any<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher> {
+    /// An MMR over digests of the operations applied to the db. The number of leaves in this MMR
     /// always equals the number of operations in the unpruned `log`.
     ops: Mmr<B, E, H>,
 
-    /// A (pruned) log of all operations applied to the store in order of occurrence. The position
+    /// A (pruned) log of all operations applied to the db in order of occurrence. The position
     /// of each operation in the log is called its _location_, which is a stable identifier. Pruning
     /// is indicated by a non-zero value for `pruned_loc`, which provides the location of the first
     /// operation in the log.
@@ -77,11 +86,9 @@ pub struct MutableMmr<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Ar
     uncommitted_ops: u64,
 }
 
-impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
-    MutableMmr<B, E, K, V, H>
-{
+impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher> Any<B, E, K, V, H> {
     /// Return an MMR initialized from `cfg`. Any uncommitted operations in the log will be
-    /// discarded and the state of the store will be as of the last committed operation.
+    /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(context: E, hasher: &mut H, cfg: Config) -> Result<Self, Error> {
         let mut mmr = Mmr::init(
             context.with_label("mmr"),
@@ -184,7 +191,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
             }
         }
 
-        let store = MutableMmr {
+        let db = Any {
             ops: mmr,
             log,
             snapshot,
@@ -192,7 +199,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
             uncommitted_ops: 0,
         };
 
-        Ok(store)
+        Ok(db)
     }
 
     /// Return a digest of the operation.
@@ -201,7 +208,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
         hasher.finalize()
     }
 
-    /// Get the value of `key` in the store, or None if it has no value.
+    /// Get the value of `key` in the db, or None if it has no value.
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
         let loc_iter = self.snapshot.get(key);
 
@@ -225,8 +232,8 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
         Ok(None)
     }
 
-    /// Get the number of operations that have been applied to this store, including those that are
-    /// not yet committed.
+    /// Get the number of operations that have been applied to this db, including those that are not
+    /// yet committed.
     pub fn op_count(&self) -> u64 {
         leaf_pos_to_num(self.ops.size()).unwrap()
     }
@@ -280,9 +287,9 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
         Ok(())
     }
 
-    /// Delete `key` and its value from the store. Deleting a key that already has no value is a
-    /// no-op. The operation is reflected in the snapshot, but will be subject to rollback until the
-    /// next successful `commit`.
+    /// Delete `key` and its value from the db. Deleting a key that already has no value is a no-op.
+    /// The operation is reflected in the snapshot, but will be subject to rollback until the next
+    /// successful `commit`.
     pub async fn delete(&mut self, hasher: &mut H, key: K) -> Result<(), Error> {
         let mut old_loc: Option<u64> = None;
         for loc in self.snapshot.get(&key) {
@@ -314,7 +321,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
         Ok(())
     }
 
-    /// Return the root hash of the mutable MMR.
+    /// Return the root hash of the db.
     pub fn root(&self, hasher: &mut H) -> H::Digest {
         self.ops.root(hasher)
     }
@@ -332,7 +339,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
     }
 
     /// Generate and return:
-    ///  1. a proof of all operations applied to the store in the range starting at (and including)
+    ///  1. a proof of all operations applied to the db in the range starting at (and including)
     ///     location `start_loc`, and ending at the first of either:
     ///     - the last operation performed, or
     ///     - the operation `max_ops` from the start.
@@ -365,7 +372,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
     }
 
     /// Return true if the given sequence of `ops` were applied starting at location `start_loc` in
-    /// the store with the provided root hash.
+    /// the log with the provided root hash.
     pub fn verify_proof(
         hasher: &mut H,
         proof: &Proof<H>,
@@ -379,13 +386,13 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
 
         let digests = ops
             .iter()
-            .map(|op| MutableMmr::<_, E, _, _, _>::op_digest(hasher, op))
+            .map(|op| Any::<_, E, _, _, _>::op_digest(hasher, op))
             .collect::<Vec<_>>();
 
         proof.verify_range_inclusion(hasher, &digests, start_pos, end_pos, root_hash)
     }
 
-    /// Commit any pending operations to the store, ensuring they are persisted to disk &
+    /// Commit any pending operations to the db, ensuring they are persisted to disk &
     /// recoverable upon return from this function.
     pub async fn commit(&mut self, hasher: &mut H) -> Result<(), Error> {
         // Raise the inactivity floor by the # of uncommitted operations, plus 1 to account for the
@@ -401,27 +408,27 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
         self.prune_inactive().await
     }
 
-    /// Sync the store to disk ensuring the current state is persisted.
+    /// Sync the db to disk ensuring the current state is persisted.
     async fn sync(&mut self) -> Result<(), Error> {
         try_join!(
             self.log.sync().map_err(Error::JournalError),
-            self.ops.sync()
+            self.ops.sync().map_err(Error::MmrError),
         )?;
 
         Ok(())
     }
 
-    /// Close the store. Operations that have not been committed will be lost.
+    /// Close the db. Operations that have not been committed will be lost.
     pub async fn close(self) -> Result<(), Error> {
         if self.uncommitted_ops > 0 {
             warn!(
                 op_count = self.uncommitted_ops,
-                "closing store with uncommitted operations"
+                "closing db with uncommitted operations"
             );
         }
         try_join!(
             self.log.close().map_err(Error::JournalError),
-            self.ops.close()
+            self.ops.close().map_err(Error::MmrError),
         )?;
 
         Ok(())
@@ -459,8 +466,8 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
     /// Raise the inactivity floor by exactly `max_steps` steps. Each step either advances over an
     /// inactive operation, or re-applies an active operation to the tip and then advances over it.
     ///
-    /// This method does not change the state of the store's snapshot, but it always changes the
-    /// root since it applies at least one (floor) operation.
+    /// This method does not change the state of the db's snapshot, but it always changes the root
+    /// since it applies at least one (floor) operation.
     async fn raise_inactivity_floor(
         &mut self,
         hasher: &mut H,
@@ -483,7 +490,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
     }
 
     /// Prune any historical operations that are known to be inactive (those preceding the
-    /// inactivity floor). This does not affect the store's root or current snapshot.
+    /// inactivity floor). This does not affect the db's root or current snapshot.
     async fn prune_inactive(&mut self) -> Result<(), Error> {
         let Some(oldest_retained_loc) = self.log.oldest_retained_pos().await? else {
             return Ok(());
@@ -508,7 +515,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher>
 
     /// Simulate a failed commit that successfully writes the log to the commit point, but without
     /// fully committing the MMR's cached elements to trigger MMR node recovery on reopening. The
-    /// root hash of the store at the point of a successful commit will be returned in the result.
+    /// root hash of the db at the point of a successful commit will be returned in the result.
     #[cfg(test)]
     pub async fn simulate_failed_commit_mmr(
         mut self,
@@ -548,11 +555,11 @@ mod test {
     use commonware_runtime::{deterministic::Context, deterministic::Executor, Runner};
     use std::collections::HashMap;
 
-    /// Return a store initialized with a fixed config.
-    async fn open_store<B: Blob, E: RStorage<B> + Clock + Metrics>(
+    /// Return an `Any` database initialized with a fixed config.
+    async fn open_db<B: Blob, E: RStorage<B> + Clock + Metrics>(
         context: E,
         hasher: &mut Sha256,
-    ) -> MutableMmr<B, E, Digest, Digest, Sha256> {
+    ) -> Any<B, E, Digest, Digest, Sha256> {
         let cfg = Config {
             mmr_journal_partition: "journal_partition".into(),
             mmr_metadata_partition: "metadata_partition".into(),
@@ -560,186 +567,180 @@ mod test {
             log_journal_partition: "log_journal_partition".into(),
             log_items_per_blob: 7,
         };
-        MutableMmr::<B, E, Digest, Digest, Sha256>::init(context, hasher, cfg)
+        Any::<B, E, Digest, Digest, Sha256>::init(context, hasher, cfg)
             .await
             .unwrap()
     }
 
     #[test_traced]
-    pub fn test_mutable_mmr_empty() {
+    pub fn test_any_db_empty() {
         let (executor, context, _) = Executor::default();
         executor.start(async move {
             let mut hasher = Sha256::new();
-            let mut store = open_store(context.clone(), &mut hasher).await;
-            assert_eq!(store.op_count(), 0);
-            assert_eq!(store.oldest_retained_loc(), None);
-            assert!(matches!(store.prune_inactive().await, Ok(())));
-            assert_eq!(store.root(&mut hasher), MemMmr::default().root(&mut hasher));
+            let mut db = open_db(context.clone(), &mut hasher).await;
+            assert_eq!(db.op_count(), 0);
+            assert_eq!(db.oldest_retained_loc(), None);
+            assert!(matches!(db.prune_inactive().await, Ok(())));
+            assert_eq!(db.root(&mut hasher), MemMmr::default().root(&mut hasher));
 
             // Make sure closing/reopening gets us back to the same state, even after adding an uncommitted op.
             let d1 = <Sha256 as CHasher>::Digest::try_from(&vec![1u8; 32]).unwrap();
             let d2 = <Sha256 as CHasher>::Digest::try_from(&vec![2u8; 32]).unwrap();
-            let root = store.root(&mut hasher);
-            store.update(&mut hasher, d1, d2).await.unwrap();
-            store.close().await.unwrap();
-            let mut store = open_store(context.clone(), &mut hasher).await;
-            assert_eq!(store.root(&mut hasher), root);
-            assert_eq!(store.op_count(), 0);
+            let root = db.root(&mut hasher);
+            db.update(&mut hasher, d1, d2).await.unwrap();
+            db.close().await.unwrap();
+            let mut db = open_db(context.clone(), &mut hasher).await;
+            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.op_count(), 0);
 
-            // Test calling commit on an empty store which should make it (durably) non-empty.
-            store.commit(&mut hasher).await.unwrap();
-            assert_eq!(store.op_count(), 1); // floor op added
-            let root = store.root(&mut hasher);
-            assert!(matches!(store.prune_inactive().await, Ok(())));
-            let mut store = open_store(context.clone(), &mut hasher).await;
-            assert_eq!(store.root(&mut hasher), root);
+            // Test calling commit on an empty db which should make it (durably) non-empty.
+            db.commit(&mut hasher).await.unwrap();
+            assert_eq!(db.op_count(), 1); // floor op added
+            let root = db.root(&mut hasher);
+            assert!(matches!(db.prune_inactive().await, Ok(())));
+            let mut db = open_db(context.clone(), &mut hasher).await;
+            assert_eq!(db.root(&mut hasher), root);
 
             // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits.
             for _ in 1..100 {
-                store.commit(&mut hasher).await.unwrap();
-                assert_eq!(store.op_count() - 1, store.inactivity_floor_loc);
+                db.commit(&mut hasher).await.unwrap();
+                assert_eq!(db.op_count() - 1, db.inactivity_floor_loc);
             }
         });
     }
 
     #[test_traced("WARN")]
-    pub fn test_mutable_mmr_build_basic() {
+    pub fn test_any_db_build_basic() {
         let (executor, context, _) = Executor::default();
         executor.start(async move {
-            // Build a store with 2 keys and make sure updates and deletions of those keys work as
+            // Build a db with 2 keys and make sure updates and deletions of those keys work as
             // expected.
             let mut hasher = Sha256::new();
-            let mut store = open_store(context.clone(), &mut hasher).await;
+            let mut db = open_db(context.clone(), &mut hasher).await;
 
             let d1 = <Sha256 as CHasher>::Digest::try_from(&vec![1u8; 32]).unwrap();
             let d2 = <Sha256 as CHasher>::Digest::try_from(&vec![2u8; 32]).unwrap();
 
-            assert!(store.get(&d1).await.unwrap().is_none());
-            assert!(store.get(&d2).await.unwrap().is_none());
+            assert!(db.get(&d1).await.unwrap().is_none());
+            assert!(db.get(&d2).await.unwrap().is_none());
 
-            store.update(&mut hasher, d1, d2).await.unwrap();
-            assert_eq!(store.get(&d1).await.unwrap().unwrap(), d2);
-            assert!(store.get(&d2).await.unwrap().is_none());
+            db.update(&mut hasher, d1, d2).await.unwrap();
+            assert_eq!(db.get(&d1).await.unwrap().unwrap(), d2);
+            assert!(db.get(&d2).await.unwrap().is_none());
 
-            store.update(&mut hasher, d2, d1).await.unwrap();
-            assert_eq!(store.get(&d1).await.unwrap().unwrap(), d2);
-            assert_eq!(store.get(&d2).await.unwrap().unwrap(), d1);
+            db.update(&mut hasher, d2, d1).await.unwrap();
+            assert_eq!(db.get(&d1).await.unwrap().unwrap(), d2);
+            assert_eq!(db.get(&d2).await.unwrap().unwrap(), d1);
 
-            store.delete(&mut hasher, d1).await.unwrap();
-            assert!(store.get(&d1).await.unwrap().is_none());
-            assert_eq!(store.get(&d2).await.unwrap().unwrap(), d1);
+            db.delete(&mut hasher, d1).await.unwrap();
+            assert!(db.get(&d1).await.unwrap().is_none());
+            assert_eq!(db.get(&d2).await.unwrap().unwrap(), d1);
 
-            store.update(&mut hasher, d1, d1).await.unwrap();
-            assert_eq!(store.get(&d1).await.unwrap().unwrap(), d1);
+            db.update(&mut hasher, d1, d1).await.unwrap();
+            assert_eq!(db.get(&d1).await.unwrap().unwrap(), d1);
 
-            store.update(&mut hasher, d2, d2).await.unwrap();
-            assert_eq!(store.get(&d2).await.unwrap().unwrap(), d2);
+            db.update(&mut hasher, d2, d2).await.unwrap();
+            assert_eq!(db.get(&d2).await.unwrap().unwrap(), d2);
 
-            assert_eq!(store.log.size().await.unwrap(), 5); // 4 updates, 1 deletion.
-            assert_eq!(store.snapshot.len(), 2);
-            assert_eq!(store.inactivity_floor_loc, 0);
-            store.sync().await.unwrap();
+            assert_eq!(db.log.size().await.unwrap(), 5); // 4 updates, 1 deletion.
+            assert_eq!(db.snapshot.len(), 2);
+            assert_eq!(db.inactivity_floor_loc, 0);
+            db.sync().await.unwrap();
 
             // Advance over 3 inactive operations.
-            store.raise_inactivity_floor(&mut hasher, 3).await.unwrap();
-            assert_eq!(store.inactivity_floor_loc, 3);
-            assert_eq!(store.log.size().await.unwrap(), 6); // 4 updates, 1 deletion, 1 commit
+            db.raise_inactivity_floor(&mut hasher, 3).await.unwrap();
+            assert_eq!(db.inactivity_floor_loc, 3);
+            assert_eq!(db.log.size().await.unwrap(), 6); // 4 updates, 1 deletion, 1 commit
 
-            let root = store.root(&mut hasher);
+            let root = db.root(&mut hasher);
 
             // Multiple assignments of the same value should be a no-op.
-            store.update(&mut hasher, d1, d1).await.unwrap();
-            store.update(&mut hasher, d2, d2).await.unwrap();
+            db.update(&mut hasher, d1, d1).await.unwrap();
+            db.update(&mut hasher, d2, d2).await.unwrap();
             // Log and root should be unchanged.
-            assert_eq!(store.log.size().await.unwrap(), 6);
-            assert_eq!(store.root(&mut hasher), root);
+            assert_eq!(db.log.size().await.unwrap(), 6);
+            assert_eq!(db.root(&mut hasher), root);
 
             // Delete all keys.
-            store.delete(&mut hasher, d1).await.unwrap();
-            store.delete(&mut hasher, d2).await.unwrap();
-            assert!(store.get(&d1).await.unwrap().is_none());
-            assert!(store.get(&d2).await.unwrap().is_none());
-            assert_eq!(store.log.size().await.unwrap(), 8); // 4 updates, 3 deletions, 1 commit
-            assert_eq!(store.inactivity_floor_loc, 3);
+            db.delete(&mut hasher, d1).await.unwrap();
+            db.delete(&mut hasher, d2).await.unwrap();
+            assert!(db.get(&d1).await.unwrap().is_none());
+            assert!(db.get(&d2).await.unwrap().is_none());
+            assert_eq!(db.log.size().await.unwrap(), 8); // 4 updates, 3 deletions, 1 commit
+            assert_eq!(db.inactivity_floor_loc, 3);
 
-            let root = store.root(&mut hasher);
+            let root = db.root(&mut hasher);
 
             // Multiple deletions of the same key should be a no-op.
-            store.delete(&mut hasher, d1).await.unwrap();
-            assert_eq!(store.log.size().await.unwrap(), 8);
-            assert_eq!(store.root(&mut hasher), root);
+            db.delete(&mut hasher, d1).await.unwrap();
+            assert_eq!(db.log.size().await.unwrap(), 8);
+            assert_eq!(db.root(&mut hasher), root);
 
             // Deletions of non-existent keys should be a no-op.
             let d3 = <Sha256 as CHasher>::Digest::try_from(&vec![2u8; 32]).unwrap();
-            store.delete(&mut hasher, d3).await.unwrap();
-            assert_eq!(store.log.size().await.unwrap(), 8);
-            assert_eq!(store.root(&mut hasher), root);
+            db.delete(&mut hasher, d3).await.unwrap();
+            assert_eq!(db.log.size().await.unwrap(), 8);
+            assert_eq!(db.root(&mut hasher), root);
 
             // Make sure closing/reopening gets us back to the same state.
-            store.commit(&mut hasher).await.unwrap();
-            assert_eq!(store.log.size().await.unwrap(), 9);
-            let root = store.root(&mut hasher);
-            store.close().await.unwrap();
-            let mut store = open_store(context.clone(), &mut hasher).await;
-            assert_eq!(store.log.size().await.unwrap(), 9);
-            assert_eq!(store.root(&mut hasher), root);
+            db.commit(&mut hasher).await.unwrap();
+            assert_eq!(db.log.size().await.unwrap(), 9);
+            let root = db.root(&mut hasher);
+            db.close().await.unwrap();
+            let mut db = open_db(context.clone(), &mut hasher).await;
+            assert_eq!(db.log.size().await.unwrap(), 9);
+            assert_eq!(db.root(&mut hasher), root);
 
-            // Since this store no longer has any active keys, we should be able to raise the
+            // Since this db no longer has any active keys, we should be able to raise the
             // inactivity floor to the tip (only the inactive commit op remains).
-            store
-                .raise_inactivity_floor(&mut hasher, 100)
-                .await
-                .unwrap();
-            assert_eq!(store.inactivity_floor_loc, store.op_count() - 1);
+            db.raise_inactivity_floor(&mut hasher, 100).await.unwrap();
+            assert_eq!(db.inactivity_floor_loc, db.op_count() - 1);
 
             // Re-activate the keys by updating them.
-            store.update(&mut hasher, d1, d1).await.unwrap();
-            store.update(&mut hasher, d2, d2).await.unwrap();
-            store.delete(&mut hasher, d1).await.unwrap();
-            store.update(&mut hasher, d2, d1).await.unwrap();
-            store.update(&mut hasher, d1, d2).await.unwrap();
-            assert_eq!(store.snapshot.len(), 2);
+            db.update(&mut hasher, d1, d1).await.unwrap();
+            db.update(&mut hasher, d2, d2).await.unwrap();
+            db.delete(&mut hasher, d1).await.unwrap();
+            db.update(&mut hasher, d2, d1).await.unwrap();
+            db.update(&mut hasher, d1, d2).await.unwrap();
+            assert_eq!(db.snapshot.len(), 2);
 
             // Confirm close/reopen gets us back to the same state.
-            store.commit(&mut hasher).await.unwrap();
-            let root = store.root(&mut hasher);
-            store.close().await.unwrap();
-            let mut store = open_store(context, &mut hasher).await;
-            assert_eq!(store.root(&mut hasher), root);
+            db.commit(&mut hasher).await.unwrap();
+            let root = db.root(&mut hasher);
+            db.close().await.unwrap();
+            let mut db = open_db(context, &mut hasher).await;
+            assert_eq!(db.root(&mut hasher), root);
 
             // Commit will raise the inactivity floor, which won't affect state but will affect the
             // root.
-            store.commit(&mut hasher).await.unwrap();
-            assert_eq!(store.snapshot.len(), 2);
-            assert!(store.root(&mut hasher) != root);
+            db.commit(&mut hasher).await.unwrap();
+            assert_eq!(db.snapshot.len(), 2);
+            assert!(db.root(&mut hasher) != root);
 
             // Pruning inactive ops should not affect current state or root
-            let root = store.root(&mut hasher);
-            store.prune_inactive().await.unwrap();
-            assert_eq!(store.snapshot.len(), 2);
-            assert_eq!(store.root(&mut hasher), root);
-            assert_eq!(
-                store.inactivity_floor_loc,
-                store.oldest_retained_loc().unwrap()
-            );
+            let root = db.root(&mut hasher);
+            db.prune_inactive().await.unwrap();
+            assert_eq!(db.snapshot.len(), 2);
+            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.inactivity_floor_loc, db.oldest_retained_loc().unwrap());
         });
     }
 
     #[test_traced("WARN")]
-    pub fn test_mutable_mmr_build_and_authenticate() {
+    pub fn test_any_db_build_and_authenticate() {
         let (executor, context, _) = Executor::default();
-        // Build a store with 1000 keys, some of which we update and some of which we delete, and
-        // confirm that the end state of the store matches that of an identically updated hashmap.
+        // Build a db with 1000 keys, some of which we update and some of which we delete, and
+        // confirm that the end state of the db matches that of an identically updated hashmap.
         executor.start(async move {
             let mut hasher = Sha256::new();
-            let mut store = open_store(context.clone(), &mut hasher).await;
+            let mut db = open_db(context.clone(), &mut hasher).await;
 
             let mut map = HashMap::<Digest, Digest>::default();
             const ELEMENTS: u64 = 1000;
             for i in 0u64..ELEMENTS {
                 let k = hash(&i.to_be_bytes());
                 let v = hash(&(i * 1000).to_be_bytes());
-                store.update(&mut hasher, k, v).await.unwrap();
+                db.update(&mut hasher, k, v).await.unwrap();
                 map.insert(k, v);
             }
 
@@ -750,7 +751,7 @@ mod test {
                 }
                 let k = hash(&i.to_be_bytes());
                 let v = hash(&((i + 1) * 10000).to_be_bytes());
-                store.update(&mut hasher, k, v).await.unwrap();
+                db.update(&mut hasher, k, v).await.unwrap();
                 map.insert(k, v);
             }
 
@@ -760,72 +761,66 @@ mod test {
                     continue;
                 }
                 let k = hash(&i.to_be_bytes());
-                store.delete(&mut hasher, k).await.unwrap();
+                db.delete(&mut hasher, k).await.unwrap();
                 map.remove(&k);
             }
 
-            assert_eq!(store.op_count(), 1477);
-            assert_eq!(store.inactivity_floor_loc, 0);
-            assert_eq!(store.log.size().await.unwrap(), 1477);
-            assert_eq!(store.oldest_retained_loc().unwrap(), 0); // no pruning yet
-            assert_eq!(store.snapshot.len(), 857);
+            assert_eq!(db.op_count(), 1477);
+            assert_eq!(db.inactivity_floor_loc, 0);
+            assert_eq!(db.log.size().await.unwrap(), 1477);
+            assert_eq!(db.oldest_retained_loc().unwrap(), 0); // no pruning yet
+            assert_eq!(db.snapshot.len(), 857);
 
             // Test that commit will raise the activity floor.
-            store.commit(&mut hasher).await.unwrap();
-            assert_eq!(store.op_count(), 2336);
-            assert_eq!(store.oldest_retained_loc().unwrap(), 1478);
-            assert_eq!(store.snapshot.len(), 857);
+            db.commit(&mut hasher).await.unwrap();
+            assert_eq!(db.op_count(), 2336);
+            assert_eq!(db.oldest_retained_loc().unwrap(), 1478);
+            assert_eq!(db.snapshot.len(), 857);
 
-            // Close & reopen the store, making sure the re-opened store has exactly the same state.
-            let root_hash = store.root(&mut hasher);
-            store.close().await.unwrap();
-            let mut store = open_store(context.clone(), &mut hasher).await;
-            assert_eq!(root_hash, store.root(&mut hasher));
-            assert_eq!(store.op_count(), 2336);
-            assert_eq!(store.inactivity_floor_loc, 1478);
-            assert_eq!(store.snapshot.len(), 857);
+            // Close & reopen the db, making sure the re-opened db has exactly the same state.
+            let root_hash = db.root(&mut hasher);
+            db.close().await.unwrap();
+            let mut db = open_db(context.clone(), &mut hasher).await;
+            assert_eq!(root_hash, db.root(&mut hasher));
+            assert_eq!(db.op_count(), 2336);
+            assert_eq!(db.inactivity_floor_loc, 1478);
+            assert_eq!(db.snapshot.len(), 857);
 
             // Raise the inactivity floor to the point where all inactive operations can be pruned.
-            store
-                .raise_inactivity_floor(&mut hasher, 3000)
-                .await
-                .unwrap();
-            store.prune_inactive().await.unwrap();
-            assert_eq!(store.inactivity_floor_loc, 4478);
+            db.raise_inactivity_floor(&mut hasher, 3000).await.unwrap();
+            db.prune_inactive().await.unwrap();
+            assert_eq!(db.inactivity_floor_loc, 4478);
             // Inactivity floor should be 858 operations from tip since 858 operations are active
             // (counting the floor op itself).
-            assert_eq!(store.op_count(), 4478 + 858);
-            assert_eq!(store.snapshot.len(), 857);
+            assert_eq!(db.op_count(), 4478 + 858);
+            assert_eq!(db.snapshot.len(), 857);
 
-            // Confirm the store's state matches that of the separate map we computed independently.
+            // Confirm the db's state matches that of the separate map we computed independently.
             for i in 0u64..1000 {
                 let k = hash(&i.to_be_bytes());
                 if let Some(map_value) = map.get(&k) {
-                    let Some(store_value) = store.get(&k).await.unwrap() else {
-                        panic!("key not found in store: {}", k);
+                    let Some(db_value) = db.get(&k).await.unwrap() else {
+                        panic!("key not found in db: {}", k);
                     };
-                    assert_eq!(*map_value, store_value);
+                    assert_eq!(*map_value, db_value);
                 } else {
-                    assert!(store.get(&k).await.unwrap().is_none());
+                    assert!(db.get(&k).await.unwrap().is_none());
                 }
             }
 
             // Make sure size-constrained batches of operations are provable from the oldest
             // retained op to tip.
             let max_ops = 4;
-            let end_loc = store.op_count();
-            let start_pos = store.ops.oldest_retained_pos().unwrap_or(store.ops.size());
+            let end_loc = db.op_count();
+            let start_pos = db.ops.oldest_retained_pos().unwrap_or(db.ops.size());
             let start_loc = leaf_pos_to_num(start_pos).unwrap();
             // Raise the inactivity floor and make sure historical inactive operations are still provable.
-            store
-                .raise_inactivity_floor(&mut hasher, 100)
-                .await
-                .unwrap();
-            let root = store.root(&mut hasher);
-            assert!(start_loc < store.inactivity_floor_loc);
+            db.raise_inactivity_floor(&mut hasher, 100).await.unwrap();
+            let root = db.root(&mut hasher);
+            assert!(start_loc < db.inactivity_floor_loc);
             for i in start_loc..end_loc {
-                let (proof, log) = store.proof(i, max_ops).await.unwrap();
-                assert!(MutableMmr::<_, Context, _, _, _>::verify_proof(
+                let (proof, log) = db.proof(i, max_ops).await.unwrap();
+                assert!(Any::<_, Context, _, _, _>::verify_proof(
                     &mut hasher,
                     &proof,
                     i,
@@ -837,77 +832,77 @@ mod test {
     }
 
     #[test_traced("WARN")]
-    pub fn test_mutable_mmr_recovery() {
+    pub fn test_any_db_recovery() {
         let (executor, context, _) = Executor::default();
         executor.start(async move {
             let mut hasher = Sha256::new();
-            let mut store = open_store(context.clone(), &mut hasher).await;
+            let mut db = open_db(context.clone(), &mut hasher).await;
 
             // Insert 1000 keys then sync.
             const ELEMENTS: u64 = 1000;
             for i in 0u64..ELEMENTS {
                 let k = hash(&i.to_be_bytes());
                 let v = hash(&(i * 1000).to_be_bytes());
-                store.update(&mut hasher, k, v).await.unwrap();
+                db.update(&mut hasher, k, v).await.unwrap();
             }
-            store.sync().await.unwrap();
+            db.sync().await.unwrap();
 
             // Insert another 1000 keys then simulate a failed close and test recovery.
             for i in 0u64..ELEMENTS {
                 let k = hash(&i.to_be_bytes());
                 let v = hash(&((i + 1) * 10000).to_be_bytes());
-                store.update(&mut hasher, k, v).await.unwrap();
+                db.update(&mut hasher, k, v).await.unwrap();
             }
 
             // We partially write 101 of the cached MMR nodes to simulate a failure that leaves the
             // MMR in a state with an orphaned leaf.
-            let root = store
+            let root = db
                 .simulate_failed_commit_mmr(&mut hasher, 101)
                 .await
                 .unwrap();
 
-            // Journaled MMR recovery should restore the orphaned leaf & its parents, then log
+            // Journaled MMR recovery should redb the orphaned leaf & its parents, then log
             // replaying will restore the rest.
-            let mut store = open_store(context.clone(), &mut hasher).await;
-            assert_eq!(store.root(&mut hasher), root);
+            let mut db = open_db(context.clone(), &mut hasher).await;
+            assert_eq!(db.root(&mut hasher), root);
 
             // Write some additional nodes, simulate failed log commit, and test we recover to the previous commit point.
             for i in 0u64..100 {
                 let k = hash(&i.to_be_bytes());
                 let v = hash(&((i + 2) * 10000).to_be_bytes());
-                store.update(&mut hasher, k, v).await.unwrap();
+                db.update(&mut hasher, k, v).await.unwrap();
             }
-            store.simulate_failed_commit_log(&mut hasher).await.unwrap();
-            let store = open_store(context.clone(), &mut hasher).await;
-            assert_eq!(store.root(&mut hasher), root);
+            db.simulate_failed_commit_log(&mut hasher).await.unwrap();
+            let db = open_db(context.clone(), &mut hasher).await;
+            assert_eq!(db.root(&mut hasher), root);
         });
     }
 
     // Test that replaying multiple updates of the same key on startup doesn't leave behind old data
     // in the snapshot.
     #[test_traced("WARN")]
-    pub fn test_mutable_mmr_log_replay() {
+    pub fn test_any_db_log_replay() {
         let (executor, context, _) = Executor::default();
         executor.start(async move {
             let mut hasher = Sha256::new();
-            let mut store = open_store(context.clone(), &mut hasher).await;
+            let mut db = open_db(context.clone(), &mut hasher).await;
 
             // Update the same key many times.
             const UPDATES: u64 = 100;
             let k = hash(&UPDATES.to_be_bytes());
             for i in 0u64..UPDATES {
                 let v = hash(&(i * 1000).to_be_bytes());
-                store.update(&mut hasher, k, v).await.unwrap();
+                db.update(&mut hasher, k, v).await.unwrap();
             }
-            store.commit(&mut hasher).await.unwrap();
-            let root = store.root(&mut hasher);
-            store.close().await.unwrap();
+            db.commit(&mut hasher).await.unwrap();
+            let root = db.root(&mut hasher);
+            db.close().await.unwrap();
 
             // Simulate a failed commit and test that the log replay doesn't leave behind old data.
-            let store = open_store(context.clone(), &mut hasher).await;
-            let iter = store.snapshot.get(&k);
+            let db = open_db(context.clone(), &mut hasher).await;
+            let iter = db.snapshot.get(&k);
             assert_eq!(iter.cloned().collect::<Vec<_>>().len(), 1);
-            assert_eq!(store.root(&mut hasher), root);
+            assert_eq!(db.root(&mut hasher), root);
         });
     }
 }
