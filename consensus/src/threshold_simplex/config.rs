@@ -1,5 +1,5 @@
-use super::{Context, View};
-use crate::{Automaton, Committer, Relay, ThresholdSupervisor};
+use super::types::{Activity, Context, View};
+use crate::{Automaton, Relay, Reporter, ThresholdSupervisor};
 use commonware_cryptography::{bls12381::primitives::group, Digest, Scheme};
 use governor::Quota;
 use std::time::Duration;
@@ -10,7 +10,7 @@ pub struct Config<
     D: Digest,
     A: Automaton<Context = Context<D>>,
     R: Relay,
-    F: Committer,
+    F: Reporter<Activity = Activity<D>>,
     S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
 > {
     /// Cryptographic primitives.
@@ -84,7 +84,7 @@ impl<
         D: Digest,
         A: Automaton<Context = Context<D>>,
         R: Relay,
-        F: Committer,
+        F: Reporter<Activity = Activity<D>>,
         S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
     > Config<C, D, A, R, F, S>
 {

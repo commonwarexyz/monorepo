@@ -1,9 +1,9 @@
 use super::{
     actors::{resolver, voter},
     config::Config,
-    Context, View,
+    types::{Activity, Context, View},
 };
-use crate::{Automaton, Committer, Relay, ThresholdSupervisor};
+use crate::{Automaton, Relay, Reporter, ThresholdSupervisor};
 use commonware_cryptography::{
     bls12381::primitives::{group, poly},
     Digest, Scheme,
@@ -24,7 +24,7 @@ pub struct Engine<
     D: Digest,
     A: Automaton<Context = Context<D>, Digest = D>,
     R: Relay<Digest = D>,
-    F: Committer<Digest = D>,
+    F: Reporter<Activity = Activity<D>>,
     S: ThresholdSupervisor<
         Seed = group::Signature,
         Index = View,
@@ -48,7 +48,7 @@ impl<
         D: Digest,
         A: Automaton<Context = Context<D>, Digest = D>,
         R: Relay<Digest = D>,
-        F: Committer<Digest = D>,
+        F: Reporter<Activity = Activity<D>>,
         S: ThresholdSupervisor<
             Seed = group::Signature,
             Index = View,
