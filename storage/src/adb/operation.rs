@@ -1,5 +1,7 @@
-//! An `Array` implementation for operations applied to a `MutableMmr` K/V store, making them
-//! storable in a `fixed::Journal`.
+//! Operations that can be applied to an authenticated database.
+//!
+//! The `Operation` enum implements the `Array` trait, allowing for a persistent log of operations
+//! based on a `crate::Journal`.
 
 use commonware_codec::{Codec, Error as CodecError, Reader, SizedCodec, Writer};
 use commonware_utils::Array;
@@ -28,7 +30,7 @@ pub enum Error<K: Array, V: Array> {
     InvalidCommitOp,
 }
 
-/// The types of operations that can change the state of the store.
+/// The types of operations that can change the state of a database.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub enum Type<K: Array, V: Array> {
     /// Indicates the key no longer has a value.
@@ -42,7 +44,7 @@ pub enum Type<K: Array, V: Array> {
     Commit(u64),
 }
 
-/// An `Array` implementation for operations applied to a `MutableMmr` K/V store.
+/// An `Array` implementation for operations applied to an authenticated database.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 #[repr(transparent)]
 pub struct Operation<K: Array, V: Array> {

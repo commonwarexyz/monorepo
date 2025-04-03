@@ -72,11 +72,9 @@ use thiserror::Error;
 
 pub mod bitmap;
 mod hasher;
-mod iterator;
+pub mod iterator;
 pub mod journaled;
 pub mod mem;
-pub mod mutable;
-pub mod operation;
 pub mod verification;
 
 /// Errors that can occur when interacting with an MMR.
