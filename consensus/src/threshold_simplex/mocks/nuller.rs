@@ -3,17 +3,17 @@
 use crate::{
     threshold_simplex::types::{
         finalize_namespace, nullify_namespace, seed_namespace, view_message, Finalize, Nullify,
-        Proposal, View, Voter,
+        View, Voter,
     },
     ThresholdSupervisor,
 };
+use commonware_codec::Codec;
 use commonware_cryptography::{
     bls12381::primitives::{group, ops},
     Hasher,
 };
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Handle, Spawner};
-use prost::Message;
 use std::marker::PhantomData;
 use tracing::debug;
 
@@ -64,59 +64,36 @@ impl<
         let (mut sender, mut receiver) = voter_network;
         while let Ok((s, msg)) = receiver.recv().await {
             // Parse message
-            let msg = match Voter::decode(msg) {
+            let msg = match Voter::<H::Digest>::decode(msg) {
                 Ok(msg) => msg,
                 Err(err) => {
                     debug!(?err, sender = ?s, "failed to decode message");
                     continue;
                 }
             };
-            let payload = match msg.payload {
-                Some(payload) => payload,
-                None => {
-                    debug!(sender = ?s, "message missing payload");
-                    continue;
-                }
-            };
 
             // Process message
-            match payload {
+            match msg {
                 Voter::Notarize(notarize) => {
-                    // Get our index
-                    let proposal = match notarize.proposal {
-                        Some(proposal) => proposal,
-                        None => {
-                            debug!(sender = ?s, "notarize missing proposal");
-                            continue;
-                        }
-                    };
-                    let Ok(payload) = H::Digest::try_from(&proposal.payload) else {
-                        debug!(sender = ?s, "invalid payload");
-                        continue;
-                    };
-                    let view = proposal.view;
-
                     // Nullify
+                    let view = notarize.view();
                     let share = self.supervisor.share(view).unwrap();
                     let message = view_message(view);
                     let view_signature =
-                        ops::partial_sign_message(share, Some(&self.nullify_namespace), &message)
-                            .serialize();
+                        ops::partial_sign_message(share, Some(&self.nullify_namespace), &message);
                     let seed_signature =
-                        ops::partial_sign_message(share, Some(&self.seed_namespace), &message)
-                            .serialize();
+                        ops::partial_sign_message(share, Some(&self.seed_namespace), &message);
                     let n = Nullify::new(view, view_signature, seed_signature);
-                    let msg = Voter::Nullify(n).encode_to_vec().into();
+                    let msg = Voter::<H::Digest>::Nullify(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
 
                     // Finalize digest
-                    let proposal = Proposal::new(view, proposal.parent, &payload);
-                    let message = proposal.digest();
+                    let proposal = notarize.proposal;
+                    let message = proposal.encode();
                     let proposal_signature =
-                        ops::partial_sign_message(share, Some(&self.finalize_namespace), &message)
-                            .serialize();
+                        ops::partial_sign_message(share, Some(&self.finalize_namespace), &message);
                     let f = Finalize::new(proposal, proposal_signature);
-                    let msg = Voter::Finalize(f).encode_to_vec().into();
+                    let msg = Voter::Finalize(f).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
                 _ => continue,
