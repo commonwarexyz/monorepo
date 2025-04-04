@@ -60,9 +60,10 @@ struct Round<
     reporter: R,
     supervisor: S,
 
-    leader: Option<C::PublicKey>,
-
     view: View,
+    participants: usize,
+
+    leader: Option<C::PublicKey>,
     leader_deadline: Option<SystemTime>,
     advance_deadline: Option<SystemTime>,
     nullify_retry: Option<SystemTime>,
@@ -74,7 +75,7 @@ struct Round<
 
     // Track notarizes for all proposals (ensuring any participant only has one recorded notarize)
     notarized_proposals: HashMap<Proposal<D>, Vec<u32>>,
-    notarizes: HashMap<u32, Notarize<D>>,
+    notarizes: Vec<Option<Notarize<D>>>,
     notarization: Option<Notarization<D>>,
     broadcast_notarize: bool,
     broadcast_notarization: bool,
@@ -87,7 +88,7 @@ struct Round<
 
     // Track finalizes for all proposals (ensuring any participant only has one recorded finalize)
     finalized_proposals: HashMap<Proposal<D>, Vec<u32>>,
-    finalizes: HashMap<u32, Finalize<D>>,
+    finalizes: Vec<Option<Finalize<D>>>,
     finalization: Option<Finalization<D>>,
     broadcast_finalize: bool,
     broadcast_finalization: bool,
@@ -107,6 +108,7 @@ impl<
     > Round<C, D, E, R, S>
 {
     pub fn new(ctx: E, reporter: R, supervisor: S, view: View) -> Self {
+        let participants = supervisor.participants(view).unwrap().len();
         Self {
             start: ctx.current(),
             context: ctx,
@@ -114,6 +116,8 @@ impl<
             supervisor,
 
             view,
+            participants,
+
             leader: None,
             leader_deadline: None,
             advance_deadline: None,
@@ -124,7 +128,7 @@ impl<
             verified_proposal: false,
 
             notarized_proposals: HashMap::new(),
-            notarizes: HashMap::new(),
+            notarizes: vec![None; participants],
             notarization: None,
             broadcast_notarize: false,
             broadcast_notarization: false,
@@ -135,7 +139,7 @@ impl<
             broadcast_nullification: false,
 
             finalized_proposals: HashMap::new(),
-            finalizes: HashMap::new(),
+            finalizes: vec![None; participants],
             finalization: None,
             broadcast_finalize: false,
             broadcast_finalization: false,
@@ -168,7 +172,7 @@ impl<
         notarize: Notarize<D>,
     ) -> bool {
         // Check if already notarized
-        if let Some(previous) = self.notarizes.get(&public_key_index) {
+        if let Some(previous) = &self.notarizes[public_key_index as usize] {
             if previous == &notarize {
                 trace!(?notarize, ?previous, "already notarized");
                 return false;
@@ -199,19 +203,17 @@ impl<
             self.notarized_proposals
                 .insert(notarize.proposal.clone(), vec![public_key_index]);
         }
-        self.notarizes.insert(public_key_index, notarize.clone());
+        self.notarizes[public_key_index as usize] = Some(notarize.clone());
         self.reporter.report(Activity::Notarize(notarize)).await;
         true
     }
 
     async fn add_verified_nullify(&mut self, public_key_index: u32, nullify: Nullify) -> bool {
         // Check if already issued finalize
-        let finalize = self.finalizes.get(&public_key_index);
-        if finalize.is_none() {
+        let Some(finalize) = &self.finalizes[public_key_index as usize] else {
             // Store the nullify
             return self.nullifies.insert(public_key_index, nullify).is_none();
-        }
-        let finalize = finalize.unwrap();
+        };
 
         // Create fault
         let activity = NullifyFinalize::new(
@@ -236,7 +238,7 @@ impl<
         finalize: Finalize<D>,
     ) -> bool {
         // Check if also issued nullify
-        if let Some(previous) = self.nullifies.get(&public_key_index) {
+        if let Some(previous) = &self.nullifies.get(&public_key_index) {
             // Create fault
             let activity = NullifyFinalize::new(
                 finalize.proposal.clone(),
@@ -255,7 +257,7 @@ impl<
         }
 
         // Check if already finalized
-        if let Some(previous) = self.finalizes.get(&public_key_index) {
+        if let Some(previous) = &self.finalizes[public_key_index as usize] {
             if previous == &finalize {
                 trace!(?finalize, ?previous, "already finalize");
                 return false;
@@ -286,7 +288,7 @@ impl<
             self.finalized_proposals
                 .insert(finalize.proposal.clone(), vec![public_key_index]);
         }
-        self.finalizes.insert(public_key_index, finalize.clone());
+        self.finalizes[public_key_index as usize] = Some(finalize.clone());
         self.reporter.report(Activity::Finalize(finalize)).await;
         true
     }
@@ -373,7 +375,7 @@ impl<
             let mut notarization = Vec::new();
             let mut seed = Vec::new();
             for notarize in notarizes {
-                let notarize = self.notarizes.get(notarize).unwrap();
+                let notarize = self.notarizes[*notarize as usize].as_ref().unwrap();
                 notarization.push(notarize.proposal_signature.clone());
                 seed.push(notarize.seed_signature.clone());
             }
@@ -489,7 +491,7 @@ impl<
             // Recover threshold signature
             let mut finalization = Vec::new();
             for finalize in finalizes {
-                let finalize = self.finalizes.get(finalize).unwrap();
+                let finalize = self.finalizes[*finalize as usize].as_ref().unwrap();
                 finalization.push(finalize.proposal_signature.clone());
             }
             let proposal_signature = self
@@ -515,8 +517,7 @@ impl<
 
     /// Returns whether at least one honest participant has notarized a proposal.
     pub fn at_least_one_honest(&self) -> Option<View> {
-        let participants = self.supervisor.participants(self.view)?;
-        let threshold = quorum(participants.len() as u32)?;
+        let threshold = quorum(self.participants as u32)?;
         let at_least_one_honest = (threshold - 1) / 2 + 1;
         for (proposal, notarizes) in self.notarized_proposals.iter() {
             if notarizes.len() < at_least_one_honest as usize {
