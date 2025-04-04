@@ -326,7 +326,10 @@ mod tests {
                 let validator = scheme.public_key();
                 let mut participants = BTreeMap::new();
                 participants.insert(0, (public.clone(), validators.clone(), shares[idx]));
-                let supervisor_config = mocks::supervisor::Config { participants };
+                let supervisor_config = mocks::supervisor::Config {
+                    namespace,
+                    participants,
+                };
                 let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
                 supervisors.push(supervisor.clone());
                 let application_cfg = mocks::application::Config {
@@ -352,7 +355,7 @@ mod tests {
                     crypto: scheme,
                     automaton: application.clone(),
                     relay: application.clone(),
-                    committer: application,
+                    reporter: supervisor.clone(),
                     supervisor,
                     mailbox_size: 1024,
                     namespace: namespace.clone(),

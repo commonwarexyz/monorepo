@@ -2,16 +2,17 @@ use crate::{
     threshold_simplex::types::{
         finalize_namespace, notarize_namespace, nullify_namespace, seed_namespace, Activity, View,
     },
-    Reporter, Supervisor as Su, ThresholdSupervisor as TSu,
+    Monitor, Reporter, Supervisor as Su, ThresholdSupervisor as TSu,
 };
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{self, Element},
-        poly,
+        poly::{self, public},
     },
     Digest,
 };
 use commonware_utils::{modulo, Array};
+use futures::channel::mpsc::{Receiver, Sender};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     sync::{Arc, Mutex},
@@ -44,6 +45,9 @@ pub struct Supervisor<P: Array, D: Digest> {
     pub notarizes: Arc<Mutex<Participation<D, P>>>,
     pub finalizes: Arc<Mutex<Participation<D, P>>>,
     pub faults: Arc<Mutex<Faults<D, P>>>,
+
+    latest: Arc<Mutex<View>>,
+    subscribers: Arc<Mutex<Vec<Sender<View>>>>,
 }
 
 impl<P: Array, D: Digest> Supervisor<P, D> {
@@ -66,6 +70,8 @@ impl<P: Array, D: Digest> Supervisor<P, D> {
             notarizes: Arc::new(Mutex::new(HashMap::new())),
             finalizes: Arc::new(Mutex::new(HashMap::new())),
             faults: Arc::new(Mutex::new(HashMap::new())),
+            latest: Arc::new(Mutex::new(0)),
+            subscribers: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -190,6 +196,24 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                     .or_default()
                     .insert(public_key);
             }
+            Activity::Finalization(ref finalization) => {
+                let view = finalization.view();
+                let (identity, _) = match self.participants.range(..=view).next_back() {
+                    Some((_, (p, _, v, _))) => (p, v),
+                    None => {
+                        panic!("no participants in required range");
+                    }
+                };
+                let public = public(identity);
+                if !finalization.verify(public, &self.finalize_namespace, &self.seed_namespace) {
+                    panic!("signature verification failed");
+                }
+                *self.latest.lock().unwrap() = finalization.view();
+                let mut subscribers = self.subscribers.lock().unwrap();
+                for subscriber in subscribers.iter_mut() {
+                    let _ = subscriber.try_send(finalization.view());
+                }
+            }
             Activity::ConflictingNotarize(ref conflicting) => {
                 let view = conflicting.view();
                 let (identity, validators) = match self.participants.range(..=view).next_back() {
@@ -262,5 +286,15 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                 panic!("unexpected activity: {:?}", unexpected);
             }
         }
+    }
+}
+
+impl<P: Array, D: Digest> Monitor for Supervisor<P, D> {
+    type Index = View;
+    async fn subscribe(&mut self) -> (Self::Index, Receiver<Self::Index>) {
+        let (tx, rx) = futures::channel::mpsc::channel(128);
+        self.subscribers.lock().unwrap().push(tx);
+        let latest = *self.latest.lock().unwrap();
+        (latest, rx)
     }
 }
