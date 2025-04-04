@@ -1189,7 +1189,7 @@ impl<
                     return;
                 }
             };
-            if round.notaries.contains_key(&leader_index)
+            if round.notarizes[leader_index as usize].is_some()
                 || round.nullifies.contains_key(&leader_index)
             {
                 return;
@@ -1249,26 +1249,17 @@ impl<
     }
 
     async fn notarize(&mut self, sender: &C::PublicKey, notarize: Notarize<D>) {
-        // Extract proposal
-        let Some(proposal) = notarize.proposal.as_ref() else {
-            return;
-        };
-
         // Ensure we are in the right view to process this message
-        if !self.interesting(proposal.view, false) {
+        let view = notarize.proposal.view;
+        if !self.interesting(view, false) {
             return;
         }
 
-        // Ensure digest is well-formed
-        let Ok(payload) = D::try_from(&proposal.payload) else {
-            return;
-        };
-
         // Verify that signer is a validator
-        let Some(public_key_index) = self.supervisor.is_participant(proposal.view, sender) else {
+        let Some(public_key_index) = self.supervisor.is_participant(view, sender) else {
             return;
         };
-        let Some(identity) = self.supervisor.identity(proposal.view) else {
+        let Some(identity) = self.supervisor.identity(view) else {
             return;
         };
 
@@ -1288,7 +1279,7 @@ impl<
 
     async fn handle_notarize(&mut self, public_key_index: u32, notarize: Notarize<D>) {
         // Check to see if notarize is for proposal in view
-        let view = notarize.message.proposal.as_ref().unwrap().view;
+        let view = notarize.proposal.view;
         let round = self.views.entry(view).or_insert_with(|| {
             Round::new(
                 self.context.with_label("round"),
@@ -1299,7 +1290,7 @@ impl<
         });
 
         // Handle notarize
-        let notarize_bytes = Voter::Notarize(notarize.clone()).encode_to_vec().into();
+        let notarize_bytes = Voter::Notarize(notarize.clone()).encode().into();
         if round
             .add_verified_notarize(public_key_index, notarize)
             .await
@@ -1315,31 +1306,22 @@ impl<
     }
 
     async fn notarization(&mut self, notarization: Notarization<D>) {
-        // Extract proposal
-        let Some(proposal) = &notarization.proposal else {
-            return;
-        };
-
         // Check if we are still in a view where this notarization could help
-        if !self.interesting(proposal.view, true) {
+        let view = notarization.proposal.view;
+        if !self.interesting(view, true) {
             return;
         }
 
-        // Ensure digest is well-formed
-        let Ok(payload) = D::try_from(&proposal.payload) else {
-            return;
-        };
-
         // Determine if we already broadcast notarization for this view (in which
         // case we can ignore this message)
-        if let Some(ref round) = self.views.get_mut(&proposal.view) {
+        if let Some(ref round) = self.views.get_mut(&view) {
             if round.broadcast_notarization {
                 return;
             }
         }
 
         // Verify notarization
-        let Some(identity) = self.supervisor.identity(proposal.view) else {
+        let Some(identity) = self.supervisor.identity(view) else {
             return;
         };
         let public_key = poly::public(identity);
@@ -1353,7 +1335,7 @@ impl<
 
     async fn handle_notarization(&mut self, notarization: Notarization<D>) {
         // Create round (if it doesn't exist)
-        let view = notarization.message.proposal.as_ref().unwrap().view;
+        let view = notarization.proposal.view;
         let round = self.views.entry(view).or_insert_with(|| {
             Round::new(
                 self.context.with_label("round"),
@@ -1364,10 +1346,8 @@ impl<
         });
 
         // Store notarization
-        let notarization_bytes = Voter::Notarization(notarization.clone())
-            .encode_to_vec()
-            .into();
-        let seed = group::Signature::deserialize(&notarization.message.seed_signature).unwrap();
+        let notarization_bytes = Voter::Notarization(notarization.clone()).encode().into();
+        let seed = notarization.seed_signature;
         if round.add_verified_notarization(notarization) && self.journal.is_some() {
             self.journal
                 .as_mut()
@@ -1421,10 +1401,10 @@ impl<
         });
 
         // Store nullification
-        let nullification_bytes = Voter::Nullification(nullification.clone())
-            .encode_to_vec()
+        let nullification_bytes = Voter::<D>::Nullification(nullification.clone())
+            .encode()
             .into();
-        let seed = group::Signature::deserialize(&nullification.seed_signature).unwrap();
+        let seed = nullification.seed_signature;
         if round.add_verified_nullification(nullification) && self.journal.is_some() {
             self.journal
                 .as_mut()
@@ -1439,26 +1419,17 @@ impl<
     }
 
     async fn finalize(&mut self, sender: &C::PublicKey, finalize: Finalize<D>) {
-        // Extract proposal
-        let Some(proposal) = finalize.proposal.as_ref() else {
-            return;
-        };
-
         // Ensure we are in the right view to process this message
-        if !self.interesting(proposal.view, false) {
+        let view = finalize.proposal.view;
+        if !self.interesting(view, false) {
             return;
         }
 
-        // Ensure digest is well-formed
-        let Ok(payload) = D::try_from(&proposal.payload) else {
-            return;
-        };
-
         // Verify that signer is a validator
-        let Some(public_key_index) = self.supervisor.is_participant(proposal.view, sender) else {
+        let Some(public_key_index) = self.supervisor.is_participant(view, sender) else {
             return;
         };
-        let Some(identity) = self.supervisor.identity(proposal.view) else {
+        let Some(identity) = self.supervisor.identity(view) else {
             return;
         };
 
@@ -1473,7 +1444,7 @@ impl<
 
     async fn handle_finalize(&mut self, public_key_index: u32, finalize: Finalize<D>) {
         // Get view for finalize
-        let view = finalize.message.proposal.as_ref().unwrap().view;
+        let view = finalize.proposal.view;
         let round = self.views.entry(view).or_insert_with(|| {
             Round::new(
                 self.context.with_label("round"),
@@ -1484,7 +1455,7 @@ impl<
         });
 
         // Handle finalize
-        let finalize_bytes = Voter::Finalize(finalize.clone()).encode_to_vec().into();
+        let finalize_bytes = Voter::Finalize(finalize.clone()).encode().into();
         if round
             .add_verified_finalize(public_key_index, finalize)
             .await
@@ -1500,31 +1471,22 @@ impl<
     }
 
     async fn finalization(&mut self, finalization: Finalization<D>) {
-        // Extract proposal
-        let Some(proposal) = &finalization.proposal else {
-            return;
-        };
-
         // Check if we are still in a view where this finalization could help
-        if !self.interesting(proposal.view, true) {
+        let view = finalization.proposal.view;
+        if !self.interesting(view, true) {
             return;
         }
 
-        // Ensure digest is well-formed
-        let Ok(payload) = D::try_from(&proposal.payload) else {
-            return;
-        };
-
         // Determine if we already broadcast finalization for this view (in which
         // case we can ignore this message)
-        if let Some(ref round) = self.views.get_mut(&proposal.view) {
+        if let Some(ref round) = self.views.get_mut(&view) {
             if round.broadcast_finalization {
                 return;
             }
         }
 
         // Verify finalization
-        let Some(identity) = self.supervisor.identity(finalization.view) else {
+        let Some(identity) = self.supervisor.identity(view) else {
             return;
         };
         let public_key = poly::public(identity);
@@ -1538,7 +1500,7 @@ impl<
 
     async fn handle_finalization(&mut self, finalization: Finalization<D>) {
         // Create round (if it doesn't exist)
-        let view = finalization.message.proposal.as_ref().unwrap().view;
+        let view = finalization.proposal.view;
         let round = self.views.entry(view).or_insert_with(|| {
             Round::new(
                 self.context.with_label("round"),
@@ -1549,10 +1511,8 @@ impl<
         });
 
         // Store finalization
-        let finalization_bytes = Voter::Finalization(finalization.clone())
-            .encode_to_vec()
-            .into();
-        let seed = group::Signature::deserialize(&finalization.message.seed_signature).unwrap();
+        let finalization_bytes = Voter::Finalization(finalization.clone()).encode().into();
+        let seed = finalization.seed_signature;
         if round.add_verified_finalization(finalization) && self.journal.is_some() {
             self.journal
                 .as_mut()
@@ -1588,15 +1548,18 @@ impl<
             return None;
         }
         let share = self.supervisor.share(view).unwrap();
-        let proposal = &round.proposal.as_ref().unwrap().1;
+        let proposal = round.proposal.as_ref().unwrap();
         let message = proposal.encode();
         let proposal_signature =
-            partial_sign_message(share, Some(&self.notarize_namespace), &message).serialize();
+            partial_sign_message(share, Some(&self.notarize_namespace), &message);
         let message = view_message(view);
-        let seed_signature =
-            partial_sign_message(share, Some(&self.seed_namespace), &message).serialize();
+        let seed_signature = partial_sign_message(share, Some(&self.seed_namespace), &message);
         round.broadcast_notarize = true;
-        Some(Notarize::new(proposal, proposal_signature, seed_signature))
+        Some(Notarize::new(
+            proposal.clone(),
+            proposal_signature,
+            seed_signature,
+        ))
     }
 
     async fn construct_notarization(&mut self, view: u64, force: bool) -> Option<Notarization<D>> {
@@ -1651,20 +1614,17 @@ impl<
             return None;
         }
         let share = self.supervisor.share(view).unwrap();
-        let proposal = match &round.proposal {
-            Some((_, proposal)) => proposal,
-            None => {
-                return None;
-            }
+        let Some(proposal) = &round.proposal else {
+            return None;
         };
         let message = proposal.encode();
         let proposal_signature =
-            partial_sign_message(share, Some(&self.finalize_namespace), &message).serialize();
+            partial_sign_message(share, Some(&self.finalize_namespace), &message);
         round.broadcast_finalize = true;
-        Some(Finalize::new(proposal, proposal_signature))
+        Some(Finalize::new(proposal.clone(), proposal_signature))
     }
 
-    async fn construct_finalization(&mut self, view: u64, force: bool) -> Option<Finalization> {
+    async fn construct_finalization(&mut self, view: u64, force: bool) -> Option<Finalization<D>> {
         let round = match self.views.get_mut(&view) {
             Some(view) => view,
             None => {
