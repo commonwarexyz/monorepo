@@ -248,7 +248,7 @@ impl<D: Digest> Codec for Notarize<D> {
         let proposal_signature = PartialSignature::read(reader)?;
         let seed_signature = PartialSignature::read(reader)?;
         if proposal_signature.index != seed_signature.index {
-            return Err();
+            return Err(Error::Invalid("notarize", "mismatched signatures"));
         }
         Ok(Notarize {
             proposal,
@@ -402,7 +402,7 @@ impl Codec for Nullify {
         let view_signature = PartialSignature::read(reader)?;
         let seed_signature = PartialSignature::read(reader)?;
         if view_signature.index != seed_signature.index {
-            return Err();
+            return Err(Error::Invalid("nullify", "mismatched signatures"));
         }
         Ok(Nullify {
             view,
@@ -951,10 +951,13 @@ impl<D: Digest> Codec for ConflictingNotarize<D> {
         let proposal_2 = Proposal::read(reader)?;
         let signature_2 = PartialSignature::read(reader)?;
         if proposal_1.view != proposal_2.view {
-            return Err();
+            return Err(Error::Invalid("conflicting_notarize", "mismatched views"));
         }
         if signature_1.index != signature_2.index {
-            return Err();
+            return Err(Error::Invalid(
+                "conflicting_notarize",
+                "mismatched signatures",
+            ));
         }
         Ok(ConflictingNotarize {
             proposal_1,
@@ -1042,10 +1045,13 @@ impl<D: Digest> Codec for ConflictingFinalize<D> {
         let proposal_2 = Proposal::read(reader)?;
         let signature_2 = PartialSignature::read(reader)?;
         if proposal_1.view != proposal_2.view {
-            return Err();
+            return Err(Error::Invalid("conflicting_finalize", "mismatched views"));
         }
         if signature_1.index != signature_2.index {
-            return Err();
+            return Err(Error::Invalid(
+                "conflicting_finalize",
+                "mismatched signatures",
+            ));
         }
         Ok(ConflictingFinalize {
             proposal_1,
@@ -1129,7 +1135,7 @@ impl<D: Digest> Codec for NullifyFinalize<D> {
         let view_signature = PartialSignature::read(reader)?;
         let finalize_signature = PartialSignature::read(reader)?;
         if view_signature.index != finalize_signature.index {
-            return Err();
+            return Err(Error::Invalid("nullify_finalize", "mismatched signatures"));
         }
         Ok(NullifyFinalize {
             proposal,

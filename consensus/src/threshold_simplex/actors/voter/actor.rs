@@ -469,7 +469,7 @@ impl<
             let Some(notarization) = &self.notarization else {
                 continue;
             };
-            let seed_signature = notarization.seed_signature.clone();
+            let seed_signature = notarization.seed_signature;
 
             // Check notarization and finalization proposal match
             if notarization.proposal != *proposal {
@@ -1089,7 +1089,7 @@ impl<
             parent: (proposal.parent, *parent_payload),
         };
         let proposal = proposal.clone();
-        let payload = proposal.payload.clone();
+        let payload = proposal.payload;
         let round = self.views.get_mut(&context.view).unwrap();
         round.proposal = Some(proposal);
         Some((
@@ -1531,9 +1531,7 @@ impl<
     }
 
     fn construct_notarize(&mut self, view: u64) -> Option<Notarize<D>> {
-        let Some(round) = self.views.get_mut(&view) else {
-            return None;
-        };
+        let round = self.views.get_mut(&view)?;
         if round.broadcast_notarize {
             return None;
         }
@@ -1560,9 +1558,7 @@ impl<
 
     async fn construct_notarization(&mut self, view: u64, force: bool) -> Option<Notarization<D>> {
         // Get requested view
-        let Some(round) = self.views.get_mut(&view) else {
-            return None;
-        };
+        let round = self.views.get_mut(&view)?;
 
         // Attempt to construct notarization
         let identity = self.supervisor.identity(view)?;
@@ -1572,9 +1568,7 @@ impl<
 
     async fn construct_nullification(&mut self, view: u64, force: bool) -> Option<Nullification> {
         // Get requested view
-        let Some(round) = self.views.get_mut(&view) else {
-            return None;
-        };
+        let round = self.views.get_mut(&view)?;
 
         // Attempt to construct nullification
         let identity = self.supervisor.identity(view)?;
@@ -1583,9 +1577,7 @@ impl<
     }
 
     fn construct_finalize(&mut self, view: u64) -> Option<Finalize<D>> {
-        let Some(round) = self.views.get_mut(&view) else {
-            return None;
-        };
+        let round = self.views.get_mut(&view)?;
         if round.broadcast_nullify {
             return None;
         }
@@ -1612,9 +1604,7 @@ impl<
     }
 
     async fn construct_finalization(&mut self, view: u64, force: bool) -> Option<Finalization<D>> {
-        let Some(round) = self.views.get_mut(&view) else {
-            return None;
-        };
+        let round = self.views.get_mut(&view)?;
 
         // Attempt to construct finalization
         let identity = self.supervisor.identity(view)?;
@@ -1678,7 +1668,8 @@ impl<
 
             // Alert application
             self.reporter
-                .report(Activity::Notarization(notarization.clone()));
+                .report(Activity::Notarization(notarization.clone()))
+                .await;
 
             // Broadcast the notarization
             let msg = Voter::Notarization(notarization.clone()).encode().into();
@@ -1708,7 +1699,8 @@ impl<
 
             // Alert application
             self.reporter
-                .report(Activity::Nullification(nullification.clone()));
+                .report(Activity::Nullification(nullification.clone()))
+                .await;
 
             // Broadcast the nullification
             let msg = Voter::<D>::Nullification(nullification.clone())
@@ -1819,7 +1811,8 @@ impl<
 
             // Alert application
             self.reporter
-                .report(Activity::Finalization(finalization.clone()));
+                .report(Activity::Finalization(finalization.clone()))
+                .await;
 
             // Broadcast the finalization
             let msg = Voter::Finalization(finalization.clone()).encode().into();
