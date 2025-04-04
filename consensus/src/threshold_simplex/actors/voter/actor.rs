@@ -16,7 +16,7 @@ use commonware_cryptography::{
     bls12381::primitives::{
         group::{self, Element},
         ops::{partial_sign_message, threshold_signature_recover},
-        poly::{self, Eval},
+        poly,
     },
     Digest, Scheme,
 };
@@ -33,7 +33,6 @@ use futures::{
 use prometheus_client::metrics::{
     counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
 };
-use prost::Message as _;
 use rand::Rng;
 use std::sync::atomic::AtomicI64;
 use std::{
@@ -1873,21 +1872,22 @@ impl<
                 match msg {
                     Voter::Notarize(notarize) => {
                         // Handle notarize
+                        let view = notarize.view();
                         let public_key_index = notarize.signer();
                         let public_key = self
                             .supervisor
-                            .participants(notarize.view())
+                            .participants(view)
                             .unwrap()
                             .get(public_key_index as usize)
                             .unwrap()
                             .clone();
+                        let proposal = notarize.proposal.clone();
                         self.handle_notarize(public_key_index, notarize).await;
 
                         // Update round info
                         if public_key == self.crypto.public_key() {
-                            let round =
-                                self.views.get_mut(&notarize.view()).expect("missing round");
-                            round.proposal = Some(notarize.proposal.clone());
+                            let round = self.views.get_mut(&view).expect("missing round");
+                            round.proposal = Some(proposal);
                             round.verified_proposal = true;
                             round.broadcast_notarize = true;
                         }
@@ -1931,10 +1931,11 @@ impl<
                     }
                     Voter::Finalize(finalize) => {
                         // Handle finalize
+                        let view = finalize.view();
                         let public_key_index = finalize.signer();
                         let public_key = self
                             .supervisor
-                            .participants(finalize.view())
+                            .participants(view)
                             .unwrap()
                             .get(public_key_index as usize)
                             .unwrap()
@@ -1945,8 +1946,7 @@ impl<
                         //
                         // If we are sending a finalize message, we must be in the next view
                         if public_key == self.crypto.public_key() {
-                            let round =
-                                self.views.get_mut(&finalize.view()).expect("missing round");
+                            let round = self.views.get_mut(&view).expect("missing round");
                             round.broadcast_finalize = true;
                         }
                     }
@@ -2062,13 +2062,9 @@ impl<
                     let proposal = Proposal::new(
                         context.view,
                         context.parent.0,
-                        proposed.to_vec(),
+                        proposed,
                     );
-                    let proposal_digest = proposal.digest();
-                    if !self.our_proposal(
-                        proposal_digest,
-                        proposal,
-                    ).await {
+                    if !self.our_proposal(proposal).await {
                         warn!(view = context.view, "failed to record our container");
                         continue;
                     }
@@ -2106,12 +2102,12 @@ impl<
                     let msg = mailbox.unwrap();
                     match msg {
                         Message::Notarization{ notarization }  => {
-                            view = notarization.message.proposal.as_ref().unwrap().view;
+                            view = notarization.view();
                             debug!(view, "received notarization from backfiller");
                             self.handle_notarization(notarization).await;
                         },
                         Message::Nullification { nullification } => {
-                            view = nullification.view;
+                            view = nullification.view();
                             debug!(view, "received nullification from backfiller");
                             self.handle_nullification(nullification).await;
                         },
@@ -2130,22 +2126,12 @@ impl<
                     match msg {
                         Voter::Notarize(notarize) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::notarize(&s)).inc();
-                            view = match &notarize.proposal {
-                                Some(proposal) => proposal.view,
-                                None => {
-                                    continue;
-                                }
-                            };
+                            view = notarize.view();
                             self.notarize(&s, notarize).await;
                         }
                         Voter::Notarization(notarization) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::notarization(&s)).inc();
-                            view = match &notarization.proposal {
-                                Some(proposal) => proposal.view,
-                                None => {
-                                    continue;
-                                }
-                            };
+                            view = notarization.view();
                             self.notarization(notarization).await;
                         }
                         Voter::Nullify(nullify) => {
@@ -2160,22 +2146,12 @@ impl<
                         }
                         Voter::Finalize(finalize) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::finalize(&s)).inc();
-                            view = match &finalize.proposal {
-                                Some(proposal) => proposal.view,
-                                None => {
-                                    continue;
-                                }
-                            };
+                            view = finalize.view();
                             self.finalize(&s, finalize).await;
                         }
                         Voter::Finalization(finalization) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::finalization(&s)).inc();
-                            view = match &finalization.proposal {
-                                Some(proposal) => proposal.view,
-                                None => {
-                                    continue;
-                                }
-                            };
+                            view = finalization.view();
                             self.finalization(finalization).await;
                         }
                     };
