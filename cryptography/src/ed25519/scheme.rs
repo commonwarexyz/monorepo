@@ -1,6 +1,6 @@
 use crate::{Array, BatchScheme, Error, Signer, Specification, Verifier};
 use bytes::{Buf, BufMut};
-use commonware_codec::{Codec, Error as CodecError, SizedCodec};
+use commonware_codec::{Decode, Encode, Error as CodecError, SizedInfo};
 use commonware_utils::{hex, union_unique};
 use ed25519_consensus::{self, VerificationKey};
 use rand::{CryptoRng, Rng, RngCore};
@@ -127,21 +127,23 @@ pub struct PrivateKey {
     key: ed25519_consensus::SigningKey,
 }
 
-impl Codec for PrivateKey {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.raw.write(buf);
-    }
-
-    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
-        Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
-    }
-
+impl Encode for PrivateKey {
     fn len_encoded(&self) -> usize {
         PRIVATE_KEY_LENGTH
     }
+
+    fn write(&self, buf: &mut impl BufMut) {
+        self.raw.write(buf);
+    }
 }
 
-impl SizedCodec for PrivateKey {
+impl Decode<()> for PrivateKey {
+    fn read(buf: &mut impl Buf, _: ()) -> Result<Self, CodecError> {
+        Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
+    }
+}
+
+impl SizedInfo for PrivateKey {
     const LEN_ENCODED: usize = PRIVATE_KEY_LENGTH;
 }
 
@@ -239,21 +241,22 @@ pub struct PublicKey {
     key: ed25519_consensus::VerificationKey,
 }
 
-impl Codec for PublicKey {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.raw.write(buf);
-    }
-
-    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
-        Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
-    }
-
+impl Encode for PublicKey {
     fn len_encoded(&self) -> usize {
         PUBLIC_KEY_LENGTH
     }
+    fn write(&self, buf: &mut impl BufMut) {
+        self.raw.write(buf);
+    }
 }
 
-impl SizedCodec for PublicKey {
+impl Decode<()> for PublicKey {
+    fn read(buf: &mut impl Buf, _: ()) -> Result<Self, CodecError> {
+        Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
+    }
+}
+
+impl SizedInfo for PublicKey {
     const LEN_ENCODED: usize = PUBLIC_KEY_LENGTH;
 }
 
@@ -325,21 +328,23 @@ pub struct Signature {
     signature: ed25519_consensus::Signature,
 }
 
-impl Codec for Signature {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.raw.write(buf);
-    }
-
-    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
-        Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
-    }
-
+impl Encode for Signature {
     fn len_encoded(&self) -> usize {
         SIGNATURE_LENGTH
     }
+
+    fn write(&self, buf: &mut impl BufMut) {
+        self.raw.write(buf);
+    }
 }
 
-impl SizedCodec for Signature {
+impl Decode<()> for Signature {
+    fn read(buf: &mut impl Buf, _: ()) -> Result<Self, CodecError> {
+        Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
+    }
+}
+
+impl SizedInfo for Signature {
     const LEN_ENCODED: usize = SIGNATURE_LENGTH;
 }
 
@@ -530,7 +535,7 @@ mod tests {
         );
         let encoded = private_key.encode();
         assert_eq!(encoded.len(), PRIVATE_KEY_LENGTH);
-        let decoded = PrivateKey::decode(encoded).unwrap();
+        let decoded = PrivateKey::decode(encoded, ()).unwrap();
         assert_eq!(private_key, decoded);
     }
 
@@ -544,7 +549,7 @@ mod tests {
         );
         let encoded = public_key.encode();
         assert_eq!(encoded.len(), PUBLIC_KEY_LENGTH);
-        let decoded = PublicKey::decode(encoded).unwrap();
+        let decoded = PublicKey::decode(encoded, ()).unwrap();
         assert_eq!(public_key, decoded);
     }
 
@@ -560,7 +565,7 @@ mod tests {
         );
         let encoded = signature.encode();
         assert_eq!(encoded.len(), SIGNATURE_LENGTH);
-        let decoded = Signature::decode(encoded).unwrap();
+        let decoded = Signature::decode(encoded, ()).unwrap();
         assert_eq!(signature, decoded);
     }
 

@@ -3,7 +3,7 @@
 use crate::mmr::{
     iterator::leaf_num_to_pos, mem::Mmr, verification::Proof, verification::Storage, Error,
 };
-use commonware_codec::SizedCodec;
+use commonware_codec::SizedInfo;
 use commonware_cryptography::Hasher as CHasher;
 
 /// Implements the [Storage] trait for generating inclusion proofs over the bitmap.

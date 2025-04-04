@@ -112,7 +112,7 @@ impl<C: Verifier> Record<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::Codec;
+    use commonware_codec::Encode;
     use commonware_cryptography::{Secp256r1, Signer};
     use std::net::SocketAddr;
 

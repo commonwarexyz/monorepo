@@ -1,5 +1,5 @@
 use bytes::{Buf, BufMut};
-use commonware_codec::{Codec, Error as CodecError, SizedCodec};
+use commonware_codec::{Decode, Encode, Error as CodecError, SizedInfo};
 use rand::{CryptoRng, Rng};
 use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey};
 
@@ -29,22 +29,26 @@ impl AsRef<x25519_dalek::PublicKey> for PublicKey {
     }
 }
 
-impl Codec for PublicKey {
+impl Encode for PublicKey {
+    fn len_encoded(&self) -> usize {
+        Self::LEN_ENCODED
+    }
+
     fn write(&self, buf: &mut impl BufMut) {
         self.inner.as_bytes().write(buf);
     }
-    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
-        let public_key = <[u8; Self::LEN_ENCODED]>::read(buf)?;
+}
+
+impl Decode<()> for PublicKey {
+    fn read(buf: &mut impl Buf, _: ()) -> Result<Self, CodecError> {
+        let public_key = <[u8; Self::LEN_ENCODED]>::read(buf, ())?;
         Ok(PublicKey {
             inner: X25519PublicKey::from(public_key),
         })
     }
-    fn len_encoded(&self) -> usize {
-        Self::LEN_ENCODED
-    }
 }
 
-impl SizedCodec for PublicKey {
+impl SizedInfo for PublicKey {
     const LEN_ENCODED: usize = 32;
 }
 
@@ -70,7 +74,7 @@ mod tests {
         };
         let encoded = original.encode();
         assert_eq!(encoded.len(), PublicKey::LEN_ENCODED);
-        let decoded = PublicKey::decode(encoded).unwrap();
+        let decoded = PublicKey::decode(encoded, ()).unwrap();
         assert_eq!(original, decoded);
     }
 
@@ -78,12 +82,12 @@ mod tests {
     fn test_decode_invalid() {
         // Create a Bytes object that is too short
         let invalid_bytes = Bytes::from(vec![1, 2, 3]); // Length 3 instead of 32
-        let result = PublicKey::decode(invalid_bytes);
+        let result = PublicKey::decode(invalid_bytes, ());
         assert!(result.is_err());
 
         // Create Bytes object that's too long
         let too_long_bytes = Bytes::from(vec![0u8; 33]); // Length 33
-        let result = PublicKey::decode(too_long_bytes);
+        let result = PublicKey::decode(too_long_bytes, ());
         assert!(result.is_err());
     }
 }

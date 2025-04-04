@@ -2,7 +2,7 @@
 
 use super::{parsed, Epoch};
 use bytes::BufMut;
-use commonware_codec::SizedCodec;
+use commonware_codec::SizedInfo;
 use commonware_cryptography::Digest;
 use commonware_utils::Array;
 

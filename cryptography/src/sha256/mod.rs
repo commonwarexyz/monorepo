@@ -22,7 +22,7 @@
 
 use crate::{Array, Error, Hasher};
 use bytes::{Buf, BufMut};
-use commonware_codec::{Codec, Error as CodecError, SizedCodec};
+use commonware_codec::{Decode, Encode, Error as CodecError, SizedInfo};
 use commonware_utils::hex;
 use rand::{CryptoRng, Rng};
 use sha2::{Digest as _, Sha256 as ISha256};
@@ -93,21 +93,23 @@ impl Hasher for Sha256 {
 #[repr(transparent)]
 pub struct Digest([u8; DIGEST_LENGTH]);
 
-impl Codec for Digest {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.0.write(buf);
-    }
-
-    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
-        Self::read_from(buf).map_err(|err| CodecError::Wrapped("Digest", err.into()))
-    }
-
+impl Encode for Digest {
     fn len_encoded(&self) -> usize {
         DIGEST_LENGTH
     }
+
+    fn write(&self, buf: &mut impl BufMut) {
+        self.0.write(buf);
+    }
 }
 
-impl SizedCodec for Digest {
+impl Decode<()> for Digest {
+    fn read(buf: &mut impl Buf, _: ()) -> Result<Self, CodecError> {
+        Self::read_from(buf).map_err(|err| CodecError::Wrapped("Digest", err.into()))
+    }
+}
+
+impl SizedInfo for Digest {
     const LEN_ENCODED: usize = DIGEST_LENGTH;
 }
 
@@ -229,7 +231,7 @@ mod tests {
         assert_eq!(encoded.len(), DIGEST_LENGTH);
         assert_eq!(encoded, digest.as_ref());
 
-        let decoded = Digest::decode(encoded).unwrap();
+        let decoded = Digest::decode(encoded, ()).unwrap();
         assert_eq!(digest, decoded);
     }
 }

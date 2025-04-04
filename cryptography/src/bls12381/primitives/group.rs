@@ -20,7 +20,7 @@ use blst::{
     blst_p2_uncompress, blst_scalar, blst_scalar_from_bendian, blst_scalar_from_fr, blst_sk_check,
     Pairing, BLS12_381_G1, BLS12_381_G2, BLS12_381_NEG_G1, BLST_ERROR,
 };
-use commonware_codec::SizedCodec;
+use commonware_codec::SizedInfo;
 use rand::RngCore;
 use std::ptr;
 use zeroize::Zeroize;

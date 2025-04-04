@@ -1,6 +1,6 @@
 use crate::Array;
 use bytes::{Buf, BufMut};
-use commonware_codec::{Codec, Error as CodecError, SizedCodec};
+use commonware_codec::{Decode, Encode, Error as CodecError, SizedInfo};
 use std::{
     cmp::{Ord, PartialOrd},
     fmt::{Debug, Display},
@@ -31,21 +31,23 @@ impl U64 {
     }
 }
 
-impl Codec for U64 {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.0.write(buf);
-    }
-
-    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
-        <[u8; U64::LEN_ENCODED]>::read(buf).map(Self)
-    }
-
+impl Encode for U64 {
     fn len_encoded(&self) -> usize {
         Self::LEN_ENCODED
     }
+
+    fn write(&self, buf: &mut impl BufMut) {
+        self.0.write(buf);
+    }
 }
 
-impl SizedCodec for U64 {
+impl Decode<()> for U64 {
+    fn read(buf: &mut impl Buf, _: ()) -> Result<Self, CodecError> {
+        <[u8; U64::LEN_ENCODED]>::read(buf, ()).map(Self)
+    }
+}
+
+impl SizedInfo for U64 {
     const LEN_ENCODED: usize = u64::LEN_ENCODED;
 }
 
@@ -145,7 +147,7 @@ mod tests {
         assert_eq!(encoded.len(), U64::LEN_ENCODED);
         assert_eq!(encoded, original.as_ref());
 
-        let decoded = U64::decode(encoded).unwrap();
+        let decoded = U64::decode(encoded, ()).unwrap();
         assert_eq!(original, decoded);
     }
 }

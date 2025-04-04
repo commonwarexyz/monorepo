@@ -1,7 +1,7 @@
 use super::{Config, Error, Translator};
 use crate::{index::Index, journal::variable::Journal};
 use bytes::{Buf, BufMut, Bytes};
-use commonware_codec::SizedCodec;
+use commonware_codec::SizedInfo;
 use commonware_runtime::{Blob, Metrics, Storage};
 use commonware_utils::Array;
 use futures::{pin_mut, StreamExt};

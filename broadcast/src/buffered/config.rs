@@ -1,7 +1,7 @@
 use commonware_utils::Array;
 
 /// Configuration for the [`Engine`](super::Engine).
-pub struct Config<P: Array> {
+pub struct Config<C: Copy + Send + 'static, P: Array> {
     /// The public key of the participant.
     pub public_key: P,
 
@@ -13,4 +13,7 @@ pub struct Config<P: Array> {
 
     /// Whether messages are sent over the network as priority.
     pub priority: bool,
+
+    /// The configuration for decoding messages.
+    pub decode_config: C,
 }

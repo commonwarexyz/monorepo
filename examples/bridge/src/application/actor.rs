@@ -6,7 +6,7 @@ use super::{
     Config,
 };
 use bytes::BufMut;
-use commonware_codec::SizedCodec;
+use commonware_codec::SizedInfo;
 use commonware_consensus::threshold_simplex::Prover;
 use commonware_cryptography::{
     bls12381::primitives::{group::Element, poly},

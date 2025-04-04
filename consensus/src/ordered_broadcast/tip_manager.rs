@@ -57,7 +57,7 @@ impl<C: Scheme, D: Digest> TipManager<C, D> {
 mod tests {
     use super::{super::parsed, *};
     use bytes::Bytes;
-    use commonware_codec::SizedCodec;
+    use commonware_codec::SizedInfo;
     use commonware_cryptography::{
         ed25519::{self, Ed25519, PublicKey, Signature},
         sha256::{self, Digest},

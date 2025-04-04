@@ -78,6 +78,12 @@ pub struct Config<C: Scheme> {
     /// key).
     pub tracked_peer_sets: usize,
 
+    /// Maximum number of peers to track in a single peer set.
+    ///
+    /// This is used to limit the size of the bit vec messages, which will take one bit per peer in
+    /// the set. This number can be set to a reasonably high value that we never expect to reach.
+    pub max_peer_set_size: usize,
+
     /// Frequency we gossip about known peers.
     ///
     /// If there is no other network activity, this message is used as a ping
@@ -125,6 +131,7 @@ impl<C: Scheme> Config<C> {
             dial_frequency: Duration::from_secs(60),
             dial_rate: Quota::per_minute(NonZeroU32::new(30).unwrap()),
             tracked_peer_sets: 4,
+            max_peer_set_size: 1 << 16, // 2^16
             gossip_bit_vec_frequency: Duration::from_secs(50),
             allowed_bit_vec_rate: Quota::per_second(NonZeroU32::new(2).unwrap()),
             peer_gossip_max_count: 32,
@@ -163,6 +170,7 @@ impl<C: Scheme> Config<C> {
             dial_frequency: Duration::from_secs(5),
             dial_rate: Quota::per_second(NonZeroU32::new(30).unwrap()),
             tracked_peer_sets: 4,
+            max_peer_set_size: 1 << 16, // 2^16
             gossip_bit_vec_frequency: Duration::from_secs(5),
             allowed_bit_vec_rate: Quota::per_second(NonZeroU32::new(5).unwrap()),
             peer_gossip_max_count: 32,
@@ -195,6 +203,7 @@ impl<C: Scheme> Config<C> {
             dial_frequency: Duration::from_secs(1),
             dial_rate: Quota::per_second(NonZeroU32::new(1_024).unwrap()),
             tracked_peer_sets: 4,
+            max_peer_set_size: 1 << 8, // 2^8
             gossip_bit_vec_frequency: Duration::from_secs(1),
             allowed_bit_vec_rate: Quota::per_second(NonZeroU32::new(5).unwrap()),
             peer_gossip_max_count: 32,

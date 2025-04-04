@@ -1,6 +1,6 @@
 use crate::{hex, Array};
 use bytes::{Buf, BufMut};
-use commonware_codec::{Codec, Error as CodecError, SizedCodec};
+use commonware_codec::{Decode, Encode, Error as CodecError, SizedInfo};
 use std::{
     cmp::{Ord, PartialOrd},
     fmt::{Debug, Display},
@@ -28,21 +28,23 @@ impl<const N: usize> FixedBytes<N> {
     }
 }
 
-impl<const N: usize> Codec for FixedBytes<N> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.0.write(buf);
-    }
-
-    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
-        Ok(Self(<[u8; N]>::read(buf)?))
-    }
-
+impl<const N: usize> Encode for FixedBytes<N> {
     fn len_encoded(&self) -> usize {
         N
     }
+
+    fn write(&self, buf: &mut impl BufMut) {
+        self.0.write(buf);
+    }
 }
 
-impl<const N: usize> SizedCodec for FixedBytes<N> {
+impl<const N: usize> Decode<()> for FixedBytes<N> {
+    fn read(buf: &mut impl Buf, _: ()) -> Result<Self, CodecError> {
+        Ok(Self(<[u8; N]>::read(buf, ())?))
+    }
+}
+
+impl<const N: usize> SizedInfo for FixedBytes<N> {
     const LEN_ENCODED: usize = N;
 }
 
@@ -110,7 +112,7 @@ mod tests {
         let original = FixedBytes::new([1, 2, 3, 4]);
         let encoded = original.encode();
         assert_eq!(encoded.len(), original.len());
-        let decoded = FixedBytes::decode(encoded).unwrap();
+        let decoded = FixedBytes::decode(encoded, ()).unwrap();
         assert_eq!(original, decoded);
     }
 

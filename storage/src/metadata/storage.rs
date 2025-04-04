@@ -1,6 +1,6 @@
 use super::{Config, Error};
 use bytes::{BufMut, Bytes};
-use commonware_codec::SizedCodec;
+use commonware_codec::SizedInfo;
 use commonware_runtime::{Blob, Clock, Metrics, Storage};
 use commonware_utils::{Array, SystemTimeExt as _};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};

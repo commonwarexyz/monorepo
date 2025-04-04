@@ -1,7 +1,7 @@
 use super::x25519;
 use crate::Error;
 use bytes::{Buf, BufMut};
-use commonware_codec::{Codec, Error as CodecError, SizedCodec};
+use commonware_codec::{Decode, Encode, Error as CodecError, SizedInfo};
 use commonware_cryptography::Scheme;
 use commonware_runtime::Clock;
 use commonware_utils::SystemTimeExt;
@@ -28,30 +28,32 @@ impl<C: Scheme> Info<C> {
     }
 }
 
-impl<C: Scheme> Codec for Info<C> {
+impl<C: Scheme> Encode for Info<C> {
+    fn len_encoded(&self) -> usize {
+        Self::LEN_ENCODED
+    }
+
     fn write(&self, buf: &mut impl BufMut) {
         self.recipient.write(buf);
         self.ephemeral_public_key.write(buf);
         self.timestamp.write(buf);
     }
+}
 
-    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
-        let recipient = C::PublicKey::read(buf)?;
-        let ephemeral_public_key = x25519::PublicKey::read(buf)?;
-        let timestamp = u64::read(buf)?;
+impl<C: Scheme> Decode<()> for Info<C> {
+    fn read(buf: &mut impl Buf, _: ()) -> Result<Self, CodecError> {
+        let recipient = C::PublicKey::read(buf, ())?;
+        let ephemeral_public_key = x25519::PublicKey::read(buf, ())?;
+        let timestamp = u64::read(buf, ())?;
         Ok(Info {
             recipient,
             ephemeral_public_key,
             timestamp,
         })
     }
-
-    fn len_encoded(&self) -> usize {
-        Self::LEN_ENCODED
-    }
 }
 
-impl<C: Scheme> SizedCodec for Info<C> {
+impl<C: Scheme> SizedInfo for Info<C> {
     const LEN_ENCODED: usize =
         C::PublicKey::LEN_ENCODED + x25519::PublicKey::LEN_ENCODED + u64::LEN_ENCODED;
 }
@@ -141,30 +143,32 @@ impl<C: Scheme> Signed<C> {
     }
 }
 
-impl<C: Scheme> Codec for Signed<C> {
+impl<C: Scheme> Encode for Signed<C> {
+    fn len_encoded(&self) -> usize {
+        Self::LEN_ENCODED
+    }
+
     fn write(&self, buf: &mut impl BufMut) {
         self.info.write(buf);
         self.signer.write(buf);
         self.signature.write(buf);
     }
+}
 
-    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
-        let info = Info::<C>::read(buf)?;
-        let signer = C::PublicKey::read(buf)?;
-        let signature = C::Signature::read(buf)?;
+impl<C: Scheme> Decode<()> for Signed<C> {
+    fn read(buf: &mut impl Buf, _: ()) -> Result<Self, CodecError> {
+        let info = Info::<C>::read(buf, ())?;
+        let signer = C::PublicKey::read(buf, ())?;
+        let signature = C::Signature::read(buf, ())?;
         Ok(Self {
             info,
             signer,
             signature,
         })
     }
-
-    fn len_encoded(&self) -> usize {
-        Self::LEN_ENCODED
-    }
 }
 
-impl<C: Scheme> SizedCodec for Signed<C> {
+impl<C: Scheme> SizedInfo for Signed<C> {
     const LEN_ENCODED: usize =
         Info::<C>::LEN_ENCODED + C::PublicKey::LEN_ENCODED + C::Signature::LEN_ENCODED;
 }
@@ -206,8 +210,8 @@ mod tests {
             );
 
             // Decode the handshake message
-            let handshake =
-                Signed::<Ed25519>::decode(handshake.encode()).expect("failed to decode handshake");
+            let handshake = Signed::<Ed25519>::decode(handshake.encode(), ())
+                .expect("failed to decode handshake");
 
             // Verify the timestamp
             let synchrony_bound = Duration::from_secs(5);
@@ -418,7 +422,7 @@ mod tests {
 
             // Tamper with the handshake to make the signature invalid
             let mut handshake =
-                Signed::decode(handshake.encode()).expect("failed to decode handshake");
+                Signed::decode(handshake.encode(), ()).expect("failed to decode handshake");
             handshake.info.timestamp += 1;
 
             // Verify the handshake

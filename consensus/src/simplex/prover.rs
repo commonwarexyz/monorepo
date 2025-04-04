@@ -7,7 +7,7 @@ use super::{
 };
 use crate::Proof;
 use bytes::{Buf, BufMut};
-use commonware_codec::SizedCodec;
+use commonware_codec::SizedInfo;
 use commonware_cryptography::Scheme;
 use commonware_utils::Array;
 use std::{collections::HashSet, marker::PhantomData};

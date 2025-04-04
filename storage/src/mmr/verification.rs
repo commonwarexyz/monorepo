@@ -8,7 +8,7 @@ use crate::mmr::{
     Error::*,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::SizedCodec;
+use commonware_codec::SizedInfo;
 use commonware_cryptography::{Digest, Hasher as CHasher};
 use commonware_utils::Array;
 use futures::future::try_join_all;

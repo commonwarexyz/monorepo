@@ -15,6 +15,8 @@ pub enum Error {
     InvalidVarint,
     #[error("Invalid Bool")]
     InvalidBool,
+    #[error("Invalid Length: {0}")]
+    InvalidLength(usize),
     #[error("Invalid. Context({0}), Message({1})")]
     Invalid(&'static str, &'static str),
     #[error("Invalid. Context({0}), Error({1})")]

@@ -8,7 +8,7 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit},
     ChaCha20Poly1305,
 };
-use commonware_codec::Codec;
+use commonware_codec::{Decode, Encode};
 use commonware_cryptography::Scheme;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Sink, Spawner, Stream};
@@ -48,7 +48,7 @@ impl<C: Scheme, Si: Sink, St: Stream> IncomingConnection<C, Si, St> {
 
         // Verify handshake message from peer
         let signed_handshake =
-            handshake::Signed::<C>::decode(msg).map_err(Error::UnableToDecode)?;
+            handshake::Signed::<C>::decode(msg, ()).map_err(Error::UnableToDecode)?;
         signed_handshake.verify(
             context,
             &config.crypto,
@@ -154,7 +154,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
 
         // Verify handshake message from peer
         let signed_handshake =
-            handshake::Signed::<C>::decode(msg).map_err(Error::UnableToDecode)?;
+            handshake::Signed::<C>::decode(msg, ()).map_err(Error::UnableToDecode)?;
         signed_handshake.verify(
             &context,
             &config.crypto,
@@ -571,7 +571,7 @@ mod tests {
                 move |mut context| async move {
                     // Read the handshake from dialer
                     let msg = recv_frame(&mut peer_stream, 1024).await.unwrap();
-                    let _ = handshake::Signed::<Ed25519>::decode(msg).unwrap(); // Simulate reading
+                    let _ = handshake::Signed::<Ed25519>::decode(msg, ()).unwrap(); // Simulate reading
 
                     // Create and send own handshake
                     let secret = x25519::new(&mut context);

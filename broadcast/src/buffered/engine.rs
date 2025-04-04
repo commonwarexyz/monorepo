@@ -28,10 +28,11 @@ use tracing::{debug, error, trace, warn};
 /// - Storing messages in the cache
 /// - Responding to requests from the application
 pub struct Engine<
+    C: Copy + Send + 'static,
     E: Clock + Spawner + Metrics,
     P: Array,
     D: Digest,
-    M: Digestible<D> + Codec,
+    M: Digestible<D> + Codec<C>,
     NetS: Sender<PublicKey = P>,
     NetR: Receiver<PublicKey = P>,
 > {
@@ -52,6 +53,9 @@ pub struct Engine<
 
     /// Number of messages to cache per sender
     deque_size: usize,
+
+    /// Configuration for decoding messages
+    decode_config: C,
 
     ////////////////////////////////////////
     // Messaging
@@ -88,17 +92,18 @@ pub struct Engine<
 }
 
 impl<
+        C: Copy + Send + 'static,
         E: Clock + Spawner + Metrics,
         P: Array,
         D: Digest,
-        M: Digestible<D> + Codec,
+        M: Digestible<D> + Codec<C>,
         NetS: Sender<PublicKey = P>,
         NetR: Receiver<PublicKey = P>,
-    > Engine<E, P, D, M, NetS, NetR>
+    > Engine<C, E, P, D, M, NetS, NetR>
 {
     /// Creates a new engine with the given context and configuration.
     /// Returns the engine and a mailbox for sending messages to the engine.
-    pub fn new(context: E, cfg: Config<P>) -> (Self, Mailbox<D, M>) {
+    pub fn new(context: E, cfg: Config<C, P>) -> (Self, Mailbox<D, M>) {
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::<D, M>::new(mailbox_sender);
         let metrics = metrics::Metrics::init(context.clone());
@@ -109,6 +114,7 @@ impl<
             public_key: cfg.public_key,
             priority: cfg.priority,
             deque_size: cfg.deque_size,
+            decode_config: cfg.decode_config,
             mailbox_receiver,
             waiters: HashMap::new(),
             deques: HashMap::new(),
@@ -171,7 +177,7 @@ impl<
                     };
 
                     // Decode the message
-                    let message = match M::decode(msg) {
+                    let message = match M::decode(msg, self.decode_config) {
                         Ok(message) => message,
                         Err(err) => {
                             warn!(?err, ?peer, "failed to decode message");

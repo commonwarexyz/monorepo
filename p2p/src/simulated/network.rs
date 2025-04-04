@@ -6,7 +6,7 @@ use super::{
 };
 use crate::{Channel, Message, Recipients};
 use bytes::Bytes;
-use commonware_codec::SizedCodec;
+use commonware_codec::SizedInfo;
 use commonware_macros::select;
 use commonware_runtime::{
     deterministic::{Listener, Sink, Stream},

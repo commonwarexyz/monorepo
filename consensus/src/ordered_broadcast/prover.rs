@@ -5,7 +5,7 @@
 use super::{namespace, parsed, serializer, Context, Epoch};
 use crate::Proof;
 use bytes::{Buf, BufMut};
-use commonware_codec::SizedCodec;
+use commonware_codec::SizedInfo;
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{self, Element},

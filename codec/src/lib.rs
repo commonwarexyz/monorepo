@@ -20,7 +20,7 @@
 //!
 //! ```
 //! use bytes::{Buf, BufMut};
-//! use commonware_codec::{Codec, Error};
+//! use commonware_codec::{Encode, Decode, Error};
 //!
 //! // Define a custom struct
 //! #[derive(Debug, Clone, PartialEq)]
@@ -30,25 +30,28 @@
 //!     metadata: [u8; 11],
 //! }
 //!
-//! // Implement the Codec trait
-//! impl Codec for Point {
+//! // Implement the Encode trait
+//! impl Encode for Point {
+//!     fn len_encoded(&self) -> usize {
+//!       self.xy.len_encoded() + self.z.len_encoded() + self.metadata.len_encoded()
+//!     }
+//!
 //!     fn write(&self, buf: &mut impl BufMut) {
 //!         // Basic types can be written by inferring the type
 //!         self.xy.write(buf);
 //!         self.z.write(buf);
 //!         self.metadata.write(buf);
 //!     }
+//! }
 //!
-//!     fn read(buf: &mut impl Buf) -> Result<Self, Error> {
+//! // Implement the Decode trait
+//! impl Decode<()> for Point {
+//!     fn read(buf: &mut impl Buf, _: ()) -> Result<Self, Error> {
 //!         // Basic types can be inferred by the return type
-//!         let xy = <(u64, u64)>::read(buf)?;
-//!         let z = <Option<u32>>::read(buf)?;
-//!         let metadata = <[u8; 11]>::read(buf)?;
+//!         let xy = <(u64, u64)>::read(buf, ((), ()))?;
+//!         let z = <Option<u32>>::read(buf, ())?;
+//!         let metadata = <[u8; 11]>::read(buf, ())?;
 //!         Ok(Self { xy, z, metadata })
-//!     }
-//!
-//!     fn len_encoded(&self) -> usize {
-//!       self.xy.len_encoded() + self.z.len_encoded() + self.metadata.len_encoded()
 //!     }
 //! }
 //! ```
@@ -60,6 +63,6 @@ pub mod util;
 pub mod varint;
 
 // Re-export main types and traits
-pub use codec::{Codec, SizedCodec};
+pub use codec::{Codec, Decode, Encode, SizedCodec, SizedDecode, SizedEncode, SizedInfo};
 pub use error::Error;
 pub use types::{net, primitives};

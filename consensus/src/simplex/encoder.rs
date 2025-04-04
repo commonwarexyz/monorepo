@@ -1,6 +1,6 @@
 use super::View;
 use bytes::BufMut;
-use commonware_codec::SizedCodec;
+use commonware_codec::SizedInfo;
 use commonware_utils::{union, Array};
 
 pub const NOTARIZE_SUFFIX: &[u8] = b"_NOTARIZE";

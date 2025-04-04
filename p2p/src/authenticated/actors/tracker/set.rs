@@ -1,4 +1,3 @@
-use crate::authenticated::types;
 use bitvec::{order::Lsb0, vec::BitVec};
 use commonware_utils::Array;
 use std::collections::HashMap;
@@ -16,9 +15,6 @@ pub struct Set<P: Array> {
 
     /// My knowledge of each peer in the set.
     pub knowledge: BitVec<u8, Lsb0>,
-
-    /// The message to send to other peers.
-    pub msg: types::BitVec,
 }
 
 impl<P: Array> Set<P> {
@@ -34,18 +30,11 @@ impl<P: Array> Set<P> {
         let mut knowledge = BitVec::repeat(false, peers.len());
         knowledge.set_uninitialized(false);
 
-        // Create message
-        let msg = types::BitVec {
-            index,
-            bits: knowledge.clone().into(),
-        };
-
         Self {
             index,
             sorted: peers,
             order,
             knowledge,
-            msg,
         }
     }
 
@@ -55,19 +44,6 @@ impl<P: Array> Set<P> {
             return true;
         }
         false
-    }
-
-    pub fn update_msg(&mut self) {
-        let mut k = self.knowledge.clone();
-        k.set_uninitialized(false);
-        self.msg = types::BitVec {
-            index: self.index,
-            bits: k.into_vec(),
-        };
-    }
-
-    pub fn msg(&self) -> types::BitVec {
-        self.msg.clone()
     }
 }
 
@@ -86,7 +62,6 @@ mod tests {
         assert_eq!(set.order.get(&U64::new(2)), Some(&1));
         assert_eq!(set.order.get(&U64::new(3)), Some(&2));
         assert_eq!(set.knowledge, bitvec![u8, Lsb0; 0; 3]);
-        assert_eq!(set.msg.bits, vec![0]); // Initial message is all zeros
     }
 
     #[test]
@@ -97,27 +72,5 @@ mod tests {
         assert_eq!(set.knowledge, bitvec![u8, Lsb0; 0, 1, 0]);
         assert!(!set.found(U64::new(4))); // Peer not in set
         assert_eq!(set.knowledge, bitvec![u8, Lsb0; 0, 1, 0]);
-    }
-
-    #[test]
-    fn test_update_msg() {
-        let peers = vec![U64::new(1), U64::new(2), U64::new(3)];
-        let mut set = Set::new(0, peers);
-        set.found(U64::new(1));
-        set.found(U64::new(3));
-        set.update_msg();
-        assert_eq!(set.msg.index, 0);
-        assert_eq!(set.msg.bits, vec![0b101]); // Bits 0 and 2 set (LSB first)
-    }
-
-    #[test]
-    fn test_msg() {
-        let peers = vec![U64::new(1), U64::new(2)];
-        let mut set = Set::new(1, peers);
-        set.found(U64::new(2));
-        set.update_msg();
-        let msg = set.msg();
-        assert_eq!(msg.index, 1);
-        assert_eq!(msg.bits, vec![0b10]); // Bit 1 set (LSB first)
     }
 }
