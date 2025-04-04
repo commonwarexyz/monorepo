@@ -1,7 +1,8 @@
 use crate::{
-    Array, Error, Signer as CommonwareSigner, Specification, Verifier as CommonowareVerifier,
+    Array, Error, Signer as CommonwareSigner, Specification, Verifier as CommonwareVerifier,
 };
-use commonware_codec::{Codec, Error as CodecError, Reader, SizedCodec, Writer};
+use bytes::{Buf, BufMut};
+use commonware_codec::{Codec, Error as CodecError, SizedCodec};
 use commonware_utils::{hex, union_unique};
 use p256::{
     ecdsa::{
@@ -35,7 +36,7 @@ impl Specification for Secp256r1 {
     type Signature = Signature;
 }
 
-impl CommonowareVerifier for Secp256r1 {
+impl CommonwareVerifier for Secp256r1 {
     fn verify(
         namespace: Option<&[u8]>,
         message: &[u8],
@@ -97,12 +98,12 @@ pub struct PrivateKey {
 }
 
 impl Codec for PrivateKey {
-    fn write(&self, writer: &mut impl Writer) {
-        writer.write_fixed(&self.raw);
+    fn write(&self, buf: &mut impl BufMut) {
+        self.raw.write(buf);
     }
 
-    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
-        Self::read_from(reader).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
+    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
+        Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
     }
 
     fn len_encoded(&self) -> usize {
@@ -201,12 +202,12 @@ pub struct PublicKey {
 }
 
 impl Codec for PublicKey {
-    fn write(&self, writer: &mut impl Writer) {
-        writer.write_fixed(&self.raw);
+    fn write(&self, buf: &mut impl BufMut) {
+        self.raw.write(buf);
     }
 
-    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
-        Self::read_from(reader).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
+    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
+        Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
     }
 
     fn len_encoded(&self) -> usize {
@@ -294,12 +295,12 @@ pub struct Signature {
 }
 
 impl Codec for Signature {
-    fn write(&self, writer: &mut impl Writer) {
-        writer.write_fixed(&self.raw);
+    fn write(&self, buf: &mut impl BufMut) {
+        self.raw.write(buf);
     }
 
-    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
-        Self::read_from(reader).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
+    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
+        Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
     }
 
     fn len_encoded(&self) -> usize {
@@ -400,6 +401,7 @@ impl Display for Signature {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
 
     fn create_private_key() -> PrivateKey {
         const HEX: &str = "519b423d715f8b581f4fa8ee59f4771a5b44c8130b4e3eacca54a56dda72b464";
@@ -517,7 +519,7 @@ mod tests {
     #[test]
     fn test_codec_signature_invalid() {
         let (_, sig, ..) = vector_sig_verification_5();
-        let result = Signature::decode(sig);
+        let result = Signature::decode(Bytes::from(sig));
         assert!(result.is_err());
     }
 
@@ -744,7 +746,7 @@ mod tests {
                 if ecdsa_signature.s().is_high().into() {
                     // Valid signatures not normalized must be considered invalid.
                     assert!(Signature::try_from(sig.clone()).is_err());
-                    assert!(Signature::decode(sig).is_err());
+                    assert!(Signature::decode(Bytes::from(sig)).is_err());
 
                     // Normalizing sig to test its validity.
                     if let Some(normalized_sig) = ecdsa_signature.normalize_s() {
@@ -755,7 +757,7 @@ mod tests {
                 Secp256r1::verify(None, &message, &public_key, &signature)
             } else {
                 let tf_res = Signature::try_from(sig.clone());
-                let dc_res = Signature::decode(sig);
+                let dc_res = Signature::decode(Bytes::from(sig));
                 if tf_res.is_err() && dc_res.is_err() {
                     // The parsing should fail
                     true

@@ -1,5 +1,5 @@
-use bytes::Bytes;
-use commonware_codec::{Codec, Error, Reader, Writer};
+use bytes::{Buf, BufMut, Bytes};
+use commonware_codec::{Codec, Error};
 use commonware_cryptography::Verifier;
 use std::net::SocketAddr;
 
@@ -19,19 +19,19 @@ pub enum Payload<C: Verifier> {
 }
 
 impl<C: Verifier> Codec for Payload<C> {
-    fn write(&self, writer: &mut impl Writer) {
+    fn write(&self, buf: &mut impl BufMut) {
         match self {
             Payload::BitVec(bitvec) => {
-                writer.write_u8(0);
-                bitvec.write(writer);
+                0u8.write(buf);
+                bitvec.write(buf);
             }
             Payload::Peers(peers) => {
-                writer.write_u8(1);
-                peers.write(writer);
+                1u8.write(buf);
+                peers.write(buf);
             }
             Payload::Data(data) => {
-                writer.write_u8(2);
-                data.write(writer);
+                2u8.write(buf);
+                data.write(buf);
             }
         }
     }
@@ -44,19 +44,19 @@ impl<C: Verifier> Codec for Payload<C> {
         }) + 1
     }
 
-    fn read(reader: &mut impl Reader) -> Result<Self, Error> {
-        let payload_type = reader.read_u8()?;
+    fn read(buf: &mut impl Buf) -> Result<Self, Error> {
+        let payload_type = <u8>::read(buf)?;
         match payload_type {
             0 => {
-                let bitvec = BitVec::read(reader)?;
+                let bitvec = BitVec::read(buf)?;
                 Ok(Payload::BitVec(bitvec))
             }
             1 => {
-                let peers = Vec::<SignedPeerInfo<C>>::read(reader)?;
+                let peers = Vec::<SignedPeerInfo<C>>::read(buf)?;
                 Ok(Payload::Peers(peers))
             }
             2 => {
-                let data = Data::read(reader)?;
+                let data = Data::read(buf)?;
                 Ok(Payload::Data(data))
             }
             _ => Err(Error::Invalid(
@@ -80,18 +80,18 @@ pub struct BitVec {
 }
 
 impl Codec for BitVec {
-    fn write(&self, writer: &mut impl Writer) {
-        self.index.write(writer);
-        self.bits.write(writer);
+    fn write(&self, buf: &mut impl BufMut) {
+        self.index.write(buf);
+        self.bits.write(buf);
     }
 
     fn len_encoded(&self) -> usize {
         self.index.len_encoded() + self.bits.len_encoded()
     }
 
-    fn read(reader: &mut impl Reader) -> Result<Self, Error> {
-        let index = u64::read(reader)?;
-        let bits = Vec::<u8>::read(reader)?;
+    fn read(buf: &mut impl Buf) -> Result<Self, Error> {
+        let index = u64::read(buf)?;
+        let bits = Vec::<u8>::read(buf)?;
         Ok(BitVec { index, bits })
     }
 }
@@ -128,11 +128,11 @@ impl<C: Verifier> SignedPeerInfo<C> {
 }
 
 impl<C: Verifier> Codec for SignedPeerInfo<C> {
-    fn write(&self, writer: &mut impl Writer) {
-        self.socket.write(writer);
-        self.timestamp.write(writer);
-        self.public_key.write(writer);
-        self.signature.write(writer);
+    fn write(&self, buf: &mut impl BufMut) {
+        self.socket.write(buf);
+        self.timestamp.write(buf);
+        self.public_key.write(buf);
+        self.signature.write(buf);
     }
 
     fn len_encoded(&self) -> usize {
@@ -142,11 +142,11 @@ impl<C: Verifier> Codec for SignedPeerInfo<C> {
             + self.signature.len_encoded()
     }
 
-    fn read(reader: &mut impl Reader) -> Result<Self, Error> {
-        let socket = SocketAddr::read(reader)?;
-        let timestamp = u64::read(reader)?;
-        let public_key = C::PublicKey::read(reader)?;
-        let signature = C::Signature::read(reader)?;
+    fn read(buf: &mut impl Buf) -> Result<Self, Error> {
+        let socket = SocketAddr::read(buf)?;
+        let timestamp = u64::read(buf)?;
+        let public_key = C::PublicKey::read(buf)?;
+        let signature = C::Signature::read(buf)?;
         Ok(SignedPeerInfo {
             socket,
             timestamp,
@@ -169,18 +169,18 @@ pub struct Data {
 }
 
 impl Codec for Data {
-    fn write(&self, writer: &mut impl Writer) {
-        self.channel.write(writer);
-        self.message.write(writer);
+    fn write(&self, buf: &mut impl BufMut) {
+        self.channel.write(buf);
+        self.message.write(buf);
     }
 
     fn len_encoded(&self) -> usize {
         self.channel.len_encoded() + self.message.len_encoded()
     }
 
-    fn read(reader: &mut impl Reader) -> Result<Self, Error> {
-        let channel = u32::read(reader)?;
-        let message = Bytes::read(reader)?;
+    fn read(buf: &mut impl Buf) -> Result<Self, Error> {
+        let channel = u32::read(buf)?;
+        let message = Bytes::read(buf)?;
         Ok(Data { channel, message })
     }
 }
@@ -188,6 +188,7 @@ impl Codec for Data {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::BytesMut;
     use commonware_cryptography::{Secp256r1, Signer};
 
     fn signed_peer_info() -> SignedPeerInfo<Secp256r1> {
@@ -241,7 +242,7 @@ mod tests {
             index: 0,
             bits: vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
         };
-        let encoded = Payload::<Secp256r1>::BitVec(original.clone()).encode();
+        let encoded: BytesMut = Payload::<Secp256r1>::BitVec(original.clone()).encode();
         let decoded = match Payload::<Secp256r1>::decode(encoded) {
             Ok(Payload::<Secp256r1>::BitVec(b)) => b,
             _ => panic!(),
@@ -277,8 +278,8 @@ mod tests {
 
     #[test]
     fn test_payload_decode_invalid_type() {
-        let invalid_payload = vec![3, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
-        let result = Payload::<Secp256r1>::decode(invalid_payload);
+        let invalid_payload = [3, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+        let result = Payload::<Secp256r1>::decode(&invalid_payload[..]);
         assert!(result.is_err());
     }
 }

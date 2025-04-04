@@ -1,5 +1,6 @@
 use crate::Array;
-use commonware_codec::{Codec, Error as CodecError, Reader, SizedCodec, Writer};
+use bytes::{Buf, BufMut};
+use commonware_codec::{Codec, Error as CodecError, SizedCodec};
 use std::{
     cmp::{Ord, PartialOrd},
     fmt::{Debug, Display},
@@ -31,12 +32,12 @@ impl U64 {
 }
 
 impl Codec for U64 {
-    fn write(&self, writer: &mut impl Writer) {
-        self.0.write(writer);
+    fn write(&self, buf: &mut impl BufMut) {
+        self.0.write(buf);
     }
 
-    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
-        <[u8; Self::LEN_ENCODED]>::read(reader).map(Self)
+    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
+        <[u8; U64::LEN_ENCODED]>::read(buf).map(Self)
     }
 
     fn len_encoded(&self) -> usize {

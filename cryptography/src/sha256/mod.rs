@@ -21,7 +21,8 @@
 //! ```
 
 use crate::{Array, Error, Hasher};
-use commonware_codec::{Codec, Error as CodecError, Reader, SizedCodec, Writer};
+use bytes::{Buf, BufMut};
+use commonware_codec::{Codec, Error as CodecError, SizedCodec};
 use commonware_utils::hex;
 use rand::{CryptoRng, Rng};
 use sha2::{Digest as _, Sha256 as ISha256};
@@ -93,12 +94,12 @@ impl Hasher for Sha256 {
 pub struct Digest([u8; DIGEST_LENGTH]);
 
 impl Codec for Digest {
-    fn write(&self, writer: &mut impl Writer) {
-        self.0.write(writer);
+    fn write(&self, buf: &mut impl BufMut) {
+        self.0.write(buf);
     }
 
-    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
-        Self::read_from(reader).map_err(|err| CodecError::Wrapped("Digest", err.into()))
+    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
+        Self::read_from(buf).map_err(|err| CodecError::Wrapped("Digest", err.into()))
     }
 
     fn len_encoded(&self) -> usize {
