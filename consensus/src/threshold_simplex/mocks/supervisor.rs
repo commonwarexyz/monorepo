@@ -1,18 +1,18 @@
 use crate::{
-    threshold_simplex::{
-        Prover, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE, NOTARIZE,
-        NULLIFY_AND_FINALIZE,
+    threshold_simplex::types::{
+        finalize_namespace, notarize_namespace, nullify_namespace, seed_namespace, Activity, View,
     },
-    Activity, Proof, Supervisor as Su, ThresholdSupervisor as TSu,
+    Monitor, Reporter, Supervisor as Su, ThresholdSupervisor as TSu,
 };
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{self, Element},
-        poly,
+        poly::{self, public},
     },
     Digest,
 };
 use commonware_utils::{modulo, Array};
+use futures::channel::mpsc::{Receiver, Sender};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     sync::{Arc, Mutex},
@@ -25,26 +25,33 @@ type ViewInfo<P> = (
     group::Share,
 );
 
-pub struct Config<P: Array, D: Digest> {
-    pub prover: Prover<D>,
+pub struct Config<P: Array> {
+    pub namespace: Vec<u8>,
     pub participants: BTreeMap<View, (poly::Poly<group::Public>, Vec<P>, group::Share)>,
 }
 
 type Participation<D, P> = HashMap<View, HashMap<D, HashSet<P>>>;
-type Faults<P> = HashMap<P, HashMap<View, HashSet<Activity>>>;
+type Faults<D, P> = HashMap<P, HashMap<View, HashSet<Activity<D>>>>;
 
 #[derive(Clone)]
 pub struct Supervisor<P: Array, D: Digest> {
-    prover: Prover<D>,
     participants: BTreeMap<View, ViewInfo<P>>,
+
+    seed_namespace: Vec<u8>,
+    notarize_namespace: Vec<u8>,
+    nullify_namespace: Vec<u8>,
+    finalize_namespace: Vec<u8>,
 
     pub notarizes: Arc<Mutex<Participation<D, P>>>,
     pub finalizes: Arc<Mutex<Participation<D, P>>>,
-    pub faults: Arc<Mutex<Faults<P>>>,
+    pub faults: Arc<Mutex<Faults<D, P>>>,
+
+    latest: Arc<Mutex<View>>,
+    subscribers: Arc<Mutex<Vec<Sender<View>>>>,
 }
 
 impl<P: Array, D: Digest> Supervisor<P, D> {
-    pub fn new(cfg: Config<P, D>) -> Self {
+    pub fn new(cfg: Config<P>) -> Self {
         let mut parsed_participants = BTreeMap::new();
         for (view, (identity, mut validators, share)) in cfg.participants.into_iter() {
             let mut map = HashMap::new();
@@ -55,11 +62,16 @@ impl<P: Array, D: Digest> Supervisor<P, D> {
             parsed_participants.insert(view, (identity, map, validators, share));
         }
         Self {
-            prover: cfg.prover,
             participants: parsed_participants,
+            seed_namespace: seed_namespace(&cfg.namespace),
+            notarize_namespace: notarize_namespace(&cfg.namespace),
+            nullify_namespace: nullify_namespace(&cfg.namespace),
+            finalize_namespace: finalize_namespace(&cfg.namespace),
             notarizes: Arc::new(Mutex::new(HashMap::new())),
             finalizes: Arc::new(Mutex::new(HashMap::new())),
             faults: Arc::new(Mutex::new(HashMap::new())),
+            latest: Arc::new(Mutex::new(0)),
+            subscribers: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -90,112 +102,6 @@ impl<P: Array, D: Digest> Su for Supervisor<P, D> {
             }
         };
         closest.get(candidate).cloned()
-    }
-
-    async fn report(&self, activity: Activity, proof: Proof) {
-        // We check signatures for all messages to ensure that the prover is working correctly
-        // but in production this isn't necessary (as signatures are already verified in
-        // consensus).
-        match activity {
-            NOTARIZE => {
-                let (view, _, payload, verifier) = self.prover.deserialize_notarize(proof).unwrap();
-                let (identity, validators) = match self.participants.range(..=view).next_back() {
-                    Some((_, (p, _, v, _))) => (p, v),
-                    None => {
-                        panic!("no participants in required range");
-                    }
-                };
-                let public_key_index = verifier.verify(identity).unwrap();
-                let public_key = validators[public_key_index as usize].clone();
-                self.notarizes
-                    .lock()
-                    .unwrap()
-                    .entry(view)
-                    .or_default()
-                    .entry(payload)
-                    .or_default()
-                    .insert(public_key);
-            }
-            FINALIZE => {
-                let (view, _, payload, verifier) = self.prover.deserialize_finalize(proof).unwrap();
-                let (identity, validators) = match self.participants.range(..=view).next_back() {
-                    Some((_, (p, _, v, _))) => (p, v),
-                    None => {
-                        panic!("no participants in required range");
-                    }
-                };
-                let public_key_index = verifier.verify(identity).unwrap();
-                let public_key = validators[public_key_index as usize].clone();
-                self.finalizes
-                    .lock()
-                    .unwrap()
-                    .entry(view)
-                    .or_default()
-                    .entry(payload)
-                    .or_default()
-                    .insert(public_key);
-            }
-            CONFLICTING_NOTARIZE => {
-                let (view, verifier) = self.prover.deserialize_conflicting_notarize(proof).unwrap();
-                let (identity, validators) = match self.participants.range(..=view).next_back() {
-                    Some((_, (p, _, v, _))) => (p, v),
-                    None => {
-                        panic!("no participants in required range");
-                    }
-                };
-                let public_key_index = verifier.verify(identity).unwrap();
-                let public_key = validators[public_key_index as usize].clone();
-                self.faults
-                    .lock()
-                    .unwrap()
-                    .entry(public_key)
-                    .or_default()
-                    .entry(view)
-                    .or_default()
-                    .insert(activity);
-            }
-            CONFLICTING_FINALIZE => {
-                let (view, verifier) = self.prover.deserialize_conflicting_finalize(proof).unwrap();
-                let (identity, validators) = match self.participants.range(..=view).next_back() {
-                    Some((_, (p, _, v, _))) => (p, v),
-                    None => {
-                        panic!("no participants in required range");
-                    }
-                };
-                let public_key_index = verifier.verify(identity).unwrap();
-                let public_key = validators[public_key_index as usize].clone();
-                self.faults
-                    .lock()
-                    .unwrap()
-                    .entry(public_key)
-                    .or_default()
-                    .entry(view)
-                    .or_default()
-                    .insert(activity);
-            }
-            NULLIFY_AND_FINALIZE => {
-                let (view, verifier) = self.prover.deserialize_nullify_finalize(proof).unwrap();
-                let (identity, validators) = match self.participants.range(..=view).next_back() {
-                    Some((_, (p, _, v, _))) => (p, v),
-                    None => {
-                        panic!("no participants in required range");
-                    }
-                };
-                let public_key_index = verifier.verify(identity).unwrap();
-                let public_key = validators[public_key_index as usize].clone();
-                self.faults
-                    .lock()
-                    .unwrap()
-                    .entry(public_key)
-                    .or_default()
-                    .entry(view)
-                    .or_default()
-                    .insert(activity);
-            }
-            unexpected => {
-                panic!("unexpected activity: {}", unexpected);
-            }
-        }
     }
 }
 
@@ -234,5 +140,161 @@ impl<P: Array, D: Digest> TSu for Supervisor<P, D> {
             }
         };
         Some(closest)
+    }
+}
+
+impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
+    type Activity = Activity<D>;
+
+    async fn report(&self, activity: Self::Activity) {
+        // TODO: restore comment about verifying signatures
+        match activity {
+            Activity::Notarize(notarize) => {
+                let view = notarize.view();
+                let (identity, validators) = match self.participants.range(..=view).next_back() {
+                    Some((_, (p, _, v, _))) => (p, v),
+                    None => {
+                        panic!("no participants in required range");
+                    }
+                };
+                if !notarize.verify(
+                    identity,
+                    None,
+                    &self.notarize_namespace,
+                    &self.seed_namespace,
+                ) {
+                    panic!("signature verification failed");
+                }
+                let public_key = validators[notarize.signer() as usize].clone();
+                self.notarizes
+                    .lock()
+                    .unwrap()
+                    .entry(view)
+                    .or_default()
+                    .entry(notarize.proposal.payload)
+                    .or_default()
+                    .insert(public_key);
+            }
+            Activity::Notarization(notarization) => {}
+            Activity::Nullify(nullify) => {}
+            Activity::Nullification(nullification) => {}
+            Activity::Finalize(finalize) => {
+                let view = finalize.view();
+                let (identity, validators) = match self.participants.range(..=view).next_back() {
+                    Some((_, (p, _, v, _))) => (p, v),
+                    None => {
+                        panic!("no participants in required range");
+                    }
+                };
+                if !finalize.verify(identity, None, &self.finalize_namespace) {
+                    panic!("signature verification failed");
+                }
+                let public_key = validators[finalize.signer() as usize].clone();
+                self.finalizes
+                    .lock()
+                    .unwrap()
+                    .entry(view)
+                    .or_default()
+                    .entry(finalize.proposal.payload)
+                    .or_default()
+                    .insert(public_key);
+            }
+            Activity::Finalization(ref finalization) => {
+                let view = finalization.view();
+                let (identity, _) = match self.participants.range(..=view).next_back() {
+                    Some((_, (p, _, v, _))) => (p, v),
+                    None => {
+                        panic!("no participants in required range");
+                    }
+                };
+                let public = public(identity);
+                if !finalization.verify(public, &self.finalize_namespace, &self.seed_namespace) {
+                    panic!("signature verification failed");
+                }
+                *self.latest.lock().unwrap() = finalization.view();
+                let mut subscribers = self.subscribers.lock().unwrap();
+                for subscriber in subscribers.iter_mut() {
+                    let _ = subscriber.try_send(finalization.view());
+                }
+            }
+            Activity::ConflictingNotarize(ref conflicting) => {
+                let view = conflicting.view();
+                let (identity, validators) = match self.participants.range(..=view).next_back() {
+                    Some((_, (p, _, v, _))) => (p, v),
+                    None => {
+                        panic!("no participants in required range");
+                    }
+                };
+                if !conflicting.verify(identity, None, &self.notarize_namespace) {
+                    panic!("signature verification failed");
+                }
+                let public_key = validators[conflicting.signer() as usize].clone();
+                self.faults
+                    .lock()
+                    .unwrap()
+                    .entry(public_key)
+                    .or_default()
+                    .entry(view)
+                    .or_default()
+                    .insert(activity);
+            }
+            Activity::ConflictingFinalize(ref conflicting) => {
+                let view = conflicting.view();
+                let (identity, validators) = match self.participants.range(..=view).next_back() {
+                    Some((_, (p, _, v, _))) => (p, v),
+                    None => {
+                        panic!("no participants in required range");
+                    }
+                };
+                if !conflicting.verify(identity, None, &self.finalize_namespace) {
+                    panic!("signature verification failed");
+                }
+                let public_key = validators[conflicting.signer() as usize].clone();
+                self.faults
+                    .lock()
+                    .unwrap()
+                    .entry(public_key)
+                    .or_default()
+                    .entry(view)
+                    .or_default()
+                    .insert(activity);
+            }
+            Activity::NullifyFinalize(ref nullify_finalize) => {
+                let view = nullify_finalize.view();
+                let (identity, validators) = match self.participants.range(..=view).next_back() {
+                    Some((_, (p, _, v, _))) => (p, v),
+                    None => {
+                        panic!("no participants in required range");
+                    }
+                };
+                if !nullify_finalize.verify(
+                    identity,
+                    None,
+                    &self.nullify_namespace,
+                    &self.finalize_namespace,
+                ) {
+                    panic!("signature verification failed");
+                }
+                let public_key = validators[nullify_finalize.signer() as usize].clone();
+                self.faults
+                    .lock()
+                    .unwrap()
+                    .entry(public_key)
+                    .or_default()
+                    .entry(view)
+                    .or_default()
+                    .insert(activity);
+            }
+        }
+    }
+}
+
+impl<P: Array, D: Digest> Monitor for Supervisor<P, D> {
+    type Index = View;
+    async fn subscribe(&mut self) -> (Self::Index, Receiver<Self::Index>) {
+        let (tx, rx) = futures::channel::mpsc::channel(128);
+        self.subscribers.lock().unwrap().push(tx);
+        let latest = *self.latest.lock().unwrap();
+        (latest, rx)
     }
 }
