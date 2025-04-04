@@ -1249,7 +1249,7 @@ impl<
 
     async fn notarize(&mut self, sender: &C::PublicKey, notarize: Notarize<D>) {
         // Ensure we are in the right view to process this message
-        let view = notarize.proposal.view;
+        let view = notarize.view();
         if !self.interesting(view, false) {
             return;
         }
@@ -1278,7 +1278,7 @@ impl<
 
     async fn handle_notarize(&mut self, public_key_index: u32, notarize: Notarize<D>) {
         // Check to see if notarize is for proposal in view
-        let view = notarize.proposal.view;
+        let view = notarize.view();
         let round = self.views.entry(view).or_insert_with(|| {
             Round::new(
                 self.context.with_label("round"),
@@ -1306,7 +1306,7 @@ impl<
 
     async fn notarization(&mut self, notarization: Notarization<D>) {
         // Check if we are still in a view where this notarization could help
-        let view = notarization.proposal.view;
+        let view = notarization.view();
         if !self.interesting(view, true) {
             return;
         }
@@ -1334,7 +1334,7 @@ impl<
 
     async fn handle_notarization(&mut self, notarization: Notarization<D>) {
         // Create round (if it doesn't exist)
-        let view = notarization.proposal.view;
+        let view = notarization.view();
         let round = self.views.entry(view).or_insert_with(|| {
             Round::new(
                 self.context.with_label("round"),
@@ -1419,7 +1419,7 @@ impl<
 
     async fn finalize(&mut self, sender: &C::PublicKey, finalize: Finalize<D>) {
         // Ensure we are in the right view to process this message
-        let view = finalize.proposal.view;
+        let view = finalize.view();
         if !self.interesting(view, false) {
             return;
         }
@@ -1443,7 +1443,7 @@ impl<
 
     async fn handle_finalize(&mut self, public_key_index: u32, finalize: Finalize<D>) {
         // Get view for finalize
-        let view = finalize.proposal.view;
+        let view = finalize.view();
         let round = self.views.entry(view).or_insert_with(|| {
             Round::new(
                 self.context.with_label("round"),
@@ -1471,7 +1471,7 @@ impl<
 
     async fn finalization(&mut self, finalization: Finalization<D>) {
         // Check if we are still in a view where this finalization could help
-        let view = finalization.proposal.view;
+        let view = finalization.view();
         if !self.interesting(view, true) {
             return;
         }
@@ -1499,7 +1499,7 @@ impl<
 
     async fn handle_finalization(&mut self, finalization: Finalization<D>) {
         // Create round (if it doesn't exist)
-        let view = finalization.proposal.view;
+        let view = finalization.view();
         let round = self.views.entry(view).or_insert_with(|| {
             Round::new(
                 self.context.with_label("round"),
@@ -1896,8 +1896,8 @@ impl<
                     }
                     Voter::Nullify(nullify) => {
                         // Handle nullify
-                        let view = nullify.view;
-                        let public_key_index = nullify.view_signature.index;
+                        let view = nullify.view();
+                        let public_key_index = nullify.signer();
                         let public_key = self
                             .supervisor
                             .participants(view)
