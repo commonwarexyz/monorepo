@@ -77,30 +77,18 @@ impl std::io::Write for Writer {
         let timestamp = json["timestamp"].as_str().unwrap();
         let target = json["target"].as_str().unwrap();
         let msg = json["fields"]["message"].as_str().unwrap();
+        let datetime_local = timestamp
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .format("%m/%d %H:%M:%S");
         let (progress, mut formatted_msg) = if target.contains("commonware_log::application") {
-            (
-                true,
-                format!(
-                    "[{}] => {} (",
-                    chrono::NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%dT%H:%M:%S%.6fZ")
-                        .unwrap()
-                        .format("%m/%d %H:%M:%S"),
-                    msg,
-                ),
-            )
+            (true, format!("[{}] => {} (", datetime_local, msg,))
         } else {
             let level = json["level"].as_str().unwrap();
             (
                 false,
-                format!(
-                    "[{}|{}] {} => {} (",
-                    chrono::NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%dT%H:%M:%S%.6fZ")
-                        .unwrap()
-                        .format("%m/%d %H:%M:%S"),
-                    level,
-                    target,
-                    msg,
-                ),
+                format!("[{}|{}] {} => {} (", datetime_local, level, target, msg,),
             )
         };
 
