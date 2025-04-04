@@ -127,12 +127,12 @@ pub struct PrivateKey {
     key: ed25519_consensus::SigningKey,
 }
 
-impl Codec for PrivateKey {
+impl Codec<()> for PrivateKey {
     fn write(&self, buf: &mut impl BufMut) {
         self.raw.write(buf);
     }
 
-    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
+    fn read(buf: &mut impl Buf, _: ()) -> Result<Self, CodecError> {
         Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
     }
 
@@ -239,12 +239,12 @@ pub struct PublicKey {
     key: ed25519_consensus::VerificationKey,
 }
 
-impl Codec for PublicKey {
+impl Codec<()> for PublicKey {
     fn write(&self, buf: &mut impl BufMut) {
         self.raw.write(buf);
     }
 
-    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
+    fn read(buf: &mut impl Buf, _: ()) -> Result<Self, CodecError> {
         Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
     }
 
@@ -325,12 +325,12 @@ pub struct Signature {
     signature: ed25519_consensus::Signature,
 }
 
-impl Codec for Signature {
+impl Codec<()> for Signature {
     fn write(&self, buf: &mut impl BufMut) {
         self.raw.write(buf);
     }
 
-    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
+    fn read(buf: &mut impl Buf, _: ()) -> Result<Self, CodecError> {
         Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
     }
 

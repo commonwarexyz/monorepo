@@ -51,13 +51,13 @@ impl TryFrom<Vec<u8>> for Key {
     }
 }
 
-impl Codec for Key {
+impl Codec<()> for Key {
     fn write(&self, buf: &mut impl BufMut) {
         self.0.write(buf);
     }
 
-    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
-        u8::read(buf).map(Self)
+    fn read(buf: &mut impl Buf, _: ()) -> Result<Self, CodecError> {
+        u8::read(buf, ()).map(Self)
     }
 
     fn len_encoded(&self) -> usize {

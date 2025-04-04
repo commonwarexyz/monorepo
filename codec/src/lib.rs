@@ -31,7 +31,7 @@
 //! }
 //!
 //! // Implement the Codec trait
-//! impl Codec for Point {
+//! impl Codec<()> for Point {
 //!     fn write(&self, buf: &mut impl BufMut) {
 //!         // Basic types can be written by inferring the type
 //!         self.xy.write(buf);
@@ -39,11 +39,11 @@
 //!         self.metadata.write(buf);
 //!     }
 //!
-//!     fn read(buf: &mut impl Buf) -> Result<Self, Error> {
+//!     fn read(buf: &mut impl Buf, _: ()) -> Result<Self, Error> {
 //!         // Basic types can be inferred by the return type
-//!         let xy = <(u64, u64)>::read(buf)?;
-//!         let z = <Option<u32>>::read(buf)?;
-//!         let metadata = <[u8; 11]>::read(buf)?;
+//!         let xy = <(u64, u64)>::read(buf, ())?;
+//!         let z = <Option<u32>>::read(buf, ())?;
+//!         let metadata = <[u8; 11]>::read(buf, ())?;
 //!         Ok(Self { xy, z, metadata })
 //!     }
 //!

@@ -28,13 +28,13 @@ impl<const N: usize> FixedBytes<N> {
     }
 }
 
-impl<const N: usize> Codec for FixedBytes<N> {
+impl<const N: usize> Codec<()> for FixedBytes<N> {
     fn write(&self, buf: &mut impl BufMut) {
         self.0.write(buf);
     }
 
-    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
-        Ok(Self(<[u8; N]>::read(buf)?))
+    fn read(buf: &mut impl Buf, _: ()) -> Result<Self, CodecError> {
+        Ok(Self(<[u8; N]>::read(buf, ())?))
     }
 
     fn len_encoded(&self) -> usize {

@@ -4,7 +4,7 @@ use crate::error::Error;
 use bytes::{Buf, BufMut, BytesMut};
 
 /// Trait for types that can be encoded to and decoded from bytes
-pub trait Codec: Sized {
+pub trait Codec<C>: Sized {
     /// Encodes this value to a writer.
     fn write(&self, buf: &mut impl BufMut);
 
@@ -21,24 +21,24 @@ pub trait Codec: Sized {
     }
 
     /// Reads a value from a buffer, returning an error if there is an error while reading.
-    fn read(buf: &mut impl Buf) -> Result<Self, Error>;
+    fn read(buf: &mut impl Buf, cfg: C) -> Result<Self, Error>;
 
     /// Decodes a value from a buffer.
     ///
     /// Returns an error if there is an error while decoding or if there is extra data remaining
     /// after decoding the value from the buffer.
-    fn decode<B: Buf>(mut buf: B) -> Result<Self, Error> {
-        let result = Self::read(&mut buf);
+    fn decode(mut buf: impl Buf, cfg: C) -> Result<Self, Error> {
+        let result = Self::read(&mut buf, cfg)?;
         let remaining = buf.remaining();
         if remaining > 0 {
             return Err(Error::ExtraData(remaining));
         }
-        result
+        Ok(result)
     }
 }
 
 /// Trait for types that have a fixed-length encoding
-pub trait SizedCodec: Codec {
+pub trait SizedCodec: Codec<()> {
     /// The encoded length of this value.
     const LEN_ENCODED: usize;
 

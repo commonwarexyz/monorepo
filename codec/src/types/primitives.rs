@@ -3,11 +3,12 @@
 use crate::{util::at_least, varint, Codec, Error, SizedCodec};
 use bytes::{Buf, BufMut, Bytes};
 use paste::paste;
+use std::ops::RangeBounds;
 
 // Numeric types implementation
 macro_rules! impl_numeric {
     ($type:ty, $read_method:ident, $write_method:ident) => {
-        impl Codec for $type {
+        impl Codec<()> for $type {
             #[inline]
             fn write(&self, buf: &mut impl BufMut) {
                 buf.$write_method(*self);
@@ -19,7 +20,7 @@ macro_rules! impl_numeric {
             }
 
             #[inline]
-            fn read(buf: &mut impl Buf) -> Result<Self, Error> {
+            fn read(buf: &mut impl Buf, _: ()) -> Result<Self, Error> {
                 at_least(buf, std::mem::size_of::<$type>())?;
                 Ok(buf.$read_method())
             }
@@ -45,7 +46,7 @@ impl_numeric!(f32, get_f32, put_f32);
 impl_numeric!(f64, get_f64, put_f64);
 
 // Usize implementation
-impl Codec for usize {
+impl Codec<()> for usize {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {
         varint::write(*self, buf);
@@ -57,13 +58,13 @@ impl Codec for usize {
     }
 
     #[inline]
-    fn read(buf: &mut impl Buf) -> Result<Self, Error> {
+    fn read(buf: &mut impl Buf, _: ()) -> Result<Self, Error> {
         varint::read(buf)
     }
 }
 
 // Bool implementation
-impl Codec for bool {
+impl Codec<()> for bool {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {
         buf.put_u8(if *self { 1 } else { 0 });
@@ -75,7 +76,7 @@ impl Codec for bool {
     }
 
     #[inline]
-    fn read(buf: &mut impl Buf) -> Result<Self, Error> {
+    fn read(buf: &mut impl Buf, _: ()) -> Result<Self, Error> {
         at_least(buf, 1)?;
         match buf.get_u8() {
             0 => Ok(false),
@@ -90,7 +91,7 @@ impl SizedCodec for bool {
 }
 
 // Bytes implementation
-impl Codec for Bytes {
+impl<C: RangeBounds<usize>> Codec<C> for Bytes {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {
         self.len().write(buf);
@@ -103,15 +104,18 @@ impl Codec for Bytes {
     }
 
     #[inline]
-    fn read(buf: &mut impl Buf) -> Result<Self, Error> {
-        let len = <usize>::read(buf)?;
+    fn read(buf: &mut impl Buf, cfg: C) -> Result<Self, Error> {
+        let len = <usize>::read(buf, ())?;
+        if !cfg.contains(&len) {
+            return Err(Error::InvalidLength(len));
+        }
         at_least(buf, len)?;
         Ok(buf.copy_to_bytes(len))
     }
 }
 
 // Constant-size array implementation
-impl<const N: usize> Codec for [u8; N] {
+impl<const N: usize> Codec<()> for [u8; N] {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {
         buf.put(&self[..]);
@@ -123,7 +127,7 @@ impl<const N: usize> Codec for [u8; N] {
     }
 
     #[inline]
-    fn read(buf: &mut impl Buf) -> Result<Self, Error> {
+    fn read(buf: &mut impl Buf, _: ()) -> Result<Self, Error> {
         at_least(buf, N)?;
         let mut dst = [0; N];
         buf.copy_to_slice(&mut dst);
@@ -136,7 +140,7 @@ impl<const N: usize> SizedCodec for [u8; N] {
 }
 
 // Option implementation
-impl<T: Codec> Codec for Option<T> {
+impl<C, T: Codec<C>> Codec<C> for Option<T> {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {
         self.is_some().write(buf);
@@ -154,9 +158,9 @@ impl<T: Codec> Codec for Option<T> {
     }
 
     #[inline]
-    fn read(buf: &mut impl Buf) -> Result<Self, Error> {
-        if bool::read(buf)? {
-            Ok(Some(T::read(buf)?))
+    fn read(buf: &mut impl Buf, cfg: C) -> Result<Self, Error> {
+        if bool::read(buf, ())? {
+            Ok(Some(T::read(buf, cfg)?))
         } else {
             Ok(None)
         }
@@ -167,7 +171,7 @@ impl<T: Codec> Codec for Option<T> {
 macro_rules! impl_codec_for_tuple {
     ($($index:literal),*) => {
         paste! {
-            impl<$( [<T $index>]: Codec ),*> Codec for ( $( [<T $index>], )* ) {
+            impl<C: Copy, $([<T $index>]: Codec<C> ),*> Codec<C> for ( $( [<T $index>], )* ) {
                 fn write(&self, buf: &mut impl BufMut) {
                     $( self.$index.write(buf); )*
                 }
@@ -176,8 +180,8 @@ macro_rules! impl_codec_for_tuple {
                     0 $( + self.$index.len_encoded() )*
                 }
 
-                fn read(buf: &mut impl Buf) -> Result<Self, Error> {
-                    Ok(( $( [<T $index>]::read(buf)?, )* ))
+                fn read(buf: &mut impl Buf, cfg: C) -> Result<Self, Error> {
+                    Ok(( $( [<T $index>]::read(buf, cfg)?, )* ))
                 }
             }
         }
@@ -199,7 +203,7 @@ impl_codec_for_tuple!(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
 impl_codec_for_tuple!(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11);
 
 // Vec implementation
-impl<T: Codec> Codec for Vec<T> {
+impl<R: RangeBounds<usize>, C: Copy, T: Codec<C>> Codec<(R, C)> for Vec<T> {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {
         self.len().write(buf);
@@ -215,11 +219,14 @@ impl<T: Codec> Codec for Vec<T> {
     }
 
     #[inline]
-    fn read(buf: &mut impl Buf) -> Result<Self, Error> {
-        let len = <usize>::read(buf)?;
+    fn read(buf: &mut impl Buf, (range, cfg): (R, C)) -> Result<Self, Error> {
+        let len = <usize>::read(buf, ())?;
+        if !range.contains(&len) {
+            return Err(Error::InvalidLength(len));
+        }
         let mut vec = Vec::with_capacity(len);
         for _ in 0..len {
-            vec.push(T::read(buf)?);
+            vec.push(T::read(buf, cfg)?);
         }
         Ok(vec)
     }

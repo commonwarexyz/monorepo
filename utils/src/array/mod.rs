@@ -48,7 +48,7 @@ pub trait Array:
     + for<'a> TryFrom<&'a [u8], Error = <Self as Array>::Error>
     + for<'a> TryFrom<&'a Vec<u8>, Error = <Self as Array>::Error>
     + TryFrom<Vec<u8>, Error = <Self as Array>::Error>
-    + Codec
+    + Codec<()>
     + SizedCodec
 {
     /// Errors returned when parsing an invalid byte sequence.

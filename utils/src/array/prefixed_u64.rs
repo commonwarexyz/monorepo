@@ -41,13 +41,13 @@ impl U64 {
     }
 }
 
-impl Codec for U64 {
+impl Codec<()> for U64 {
     fn write(&self, buf: &mut impl BufMut) {
         self.0.write(buf);
     }
 
-    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
-        <[u8; Self::LEN_ENCODED]>::read(buf).map(Self)
+    fn read(buf: &mut impl Buf, _: ()) -> Result<Self, CodecError> {
+        <[u8; Self::LEN_ENCODED]>::read(buf, ()).map(Self)
     }
 
     fn len_encoded(&self) -> usize {

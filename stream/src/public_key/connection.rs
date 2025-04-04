@@ -48,7 +48,7 @@ impl<C: Scheme, Si: Sink, St: Stream> IncomingConnection<C, Si, St> {
 
         // Verify handshake message from peer
         let signed_handshake =
-            handshake::Signed::<C>::decode(msg).map_err(Error::UnableToDecode)?;
+            handshake::Signed::<C>::decode(msg, ()).map_err(Error::UnableToDecode)?;
         signed_handshake.verify(
             context,
             &config.crypto,
@@ -154,7 +154,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
 
         // Verify handshake message from peer
         let signed_handshake =
-            handshake::Signed::<C>::decode(msg).map_err(Error::UnableToDecode)?;
+            handshake::Signed::<C>::decode(msg, ()).map_err(Error::UnableToDecode)?;
         signed_handshake.verify(
             &context,
             &config.crypto,
