@@ -11,13 +11,14 @@ use crate::{
     },
     Automaton, Relay, Reporter, ThresholdSupervisor, LATENCY,
 };
+use commonware_codec::Codec;
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{self, Element},
         ops::{partial_sign_message, threshold_signature_recover},
         poly::{self, Eval},
     },
-    sha256, Digest, Scheme,
+    Digest, Scheme,
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
@@ -692,14 +693,14 @@ impl<
     fn is_notarized(&self, view: View) -> Option<&D> {
         let round = self.views.get(&view)?;
         if let Some(notarization) = &round.notarization {
-            return Some(&notarization.digest);
+            return Some(&notarization.proposal.payload);
         }
-        let (digest, proposal) = round.proposal.as_ref()?;
-        let notarizes = round.notarizes.get(digest)?;
+        let proposal = round.proposal.as_ref()?;
+        let notarizes = round.notarized_proposals.get(proposal)?;
         let identity = self.supervisor.identity(view)?;
         let threshold = identity.required();
         if notarizes.len() >= threshold as usize {
-            return Some(&proposal.digest);
+            return Some(&proposal.payload);
         }
         None
     }
@@ -720,14 +721,14 @@ impl<
     fn is_finalized(&self, view: View) -> Option<&D> {
         let round = self.views.get(&view)?;
         if let Some(finalization) = &round.finalization {
-            return Some(&finalization.digest);
+            return Some(&finalization.proposal.payload);
         }
-        let (digest, proposal) = round.proposal.as_ref()?;
-        let finalizes = round.finalizes.get(digest)?;
+        let proposal = round.proposal.as_ref()?;
+        let finalizes = round.finalized_proposals.get(proposal)?;
         let identity = self.supervisor.identity(view)?;
         let threshold = identity.required();
         if finalizes.len() >= threshold as usize {
-            return Some(&proposal.digest);
+            return Some(&proposal.payload);
         }
         None
     }
@@ -867,7 +868,7 @@ impl<
         let past_view = self.view - 1;
         if retry && past_view > 0 {
             if let Some(notarization) = self.construct_notarization(past_view, true).await {
-                let msg = Voter::Notarization(notarization).encode_to_vec().into();
+                let msg = Voter::Notarization(notarization).encode().into();
                 sender.send(Recipients::All, msg, true).await.unwrap();
                 self.broadcast_messages
                     .get_or_create(&metrics::NOTARIZATION)
@@ -875,7 +876,7 @@ impl<
                 debug!(view = past_view, "rebroadcast entry notarization");
             } else if let Some(nullification) = self.construct_nullification(past_view, true).await
             {
-                let msg = Voter::Nullification(nullification).encode_to_vec().into();
+                let msg = Voter::<D>::Nullification(nullification).encode().into();
                 sender.send(Recipients::All, msg, true).await.unwrap();
                 self.broadcast_messages
                     .get_or_create(&metrics::NULLIFICATION)
@@ -892,10 +893,8 @@ impl<
         // Construct nullify
         let share = self.supervisor.share(self.view).unwrap();
         let message = view_message(self.view);
-        let view_signature =
-            partial_sign_message(share, Some(&self.nullify_namespace), &message).serialize();
-        let seed_signature =
-            partial_sign_message(share, Some(&self.seed_namespace), &message).serialize();
+        let view_signature = partial_sign_message(share, Some(&self.nullify_namespace), &message);
+        let seed_signature = partial_sign_message(share, Some(&self.seed_namespace), &message);
         let null = Nullify::new(self.view, view_signature, seed_signature);
 
         // Handle the nullify
@@ -910,7 +909,7 @@ impl<
             .expect("unable to sync journal");
 
         // Broadcast nullify
-        let msg = Voter::Nullify(null).encode_to_vec().into();
+        let msg = Voter::<D>::Nullify(null).encode().into();
         sender.send(Recipients::All, msg, true).await.unwrap();
         self.broadcast_messages
             .get_or_create(&metrics::NULLIFY)
@@ -959,7 +958,7 @@ impl<
         });
 
         // Handle nullify
-        let nullify_bytes = Voter::Nullify(nullify.clone()).encode_to_vec().into();
+        let nullify_bytes = Voter::<D>::Nullify(nullify.clone()).encode().into();
         if round.add_verified_nullify(public_key_index, nullify).await && self.journal.is_some() {
             self.journal
                 .as_mut()
@@ -970,21 +969,14 @@ impl<
         }
     }
 
-    async fn our_proposal(
-        &mut self,
-        proposal_digest: sha256::Digest,
-        proposal: Proposal<D>,
-    ) -> bool {
+    async fn our_proposal(&mut self, proposal: Proposal<D>) -> bool {
         // Store the proposal
-        let round = self
-            .views
-            .get_mut(&proposal.message.view)
-            .expect("view missing");
+        let round = self.views.get_mut(&proposal.view).expect("view missing");
 
         // Check if view timed out
         if round.broadcast_nullify {
             debug!(
-                view = proposal.message.view,
+                ?proposal,
                 reason = "view timed out",
                 "dropping our proposal"
             );
@@ -992,13 +984,8 @@ impl<
         }
 
         // Store the proposal
-        debug!(
-            view = proposal.message.view,
-            parent = proposal.message.parent,
-            digest = ?proposal_digest,
-            "generated proposal"
-        );
-        round.proposal = Some((proposal_digest, proposal));
+        debug!(?proposal, "generated proposal");
+        round.proposal = Some(proposal);
         round.verified_proposal = true;
         round.leader_deadline = None;
         true
@@ -1008,7 +995,7 @@ impl<
     #[allow(clippy::question_mark)]
     async fn peer_proposal(&mut self) -> Option<(Context<D>, oneshot::Receiver<bool>)> {
         // Get round
-        let (proposal_digest, proposal) = {
+        let proposal = {
             // Get view or exit
             let round = self.views.get(&self.view)?;
 
@@ -1034,9 +1021,8 @@ impl<
             }
 
             // Check if leader has signed a digest
-            let proposal_digest = round.notaries.get(&leader_index)?;
-            let notarize = round.notarizes.get(proposal_digest)?.get(&leader_index)?;
-            let proposal = notarize.message.proposal.as_ref()?;
+            let notarize = round.notarizes[leader_index as usize].as_ref()?;
+            let proposal = &notarize.proposal;
 
             // Check parent validity
             if proposal.view <= proposal.parent {
@@ -1056,7 +1042,7 @@ impl<
                 );
                 return None;
             }
-            (proposal_digest, proposal)
+            proposal
         };
 
         // Ensure we have required notarizations
@@ -1067,9 +1053,9 @@ impl<
             _ => self.view - 1,
         };
         let parent_payload = loop {
-            if cursor == proposal.message.parent {
+            if cursor == proposal.parent {
                 // Check if first block
-                if proposal.message.parent == GENESIS_VIEW {
+                if proposal.parent == GENESIS_VIEW {
                     break self.genesis.as_ref().unwrap();
                 }
 
@@ -1098,20 +1084,15 @@ impl<
         };
 
         // Request verification
-        debug!(
-            view = proposal.message.view,
-            digest = ?proposal_digest,
-            payload = ?proposal.digest,
-            "requested proposal verification",
-        );
+        debug!(?proposal, "requested proposal verification",);
         let context = Context {
-            view: proposal.message.view,
-            parent: (proposal.message.parent, *parent_payload),
+            view: proposal.view,
+            parent: (proposal.parent, *parent_payload),
         };
-        let payload = proposal.digest;
-        let round_proposal = Some((*proposal_digest, proposal));
+        let proposal = proposal.clone();
+        let payload = proposal.payload.clone();
         let round = self.views.get_mut(&context.view).unwrap();
-        round.proposal = round_proposal;
+        round.proposal = Some(proposal);
         Some((
             context.clone(),
             self.automaton.verify(context, payload).await,
