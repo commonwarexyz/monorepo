@@ -22,8 +22,8 @@ pub struct Config<
     /// Relay for the consensus engine.
     pub relay: R,
 
-    /// Committer for the consensus engine.
-    pub committer: F,
+    /// Reporter for the consensus engine.
+    pub reporter: F,
 
     /// Supervisor for the consensus engine.
     pub supervisor: S,

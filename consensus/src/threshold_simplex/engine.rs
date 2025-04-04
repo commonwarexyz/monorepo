@@ -71,7 +71,7 @@ impl<
                 crypto: cfg.crypto.clone(),
                 automaton: cfg.automaton,
                 relay: cfg.relay,
-                committer: cfg.committer,
+                reporter: cfg.reporter,
                 supervisor: cfg.supervisor.clone(),
                 mailbox_size: cfg.mailbox_size,
                 namespace: cfg.namespace.clone(),
