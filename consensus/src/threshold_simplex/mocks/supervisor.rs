@@ -175,6 +175,9 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                     .or_default()
                     .insert(public_key);
             }
+            Activity::Notarization(notarization) => {}
+            Activity::Nullify(nullify) => {}
+            Activity::Nullification(nullification) => {}
             Activity::Finalize(finalize) => {
                 let view = finalize.view();
                 let (identity, validators) = match self.participants.range(..=view).next_back() {
@@ -281,9 +284,6 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                     .entry(view)
                     .or_default()
                     .insert(activity);
-            }
-            unexpected => {
-                panic!("unexpected activity: {:?}", unexpected);
             }
         }
     }

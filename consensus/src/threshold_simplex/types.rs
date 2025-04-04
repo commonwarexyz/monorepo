@@ -210,7 +210,7 @@ impl<D: Digest> Notarize<D> {
         seed_namespace: &[u8],
     ) -> bool {
         let public_key_index = public_key_index.unwrap_or(self.proposal_signature.index);
-        let notarize_message = self.encode();
+        let notarize_message = self.proposal.encode();
         let notarize_message = (Some(notarize_namespace), notarize_message.as_ref());
         let seed_message = view_message(self.proposal.view);
         let seed_message = (Some(seed_namespace), seed_message.as_ref());
@@ -218,7 +218,7 @@ impl<D: Digest> Notarize<D> {
             identity,
             public_key_index,
             &[notarize_message, seed_message],
-            &[self.proposal_signature.clone(), self.seed_signature.clone()],
+            &[&self.proposal_signature, &self.seed_signature],
         )
         .is_ok()
     }
@@ -372,7 +372,7 @@ impl Nullify {
             identity,
             public_key_index,
             &[nullify_message, seed_message],
-            &[self.view_signature.clone(), self.seed_signature.clone()],
+            &[&self.view_signature, &self.seed_signature],
         )
         .is_ok()
     }
@@ -549,7 +549,7 @@ impl<D: Digest> Codec for Finalize<D> {
 }
 
 impl<D: Digest> SizedCodec for Finalize<D> {
-    const LEN_ENCODED: usize = Proposal::<D>::LEN_ENCODED + Signature::LEN_ENCODED;
+    const LEN_ENCODED: usize = Proposal::<D>::LEN_ENCODED + PartialSignature::LEN_ENCODED;
 }
 
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
@@ -919,7 +919,7 @@ impl<D: Digest> ConflictingNotarize<D> {
             identity,
             public_key_index,
             &[notarize_message_1, notarize_message_2],
-            &[self.signature_1.clone(), self.signature_2.clone()],
+            &[&self.signature_1, &self.signature_2],
         )
         .is_ok()
     }
@@ -1013,7 +1013,7 @@ impl<D: Digest> ConflictingFinalize<D> {
             identity,
             public_key_index,
             &[finalize_message_1, finalize_message_2],
-            &[self.signature_1.clone(), self.signature_2.clone()],
+            &[&self.signature_1, &self.signature_2],
         )
         .is_ok()
     }
@@ -1105,7 +1105,7 @@ impl<D: Digest> NullifyFinalize<D> {
             identity,
             public_key_index,
             &[nullify_message, finalize_message],
-            &[self.view_signature.clone(), self.finalize_signature.clone()],
+            &[&self.view_signature, &self.finalize_signature],
         )
         .is_ok()
     }
