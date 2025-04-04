@@ -1885,21 +1885,20 @@ impl<
 
                         // Update round info
                         if public_key == self.crypto.public_key() {
-                            let round = self.views.get_mut(&proposal.view).expect("missing round");
-                            let proposal_digest = proposal.digest();
-                            round.proposal = Some((proposal_digest, proposal));
+                            let round =
+                                self.views.get_mut(&notarize.view()).expect("missing round");
+                            round.proposal = Some(notarize.proposal.clone());
                             round.verified_proposal = true;
                             round.broadcast_notarize = true;
                         }
                     }
                     Voter::Notarization(notarization) => {
                         // Handle notarization
-                        let proposal = notarization.proposal.as_ref().unwrap().clone();
-                        let payload = D::try_from(&proposal.payload).unwrap();
+                        let view = notarization.view();
                         self.handle_notarization(notarization).await;
 
                         // Update round info
-                        let round = self.views.get_mut(&proposal.view).expect("missing round");
+                        let round = self.views.get_mut(&view).expect("missing round");
                         round.broadcast_notarization = true;
                     }
                     Voter::Nullify(nullify) => {
@@ -1932,15 +1931,10 @@ impl<
                     }
                     Voter::Finalize(finalize) => {
                         // Handle finalize
-                        let proposal = finalize.proposal.as_ref().unwrap();
-                        let view = proposal.view;
-                        let payload = D::try_from(&proposal.payload).unwrap();
-                        let signature: Eval<group::Signature> =
-                            Eval::deserialize(&finalize.proposal_signature).unwrap();
-                        let public_key_index = signature.index;
+                        let public_key_index = finalize.signer();
                         let public_key = self
                             .supervisor
-                            .participants(proposal.view)
+                            .participants(finalize.view())
                             .unwrap()
                             .get(public_key_index as usize)
                             .unwrap()
@@ -1951,15 +1945,14 @@ impl<
                         //
                         // If we are sending a finalize message, we must be in the next view
                         if public_key == self.crypto.public_key() {
-                            let round = self.views.get_mut(&view).expect("missing round");
+                            let round =
+                                self.views.get_mut(&finalize.view()).expect("missing round");
                             round.broadcast_finalize = true;
                         }
                     }
                     Voter::Finalization(finalization) => {
                         // Handle finalization
-                        let proposal = finalization.proposal.as_ref().unwrap();
-                        let view = proposal.view;
-                        let payload = D::try_from(&proposal.payload).unwrap();
+                        let view = finalization.view();
                         self.handle_finalization(finalization).await;
 
                         // Update round info

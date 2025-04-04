@@ -226,6 +226,10 @@ impl<D: Digest> Notarize<D> {
     pub fn signer(&self) -> u32 {
         self.proposal_signature.index
     }
+
+    pub fn view(&self) -> View {
+        self.proposal.view
+    }
 }
 
 impl<D: Digest> Codec for Notarize<D> {
@@ -517,6 +521,10 @@ impl<D: Digest> Finalize<D> {
 
     pub fn signer(&self) -> u32 {
         self.proposal_signature.index
+    }
+
+    pub fn view(&self) -> View {
+        self.proposal.view
     }
 }
 
