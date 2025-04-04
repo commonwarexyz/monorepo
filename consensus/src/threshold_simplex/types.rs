@@ -182,7 +182,7 @@ impl<D: Digest> SizedCodec for Proposal<D> {
     const LEN_ENCODED: usize = View::LEN_ENCODED + View::LEN_ENCODED + D::LEN_ENCODED;
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub struct Notarize<D: Digest> {
     pub proposal: Proposal<D>,
     pub proposal_signature: PartialSignature,
@@ -263,7 +263,7 @@ impl<D: Digest> SizedCodec for Notarize<D> {
         Proposal::<D>::LEN_ENCODED + PartialSignature::LEN_ENCODED + PartialSignature::LEN_ENCODED;
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub struct Notarization<D: Digest> {
     pub proposal: Proposal<D>,
     pub proposal_signature: Signature,
@@ -337,7 +337,7 @@ impl<D: Digest> SizedCodec for Notarization<D> {
         Proposal::<D>::LEN_ENCODED + Signature::LEN_ENCODED + Signature::LEN_ENCODED;
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub struct Nullify {
     pub view: View,
     pub view_signature: PartialSignature,
@@ -417,7 +417,7 @@ impl SizedCodec for Nullify {
         View::LEN_ENCODED + PartialSignature::LEN_ENCODED + PartialSignature::LEN_ENCODED;
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub struct Nullification {
     pub view: View,
     pub view_signature: Signature,
@@ -484,7 +484,7 @@ impl SizedCodec for Nullification {
     const LEN_ENCODED: usize = View::LEN_ENCODED + Signature::LEN_ENCODED + Signature::LEN_ENCODED;
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub struct Finalize<D: Digest> {
     pub proposal: Proposal<D>,
     pub proposal_signature: PartialSignature,
@@ -552,7 +552,7 @@ impl<D: Digest> SizedCodec for Finalize<D> {
     const LEN_ENCODED: usize = Proposal::<D>::LEN_ENCODED + Signature::LEN_ENCODED;
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub struct Finalization<D: Digest> {
     pub proposal: Proposal<D>,
     pub proposal_signature: Signature,
@@ -765,7 +765,7 @@ pub fn view_message(view: View) -> Vec<u8> {
     View::encode(&view)
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub enum Activity<D: Digest> {
     Notarize(Notarize<D>),
     Notarization(Notarization<D>),
@@ -881,7 +881,7 @@ impl<D: Digest> Codec for Activity<D> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ConflictingNotarize<D: Digest> {
     pub proposal_1: Proposal<D>,
     pub signature_1: PartialSignature,
@@ -975,7 +975,7 @@ impl<D: Digest> SizedCodec for ConflictingNotarize<D> {
         + PartialSignature::LEN_ENCODED;
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ConflictingFinalize<D: Digest> {
     pub proposal_1: Proposal<D>,
     pub signature_1: PartialSignature,
@@ -1069,7 +1069,7 @@ impl<D: Digest> SizedCodec for ConflictingFinalize<D> {
         + PartialSignature::LEN_ENCODED;
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct NullifyFinalize<D: Digest> {
     pub proposal: Proposal<D>,
     pub view_signature: PartialSignature,

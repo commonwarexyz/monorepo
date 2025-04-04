@@ -1,5 +1,7 @@
 use crate::{
-    threshold_simplex::types::{Activity, View},
+    threshold_simplex::types::{
+        finalize_namespace, notarize_namespace, nullify_namespace, seed_namespace, Activity, View,
+    },
     Reporter, Supervisor as Su, ThresholdSupervisor as TSu,
 };
 use commonware_cryptography::{
@@ -22,7 +24,8 @@ type ViewInfo<P> = (
     group::Share,
 );
 
-pub struct Config<P: Array, D: Digest> {
+pub struct Config<P: Array> {
+    pub namespace: Vec<u8>,
     pub participants: BTreeMap<View, (poly::Poly<group::Public>, Vec<P>, group::Share)>,
 }
 
@@ -33,13 +36,18 @@ type Faults<D, P> = HashMap<P, HashMap<View, HashSet<Activity<D>>>>;
 pub struct Supervisor<P: Array, D: Digest> {
     participants: BTreeMap<View, ViewInfo<P>>,
 
+    seed_namespace: Vec<u8>,
+    notarize_namespace: Vec<u8>,
+    nullify_namespace: Vec<u8>,
+    finalize_namespace: Vec<u8>,
+
     pub notarizes: Arc<Mutex<Participation<D, P>>>,
     pub finalizes: Arc<Mutex<Participation<D, P>>>,
     pub faults: Arc<Mutex<Faults<D, P>>>,
 }
 
 impl<P: Array, D: Digest> Supervisor<P, D> {
-    pub fn new(cfg: Config<P, D>) -> Self {
+    pub fn new(cfg: Config<P>) -> Self {
         let mut parsed_participants = BTreeMap::new();
         for (view, (identity, mut validators, share)) in cfg.participants.into_iter() {
             let mut map = HashMap::new();
@@ -51,6 +59,10 @@ impl<P: Array, D: Digest> Supervisor<P, D> {
         }
         Self {
             participants: parsed_participants,
+            seed_namespace: seed_namespace(&cfg.namespace),
+            notarize_namespace: notarize_namespace(&cfg.namespace),
+            nullify_namespace: nullify_namespace(&cfg.namespace),
+            finalize_namespace: finalize_namespace(&cfg.namespace),
             notarizes: Arc::new(Mutex::new(HashMap::new())),
             finalizes: Arc::new(Mutex::new(HashMap::new())),
             faults: Arc::new(Mutex::new(HashMap::new())),
@@ -125,106 +137,129 @@ impl<P: Array, D: Digest> TSu for Supervisor<P, D> {
     }
 }
 
-impl<D: Digest> Reporter for Supervisor<group::Public, D> {
+impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
     type Activity = Activity<D>;
 
     async fn report(&self, activity: Self::Activity) {
-        // We check signatures for all messages to ensure that the prover is working correctly
-        // but in production this isn't necessary (as signatures are already verified in
-        // consensus).
+        // TODO: restore comment about verifying signatures
         match activity {
             Activity::Notarize(notarize) => {
-                let (identity, validators) =
-                    match self.participants.range(..=notarize.view).next_back() {
-                        Some((_, (p, _, v, _))) => (p, v),
-                        None => {
-                            panic!("no participants in required range");
-                        }
-                    };
+                let view = notarize.view();
+                let (identity, validators) = match self.participants.range(..=view).next_back() {
+                    Some((_, (p, _, v, _))) => (p, v),
+                    None => {
+                        panic!("no participants in required range");
+                    }
+                };
+                if !notarize.verify(
+                    identity,
+                    None,
+                    &self.notarize_namespace,
+                    &self.seed_namespace,
+                ) {
+                    panic!("signature verification failed");
+                }
                 let public_key = validators[notarize.signer() as usize].clone();
                 self.notarizes
                     .lock()
                     .unwrap()
-                    .entry(notarize.view)
+                    .entry(view)
                     .or_default()
                     .entry(notarize.proposal.payload)
                     .or_default()
                     .insert(public_key);
             }
             Activity::Finalize(finalize) => {
-                let (identity, validators) =
-                    match self.participants.range(..=finalize.view).next_back() {
-                        Some((_, (p, _, v, _))) => (p, v),
-                        None => {
-                            panic!("no participants in required range");
-                        }
-                    };
+                let view = finalize.view();
+                let (identity, validators) = match self.participants.range(..=view).next_back() {
+                    Some((_, (p, _, v, _))) => (p, v),
+                    None => {
+                        panic!("no participants in required range");
+                    }
+                };
+                if !finalize.verify(identity, None, &self.finalize_namespace) {
+                    panic!("signature verification failed");
+                }
                 let public_key = validators[finalize.signer() as usize].clone();
                 self.finalizes
                     .lock()
                     .unwrap()
-                    .entry(finalize.view)
+                    .entry(view)
                     .or_default()
-                    .entry(finalize.payload)
+                    .entry(finalize.proposal.payload)
                     .or_default()
                     .insert(public_key);
             }
-            Activity::ConflictingNotarize(conflicting) => {
-                let (identity, validators) =
-                    match self.participants.range(..=conflicting.view).next_back() {
-                        Some((_, (p, _, v, _))) => (p, v),
-                        None => {
-                            panic!("no participants in required range");
-                        }
-                    };
+            Activity::ConflictingNotarize(ref conflicting) => {
+                let view = conflicting.view();
+                let (identity, validators) = match self.participants.range(..=view).next_back() {
+                    Some((_, (p, _, v, _))) => (p, v),
+                    None => {
+                        panic!("no participants in required range");
+                    }
+                };
+                if !conflicting.verify(identity, None, &self.notarize_namespace) {
+                    panic!("signature verification failed");
+                }
                 let public_key = validators[conflicting.signer() as usize].clone();
                 self.faults
                     .lock()
                     .unwrap()
                     .entry(public_key)
                     .or_default()
-                    .entry(conflicting.view)
+                    .entry(view)
                     .or_default()
                     .insert(activity);
             }
-            Activity::ConflictingFinalize(conflicting) => {
-                let (identity, validators) =
-                    match self.participants.range(..=conflicting.view).next_back() {
-                        Some((_, (p, _, v, _))) => (p, v),
-                        None => {
-                            panic!("no participants in required range");
-                        }
-                    };
+            Activity::ConflictingFinalize(ref conflicting) => {
+                let view = conflicting.view();
+                let (identity, validators) = match self.participants.range(..=view).next_back() {
+                    Some((_, (p, _, v, _))) => (p, v),
+                    None => {
+                        panic!("no participants in required range");
+                    }
+                };
+                if !conflicting.verify(identity, None, &self.finalize_namespace) {
+                    panic!("signature verification failed");
+                }
                 let public_key = validators[conflicting.signer() as usize].clone();
                 self.faults
                     .lock()
                     .unwrap()
                     .entry(public_key)
                     .or_default()
-                    .entry(conflicting.view())
+                    .entry(view)
                     .or_default()
                     .insert(activity);
             }
-            Activity::NullifyFinalize(double) => {
-                let (identity, validators) =
-                    match self.participants.range(..=double.view()).next_back() {
-                        Some((_, (p, _, v, _))) => (p, v),
-                        None => {
-                            panic!("no participants in required range");
-                        }
-                    };
-                let public_key = validators[double.signer() as usize].clone();
+            Activity::NullifyFinalize(ref nullify_finalize) => {
+                let view = nullify_finalize.view();
+                let (identity, validators) = match self.participants.range(..=view).next_back() {
+                    Some((_, (p, _, v, _))) => (p, v),
+                    None => {
+                        panic!("no participants in required range");
+                    }
+                };
+                if !nullify_finalize.verify(
+                    identity,
+                    None,
+                    &self.nullify_namespace,
+                    &self.finalize_namespace,
+                ) {
+                    panic!("signature verification failed");
+                }
+                let public_key = validators[nullify_finalize.signer() as usize].clone();
                 self.faults
                     .lock()
                     .unwrap()
                     .entry(public_key)
                     .or_default()
-                    .entry(double.view())
+                    .entry(view)
                     .or_default()
                     .insert(activity);
             }
             unexpected => {
-                panic!("unexpected activity: {}", unexpected);
+                panic!("unexpected activity: {:?}", unexpected);
             }
         }
     }

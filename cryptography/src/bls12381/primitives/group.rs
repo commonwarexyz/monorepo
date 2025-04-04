@@ -22,7 +22,7 @@ use blst::{
 };
 use commonware_codec::{Codec, Reader, SizedCodec, Writer};
 use rand::RngCore;
-use std::ptr;
+use std::{hash::Hash, ptr};
 use zeroize::Zeroize;
 
 /// Domain separation tag used when hashing a message to a curve (G1 or G2).
@@ -446,6 +446,13 @@ impl SizedCodec for G1 {
     const LEN_ENCODED: usize = G1_ELEMENT_BYTE_LENGTH;
 }
 
+impl Hash for G1 {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        let bytes = self.serialize();
+        state.write(&bytes);
+    }
+}
+
 impl Element for G2 {
     fn zero() -> Self {
         Self(blst_p2::default())
@@ -527,10 +534,6 @@ impl Codec for G2 {
     }
 }
 
-impl SizedCodec for G2 {
-    const LEN_ENCODED: usize = G2_ELEMENT_BYTE_LENGTH;
-}
-
 impl Point for G2 {
     fn map(&mut self, dst: DST, data: &[u8]) {
         unsafe {
@@ -544,6 +547,17 @@ impl Point for G2 {
                 0,
             );
         }
+    }
+}
+
+impl SizedCodec for G2 {
+    const LEN_ENCODED: usize = G2_ELEMENT_BYTE_LENGTH;
+}
+
+impl Hash for G2 {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        let bytes = self.serialize();
+        state.write(&bytes);
     }
 }
 
