@@ -8,7 +8,7 @@ use commonware_cryptography::{
         },
         poly::{PartialSignature, Poly},
     },
-    hash, sha256, Digest,
+    Digest,
 };
 use commonware_utils::union;
 
@@ -138,7 +138,7 @@ impl<D: Digest> Codec for Voter<D> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Proposal<D: Digest> {
     pub view: View,
     pub parent: View,
@@ -152,10 +152,6 @@ impl<D: Digest> Proposal<D> {
             parent,
             payload,
         }
-    }
-
-    pub fn hash(&self) -> sha256::Digest {
-        hash(&self.encode())
     }
 }
 

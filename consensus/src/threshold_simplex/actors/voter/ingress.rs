@@ -1,5 +1,4 @@
 use commonware_cryptography::Digest;
-use commonware_utils::Array;
 use futures::{channel::mpsc, SinkExt};
 
 use crate::threshold_simplex::types::{Notarization, Nullification};
@@ -15,7 +14,7 @@ pub struct Mailbox<D: Digest> {
     sender: mpsc::Sender<Message<D>>,
 }
 
-impl<D: Array> Mailbox<D> {
+impl<D: Digest> Mailbox<D> {
     pub(super) fn new(sender: mpsc::Sender<Message<D>>) -> Self {
         Self { sender }
     }

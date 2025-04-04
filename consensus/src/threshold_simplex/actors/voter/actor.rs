@@ -73,8 +73,8 @@ struct Round<
     verified_proposal: bool,
 
     // Track notarizes for all proposals (ensuring any participant only has one recorded notarize)
-    notaries: HashMap<u32, sha256::Digest>,
-    notarizes: HashMap<sha256::Digest, HashMap<u32, Notarize<D>>>,
+    notarized_proposals: HashMap<Proposal<D>, Vec<u32>>,
+    notarizes: HashMap<u32, Notarize<D>>,
     notarization: Option<Notarization<D>>,
     broadcast_notarize: bool,
     broadcast_notarization: bool,
@@ -86,8 +86,8 @@ struct Round<
     broadcast_nullification: bool,
 
     // Track finalizes for all proposals (ensuring any participant only has one recorded finalize)
-    finalizers: HashMap<u32, sha256::Digest>,
-    finalizes: HashMap<sha256::Digest, HashMap<u32, Finalize<D>>>,
+    finalized_proposals: HashMap<Proposal<D>, Vec<u32>>,
+    finalizes: HashMap<u32, Finalize<D>>,
     finalization: Option<Finalization<D>>,
     broadcast_finalize: bool,
     broadcast_finalization: bool,
@@ -123,7 +123,7 @@ impl<
             proposal: None,
             verified_proposal: false,
 
-            notaries: HashMap::new(),
+            notarized_proposals: HashMap::new(),
             notarizes: HashMap::new(),
             notarization: None,
             broadcast_notarize: false,
@@ -134,7 +134,7 @@ impl<
             broadcast_nullify: false,
             broadcast_nullification: false,
 
-            finalizers: HashMap::new(),
+            finalized_proposals: HashMap::new(),
             finalizes: HashMap::new(),
             finalization: None,
             broadcast_finalize: false,
@@ -148,20 +148,14 @@ impl<
     }
 
     fn add_verified_proposal(&mut self, proposal: Proposal<D>) {
-        let digest = proposal.digest();
         if self.proposal.is_none() {
-            debug!(
-                view = proposal.view,
-                ?digest,
-                "setting unverified proposal in notarization"
-            );
+            debug!(?proposal, "setting unverified proposal in notarization");
             self.proposal = Some(proposal);
         } else if let Some(previous) = &self.proposal {
             if proposal != *previous {
                 warn!(
-                    view = proposal.view,
-                    previous = ?previous.digest(),
-                    ?digest,
+                    ?proposal,
+                    ?previous,
                     "proposal in notarization does not match stored proposal"
                 );
             }
@@ -174,28 +168,16 @@ impl<
         notarize: Notarize<D>,
     ) -> bool {
         // Check if already notarized
-        let proposal_digest = notarize.proposal.digest();
-        if let Some(previous_notarize) = self.notaries.get(&public_key_index) {
-            if previous_notarize == &proposal_digest {
-                trace!(
-                    view = self.view,
-                    signer = public_key_index,
-                    ?previous_notarize,
-                    "already notarized"
-                );
+        if let Some(previous) = self.notarizes.get(&public_key_index) {
+            if previous == &notarize {
+                trace!(?notarize, ?previous, "already notarized");
                 return false;
             }
 
             // Create fault
-            let previous_notarize = self
-                .notarizes
-                .get(previous_notarize)
-                .unwrap()
-                .get(&public_key_index)
-                .unwrap();
             let activity = ConflictingNotarize::new(
-                previous_notarize.proposal.clone(),
-                previous_notarize.proposal_signature.clone(),
+                previous.proposal.clone(),
+                previous.proposal_signature.clone(),
                 notarize.proposal,
                 notarize.proposal_signature,
             );
@@ -211,22 +193,20 @@ impl<
         }
 
         // Store the notarize
-        if self
-            .notaries
-            .insert(public_key_index, proposal_digest)
-            .is_some()
-        {
-            return false;
+        if let Some(vec) = self.notarized_proposals.get_mut(&notarize.proposal) {
+            vec.push(public_key_index);
+        } else {
+            self.notarized_proposals
+                .insert(notarize.proposal.clone(), vec![public_key_index]);
         }
-        let entry = self.notarizes.entry(proposal_digest).or_default();
-        entry.insert(public_key_index, notarize.clone());
+        self.notarizes.insert(public_key_index, notarize.clone());
         self.reporter.report(Activity::Notarize(notarize)).await;
         true
     }
 
     async fn add_verified_nullify(&mut self, public_key_index: u32, nullify: Nullify) -> bool {
         // Check if already issued finalize
-        let finalize = self.finalizers.get(&public_key_index);
+        let finalize = self.finalizes.get(&public_key_index);
         if finalize.is_none() {
             // Store the nullify
             return self.nullifies.insert(public_key_index, nullify).is_none();
@@ -234,12 +214,6 @@ impl<
         let finalize = finalize.unwrap();
 
         // Create fault
-        let finalize = self
-            .finalizes
-            .get(finalize)
-            .unwrap()
-            .get(&public_key_index)
-            .unwrap();
         let activity = NullifyFinalize::new(
             finalize.proposal.clone(),
             finalize.proposal_signature.clone(),
@@ -262,13 +236,12 @@ impl<
         finalize: Finalize<D>,
     ) -> bool {
         // Check if also issued nullify
-        let null = self.nullifies.get(&public_key_index);
-        if let Some(null) = null {
+        if let Some(previous) = self.nullifies.get(&public_key_index) {
             // Create fault
             let activity = NullifyFinalize::new(
                 finalize.proposal.clone(),
                 finalize.proposal_signature.clone(),
-                null.view_signature.clone(),
+                previous.view_signature.clone(),
             );
             self.reporter
                 .report(Activity::NullifyFinalize(activity))
@@ -280,31 +253,18 @@ impl<
             );
             return false;
         }
-        // Compute proposal digest
-        let proposal_digest = finalize.proposal.digest();
 
         // Check if already finalized
-        if let Some(previous_finalize) = self.finalizers.get(&public_key_index) {
-            if previous_finalize == &proposal_digest {
-                trace!(
-                    view = self.view,
-                    signer = public_key_index,
-                    ?previous_finalize,
-                    "already finalize"
-                );
+        if let Some(previous) = self.finalizes.get(&public_key_index) {
+            if previous == &finalize {
+                trace!(?finalize, ?previous, "already finalize");
                 return false;
             }
 
             // Create fault
-            let previous_finalize = self
-                .finalizes
-                .get(previous_finalize)
-                .unwrap()
-                .get(&public_key_index)
-                .unwrap();
             let activity = ConflictingFinalize::new(
-                previous_finalize.proposal.clone(),
-                previous_finalize.proposal_signature.clone(),
+                previous.proposal.clone(),
+                previous.proposal_signature.clone(),
                 finalize.proposal.clone(),
                 finalize.proposal_signature.clone(),
             );
@@ -320,15 +280,13 @@ impl<
         }
 
         // Store the finalize
-        if self
-            .finalizers
-            .insert(public_key_index, proposal_digest)
-            .is_some()
-        {
-            return false;
+        if let Some(vec) = self.finalized_proposals.get_mut(&finalize.proposal) {
+            vec.push(public_key_index);
+        } else {
+            self.finalized_proposals
+                .insert(finalize.proposal.clone(), vec![public_key_index]);
         }
-        let entry = self.finalizes.entry(proposal_digest).or_default();
-        entry.insert(public_key_index, finalize.clone());
+        self.finalizes.insert(public_key_index, finalize.clone());
         self.reporter.report(Activity::Finalize(finalize)).await;
         true
     }
@@ -398,7 +356,7 @@ impl<
         }
 
         // Attempt to construct notarization
-        for (proposal, notarizes) in self.notarizes.iter() {
+        for (proposal, notarizes) in self.notarized_proposals.iter() {
             if (notarizes.len() as u32) < threshold {
                 continue;
             }
@@ -406,20 +364,16 @@ impl<
             // There should never exist enough notarizes for multiple proposals, so it doesn't
             // matter which one we choose.
             debug!(
-                view = self.view,
                 ?proposal,
                 verified = self.verified_proposal,
                 "broadcasting notarization"
             );
 
-            // Grab the proposal (all will be the same)
-            let notarize = notarizes.values().next().unwrap();
-            let proposal = notarize.proposal.clone();
-
             // Recover threshold signature
             let mut notarization = Vec::new();
             let mut seed = Vec::new();
-            for notarize in notarizes.values() {
+            for notarize in notarizes {
+                let notarize = self.notarizes.get(notarize).unwrap();
                 notarization.push(notarize.proposal_signature.clone());
                 seed.push(notarize.seed_signature.clone());
             }
@@ -438,7 +392,7 @@ impl<
 
             // Construct notarization
             let notarization = Notarization::new(
-                proposal,
+                proposal.clone(),
                 proposal_signature.unwrap(),
                 seed_signature.unwrap(),
             );
@@ -504,7 +458,7 @@ impl<
         }
 
         // Attempt to construct finalization
-        for (proposal_digest, finalizes) in self.finalizes.iter() {
+        for (proposal, finalizes) in self.finalized_proposals.iter() {
             if (finalizes.len() as u32) < threshold {
                 continue;
             }
@@ -516,12 +470,10 @@ impl<
             let seed_signature = notarization.seed_signature.clone();
 
             // Check notarization and finalization proposal match
-            let notarization_digest = notarization.proposal.digest();
-            if notarization_digest != *proposal_digest {
+            if notarization.proposal != *proposal {
                 warn!(
-                    view = self.view,
-                    proposal = ?proposal_digest,
-                    notarization = ?notarization_digest,
+                    ?proposal,
+                    ?notarization.proposal,
                     "finalization proposal does not match notarization"
                 );
             }
@@ -529,19 +481,15 @@ impl<
             // There should never exist enough finalizes for multiple proposals, so it doesn't
             // matter which one we choose.
             debug!(
-                view = self.view,
-                proposal = ?proposal_digest,
+                ?proposal,
                 verified = self.verified_proposal,
                 "broadcasting finalization"
             );
 
-            // Grab the proposal
-            let finalize = finalizes.values().next().unwrap();
-            let proposal = finalize.proposal.clone();
-
             // Recover threshold signature
             let mut finalization = Vec::new();
-            for finalize in finalizes.values() {
+            for finalize in finalizes {
+                let finalize = self.finalizes.get(finalize).unwrap();
                 finalization.push(finalize.proposal_signature.clone());
             }
             let proposal_signature = self
@@ -553,8 +501,11 @@ impl<
                 .await;
 
             // Construct finalization
-            let finalization =
-                Finalization::new(proposal, proposal_signature.unwrap(), seed_signature);
+            let finalization = Finalization::new(
+                proposal.clone(),
+                proposal_signature.unwrap(),
+                seed_signature,
+            );
             // self.finalization = Some(finalization.clone());
             self.broadcast_finalization = true;
             return Some(finalization);
@@ -567,12 +518,11 @@ impl<
         let participants = self.supervisor.participants(self.view)?;
         let threshold = quorum(participants.len() as u32)?;
         let at_least_one_honest = (threshold - 1) / 2 + 1;
-        for (_, notarizes) in self.notarizes.iter() {
+        for (proposal, notarizes) in self.notarized_proposals.iter() {
             if notarizes.len() < at_least_one_honest as usize {
                 continue;
             }
-            let parent = notarizes.values().next().unwrap().proposal.parent;
-            return Some(parent);
+            return Some(proposal.parent);
         }
         None
     }
