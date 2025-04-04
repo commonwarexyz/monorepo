@@ -243,6 +243,9 @@ impl<D: Digest> Codec for Notarize<D> {
         let proposal = Proposal::read(reader)?;
         let proposal_signature = PartialSignature::read(reader)?;
         let seed_signature = PartialSignature::read(reader)?;
+        if proposal_signature.index != seed_signature.index {
+            return Err();
+        }
         Ok(Notarize {
             proposal,
             proposal_signature,
@@ -394,6 +397,9 @@ impl Codec for Nullify {
         let view = View::read(reader)?;
         let view_signature = PartialSignature::read(reader)?;
         let seed_signature = PartialSignature::read(reader)?;
+        if view_signature.index != seed_signature.index {
+            return Err();
+        }
         Ok(Nullify {
             view,
             view_signature,
@@ -897,9 +903,6 @@ impl<D: Digest> ConflictingNotarize<D> {
         notarize_namespace: &[u8],
     ) -> bool {
         let public_key_index = public_key_index.unwrap_or(self.signature_1.index);
-        if self.proposal_1.view != self.proposal_2.view {
-            return false;
-        }
         let notarize_message_1 = self.proposal_1.encode();
         let notarize_message_1 = (Some(notarize_namespace), notarize_message_1.as_ref());
         let notarize_message_2 = self.proposal_2.encode();
@@ -939,6 +942,12 @@ impl<D: Digest> Codec for ConflictingNotarize<D> {
         let signature_1 = PartialSignature::read(reader)?;
         let proposal_2 = Proposal::read(reader)?;
         let signature_2 = PartialSignature::read(reader)?;
+        if proposal_1.view != proposal_2.view {
+            return Err();
+        }
+        if signature_1.index != signature_2.index {
+            return Err();
+        }
         Ok(ConflictingNotarize {
             proposal_1,
             signature_1,
@@ -985,9 +994,6 @@ impl<D: Digest> ConflictingFinalize<D> {
         finalize_namespace: &[u8],
     ) -> bool {
         let public_key_index = public_key_index.unwrap_or(self.signature_1.index);
-        if self.proposal_1.view != self.proposal_2.view {
-            return false;
-        }
         let finalize_message_1 = self.proposal_1.encode();
         let finalize_message_1 = (Some(finalize_namespace), finalize_message_1.as_ref());
         let finalize_message_2 = self.proposal_2.encode();
@@ -1027,6 +1033,12 @@ impl<D: Digest> Codec for ConflictingFinalize<D> {
         let signature_1 = PartialSignature::read(reader)?;
         let proposal_2 = Proposal::read(reader)?;
         let signature_2 = PartialSignature::read(reader)?;
+        if proposal_1.view != proposal_2.view {
+            return Err();
+        }
+        if signature_1.index != signature_2.index {
+            return Err();
+        }
         Ok(ConflictingFinalize {
             proposal_1,
             signature_1,
@@ -1108,6 +1120,9 @@ impl<D: Digest> Codec for NullifyFinalize<D> {
         let proposal = Proposal::read(reader)?;
         let view_signature = PartialSignature::read(reader)?;
         let finalize_signature = PartialSignature::read(reader)?;
+        if view_signature.index != finalize_signature.index {
+            return Err();
+        }
         Ok(NullifyFinalize {
             proposal,
             view_signature,

@@ -1532,11 +1532,8 @@ impl<
     }
 
     fn construct_notarize(&mut self, view: u64) -> Option<Notarize<D>> {
-        let round = match self.views.get_mut(&view) {
-            Some(view) => view,
-            None => {
-                return None;
-            }
+        let Some(round) = self.views.get_mut(&view) else {
+            return None;
         };
         if round.broadcast_notarize {
             return None;
@@ -1564,11 +1561,8 @@ impl<
 
     async fn construct_notarization(&mut self, view: u64, force: bool) -> Option<Notarization<D>> {
         // Get requested view
-        let round = match self.views.get_mut(&view) {
-            Some(view) => view,
-            None => {
-                return None;
-            }
+        let Some(round) = self.views.get_mut(&view) else {
+            return None;
         };
 
         // Attempt to construct notarization
@@ -1579,11 +1573,8 @@ impl<
 
     async fn construct_nullification(&mut self, view: u64, force: bool) -> Option<Nullification> {
         // Get requested view
-        let round = match self.views.get_mut(&view) {
-            Some(view) => view,
-            None => {
-                return None;
-            }
+        let Some(round) = self.views.get_mut(&view) else {
+            return None;
         };
 
         // Attempt to construct nullification
@@ -1593,11 +1584,8 @@ impl<
     }
 
     fn construct_finalize(&mut self, view: u64) -> Option<Finalize<D>> {
-        let round = match self.views.get_mut(&view) {
-            Some(view) => view,
-            None => {
-                return None;
-            }
+        let Some(round) = self.views.get_mut(&view) else {
+            return None;
         };
         if round.broadcast_nullify {
             return None;
@@ -1625,11 +1613,8 @@ impl<
     }
 
     async fn construct_finalization(&mut self, view: u64, force: bool) -> Option<Finalization<D>> {
-        let round = match self.views.get_mut(&view) {
-            Some(view) => view,
-            None => {
-                return None;
-            }
+        let Some(round) = self.views.get_mut(&view) else {
+            return None;
         };
 
         // Attempt to construct finalization
@@ -1662,7 +1647,7 @@ impl<
                 .expect("unable to sync journal");
 
             // Broadcast the notarize
-            let msg = Voter::Notarize(notarize.clone()).encode_to_vec().into();
+            let msg = Voter::Notarize(notarize.clone()).encode().into();
             sender.send(Recipients::All, msg, true).await.unwrap();
             self.broadcast_messages
                 .get_or_create(&metrics::NOTARIZE)
@@ -1679,7 +1664,7 @@ impl<
             }
 
             // Update backfiller
-            backfiller.notarized(notarization.message.clone()).await;
+            backfiller.notarized(notarization.clone()).await;
 
             // Handle the notarization
             self.handle_notarization(notarization.clone()).await;
@@ -1697,9 +1682,7 @@ impl<
                 .report(Activity::Notarization(notarization.clone()));
 
             // Broadcast the notarization
-            let msg = Voter::Notarization(notarization.clone())
-                .encode_to_vec()
-                .into();
+            let msg = Voter::Notarization(notarization.clone()).encode().into();
             sender.send(Recipients::All, msg, true).await.unwrap();
             self.broadcast_messages
                 .get_or_create(&metrics::NOTARIZATION)
@@ -1729,8 +1712,8 @@ impl<
                 .report(Activity::Nullification(nullification.clone()));
 
             // Broadcast the nullification
-            let msg = Voter::Nullification(nullification.clone())
-                .encode_to_vec()
+            let msg = Voter::<D>::Nullification(nullification.clone())
+                .encode()
                 .into();
             sender.send(Recipients::All, msg, true).await.unwrap();
             self.broadcast_messages
@@ -1772,9 +1755,7 @@ impl<
                     if let Some(finalization) =
                         self.construct_finalization(self.last_finalized, true).await
                     {
-                        let msg = Voter::Finalization(finalization.clone())
-                            .encode_to_vec()
-                            .into();
+                        let msg = Voter::Finalization(finalization.clone()).encode().into();
                         sender
                             .send(Recipients::All, msg, true)
                             .await
@@ -1807,7 +1788,7 @@ impl<
                 .expect("unable to sync journal");
 
             // Broadcast the finalize
-            let msg = Voter::Finalize(finalize.clone()).encode_to_vec().into();
+            let msg = Voter::Finalize(finalize.clone()).encode().into();
             sender.send(Recipients::All, msg, true).await.unwrap();
             self.broadcast_messages
                 .get_or_create(&metrics::FINALIZE)
@@ -1842,9 +1823,7 @@ impl<
                 .report(Activity::Finalization(finalization.clone()));
 
             // Broadcast the finalization
-            let msg = Voter::Finalization(finalization.clone())
-                .encode_to_vec()
-                .into();
+            let msg = Voter::Finalization(finalization.clone()).encode().into();
             sender.send(Recipients::All, msg, true).await.unwrap();
             self.broadcast_messages
                 .get_or_create(&metrics::FINALIZATION)
@@ -1894,14 +1873,10 @@ impl<
                 match msg {
                     Voter::Notarize(notarize) => {
                         // Handle notarize
-                        let proposal = notarize.proposal.as_ref().unwrap().clone();
-                        let payload = D::try_from(&proposal.payload).unwrap();
-                        let signature: Eval<group::Signature> =
-                            Eval::deserialize(&notarize.proposal_signature).unwrap();
-                        let public_key_index = signature.index;
+                        let public_key_index = notarize.signer();
                         let public_key = self
                             .supervisor
-                            .participants(proposal.view)
+                            .participants(notarize.view())
                             .unwrap()
                             .get(public_key_index as usize)
                             .unwrap()
