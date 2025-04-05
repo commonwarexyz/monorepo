@@ -20,7 +20,7 @@ impl<H: CHasher + Send + Sync> Storage<H::Digest> for BitmapStorage<'_, H> {
         if pos < self.mmr.size() {
             Ok(self.mmr.get_node(pos))
         } else {
-            Ok(self.last_chunk_mmr.get_node(pos))
+            Ok(self.last_chunk_mmr.get_node(pos))   
         }
     }
 
@@ -74,7 +74,7 @@ impl<H: CHasher> Bitmap<H> {
 
     /// Return the number of bits currently stored in the bitmap.
     pub fn bit_count(&self) -> u64 {
-        (self.bitmap.len() * 8 - Self::CHUNK_SIZE * 8 + self.next_bit) as u64
+        ((self.bitmap.len() * 8) - (Self::CHUNK_SIZE * 8) + self.next_bit) as u64
     }
 
     /// Return the last chunk of the bitmap as a digest.
@@ -181,11 +181,11 @@ impl<H: CHasher> Bitmap<H> {
 
         let byte_offset = bit_offset as usize / 8;
         let mask = Self::chunk_byte_bit_mask(bit_offset);
-        if bit {
-            self.bitmap[byte_offset] |= mask;
-        } else {
-            self.bitmap[byte_offset] &= !mask;
-        }
+        
+        // XOR the bit with the current value of the bitmap at that offset from;
+        // avoids jump
+        self.bitmap[byte_offset] ^= ((-(bit as i8) as u8) ^ self.bitmap[byte_offset]) & mask;
+
         if byte_offset >= self.bitmap.len() - Self::CHUNK_SIZE {
             // No need to update the Merkle tree since this bit is within the last (yet to be
             // inserted) chunk.
