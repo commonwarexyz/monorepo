@@ -74,7 +74,7 @@ impl<H: CHasher> Bitmap<H> {
 
     /// Return the number of bits currently stored in the bitmap.
     pub fn bit_count(&self) -> u64 {
-        ((self.bitmap.len() * 8) - (Self::CHUNK_SIZE * 8) + self.next_bit) as u64
+        (self.bitmap.len() * 8 - Self::CHUNK_SIZE * 8 + self.next_bit) as u64
     }
 
     /// Return the last chunk of the bitmap as a digest.
@@ -183,7 +183,7 @@ impl<H: CHasher> Bitmap<H> {
         let mask = Self::chunk_byte_bit_mask(bit_offset);
         
         // XOR the bit with the current value of the bitmap at that offset from;
-        // avoids jump
+        // avoids branching
         self.bitmap[byte_offset] ^= ((-(bit as i8) as u8) ^ self.bitmap[byte_offset]) & mask;
 
         if byte_offset >= self.bitmap.len() - Self::CHUNK_SIZE {
