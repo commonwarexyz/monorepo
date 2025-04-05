@@ -81,7 +81,7 @@ impl std::io::Write for Writer {
             .parse::<chrono::DateTime<chrono::Utc>>()
             .unwrap()
             .with_timezone(&chrono::Local)
-            .format("%m/%d %H:%M:%S");
+            .format("%Y-%m-%dT%H:%M:%S");
         let (progress, mut formatted_msg) = if target.contains("commonware_log::application") {
             (true, format!("[{}] => {} (", datetime_local, msg,))
         } else {
