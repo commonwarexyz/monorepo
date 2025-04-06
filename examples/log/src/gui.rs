@@ -83,12 +83,12 @@ impl std::io::Write for Writer {
             .with_timezone(&chrono::Local)
             .format("%Y-%m-%dT%H:%M:%S");
         let (progress, mut formatted_msg) = if target.contains("commonware_log::application") {
-            (true, format!("[{}] => {} (", datetime_local, msg,))
+            (true, format!("[{}] => {} (", datetime_local, msg))
         } else {
             let level = json["level"].as_str().unwrap();
             (
                 false,
-                format!("[{}|{}] {} => {} (", datetime_local, level, target, msg,),
+                format!("[{}|{}] {} => {} (", datetime_local, level, target, msg),
             )
         };
 
