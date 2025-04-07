@@ -61,10 +61,10 @@ pub trait SizedCodec: Codec {
             N
         );
 
-        let buf = self.encode();
-        assert_eq!(buf.len(), N);
         let mut array = [0u8; N];
-        array.copy_from_slice(&buf);
+        let mut buf = &mut array[..];
+        self.write(&mut buf);
+        assert_eq!(buf.len(), 0);
         array
     }
 }
