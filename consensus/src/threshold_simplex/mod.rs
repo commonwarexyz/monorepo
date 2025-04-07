@@ -474,15 +474,13 @@ mod tests {
 
         // Random restarts every x seconds
         let shutdowns: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
-        let completed = Arc::new(Mutex::new(HashSet::new()));
         let supervised = Arc::new(Mutex::new(Vec::new()));
         let (mut executor, mut context, _) = Executor::timed(Duration::from_secs(300));
-        while completed.lock().unwrap().len() != n as usize {
+        loop {
             let namespace = namespace.clone();
             let shutdowns = shutdowns.clone();
-            let completed = completed.clone();
             let supervised = supervised.clone();
-            executor.start({
+            let complete = executor.start({
                 let mut context = context.clone();
                 let public = public.clone();
                 let shares = shares.clone();
@@ -520,7 +518,6 @@ mod tests {
                     link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
                     // Create engines
-                    let pk = poly::public(&public);
                     let relay = Arc::new(mocks::relay::Relay::new());
                     let mut supervisors = HashMap::new();
                     let mut engine_handlers = Vec::new();
@@ -587,7 +584,7 @@ mod tests {
                         engine_handlers.push(engine.start(voter, resolver));
                     }
 
-                    // Wait for all engines to finish
+                    // Store all finalizer handles
                     let mut finalizers = Vec::new();
                     for (_, supervisor) in supervisors.iter_mut() {
                         let (mut latest, mut monitor) = supervisor.subscribe().await;
@@ -600,35 +597,42 @@ mod tests {
                         ));
                     }
 
-                    // TODO: use select! over wait
-                    join_all(finalizers).await;
-
                     // Exit at random points for unclean shutdown of entire set
                     let wait =
                         context.gen_range(Duration::from_millis(10)..Duration::from_millis(2_000));
-                    context.sleep(wait).await;
-                    {
-                        let mut shutdowns = shutdowns.lock().unwrap();
-                        debug!(shutdowns = *shutdowns, elapsed = ?wait, "restarting");
-                        *shutdowns += 1;
+                    select! {
+                        _ = context.sleep(wait) => {
+                            // Collect supervisors to check faults
+                            {
+                                let mut shutdowns = shutdowns.lock().unwrap();
+                                debug!(shutdowns = *shutdowns, elapsed = ?wait, "restarting");
+                                *shutdowns += 1;
+                            }
+                            supervised.lock().unwrap().push(supervisors);
+                            false
+                        },
+                        _ = join_all(finalizers) => {
+                            // Check supervisors for faults activity
+                            let supervised = supervised.lock().unwrap();
+                            for supervisors in supervised.iter() {
+                                for (_, supervisor) in supervisors.iter() {
+                                    let faults = supervisor.faults.lock().unwrap();
+                                    assert!(faults.is_empty());
+                                }
+                            }
+                            true
+                        }
                     }
-
-                    // Collect supervisors
-                    supervised.lock().unwrap().push(supervisors);
                 }
             });
 
+            // If we are done, break
+            if complete {
+                break;
+            }
+
             // Recover context
             (executor, context, _) = context.recover();
-        }
-
-        // Check supervisors for faults activity
-        let supervised = supervised.lock().unwrap();
-        for supervisors in supervised.iter() {
-            for (_, supervisor) in supervisors.iter() {
-                let faults = supervisor.faults.lock().unwrap();
-                assert!(faults.is_empty());
-            }
         }
     }
     //
