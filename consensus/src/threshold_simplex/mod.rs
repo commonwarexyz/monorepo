@@ -635,301 +635,257 @@ mod tests {
             (executor, context, _) = context.recover();
         }
     }
-    //
-    //     #[test_traced]
-    //     fn test_backfill() {
-    //         // Create context
-    //         let n = 4;
-    //         let threshold = quorum(n).expect("unable to calculate threshold");
-    //         let required_containers = 100;
-    //         let activity_timeout = 10;
-    //         let skip_timeout = 5;
-    //         let namespace = b"consensus".to_vec();
-    //         let (executor, mut context, _) = Executor::timed(Duration::from_secs(360));
-    //         executor.start(async move {
-    //             // Create simulated network
-    //             let (network, mut oracle) = Network::new(
-    //                 context.with_label("network"),
-    //                 Config {
-    //                     max_size: 1024 * 1024,
-    //                 },
-    //             );
-    //
-    //             // Start network
-    //             network.start();
-    //
-    //             // Register participants
-    //             let mut schemes = Vec::new();
-    //             let mut validators = Vec::new();
-    //             for i in 0..n {
-    //                 let scheme = Ed25519::from_seed(i as u64);
-    //                 let pk = scheme.public_key();
-    //                 schemes.push(scheme);
-    //                 validators.push(pk);
-    //             }
-    //             validators.sort();
-    //             schemes.sort_by_key(|s| s.public_key());
-    //             let mut registrations = register_validators(&mut oracle, &validators).await;
-    //
-    //             // Link all validators except first
-    //             let link = Link {
-    //                 latency: 10.0,
-    //                 jitter: 1.0,
-    //                 success_rate: 1.0,
-    //             };
-    //             link_validators(
-    //                 &mut oracle,
-    //                 &validators,
-    //                 Action::Link(link),
-    //                 Some(|_, i, j| ![i, j].contains(&0usize)),
-    //             )
-    //             .await;
-    //
-    //             // Derive threshold
-    //             let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
-    //             let pk = poly::public(&public);
-    //             let prover = Prover::new(*pk, &namespace);
-    //
-    //             // Create engines
-    //             let relay = Arc::new(mocks::relay::Relay::new());
-    //             let mut supervisors = Vec::new();
-    //             let (done_sender, mut done_receiver) = mpsc::unbounded();
-    //             let mut engine_handlers = Vec::new();
-    //             for (idx_scheme, scheme) in schemes.iter().enumerate() {
-    //                 // Skip first peer
-    //                 if idx_scheme == 0 {
-    //                     continue;
-    //                 }
-    //
-    //                 // Create scheme context
-    //                 let context = context.with_label(&format!("validator-{}", scheme.public_key()));
-    //
-    //                 // Configure engine
-    //                 let validator = scheme.public_key();
-    //                 let mut participants = BTreeMap::new();
-    //                 participants.insert(0, (public.clone(), validators.clone(), shares[idx_scheme]));
-    //                 let supervisor_config = mocks::supervisor::Config {
-    //                     prover: prover.clone(),
-    //                     participants,
-    //                 };
-    //                 let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
-    //                 supervisors.push(supervisor.clone());
-    //                 let application_cfg = mocks::application::Config {
-    //                     hasher: Sha256::default(),
-    //                     relay: relay.clone(),
-    //                     participant: validator.clone(),
-    //                     tracker: done_sender.clone(),
-    //                     propose_latency: (10.0, 5.0),
-    //                     verify_latency: (10.0, 5.0),
-    //                 };
-    //                 let (actor, application) = mocks::application::Application::new(
-    //                     context.with_label("application"),
-    //                     application_cfg,
-    //                 );
-    //                 actor.start();
-    //                 let cfg = JConfig {
-    //                     partition: validator.to_string(),
-    //                 };
-    //                 let journal = Journal::init(context.with_label("journal"), cfg)
-    //                     .await
-    //                     .expect("unable to create journal");
-    //                 let cfg = config::Config {
-    //                     crypto: scheme.clone(),
-    //                     automaton: application.clone(),
-    //                     relay: application.clone(),
-    //                     committer: application,
-    //                     supervisor,
-    //                     mailbox_size: 1024,
-    //                     namespace: namespace.clone(),
-    //                     leader_timeout: Duration::from_secs(1),
-    //                     notarization_timeout: Duration::from_secs(2),
-    //                     nullify_retry: Duration::from_secs(10),
-    //                     fetch_timeout: Duration::from_secs(1),
-    //                     activity_timeout,
-    //                     skip_timeout,
-    //                     max_fetch_count: 1, // force many fetches
-    //                     max_fetch_size: 1024 * 1024,
-    //                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
-    //                     fetch_concurrent: 1,
-    //                     replay_concurrency: 1,
-    //                 };
-    //                 let engine = Engine::new(context.with_label("engine"), journal, cfg);
-    //
-    //                 // Start engine
-    //                 let (voter, resolver) = registrations
-    //                     .remove(&validator)
-    //                     .expect("validator should be registered");
-    //                 engine_handlers.push(engine.start(voter, resolver));
-    //             }
-    //
-    //             // Wait for all online engines to finish
-    //             let mut completed = HashSet::new();
-    //             let mut finalized = HashMap::new();
-    //             loop {
-    //                 let (validator, event) = done_receiver.next().await.unwrap();
-    //                 if let mocks::application::Progress::Finalized(proof, digest) = event {
-    //                     let (view, _, payload, _, _) = prover.deserialize_finalization(proof).unwrap();
-    //                     if digest != payload {
-    //                         panic!(
-    //                             "finalization mismatch digest: {:?}, payload: {:?}",
-    //                             digest, payload
-    //                         );
-    //                     }
-    //                     finalized.insert(view, digest);
-    //                     if (finalized.len() as u64) < required_containers {
-    //                         continue;
-    //                     }
-    //                     completed.insert(validator);
-    //                 }
-    //                 if completed.len() == (n - 1) as usize {
-    //                     break;
-    //                 }
-    //             }
-    //
-    //             // Degrade network connections for online peers
-    //             let link = Link {
-    //                 latency: 3_000.0,
-    //                 jitter: 0.0,
-    //                 success_rate: 1.0,
-    //             };
-    //             link_validators(
-    //                 &mut oracle,
-    //                 &validators,
-    //                 Action::Update(link.clone()),
-    //                 Some(|_, i, j| ![i, j].contains(&0usize)),
-    //             )
-    //             .await;
-    //
-    //             // Wait for nullifications to accrue
-    //             context.sleep(Duration::from_secs(120)).await;
-    //
-    //             // Unlink second peer from all (except first)
-    //             link_validators(
-    //                 &mut oracle,
-    //                 &validators,
-    //                 Action::Unlink,
-    //                 Some(|_, i, j| [i, j].contains(&1usize) && ![i, j].contains(&0usize)),
-    //             )
-    //             .await;
-    //
-    //             // Configure engine for first peer
-    //             let scheme = schemes[0].clone();
-    //             let validator = scheme.public_key();
-    //             {
-    //                 // Create scheme context
-    //                 let context = context.with_label(&format!("validator-{}", validator));
-    //
-    //                 // Link first peer to all (except second)
-    //                 link_validators(
-    //                     &mut oracle,
-    //                     &validators,
-    //                     Action::Link(link),
-    //                     Some(|_, i, j| [i, j].contains(&0usize) && ![i, j].contains(&1usize)),
-    //                 )
-    //                 .await;
-    //
-    //                 // Restore network connections for all online peers
-    //                 let link = Link {
-    //                     latency: 10.0,
-    //                     jitter: 2.5,
-    //                     success_rate: 1.0,
-    //                 };
-    //                 link_validators(
-    //                     &mut oracle,
-    //                     &validators,
-    //                     Action::Update(link),
-    //                     Some(|_, i, j| ![i, j].contains(&1usize)),
-    //                 )
-    //                 .await;
-    //
-    //                 // Configure engine
-    //                 let mut participants = BTreeMap::new();
-    //                 participants.insert(0, (public.clone(), validators.clone(), shares[0]));
-    //                 let supervisor_config = mocks::supervisor::Config {
-    //                     prover: prover.clone(),
-    //                     participants,
-    //                 };
-    //                 let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
-    //                 supervisors.push(supervisor.clone());
-    //                 let application_cfg = mocks::application::Config {
-    //                     hasher: Sha256::default(),
-    //                     relay: relay.clone(),
-    //                     participant: validator.clone(),
-    //                     tracker: done_sender.clone(),
-    //                     propose_latency: (10.0, 5.0),
-    //                     verify_latency: (10.0, 5.0),
-    //                 };
-    //                 let (actor, application) = mocks::application::Application::new(
-    //                     context.with_label("application"),
-    //                     application_cfg,
-    //                 );
-    //                 actor.start();
-    //                 let cfg = JConfig {
-    //                     partition: validator.to_string(),
-    //                 };
-    //                 let journal = Journal::init(context.with_label("journal"), cfg)
-    //                     .await
-    //                     .expect("unable to create journal");
-    //                 let cfg = config::Config {
-    //                     crypto: scheme,
-    //                     automaton: application.clone(),
-    //                     relay: application.clone(),
-    //                     committer: application,
-    //                     supervisor,
-    //                     mailbox_size: 1024,
-    //                     namespace: namespace.clone(),
-    //                     leader_timeout: Duration::from_secs(1),
-    //                     notarization_timeout: Duration::from_secs(2),
-    //                     nullify_retry: Duration::from_secs(10),
-    //                     fetch_timeout: Duration::from_secs(1),
-    //                     activity_timeout,
-    //                     skip_timeout,
-    //                     max_fetch_count: 1,
-    //                     max_fetch_size: 1024 * 512,
-    //                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
-    //                     fetch_concurrent: 1,
-    //                     replay_concurrency: 1,
-    //                 };
-    //                 let engine = Engine::new(context.with_label("engine"), journal, cfg);
-    //
-    //                 // Start engine
-    //                 let (voter, resolver) = registrations
-    //                     .remove(&validator)
-    //                     .expect("validator should be registered");
-    //                 engine_handlers.push(engine.start(voter, resolver));
-    //             }
-    //
-    //             // Wait for new engine to finalize required
-    //             let mut finalized = HashMap::new();
-    //             let mut validator_finalized = HashSet::new();
-    //             loop {
-    //                 let (candidate, event) = done_receiver.next().await.unwrap();
-    //                 if let mocks::application::Progress::Finalized(proof, digest) = event {
-    //                     let (view, _, payload, _, _) = prover.deserialize_finalization(proof).unwrap();
-    //                     if digest != payload {
-    //                         panic!(
-    //                             "finalization mismatch digest: {:?}, payload: {:?}",
-    //                             digest, payload
-    //                         );
-    //                     }
-    //                     if let Some(previous) = finalized.insert(view, digest) {
-    //                         if previous != digest {
-    //                             panic!(
-    //                                 "finalization mismatch at {:?} previous: {:?}, current: {:?}",
-    //                                 view, previous, digest
-    //                             );
-    //                         }
-    //                     }
-    //                     if validator == candidate {
-    //                         validator_finalized.insert(view);
-    //                     }
-    //                 }
-    //                 if validator_finalized.len() == required_containers as usize {
-    //                     break;
-    //                 }
-    //             }
-    //         });
-    //     }
+
+    #[test_traced]
+    fn test_backfill() {
+        // Create context
+        let n = 4;
+        let threshold = quorum(n).expect("unable to calculate threshold");
+        let required_containers = 100;
+        let activity_timeout = 10;
+        let skip_timeout = 5;
+        let namespace = b"consensus".to_vec();
+        let (executor, mut context, _) = Executor::timed(Duration::from_secs(360));
+        executor.start(async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                },
+            );
+
+            // Start network
+            network.start();
+
+            // Register participants
+            let mut schemes = Vec::new();
+            let mut validators = Vec::new();
+            for i in 0..n {
+                let scheme = Ed25519::from_seed(i as u64);
+                let pk = scheme.public_key();
+                schemes.push(scheme);
+                validators.push(pk);
+            }
+            validators.sort();
+            schemes.sort_by_key(|s| s.public_key());
+            let mut registrations = register_validators(&mut oracle, &validators).await;
+
+            // Link all validators except first
+            let link = Link {
+                latency: 10.0,
+                jitter: 1.0,
+                success_rate: 1.0,
+            };
+            link_validators(
+                &mut oracle,
+                &validators,
+                Action::Link(link),
+                Some(|_, i, j| ![i, j].contains(&0usize)),
+            )
+            .await;
+
+            // Derive threshold
+            let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
+
+            // Create engines
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let mut supervisors = Vec::new();
+            let mut engine_handlers = Vec::new();
+            for (idx_scheme, scheme) in schemes.iter().enumerate() {
+                // Skip first peer
+                if idx_scheme == 0 {
+                    continue;
+                }
+
+                // Create scheme context
+                let context = context.with_label(&format!("validator-{}", scheme.public_key()));
+
+                // Configure engine
+                let validator = scheme.public_key();
+                let mut participants = BTreeMap::new();
+                participants.insert(0, (public.clone(), validators.clone(), shares[idx_scheme]));
+                let supervisor_config = mocks::supervisor::Config {
+                    namespace: namespace.clone(),
+                    participants,
+                };
+                let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
+                supervisors.push(supervisor.clone());
+                let application_cfg = mocks::application::Config {
+                    hasher: Sha256::default(),
+                    relay: relay.clone(),
+                    participant: validator.clone(),
+                    propose_latency: (10.0, 5.0),
+                    verify_latency: (10.0, 5.0),
+                };
+                let (actor, application) = mocks::application::Application::new(
+                    context.with_label("application"),
+                    application_cfg,
+                );
+                actor.start();
+                let cfg = JConfig {
+                    partition: validator.to_string(),
+                };
+                let journal = Journal::init(context.with_label("journal"), cfg)
+                    .await
+                    .expect("unable to create journal");
+                let cfg = config::Config {
+                    crypto: scheme.clone(),
+                    automaton: application.clone(),
+                    relay: application.clone(),
+                    reporter: supervisor.clone(),
+                    supervisor,
+                    mailbox_size: 1024,
+                    namespace: namespace.clone(),
+                    leader_timeout: Duration::from_secs(1),
+                    notarization_timeout: Duration::from_secs(2),
+                    nullify_retry: Duration::from_secs(10),
+                    fetch_timeout: Duration::from_secs(1),
+                    activity_timeout,
+                    skip_timeout,
+                    max_fetch_count: 1, // force many fetches
+                    max_fetch_size: 1024 * 1024,
+                    fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                    fetch_concurrent: 1,
+                    replay_concurrency: 1,
+                };
+                let engine = Engine::new(context.with_label("engine"), journal, cfg);
+
+                // Start engine
+                let (voter, resolver) = registrations
+                    .remove(&validator)
+                    .expect("validator should be registered");
+                engine_handlers.push(engine.start(voter, resolver));
+            }
+
+            // Wait for all engines to finish
+            let mut finalizers = Vec::new();
+            for supervisor in supervisors.iter_mut() {
+                let (mut latest, mut monitor) = supervisor.subscribe().await;
+                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                    while latest < required_containers {
+                        latest = monitor.next().await.expect("event missing");
+                    }
+                }));
+            }
+            join_all(finalizers).await;
+
+            // Degrade network connections for online peers
+            let link = Link {
+                latency: 3_000.0,
+                jitter: 0.0,
+                success_rate: 1.0,
+            };
+            link_validators(
+                &mut oracle,
+                &validators,
+                Action::Update(link.clone()),
+                Some(|_, i, j| ![i, j].contains(&0usize)),
+            )
+            .await;
+
+            // Wait for nullifications to accrue
+            context.sleep(Duration::from_secs(120)).await;
+
+            // Unlink second peer from all (except first)
+            link_validators(
+                &mut oracle,
+                &validators,
+                Action::Unlink,
+                Some(|_, i, j| [i, j].contains(&1usize) && ![i, j].contains(&0usize)),
+            )
+            .await;
+
+            // Configure engine for first peer
+            let scheme = schemes[0].clone();
+            let validator = scheme.public_key();
+            let context = context.with_label(&format!("validator-{}", validator));
+
+            // Link first peer to all (except second)
+            link_validators(
+                &mut oracle,
+                &validators,
+                Action::Link(link),
+                Some(|_, i, j| [i, j].contains(&0usize) && ![i, j].contains(&1usize)),
+            )
+            .await;
+
+            // Restore network connections for all online peers
+            let link = Link {
+                latency: 10.0,
+                jitter: 2.5,
+                success_rate: 1.0,
+            };
+            link_validators(
+                &mut oracle,
+                &validators,
+                Action::Update(link),
+                Some(|_, i, j| ![i, j].contains(&1usize)),
+            )
+            .await;
+
+            // Configure engine
+            let mut participants = BTreeMap::new();
+            participants.insert(0, (public.clone(), validators.clone(), shares[0]));
+            let supervisor_config = mocks::supervisor::Config {
+                namespace: namespace.clone(),
+                participants,
+            };
+            let mut supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
+            supervisors.push(supervisor.clone());
+            let application_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                participant: validator.clone(),
+                propose_latency: (10.0, 5.0),
+                verify_latency: (10.0, 5.0),
+            };
+            let (actor, application) = mocks::application::Application::new(
+                context.with_label("application"),
+                application_cfg,
+            );
+            actor.start();
+            let cfg = JConfig {
+                partition: validator.to_string(),
+            };
+            let journal = Journal::init(context.with_label("journal"), cfg)
+                .await
+                .expect("unable to create journal");
+            let cfg = config::Config {
+                crypto: scheme,
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: supervisor.clone(),
+                supervisor: supervisor.clone(),
+                mailbox_size: 1024,
+                namespace: namespace.clone(),
+                leader_timeout: Duration::from_secs(1),
+                notarization_timeout: Duration::from_secs(2),
+                nullify_retry: Duration::from_secs(10),
+                fetch_timeout: Duration::from_secs(1),
+                activity_timeout,
+                skip_timeout,
+                max_fetch_count: 1,
+                max_fetch_size: 1024 * 512,
+                fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                fetch_concurrent: 1,
+                replay_concurrency: 1,
+            };
+            let engine = Engine::new(context.with_label("engine"), journal, cfg);
+
+            // Start engine
+            let (voter, resolver) = registrations
+                .remove(&validator)
+                .expect("validator should be registered");
+            engine_handlers.push(engine.start(voter, resolver));
+
+            // Wait for new engine to finalize required
+            let (mut latest, mut monitor) = supervisor.subscribe().await;
+            while latest < required_containers {
+                latest = monitor.next().await.expect("event missing");
+            }
+        });
+    }
     //
     //     #[test_traced]
     //     fn test_one_offline() {
