@@ -89,7 +89,7 @@ impl Codec for Bytes {
     #[inline]
     fn read(buf: &mut impl Buf) -> Result<Self, Error> {
         let len32 = varint::read::<u32>(buf)?;
-        let len = usize::try_from(len32).unwrap();
+        let len = usize::try_from(len32).map_err(|_| Error::InvalidVarint)?;
         at_least(buf, len)?;
         Ok(buf.copy_to_bytes(len))
     }
@@ -203,7 +203,7 @@ impl<T: Codec> Codec for Vec<T> {
     #[inline]
     fn read(buf: &mut impl Buf) -> Result<Self, Error> {
         let len32 = varint::read::<u32>(buf)?;
-        let len = usize::try_from(len32).unwrap();
+        let len = usize::try_from(len32).map_err(|_| Error::InvalidVarint)?;
         let mut vec = Vec::with_capacity(len);
         for _ in 0..len {
             vec.push(T::read(buf)?);

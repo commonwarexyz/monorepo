@@ -4,7 +4,7 @@
 //! based on a `crate::Journal`.
 
 use bytes::{Buf, BufMut};
-use commonware_codec::{Codec, Error as CodecError, SizedCodec};
+use commonware_codec::{util as CodecUtil, Codec, Error as CodecError, SizedCodec};
 use commonware_utils::Array;
 use std::{
     cmp::{Ord, PartialOrd},
@@ -152,7 +152,7 @@ impl<K: Array, V: Array> Codec for Operation<K, V> {
     }
 
     fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
-        commonware_codec::util::at_least(buf, Self::LEN_ENCODED)?;
+        CodecUtil::at_least(buf, Self::LEN_ENCODED)?;
         let mut value = vec![0; Self::LEN_ENCODED];
         buf.copy_to_slice(&mut value);
         Self::try_from(value.as_slice())
