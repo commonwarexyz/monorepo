@@ -44,24 +44,6 @@ impl_numeric!(i128, get_i128, put_i128);
 impl_numeric!(f32, get_f32, put_f32);
 impl_numeric!(f64, get_f64, put_f64);
 
-// Usize implementation
-impl Codec for usize {
-    #[inline]
-    fn write(&self, buf: &mut impl BufMut) {
-        varint::write(*self, buf);
-    }
-
-    #[inline]
-    fn len_encoded(&self) -> usize {
-        varint::size(*self as u64)
-    }
-
-    #[inline]
-    fn read(buf: &mut impl Buf) -> Result<Self, Error> {
-        varint::read(buf)
-    }
-}
-
 // Bool implementation
 impl Codec for bool {
     #[inline]
@@ -93,18 +75,21 @@ impl SizedCodec for bool {
 impl Codec for Bytes {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {
-        self.len().write(buf);
+        let len = u32::try_from(self.len()).expect("Bytes length exceeds u32");
+        varint::write(len, buf);
         buf.put_slice(self);
     }
 
     #[inline]
     fn len_encoded(&self) -> usize {
-        self.len() + varint::size(self.len() as u64)
+        let len = u32::try_from(self.len()).expect("Bytes length exceeds u32");
+        varint::size(len) + self.len()
     }
 
     #[inline]
     fn read(buf: &mut impl Buf) -> Result<Self, Error> {
-        let len = <usize>::read(buf)?;
+        let len32 = varint::read::<u32>(buf)?;
+        let len = usize::try_from(len32).unwrap();
         at_least(buf, len)?;
         Ok(buf.copy_to_bytes(len))
     }
@@ -202,7 +187,8 @@ impl_codec_for_tuple!(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11);
 impl<T: Codec> Codec for Vec<T> {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {
-        self.len().write(buf);
+        let len = u32::try_from(self.len()).expect("Vec length exceeds u32");
+        varint::write(len, buf);
         for item in self {
             item.write(buf);
         }
@@ -210,13 +196,14 @@ impl<T: Codec> Codec for Vec<T> {
 
     #[inline]
     fn len_encoded(&self) -> usize {
-        let len = varint::size(self.len() as u64);
-        self.iter().map(Codec::len_encoded).sum::<usize>() + len
+        let len = u32::try_from(self.len()).expect("Vec length exceeds u32");
+        varint::size(len) + self.iter().map(Codec::len_encoded).sum::<usize>()
     }
 
     #[inline]
     fn read(buf: &mut impl Buf) -> Result<Self, Error> {
-        let len = <usize>::read(buf)?;
+        let len32 = varint::read::<u32>(buf)?;
+        let len = usize::try_from(len32).unwrap();
         let mut vec = Vec::with_capacity(len);
         for _ in 0..len {
             vec.push(T::read(buf)?);

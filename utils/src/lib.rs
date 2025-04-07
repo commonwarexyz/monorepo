@@ -1,7 +1,7 @@
 //! Leverage common functionality across multiple primitives.
 
 use bytes::{BufMut, BytesMut};
-use commonware_codec::{varint, Codec};
+use commonware_codec::varint;
 
 pub mod array;
 pub use array::Array;
@@ -69,9 +69,9 @@ pub fn union(a: &[u8], b: &[u8]) -> Vec<u8> {
 ///
 /// This produces a unique byte sequence (i.e. no collisions) for each `(namespace, msg)` pair.
 pub fn union_unique(namespace: &[u8], msg: &[u8]) -> Vec<u8> {
-    let len = namespace.len();
-    let mut buf = BytesMut::with_capacity(varint::size::<usize>(len) + namespace.len() + msg.len());
-    len.write(&mut buf);
+    let len = u32::try_from(namespace.len()).expect("namespace length too large");
+    let mut buf = BytesMut::with_capacity(varint::size(len) + namespace.len() + msg.len());
+    varint::write(len, &mut buf);
     buf.put_slice(namespace);
     buf.put_slice(msg);
     buf.into()
