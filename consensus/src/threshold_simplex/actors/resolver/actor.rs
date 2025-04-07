@@ -265,7 +265,7 @@ impl<
 
                 // Create new message
                 msg.id = request;
-                let encoded = msg.encode();
+                let encoded = Backfiller::<D>::Request(msg.clone()).encode();
 
                 // Try to send
                 if sender
@@ -357,9 +357,11 @@ impl<
                             // Add to all outstanding required
                             for view in notarizations {
                                 self.required.insert(Entry { task: Task::Notarization, view });
+                                debug!(?view, "notarization required");
                             }
                             for view in nullifications {
                                 self.required.insert(Entry { task: Task::Nullification, view });
+                                debug!(?view, "nullification required");
                             }
 
                             // Trigger fetch of new notarizations and nullifications as soon as possible

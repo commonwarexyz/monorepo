@@ -4,9 +4,10 @@ use crate::{
         actors::resolver,
         metrics,
         types::{
-            finalize_namespace, notarize_namespace, seed_namespace, view_message, Activity,
-            ConflictingFinalize, ConflictingNotarize, Context, Finalization, Finalize,
-            Notarization, Notarize, Nullification, Nullify, NullifyFinalize, Proposal, View, Voter,
+            finalize_namespace, notarize_namespace, nullify_namespace, seed_namespace,
+            view_message, Activity, ConflictingFinalize, ConflictingNotarize, Context,
+            Finalization, Finalize, Notarization, Notarize, Nullification, Nullify,
+            NullifyFinalize, Proposal, View, Voter,
         },
     },
     Automaton, Relay, Reporter, ThresholdSupervisor, LATENCY,
@@ -661,7 +662,7 @@ impl<
 
                 seed_namespace: seed_namespace(&cfg.namespace),
                 notarize_namespace: notarize_namespace(&cfg.namespace),
-                nullify_namespace: notarize_namespace(&cfg.namespace),
+                nullify_namespace: nullify_namespace(&cfg.namespace),
                 finalize_namespace: finalize_namespace(&cfg.namespace),
 
                 leader_timeout: cfg.leader_timeout,
