@@ -43,6 +43,7 @@ pub struct Supervisor<P: Array, D: Digest> {
     finalize_namespace: Vec<u8>,
 
     pub notarizes: Arc<Mutex<Participation<D, P>>>,
+    pub nullifies: Arc<Mutex<HashMap<View, HashSet<P>>>>,
     pub finalizes: Arc<Mutex<Participation<D, P>>>,
     pub faults: Arc<Mutex<Faults<D, P>>>,
 
@@ -68,6 +69,7 @@ impl<P: Array, D: Digest> Supervisor<P, D> {
             nullify_namespace: nullify_namespace(&cfg.namespace),
             finalize_namespace: finalize_namespace(&cfg.namespace),
             notarizes: Arc::new(Mutex::new(HashMap::new())),
+            nullifies: Arc::new(Mutex::new(HashMap::new())),
             finalizes: Arc::new(Mutex::new(HashMap::new())),
             faults: Arc::new(Mutex::new(HashMap::new())),
             latest: Arc::new(Mutex::new(0)),
@@ -147,7 +149,9 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
     type Activity = Activity<D>;
 
     async fn report(&self, activity: Self::Activity) {
-        // TODO: restore comment about verifying signatures
+        // We check signatures for all messages to ensure that the prover is working correctly
+        // but in production this isn't necessary (as signatures are already verified in
+        // consensus).
         match activity {
             Activity::Notarize(notarize) => {
                 let view = notarize.view();
@@ -175,9 +179,56 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                     .or_default()
                     .insert(public_key);
             }
-            Activity::Notarization(notarization) => {}
-            Activity::Nullify(nullify) => {}
-            Activity::Nullification(nullification) => {}
+            Activity::Notarization(notarization) => {
+                let view = notarization.view();
+                let (identity, _) = match self.participants.range(..=view).next_back() {
+                    Some((_, (p, _, v, _))) => (p, v),
+                    None => {
+                        panic!("no participants in required range");
+                    }
+                };
+                let public = public(identity);
+                if !notarization.verify(public, &self.notarize_namespace, &self.seed_namespace) {
+                    panic!("signature verification failed");
+                }
+            }
+            Activity::Nullify(nullify) => {
+                let view = nullify.view();
+                let (identity, validators) = match self.participants.range(..=view).next_back() {
+                    Some((_, (p, _, v, _))) => (p, v),
+                    None => {
+                        panic!("no participants in required range");
+                    }
+                };
+                if !nullify.verify(
+                    identity,
+                    None,
+                    &self.nullify_namespace,
+                    &self.seed_namespace,
+                ) {
+                    panic!("signature verification failed");
+                }
+                let public_key = validators[nullify.signer() as usize].clone();
+                self.nullifies
+                    .lock()
+                    .unwrap()
+                    .entry(view)
+                    .or_default()
+                    .insert(public_key);
+            }
+            Activity::Nullification(nullification) => {
+                let view = nullification.view();
+                let (identity, _) = match self.participants.range(..=view).next_back() {
+                    Some((_, (p, _, v, _))) => (p, v),
+                    None => {
+                        panic!("no participants in required range");
+                    }
+                };
+                let public = public(identity);
+                if !nullification.verify(public, &self.nullify_namespace, &self.seed_namespace) {
+                    panic!("signature verification failed");
+                }
+            }
             Activity::Finalize(finalize) => {
                 let view = finalize.view();
                 let (identity, validators) = match self.participants.range(..=view).next_back() {

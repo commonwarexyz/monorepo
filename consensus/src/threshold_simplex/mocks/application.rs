@@ -133,8 +133,6 @@ pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: Array> {
     pending: HashMap<H::Digest, Bytes>,
 
     verified: HashSet<H::Digest>,
-    notarized_views: HashSet<H::Digest>,
-    finalized_views: HashSet<H::Digest>,
 }
 
 impl<E: Clock + RngCore + Spawner, H: Hasher, P: Array> Application<E, H, P> {
@@ -165,8 +163,6 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: Array> Application<E, H, P> {
                 pending: HashMap::new(),
 
                 verified: HashSet::new(),
-                notarized_views: HashSet::new(),
-                finalized_views: HashSet::new(),
             },
             Mailbox::new(sender),
         )
@@ -181,7 +177,6 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: Array> Application<E, H, P> {
         self.hasher.update(&payload);
         let digest = self.hasher.finalize();
         self.verified.insert(digest);
-        self.finalized_views.insert(digest);
         digest
     }
 
