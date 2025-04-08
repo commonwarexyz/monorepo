@@ -42,6 +42,7 @@ pub struct Supervisor<P: Array, D: Digest> {
     nullify_namespace: Vec<u8>,
     finalize_namespace: Vec<u8>,
 
+    pub leaders: Arc<Mutex<HashMap<View, P>>>,
     pub notarizes: Arc<Mutex<Participation<D, P>>>,
     pub nullifies: Arc<Mutex<HashMap<View, HashSet<P>>>>,
     pub finalizes: Arc<Mutex<Participation<D, P>>>,
@@ -68,6 +69,7 @@ impl<P: Array, D: Digest> Supervisor<P, D> {
             notarize_namespace: notarize_namespace(&cfg.namespace),
             nullify_namespace: nullify_namespace(&cfg.namespace),
             finalize_namespace: finalize_namespace(&cfg.namespace),
+            leaders: Arc::new(Mutex::new(HashMap::new())),
             notarizes: Arc::new(Mutex::new(HashMap::new())),
             nullifies: Arc::new(Mutex::new(HashMap::new())),
             finalizes: Arc::new(Mutex::new(HashMap::new())),
@@ -121,7 +123,13 @@ impl<P: Array, D: Digest> TSu for Supervisor<P, D> {
         };
         let seed = seed.serialize();
         let index = modulo(&seed, closest.len() as u64);
-        Some(closest[index as usize].clone())
+        let leader = closest[index as usize].clone();
+        self.leaders
+            .lock()
+            .unwrap()
+            .entry(index)
+            .or_insert(leader.clone());
+        Some(leader)
     }
 
     fn identity(&self, index: Self::Index) -> Option<&Self::Identity> {

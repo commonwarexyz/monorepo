@@ -164,9 +164,8 @@ pub mod mocks;
 
 #[cfg(test)]
 mod tests {
-    use crate::Monitor;
-
     use super::*;
+    use crate::Monitor;
     use commonware_cryptography::{bls12381::dkg::ops, Ed25519, Sha256, Signer};
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};
@@ -1067,6 +1066,28 @@ mod tests {
                             if finalizers.contains(offline) {
                                 panic!("view: {}", view);
                             }
+                        }
+                    }
+                }
+
+                // Identify offline views
+                let mut offline_views = Vec::new();
+                {
+                    let leaders = supervisor.leaders.lock().unwrap();
+                    for (view, leader) in leaders.iter() {
+                        if leader == offline {
+                            offline_views.push(*view);
+                        }
+                    }
+                }
+
+                // Ensure nullifies collected for offline node
+                {
+                    let nullifies = supervisor.nullifies.lock().unwrap();
+                    for view in offline_views.iter() {
+                        let nullifies = nullifies.get(view).unwrap();
+                        if nullifies.len() < threshold as usize {
+                            panic!("view: {}", view);
                         }
                     }
                 }
