@@ -1,5 +1,6 @@
 use crate::{hex, Array};
-use commonware_codec::{Codec, Error as CodecError, Reader, SizedCodec, Writer};
+use bytes::{Buf, BufMut};
+use commonware_codec::{Codec, Error as CodecError, SizedCodec};
 use std::{
     cmp::{Ord, PartialOrd},
     fmt::{Debug, Display},
@@ -28,13 +29,12 @@ impl<const N: usize> FixedBytes<N> {
 }
 
 impl<const N: usize> Codec for FixedBytes<N> {
-    fn write(&self, writer: &mut impl Writer) {
-        writer.write_fixed(&self.0);
+    fn write(&self, buf: &mut impl BufMut) {
+        self.0.write(buf);
     }
 
-    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
-        let value = reader.read_fixed()?;
-        Ok(Self(value))
+    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
+        Ok(Self(<[u8; N]>::read(buf)?))
     }
 
     fn len_encoded(&self) -> usize {

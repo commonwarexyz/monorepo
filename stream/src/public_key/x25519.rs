@@ -1,4 +1,5 @@
-use commonware_codec::{Codec, Error as CodecError, Reader, SizedCodec, Writer};
+use bytes::{Buf, BufMut};
+use commonware_codec::{Codec, Error as CodecError, SizedCodec};
 use rand::{CryptoRng, Rng};
 use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey};
 
@@ -29,11 +30,11 @@ impl AsRef<x25519_dalek::PublicKey> for PublicKey {
 }
 
 impl Codec for PublicKey {
-    fn write(&self, writer: &mut impl Writer) {
-        self.inner.as_bytes().write(writer);
+    fn write(&self, buf: &mut impl BufMut) {
+        self.inner.as_bytes().write(buf);
     }
-    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
-        let public_key: [u8; Self::LEN_ENCODED] = reader.read_fixed()?;
+    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
+        let public_key = <[u8; Self::LEN_ENCODED]>::read(buf)?;
         Ok(PublicKey {
             inner: X25519PublicKey::from(public_key),
         })

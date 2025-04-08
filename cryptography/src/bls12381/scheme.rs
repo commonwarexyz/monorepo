@@ -24,7 +24,8 @@ use super::primitives::{
     ops,
 };
 use crate::{Array, Error, Signer, Specification, Verifier};
-use commonware_codec::{Codec, Error as CodecError, Reader, SizedCodec, Writer};
+use bytes::{Buf, BufMut};
+use commonware_codec::{Codec, Error as CodecError, SizedCodec};
 use commonware_utils::hex;
 use rand::{CryptoRng, Rng};
 use std::{
@@ -100,12 +101,12 @@ pub struct PrivateKey {
 }
 
 impl Codec for PrivateKey {
-    fn write(&self, writer: &mut impl Writer) {
-        self.raw.write(writer);
+    fn write(&self, buf: &mut impl BufMut) {
+        self.raw.write(buf);
     }
 
-    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
-        Self::read_from(reader).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
+    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
+        Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
     }
 
     fn len_encoded(&self) -> usize {
@@ -204,12 +205,12 @@ pub struct PublicKey {
 }
 
 impl Codec for PublicKey {
-    fn write(&self, writer: &mut impl Writer) {
-        self.raw.write(writer);
+    fn write(&self, buf: &mut impl BufMut) {
+        self.raw.write(buf);
     }
 
-    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
-        Self::read_from(reader).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
+    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
+        Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
     }
 
     fn len_encoded(&self) -> usize {
@@ -308,12 +309,12 @@ pub struct Signature {
 }
 
 impl Codec for Signature {
-    fn write(&self, writer: &mut impl Writer) {
-        self.raw.write(writer);
+    fn write(&self, buf: &mut impl BufMut) {
+        self.raw.write(buf);
     }
 
-    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
-        Self::read_from(reader).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
+    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
+        Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
     }
 
     fn len_encoded(&self) -> usize {

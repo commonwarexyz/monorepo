@@ -318,12 +318,11 @@ impl<St: Stream> crate::Receiver for Receiver<St> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use super::*;
     use crate::{Receiver as _, Sender as _};
     use commonware_cryptography::{Ed25519, Signer};
     use commonware_runtime::{deterministic::Executor, mocks, Metrics, Runner};
+    use std::time::Duration;
 
     #[test]
     fn test_decryption_failure() {

@@ -3,7 +3,8 @@
 //! The `Operation` enum implements the `Array` trait, allowing for a persistent log of operations
 //! based on a `crate::Journal`.
 
-use commonware_codec::{Codec, Error as CodecError, Reader, SizedCodec, Writer};
+use bytes::{Buf, BufMut};
+use commonware_codec::{util as CodecUtil, Codec, Error as CodecError, SizedCodec};
 use commonware_utils::Array;
 use std::{
     cmp::{Ord, PartialOrd},
@@ -145,13 +146,17 @@ impl<K: Array, V: Array> Operation<K, V> {
 }
 
 impl<K: Array, V: Array> Codec for Operation<K, V> {
-    fn write(&self, writer: &mut impl Writer) {
-        writer.write_fixed(&self.data);
+    fn write(&self, buf: &mut impl BufMut) {
+        assert!(self.data.len() == Self::LEN_ENCODED);
+        buf.put(&self.data[..]);
     }
 
-    fn read(reader: &mut impl Reader) -> Result<Self, CodecError> {
-        let value = reader.read_n_bytes(Self::LEN_ENCODED)?;
-        Self::try_from(value.as_ref()).map_err(|e| CodecError::Wrapped("Operation", e.into()))
+    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
+        CodecUtil::at_least(buf, Self::LEN_ENCODED)?;
+        let mut value = vec![0; Self::LEN_ENCODED];
+        buf.copy_to_slice(&mut value);
+        Self::try_from(value.as_slice())
+            .map_err(|e: Error<K, V>| CodecError::Wrapped("Operation", e.into()))
     }
 
     fn len_encoded(&self) -> usize {

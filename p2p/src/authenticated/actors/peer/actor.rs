@@ -167,7 +167,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Ver
                         .receive()
                         .await
                         .map_err(Error::ReceiveFailed)?;
-                    let msg = match types::Payload::decode(msg) {
+                    let msg = match types::Payload::<C>::decode(msg) {
                         Ok(msg) => msg,
                         Err(err) => {
                             info!(?err, ?peer, "failed to decode message");
