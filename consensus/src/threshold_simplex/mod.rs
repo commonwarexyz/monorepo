@@ -1080,14 +1080,12 @@ mod tests {
                         }
                     }
                 }
+                assert!(!offline_views.is_empty());
 
                 // Ensure nullifies collected for offline node
                 {
                     let nullifies = supervisor.nullifies.lock().unwrap();
                     for view in offline_views.iter() {
-                        if *view == 0 {
-                            continue;
-                        }
                         let nullifies = nullifies.get(view).unwrap();
                         if nullifies.len() < threshold as usize {
                             panic!("view: {}", view);

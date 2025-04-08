@@ -122,8 +122,8 @@ impl<P: Array, D: Digest> TSu for Supervisor<P, D> {
             }
         };
         let seed = seed.serialize();
-        let index = modulo(&seed, closest.len() as u64);
-        let leader = closest[index as usize].clone();
+        let leader_index = modulo(&seed, closest.len() as u64);
+        let leader = closest[leader_index as usize].clone();
         self.leaders
             .lock()
             .unwrap()
