@@ -1119,7 +1119,7 @@ mod tests {
                 }
                 assert!(!offline_views.is_empty());
 
-                // Ensure nullifies collected for offline node
+                // Ensure nullifies/nullification collected for offline node
                 {
                     let nullifies = supervisor.nullifies.lock().unwrap();
                     for view in offline_views.iter() {
@@ -1127,6 +1127,12 @@ mod tests {
                         if nullifies.len() < threshold as usize {
                             panic!("view: {}", view);
                         }
+                    }
+                }
+                {
+                    let nullifications = supervisor.nullifications.lock().unwrap();
+                    for view in offline_views.iter() {
+                        nullifications.get(view).unwrap();
                     }
                 }
             }
