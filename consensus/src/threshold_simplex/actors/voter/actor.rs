@@ -213,7 +213,15 @@ impl<
         // Check if already issued finalize
         let Some(finalize) = &self.finalizes[public_key_index as usize] else {
             // Store the nullify
-            return self.nullifies.insert(public_key_index, nullify).is_none();
+            let entry = self.nullifies.entry(public_key_index);
+            return match entry {
+                std::collections::hash_map::Entry::Occupied(_) => false,
+                std::collections::hash_map::Entry::Vacant(_) => {
+                    entry.or_insert(nullify.clone());
+                    self.reporter.report(Activity::Nullify(nullify)).await;
+                    true
+                }
+            };
         };
 
         // Create fault
