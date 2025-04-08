@@ -447,6 +447,19 @@ mod tests {
                         if finalizers.len() != n as usize {
                             exceptions += 1;
                         }
+
+                        // Ensure no nullifies for any finalizers
+                        let nullifies = supervisor.nullifies.lock().unwrap();
+                        let Some(nullifies) = nullifies.get(view) else {
+                            continue;
+                        };
+                        for (_, finalizers) in payloads.iter() {
+                            for finalizer in finalizers.iter() {
+                                if nullifies.contains(finalizer) {
+                                    panic!("should not nullify and finalize at same view");
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -1040,6 +1053,14 @@ mod tests {
                     }
                 }
                 {
+                    let nullifies = supervisor.nullifies.lock().unwrap();
+                    for (view, participants) in nullifies.iter() {
+                        if participants.contains(offline) {
+                            panic!("view: {}", view);
+                        }
+                    }
+                }
+                {
                     let finalizes = supervisor.finalizes.lock().unwrap();
                     for (view, payloads) in finalizes.iter() {
                         for (_, finalizers) in payloads.iter() {
@@ -1195,7 +1216,7 @@ mod tests {
                     assert!(faults.is_empty());
                 }
 
-                // Ensure slow node is never active
+                // Ensure slow node is never active (will never process anything fast enough to nullify)
                 {
                     let notarizes = supervisor.notarizes.lock().unwrap();
                     for (view, payloads) in notarizes.iter() {
@@ -1203,6 +1224,14 @@ mod tests {
                             if participants.contains(slow) {
                                 panic!("view: {}", view);
                             }
+                        }
+                    }
+                }
+                {
+                    let nullifies = supervisor.nullifies.lock().unwrap();
+                    for (view, participants) in nullifies.iter() {
+                        if participants.contains(slow) {
+                            panic!("view: {}", view);
                         }
                     }
                 }
