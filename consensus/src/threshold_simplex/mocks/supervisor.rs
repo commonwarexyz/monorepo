@@ -1,6 +1,7 @@
 use crate::{
     threshold_simplex::types::{
-        finalize_namespace, notarize_namespace, nullify_namespace, seed_namespace, Activity, View,
+        finalize_namespace, notarize_namespace, nullify_namespace, seed_namespace, Activity,
+        Finalization, Notarization, Nullification, View,
     },
     Monitor, Reporter, Supervisor as Su, ThresholdSupervisor as TSu,
 };
@@ -44,8 +45,11 @@ pub struct Supervisor<P: Array, D: Digest> {
 
     pub leaders: Arc<Mutex<HashMap<View, P>>>,
     pub notarizes: Arc<Mutex<Participation<D, P>>>,
+    pub notarizations: Arc<Mutex<HashMap<View, Notarization<D>>>>,
     pub nullifies: Arc<Mutex<HashMap<View, HashSet<P>>>>,
+    pub nullifications: Arc<Mutex<HashMap<View, Nullification>>>,
     pub finalizes: Arc<Mutex<Participation<D, P>>>,
+    pub finalizations: Arc<Mutex<HashMap<View, Finalization<D>>>>,
     pub faults: Arc<Mutex<Faults<D, P>>>,
 
     latest: Arc<Mutex<View>>,
@@ -71,8 +75,11 @@ impl<P: Array, D: Digest> Supervisor<P, D> {
             finalize_namespace: finalize_namespace(&cfg.namespace),
             leaders: Arc::new(Mutex::new(HashMap::new())),
             notarizes: Arc::new(Mutex::new(HashMap::new())),
+            notarizations: Arc::new(Mutex::new(HashMap::new())),
             nullifies: Arc::new(Mutex::new(HashMap::new())),
+            nullifications: Arc::new(Mutex::new(HashMap::new())),
             finalizes: Arc::new(Mutex::new(HashMap::new())),
+            finalizations: Arc::new(Mutex::new(HashMap::new())),
             faults: Arc::new(Mutex::new(HashMap::new())),
             latest: Arc::new(Mutex::new(0)),
             subscribers: Arc::new(Mutex::new(Vec::new())),
@@ -199,6 +206,10 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                 if !notarization.verify(public, &self.notarize_namespace, &self.seed_namespace) {
                     panic!("signature verification failed");
                 }
+                self.notarizations
+                    .lock()
+                    .unwrap()
+                    .insert(view, notarization.clone());
             }
             Activity::Nullify(nullify) => {
                 let view = nullify.view();
@@ -236,6 +247,10 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                 if !nullification.verify(public, &self.nullify_namespace, &self.seed_namespace) {
                     panic!("signature verification failed");
                 }
+                self.nullifications
+                    .lock()
+                    .unwrap()
+                    .insert(view, nullification);
             }
             Activity::Finalize(finalize) => {
                 let view = finalize.view();
@@ -270,6 +285,12 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                 if !finalization.verify(public, &self.finalize_namespace, &self.seed_namespace) {
                     panic!("signature verification failed");
                 }
+                self.finalizations
+                    .lock()
+                    .unwrap()
+                    .insert(view, finalization.clone());
+
+                // Send message to subscribers
                 *self.latest.lock().unwrap() = finalization.view();
                 let mut subscribers = self.subscribers.lock().unwrap();
                 for subscriber in subscribers.iter_mut() {

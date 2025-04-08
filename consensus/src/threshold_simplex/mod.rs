@@ -399,19 +399,21 @@ mod tests {
 
                 // Ensure no forks
                 let mut exceptions = 0;
+                let mut notarized = HashMap::new();
+                let mut finalized = HashMap::new();
                 {
                     let notarizes = supervisor.notarizes.lock().unwrap();
-                    for (view, payloads) in notarizes.iter() {
+                    for view in 1..latest_complete {
                         // Ensure only one payload proposed per view
+                        let Some(payloads) = notarizes.get(&view) else {
+                            exceptions += 1;
+                            continue;
+                        };
                         if payloads.len() > 1 {
                             panic!("view: {}", view);
                         }
-                        let (_, notarizers) = payloads.iter().next().unwrap();
-
-                        // Only check at views below timeout
-                        if *view > latest_complete {
-                            continue;
-                        }
+                        let (digest, notarizers) = payloads.iter().next().unwrap();
+                        notarized.insert(view, *digest);
 
                         if notarizers.len() < threshold as usize {
                             // We can't verify that everyone participated at every view because some nodes may
@@ -424,16 +426,36 @@ mod tests {
                     }
                 }
                 {
+                    let notarizations = supervisor.notarizations.lock().unwrap();
+                    for view in 1..latest_complete {
+                        // Ensure notarization matches digest from notarizes
+                        let Some(notarization) = notarizations.get(&view) else {
+                            exceptions += 1;
+                            continue;
+                        };
+                        let Some(digest) = notarized.get(&view) else {
+                            exceptions += 1;
+                            continue;
+                        };
+                        assert_eq!(&notarization.proposal.payload, digest);
+                    }
+                }
+                {
                     let finalizes = supervisor.finalizes.lock().unwrap();
-                    for (view, payloads) in finalizes.iter() {
+                    for view in 1..latest_complete {
                         // Ensure only one payload proposed per view
+                        let Some(payloads) = finalizes.get(&view) else {
+                            exceptions += 1;
+                            continue;
+                        };
                         if payloads.len() > 1 {
                             panic!("view: {}", view);
                         }
-                        let (_, finalizers) = payloads.iter().next().unwrap();
+                        let (digest, finalizers) = payloads.iter().next().unwrap();
+                        finalized.insert(view, *digest);
 
                         // Only check at views below timeout
-                        if *view > latest_complete {
+                        if view > latest_complete {
                             continue;
                         }
 
@@ -449,7 +471,7 @@ mod tests {
 
                         // Ensure no nullifies for any finalizers
                         let nullifies = supervisor.nullifies.lock().unwrap();
-                        let Some(nullifies) = nullifies.get(view) else {
+                        let Some(nullifies) = nullifies.get(&view) else {
                             continue;
                         };
                         for (_, finalizers) in payloads.iter() {
@@ -459,6 +481,21 @@ mod tests {
                                 }
                             }
                         }
+                    }
+                }
+                {
+                    let finalizations = supervisor.finalizations.lock().unwrap();
+                    for view in 1..latest_complete {
+                        // Ensure finalization matches digest from finalizes
+                        let Some(finalization) = finalizations.get(&view) else {
+                            exceptions += 1;
+                            continue;
+                        };
+                        let Some(digest) = finalized.get(&view) else {
+                            exceptions += 1;
+                            continue;
+                        };
+                        assert_eq!(&finalization.proposal.payload, digest);
                     }
                 }
 
