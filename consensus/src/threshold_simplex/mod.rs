@@ -1567,189 +1567,166 @@ mod tests {
             }
         });
     }
-    //
-    //     fn slow_and_lossy_links(seed: u64) -> String {
-    //         // Create context
-    //         let n = 5;
-    //         let threshold = quorum(n).expect("unable to calculate threshold");
-    //         let required_containers = 50;
-    //         let activity_timeout = 10;
-    //         let skip_timeout = 5;
-    //         let namespace = b"consensus".to_vec();
-    //         let cfg = deterministic::Config {
-    //             seed,
-    //             timeout: Some(Duration::from_secs(3_000)),
-    //             ..deterministic::Config::default()
-    //         };
-    //         let (executor, mut context, auditor) = Executor::init(cfg);
-    //         executor.start(async move {
-    //             // Create simulated network
-    //             let (network, mut oracle) = Network::new(
-    //                 context.with_label("network"),
-    //                 Config {
-    //                     max_size: 1024 * 1024,
-    //                 },
-    //             );
-    //
-    //             // Start network
-    //             network.start();
-    //
-    //             // Register participants
-    //             let mut schemes = Vec::new();
-    //             let mut validators = Vec::new();
-    //             for i in 0..n {
-    //                 let scheme = Ed25519::from_seed(i as u64);
-    //                 let pk = scheme.public_key();
-    //                 schemes.push(scheme);
-    //                 validators.push(pk);
-    //             }
-    //             validators.sort();
-    //             schemes.sort_by_key(|s| s.public_key());
-    //             let mut registrations = register_validators(&mut oracle, &validators).await;
-    //
-    //             // Link all validators
-    //             let degraded_link = Link {
-    //                 latency: 200.0,
-    //                 jitter: 150.0,
-    //                 success_rate: 0.5,
-    //             };
-    //             link_validators(&mut oracle, &validators, Action::Link(degraded_link), None).await;
-    //
-    //             // Derive threshold
-    //             let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
-    //             let pk = poly::public(&public);
-    //             let prover = Prover::new(*pk, &namespace);
-    //
-    //             // Create engines
-    //             let relay = Arc::new(mocks::relay::Relay::new());
-    //             let mut supervisors = Vec::new();
-    //             let (done_sender, mut done_receiver) = mpsc::unbounded();
-    //             let mut engine_handlers = Vec::new();
-    //             for (idx, scheme) in schemes.into_iter().enumerate() {
-    //                 // Create scheme context
-    //                 let context = context.with_label(&format!("validator-{}", scheme.public_key()));
-    //
-    //                 // Configure engine
-    //                 let validator = scheme.public_key();
-    //                 let mut participants = BTreeMap::new();
-    //                 participants.insert(0, (public.clone(), validators.clone(), shares[idx]));
-    //                 let supervisor_config = mocks::supervisor::Config {
-    //                     prover: prover.clone(),
-    //                     participants,
-    //                 };
-    //                 let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
-    //                 supervisors.push(supervisor.clone());
-    //                 let application_cfg = mocks::application::Config {
-    //                     hasher: Sha256::default(),
-    //                     relay: relay.clone(),
-    //                     participant: validator.clone(),
-    //                     tracker: done_sender.clone(),
-    //                     propose_latency: (10.0, 5.0),
-    //                     verify_latency: (10.0, 5.0),
-    //                 };
-    //                 let (actor, application) = mocks::application::Application::new(
-    //                     context.with_label("application"),
-    //                     application_cfg,
-    //                 );
-    //                 actor.start();
-    //                 let cfg = JConfig {
-    //                     partition: validator.to_string(),
-    //                 };
-    //                 let journal = Journal::init(context.with_label("journal"), cfg)
-    //                     .await
-    //                     .expect("unable to create journal");
-    //                 let cfg = config::Config {
-    //                     crypto: scheme,
-    //                     automaton: application.clone(),
-    //                     relay: application.clone(),
-    //                     committer: application,
-    //                     supervisor,
-    //                     mailbox_size: 1024,
-    //                     namespace: namespace.clone(),
-    //                     leader_timeout: Duration::from_secs(1),
-    //                     notarization_timeout: Duration::from_secs(2),
-    //                     nullify_retry: Duration::from_secs(10),
-    //                     fetch_timeout: Duration::from_secs(1),
-    //                     activity_timeout,
-    //                     skip_timeout,
-    //                     max_fetch_count: 1,
-    //                     max_fetch_size: 1024 * 512,
-    //                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
-    //                     fetch_concurrent: 1,
-    //                     replay_concurrency: 1,
-    //                 };
-    //                 let engine = Engine::new(context.with_label("engine"), journal, cfg);
-    //
-    //                 // Start engine
-    //                 let (voter, resolver) = registrations
-    //                     .remove(&validator)
-    //                     .expect("validator should be registered");
-    //                 engine_handlers.push(engine.start(voter, resolver));
-    //             }
-    //
-    //             // Wait for all engines to finish
-    //             let mut completed = HashSet::new();
-    //             let mut finalized = HashMap::new();
-    //             loop {
-    //                 let (validator, event) = done_receiver.next().await.unwrap();
-    //                 if let mocks::application::Progress::Finalized(proof, digest) = event {
-    //                     let (view, _, payload, _, _) = prover.deserialize_finalization(proof).unwrap();
-    //                     if digest != payload {
-    //                         panic!(
-    //                             "finalization mismatch digest: {:?}, payload: {:?}",
-    //                             digest, payload
-    //                         );
-    //                     }
-    //                     if let Some(previous) = finalized.insert(view, digest) {
-    //                         if previous != digest {
-    //                             panic!(
-    //                                 "finalization mismatch at {:?} previous: {:?}, current: {:?}",
-    //                                 view, previous, digest
-    //                             );
-    //                         }
-    //                     }
-    //                     if (finalized.len() as u64) < required_containers {
-    //                         continue;
-    //                     }
-    //                     completed.insert(validator);
-    //                 }
-    //                 if completed.len() == n as usize {
-    //                     break;
-    //                 }
-    //             }
-    //
-    //             // Check supervisors for correct activity
-    //             for supervisor in supervisors.iter() {
-    //                 // Ensure no faults
-    //                 {
-    //                     let faults = supervisor.faults.lock().unwrap();
-    //                     assert!(faults.is_empty());
-    //                 }
-    //             }
-    //         });
-    //         auditor.state()
-    //     }
-    //
-    //     #[test_traced]
-    //     fn test_slow_and_lossy_links() {
-    //         slow_and_lossy_links(0);
-    //     }
-    //
-    //     #[test_traced]
-    //     fn test_determinism() {
-    //         // We use slow and lossy links as the deterministic test
-    //         // because it is the most complex test.
-    //         for seed in 1..6 {
-    //             // Run test with seed
-    //             let state_1 = slow_and_lossy_links(seed);
-    //
-    //             // Run test again with same seed
-    //             let state_2 = slow_and_lossy_links(seed);
-    //
-    //             // Ensure states are equal
-    //             assert_eq!(state_1, state_2);
-    //         }
-    //     }
+
+    fn slow_and_lossy_links(seed: u64) -> String {
+        // Create context
+        let n = 5;
+        let threshold = quorum(n).expect("unable to calculate threshold");
+        let required_containers = 50;
+        let activity_timeout = 10;
+        let skip_timeout = 5;
+        let namespace = b"consensus".to_vec();
+        let cfg = deterministic::Config {
+            seed,
+            timeout: Some(Duration::from_secs(3_000)),
+            ..deterministic::Config::default()
+        };
+        let (executor, mut context, auditor) = Executor::init(cfg);
+        executor.start(async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                },
+            );
+
+            // Start network
+            network.start();
+
+            // Register participants
+            let mut schemes = Vec::new();
+            let mut validators = Vec::new();
+            for i in 0..n {
+                let scheme = Ed25519::from_seed(i as u64);
+                let pk = scheme.public_key();
+                schemes.push(scheme);
+                validators.push(pk);
+            }
+            validators.sort();
+            schemes.sort_by_key(|s| s.public_key());
+            let mut registrations = register_validators(&mut oracle, &validators).await;
+
+            // Link all validators
+            let degraded_link = Link {
+                latency: 200.0,
+                jitter: 150.0,
+                success_rate: 0.5,
+            };
+            link_validators(&mut oracle, &validators, Action::Link(degraded_link), None).await;
+
+            // Derive threshold
+            let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
+
+            // Create engines
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let mut supervisors = Vec::new();
+            let mut engine_handlers = Vec::new();
+            for (idx, scheme) in schemes.into_iter().enumerate() {
+                // Create scheme context
+                let context = context.with_label(&format!("validator-{}", scheme.public_key()));
+
+                // Configure engine
+                let validator = scheme.public_key();
+                let mut participants = BTreeMap::new();
+                participants.insert(0, (public.clone(), validators.clone(), shares[idx]));
+                let supervisor_config = mocks::supervisor::Config {
+                    namespace: namespace.clone(),
+                    participants,
+                };
+                let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
+                supervisors.push(supervisor.clone());
+                let application_cfg = mocks::application::Config {
+                    hasher: Sha256::default(),
+                    relay: relay.clone(),
+                    participant: validator.clone(),
+                    propose_latency: (10.0, 5.0),
+                    verify_latency: (10.0, 5.0),
+                };
+                let (actor, application) = mocks::application::Application::new(
+                    context.with_label("application"),
+                    application_cfg,
+                );
+                actor.start();
+                let cfg = JConfig {
+                    partition: validator.to_string(),
+                };
+                let journal = Journal::init(context.with_label("journal"), cfg)
+                    .await
+                    .expect("unable to create journal");
+                let cfg = config::Config {
+                    crypto: scheme,
+                    automaton: application.clone(),
+                    relay: application.clone(),
+                    reporter: supervisor.clone(),
+                    supervisor,
+                    mailbox_size: 1024,
+                    namespace: namespace.clone(),
+                    leader_timeout: Duration::from_secs(1),
+                    notarization_timeout: Duration::from_secs(2),
+                    nullify_retry: Duration::from_secs(10),
+                    fetch_timeout: Duration::from_secs(1),
+                    activity_timeout,
+                    skip_timeout,
+                    max_fetch_count: 1,
+                    max_fetch_size: 1024 * 512,
+                    fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                    fetch_concurrent: 1,
+                    replay_concurrency: 1,
+                };
+                let engine = Engine::new(context.with_label("engine"), journal, cfg);
+
+                // Start engine
+                let (voter, resolver) = registrations
+                    .remove(&validator)
+                    .expect("validator should be registered");
+                engine_handlers.push(engine.start(voter, resolver));
+            }
+
+            // Wait for all engines to finish
+            let mut finalizers = Vec::new();
+            for supervisor in supervisors.iter_mut() {
+                let (mut latest, mut monitor) = supervisor.subscribe().await;
+                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                    while latest < required_containers {
+                        latest = monitor.next().await.expect("event missing");
+                    }
+                }));
+            }
+            join_all(finalizers).await;
+
+            // Check supervisors for correct activity
+            for supervisor in supervisors.iter() {
+                // Ensure no faults
+                {
+                    let faults = supervisor.faults.lock().unwrap();
+                    assert!(faults.is_empty());
+                }
+            }
+        });
+        auditor.state()
+    }
+
+    #[test_traced]
+    fn test_slow_and_lossy_links() {
+        slow_and_lossy_links(0);
+    }
+
+    #[test_traced]
+    fn test_determinism() {
+        // We use slow and lossy links as the deterministic test
+        // because it is the most complex test.
+        for seed in 1..6 {
+            // Run test with seed
+            let state_1 = slow_and_lossy_links(seed);
+
+            // Run test again with same seed
+            let state_2 = slow_and_lossy_links(seed);
+
+            // Ensure states are equal
+            assert_eq!(state_1, state_2);
+        }
+    }
     //
     //     #[test_traced]
     //     fn test_conflicter() {
