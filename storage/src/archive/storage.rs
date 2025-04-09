@@ -291,7 +291,7 @@ impl<T: Translator, K: Array, B: Blob, E: Storage<B> + Metrics> Archive<T, K, B,
         self.gets.inc();
 
         // Fetch index
-        let iter = self.keys.get(key);
+        let iter = self.keys.get_iter(key);
         let min_allowed = self.oldest_allowed.unwrap_or(0);
         for index in iter {
             // Continue if index is no longer allowed due to pruning.
@@ -342,7 +342,7 @@ impl<T: Translator, K: Array, B: Blob, E: Storage<B> + Metrics> Archive<T, K, B,
     }
 
     async fn has_key(&self, key: &[u8]) -> Result<bool, Error> {
-        let iter = self.keys.get(key);
+        let iter = self.keys.get_iter(key);
         let min_allowed = self.oldest_allowed.unwrap_or(0);
         for index in iter {
             // Continue if index is no longer allowed due to pruning.
