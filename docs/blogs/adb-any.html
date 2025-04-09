@@ -6,7 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1" />
     <link rel="icon" href="../favicon.ico" type="image/x-icon">
 
-    <title>commonware > TBD</title>
+    <title>commonware > The Simplest Database You Need</title>
     <meta name="description" content="The primary limitation of the MMR compared to a more typical Merkle tree structure is its lack of support for removing elements from the list over which inclusion proofs can be provided. This restriction, at first glance, might appear to prohibit an MMR from being used to build a mutable database where keys take on values that change over time. However, append-only MMRs are a natural fit for authenticating log data. Instead of viewing our database as only a snapshot in time, the basic idea we'll build on is to maintain an MMR over the historical log of all database operations performed up until the present state.">
     <meta name="author" content="Roberto Bayardo, Patrick O'Grady">
     <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
@@ -15,7 +15,7 @@
     <meta property="og:type" content="article" />
     <meta property="og:site_name" content="commonware" />
     <meta property="og:image" content="https://commonware.xyz/imgs/adb-any.png" />
-    <meta property="og:title" content="TBD" />
+    <meta property="og:title" content="The Simplest Database You Need" />
     <meta property="og:description" content="The primary limitation of the MMR compared to a more typical Merkle tree structure is its lack of support for removing elements from the list over which inclusion proofs can be provided. This restriction, at first glance, might appear to prohibit an MMR from being used to build a mutable database where keys take on values that change over time. However, append-only MMRs are a natural fit for authenticating log data. Instead of viewing our database as only a snapshot in time, the basic idea we'll build on is to maintain an MMR over the historical log of all database operations performed up until the present state." />
     <meta property="article:author" content="https://x.com/roberto_bayardo" />
     <meta property="article:author" content="https://x.com/_patrickogrady" />
@@ -25,7 +25,7 @@
     <meta name="twitter:card" content="summary_large_image" />
     <meta property="twitter:domain" content="commonware.xyz" />
     <meta property="twitter:url" content="https://commonware.xyz/blogs/adb-any.html" />
-    <meta property="twitter:title" content="TBD" />
+    <meta property="twitter:title" content="The Simplest Database You Need" />
     <meta property="twitter:description" content="The primary limitation of the MMR compared to a more typical Merkle tree structure is its lack of support for removing elements from the list over which inclusion proofs can be provided. This restriction, at first glance, might appear to prohibit an MMR from being used to build a mutable database where keys take on values that change over time. However, append-only MMRs are a natural fit for authenticating log data. Instead of viewing our database as only a snapshot in time, the basic idea we'll build on is to maintain an MMR over the historical log of all database operations performed up until the present state." />
     <meta property="twitter:image" content="https://commonware.xyz/imgs/adb-any.png" />
     <meta property="twitter:site" content="@commonwarexyz" />
@@ -75,7 +75,7 @@
         </div>
     </div>
     <div class="content">
-        <h1>TBD</h1>
+        <h1>The Simplest Database You Need</h1>
         <div class="meta">
             <div class="author">By <a href="https://x.com/roberto_bayardo">Roberto Bayardo</a> and <a href="https://x.com/_patrickogrady">Patrick O'Grady</a></div>
             <div class="date">April 9, 2025</div>
@@ -85,7 +85,7 @@
             <img src="../imgs/mmr.png" alt="Appending new elements to an MMR">
             <div class="image-caption">Figure 1: Appending new elements to an MMR</div>
         </div>
-        <p>Here, we'll dive into how the construction can be extended to create an <i>authenticated database</i> (ADB) capable of storing and proving mutable blockchain state. We call the first of these MMR-powered ADBs <a href="https://docs.rs/commonware-storage/latest/commonware_storage/adb/any/index.html">adb::any</a>, and are excited to share that it is now available under an MIT/Apache-2 license.</p>
+        <p>Here, we'll dive into how the construction can be extended to create a lightweight <i>authenticated database</i> (ADB) capable of storing and proving mutable blockchain state with minimal IO amplification. We call the first of these MMR-powered ADBs <a href="https://docs.rs/commonware-storage/latest/commonware_storage/adb/any/index.html">adb::any</a>, and are excited to share that it is now available under an MIT/Apache-2 license.</p>
         <p>The primary limitation of the MMR compared to a more typical Merkle tree structure is its lack of support for removing elements from the list over which inclusion proofs can be provided. This restriction, at first glance, might appear to prohibit an MMR from being used to build a mutable database where keys take on values that change over time. However, append-only MMRs are a natural fit for authenticating log data. Instead of viewing our database as only a snapshot in time, the basic idea we'll build on is to maintain an MMR over the <i>historical log</i> of all database <i>operations</i> performed up until the present state.</p>
         <p>Let us consider two basic operations, <i>assigning</i> a key a value and <i>deleting</i> a key's value. Each operation applied to the database gets added to a persistent log, and its digest added to an MMR. To provide efficient lookups of a key's value, we employ a <a href="https://docs.rs/commonware-storage/latest/commonware_storage/index/index.html">memory-efficient index</a> that maps a compressed representation of each key to its latest value in the log.</p>
         <p>The figure below depicts a small example of this kind of ADB, showing only the updates for key “foo” which is assigned value 5 in log operation 3, deleted at operation 6, and later updated to value 6 at operation 9, which contains its active state. While the contents of the log are durably persisted to disk, the index depicted to the right is memory resident, mapping a key to the location of its currently active operation. Because keys in some applications may be large (e.g. 32 byte hashes), keys are transformed by a user-provided function into a more compact representation (e.g. an 8 byte hash prefix) for memory efficiency. (There is some additional complexity we don't describe here required for handling a small but non-negligible chance of collisions among these transformed keys.)</p>
