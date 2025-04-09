@@ -923,7 +923,7 @@ checksum = "d3fd119d74b830634cea2a0f58bbd0d54540518a14397557951e79340abc28c0"
 
 [[package]]
 name = "commonware-bridge"
-version = "0.0.43"
+version = "0.0.44"
 dependencies = [
  "bytes",
  "clap",
@@ -948,7 +948,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-broadcast"
-version = "0.0.43"
+version = "0.0.44"
 dependencies = [
  "bytes",
  "commonware-codec",
@@ -966,7 +966,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-chat"
-version = "0.0.43"
+version = "0.0.44"
 dependencies = [
  "chrono",
  "clap",
@@ -987,7 +987,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-codec"
-version = "0.0.43"
+version = "0.0.44"
 dependencies = [
  "bytes",
  "paste",
@@ -996,7 +996,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-consensus"
-version = "0.0.43"
+version = "0.0.44"
 dependencies = [
  "bytes",
  "cfg-if",
@@ -1021,7 +1021,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-cryptography"
-version = "0.0.43"
+version = "0.0.44"
 dependencies = [
  "blst",
  "bytes",
@@ -1041,7 +1041,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-deployer"
-version = "0.0.43"
+version = "0.0.44"
 dependencies = [
  "aws-config",
  "aws-sdk-ec2",
@@ -1060,7 +1060,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-flood"
-version = "0.0.43"
+version = "0.0.44"
 dependencies = [
  "clap",
  "commonware-cryptography",
@@ -1081,7 +1081,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-log"
-version = "0.0.43"
+version = "0.0.44"
 dependencies = [
  "bytes",
  "chrono",
@@ -1106,7 +1106,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-macros"
-version = "0.0.43"
+version = "0.0.44"
 dependencies = [
  "futures",
  "futures-timer",
@@ -1119,7 +1119,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-p2p"
-version = "0.0.43"
+version = "0.0.44"
 dependencies = [
  "bitvec",
  "bytes",
@@ -1143,7 +1143,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-resolver"
-version = "0.0.43"
+version = "0.0.44"
 dependencies = [
  "bimap",
  "bytes",
@@ -1167,7 +1167,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-runtime"
-version = "0.0.43"
+version = "0.0.44"
 dependencies = [
  "axum",
  "bytes",
@@ -1192,7 +1192,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-storage"
-version = "0.0.43"
+version = "0.0.44"
 dependencies = [
  "bytes",
  "commonware-codec",
@@ -1215,7 +1215,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-stream"
-version = "0.0.43"
+version = "0.0.44"
 dependencies = [
  "bytes",
  "chacha20poly1305",
@@ -1233,7 +1233,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-utils"
-version = "0.0.43"
+version = "0.0.44"
 dependencies = [
  "bytes",
  "commonware-codec",
@@ -1245,7 +1245,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-vrf"
-version = "0.0.43"
+version = "0.0.44"
 dependencies = [
  "bytes",
  "clap",
