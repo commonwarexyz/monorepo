@@ -183,7 +183,7 @@ pub fn partial_verify_message(
 /// that each `signature` is unique. If any of these assumptions are violated, an attacker can
 /// exploit this function to verify an incorrect aggregate signature.
 pub fn partial_aggregate_signatures(
-    partials: &[PartialSignature],
+    partials: &[&PartialSignature],
 ) -> Option<(u32, group::Signature)> {
     if partials.is_empty() {
         return None;
@@ -209,7 +209,7 @@ pub fn partial_verify_multiple_messages(
     public: &poly::Public,
     partial_signer: u32,
     messages: &[(Option<&[u8]>, &[u8])],
-    signatures: &[PartialSignature],
+    signatures: &[&PartialSignature],
 ) -> Result<(), Error> {
     // Aggregate the partial signatures
     let (index, signature) =

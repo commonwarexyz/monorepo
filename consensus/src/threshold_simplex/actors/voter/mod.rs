@@ -2,28 +2,27 @@ mod actor;
 mod ingress;
 
 use crate::{
-    threshold_simplex::{Context, View},
-    Automaton, Committer, Relay, ThresholdSupervisor,
+    threshold_simplex::types::{Activity, Context, View},
+    Automaton, Relay, Reporter, ThresholdSupervisor,
 };
 pub use actor::Actor;
-use commonware_cryptography::bls12381::primitives::group;
 use commonware_cryptography::Scheme;
-use commonware_utils::Array;
+use commonware_cryptography::{bls12381::primitives::group, Digest};
 pub use ingress::{Mailbox, Message};
 use std::time::Duration;
 
 pub struct Config<
     C: Scheme,
-    D: Array,
+    D: Digest,
     A: Automaton<Context = Context<D>>,
     R: Relay<Digest = D>,
-    F: Committer<Digest = D>,
+    F: Reporter<Activity = Activity<D>>,
     S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
 > {
     pub crypto: C,
     pub automaton: A,
     pub relay: R,
-    pub committer: F,
+    pub reporter: F,
     pub supervisor: S,
 
     pub namespace: Vec<u8>,
