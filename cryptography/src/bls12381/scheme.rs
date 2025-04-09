@@ -25,7 +25,7 @@ use super::primitives::{
 };
 use crate::{Array, Error, Signer, Specification, Verifier};
 use bytes::{Buf, BufMut};
-use commonware_codec::{Decode, Encode, Error as CodecError, SizedInfo};
+use commonware_codec::{Error as CodecError, FixedSize, Read, Write};
 use commonware_utils::hex;
 use rand::{CryptoRng, Rng};
 use std::{
@@ -100,23 +100,19 @@ pub struct PrivateKey {
     key: group::Private,
 }
 
-impl Encode for PrivateKey {
-    fn len_encoded(&self) -> usize {
-        group::PRIVATE_KEY_LENGTH
-    }
-
+impl Write for PrivateKey {
     fn write(&self, buf: &mut impl BufMut) {
         self.raw.write(buf);
     }
 }
 
-impl Decode<()> for PrivateKey {
-    fn read(buf: &mut impl Buf, _: ()) -> Result<Self, CodecError> {
+impl Read for PrivateKey {
+    fn read_cfg(buf: &mut impl Buf, _: ()) -> Result<Self, CodecError> {
         Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
     }
 }
 
-impl SizedInfo for PrivateKey {
+impl FixedSize for PrivateKey {
     const LEN_ENCODED: usize = group::PRIVATE_KEY_LENGTH;
 }
 
@@ -206,23 +202,19 @@ pub struct PublicKey {
     key: group::Public,
 }
 
-impl Encode for PublicKey {
-    fn len_encoded(&self) -> usize {
-        group::PUBLIC_KEY_LENGTH
-    }
-
+impl Write for PublicKey {
     fn write(&self, buf: &mut impl BufMut) {
         self.raw.write(buf);
     }
 }
 
-impl Decode<()> for PublicKey {
-    fn read(buf: &mut impl Buf, _: ()) -> Result<Self, CodecError> {
+impl Read for PublicKey {
+    fn read_cfg(buf: &mut impl Buf, _: ()) -> Result<Self, CodecError> {
         Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
     }
 }
 
-impl SizedInfo for PublicKey {
+impl FixedSize for PublicKey {
     const LEN_ENCODED: usize = group::PUBLIC_KEY_LENGTH;
 }
 
@@ -312,23 +304,19 @@ pub struct Signature {
     signature: group::Signature,
 }
 
-impl Encode for Signature {
-    fn len_encoded(&self) -> usize {
-        group::SIGNATURE_LENGTH
-    }
-
+impl Write for Signature {
     fn write(&self, buf: &mut impl BufMut) {
         self.raw.write(buf);
     }
 }
 
-impl Decode<()> for Signature {
-    fn read(buf: &mut impl Buf, _: ()) -> Result<Self, CodecError> {
+impl Read for Signature {
+    fn read_cfg(buf: &mut impl Buf, _: ()) -> Result<Self, CodecError> {
         Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
     }
 }
 
-impl SizedInfo for Signature {
+impl FixedSize for Signature {
     const LEN_ENCODED: usize = group::SIGNATURE_LENGTH;
 }
 
@@ -415,6 +403,7 @@ impl Display for Signature {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_codec::{DecodeExt, Encode};
 
     #[test]
     fn test_codec_private_key() {
@@ -423,7 +412,7 @@ mod tests {
                 .unwrap();
         let encoded = original.encode();
         assert_eq!(encoded.len(), PrivateKey::LEN_ENCODED);
-        let decoded = PrivateKey::decode(encoded, ()).unwrap();
+        let decoded = PrivateKey::decode(encoded).unwrap();
         assert_eq!(original, decoded);
     }
 
@@ -434,7 +423,7 @@ mod tests {
                 .unwrap();
         let encoded = original.encode();
         assert_eq!(encoded.len(), PublicKey::LEN_ENCODED);
-        let decoded = PublicKey::decode(encoded, ()).unwrap();
+        let decoded = PublicKey::decode(encoded).unwrap();
         assert_eq!(original, decoded);
     }
 
@@ -445,7 +434,7 @@ mod tests {
                 .unwrap();
         let encoded = original.encode();
         assert_eq!(encoded.len(), Signature::LEN_ENCODED);
-        let decoded = Signature::decode(encoded, ()).unwrap();
+        let decoded = Signature::decode(encoded).unwrap();
         assert_eq!(original, decoded);
     }
 

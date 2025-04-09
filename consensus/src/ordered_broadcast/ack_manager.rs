@@ -154,7 +154,7 @@ mod tests {
         super::{namespace, parsed, serializer},
         *,
     };
-    use commonware_codec::SizedInfo;
+    use commonware_codec::FixedSize;
     use commonware_cryptography::{bls12381::dkg::ops::generate_shares, ed25519, sha256};
     use commonware_runtime::deterministic::Executor;
 

@@ -4,7 +4,7 @@
 //! based on a `crate::Journal`.
 
 use bytes::{Buf, BufMut};
-use commonware_codec::{Decode, Encode, Error as CodecError, SizedInfo};
+use commonware_codec::{Error as CodecError, FixedSize, Read, Write};
 use commonware_utils::Array;
 use std::{
     cmp::{Ord, PartialOrd},
@@ -145,26 +145,22 @@ impl<K: Array, V: Array> Operation<K, V> {
     }
 }
 
-impl<K: Array, V: Array> Encode for Operation<K, V> {
-    fn len_encoded(&self) -> usize {
-        Self::LEN_ENCODED
-    }
-
+impl<K: Array, V: Array> Write for Operation<K, V> {
     fn write(&self, buf: &mut impl BufMut) {
         assert!(self.data.len() == Self::LEN_ENCODED);
         buf.put_slice(&self.data);
     }
 }
 
-impl<K: Array, V: Array> Decode<()> for Operation<K, V> {
-    fn read(buf: &mut impl Buf, _: ()) -> Result<Self, CodecError> {
+impl<K: Array, V: Array> Read for Operation<K, V> {
+    fn read_cfg(buf: &mut impl Buf, _: ()) -> Result<Self, CodecError> {
         let mut value = vec![0u8; Self::LEN_ENCODED];
         buf.copy_to_slice(&mut value);
         Self::try_from(&value).map_err(|e: Error<K, V>| CodecError::Wrapped("Operation", e.into()))
     }
 }
 
-impl<K: Array, V: Array> SizedInfo for Operation<K, V> {
+impl<K: Array, V: Array> FixedSize for Operation<K, V> {
     const LEN_ENCODED: usize = K::LEN_ENCODED + 1 + V::LEN_ENCODED;
 }
 
@@ -253,6 +249,7 @@ impl<K: Array, V: Array> Display for Operation<K, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_codec::{DecodeExt, Encode};
     use commonware_utils::array::U64;
 
     #[test]
@@ -338,7 +335,7 @@ mod tests {
         assert_eq!(encoded.len(), Operation::<U64, U64>::LEN_ENCODED);
         assert_eq!(encoded, update_op.as_ref());
 
-        let decoded = Operation::decode(encoded, ()).unwrap();
+        let decoded = Operation::decode(encoded).unwrap();
         assert_eq!(update_op, decoded);
     }
 }

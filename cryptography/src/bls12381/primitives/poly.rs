@@ -11,7 +11,7 @@ use crate::bls12381::primitives::{
     Error,
 };
 use bytes::BufMut;
-use commonware_codec::SizedInfo;
+use commonware_codec::FixedSize;
 use rand::{rngs::OsRng, RngCore};
 use std::collections::BTreeMap;
 

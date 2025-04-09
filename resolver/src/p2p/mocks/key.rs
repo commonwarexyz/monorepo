@@ -1,5 +1,5 @@
 use bytes::{Buf, BufMut};
-use commonware_codec::{Decode, Encode, Error as CodecError, SizedInfo};
+use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_utils::Array;
 use std::{fmt, ops::Deref};
 use thiserror::Error;
@@ -51,23 +51,19 @@ impl TryFrom<Vec<u8>> for Key {
     }
 }
 
-impl Encode for Key {
-    fn len_encoded(&self) -> usize {
-        Self::LEN_ENCODED
-    }
-
+impl Write for Key {
     fn write(&self, buf: &mut impl BufMut) {
         self.0.write(buf);
     }
 }
 
-impl Decode<()> for Key {
-    fn read(buf: &mut impl Buf, _: ()) -> Result<Self, CodecError> {
-        u8::read(buf, ()).map(Self)
+impl Read for Key {
+    fn read_cfg(buf: &mut impl Buf, _: ()) -> Result<Self, CodecError> {
+        u8::read(buf).map(Self)
     }
 }
 
-impl SizedInfo for Key {
+impl FixedSize for Key {
     const LEN_ENCODED: usize = u8::LEN_ENCODED;
 }
 

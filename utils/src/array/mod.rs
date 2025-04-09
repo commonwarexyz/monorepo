@@ -1,5 +1,5 @@
 use bytes::Buf;
-use commonware_codec::{Codec, SizedInfo};
+use commonware_codec::{Decode, Encode, FixedSize};
 use std::{
     cmp::{Ord, PartialOrd},
     error::Error as StdError,
@@ -48,8 +48,9 @@ pub trait Array:
     + for<'a> TryFrom<&'a [u8], Error = <Self as Array>::Error>
     + for<'a> TryFrom<&'a Vec<u8>, Error = <Self as Array>::Error>
     + TryFrom<Vec<u8>, Error = <Self as Array>::Error>
-    + Codec<()>
-    + SizedInfo
+    + FixedSize
+    + Encode
+    + Decode
 {
     /// Errors returned when parsing an invalid byte sequence.
     type Error: StdError + Send + Sync + 'static;

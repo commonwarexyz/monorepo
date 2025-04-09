@@ -1,35 +1,29 @@
 //! Implementations of Codec for common types
 
-use std::ops::RangeBounds;
-
-use crate::{util::at_least, varint, Decode, Encode, Error, SizedInfo};
+use crate::{util::at_least, varint, Encode, Error, FixedSize, Read, ReadExt, Write};
 use bytes::{Buf, BufMut, Bytes};
 use paste::paste;
+use std::ops::RangeBounds;
 
 // Numeric types implementation
 macro_rules! impl_numeric {
     ($type:ty, $read_method:ident, $write_method:ident) => {
-        impl Encode for $type {
-            #[inline]
-            fn len_encoded(&self) -> usize {
-                Self::LEN_ENCODED
-            }
-
+        impl Write for $type {
             #[inline]
             fn write(&self, buf: &mut impl BufMut) {
                 buf.$write_method(*self);
             }
         }
 
-        impl Decode<()> for $type {
+        impl Read for $type {
             #[inline]
-            fn read(buf: &mut impl Buf, _: ()) -> Result<Self, Error> {
+            fn read_cfg(buf: &mut impl Buf, _: ()) -> Result<Self, Error> {
                 at_least(buf, std::mem::size_of::<$type>())?;
                 Ok(buf.$read_method())
             }
         }
 
-        impl SizedInfo for $type {
+        impl FixedSize for $type {
             const LEN_ENCODED: usize = std::mem::size_of::<$type>();
         }
     };
@@ -49,21 +43,16 @@ impl_numeric!(f32, get_f32, put_f32);
 impl_numeric!(f64, get_f64, put_f64);
 
 // Bool implementation
-impl Encode for bool {
-    #[inline]
-    fn len_encoded(&self) -> usize {
-        Self::LEN_ENCODED
-    }
-
+impl Write for bool {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {
         buf.put_u8(if *self { 1 } else { 0 });
     }
 }
 
-impl Decode<()> for bool {
+impl Read for bool {
     #[inline]
-    fn read(buf: &mut impl Buf, _: ()) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, _: ()) -> Result<Self, Error> {
         at_least(buf, 1)?;
         match buf.get_u8() {
             0 => Ok(false),
@@ -73,19 +62,21 @@ impl Decode<()> for bool {
     }
 }
 
-impl SizedInfo for bool {
+impl FixedSize for bool {
     const LEN_ENCODED: usize = 1;
 }
 
 // Bytes implementation
-impl Encode for Bytes {
+impl Write for Bytes {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {
         let len = u32::try_from(self.len()).expect("Bytes length exceeds u32");
         varint::write(len, buf);
         buf.put_slice(self);
     }
+}
 
+impl Encode for Bytes {
     #[inline]
     fn len_encoded(&self) -> usize {
         let len = u32::try_from(self.len()).expect("Bytes length exceeds u32");
@@ -93,9 +84,9 @@ impl Encode for Bytes {
     }
 }
 
-impl<R: RangeBounds<usize>> Decode<R> for Bytes {
+impl<R: RangeBounds<usize>> Read<R> for Bytes {
     #[inline]
-    fn read(buf: &mut impl Buf, cfg: R) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, cfg: R) -> Result<Self, Error> {
         let len32 = varint::read::<u32>(buf)?;
         let len = usize::try_from(len32).map_err(|_| Error::InvalidVarint)?;
         if !cfg.contains(&len) {
@@ -107,21 +98,16 @@ impl<R: RangeBounds<usize>> Decode<R> for Bytes {
 }
 
 // Constant-size array implementation
-impl<const N: usize> Encode for [u8; N] {
-    #[inline]
-    fn len_encoded(&self) -> usize {
-        N
-    }
-
+impl<const N: usize> Write for [u8; N] {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {
         buf.put(&self[..]);
     }
 }
 
-impl<const N: usize> Decode<()> for [u8; N] {
+impl<const N: usize> Read for [u8; N] {
     #[inline]
-    fn read(buf: &mut impl Buf, _: ()) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, _: ()) -> Result<Self, Error> {
         at_least(buf, N)?;
         let mut dst = [0; N];
         buf.copy_to_slice(&mut dst);
@@ -129,20 +115,12 @@ impl<const N: usize> Decode<()> for [u8; N] {
     }
 }
 
-impl<const N: usize> SizedInfo for [u8; N] {
+impl<const N: usize> FixedSize for [u8; N] {
     const LEN_ENCODED: usize = N;
 }
 
 // Option implementation
-impl<T: Encode> Encode for Option<T> {
-    #[inline]
-    fn len_encoded(&self) -> usize {
-        match self {
-            Some(inner) => 1 + inner.len_encoded(),
-            None => 1,
-        }
-    }
-
+impl<T: Encode> Write for Option<T> {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {
         self.is_some().write(buf);
@@ -152,18 +130,65 @@ impl<T: Encode> Encode for Option<T> {
     }
 }
 
-impl<C, T: Decode<C>> Decode<C> for Option<T> {
+impl<T: Encode> Encode for Option<T> {
     #[inline]
-    fn read(buf: &mut impl Buf, cfg: C) -> Result<Self, Error> {
-        if bool::read(buf, ())? {
-            Ok(Some(T::read(buf, cfg)?))
+    fn len_encoded(&self) -> usize {
+        match self {
+            Some(inner) => 1 + inner.len_encoded(),
+            None => 1,
+        }
+    }
+}
+
+impl<Cfg, T: Read<Cfg>> Read<Cfg> for Option<T> {
+    #[inline]
+    fn read_cfg(buf: &mut impl Buf, cfg: Cfg) -> Result<Self, Error> {
+        if bool::read(buf)? {
+            Ok(Some(T::read_cfg(buf, cfg)?))
         } else {
             Ok(None)
         }
     }
 }
 
+// Vec implementation
+impl<T: Write> Write for Vec<T> {
+    #[inline]
+    fn write(&self, buf: &mut impl BufMut) {
+        let len = u32::try_from(self.len()).expect("Vec length exceeds u32");
+        varint::write(len, buf);
+        for item in self {
+            item.write(buf);
+        }
+    }
+}
+
+impl<T: Encode> Encode for Vec<T> {
+    #[inline]
+    fn len_encoded(&self) -> usize {
+        let len = u32::try_from(self.len()).expect("Vec length exceeds u32");
+        varint::size(len) + self.iter().map(Encode::len_encoded).sum::<usize>()
+    }
+}
+
+impl<R: RangeBounds<usize>, Cfg: Copy, T: Read<Cfg>> Read<(R, Cfg)> for Vec<T> {
+    #[inline]
+    fn read_cfg(buf: &mut impl Buf, (range, cfg): (R, Cfg)) -> Result<Self, Error> {
+        let len32 = varint::read::<u32>(buf)?;
+        let len = usize::try_from(len32).map_err(|_| Error::InvalidVarint)?;
+        if !range.contains(&len) {
+            return Err(Error::InvalidLength(len));
+        }
+        let mut vec = Vec::with_capacity(len);
+        for _ in 0..len {
+            vec.push(T::read_cfg(buf, cfg)?);
+        }
+        Ok(vec)
+    }
+}
+
 // Tuple implementation
+// Each type must have the same configuration type for reading.
 macro_rules! impl_codec_for_tuple {
     ($($index:literal),*) => {
         paste! {
@@ -172,17 +197,19 @@ macro_rules! impl_codec_for_tuple {
                 fn len_encoded(&self) -> usize {
                     0 $( + self.$index.len_encoded() )*
                 }
+            }
 
+            impl<$( [<T $index>]: Write ),*> Write for ( $( [<T $index>], )* ) {
                 #[inline]
                 fn write(&self, buf: &mut impl BufMut) {
                     $( self.$index.write(buf); )*
                 }
             }
 
-            impl <$( [<C $index>]),* , $( [<T $index>]: Decode<[<C $index>]> ),*> Decode<( $( [<C $index>], )* )> for ( $( [<T $index>], )* ) {
+            impl <Cfg: Copy, $( [<T $index>]: Read<Cfg> ),*> Read<Cfg> for ( $( [<T $index>], )* ) {
                 #[inline]
-                fn read(buf: &mut impl Buf, cfg: ( $( [<C $index>], )* )) -> Result<Self, Error> {
-                    Ok(( $( [<T $index>]::read(buf, cfg.$index)?, )* ))
+                fn read_cfg(buf: &mut impl Buf, cfg: Cfg) -> Result<Self, Error> {
+                    Ok(( $( [<T $index>]::read_cfg(buf, cfg)?, )* ))
                 }
             }
         }
@@ -203,44 +230,10 @@ impl_codec_for_tuple!(0, 1, 2, 3, 4, 5, 6, 7, 8, 9);
 impl_codec_for_tuple!(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
 impl_codec_for_tuple!(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11);
 
-// Vec implementation
-impl<T: Encode> Encode for Vec<T> {
-    #[inline]
-    fn len_encoded(&self) -> usize {
-        let len = u32::try_from(self.len()).expect("Vec length exceeds u32");
-        varint::size(len) + self.iter().map(Encode::len_encoded).sum::<usize>()
-    }
-
-    #[inline]
-    fn write(&self, buf: &mut impl BufMut) {
-        let len = u32::try_from(self.len()).expect("Vec length exceeds u32");
-        varint::write(len, buf);
-        for item in self {
-            item.write(buf);
-        }
-    }
-}
-
-impl<R: RangeBounds<usize>, C: Copy, T: Decode<C>> Decode<(R, C)> for Vec<T> {
-    #[inline]
-    fn read(buf: &mut impl Buf, (range, cfg): (R, C)) -> Result<Self, Error> {
-        let len32 = varint::read::<u32>(buf)?;
-        let len = usize::try_from(len32).map_err(|_| Error::InvalidVarint)?;
-        if !range.contains(&len) {
-            return Err(Error::InvalidLength(len));
-        }
-        let mut vec = Vec::with_capacity(len);
-        for _ in 0..len {
-            vec.push(T::read(buf, cfg)?);
-        }
-        Ok(vec)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codec::SizedEncode;
+    use crate::{Decode, DecodeExt, EncodeFixed};
     use bytes::Bytes;
 
     // Float tests
@@ -255,14 +248,13 @@ mod tests {
                     for value in values.iter() {
                         let encoded = value.encode();
                         assert_eq!(encoded.len(), expected_len);
-                        let decoded = <$type>::decode(encoded, ()).unwrap();
+                        let decoded = <$type>::decode(encoded).unwrap();
                         assert_eq!(*value, decoded);
                         assert_eq!(Encode::len_encoded(value), expected_len);
-                        assert_eq!(SizedEncode::len_encoded(value), expected_len);
 
                         let fixed: [u8; $size] = value.encode_fixed();
                         assert_eq!(fixed.len(), expected_len);
-                        let decoded = <$type>::decode(Bytes::copy_from_slice(&fixed), ()).unwrap();
+                        let decoded = <$type>::decode(Bytes::copy_from_slice(&fixed)).unwrap();
                         assert_eq!(*value, decoded);
                     }
                 }
@@ -303,10 +295,9 @@ mod tests {
         for value in values.iter() {
             let encoded = value.encode();
             assert_eq!(encoded.len(), 1);
-            let decoded = bool::decode(encoded, ()).unwrap();
+            let decoded = bool::decode(encoded).unwrap();
             assert_eq!(*value, decoded);
             assert_eq!(Encode::len_encoded(value), 1);
-            assert_eq!(SizedEncode::len_encoded(value), 1);
         }
     }
 
@@ -326,18 +317,18 @@ mod tests {
             let len = value.len();
 
             // Valid decoding
-            let decoded = Bytes::decode(encoded, len..=len).unwrap();
+            let decoded = Bytes::decode_cfg(encoded, len..=len).unwrap();
             assert_eq!(value, decoded);
 
             // Failure for too long
             matches!(
-                Bytes::decode(value.encode(), 0..len),
+                Bytes::decode_cfg(value.encode(), 0..len),
                 Err(Error::InvalidLength(_))
             );
 
             // Failure for too short
             matches!(
-                Bytes::decode(value.encode(), len + 1..),
+                Bytes::decode_cfg(value.encode(), len + 1..),
                 Err(Error::InvalidLength(_))
             );
         }
@@ -347,7 +338,7 @@ mod tests {
     fn test_array() {
         let values = [1u8, 2, 3];
         let encoded = values.encode();
-        let decoded = <[u8; 3]>::decode(encoded, ()).unwrap();
+        let decoded = <[u8; 3]>::decode(encoded).unwrap();
         assert_eq!(values, decoded);
     }
 
@@ -356,7 +347,7 @@ mod tests {
         let option_values = [Some(42u32), None];
         for value in option_values {
             let encoded = value.encode();
-            let decoded = Option::<u32>::decode(encoded, ()).unwrap();
+            let decoded = Option::<u32>::decode(encoded).unwrap();
             assert_eq!(value, decoded);
         }
     }
@@ -376,7 +367,7 @@ mod tests {
         let tuple_values = [(1u16, None), (1u16, Some(2u32))];
         for value in tuple_values {
             let encoded = value.encode();
-            let decoded = <(u16, Option<u32>)>::decode(encoded, ((), ())).unwrap();
+            let decoded = <(u16, Option<u32>)>::decode(encoded).unwrap();
             assert_eq!(value, decoded);
         }
     }
@@ -390,18 +381,18 @@ mod tests {
 
             // Valid decoding
             let len = value.len();
-            let decoded = Vec::<u8>::decode(encoded, (len..=len, ())).unwrap();
+            let decoded = Vec::<u8>::decode_cfg(encoded, (len..=len, ())).unwrap();
             assert_eq!(value, decoded);
 
             // Failure for too long
             matches!(
-                Vec::<u8>::decode(value.encode(), (0..len, ())),
+                Vec::<u8>::decode_cfg(value.encode(), (0..len, ())),
                 Err(Error::InvalidLength(_))
             );
 
             // Failure for too short
             matches!(
-                Vec::<u8>::decode(value.encode(), (len + 1.., ())),
+                Vec::<u8>::decode_cfg(value.encode(), (len + 1.., ())),
                 Err(Error::InvalidLength(_))
             );
         }

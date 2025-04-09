@@ -41,7 +41,7 @@
 //! ```
 
 use bytes::Buf;
-use commonware_codec::SizedInfo;
+use commonware_codec::FixedSize;
 use commonware_cryptography::Hasher;
 use commonware_utils::Array;
 use thiserror::Error;

@@ -3,69 +3,120 @@
 use crate::error::Error;
 use bytes::{Buf, BufMut, BytesMut};
 
-/// Trait for types that know their encoded length and can be written to a buffer.
-pub trait Encode {
-    /// Returns the encoded length of this value.
-    fn len_encoded(&self) -> usize;
+/// Trait for all types. By default, types have no size information.
+pub trait Size {
+    /// The length of the encoded value.
+    ///
+    /// Should be left as `None` for types that do not have a fixed size.
+    const FIXED_SIZE: Option<usize> = None;
+}
 
+impl<T> Size for T {}
+
+/// Trait for types that can be written (encoded) to a buffer.
+pub trait Write {
     /// Encodes this value by writing to a buffer.
     ///
-    /// Implementers MUST write exactly `len_encoded()` bytes.
+    /// Implementations should panic if the buffer doesn't have enough capacity.
     fn write(&self, buf: &mut impl BufMut);
+}
+
+/// Trait for types that can be read/decoded from a buffer.
+///
+/// The `Cfg` type parameter allows for configuration during the read process. For example, it can
+/// be used to limit the maximum size of allocated buffers for safety when decoding untrusted data.
+/// Use `()` for types that do not require configuration.
+pub trait Read<Cfg = ()>: Sized {
+    /// Reads a value from the buffer using the provided configuration `cfg`, consuming the
+    /// necessary bytes.
+    ///
+    /// Returns an error if decoding fails (e.g., invalid data, not enough bytes initially).
+    fn read_cfg(buf: &mut impl Buf, cfg: Cfg) -> Result<Self, Error>;
+}
+
+/// Trait for types that can be encoded to a buffer.
+pub trait Encode: Write {
+    /// Returns the encoded length of this value.
+    ///
+    /// This method MUST return the exact number of bytes that will be written by `write()`.
+    fn len_encoded(&self) -> usize;
 
     /// Encodes a value to a `BytesMut` buffer.
+    ///
+    /// Panics if the `write` implementation does not write the expected number of bytes.
     ///
     /// (Provided method).
     fn encode(&self) -> BytesMut {
         let len = self.len_encoded();
         let mut buffer = BytesMut::with_capacity(len);
         self.write(&mut buffer);
-        assert_eq!(
-            buffer.len(),
-            len,
-            "write() did not write expected len_encoded() bytes"
-        );
+        assert_eq!(buffer.len(), len, "write() did not write expected bytes");
         buffer
     }
 }
 
-/// Trait for types that can be read/decoded from a buffer.
-pub trait Decode<C>: Sized {
-    /// Reads a value from the buffer, consuming the necessary bytes.
-    /// Returns an error if decoding fails (e.g., invalid data, not enough bytes initially).
-    fn read(buf: &mut impl Buf, cfg: C) -> Result<Self, Error>;
+// Automatically implement `Encode` for types with a known size.
+// Otherwise, the type must define its own `len_encoded()` method.
+impl<T: EncodeFixed> Encode for T {
+    fn len_encoded(&self) -> usize {
+        Self::LEN_ENCODED
+    }
+}
 
+/// Trait for types that can be decoded from a buffer, ensuring the entire buffer is consumed.
+pub trait Decode<Cfg = ()>: Read<Cfg> + Size {
     /// Decodes a value from a buffer, ensuring the buffer is fully consumed.
     ///
+    /// For types with a known size, this method first checks that the buffer has the expected size.
+    ///
     /// (Provided method).
-    fn decode<B: Buf>(mut buf: B, cfg: C) -> Result<Self, Error> {
-        let result = Self::read(&mut buf, cfg)?;
+    fn decode_cfg(mut buf: impl Buf, cfg: Cfg) -> Result<Self, Error> {
+        // If we can, before reading, check that the buffer has the expected size.
+        if let Some(size) = Self::FIXED_SIZE {
+            if buf.remaining() < size {
+                return Err(Error::EndOfBuffer);
+            }
+            if buf.remaining() > size {
+                return Err(Error::ExtraData(buf.remaining() - size));
+            }
+        }
+
+        let result = Self::read_cfg(&mut buf, cfg)?;
+
+        // Check that the buffer is fully consumed.
         let remaining = buf.remaining();
         if remaining > 0 {
             return Err(Error::ExtraData(remaining));
         }
+
         Ok(result)
     }
 }
 
+// Automatically implement `Decode` for types that implement `Read`.
+impl<Cfg, T: Read<Cfg>> Decode<Cfg> for T {}
+
 /// Trait for types that can be encoded and decoded.
-pub trait Codec<C>: Encode + Decode<C> {}
+pub trait Codec<Cfg = ()>: Encode + Decode<Cfg> {}
+
+/// Automatically implement `Codec` for types that implement `Encode` and `Decode`.
+impl<Cfg, T: Encode + Decode<Cfg>> Codec<Cfg> for T {}
 
 /// Trait for types with a known, fixed encoded length.
-pub trait SizedInfo {
+pub trait FixedSize: Size {
+    /// The length of the encoded value.
     const LEN_ENCODED: usize;
+
+    /// Overwrites [`Size::FIXED_SIZE`] with the encoded length.
+    const FIXED_SIZE: Option<usize> = Some(Self::LEN_ENCODED);
 }
 
 /// Trait for types that can be encoded to a fixed-size byte array.
-pub trait SizedEncode: Encode + SizedInfo {
-    /// Returns the encoded length of this value.
-    ///
-    /// (Provided method. Overrides [`Encode::len_encoded`]).
-    fn len_encoded(&self) -> usize {
-        Self::LEN_ENCODED
-    }
-
+pub trait EncodeFixed: Write + FixedSize {
     /// Encodes a value to a fixed-size byte array.
+    ///
+    /// The caller MUST ensure `N` is equal to `Self::LEN_ENCODED`.
+    /// Panics if the `write` implementation does not write exactly `N` bytes.
     ///
     /// (Provided method).
     fn encode_fixed<const N: usize>(&self) -> [u8; N] {
@@ -87,38 +138,30 @@ pub trait SizedEncode: Encode + SizedInfo {
     }
 }
 
-/// Trait for types that can be decoded from a buffer with a fixed size.
-pub trait SizedDecode<C>: Decode<C> + SizedInfo {
-    /// Decodes a value from a buffer, ensuring exactly LEN_ENCODED bytes are consumed.
-    ///
-    /// (Provided method. Overrides [`Decode::decode`]).
-    fn decode<B: Buf>(mut buf: B, cfg: C) -> Result<Self, Error> {
-        // Before doing work, check that the buffer has exactly the expected size.
-        if buf.remaining() < Self::LEN_ENCODED {
-            return Err(Error::EndOfBuffer);
-        }
-        if buf.remaining() > Self::LEN_ENCODED {
-            return Err(Error::ExtraData(buf.remaining() - Self::LEN_ENCODED));
-        }
+// Automatically implement `EncodeFixed` for types that implement `Write` and `FixedSize`.
+impl<T: Write + FixedSize> EncodeFixed for T {}
 
-        // Read the value from the buffer.
-        let result = Self::read(&mut buf, cfg)?;
-        assert!(
-            !buf.has_remaining(),
-            "Read() did not consume the expected number of bytes"
-        );
-        Ok(result)
+/// Extension trait providing an ergonomic read method for types requiring no configuration.
+pub trait ReadExt: Read<()> {
+    /// Reads a value using the default `()` config.
+    fn read(buf: &mut impl Buf) -> Result<Self, Error> {
+        <Self as Read<()>>::read_cfg(buf, ())
     }
 }
 
-/// Trait for types that are both encodable and decodable with a fixed size.
-pub trait SizedCodec<C>: SizedEncode + SizedDecode<C> + SizedInfo {}
+// Automatically implement `ReadExt` for types that implement `Read` with no config.
+impl<T: Read<()>> ReadExt for T {}
 
-// Blanket implementations.
-impl<C, T: Encode + Decode<C>> Codec<C> for T {}
-impl<T: Encode + SizedInfo> SizedEncode for T {}
-impl<C, T: Decode<C> + SizedInfo> SizedDecode<C> for T {}
-impl<C, T: SizedEncode + SizedDecode<C>> SizedCodec<C> for T {}
+/// Extension trait providing ergonomic decode method for types requiring no configuration.
+pub trait DecodeExt: Decode<()> {
+    /// Decodes a value using the default `()` config.
+    fn decode(buf: impl Buf) -> Result<Self, Error> {
+        <Self as Decode<()>>::decode_cfg(buf, ())
+    }
+}
+
+// Automatically implement `DecodeExt` for types that implement `Decode` with no config.
+impl<T: Decode<()>> DecodeExt for T {}
 
 #[cfg(test)]
 mod tests {
@@ -129,27 +172,20 @@ mod tests {
     #[test]
     fn test_insufficient_buffer() {
         let mut reader = Bytes::from_static(&[0x01, 0x02]);
-        assert!(matches!(
-            u32::read(&mut reader, ()),
-            Err(Error::EndOfBuffer)
-        ));
+        assert!(matches!(u32::read(&mut reader), Err(Error::EndOfBuffer)));
     }
 
     #[test]
     fn test_extra_data() {
         let encoded = Bytes::from_static(&[0x01, 0x02]);
-        assert!(matches!(
-            <u8 as Decode<()>>::decode(encoded, ()),
-            Err(Error::ExtraData(1))
-        ));
+        assert!(matches!(u8::decode(encoded), Err(Error::ExtraData(1))));
     }
 
     #[test]
     fn test_encode_fixed() {
         let value = 42u32;
         let encoded: [u8; 4] = value.encode_fixed();
-        let decoded =
-            <u32 as SizedDecode<()>>::decode(Bytes::copy_from_slice(&encoded), ()).unwrap();
+        let decoded = <u32>::decode(&encoded[..]).unwrap();
         assert_eq!(value, decoded);
     }
 

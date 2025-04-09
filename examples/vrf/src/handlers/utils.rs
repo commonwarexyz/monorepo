@@ -1,5 +1,5 @@
 use bytes::BufMut;
-use commonware_codec::SizedInfo;
+use commonware_codec::FixedSize;
 use commonware_cryptography::bls12381::primitives::{group::Element, poly};
 use commonware_utils::{hex, Array};
 

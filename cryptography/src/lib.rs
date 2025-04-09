@@ -201,7 +201,7 @@ pub trait Hasher: Clone + Send + Sync + 'static {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::SizedInfo;
+    use commonware_codec::FixedSize;
     use rand::rngs::OsRng;
 
     fn test_validate<C: Scheme>() {

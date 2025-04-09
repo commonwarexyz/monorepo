@@ -48,7 +48,7 @@ impl<D: Digest, M: Digestible<D>> Mailbox<D, M> {
     }
 }
 
-impl<C, D: Digest, M: Codec<C> + Digestible<D>> Broadcaster<C> for Mailbox<D, M> {
+impl<Cfg, D: Digest, M: Codec<Cfg> + Digestible<D>> Broadcaster<Cfg> for Mailbox<D, M> {
     type Message = M;
 
     async fn broadcast(&mut self, message: Self::Message) {

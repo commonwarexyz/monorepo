@@ -1,6 +1,6 @@
 use bitvec::{order::Lsb0, vec};
 use bytes::{Buf, BufMut, Bytes};
-use commonware_codec::{util as CodecUtil, varint, Decode, Encode, Error};
+use commonware_codec::{util as CodecUtil, varint, Encode, Error, Read, ReadExt, Write};
 use commonware_cryptography::Verifier;
 use std::{net::SocketAddr, ops::RangeBounds};
 
@@ -36,7 +36,9 @@ impl<C: Verifier> Encode for Payload<C> {
             Payload::Data(data) => data.len_encoded(),
         }) + 1
     }
+}
 
+impl<C: Verifier> Write for Payload<C> {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
             Payload::BitVec(bitvec) => {
@@ -55,22 +57,22 @@ impl<C: Verifier> Encode for Payload<C> {
     }
 }
 
-impl<C: Verifier> Decode<PayloadCodecConfig> for Payload<C> {
-    fn read(buf: &mut impl Buf, cfg: PayloadCodecConfig) -> Result<Self, Error> {
-        let payload_type = <u8>::read(buf, ())?;
+impl<C: Verifier> Read<PayloadCodecConfig> for Payload<C> {
+    fn read_cfg(buf: &mut impl Buf, cfg: PayloadCodecConfig) -> Result<Self, Error> {
+        let payload_type = <u8>::read(buf)?;
         match payload_type {
             0 => {
-                let bitvec = BitVec::read(buf, cfg.max_bitvec)?;
+                let bitvec = BitVec::read_cfg(buf, cfg.max_bitvec)?;
                 Ok(Payload::BitVec(bitvec))
             }
             1 => {
-                let peers = Vec::<SignedPeerInfo<C>>::read(buf, (..=cfg.max_peers, ()))?;
+                let peers = Vec::<SignedPeerInfo<C>>::read_cfg(buf, (..=cfg.max_peers, ()))?;
                 Ok(Payload::Peers(peers))
             }
             2 => {
                 // Don't limit the size of the data to be read.
                 // The max message size should already be limited by the p2p layer.
-                let data = Data::read(buf, ..)?;
+                let data = Data::read_cfg(buf, ..)?;
                 Ok(Payload::Data(data))
             }
             _ => Err(Error::Invalid(
@@ -99,7 +101,9 @@ impl Encode for BitVec {
         let num_bytes = self.bits.len().div_ceil(8);
         self.index.len_encoded() + varint::size(len32) + num_bytes
     }
+}
 
+impl Write for BitVec {
     fn write(&self, buf: &mut impl BufMut) {
         self.index.write(buf);
         let len32 = u32::try_from(self.bits.len()).unwrap();
@@ -124,9 +128,9 @@ impl Encode for BitVec {
     }
 }
 
-impl Decode<usize> for BitVec {
-    fn read(buf: &mut impl Buf, max_bits: usize) -> Result<Self, Error> {
-        let index = u64::read(buf, ())?;
+impl Read<usize> for BitVec {
+    fn read_cfg(buf: &mut impl Buf, max_bits: usize) -> Result<Self, Error> {
+        let index = u64::read(buf)?;
         let len32: u32 = varint::read(buf)?;
         let len = usize::try_from(len32).map_err(|_| Error::InvalidVarint)?;
         if len > max_bits {
@@ -195,7 +199,9 @@ impl<C: Verifier> Encode for SignedPeerInfo<C> {
             + self.public_key.len_encoded()
             + self.signature.len_encoded()
     }
+}
 
+impl<C: Verifier> Write for SignedPeerInfo<C> {
     fn write(&self, buf: &mut impl BufMut) {
         self.socket.write(buf);
         self.timestamp.write(buf);
@@ -204,12 +210,12 @@ impl<C: Verifier> Encode for SignedPeerInfo<C> {
     }
 }
 
-impl<C: Verifier> Decode<()> for SignedPeerInfo<C> {
-    fn read(buf: &mut impl Buf, _: ()) -> Result<Self, Error> {
-        let socket = SocketAddr::read(buf, ())?;
-        let timestamp = u64::read(buf, ())?;
-        let public_key = C::PublicKey::read(buf, ())?;
-        let signature = C::Signature::read(buf, ())?;
+impl<C: Verifier> Read for SignedPeerInfo<C> {
+    fn read_cfg(buf: &mut impl Buf, _: ()) -> Result<Self, Error> {
+        let socket = SocketAddr::read(buf)?;
+        let timestamp = u64::read(buf)?;
+        let public_key = C::PublicKey::read(buf)?;
+        let signature = C::Signature::read(buf)?;
         Ok(SignedPeerInfo {
             socket,
             timestamp,
@@ -235,17 +241,19 @@ impl Encode for Data {
     fn len_encoded(&self) -> usize {
         self.channel.len_encoded() + self.message.len_encoded()
     }
+}
 
+impl Write for Data {
     fn write(&self, buf: &mut impl BufMut) {
         self.channel.write(buf);
         self.message.write(buf);
     }
 }
 
-impl<C: RangeBounds<usize>> Decode<C> for Data {
-    fn read(buf: &mut impl Buf, cfg: C) -> Result<Self, Error> {
-        let channel = u32::read(buf, ())?;
-        let message = Bytes::read(buf, cfg)?;
+impl<R: RangeBounds<usize>> Read<R> for Data {
+    fn read_cfg(buf: &mut impl Buf, range: R) -> Result<Self, Error> {
+        let channel = u32::read(buf)?;
+        let message = Bytes::read_cfg(buf, range)?;
         Ok(Data { channel, message })
     }
 }
@@ -254,6 +262,7 @@ impl<C: RangeBounds<usize>> Decode<C> for Data {
 mod tests {
     use super::*;
     use bytes::BytesMut;
+    use commonware_codec::Decode;
     use commonware_cryptography::{Secp256r1, Signer};
 
     fn signed_peer_info() -> SignedPeerInfo<Secp256r1> {
@@ -274,10 +283,10 @@ mod tests {
             bits.set_len(71);
         }
         let mut original = BitVec { index: 1234, bits };
-        let decoded = BitVec::decode(original.encode(), 71).unwrap();
+        let decoded = BitVec::decode_cfg(original.encode(), 71).unwrap();
         assert_eq!(original, decoded);
 
-        let too_short = BitVec::decode(original.encode(), 70);
+        let too_short = BitVec::decode_cfg(original.encode(), 70);
         assert!(matches!(too_short, Err(Error::InvalidLength(71))));
 
         // Test with a bit vector aligned with the byte size
@@ -285,7 +294,7 @@ mod tests {
             original.bits.set_len(64);
         }
         let encoded = original.encode();
-        let decoded = BitVec::decode(encoded, 64).unwrap();
+        let decoded = BitVec::decode_cfg(encoded, 64).unwrap();
         assert_eq!(original, decoded);
 
         // Test a zero-length bit vector
@@ -293,7 +302,7 @@ mod tests {
             original.bits.set_len(0);
         }
         let encoded = original.encode();
-        let decoded = BitVec::decode(encoded, 0).unwrap();
+        let decoded = BitVec::decode_cfg(encoded, 0).unwrap();
         assert_eq!(original, decoded);
     }
 
@@ -301,7 +310,7 @@ mod tests {
     fn test_signed_peer_info_codec() {
         let original = vec![signed_peer_info(), signed_peer_info(), signed_peer_info()];
         let encoded = original.encode();
-        let decoded = Vec::<SignedPeerInfo<Secp256r1>>::decode(encoded, (3..=3, ())).unwrap();
+        let decoded = Vec::<SignedPeerInfo<Secp256r1>>::decode_cfg(encoded, (3..=3, ())).unwrap();
         for (original, decoded) in original.iter().zip(decoded.iter()) {
             assert_eq!(original.socket, decoded.socket);
             assert_eq!(original.timestamp, decoded.timestamp);
@@ -309,10 +318,10 @@ mod tests {
             assert_eq!(original.signature, decoded.signature);
         }
 
-        let too_short = Vec::<SignedPeerInfo<Secp256r1>>::decode(original.encode(), (..3, ()));
+        let too_short = Vec::<SignedPeerInfo<Secp256r1>>::decode_cfg(original.encode(), (..3, ()));
         assert!(matches!(too_short, Err(Error::InvalidLength(3))));
 
-        let too_long = Vec::<SignedPeerInfo<Secp256r1>>::decode(original.encode(), (4.., ()));
+        let too_long = Vec::<SignedPeerInfo<Secp256r1>>::decode_cfg(original.encode(), (4.., ()));
         assert!(matches!(too_long, Err(Error::InvalidLength(3))));
     }
 
@@ -323,13 +332,13 @@ mod tests {
             message: Bytes::from("Hello, world!"),
         };
         let encoded = original.encode();
-        let decoded = Data::decode(encoded, 13..=13).unwrap();
+        let decoded = Data::decode_cfg(encoded, 13..=13).unwrap();
         assert_eq!(original, decoded);
 
-        let too_short = Data::decode(original.encode(), 0..13);
+        let too_short = Data::decode_cfg(original.encode(), 0..13);
         assert!(matches!(too_short, Err(Error::InvalidLength(13))));
 
-        let too_long = Data::decode(original.encode(), 14..);
+        let too_long = Data::decode_cfg(original.encode(), 14..);
         assert!(matches!(too_long, Err(Error::InvalidLength(13))));
     }
 
@@ -348,7 +357,7 @@ mod tests {
         }
         let original = BitVec { index: 1234, bits };
         let encoded: BytesMut = Payload::<Secp256r1>::BitVec(original.clone()).encode();
-        let decoded = match Payload::<Secp256r1>::decode(encoded, cfg.clone()) {
+        let decoded = match Payload::<Secp256r1>::decode_cfg(encoded, cfg.clone()) {
             Ok(Payload::<Secp256r1>::BitVec(b)) => b,
             _ => panic!(),
         };
@@ -357,7 +366,7 @@ mod tests {
         // Test Peers
         let original = vec![signed_peer_info(), signed_peer_info()];
         let encoded = Payload::Peers(original.clone()).encode();
-        let decoded = match Payload::<Secp256r1>::decode(encoded, cfg.clone()) {
+        let decoded = match Payload::<Secp256r1>::decode_cfg(encoded, cfg.clone()) {
             Ok(Payload::<Secp256r1>::Peers(p)) => p,
             _ => panic!(),
         };
@@ -374,7 +383,7 @@ mod tests {
             message: Bytes::from("Hello, world!"),
         };
         let encoded = Payload::<Secp256r1>::Data(original.clone()).encode();
-        let decoded = match Payload::<Secp256r1>::decode(encoded, cfg) {
+        let decoded = match Payload::<Secp256r1>::decode_cfg(encoded, cfg) {
             Ok(Payload::<Secp256r1>::Data(d)) => d,
             _ => panic!(),
         };
@@ -388,7 +397,7 @@ mod tests {
             max_bitvec: 1024,
         };
         let invalid_payload = [3, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
-        let result = Payload::<Secp256r1>::decode(&invalid_payload[..], cfg);
+        let result = Payload::<Secp256r1>::decode_cfg(&invalid_payload[..], cfg);
         assert!(result.is_err());
     }
 }

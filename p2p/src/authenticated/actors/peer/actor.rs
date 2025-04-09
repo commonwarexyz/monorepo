@@ -180,7 +180,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Ver
                         max_bitvec: self.max_peer_set_size,
                         max_peers: self.peer_gossip_max_count,
                     };
-                    let msg = match types::Payload::decode(msg, decode_config) {
+                    let msg = match types::Payload::decode_cfg(msg, decode_config) {
                         Ok(msg) => msg,
                         Err(err) => {
                             info!(?err, ?peer, "failed to decode message");

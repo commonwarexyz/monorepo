@@ -1,61 +1,46 @@
-use crate::{Decode, Encode, Error, SizedInfo};
+use crate::{Encode, Error, FixedSize, Read, ReadExt, Write};
 use bytes::{Buf, BufMut};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
-impl Encode for Ipv4Addr {
-    #[inline]
-    fn len_encoded(&self) -> usize {
-        Self::LEN_ENCODED
-    }
-
+impl Write for Ipv4Addr {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {
         self.to_bits().write(buf);
     }
 }
 
-impl Decode<()> for Ipv4Addr {
+impl Read for Ipv4Addr {
     #[inline]
-    fn read(buf: &mut impl Buf, _: ()) -> Result<Self, Error> {
-        let bits = <u32>::read(buf, ())?;
+    fn read_cfg(buf: &mut impl Buf, _: ()) -> Result<Self, Error> {
+        let bits = <u32>::read(buf)?;
         Ok(Ipv4Addr::from_bits(bits))
     }
 }
 
-impl SizedInfo for Ipv4Addr {
+impl FixedSize for Ipv4Addr {
     const LEN_ENCODED: usize = u32::LEN_ENCODED;
 }
 
-impl Encode for Ipv6Addr {
-    #[inline]
-    fn len_encoded(&self) -> usize {
-        Self::LEN_ENCODED
-    }
-
+impl Write for Ipv6Addr {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {
         self.to_bits().write(buf);
     }
 }
 
-impl Decode<()> for Ipv6Addr {
+impl Read for Ipv6Addr {
     #[inline]
-    fn read(buf: &mut impl Buf, _: ()) -> Result<Self, Error> {
-        let bits = <u128>::read(buf, ())?;
+    fn read_cfg(buf: &mut impl Buf, _: ()) -> Result<Self, Error> {
+        let bits = <u128>::read(buf)?;
         Ok(Ipv6Addr::from_bits(bits))
     }
 }
 
-impl SizedInfo for Ipv6Addr {
+impl FixedSize for Ipv6Addr {
     const LEN_ENCODED: usize = u128::LEN_ENCODED;
 }
 
-impl Encode for SocketAddrV4 {
-    #[inline]
-    fn len_encoded(&self) -> usize {
-        Self::LEN_ENCODED
-    }
-
+impl Write for SocketAddrV4 {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {
         self.ip().write(buf);
@@ -63,25 +48,20 @@ impl Encode for SocketAddrV4 {
     }
 }
 
-impl Decode<()> for SocketAddrV4 {
+impl Read for SocketAddrV4 {
     #[inline]
-    fn read(buf: &mut impl Buf, _: ()) -> Result<Self, Error> {
-        let ip = Ipv4Addr::read(buf, ())?;
-        let port = u16::read(buf, ())?;
+    fn read_cfg(buf: &mut impl Buf, _: ()) -> Result<Self, Error> {
+        let ip = Ipv4Addr::read(buf)?;
+        let port = u16::read(buf)?;
         Ok(Self::new(ip, port))
     }
 }
 
-impl SizedInfo for SocketAddrV4 {
+impl FixedSize for SocketAddrV4 {
     const LEN_ENCODED: usize = Ipv4Addr::LEN_ENCODED + u16::LEN_ENCODED;
 }
 
-impl Encode for SocketAddrV6 {
-    #[inline]
-    fn len_encoded(&self) -> usize {
-        Self::LEN_ENCODED
-    }
-
+impl Write for SocketAddrV6 {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {
         self.ip().write(buf);
@@ -89,29 +69,21 @@ impl Encode for SocketAddrV6 {
     }
 }
 
-impl Decode<()> for SocketAddrV6 {
+impl Read for SocketAddrV6 {
     #[inline]
-    fn read(buf: &mut impl Buf, _: ()) -> Result<Self, Error> {
-        let address = Ipv6Addr::read(buf, ())?;
-        let port = u16::read(buf, ())?;
+    fn read_cfg(buf: &mut impl Buf, _: ()) -> Result<Self, Error> {
+        let address = Ipv6Addr::read(buf)?;
+        let port = u16::read(buf)?;
         Ok(SocketAddrV6::new(address, port, 0, 0))
     }
 }
 
-impl SizedInfo for SocketAddrV6 {
+impl FixedSize for SocketAddrV6 {
     const LEN_ENCODED: usize = Ipv6Addr::LEN_ENCODED + u16::LEN_ENCODED;
 }
 
 // SocketAddr implementation
-impl Encode for SocketAddr {
-    #[inline]
-    fn len_encoded(&self) -> usize {
-        (match self {
-            SocketAddr::V4(_) => SocketAddrV4::LEN_ENCODED,
-            SocketAddr::V6(_) => SocketAddrV6::LEN_ENCODED,
-        }) + u8::LEN_ENCODED
-    }
-
+impl Write for SocketAddr {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {
         match self {
@@ -127,13 +99,23 @@ impl Encode for SocketAddr {
     }
 }
 
-impl Decode<()> for SocketAddr {
+impl Encode for SocketAddr {
     #[inline]
-    fn read(buf: &mut impl Buf, _: ()) -> Result<Self, Error> {
-        let version = u8::read(buf, ())?;
+    fn len_encoded(&self) -> usize {
+        (match self {
+            SocketAddr::V4(_) => SocketAddrV4::LEN_ENCODED,
+            SocketAddr::V6(_) => SocketAddrV6::LEN_ENCODED,
+        }) + u8::LEN_ENCODED
+    }
+}
+
+impl Read for SocketAddr {
+    #[inline]
+    fn read_cfg(buf: &mut impl Buf, _: ()) -> Result<Self, Error> {
+        let version = u8::read(buf)?;
         match version {
-            4 => Ok(SocketAddr::V4(SocketAddrV4::read(buf, ())?)),
-            6 => Ok(SocketAddr::V6(SocketAddrV6::read(buf, ())?)),
+            4 => Ok(SocketAddr::V4(SocketAddrV4::read(buf)?)),
+            6 => Ok(SocketAddr::V6(SocketAddrV6::read(buf)?)),
             _ => Err(Error::Invalid("SocketAddr", "Invalid version")),
         }
     }
@@ -142,6 +124,7 @@ impl Decode<()> for SocketAddr {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::DecodeExt;
     use bytes::Bytes;
 
     #[test]
@@ -157,13 +140,13 @@ mod test {
         for ip in ips.iter() {
             let encoded = ip.encode();
             assert_eq!(encoded.len(), 4);
-            let decoded = Ipv4Addr::decode(encoded, ()).unwrap();
+            let decoded = Ipv4Addr::decode(encoded).unwrap();
             assert_eq!(*ip, decoded);
         }
 
         // Test insufficient data
         let insufficient = vec![0, 0, 0]; // 3 bytes instead of 4
-        assert!(Ipv4Addr::decode(Bytes::from(insufficient), ()).is_err());
+        assert!(Ipv4Addr::decode(Bytes::from(insufficient)).is_err());
     }
 
     #[test]
@@ -181,13 +164,13 @@ mod test {
         for ip in ips.iter() {
             let encoded = ip.encode();
             assert_eq!(encoded.len(), 16);
-            let decoded = Ipv6Addr::decode(encoded, ()).unwrap();
+            let decoded = Ipv6Addr::decode(encoded).unwrap();
             assert_eq!(*ip, decoded);
         }
 
         // Test insufficient data
         let insufficient = Bytes::from(vec![0u8; 15]); // 15 bytes instead of 16
-        assert!(Ipv6Addr::decode(insufficient, ()).is_err());
+        assert!(Ipv6Addr::decode(insufficient).is_err());
     }
 
     #[test]
@@ -202,13 +185,13 @@ mod test {
         for addr in addrs.iter() {
             let encoded = addr.encode();
             assert_eq!(encoded.len(), 6);
-            let decoded = SocketAddrV4::decode(encoded, ()).unwrap();
+            let decoded = SocketAddrV4::decode(encoded).unwrap();
             assert_eq!(*addr, decoded);
         }
 
         // Test insufficient data
         let insufficient = Bytes::from(vec![0u8; 5]); // 5 bytes instead of 6
-        assert!(SocketAddrV4::decode(insufficient, ()).is_err());
+        assert!(SocketAddrV4::decode(insufficient).is_err());
     }
 
     #[test]
@@ -223,13 +206,13 @@ mod test {
         for addr in addrs.iter() {
             let encoded = addr.encode();
             assert_eq!(encoded.len(), 18);
-            let decoded = SocketAddrV6::decode(encoded, ()).unwrap();
+            let decoded = SocketAddrV6::decode(encoded).unwrap();
             assert_eq!(*addr, decoded);
         }
 
         // Test insufficient data
         let insufficient = Bytes::from(vec![0u8; 17]); // 17 bytes instead of 18
-        assert!(SocketAddrV6::decode(insufficient, ()).is_err());
+        assert!(SocketAddrV6::decode(insufficient).is_err());
     }
 
     #[test]
@@ -239,7 +222,7 @@ mod test {
         let encoded_v4 = addr_v4.encode();
         assert_eq!(encoded_v4.len(), 7);
         assert_eq!(addr_v4.len_encoded(), 7);
-        let decoded_v4 = SocketAddr::decode(encoded_v4, ()).unwrap();
+        let decoded_v4 = SocketAddr::decode(encoded_v4).unwrap();
         assert_eq!(addr_v4, decoded_v4);
 
         // Test SocketAddr::V6
@@ -252,24 +235,24 @@ mod test {
         let encoded_v6 = addr_v6.encode();
         assert_eq!(encoded_v6.len(), 19);
         assert_eq!(addr_v6.len_encoded(), 19);
-        let decoded_v6 = SocketAddr::decode(encoded_v6, ()).unwrap();
+        let decoded_v6 = SocketAddr::decode(encoded_v6).unwrap();
         assert_eq!(addr_v6, decoded_v6);
 
         // Test invalid version
         let invalid_version = [5]; // Neither 4 nor 6
         assert!(matches!(
-            SocketAddr::decode(&invalid_version[..], ()),
+            SocketAddr::decode(&invalid_version[..]),
             Err(Error::Invalid(_, _))
         ));
 
         // Test insufficient data for V4
         let mut insufficient_v4 = vec![4]; // Version byte
         insufficient_v4.extend_from_slice(&[127, 0, 0, 1, 0x1f]); // IP + 1 byte of port (5 bytes total)
-        assert!(SocketAddr::decode(&insufficient_v4[..], ()).is_err());
+        assert!(SocketAddr::decode(&insufficient_v4[..]).is_err());
 
         // Test insufficient data for V6
         let mut insufficient_v6 = vec![6]; // Version byte
         insufficient_v6.extend_from_slice(&[0; 17]); // 17 bytes instead of 18
-        assert!(SocketAddr::decode(&insufficient_v6[..], ()).is_err());
+        assert!(SocketAddr::decode(&insufficient_v6[..]).is_err());
     }
 }

@@ -1,6 +1,6 @@
 use super::View;
 use bytes::BufMut;
-use commonware_codec::SizedInfo;
+use commonware_codec::FixedSize;
 use commonware_utils::{union, Array};
 
 pub const SEED_SUFFIX: &[u8] = b"_SEED";
