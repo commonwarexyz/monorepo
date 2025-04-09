@@ -31,6 +31,9 @@ tracing-subscriber = { workspace = true }
 rand = { workspace = true }
 criterion = { workspace = true }
 
+[features]
+bench_internal = []
+
 [lib]
 bench = false
 crate-type = ["rlib", "cdylib"]

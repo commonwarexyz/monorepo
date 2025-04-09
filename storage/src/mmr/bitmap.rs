@@ -20,7 +20,7 @@ impl<H: CHasher + Send + Sync> Storage<H::Digest> for BitmapStorage<'_, H> {
         if pos < self.mmr.size() {
             Ok(self.mmr.get_node(pos))
         } else {
-            Ok(self.last_chunk_mmr.get_node(pos))   
+            Ok(self.last_chunk_mmr.get_node(pos))
         }
     }
 
@@ -70,6 +70,15 @@ impl<H: CHasher> Bitmap<H> {
             next_bit: 0,
             mmr: Mmr::new(),
         }
+    }
+
+    /// Returns a mutable reference to the internal bitmap buffer.
+    ///
+    /// # Warning
+    /// This method is intended for testing and benchmarking purposes only.
+    #[cfg(feature = "bench_internal")]
+    pub fn get_bitmap_mut(&mut self) -> &mut Vec<u8> {
+        &mut self.bitmap
     }
 
     /// Return the number of bits currently stored in the bitmap.
@@ -181,9 +190,16 @@ impl<H: CHasher> Bitmap<H> {
 
         let byte_offset = bit_offset as usize / 8;
         let mask = Self::chunk_byte_bit_mask(bit_offset);
-        
-        // XOR the bit with the current value of the bitmap at that offset from;
-        // avoids branching
+
+        // Original branching implementation:
+        // if bit {
+        //     self.bitmap[byte_offset] |= mask;
+        // } else {
+        //     self.bitmap[byte_offset] &= !mask;
+        // }
+
+        // Branchless XOR variant:
+        //FROM: from: https://graphics.stanford.edu/~seander/bithacks.html#ConditionalSetOrClearBitsWithoutBranching
         self.bitmap[byte_offset] ^= ((-(bit as i8) as u8) ^ self.bitmap[byte_offset]) & mask;
 
         if byte_offset >= self.bitmap.len() - Self::CHUNK_SIZE {
