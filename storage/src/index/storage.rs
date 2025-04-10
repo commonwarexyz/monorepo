@@ -37,12 +37,12 @@ impl<'a, V> Iterator for ValueIterator<'a, V> {
     fn next(&mut self) -> Option<Self::Item> {
         match self.next {
             Some(next) => {
-                let loc = &next.value;
+                let value = &next.value;
                 match next.next {
                     Some(ref next_next) => self.next = Some(next_next),
                     None => self.next = None,
                 }
-                Some(loc)
+                Some(value)
             }
             None => None,
         }
@@ -50,7 +50,7 @@ impl<'a, V> Iterator for ValueIterator<'a, V> {
 }
 
 /// A wrapper for the hashmap entry when it can be either occupied or vacant.
-enum OccupiedOrVacant<'a, K, V> {
+enum MapEntry<'a, K, V> {
     Occupied(OccupiedEntry<'a, K, Record<V>>),
     Vacant(VacantEntry<'a, K, Record<V>>),
 }
@@ -59,7 +59,7 @@ enum OccupiedOrVacant<'a, K, V> {
 /// current element and insertion of new elements at the front of the list.
 pub struct UpdateValueIterator<'a, K, V> {
     next: Option<*mut Record<V>>,
-    entry: Option<OccupiedOrVacant<'a, K, V>>,
+    entry: Option<MapEntry<'a, K, V>>,
     collisions_counter: &'a Counter,
 }
 
@@ -74,12 +74,12 @@ impl<'a, K, V> Iterator for UpdateValueIterator<'a, K, V> {
         match self.next {
             Some(next) => {
                 let current = unsafe { &mut (*next) };
-                let loc = &mut current.value;
+                let value = &mut current.value;
                 self.next = current
                     .next
                     .as_mut()
                     .map(|next_next| next_next.as_mut() as *mut _);
-                Some(loc)
+                Some(value)
             }
             None => None,
         }
@@ -94,12 +94,12 @@ impl<K, V> UpdateValueIterator<'_, K, V> {
         let entry = self.entry.take().unwrap();
 
         let mut occupied_entry = match entry {
-            OccupiedOrVacant::Occupied(occupied_entry) => occupied_entry,
-            OccupiedOrVacant::Vacant(vacant_entry) => {
+            MapEntry::Occupied(occupied_entry) => occupied_entry,
+            MapEntry::Vacant(vacant_entry) => {
                 // Key had no associated values, so just turn the vacant entry into an occupied one.
                 let record = Record { value, next: None };
                 let occupied_entry = vacant_entry.insert_entry(record);
-                self.entry = Some(OccupiedOrVacant::Occupied(occupied_entry));
+                self.entry = Some(MapEntry::Occupied(occupied_entry));
                 return;
             }
         };
@@ -111,7 +111,7 @@ impl<K, V> UpdateValueIterator<'_, K, V> {
             value,
             next: record.next.take(),
         }));
-        self.entry = Some(OccupiedOrVacant::Occupied(occupied_entry));
+        self.entry = Some(MapEntry::Occupied(occupied_entry));
 
         self.collisions_counter.inc();
     }
@@ -137,13 +137,13 @@ impl<'a, K, V> Iterator for DeleteValueIterator<'a, K, V> {
         match self.next {
             Some(next) => {
                 let current = unsafe { &mut (*next) };
-                let loc = &mut current.value;
+                let value = &mut current.value;
                 self.prev = self.next;
                 self.next = current
                     .next
                     .as_mut()
                     .map(|next_next| next_next.as_mut() as *mut _);
-                Some(loc)
+                Some(value)
             }
             None => None,
         }
@@ -201,8 +201,8 @@ impl<K, V> DeleteValueIterator<'_, K, V> {
             if next_ptr == delete_me {
                 // Remove the element from the linked list
                 unsafe {
-                    let removed = (*cursor).next.take();
-                    (*cursor).next = removed.unwrap().next
+                    let removed = (*cursor).next.take().unwrap();
+                    (*cursor).next = removed.next;
                 };
                 self.pruned_counter.inc();
                 return;
@@ -301,13 +301,13 @@ impl<T: Translator, V> Index<T, V> {
                 let record_ptr = occupied_entry.get_mut();
                 UpdateValueIterator {
                     next: Some(record_ptr),
-                    entry: Some(OccupiedOrVacant::Occupied(occupied_entry)),
+                    entry: Some(MapEntry::Occupied(occupied_entry)),
                     collisions_counter: &self.collisions,
                 }
             }
             Entry::Vacant(vacant_entry) => UpdateValueIterator {
                 next: None,
-                entry: Some(OccupiedOrVacant::Vacant(vacant_entry)),
+                entry: Some(MapEntry::Vacant(vacant_entry)),
                 collisions_counter: &self.collisions,
             },
         }

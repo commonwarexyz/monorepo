@@ -206,35 +206,22 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher> 
         new_loc: u64,
     ) -> Result<bool, Error> {
         let mut loc_iter = snapshot.update_iter(&key);
-
-        let found_loc = {
-            let mut found = None;
-            for loc in &mut loc_iter {
-                let op = log.read(*loc).await?;
-                if op.to_key() == key {
-                    if let Some(v) = value {
-                        if op.to_value().unwrap() == *v {
-                            // The key value is the same as the previous one: treat as a no-op.
-                            return Ok(false);
-                        }
+        for loc in &mut loc_iter {
+            let op = log.read(*loc).await?;
+            if op.to_key() == key {
+                if let Some(v) = value {
+                    if op.to_value().unwrap() == *v {
+                        // The key value is the same as the previous one: treat as a no-op.
+                        return Ok(false);
                     }
-                    found = Some(loc);
-                    break;
                 }
-            }
-            found
-        };
-
-        match found_loc {
-            Some(loc) => {
-                // The key was already in the snapshot, so update its location.
                 *loc = new_loc;
-            }
-            None => {
-                // The key wasn't in the snapshot, so add it.
-                loc_iter.insert(new_loc);
+                return Ok(true);
             }
         }
+
+        // The key wasn't in the snapshot, so add it.
+        loc_iter.insert(new_loc);
 
         Ok(true)
     }
