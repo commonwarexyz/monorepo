@@ -23,13 +23,9 @@ bytes = { workspace = true }
 rand = { workspace = true }
 futures = { workspace = true }
 tracing = { workspace = true }
-prost = { workspace = true }
 governor = { workspace = true }
 prometheus-client = { workspace = true }
 thiserror = { workspace = true }
-
-[build-dependencies]
-prost-build = { workspace = true }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }

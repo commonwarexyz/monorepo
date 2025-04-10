@@ -41,9 +41,7 @@ mod fetcher;
 mod ingress;
 pub use ingress::Mailbox;
 mod metrics;
-mod wire {
-    include!(concat!(env!("OUT_DIR"), "/wire.rs"));
-}
+mod wire;
 
 #[cfg(test)]
 pub mod mocks;
