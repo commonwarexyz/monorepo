@@ -16,7 +16,6 @@ use commonware_runtime::{Sink, Spawner, Stream};
 use commonware_stream::{public_key::Connection, Receiver, Sender};
 use commonware_utils::{hex, Array};
 use futures::{channel::mpsc, StreamExt};
-use prost::Message as _;
 use rand::Rng;
 use tracing::{debug, info};
 
@@ -84,10 +83,7 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                             let msg = wire::GetFinalization {
                                 network: self.other_public.clone(),
                             };
-                            let msg = wire::Inbound {
-                                payload: Some(wire::inbound::Payload::GetFinalization(msg)),
-                            }
-                            .encode_to_vec();
+                            let msg = wire::Inbound::GetFinalization(msg).encode().into();
                             indexer_sender
                                 .send(&msg)
                                 .await
@@ -100,11 +96,11 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                                 wire::Outbound::decode(result).expect("failed to decode result");
                             let payload = msg.payload.expect("missing payload");
                             let proof = match payload {
-                                wire::outbound::Payload::Success(_) => {
+                                wire::Outbound::Success(_) => {
                                     debug!("no finalization found");
                                     continue;
                                 }
-                                wire::outbound::Payload::Finalization(f) => f,
+                                wire::Outbound::Finalization(f) => f,
                                 _ => panic!("unexpected response"),
                             };
 
@@ -131,10 +127,7 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                         network: self.public.clone(),
                         data: msg.into(),
                     };
-                    let msg = wire::Inbound {
-                        payload: Some(wire::inbound::Payload::PutBlock(msg)),
-                    }
-                    .encode_to_vec();
+                    let msg = wire::Inbound::PutBlock(msg).encode().into();
                     indexer_sender
                         .send(&msg)
                         .await
@@ -146,7 +139,7 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                     let msg = wire::Outbound::decode(result).expect("failed to decode result");
                     let payload = msg.payload.expect("missing payload");
                     let success = match payload {
-                        wire::outbound::Payload::Success(s) => s,
+                        wire::Outbound::Success(s) => s,
                         _ => panic!("unexpected response"),
                     };
                     debug!(view = index, success, "block published");
@@ -163,10 +156,7 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                         network: self.public.clone(),
                         digest: payload.to_vec(),
                     };
-                    let msg = wire::Inbound {
-                        payload: Some(wire::inbound::Payload::GetBlock(msg)),
-                    }
-                    .encode_to_vec();
+                    let msg = wire::Inbound::GetBlock(msg).encode().into();
                     indexer_sender
                         .send(&msg)
                         .await
@@ -178,7 +168,7 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                     let msg = wire::Outbound::decode(result).expect("failed to decode result");
                     let payload = msg.payload.expect("missing payload");
                     let block = match payload {
-                        wire::outbound::Payload::Success(b) => {
+                        wire::Outbound::Success(b) => {
                             if b {
                                 panic!("unexpected success");
                             }
@@ -186,7 +176,7 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                             debug!("block not found");
                             continue;
                         }
-                        wire::outbound::Payload::Block(b) => b,
+                        wire::Outbound::Block(b) => b,
                         _ => panic!("unexpected response"),
                     };
 
@@ -225,10 +215,7 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                         network: self.public.clone(),
                         data: proof,
                     };
-                    let msg = wire::Inbound {
-                        payload: Some(wire::inbound::Payload::PutFinalization(msg)),
-                    }
-                    .encode_to_vec();
+                    let msg = wire::Inbound::PutFinalization(msg).encode().into();
                     indexer_sender
                         .send(&msg)
                         .await
@@ -240,7 +227,7 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                     let msg = wire::Outbound::decode(result).expect("failed to decode result");
                     let payload = msg.payload.expect("missing payload");
                     let success = match payload {
-                        wire::outbound::Payload::Success(s) => s,
+                        wire::Outbound::Success(s) => s,
                         _ => panic!("unexpected response"),
                     };
                     debug!(view, success, "finalization posted");
