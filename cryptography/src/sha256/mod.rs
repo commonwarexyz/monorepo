@@ -100,7 +100,7 @@ impl Write for Digest {
 }
 
 impl Read for Digest {
-    fn read_cfg(buf: &mut impl Buf, _: ()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         Self::read_from(buf).map_err(|err| CodecError::Wrapped("Digest", err.into()))
     }
 }

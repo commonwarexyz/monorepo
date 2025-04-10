@@ -153,7 +153,7 @@ impl<K: Array, V: Array> Write for Operation<K, V> {
 }
 
 impl<K: Array, V: Array> Read for Operation<K, V> {
-    fn read_cfg(buf: &mut impl Buf, _: ()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let mut value = vec![0u8; Self::SIZE];
         buf.copy_to_slice(&mut value);
         Self::try_from(&value).map_err(|e: Error<K, V>| CodecError::Wrapped("Operation", e.into()))

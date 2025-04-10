@@ -3,7 +3,7 @@ use crate::authenticated::{
     actors::tracker,
     channels::Channels,
     metrics,
-    types::{self, PayloadCodecConfig},
+    types::{self},
 };
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::Verifier;
@@ -25,9 +25,9 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: Verifier>
 
     gossip_bit_vec_frequency: Duration,
     allowed_bit_vec_rate: Quota,
-    max_peer_set_size: usize,
     allowed_peers_rate: Quota,
-    peer_gossip_max_count: usize,
+
+    codec_config: types::PayloadCodecConfig,
 
     mailbox: Mailbox<C>,
     control: mpsc::Receiver<Message<C>>,
@@ -54,9 +54,11 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Ver
                 mailbox: Mailbox::new(control_sender),
                 gossip_bit_vec_frequency: cfg.gossip_bit_vec_frequency,
                 allowed_bit_vec_rate: cfg.allowed_bit_vec_rate,
-                max_peer_set_size: cfg.max_peer_set_size,
                 allowed_peers_rate: cfg.allowed_peers_rate,
-                peer_gossip_max_count: cfg.peer_gossip_max_count,
+                codec_config: types::PayloadCodecConfig {
+                    max_bitvec: cfg.max_peer_set_size,
+                    max_peers: cfg.peer_gossip_max_count,
+                },
                 control: control_receiver,
                 high: high_receiver,
                 low: low_receiver,
@@ -176,11 +178,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Ver
                         .receive()
                         .await
                         .map_err(Error::ReceiveFailed)?;
-                    let decode_config = PayloadCodecConfig {
-                        max_bitvec: self.max_peer_set_size,
-                        max_peers: self.peer_gossip_max_count,
-                    };
-                    let msg = match types::Payload::decode_cfg(msg, decode_config) {
+                    let msg = match types::Payload::decode_cfg(msg, &self.codec_config) {
                         Ok(msg) => msg,
                         Err(err) => {
                             info!(?err, ?peer, "failed to decode message");

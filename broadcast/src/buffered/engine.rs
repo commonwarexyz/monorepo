@@ -177,7 +177,7 @@ impl<
                     };
 
                     // Decode the message
-                    let message = match M::decode_cfg(msg, self.decode_config.clone()) {
+                    let message = match M::decode_cfg(msg, &self.decode_config) {
                         Ok(message) => message,
                         Err(err) => {
                             warn!(?err, ?peer, "failed to decode message");

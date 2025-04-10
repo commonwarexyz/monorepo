@@ -11,7 +11,7 @@ impl Write for Ipv4Addr {
 
 impl Read for Ipv4Addr {
     #[inline]
-    fn read_cfg(buf: &mut impl Buf, _: ()) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let bits = <u32>::read(buf)?;
         Ok(Ipv4Addr::from_bits(bits))
     }
@@ -30,7 +30,7 @@ impl Write for Ipv6Addr {
 
 impl Read for Ipv6Addr {
     #[inline]
-    fn read_cfg(buf: &mut impl Buf, _: ()) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let bits = <u128>::read(buf)?;
         Ok(Ipv6Addr::from_bits(bits))
     }
@@ -50,7 +50,7 @@ impl Write for SocketAddrV4 {
 
 impl Read for SocketAddrV4 {
     #[inline]
-    fn read_cfg(buf: &mut impl Buf, _: ()) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let ip = Ipv4Addr::read(buf)?;
         let port = u16::read(buf)?;
         Ok(Self::new(ip, port))
@@ -71,7 +71,7 @@ impl Write for SocketAddrV6 {
 
 impl Read for SocketAddrV6 {
     #[inline]
-    fn read_cfg(buf: &mut impl Buf, _: ()) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let address = Ipv6Addr::read(buf)?;
         let port = u16::read(buf)?;
         Ok(SocketAddrV6::new(address, port, 0, 0))
@@ -111,7 +111,7 @@ impl EncodeSize for SocketAddr {
 
 impl Read for SocketAddr {
     #[inline]
-    fn read_cfg(buf: &mut impl Buf, _: ()) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let version = u8::read(buf)?;
         match version {
             4 => Ok(SocketAddr::V4(SocketAddrV4::read(buf)?)),

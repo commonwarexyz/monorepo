@@ -25,7 +25,7 @@ impl<T: EncodeSize> EncodeSize for Vec<T> {
 
 impl<R: RangeConfig, Cfg: Config, T: Read<Cfg>> Read<(R, Cfg)> for Vec<T> {
     #[inline]
-    fn read_cfg(buf: &mut impl Buf, (range, cfg): (R, Cfg)) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, (range, cfg): &(R, Cfg)) -> Result<Self, Error> {
         let len32 = varint::read::<u32>(buf)?;
         let len = usize::try_from(len32).map_err(|_| Error::InvalidVarint)?;
         if !range.contains(&len) {
@@ -33,7 +33,7 @@ impl<R: RangeConfig, Cfg: Config, T: Read<Cfg>> Read<(R, Cfg)> for Vec<T> {
         }
         let mut vec = Vec::with_capacity(len);
         for _ in 0..len {
-            vec.push(T::read_cfg(buf, cfg.clone())?);
+            vec.push(T::read_cfg(buf, cfg)?);
         }
         Ok(vec)
     }

@@ -44,7 +44,7 @@ impl EncodeSize for TestMessage {
 }
 
 impl Read for TestMessage {
-    fn read_cfg(buf: &mut impl Buf, _: ()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let content = Vec::<u8>::read_range(buf, ..)?;
         Ok(Self { content })
     }

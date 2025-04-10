@@ -17,7 +17,7 @@ macro_rules! impl_numeric {
 
         impl Read for $type {
             #[inline]
-            fn read_cfg(buf: &mut impl Buf, _: ()) -> Result<Self, Error> {
+            fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
                 at_least(buf, std::mem::size_of::<$type>())?;
                 Ok(buf.$read_method())
             }
@@ -52,7 +52,7 @@ impl Write for bool {
 
 impl Read for bool {
     #[inline]
-    fn read_cfg(buf: &mut impl Buf, _: ()) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         at_least(buf, 1)?;
         match buf.get_u8() {
             0 => Ok(false),
@@ -86,7 +86,7 @@ impl EncodeSize for Bytes {
 
 impl<R: RangeConfig> Read<R> for Bytes {
     #[inline]
-    fn read_cfg(buf: &mut impl Buf, cfg: R) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &R) -> Result<Self, Error> {
         let len32 = varint::read::<u32>(buf)?;
         let len = usize::try_from(len32).map_err(|_| Error::InvalidVarint)?;
         if !cfg.contains(&len) {
@@ -107,7 +107,7 @@ impl<const N: usize> Write for [u8; N] {
 
 impl<const N: usize> Read for [u8; N] {
     #[inline]
-    fn read_cfg(buf: &mut impl Buf, _: ()) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         at_least(buf, N)?;
         let mut dst = [0; N];
         buf.copy_to_slice(&mut dst);
@@ -142,7 +142,7 @@ impl<T: EncodeSize> EncodeSize for Option<T> {
 
 impl<Cfg: Config, T: Read<Cfg>> Read<Cfg> for Option<T> {
     #[inline]
-    fn read_cfg(buf: &mut impl Buf, cfg: Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &Cfg) -> Result<Self, Error> {
         if bool::read(buf)? {
             Ok(Some(T::read_cfg(buf, cfg)?))
         } else {

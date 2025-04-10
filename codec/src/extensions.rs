@@ -14,7 +14,7 @@ use bytes::Buf;
 pub trait ReadExt: Read<()> {
     /// Reads a value using the default `()` config.
     fn read(buf: &mut impl Buf) -> Result<Self, Error> {
-        <Self as Read<()>>::read_cfg(buf, ())
+        <Self as Read<()>>::read_cfg(buf, &())
     }
 }
 
@@ -28,7 +28,7 @@ impl<T: Read<()>> ReadExt for T {}
 pub trait DecodeExt: Decode<()> {
     /// Decodes a value using the default `()` config.
     fn decode(buf: impl Buf) -> Result<Self, Error> {
-        <Self as Decode<()>>::decode_cfg(buf, ())
+        <Self as Decode<()>>::decode_cfg(buf, &())
     }
 }
 
@@ -43,7 +43,7 @@ impl<T: Decode<()>> DecodeExt for T {}
 pub trait ReadRangeExt<R: RangeConfig>: Read<(R, ())> {
     /// Reads a value using only a range configuration, assuming the inner config is `()`.
     fn read_range(buf: &mut impl Buf, range: R) -> Result<Self, Error> {
-        Self::read_cfg(buf, (range, ()))
+        Self::read_cfg(buf, &(range, ()))
     }
 }
 
@@ -57,7 +57,7 @@ impl<R: RangeConfig, T: Read<(R, ())>> ReadRangeExt<R> for T {}
 /// Import this trait to use the `.decode_range()` method.
 pub trait DecodeRangeExt<R: RangeConfig>: Decode<(R, ())> {
     fn decode_range(buf: impl Buf, range: R) -> Result<Self, Error> {
-        Self::decode_cfg(buf, (range, ()))
+        Self::decode_cfg(buf, &(range, ()))
     }
 }
 

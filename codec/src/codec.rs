@@ -11,10 +11,10 @@ use std::ops::RangeBounds;
 /// `Clone + Send + 'static`.
 ///
 /// Use the unit type `()` if no configuration is required for a specific [`Read`] implementation.
-pub trait Config: Clone + Send + 'static {}
+pub trait Config: Send + 'static {}
 
 // Automatically implement `Config` for matching types.
-impl<T: Clone + Send + 'static> Config for T {}
+impl<T: Send + 'static> Config for T {}
 
 /// A marker trait for a [`Config`] type that is also a [`RangeBounds<usize>`].
 ///
@@ -76,7 +76,7 @@ pub trait Read<Cfg: Config = ()>: Sized {
     ///
     /// Returns [`Error`] if decoding fails due to invalid data, insufficient bytes in the buffer,
     /// or violation of constraints imposed by the `cfg`.
-    fn read_cfg(buf: &mut impl Buf, cfg: Cfg) -> Result<Self, Error>;
+    fn read_cfg(buf: &mut impl Buf, cfg: &Cfg) -> Result<Self, Error>;
 }
 
 /// Trait combining [`Write`] and [`EncodeSize`] for types that can be fully encoded.
@@ -112,7 +112,7 @@ pub trait Decode<Cfg: Config = ()>: Read<Cfg> {
     ///
     /// Returns [`Error`] if decoding fails via [`Read::read_cfg`] or if there are leftover bytes in
     /// `buf` after reading.
-    fn decode_cfg(mut buf: impl Buf, cfg: Cfg) -> Result<Self, Error> {
+    fn decode_cfg(mut buf: impl Buf, cfg: &Cfg) -> Result<Self, Error> {
         let result = Self::read_cfg(&mut buf, cfg)?;
 
         // Check that the buffer is fully consumed.

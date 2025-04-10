@@ -61,11 +61,11 @@ impl<C: Verifier> Write for Payload<C> {
 }
 
 impl<C: Verifier> Read<PayloadCodecConfig> for Payload<C> {
-    fn read_cfg(buf: &mut impl Buf, cfg: PayloadCodecConfig) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &PayloadCodecConfig) -> Result<Self, Error> {
         let payload_type = <u8>::read(buf)?;
         match payload_type {
             0 => {
-                let bitvec = BitVec::read_cfg(buf, cfg.max_bitvec)?;
+                let bitvec = BitVec::read_cfg(buf, &cfg.max_bitvec)?;
                 Ok(Payload::BitVec(bitvec))
             }
             1 => {
@@ -75,7 +75,7 @@ impl<C: Verifier> Read<PayloadCodecConfig> for Payload<C> {
             2 => {
                 // Don't limit the size of the data to be read.
                 // The max message size should already be limited by the p2p layer.
-                let data = Data::read_cfg(buf, ..)?;
+                let data = Data::read_cfg(buf, &..)?;
                 Ok(Payload::Data(data))
             }
             _ => Err(Error::Invalid(
@@ -132,11 +132,11 @@ impl Write for BitVec {
 }
 
 impl Read<usize> for BitVec {
-    fn read_cfg(buf: &mut impl Buf, max_bits: usize) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, max_bits: &usize) -> Result<Self, Error> {
         let index = u64::read(buf)?;
         let len32: u32 = varint::read(buf)?;
         let len = usize::try_from(len32).map_err(|_| Error::InvalidVarint)?;
-        if len > max_bits {
+        if len > *max_bits {
             return Err(Error::InvalidLength(len));
         }
 
@@ -214,7 +214,7 @@ impl<C: Verifier> Write for SignedPeerInfo<C> {
 }
 
 impl<C: Verifier> Read for SignedPeerInfo<C> {
-    fn read_cfg(buf: &mut impl Buf, _: ()) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let socket = SocketAddr::read(buf)?;
         let timestamp = u64::read(buf)?;
         let public_key = C::PublicKey::read(buf)?;
@@ -254,7 +254,7 @@ impl Write for Data {
 }
 
 impl<R: RangeConfig> Read<R> for Data {
-    fn read_cfg(buf: &mut impl Buf, range: R) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, range: &R) -> Result<Self, Error> {
         let channel = u32::read(buf)?;
         let message = Bytes::read_cfg(buf, range)?;
         Ok(Data { channel, message })
