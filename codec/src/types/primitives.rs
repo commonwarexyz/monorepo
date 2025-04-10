@@ -1,7 +1,7 @@
 //! Implementations of Codec for common types
 
 use crate::{
-    util::at_least, varint, Config, Encode, Error, FixedSize, RangeConfig, Read, ReadExt, Write,
+    util::at_least, varint, Config, EncodeSize, Error, FixedSize, RangeConfig, Read, ReadExt, Write,
 };
 use bytes::{Buf, BufMut, Bytes};
 
@@ -76,9 +76,9 @@ impl Write for Bytes {
     }
 }
 
-impl Encode for Bytes {
+impl EncodeSize for Bytes {
     #[inline]
-    fn len_encoded(&self) -> usize {
+    fn encode_size(&self) -> usize {
         let len = u32::try_from(self.len()).expect("Bytes length exceeds u32");
         varint::size(len) + self.len()
     }
@@ -120,7 +120,7 @@ impl<const N: usize> FixedSize for [u8; N] {
 }
 
 // Option implementation
-impl<T: Encode> Write for Option<T> {
+impl<T: Write> Write for Option<T> {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {
         self.is_some().write(buf);
@@ -130,11 +130,11 @@ impl<T: Encode> Write for Option<T> {
     }
 }
 
-impl<T: Encode> Encode for Option<T> {
+impl<T: EncodeSize> EncodeSize for Option<T> {
     #[inline]
-    fn len_encoded(&self) -> usize {
+    fn encode_size(&self) -> usize {
         match self {
-            Some(inner) => 1 + inner.len_encoded(),
+            Some(inner) => 1 + inner.encode_size(),
             None => 1,
         }
     }
@@ -154,7 +154,7 @@ impl<Cfg: Config, T: Read<Cfg>> Read<Cfg> for Option<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Decode, DecodeExt, EncodeFixed};
+    use crate::{Decode, DecodeExt, Encode, EncodeFixed};
     use bytes::Bytes;
     use paste::paste;
 
@@ -172,7 +172,7 @@ mod tests {
                         assert_eq!(encoded.len(), expected_len);
                         let decoded = <$type>::decode(encoded).unwrap();
                         assert_eq!(*value, decoded);
-                        assert_eq!(Encode::len_encoded(value), expected_len);
+                        assert_eq!(value.encode_size(), expected_len);
 
                         let fixed: [u8; $size] = value.encode_fixed();
                         assert_eq!(fixed.len(), expected_len);
@@ -219,7 +219,7 @@ mod tests {
             assert_eq!(encoded.len(), 1);
             let decoded = bool::decode(encoded).unwrap();
             assert_eq!(*value, decoded);
-            assert_eq!(Encode::len_encoded(value), 1);
+            assert_eq!(value.encode_size(), 1);
         }
     }
 
@@ -277,10 +277,10 @@ mod tests {
     #[test]
     fn test_option_length() {
         let some = Some(42u32);
-        assert_eq!(Encode::len_encoded(&some), 1 + 4);
+        assert_eq!(some.encode_size(), 1 + 4);
         assert_eq!(some.encode().len(), 1 + 4);
         let none: Option<u32> = None;
-        assert_eq!(Encode::len_encoded(&none), 1);
+        assert_eq!(none.encode_size(), 1);
         assert_eq!(none.encode().len(), 1);
     }
 }

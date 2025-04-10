@@ -1,7 +1,7 @@
 use bitvec::{order::Lsb0, vec};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{
-    util as CodecUtil, varint, Encode, Error, RangeConfig, Read, ReadExt, Write,
+    util as CodecUtil, varint, Encode, EncodeSize, Error, RangeConfig, Read, ReadExt, Write,
 };
 use commonware_cryptography::Verifier;
 use std::net::SocketAddr;
@@ -30,12 +30,12 @@ pub enum Payload<C: Verifier> {
     Data(Data),
 }
 
-impl<C: Verifier> Encode for Payload<C> {
-    fn len_encoded(&self) -> usize {
+impl<C: Verifier> EncodeSize for Payload<C> {
+    fn encode_size(&self) -> usize {
         (match self {
-            Payload::BitVec(bitvec) => bitvec.len_encoded(),
-            Payload::Peers(peers) => peers.len_encoded(),
-            Payload::Data(data) => data.len_encoded(),
+            Payload::BitVec(bitvec) => bitvec.encode_size(),
+            Payload::Peers(peers) => peers.encode_size(),
+            Payload::Data(data) => data.encode_size(),
         }) + 1
     }
 }
@@ -97,11 +97,11 @@ pub struct BitVec {
     pub bits: vec::BitVec<u8, Lsb0>,
 }
 
-impl Encode for BitVec {
-    fn len_encoded(&self) -> usize {
+impl EncodeSize for BitVec {
+    fn encode_size(&self) -> usize {
         let len32 = u32::try_from(self.bits.len()).unwrap();
         let num_bytes = self.bits.len().div_ceil(8);
-        self.index.len_encoded() + varint::size(len32) + num_bytes
+        self.index.encode_size() + varint::size(len32) + num_bytes
     }
 }
 
@@ -194,12 +194,12 @@ impl<C: Verifier> SignedPeerInfo<C> {
     }
 }
 
-impl<C: Verifier> Encode for SignedPeerInfo<C> {
-    fn len_encoded(&self) -> usize {
-        self.socket.len_encoded()
-            + self.timestamp.len_encoded()
-            + self.public_key.len_encoded()
-            + self.signature.len_encoded()
+impl<C: Verifier> EncodeSize for SignedPeerInfo<C> {
+    fn encode_size(&self) -> usize {
+        self.socket.encode_size()
+            + self.timestamp.encode_size()
+            + self.public_key.encode_size()
+            + self.signature.encode_size()
     }
 }
 
@@ -239,9 +239,9 @@ pub struct Data {
     pub message: Bytes,
 }
 
-impl Encode for Data {
-    fn len_encoded(&self) -> usize {
-        self.channel.len_encoded() + self.message.len_encoded()
+impl EncodeSize for Data {
+    fn encode_size(&self) -> usize {
+        self.channel.encode_size() + self.message.encode_size()
     }
 }
 

@@ -1,6 +1,6 @@
 //! Implementations of Codec for common types
 
-use crate::{varint, Config, Encode, Error, RangeConfig, Read, Write};
+use crate::{varint, Config, EncodeSize, Error, RangeConfig, Read, Write};
 use bytes::{Buf, BufMut};
 
 // Vec implementation
@@ -15,11 +15,11 @@ impl<T: Write> Write for Vec<T> {
     }
 }
 
-impl<T: Encode> Encode for Vec<T> {
+impl<T: EncodeSize> EncodeSize for Vec<T> {
     #[inline]
-    fn len_encoded(&self) -> usize {
+    fn encode_size(&self) -> usize {
         let len = u32::try_from(self.len()).expect("Vec length exceeds u32");
-        varint::size(len) + self.iter().map(Encode::len_encoded).sum::<usize>()
+        varint::size(len) + self.iter().map(EncodeSize::encode_size).sum::<usize>()
     }
 }
 
@@ -42,7 +42,7 @@ impl<R: RangeConfig, Cfg: Config, T: Read<Cfg>> Read<(R, Cfg)> for Vec<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Decode;
+    use crate::{Decode, Encode};
 
     #[test]
     fn test_vec() {

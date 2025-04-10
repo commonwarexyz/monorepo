@@ -1,4 +1,4 @@
-use crate::{Encode, Error, FixedSize, Read, ReadExt, Write};
+use crate::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use bytes::{Buf, BufMut};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
@@ -99,9 +99,9 @@ impl Write for SocketAddr {
     }
 }
 
-impl Encode for SocketAddr {
+impl EncodeSize for SocketAddr {
     #[inline]
-    fn len_encoded(&self) -> usize {
+    fn encode_size(&self) -> usize {
         (match self {
             SocketAddr::V4(_) => SocketAddrV4::SIZE,
             SocketAddr::V6(_) => SocketAddrV6::SIZE,
@@ -124,7 +124,7 @@ impl Read for SocketAddr {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::DecodeExt;
+    use crate::{DecodeExt, Encode};
     use bytes::Bytes;
 
     #[test]
@@ -221,7 +221,7 @@ mod test {
         let addr_v4 = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(196, 168, 0, 1), 8080));
         let encoded_v4 = addr_v4.encode();
         assert_eq!(encoded_v4.len(), 7);
-        assert_eq!(addr_v4.len_encoded(), 7);
+        assert_eq!(addr_v4.encode_size(), 7);
         let decoded_v4 = SocketAddr::decode(encoded_v4).unwrap();
         assert_eq!(addr_v4, decoded_v4);
 
@@ -234,7 +234,7 @@ mod test {
         ));
         let encoded_v6 = addr_v6.encode();
         assert_eq!(encoded_v6.len(), 19);
-        assert_eq!(addr_v6.len_encoded(), 19);
+        assert_eq!(addr_v6.encode_size(), 19);
         let decoded_v6 = SocketAddr::decode(encoded_v6).unwrap();
         assert_eq!(addr_v6, decoded_v6);
 

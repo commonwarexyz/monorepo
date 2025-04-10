@@ -1,7 +1,7 @@
 //! Mock implementations for testing.
 
 use bytes::{Buf, BufMut};
-use commonware_codec::{Encode, Error as CodecError, Read, Write};
+use commonware_codec::{EncodeSize, Error as CodecError, Read, Write};
 use commonware_cryptography::{
     sha256::{Digest as Sha256Digest, Sha256},
     Digestible, Hasher,
@@ -37,9 +37,9 @@ impl Write for TestMessage {
     }
 }
 
-impl Encode for TestMessage {
-    fn len_encoded(&self) -> usize {
-        self.content.len_encoded()
+impl EncodeSize for TestMessage {
+    fn encode_size(&self) -> usize {
+        self.content.encode_size()
     }
 }
 

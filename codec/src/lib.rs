@@ -25,7 +25,7 @@
 //!
 //! ```
 //! use bytes::{Buf, BufMut};
-//! use commonware_codec::{Encode, Error, Read, ReadExt, ReadRangeExt, Write};
+//! use commonware_codec::{EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write};
 //!
 //! // Define a custom struct
 //! #[derive(Debug, Clone, PartialEq)]
@@ -54,10 +54,10 @@
 //!     }
 //! }
 //!
-//! // Since `Item` has a variable size, we implement the `len_encoded` method manually.
-//! impl Encode for Item {
-//!     fn len_encoded(&self) -> usize {
-//!       self.xy.len_encoded() + self.z.len_encoded() + self.metadata.len_encoded()
+//! // Since `Item` has a variable size, we implement the `encode_size` method manually.
+//! impl EncodeSize for Item {
+//!     fn encode_size(&self) -> usize {
+//!       self.xy.encode_size() + self.z.encode_size() + self.metadata.encode_size()
 //!     }
 //! }
 //! ```

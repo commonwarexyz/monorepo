@@ -16,6 +16,25 @@ pub trait RangeConfig: Config + RangeBounds<usize> {}
 // Automatically implement `RangeConfig` for matching types.
 impl<T: Config + RangeBounds<usize>> RangeConfig for T {}
 
+/// Trait for types with a fixed encoded size.
+pub trait FixedSize {
+    /// The size of the encoded value (in bytes).
+    const SIZE: usize;
+}
+
+/// Trait for types that may have a variable or fixed encoded size.
+pub trait EncodeSize {
+    /// Returns the encoded size of this value (in bytes).
+    fn encode_size(&self) -> usize;
+}
+
+// Automatically implement `EncodeSize` for types with a fixed size.
+impl<T: FixedSize> EncodeSize for T {
+    fn encode_size(&self) -> usize {
+        Self::SIZE
+    }
+}
+
 /// Trait for types that can be written (encoded) to a buffer.
 pub trait Write {
     /// Encodes this value by writing to a buffer.
@@ -38,19 +57,14 @@ pub trait Read<Cfg: Config = ()>: Sized {
 }
 
 /// Trait for types that can be encoded to a buffer.
-pub trait Encode: Write {
-    /// Returns the encoded length of this value.
-    ///
-    /// This method MUST return the exact number of bytes that will be written by `write()`.
-    fn len_encoded(&self) -> usize;
-
+pub trait Encode: Write + EncodeSize {
     /// Encodes a value to a `BytesMut` buffer.
     ///
     /// Panics if the `write` implementation does not write the expected number of bytes.
     ///
     /// (Provided method).
     fn encode(&self) -> BytesMut {
-        let len = self.len_encoded();
+        let len = self.encode_size();
         let mut buffer = BytesMut::with_capacity(len);
         self.write(&mut buffer);
         assert_eq!(buffer.len(), len, "write() did not write expected bytes");
@@ -58,13 +72,8 @@ pub trait Encode: Write {
     }
 }
 
-// Automatically implement `Encode` for types with a known size.
-// Otherwise, the type must define its own `len_encoded()` method.
-impl<T: EncodeFixed> Encode for T {
-    fn len_encoded(&self) -> usize {
-        Self::SIZE
-    }
-}
+// Automatically implement `Encode` for types that implement `Write` and `EncodeSize`.
+impl<T: Write + EncodeSize> Encode for T {}
 
 /// Trait for types that can be decoded from a buffer, ensuring the entire buffer is consumed.
 pub trait Decode<Cfg: Config = ()>: Read<Cfg> {
@@ -92,12 +101,6 @@ pub trait Codec<Cfg: Config = ()>: Encode + Decode<Cfg> {}
 
 /// Automatically implement `Codec` for types that implement `Encode` and `Decode`.
 impl<Cfg: Config, T: Encode + Decode<Cfg>> Codec<Cfg> for T {}
-
-/// Trait for types with a known, fixed encoded length.
-pub trait FixedSize {
-    /// The length of the encoded value (in bytes).
-    const SIZE: usize;
-}
 
 /// Trait for types that can be encoded to a fixed-size byte array.
 pub trait EncodeFixed: Write + FixedSize {

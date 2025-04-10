@@ -1,6 +1,6 @@
 //! Implementations of Codec for common types
 
-use crate::{Config, Encode, Error, Read, Write};
+use crate::{Config, EncodeSize, Error, Read, Write};
 use bytes::{Buf, BufMut};
 use paste::paste;
 
@@ -9,10 +9,10 @@ use paste::paste;
 macro_rules! impl_codec_for_tuple {
     ($($index:literal),*) => {
         paste! {
-            impl<$( [<T $index>]: Encode ),*> Encode for ( $( [<T $index>], )* ) {
+            impl<$( [<T $index>]: EncodeSize ),*> EncodeSize for ( $( [<T $index>], )* ) {
                 #[inline]
-                fn len_encoded(&self) -> usize {
-                    0 $( + self.$index.len_encoded() )*
+                fn encode_size(&self) -> usize {
+                    0 $( + self.$index.encode_size() )*
                 }
             }
 
@@ -49,8 +49,7 @@ impl_codec_for_tuple!(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11);
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::DecodeExt;
+    use crate::{DecodeExt, Encode};
 
     #[test]
     fn test_tuple() {
