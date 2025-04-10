@@ -49,12 +49,17 @@ impl<'a, V> Iterator for ValueIterator<'a, V> {
     }
 }
 
+/// A wrapper for the hashmap entry when it can be either occupied or vacant.
+enum OccupiedOrVacant<'a, K, V> {
+    Occupied(OccupiedEntry<'a, K, Record<V>>),
+    Vacant(VacantEntry<'a, K, Record<V>>),
+}
+
 /// An iterator over all values associated with a translated key, allowing for mutation of the
 /// current element and insertion of new elements at the front of the list.
 pub struct UpdateValueIterator<'a, K, V> {
     next: Option<*mut Record<V>>,
-    entry: Option<OccupiedEntry<'a, K, Record<V>>>,
-    vacant: Option<VacantEntry<'a, K, Record<V>>>,
+    entry: Option<OccupiedOrVacant<'a, K, V>>,
     collisions_counter: &'a Counter,
 }
 
@@ -82,17 +87,19 @@ impl<'a, K, V> Iterator for UpdateValueIterator<'a, K, V> {
 }
 
 impl<K, V> UpdateValueIterator<'_, K, V> {
-    /// Insert a new value at the front of the list.
+    /// Insert a new value at the front of the list. We always add to the front so behavior is
+    /// consistently last in, first out. This means most recently added values will be returned
+    /// first by the iterators, providing an LRU like behavior.
     pub fn insert(&mut self, mut value: V) {
-        let occupied_entry = match self.entry.as_mut() {
-            Some(entry) => entry,
-            None => {
+        let entry = self.entry.take().unwrap();
+
+        let mut occupied_entry = match entry {
+            OccupiedOrVacant::Occupied(occupied_entry) => occupied_entry,
+            OccupiedOrVacant::Vacant(vacant_entry) => {
                 // Key had no associated values, so just turn the vacant entry into an occupied one.
-                let Some(vacant_entry) = self.vacant.take() else {
-                    unreachable!("vacant entry should never be none if there is no occupied entry");
-                };
                 let record = Record { value, next: None };
-                self.entry = Some(vacant_entry.insert_entry(record));
+                let occupied_entry = vacant_entry.insert_entry(record);
+                self.entry = Some(OccupiedOrVacant::Occupied(occupied_entry));
                 return;
             }
         };
@@ -104,6 +111,8 @@ impl<K, V> UpdateValueIterator<'_, K, V> {
             value,
             next: record.next.take(),
         }));
+        self.entry = Some(OccupiedOrVacant::Occupied(occupied_entry));
+
         self.collisions_counter.inc();
     }
 }
@@ -292,15 +301,13 @@ impl<T: Translator, V> Index<T, V> {
                 let record_ptr = occupied_entry.get_mut();
                 UpdateValueIterator {
                     next: Some(record_ptr),
-                    entry: Some(occupied_entry),
-                    vacant: None,
+                    entry: Some(OccupiedOrVacant::Occupied(occupied_entry)),
                     collisions_counter: &self.collisions,
                 }
             }
             Entry::Vacant(vacant_entry) => UpdateValueIterator {
                 next: None,
-                entry: None,
-                vacant: Some(vacant_entry),
+                entry: Some(OccupiedOrVacant::Vacant(vacant_entry)),
                 collisions_counter: &self.collisions,
             },
         }
