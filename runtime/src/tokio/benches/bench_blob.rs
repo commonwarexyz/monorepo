@@ -11,24 +11,26 @@ use tokio::runtime::Runtime;
 
 fn bench_blob_write_at(c: &mut Criterion) {
     // Example: Replace this with your actual Blob implementation.
-    let blob = create_test_blob();
-
-    bench_blob_write_at_driver(c, blob);
+    for max_write_size in [32, 64, 128, 256, 512, 2048] {
+        // Create a new blob for each benchmark iteration.
+        let blob = create_test_blob();
+        bench_blob_write_at_driver(c, blob, max_write_size);
+    }
 }
 
-fn bench_blob_write_at_driver<B: Blob>(c: &mut Criterion, blob: B) {
+fn bench_blob_write_at_driver<B: Blob>(c: &mut Criterion, blob: B, max_write_size: usize) {
     let runtime = Runtime::new().unwrap();
 
-    c.bench_function("Blob::write_at", |b| {
+    c.bench_function(&format!("Blob::write_at {:?}", max_write_size), |b| {
         b.to_async(&runtime).iter(|| async {
             let mut rng = thread_rng(); // Create a random number generator.
-            let buffer_size = rng.gen_range(1..=128); // Random buffer size between 1 and 128 bytes.
+            let buffer_size = rng.gen_range(1..=max_write_size); // Random buffer size between 1 and 128 bytes.
             let mut buffer = vec![0u8; buffer_size]; // Create a buffer of size 1024 bytes.
             rng.fill_bytes(&mut buffer); // Read random bytes into the buffer.
 
             let len = blob.len().await.unwrap();
 
-            let offset = if len == 0 { 0 } else { rng.gen_range(0..len) }; // Random offset between 0 and 1024 bytes.
+            let offset = rng.gen_range(0..=len); // Random offset between 0 and 1024 bytes.
 
             blob.write_at(&buffer, offset)
                 .await
