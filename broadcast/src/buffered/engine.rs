@@ -1,7 +1,7 @@
 use super::{metrics, Config, Mailbox, Message};
 use crate::buffered::metrics::SequencerLabel;
 use bytes::Bytes;
-use commonware_codec::Codec;
+use commonware_codec::{Codec, Config as CodecCfg};
 use commonware_cryptography::{Digest, Digestible};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
@@ -28,7 +28,7 @@ use tracing::{debug, error, trace, warn};
 /// - Storing messages in the cache
 /// - Responding to requests from the application
 pub struct Engine<
-    Cfg: Copy + Send + 'static,
+    Cfg: CodecCfg,
     E: Clock + Spawner + Metrics,
     P: Array,
     D: Digest,
@@ -92,7 +92,7 @@ pub struct Engine<
 }
 
 impl<
-        Cfg: Copy + Send + 'static,
+        Cfg: CodecCfg,
         E: Clock + Spawner + Metrics,
         P: Array,
         D: Digest,
@@ -177,7 +177,7 @@ impl<
                     };
 
                     // Decode the message
-                    let message = match M::decode_cfg(msg, self.decode_config) {
+                    let message = match M::decode_cfg(msg, self.decode_config.clone()) {
                         Ok(message) => message,
                         Err(err) => {
                             warn!(?err, ?peer, "failed to decode message");
