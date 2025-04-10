@@ -1,6 +1,6 @@
 use bitvec::{order::Lsb0, vec};
 use bytes::{Buf, BufMut, Bytes};
-use commonware_codec::{util as CodecUtil, varint, Encode, Error, Read, ReadExt, Write};
+use commonware_codec::{util as CodecUtil, varint, Config, Encode, Error, Read, ReadExt, Write};
 use commonware_cryptography::Verifier;
 use std::{net::SocketAddr, ops::RangeBounds};
 
@@ -250,7 +250,7 @@ impl Write for Data {
     }
 }
 
-impl<R: RangeBounds<usize>> Read<R> for Data {
+impl<R: Config + RangeBounds<usize>> Read<R> for Data {
     fn read_cfg(buf: &mut impl Buf, range: R) -> Result<Self, Error> {
         let channel = u32::read(buf)?;
         let message = Bytes::read_cfg(buf, range)?;

@@ -1,6 +1,6 @@
 //! Implementations of Codec for common types
 
-use crate::{util::at_least, varint, Encode, Error, FixedSize, Read, ReadExt, Write};
+use crate::{util::at_least, varint, Config, Encode, Error, FixedSize, Read, ReadExt, Write};
 use bytes::{Buf, BufMut, Bytes};
 use paste::paste;
 use std::ops::RangeBounds;
@@ -84,7 +84,7 @@ impl Encode for Bytes {
     }
 }
 
-impl<R: RangeBounds<usize>> Read<R> for Bytes {
+impl<R: Config + RangeBounds<usize>> Read<R> for Bytes {
     #[inline]
     fn read_cfg(buf: &mut impl Buf, cfg: R) -> Result<Self, Error> {
         let len32 = varint::read::<u32>(buf)?;
@@ -140,7 +140,7 @@ impl<T: Encode> Encode for Option<T> {
     }
 }
 
-impl<Cfg, T: Read<Cfg>> Read<Cfg> for Option<T> {
+impl<Cfg: Config, T: Read<Cfg>> Read<Cfg> for Option<T> {
     #[inline]
     fn read_cfg(buf: &mut impl Buf, cfg: Cfg) -> Result<Self, Error> {
         if bool::read(buf)? {
@@ -171,7 +171,7 @@ impl<T: Encode> Encode for Vec<T> {
     }
 }
 
-impl<R: RangeBounds<usize>, Cfg: Copy, T: Read<Cfg>> Read<(R, Cfg)> for Vec<T> {
+impl<R: Config + RangeBounds<usize>, Cfg: Config, T: Read<Cfg>> Read<(R, Cfg)> for Vec<T> {
     #[inline]
     fn read_cfg(buf: &mut impl Buf, (range, cfg): (R, Cfg)) -> Result<Self, Error> {
         let len32 = varint::read::<u32>(buf)?;
@@ -181,7 +181,7 @@ impl<R: RangeBounds<usize>, Cfg: Copy, T: Read<Cfg>> Read<(R, Cfg)> for Vec<T> {
         }
         let mut vec = Vec::with_capacity(len);
         for _ in 0..len {
-            vec.push(T::read_cfg(buf, cfg)?);
+            vec.push(T::read_cfg(buf, cfg.clone())?);
         }
         Ok(vec)
     }
@@ -206,10 +206,10 @@ macro_rules! impl_codec_for_tuple {
                 }
             }
 
-            impl <Cfg: Copy, $( [<T $index>]: Read<Cfg> ),*> Read<Cfg> for ( $( [<T $index>], )* ) {
+            impl <Cfg: Config, $( [<T $index>]: Read<Cfg> ),*> Read<Cfg> for ( $( [<T $index>], )* ) {
                 #[inline]
                 fn read_cfg(buf: &mut impl Buf, cfg: Cfg) -> Result<Self, Error> {
-                    Ok(( $( [<T $index>]::read_cfg(buf, cfg)?, )* ))
+                    Ok(( $( [<T $index>]::read_cfg(buf, cfg.clone())?, )* ))
                 }
             }
         }
