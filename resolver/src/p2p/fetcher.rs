@@ -1,5 +1,6 @@
-use crate::p2p::wire::{self, peer_msg::Payload};
+use crate::p2p::wire::{Payload, PeerMsg};
 use bimap::BiHashMap;
+use commonware_codec::Encode;
 use commonware_p2p::{
     utils::requester::{Config, Requester, ID},
     Recipients, Sender,
@@ -7,7 +8,6 @@ use commonware_p2p::{
 use commonware_runtime::{Clock, Metrics};
 use commonware_utils::{Array, PrioritySet};
 use governor::clock::Clock as GClock;
-use prost::Message;
 use rand::Rng;
 use std::{
     marker::PhantomData,
@@ -103,8 +103,8 @@ impl<E: Clock + GClock + Rng + Metrics, P: Array, Key: Array, NetS: Sender<Publi
         };
 
         // Send message to peer
-        let payload = Some(Payload::Request(key.to_vec().into()));
-        let msg = wire::PeerMsg { id, payload }.encode_to_vec().into();
+        let payload = Payload::Request(key.encode().into());
+        let msg = PeerMsg { id, payload }.encode().into();
         let result = sender
             .send(Recipients::One(peer.clone()), msg, self.priority_requests)
             .await;
