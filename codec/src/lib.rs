@@ -101,14 +101,13 @@
 
 pub mod codec;
 pub mod error;
+pub mod extensions;
 pub mod types;
 pub mod util;
 pub mod varint;
 
 // Re-export main types and traits
-pub use codec::{
-    Codec, Config, Decode, DecodeExt, Encode, EncodeFixed, FixedSize, Read, ReadExt,
-    ReadRangeCfgExt, ReadRangeExt, Write,
-};
+pub use codec::*;
 pub use error::Error;
+pub use extensions::*;
 pub use types::{net, primitives};
