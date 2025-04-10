@@ -26,7 +26,6 @@ tracing-subscriber = { workspace = true, features = ["fmt", "json", "env-filter"
 opentelemetry = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 
-
 # Enable "js" feature when WASM is target
 [target.'cfg(target_arch = "wasm32")'.dependencies.getrandom]
 version = "0.2.15"
@@ -38,6 +37,22 @@ axum = { workspace = true }
 opentelemetry_sdk = { workspace = true, features = ["rt-tokio"] }
 opentelemetry-otlp = { workspace = true, features = ["http-proto"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = "0.7.4"
+
 [lib]
 bench = false
 crate-type = ["rlib", "cdylib"]
+
+[dev-dependencies]
+criterion = { workspace = true, features = ["async_tokio"]}
+tokio = { workspace = true }
+tempfile = "3.19"
+
+[[bench]]
+name = "blob"
+harness = false
+path = "src/tokio/benches/bench_blob.rs"
+
+[features]
+iouring = []

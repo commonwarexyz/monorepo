@@ -584,13 +584,25 @@ mod tests {
 
             // Write data at different offsets
             let data1 = b"Hello";
-            let data2 = b"World";
             blob.write_at(data1, 0)
                 .await
                 .expect("Failed to write data1");
+
+            let mut buffer = vec![0u8; 5];
+            blob.read_at(&mut buffer, 0)
+                .await
+                .expect("Failed to read data");
+            assert_eq!(&buffer[..5], data1);
+
+            let data2 = b"World";
             blob.write_at(data2, 5)
                 .await
                 .expect("Failed to write data2");
+            let mut buffer = vec![0u8; 5];
+            blob.read_at(&mut buffer, 5)
+                .await
+                .expect("Failed to read data");
+            assert_eq!(&buffer[..5], data2);
 
             // Assert that length tracks pending data
             let length = blob.len().await.expect("Failed to get blob length");
