@@ -25,7 +25,7 @@
 //!
 //! ```
 //! use bytes::{Buf, BufMut};
-//! use commonware_codec::{Encode, Error, Read, ReadExt, Write};
+//! use commonware_codec::{Encode, Error, Read, ReadExt, ReadRangeExt, Write};
 //!
 //! // Define a custom struct
 //! #[derive(Debug, Clone, PartialEq)]
@@ -49,7 +49,7 @@
 //!     fn read_cfg(buf: &mut impl Buf, max_len: usize) -> Result<Self, Error> {
 //!         let xy = <(u64, u64)>::read(buf)?;
 //!         let z = <Option<u32>>::read(buf)?;
-//!         let metadata = <Vec<u8>>::read_cfg(buf, (..=max_len, ()))?;
+//!         let metadata = <Vec<u8>>::read_range(buf, ..=max_len)?;
 //!         Ok(Self { xy, z, metadata })
 //!     }
 //! }
@@ -107,7 +107,8 @@ pub mod varint;
 
 // Re-export main types and traits
 pub use codec::{
-    Codec, Config, Decode, DecodeExt, Encode, EncodeFixed, FixedSize, Read, ReadExt, Write,
+    Codec, Config, Decode, DecodeExt, Encode, EncodeFixed, FixedSize, Read, ReadExt,
+    ReadRangeCfgExt, ReadRangeExt, Write,
 };
 pub use error::Error;
 pub use types::{net, primitives};

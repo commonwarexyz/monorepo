@@ -2,6 +2,7 @@
 
 use crate::error::Error;
 use bytes::{Buf, BufMut, BytesMut};
+use std::ops::RangeBounds;
 
 /// Trait for types that can be used as configuration during decoding.
 pub trait Config: Clone + Send + 'static {}
@@ -143,6 +144,26 @@ pub trait DecodeExt: Decode<()> {
 
 // Automatically implement `DecodeExt` for types that implement `Decode` with no config.
 impl<T: Decode<()>> DecodeExt for T {}
+
+/// Extension trait for types that can read a range of items with a configuration.
+pub trait ReadRangeCfgExt<R: Config + RangeBounds<usize>, Cfg: Config>: Read<(R, Cfg)> {
+    fn read_range_cfg(buf: &mut impl Buf, range: R, cfg: Cfg) -> Result<Self, Error> {
+        Self::read_cfg(buf, (range, cfg))
+    }
+}
+
+// Automatically implement `ReadRangeCfgExt` for types that implement `Read` with a range and config.
+impl<R: Config + RangeBounds<usize>, Cfg: Config, T: Read<(R, Cfg)>> ReadRangeCfgExt<R, Cfg> for T {}
+
+/// Extension trait for types that can read a range of items without configuration.
+pub trait ReadRangeExt<R: Config + RangeBounds<usize>>: ReadRangeCfgExt<R, ()> {
+    fn read_range(buf: &mut impl Buf, range: R) -> Result<Self, Error> {
+        Self::read_range_cfg(buf, range, ())
+    }
+}
+
+// Automatically implement `ReadRangeExt` for types that implement `Read` with a range and no config.
+impl<R: Config + RangeBounds<usize>, T: Read<(R, ())>> ReadRangeExt<R> for T {}
 
 #[cfg(test)]
 mod tests {
