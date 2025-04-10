@@ -167,7 +167,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher> 
             let op: Operation<K, V> = log.read(i).await?;
             match op.to_type() {
                 Type::Deleted(key) => {
-                    let mut loc_iter = snapshot.delete_iter(&key);
+                    let mut loc_iter = snapshot.remove_iter(&key);
                     while let Some(loc) = loc_iter.next() {
                         let op = log.read(*loc).await?;
                         if op.to_key() == key {
@@ -295,7 +295,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher> 
     /// The operation is reflected in the snapshot, but will be subject to rollback until the next
     /// successful `commit`.
     pub async fn delete(&mut self, hasher: &mut H, key: K) -> Result<(), Error> {
-        let mut loc_iter = self.snapshot.delete_iter(&key);
+        let mut loc_iter = self.snapshot.remove_iter(&key);
         for loc in &mut loc_iter {
             let op = self.log.read(*loc).await?;
             match op.to_type() {

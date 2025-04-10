@@ -12,7 +12,7 @@
 //! degrade substantially (each conflicting key may contain the desired value).
 
 mod storage;
-pub use storage::{Index, ValueIterator};
+pub use storage::{Index, RemoveValueIterator, UpdateValueIterator, ValueIterator};
 pub mod translator;
 
 use std::hash::Hash;
@@ -234,8 +234,8 @@ mod tests {
             vec![13, 12, 11]
         );
 
-        // Mutations should work with a delete iterator too
-        for value in index.update_iter(b"key") {
+        // Mutations should work with a remove iterator too
+        for value in index.remove_iter(b"key") {
             // Mutate the value
             *value *= 10;
         }
@@ -246,85 +246,92 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_index_delete_through_iterator() {
+    fn test_index_remove_through_iterator() {
         let (_, context, _) = Executor::default();
         let mut index = Index::init(context.clone(), TwoCap);
 
         index.insert(b"key", 1);
         index.insert(b"key", 2);
         index.insert(b"key", 3);
+        index.insert(b"key", 4);
 
         assert_eq!(
             index.get_iter(b"key").copied().collect::<Vec<_>>(),
-            vec![3, 2, 1]
+            vec![4, 3, 2, 1]
         );
         assert!(context.encode().contains("pruned_total 0"));
 
-        // Test deleting first value from the list.
-        let mut iter = index.delete_iter(b"key");
-        assert_eq!(*iter.next().unwrap(), 3);
+        // Test removing first value from the list.
+        let mut iter = index.remove_iter(b"key");
+        iter.remove(); // should be a no-op
+        assert_eq!(*iter.next().unwrap(), 4);
         iter.remove();
+        iter.remove(); // should be a no-op
         assert!(context.encode().contains("pruned_total 1"));
 
         assert_eq!(
             index.get_iter(b"key").copied().collect::<Vec<_>>(),
-            vec![2, 1]
-        );
-
-        index.insert(b"key", 3);
-        assert_eq!(
-            index.get_iter(b"key").copied().collect::<Vec<_>>(),
             vec![3, 2, 1]
         );
 
-        // Test deleting from the middle.
-        let mut iter = index.delete_iter(b"key");
+        index.insert(b"key", 4);
+        assert_eq!(
+            index.get_iter(b"key").copied().collect::<Vec<_>>(),
+            vec![4, 3, 2, 1]
+        );
+
+        // Test removing from the middle.
+        let mut iter = index.remove_iter(b"key");
+        assert_eq!(*iter.next().unwrap(), 4);
         assert_eq!(*iter.next().unwrap(), 3);
         assert_eq!(*iter.next().unwrap(), 2);
         iter.remove();
+        iter.remove(); // should be a no-op
         assert!(context.encode().contains("pruned_total 2"));
 
         assert_eq!(
             index.get_iter(b"key").copied().collect::<Vec<_>>(),
-            vec![3, 1]
+            vec![4, 3, 1]
         );
         index.insert(b"key", 2);
         assert_eq!(
             index.get_iter(b"key").copied().collect::<Vec<_>>(),
-            vec![2, 3, 1]
+            vec![2, 4, 3, 1]
         );
 
-        // Test deleting last value.
-        let mut iter = index.delete_iter(b"key");
+        // Test removing last value.
+        let mut iter = index.remove_iter(b"key");
         assert_eq!(*iter.next().unwrap(), 2);
+        assert_eq!(*iter.next().unwrap(), 4);
         assert_eq!(*iter.next().unwrap(), 3);
         assert_eq!(*iter.next().unwrap(), 1);
         iter.remove();
+        iter.remove(); // should be a no-op
         assert!(context.encode().contains("pruned_total 3"));
 
         assert_eq!(
             index.get_iter(b"key").copied().collect::<Vec<_>>(),
-            vec![2, 3]
+            vec![2, 4, 3]
         );
 
-        // Test deleting all values.
-        let mut iter = index.delete_iter(b"key");
+        // Test removing all values.
+        let mut iter = index.remove_iter(b"key");
         while let Some(_) = iter.next() {
             iter.remove();
         }
         iter.remove(); // should be a no-op
         assert_eq!(index.len(), 0);
-        assert!(context.encode().contains("pruned_total 5"));
+        assert!(context.encode().contains("pruned_total 6"));
 
-        // Deleting from an empty iterator should be a no-op and shouldn't panic
-        let mut iter = index.delete_iter(b"key");
+        // Removing from an empty iterator should be a no-op and shouldn't panic
+        let mut iter = index.remove_iter(b"key");
         iter.remove();
 
         assert_eq!(
             index.get_iter(b"key").copied().collect::<Vec<_>>(),
             Vec::<u64>::new()
         );
-        assert!(context.encode().contains("pruned_total 5"));
+        assert!(context.encode().contains("pruned_total 6"));
     }
 
     #[test_traced]

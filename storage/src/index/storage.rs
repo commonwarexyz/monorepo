@@ -117,20 +117,22 @@ impl<K, V> UpdateValueIterator<'_, K, V> {
     }
 }
 
-/// An iterator over all values associated with a translated key, allowing for mutation and deletion
+/// An iterator over all values associated with a translated key, allowing for mutation and removal
 /// of the current element.
-pub struct DeleteValueIterator<'a, K, V> {
+pub struct RemoveValueIterator<'a, K, V> {
+    can_remove: bool, //  false means remove should be a no-op
+    prev_prev: Option<*mut Record<V>>,
     prev: Option<*mut Record<V>>,
     next: Option<*mut Record<V>>,
     entry: Option<OccupiedEntry<'a, K, Record<V>>>,
     pruned_counter: &'a Counter,
 }
 
-/// DeleteValueIterator must be sendable across threads so it can be held across a journal's read
+/// RemoveValueIterator must be sendable across threads so it can be held across a journal's read
 /// async boundary.
-unsafe impl<K, V> Send for DeleteValueIterator<'_, K, V> {}
+unsafe impl<K, V> Send for RemoveValueIterator<'_, K, V> {}
 
-impl<'a, K, V> Iterator for DeleteValueIterator<'a, K, V> {
+impl<'a, K, V> Iterator for RemoveValueIterator<'a, K, V> {
     type Item = &'a mut V;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -138,11 +140,13 @@ impl<'a, K, V> Iterator for DeleteValueIterator<'a, K, V> {
             Some(next) => {
                 let current = unsafe { &mut (*next) };
                 let value = &mut current.value;
+                self.prev_prev = self.prev;
                 self.prev = self.next;
                 self.next = current
                     .next
                     .as_mut()
                     .map(|next_next| next_next.as_mut() as *mut _);
+                self.can_remove = true;
                 Some(value)
             }
             None => None,
@@ -150,69 +154,45 @@ impl<'a, K, V> Iterator for DeleteValueIterator<'a, K, V> {
     }
 }
 
-impl<K, V> DeleteValueIterator<'_, K, V> {
+impl<K, V> RemoveValueIterator<'_, K, V> {
     /// Remove the value last returned from this iterator from the map. If no value has been
-    /// returned yet, or if the last returned value was deleted already, then this is a no-op.
+    /// returned yet, or if the last returned value was removed already, then this is a no-op.
     pub fn remove(&mut self) {
-        // This implementation is linear in the length of the linked list since it searches the list
-        // from the beginning even when the current value is positioned towards the end. We could
-        // make this constant time by storing an extra pointer, but since these lists are generally
-        // tiny, it's unlikely to improve performance.
-        let delete_me = match self.prev {
-            Some(prev) => prev,
-            None => return,
-        };
-        let occupied_entry = match self.entry.as_mut() {
-            Some(entry) => entry,
-            None => unreachable!("self.entry should not be None if self.prev is not None"),
-        };
-        let head = occupied_entry.get_mut();
-        let head_ptr = head as *mut Record<V>;
+        if !self.can_remove {
+            return;
+        }
+        self.can_remove = false;
+        self.pruned_counter.inc();
 
-        // If the element we are deleting is at the front, we simply update the map entry to point
-        // to the next item (if any).
-        if head_ptr == delete_me {
-            match head.next.take() {
-                Some(next) => {
-                    // There is a linked element, so just make it the new head.
-                    *head = *next;
-                    self.prev = None;
-                    self.next = Some(head as *mut Record<V>);
-                    self.pruned_counter.inc();
-                }
-                None => {
-                    // This is the only element, so removing it requires we remove the map entry
-                    // entirely.
-                    self.entry.take().unwrap().remove();
-                    self.prev = None;
-                    self.next = None;
-                    self.pruned_counter.inc();
-                }
+        if let Some(prev_prev) = self.prev_prev {
+            unsafe {
+                (*prev_prev).next = (*self.prev.unwrap()).next.take();
             }
             return;
         }
 
-        // The element must be one of the linked elements.
-        let mut cursor = head_ptr;
+        let Some(occupied_entry) = self.entry.as_mut() else {
+            unreachable!("can_remove should prevent this");
+        };
 
-        // Iterate through the linked list to find the element pointing to delete_me
-        while let Some(next_box) = unsafe { (*cursor).next.as_mut() } {
-            let next_ptr = next_box.as_mut() as *mut Record<V>;
-            if next_ptr == delete_me {
-                // Remove the element from the linked list
-                unsafe {
-                    let removed = (*cursor).next.take().unwrap();
-                    (*cursor).next = removed.next;
-                };
-                self.pruned_counter.inc();
-                return;
+        // The element we are removing is at the front.
+        let head = occupied_entry.get_mut();
+
+        match head.next.take() {
+            Some(next) => {
+                // There is a linked element, so just make it the new head.
+                *head = *next;
+                self.prev = None;
+                self.next = Some(head as *mut Record<V>);
             }
-            cursor = next_ptr;
+            None => {
+                // This is the only element, so removing it requires we remove the map entry
+                // entirely.
+                self.entry.take().unwrap().remove();
+                self.prev = None;
+                self.next = None;
+            }
         }
-
-        // delete_me (which was initialized with self.prev) should always point to an element
-        // somewhere the list, otherwise something is very wrong.
-        unreachable!("delete_me should always be in the list");
     }
 }
 
@@ -313,21 +293,25 @@ impl<T: Translator, V> Index<T, V> {
         }
     }
 
-    /// Retrieve all values associated with a translated key, allowing for mutation and deletion.
-    pub fn delete_iter(&mut self, key: &[u8]) -> DeleteValueIterator<T::Key, V> {
+    /// Retrieve all values associated with a translated key, allowing for mutation and removal.
+    pub fn remove_iter(&mut self, key: &[u8]) -> RemoveValueIterator<T::Key, V> {
         let translated_key = self.translator.transform(key);
         let entry = self.map.entry(translated_key);
         match entry {
             Entry::Occupied(mut occupied_entry) => {
                 let record_ptr = occupied_entry.get_mut();
-                DeleteValueIterator {
+                RemoveValueIterator {
+                    can_remove: false,
+                    prev_prev: None,
                     prev: None,
                     next: Some(record_ptr),
                     entry: Some(occupied_entry),
                     pruned_counter: &self.keys_pruned,
                 }
             }
-            Entry::Vacant(_) => DeleteValueIterator {
+            Entry::Vacant(_) => RemoveValueIterator {
+                can_remove: false,
+                prev_prev: None,
                 prev: None,
                 next: None,
                 entry: None,
@@ -338,7 +322,7 @@ impl<T: Translator, V> Index<T, V> {
 
     /// Remove all values associated with a translated key that match the `prune` predicate.
     pub fn remove(&mut self, key: &[u8], prune: impl Fn(&V) -> bool) {
-        let mut iter = self.delete_iter(key);
+        let mut iter = self.remove_iter(key);
         while let Some(value) = iter.next() {
             if prune(value) {
                 iter.remove();
