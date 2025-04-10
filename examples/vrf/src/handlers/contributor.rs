@@ -14,7 +14,6 @@ use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Spawner};
 use commonware_utils::quorum;
 use futures::{channel::mpsc, SinkExt};
-use prost::Message;
 use rand::Rng;
 use std::{collections::HashMap, time::Duration};
 use tracing::{debug, info, warn};
@@ -94,30 +93,19 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
                         debug!("dropping messages until receive start message from arbiter");
                         continue;
                     }
-                    let msg = match wire::Dkg::decode(msg) {
+                    let msg: wire::DKG = match wire::DKG::decode_cfg(msg, self.t) {
                         Ok(msg) => msg,
-                        Err(_) => {
-                            warn!("received invalid message from arbiter");
+                        Err(err) => {
+                            warn!(?err, "received invalid message from arbiter");
                             continue;
                         }
                     };
                     let round = msg.round;
-                    let msg = match msg.payload {
-                        Some(wire::dkg::Payload::Start(msg)) => msg,
-                        _ => {
-                            // This could happen if out-of-sync on phase.
-                            return (round, None);
-                        }
+                    let wire::Payload::Start(msg) = msg.payload else {
+                        // This could happen if out-of-sync on phase.
+                        return (round, None);
                     };
-                    if let Some(group) = msg.group {
-                        let result = poly::Public::deserialize(&group, self.t);
-                        if result.is_none() {
-                            warn!("received invalid group polynomial");
-                            continue;
-                        }
-                        break (Some(result.unwrap()), round);
-                    }
-                    break (None, round);
+                    break (msg.group, round);
                 }
                 Err(err) => {
                     debug!(?err, "did not receive start message");
@@ -234,14 +222,14 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
                 let success = sender
                     .send(
                         Recipients::One(player.clone()),
-                        wire::Dkg {
+                        wire::DKG {
                             round,
-                            payload: Some(wire::dkg::Payload::Share(wire::Share {
+                            payload: wire::Payload::Share(wire::Share {
                                 commitment: serialized_commitment.clone(),
                                 share: serialized_share,
-                            })),
+                            }),
                         }
-                        .encode_to_vec()
+                        .encode()
                         .into(),
                         true,
                     )
@@ -267,7 +255,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
                     result = receiver.recv() => {
                         match result {
                             Ok((s, msg)) => {
-                                let msg = match wire::Dkg::decode(msg) {
+                                let msg = match wire::DKG::decode(msg) {
                                     Ok(msg) => msg,
                                     Err(_) => {
                                         warn!("received invalid message from arbiter");
@@ -283,7 +271,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
                                     return (round, None);
                                 }
                                 match msg.payload {
-                                    Some(wire::dkg::Payload::Ack(msg)) => {
+                                    Some(wire::Payload::Ack(msg)) => {
                                         // Skip if not dealing
                                         let Some((dealer, _, commitment, _, acks)) = &mut dealer_obj else {
                                             continue;
@@ -322,7 +310,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
                                         acks.insert(msg.public_key, signature);
 
                                     },
-                                    Some(wire::dkg::Payload::Share(msg)) => {
+                                    Some(wire::Payload::Share(msg)) => {
                                         // Deserialize commitment
                                         let commitment = match poly::Public::deserialize(&msg.commitment, self.t) {
                                             Some(commitment) => commitment,
@@ -353,14 +341,14 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
                                         sender
                                             .send(
                                                 Recipients::One(s),
-                                                wire::Dkg {
+                                                wire::DKG {
                                                     round,
-                                                    payload: Some(wire::dkg::Payload::Ack(wire::Ack {
+                                                    payload: wire::Payload::Ack(wire::Ack {
                                                         public_key: me_idx,
-                                                        signature: signature.to_vec(),
-                                                    })),
+                                                        signature,
+                                                    }),
                                                 }
-                                                .encode_to_vec()
+                                                .encode()
                                                 .into(),
                                                 true,
                                             )
@@ -391,11 +379,11 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
                     Some(signature) => {
                         ack_vec.push(wire::Ack {
                             public_key: idx,
-                            signature: signature.to_vec(),
+                            signature,
                         });
                     }
                     None => {
-                        reveals.push(shares[idx as usize].serialize());
+                        reveals.push(shares[idx as usize]);
                     }
                 }
             }
@@ -408,15 +396,15 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
             sender
                 .send(
                     Recipients::One(self.arbiter.clone()),
-                    wire::Dkg {
+                    wire::DKG {
                         round,
-                        payload: Some(wire::dkg::Payload::Commitment(wire::Commitment {
+                        payload: wire::Payload::Commitment(wire::Commitment {
                             commitment: serialized_commitment,
                             acks: ack_vec,
                             reveals,
-                        })),
+                        }),
                     }
-                    .encode_to_vec()
+                    .encode()
                     .into(),
                     true,
                 )
@@ -428,7 +416,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
         loop {
             match receiver.recv().await {
                 Ok((s, msg)) => {
-                    let msg = match wire::Dkg::decode(msg) {
+                    let msg = match wire::DKG::decode(msg) {
                         Ok(msg) => msg,
                         Err(_) => {
                             warn!("received invalid message from arbiter");
@@ -446,8 +434,8 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
                         continue;
                     }
                     let msg = match msg.payload {
-                        Some(wire::dkg::Payload::Success(msg)) => msg,
-                        Some(wire::dkg::Payload::Abort(_)) => {
+                        wire::Payload::Success(msg) => msg,
+                        wire::Payload::Abort => {
                             warn!(round, "received abort message");
                             return (round, None);
                         }
@@ -464,32 +452,10 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
                         reveals = msg.reveals.len(),
                         "finalizing round"
                     );
-                    let mut commitments = HashMap::new();
-                    for (idx, commitment) in msg.commitments {
-                        let commitment = match poly::Public::deserialize(&commitment, self.t) {
-                            Some(commitment) => commitment,
-                            None => {
-                                warn!(round, "received invalid commitment");
-                                continue;
-                            }
-                        };
-                        commitments.insert(idx, commitment);
-                    }
-                    if should_deal && !commitments.contains_key(&me_idx) {
+                    if should_deal && !msg.commitments.contains_key(&me_idx) {
                         warn!(round, "commitment not included");
                     }
-                    let mut reveals = HashMap::new();
-                    for (idx, share) in msg.reveals {
-                        let share = match group::Share::deserialize(&share) {
-                            Some(share) => share,
-                            None => {
-                                warn!(round, "received invalid share");
-                                continue;
-                            }
-                        };
-                        reveals.insert(idx, share);
-                    }
-                    let Ok(output) = player_obj.finalize(commitments, reveals) else {
+                    let Ok(output) = player_obj.finalize(msg.commitments, msg.reveals) else {
                         warn!(round, "failed to finalize round");
                         return (round, None);
                     };

@@ -1,4 +1,5 @@
 use crate::handlers::wire;
+use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::bls12381::{
     dkg::player::Output,
     primitives::{
@@ -12,7 +13,6 @@ use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};
 use commonware_utils::{hex, Array};
 use futures::{channel::mpsc, StreamExt};
-use prost::Message;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tracing::{debug, info, warn};
@@ -72,11 +72,11 @@ impl<E: Clock + Spawner, P: Array> Vrf<E, P> {
         sender
             .send(
                 Recipients::Some(self.contributors.clone()),
-                wire::Vrf {
+                wire::VRF {
                     round,
                     signature: signature.serialize(),
                 }
-                .encode_to_vec()
+                .encode()
                 .into(),
                 true,
             )
@@ -107,7 +107,7 @@ impl<E: Clock + Spawner, P: Array> Vrf<E, P> {
                                 warn!(round, dealer, "received duplicate signature");
                                 continue;
                             }
-                            let msg = match wire::Vrf::decode(msg) {
+                            let msg = match wire::VRF::decode(msg) {
                                 Ok(msg) => msg,
                                 Err(_) => {
                                     warn!(round, "received invalid message from player");

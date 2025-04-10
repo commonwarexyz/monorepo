@@ -149,11 +149,9 @@
 //! ```
 
 #[doc(hidden)]
-pub mod wire {
-    include!(concat!(env!("OUT_DIR"), "/wire.rs"));
-}
-#[doc(hidden)]
 pub mod application;
+#[doc(hidden)]
+pub mod wire;
 #[doc(hidden)]
 pub const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_BRIDGE";
 #[doc(hidden)]
