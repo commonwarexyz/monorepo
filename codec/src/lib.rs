@@ -13,8 +13,13 @@
 //! - Collections: `Vec<T>`, `Option<T>`, tuples, and fixed-size arrays like `[u8; N]`
 //! - Recursive serialization of nested structs and enums via trait implementations
 //!
-//! User-defined types can be serialized and deserialized by implementing the `Codec` trait.
-//! For types with a constant encoded size, optionally implement the `SizedCodec` trait.
+//! User-defined types can be serialized and deserialized by implementing the `Write` and `Read`
+//! traits.
+//!
+//! It is suggested to implement the `Encode` trait for types as well, which allows for efficient
+//! pre-allocation of buffers.
+//!
+//! For types with a constant encoded size, the `FixedSize` trait should be implemented.
 //!
 //! # Example (Variable Size)
 //!
@@ -27,7 +32,7 @@
 //! struct Item {
 //!     xy: (u64, u64),
 //!     z: Option<u32>,
-//!     metadata: [u8; 11],
+//!     metadata: Vec<u8>,
 //! }
 //!
 //! // Implement the `Write` trait
@@ -39,12 +44,12 @@
 //!     }
 //! }
 //!
-//! // Implement the `Read` trait
-//! impl Read for Item {
-//!     fn read_cfg(buf: &mut impl Buf, _: ()) -> Result<Self, Error> {
+//! // Implement the `Read` trait. `Decode` is automatically implemented for `Read` types.
+//! impl Read<usize> for Item {
+//!     fn read_cfg(buf: &mut impl Buf, max_len: usize) -> Result<Self, Error> {
 //!         let xy = <(u64, u64)>::read(buf)?;
 //!         let z = <Option<u32>>::read(buf)?;
-//!         let metadata = <[u8; 11]>::read(buf)?;
+//!         let metadata = <Vec<u8>>::read_cfg(buf, (..=max_len, ()))?;
 //!         Ok(Self { xy, z, metadata })
 //!     }
 //! }
@@ -78,7 +83,7 @@
 //!     }
 //! }
 //!
-//! // Implement the `Read` trait
+//! // Implement the `Read` trait. `Decode` is automatically implemented for `Read` types.
 //! impl Read for Point {
 //!     fn read_cfg(buf: &mut impl Buf, _: ()) -> Result<Self, Error> {
 //!         let x = <u32>::read(buf)?;
@@ -88,6 +93,7 @@
 //! }
 //!
 //! // Since `Point` has a fixed size, we implement `FixedSize`.
+//! // `Encode` is automatically implemented for `FixedSize` types.
 //! impl FixedSize for Point {
 //!     const LEN_ENCODED: usize = u32::LEN_ENCODED + u32::LEN_ENCODED;
 //! }
