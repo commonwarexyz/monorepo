@@ -42,7 +42,7 @@ impl<R: RangeConfig, Cfg: Config, T: Read<Cfg>> Read<(R, Cfg)> for Vec<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Decode, Encode};
+    use crate::{DecodeRangeExt, Encode};
 
     #[test]
     fn test_vec() {
@@ -53,18 +53,18 @@ mod tests {
 
             // Valid decoding
             let len = value.len();
-            let decoded = Vec::<u8>::decode_cfg(encoded, (len..=len, ())).unwrap();
+            let decoded = Vec::<u8>::decode_range(encoded, len..=len).unwrap();
             assert_eq!(value, decoded);
 
             // Failure for too long
             matches!(
-                Vec::<u8>::decode_cfg(value.encode(), (0..len, ())),
+                Vec::<u8>::decode_range(value.encode(), 0..len),
                 Err(Error::InvalidLength(_))
             );
 
             // Failure for too short
             matches!(
-                Vec::<u8>::decode_cfg(value.encode(), (len + 1.., ())),
+                Vec::<u8>::decode_range(value.encode(), len + 1..),
                 Err(Error::InvalidLength(_))
             );
         }

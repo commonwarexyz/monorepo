@@ -42,3 +42,23 @@ pub trait ReadRangeExt<R: RangeConfig>: ReadRangeCfgExt<R, ()> {
 
 // Automatically implement `ReadRangeExt` for types that implement `Read` with a range and no config.
 impl<R: RangeConfig, T: Read<(R, ())>> ReadRangeExt<R> for T {}
+
+/// Extension trait for types that can read a range of items with a configuration.
+pub trait DecodeRangeCfgExt<R: RangeConfig, Cfg: Config>: Decode<(R, Cfg)> {
+    fn decode_range_cfg(buf: impl Buf, range: R, cfg: Cfg) -> Result<Self, Error> {
+        Self::decode_cfg(buf, (range, cfg))
+    }
+}
+
+// Automatically implement `DecodeRangeCfgExt` for types that implement `Decode` with a range and config.
+impl<R: RangeConfig, Cfg: Config, T: Decode<(R, Cfg)>> DecodeRangeCfgExt<R, Cfg> for T {}
+
+/// Extension trait for types that can decode a range of items without configuration.
+pub trait DecodeRangeExt<R: RangeConfig>: DecodeRangeCfgExt<R, ()> {
+    fn decode_range(buf: impl Buf, range: R) -> Result<Self, Error> {
+        Self::decode_range_cfg(buf, range, ())
+    }
+}
+
+// Automatically implement `DecodeRangeExt` for types that implement `Decode` with a range and no config.
+impl<R: RangeConfig, T: Decode<(R, ())>> DecodeRangeExt<R> for T {}

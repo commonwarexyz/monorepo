@@ -1,7 +1,8 @@
 use bitvec::{order::Lsb0, vec};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{
-    util as CodecUtil, varint, Encode, EncodeSize, Error, RangeConfig, Read, ReadExt, Write,
+    util as CodecUtil, varint, Encode, EncodeSize, Error, RangeConfig, Read, ReadExt, ReadRangeExt,
+    Write,
 };
 use commonware_cryptography::Verifier;
 use std::net::SocketAddr;
@@ -68,7 +69,7 @@ impl<C: Verifier> Read<PayloadCodecConfig> for Payload<C> {
                 Ok(Payload::BitVec(bitvec))
             }
             1 => {
-                let peers = Vec::<SignedPeerInfo<C>>::read_cfg(buf, (..=cfg.max_peers, ()))?;
+                let peers = Vec::<SignedPeerInfo<C>>::read_range(buf, ..=cfg.max_peers)?;
                 Ok(Payload::Peers(peers))
             }
             2 => {
@@ -264,7 +265,7 @@ impl<R: RangeConfig> Read<R> for Data {
 mod tests {
     use super::*;
     use bytes::BytesMut;
-    use commonware_codec::Decode;
+    use commonware_codec::{Decode, DecodeRangeExt};
     use commonware_cryptography::{Secp256r1, Signer};
 
     fn signed_peer_info() -> SignedPeerInfo<Secp256r1> {
@@ -312,7 +313,7 @@ mod tests {
     fn test_signed_peer_info_codec() {
         let original = vec![signed_peer_info(), signed_peer_info(), signed_peer_info()];
         let encoded = original.encode();
-        let decoded = Vec::<SignedPeerInfo<Secp256r1>>::decode_cfg(encoded, (3..=3, ())).unwrap();
+        let decoded = Vec::<SignedPeerInfo<Secp256r1>>::decode_range(encoded, 3..=3).unwrap();
         for (original, decoded) in original.iter().zip(decoded.iter()) {
             assert_eq!(original.socket, decoded.socket);
             assert_eq!(original.timestamp, decoded.timestamp);
@@ -320,10 +321,10 @@ mod tests {
             assert_eq!(original.signature, decoded.signature);
         }
 
-        let too_short = Vec::<SignedPeerInfo<Secp256r1>>::decode_cfg(original.encode(), (..3, ()));
+        let too_short = Vec::<SignedPeerInfo<Secp256r1>>::decode_range(original.encode(), ..3);
         assert!(matches!(too_short, Err(Error::InvalidLength(3))));
 
-        let too_long = Vec::<SignedPeerInfo<Secp256r1>>::decode_cfg(original.encode(), (4.., ()));
+        let too_long = Vec::<SignedPeerInfo<Secp256r1>>::decode_range(original.encode(), 4..);
         assert!(matches!(too_long, Err(Error::InvalidLength(3))));
     }
 
