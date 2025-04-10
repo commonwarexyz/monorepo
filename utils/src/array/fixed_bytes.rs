@@ -41,7 +41,7 @@ impl<const N: usize> Read for FixedBytes<N> {
 }
 
 impl<const N: usize> FixedSize for FixedBytes<N> {
-    const LEN_ENCODED: usize = N;
+    const SIZE: usize = N;
 }
 
 impl<const N: usize> Array for FixedBytes<N> {

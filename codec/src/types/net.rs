@@ -18,7 +18,7 @@ impl Read for Ipv4Addr {
 }
 
 impl FixedSize for Ipv4Addr {
-    const LEN_ENCODED: usize = u32::LEN_ENCODED;
+    const SIZE: usize = u32::SIZE;
 }
 
 impl Write for Ipv6Addr {
@@ -37,7 +37,7 @@ impl Read for Ipv6Addr {
 }
 
 impl FixedSize for Ipv6Addr {
-    const LEN_ENCODED: usize = u128::LEN_ENCODED;
+    const SIZE: usize = u128::SIZE;
 }
 
 impl Write for SocketAddrV4 {
@@ -58,7 +58,7 @@ impl Read for SocketAddrV4 {
 }
 
 impl FixedSize for SocketAddrV4 {
-    const LEN_ENCODED: usize = Ipv4Addr::LEN_ENCODED + u16::LEN_ENCODED;
+    const SIZE: usize = Ipv4Addr::SIZE + u16::SIZE;
 }
 
 impl Write for SocketAddrV6 {
@@ -79,7 +79,7 @@ impl Read for SocketAddrV6 {
 }
 
 impl FixedSize for SocketAddrV6 {
-    const LEN_ENCODED: usize = Ipv6Addr::LEN_ENCODED + u16::LEN_ENCODED;
+    const SIZE: usize = Ipv6Addr::SIZE + u16::SIZE;
 }
 
 // SocketAddr implementation
@@ -103,9 +103,9 @@ impl Encode for SocketAddr {
     #[inline]
     fn len_encoded(&self) -> usize {
         (match self {
-            SocketAddr::V4(_) => SocketAddrV4::LEN_ENCODED,
-            SocketAddr::V6(_) => SocketAddrV6::LEN_ENCODED,
-        }) + u8::LEN_ENCODED
+            SocketAddr::V4(_) => SocketAddrV4::SIZE,
+            SocketAddr::V6(_) => SocketAddrV6::SIZE,
+        }) + u8::SIZE
     }
 }
 

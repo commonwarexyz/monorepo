@@ -19,7 +19,7 @@ pub enum Error {
 /// An `Array` implementation for `u64`.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Default)]
 #[repr(transparent)]
-pub struct U64([u8; u64::LEN_ENCODED]);
+pub struct U64([u8; u64::SIZE]);
 
 impl U64 {
     pub fn new(value: u64) -> Self {
@@ -39,20 +39,20 @@ impl Write for U64 {
 
 impl Read for U64 {
     fn read_cfg(buf: &mut impl Buf, _: ()) -> Result<Self, CodecError> {
-        <[u8; U64::LEN_ENCODED]>::read(buf).map(Self)
+        <[u8; U64::SIZE]>::read(buf).map(Self)
     }
 }
 
 impl FixedSize for U64 {
-    const LEN_ENCODED: usize = u64::LEN_ENCODED;
+    const SIZE: usize = u64::SIZE;
 }
 
 impl Array for U64 {
     type Error = Error;
 }
 
-impl From<[u8; U64::LEN_ENCODED]> for U64 {
-    fn from(value: [u8; U64::LEN_ENCODED]) -> Self {
+impl From<[u8; U64::SIZE]> for U64 {
+    fn from(value: [u8; U64::SIZE]) -> Self {
         Self(value)
     }
 }
@@ -61,10 +61,10 @@ impl TryFrom<&[u8]> for U64 {
     type Error = Error;
 
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        if value.len() != U64::LEN_ENCODED {
+        if value.len() != U64::SIZE {
             return Err(Error::InvalidLength);
         }
-        let array: [u8; U64::LEN_ENCODED] = value.try_into().map_err(|_| Error::InvalidLength)?;
+        let array: [u8; U64::SIZE] = value.try_into().map_err(|_| Error::InvalidLength)?;
         Ok(Self(array))
     }
 }
@@ -81,14 +81,14 @@ impl TryFrom<Vec<u8>> for U64 {
     type Error = Error;
 
     fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
-        if value.len() != U64::LEN_ENCODED {
+        if value.len() != U64::SIZE {
             return Err(Error::InvalidLength);
         }
 
         // If the length is correct, we can safely convert the vector into a boxed slice without any
         // copies.
         let boxed_slice = value.into_boxed_slice();
-        let boxed_array: Box<[u8; U64::LEN_ENCODED]> =
+        let boxed_array: Box<[u8; U64::SIZE]> =
             boxed_slice.try_into().map_err(|_| Error::InvalidLength)?;
         Ok(Self(*boxed_array))
     }
@@ -142,7 +142,7 @@ mod tests {
         let original = U64::new(42u64);
 
         let encoded = original.encode();
-        assert_eq!(encoded.len(), U64::LEN_ENCODED);
+        assert_eq!(encoded.len(), U64::SIZE);
         assert_eq!(encoded, original.as_ref());
 
         let decoded = U64::decode(encoded).unwrap();

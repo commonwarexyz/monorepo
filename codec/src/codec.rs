@@ -62,7 +62,7 @@ pub trait Encode: Write {
 // Otherwise, the type must define its own `len_encoded()` method.
 impl<T: EncodeFixed> Encode for T {
     fn len_encoded(&self) -> usize {
-        Self::LEN_ENCODED
+        Self::SIZE
     }
 }
 
@@ -95,15 +95,15 @@ impl<Cfg: Config, T: Encode + Decode<Cfg>> Codec<Cfg> for T {}
 
 /// Trait for types with a known, fixed encoded length.
 pub trait FixedSize {
-    /// The length of the encoded value.
-    const LEN_ENCODED: usize;
+    /// The length of the encoded value (in bytes).
+    const SIZE: usize;
 }
 
 /// Trait for types that can be encoded to a fixed-size byte array.
 pub trait EncodeFixed: Write + FixedSize {
     /// Encodes a value to a fixed-size byte array.
     ///
-    /// The caller MUST ensure `N` is equal to `Self::LEN_ENCODED`.
+    /// The caller MUST ensure `N` is equal to `Self::SIZE`.
     /// Panics if the `write` implementation does not write exactly `N` bytes.
     ///
     /// (Provided method).
@@ -112,9 +112,9 @@ pub trait EncodeFixed: Write + FixedSize {
         // without adding a new generic parameter to the trait.
         assert_eq!(
             N,
-            Self::LEN_ENCODED,
+            Self::SIZE,
             "Can't encode {} bytes into {} bytes",
-            Self::LEN_ENCODED,
+            Self::SIZE,
             N
         );
 

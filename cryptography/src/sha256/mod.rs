@@ -106,7 +106,7 @@ impl Read for Digest {
 }
 
 impl FixedSize for Digest {
-    const LEN_ENCODED: usize = DIGEST_LENGTH;
+    const SIZE: usize = DIGEST_LENGTH;
 }
 
 impl Array for Digest {
@@ -214,7 +214,7 @@ mod tests {
 
     #[test]
     fn test_sha256_len() {
-        assert_eq!(Digest::LEN_ENCODED, DIGEST_LENGTH);
+        assert_eq!(Digest::SIZE, DIGEST_LENGTH);
     }
 
     #[test]

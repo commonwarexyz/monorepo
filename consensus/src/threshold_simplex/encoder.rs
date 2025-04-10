@@ -9,7 +9,7 @@ pub const NULLIFY_SUFFIX: &[u8] = b"_NULLIFY";
 pub const FINALIZE_SUFFIX: &[u8] = b"_FINALIZE";
 
 pub fn proposal_message<D: Array>(view: View, parent: View, payload: &D) -> Vec<u8> {
-    let mut msg = Vec::with_capacity(u64::LEN_ENCODED + u64::LEN_ENCODED + D::LEN_ENCODED);
+    let mut msg = Vec::with_capacity(u64::SIZE + u64::SIZE + D::SIZE);
     msg.put_u64(view);
     msg.put_u64(parent);
     msg.extend_from_slice(payload);

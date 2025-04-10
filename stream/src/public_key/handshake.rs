@@ -50,8 +50,7 @@ impl<C: Scheme> Read for Info<C> {
 }
 
 impl<C: Scheme> FixedSize for Info<C> {
-    const LEN_ENCODED: usize =
-        C::PublicKey::LEN_ENCODED + x25519::PublicKey::LEN_ENCODED + u64::LEN_ENCODED;
+    const SIZE: usize = C::PublicKey::SIZE + x25519::PublicKey::SIZE + u64::SIZE;
 }
 
 // Allows recipient to verify that the sender has the private key
@@ -161,8 +160,7 @@ impl<C: Scheme> Read for Signed<C> {
 }
 
 impl<C: Scheme> FixedSize for Signed<C> {
-    const LEN_ENCODED: usize =
-        Info::<C>::LEN_ENCODED + C::PublicKey::LEN_ENCODED + C::Signature::LEN_ENCODED;
+    const SIZE: usize = Info::<C>::SIZE + C::PublicKey::SIZE + C::Signature::SIZE;
 }
 
 #[cfg(test)]

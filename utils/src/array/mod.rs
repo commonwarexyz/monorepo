@@ -57,7 +57,7 @@ pub trait Array:
 
     /// Attempts to read an array from the provided buffer.
     fn read_from(buf: &mut impl Buf) -> Result<Self, Error<<Self as Array>::Error>> {
-        let len = Self::LEN_ENCODED;
+        let len = Self::SIZE;
         if buf.remaining() < len {
             return Err(Error::InsufficientBytes);
         }

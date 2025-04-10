@@ -95,7 +95,7 @@
 //! // Since `Point` has a fixed size, we implement `FixedSize`.
 //! // `Encode` is automatically implemented for `FixedSize` types.
 //! impl FixedSize for Point {
-//!     const LEN_ENCODED: usize = u32::LEN_ENCODED + u32::LEN_ENCODED;
+//!     const SIZE: usize = u32::SIZE + u32::SIZE;
 //! }
 //! ```
 

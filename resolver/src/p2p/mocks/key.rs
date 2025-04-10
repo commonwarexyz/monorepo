@@ -64,7 +64,7 @@ impl Read for Key {
 }
 
 impl FixedSize for Key {
-    const LEN_ENCODED: usize = u8::LEN_ENCODED;
+    const SIZE: usize = u8::SIZE;
 }
 
 impl Array for Key {

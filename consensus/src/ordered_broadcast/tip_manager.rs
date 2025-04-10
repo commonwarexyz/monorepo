@@ -77,7 +77,7 @@ mod tests {
             payload: &str,
         ) -> parsed::Node<Ed25519, Digest> {
             let signature = {
-                let mut data = Bytes::from(vec![3u8; Signature::LEN_ENCODED]);
+                let mut data = Bytes::from(vec![3u8; Signature::SIZE]);
                 Signature::read_from(&mut data).unwrap()
             };
             parsed::Node::<Ed25519, Digest> {

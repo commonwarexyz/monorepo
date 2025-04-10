@@ -30,11 +30,8 @@ pub struct Prover<C: Scheme, D: Digest> {
 
 impl<C: Scheme, D: Digest> Prover<C, D> {
     /// The length of a serialized proof.
-    const PROOF_LEN: usize = C::PublicKey::LEN_ENCODED
-        + u64::LEN_ENCODED
-        + D::LEN_ENCODED
-        + u64::LEN_ENCODED
-        + group::SIGNATURE_LENGTH;
+    const PROOF_LEN: usize =
+        C::PublicKey::SIZE + u64::SIZE + D::SIZE + u64::SIZE + group::SIGNATURE_LENGTH;
 
     /// Create a new prover with the given signing `namespace`.
     pub fn new(namespace: &[u8], public: group::Public) -> Self {

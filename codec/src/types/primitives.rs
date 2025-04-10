@@ -24,7 +24,7 @@ macro_rules! impl_numeric {
         }
 
         impl FixedSize for $type {
-            const LEN_ENCODED: usize = std::mem::size_of::<$type>();
+            const SIZE: usize = std::mem::size_of::<$type>();
         }
     };
 }
@@ -63,7 +63,7 @@ impl Read for bool {
 }
 
 impl FixedSize for bool {
-    const LEN_ENCODED: usize = 1;
+    const SIZE: usize = 1;
 }
 
 // Bytes implementation
@@ -116,7 +116,7 @@ impl<const N: usize> Read for [u8; N] {
 }
 
 impl<const N: usize> FixedSize for [u8; N] {
-    const LEN_ENCODED: usize = N;
+    const SIZE: usize = N;
 }
 
 // Option implementation

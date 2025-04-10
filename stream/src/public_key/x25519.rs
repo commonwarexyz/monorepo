@@ -37,7 +37,7 @@ impl Write for PublicKey {
 
 impl Read for PublicKey {
     fn read_cfg(buf: &mut impl Buf, _: ()) -> Result<Self, CodecError> {
-        let public_key = <[u8; Self::LEN_ENCODED]>::read(buf)?;
+        let public_key = <[u8; Self::SIZE]>::read(buf)?;
         Ok(PublicKey {
             inner: X25519PublicKey::from(public_key),
         })
@@ -45,7 +45,7 @@ impl Read for PublicKey {
 }
 
 impl FixedSize for PublicKey {
-    const LEN_ENCODED: usize = 32;
+    const SIZE: usize = 32;
 }
 
 pub fn new<R: Rng + CryptoRng>(rng: &mut R) -> EphemeralSecret {
@@ -63,14 +63,14 @@ mod tests {
     fn test_codec() {
         // Create a random public key
         let (_, mut context, _) = Executor::default();
-        let mut buf = [0u8; PublicKey::LEN_ENCODED];
+        let mut buf = [0u8; PublicKey::SIZE];
         context.fill(&mut buf);
 
         let original = PublicKey {
             inner: X25519PublicKey::from(buf),
         };
         let encoded = original.encode();
-        assert_eq!(encoded.len(), PublicKey::LEN_ENCODED);
+        assert_eq!(encoded.len(), PublicKey::SIZE);
         let decoded = PublicKey::decode(encoded).unwrap();
         assert_eq!(original, decoded);
     }

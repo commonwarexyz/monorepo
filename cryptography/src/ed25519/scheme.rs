@@ -140,7 +140,7 @@ impl Read for PrivateKey {
 }
 
 impl FixedSize for PrivateKey {
-    const LEN_ENCODED: usize = PRIVATE_KEY_LENGTH;
+    const SIZE: usize = PRIVATE_KEY_LENGTH;
 }
 
 impl Array for PrivateKey {
@@ -250,7 +250,7 @@ impl Read for PublicKey {
 }
 
 impl FixedSize for PublicKey {
-    const LEN_ENCODED: usize = PUBLIC_KEY_LENGTH;
+    const SIZE: usize = PUBLIC_KEY_LENGTH;
 }
 
 impl Array for PublicKey {
@@ -334,7 +334,7 @@ impl Read for Signature {
 }
 
 impl FixedSize for Signature {
-    const LEN_ENCODED: usize = SIGNATURE_LENGTH;
+    const SIZE: usize = SIGNATURE_LENGTH;
 }
 
 impl Array for Signature {
