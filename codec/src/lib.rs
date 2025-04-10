@@ -2,71 +2,131 @@
 //!
 //! # Overview
 //!
-//! A binary serialization library designed to efficiently and safely:
-//! - Serialize structured data into a binary format
-//! - Deserialize untrusted binary input into structured data
+//! `commonware-codec` provides traits and implementations for efficient and safe
+//! binary serialization and deserialization of structured data. It focuses on:
+//!
+//! - **Performance:** Uses the `bytes` crate and aims to minimize allocations.
+//! - **Safety:** Deserialization of untrusted data is made safer via the
+//!   [`Config`] system for the [`Read`] trait, allowing users to impose limits
+//!   (like maximum lengths) during decoding.
+//! - **Ease of Use:** Provides implementations for common Rust types and uses
+//!   extension traits ([`ReadExt`], [`DecodeExt`], etc.) for ergonomic usage.
+//!
+//! # Core Concepts
+//!
+//! The library revolves around a few core traits:
+//!
+//! - [`Write`]: Implement this to define how your type is written to a byte buffer.
+//! - [`EncodeSize`]: Implement this to calculate the exact encoded byte size of a value.
+//!   Required for efficient buffer pre-allocation.
+//! - [`FixedSize`]: Marker trait for types whose encoded size is constant. Automatically
+//!   implements [`EncodeSize`].
+//! - [`Read<Cfg>`]: Implement this to define how your type is read from a byte buffer.
+//!   It takes a configuration `Cfg` parameter, primarily used to enforce constraints
+//!   (e.g., size limits) when reading untrusted data. Use `()` if no config is needed.
+//!
+//! Helper traits combine these for convenience:
+//!
+//! - [`Encode`]: Combines [`Write`] + [`EncodeSize`]. Provides [`Encode::encode()`] method.
+//! - [`Decode<Cfg>`]: Requires [`Read<Cfg>`]. Provides [`Decode::decode_cfg()`] method that ensures
+//!   that the entire buffer is consumed.
+//! - [`Codec<Cfg>`]: Combines [`Encode`] + [`Decode<Cfg>`].
 //!
 //! # Supported Types
 //!
-//! Natively supports:
-//! - Primitives: `u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`, `i64`, `f32`, `f64`, `bool`
-//! - Collections: `Vec<T>`, `Option<T>`, tuples, and fixed-size arrays like `[u8; N]`
-//! - Recursive serialization of nested structs and enums via trait implementations
+//! Natively supports encoding/decoding for:
+//! - Primitives: `bool`, `u8`, `u16`, `u32`, `u64`, `u128`, `i8`, `i16`, `i32`, `i64`, `i128`, `f32`, `f64`, `[u8; N]`
+//! - Collections: `Vec<T>`, `Option<T>`
+//! - Tuples: Supports tuples of encodable types (up to 12 elements)
+//! - Common External Types: [`bytes::Bytes`]
+//! - Networking: `Ipv4Addr`, `Ipv6Addr`, `SocketAddrV4`, `SocketAddrV6`, `SocketAddr`
 //!
-//! User-defined types can be serialized and deserialized by implementing the `Write` and `Read`
-//! traits.
+//! # Implementing for Custom Types
 //!
-//! It is suggested to implement the `Encode` trait for types as well, which allows for efficient
-//! pre-allocation of buffers.
+//! You typically need to implement [`Write`], [`EncodeSize`] (unless [`FixedSize`]), and [`Read<Cfg>`]
+//! for your custom structs and enums.
 //!
-//! For types with a constant encoded size, the `FixedSize` trait should be implemented.
-//!
-//! # Example (Variable Size)
+//! ## Example (Variable Size Type)
 //!
 //! ```
 //! use bytes::{Buf, BufMut};
-//! use commonware_codec::{EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write};
+//! // Import necessary traits, including extension traits for convenience
+//! use commonware_codec::{
+//!     Config, Decode, Encode, EncodeSize, Error, FixedSize, Read, ReadExt,
+//!     ReadRangeExt, Write, RangeConfig
+//! };
+//! use std::ops::RangeInclusive; // Example RangeConfig
+//!
+//! // Define a simple configuration for reading Item
+//! // Here, it just specifies the maximum allowed metadata length.
+//! #[derive(Clone)]
+//! pub struct ItemConfig {
+//!     max_metadata_len: usize,
+//! }
 //!
 //! // Define a custom struct
 //! #[derive(Debug, Clone, PartialEq)]
 //! struct Item {
-//!     xy: (u64, u64),
-//!     z: Option<u32>,
-//!     metadata: Vec<u8>,
+//!     id: u64,          // FixedSize
+//!     name: Option<u32>,// EncodeSize (depends on Option)
+//!     metadata: Vec<u8>,// EncodeSize (variable)
 //! }
 //!
-//! // Implement the `Write` trait
+//! // 1. Implement Write: How to serialize the struct
 //! impl Write for Item {
 //!     fn write(&self, buf: &mut impl BufMut) {
-//!         self.xy.write(buf);
-//!         self.z.write(buf);
-//!         self.metadata.write(buf);
+//!         self.id.write(buf);     // u64 implements Write
+//!         self.name.write(buf);   // Option<u32> implements Write
+//!         self.metadata.write(buf); // Vec<u8> implements Write
 //!     }
 //! }
 //!
-//! // Implement the `Read` trait. `Decode` is automatically implemented for `Read` types.
-//! impl Read<usize> for Item {
-//!     fn read_cfg(buf: &mut impl Buf, max_len: usize) -> Result<Self, Error> {
-//!         let xy = <(u64, u64)>::read(buf)?;
-//!         let z = <Option<u32>>::read(buf)?;
-//!         let metadata = <Vec<u8>>::read_range(buf, ..=max_len)?;
-//!         Ok(Self { xy, z, metadata })
-//!     }
-//! }
-//!
-//! // Since `Item` has a variable size, we implement the `encode_size` method manually.
+//! // 2. Implement EncodeSize: How to calculate the encoded size
 //! impl EncodeSize for Item {
 //!     fn encode_size(&self) -> usize {
-//!       self.xy.encode_size() + self.z.encode_size() + self.metadata.encode_size()
+//!         // Sum the sizes of the parts
+//!         self.id.encode_size()       // u64 implements EncodeSize (via FixedSize)
+//!         + self.name.encode_size()   // Option<u32> implements EncodeSize
+//!         + self.metadata.encode_size() // Vec<u8> implements EncodeSize
 //!     }
 //! }
+//!
+//! // 3. Implement Read<Cfg>: How to deserialize the struct
+//! impl Read<ItemConfig> for Item {
+//!     // Use the config Cfg = ItemConfig
+//!     fn read_cfg(buf: &mut impl Buf, cfg: ItemConfig) -> Result<Self, Error> {
+//!         let id = <u64>::read(buf)?; // u64 requires Cfg = (), uses ReadExt::read
+//!         let name = <Option<u32>>::read(buf)?; // Option<u32> requires Cfg = (), uses ReadExt::read
+//!
+//!         // For Vec<u8>, the required config is (RangeConfig, InnerConfig)
+//!         // InnerConfig for u8 is (), so we need (RangeConfig, ())
+//!         // We use ReadRangeExt::read_range which handles the () for us.
+//!         // The RangeConfig limits the vector length using our ItemConfig.
+//!         let metadata_range = 0..=cfg.max_metadata_len; // Create the RangeConfig
+//!         let metadata = <Vec<u8>>::read_range(buf, metadata_range)?;
+//!
+//!         Ok(Self { id, name, metadata })
+//!     }
+//! }
+//!
+//! // Now you can use Encode and Decode:
+//! let item = Item { id: 101, name: None, metadata: vec![1, 2, 3] };
+//! let config = ItemConfig { max_metadata_len: 1024 };
+//!
+//! // Encode the item (uses Write + EncodeSize)
+//! let bytes = item.encode(); // Returns BytesMut
+//!
+//! // Decode the item (uses Read<ItemConfig>)
+//! // decode_cfg ensures all bytes are consumed.
+//! let decoded_item = Item::decode_cfg(bytes, config).unwrap();
+//! assert_eq!(item, decoded_item);
 //! ```
 //!
-//! # Example (Fixed Size)
+//! ## Example (Fixed Size Type)
 //!
 //! ```
 //! use bytes::{Buf, BufMut};
-//! use commonware_codec::{Error, FixedSize, Read, ReadExt, Write};
+//! use commonware_codec::{Error, FixedSize, Read, ReadExt, Write, Encode, DecodeExt};
 //!
 //! // Define a custom struct
 //! #[derive(Debug, Clone, PartialEq)]
@@ -75,7 +135,7 @@
 //!     y: u32,
 //! }
 //!
-//! // Implement the `Write` trait
+//! // 1. Implement Write
 //! impl Write for Point {
 //!     fn write(&self, buf: &mut impl BufMut) {
 //!         self.x.write(buf);
@@ -83,20 +143,28 @@
 //!     }
 //! }
 //!
-//! // Implement the `Read` trait. `Decode` is automatically implemented for `Read` types.
+//! // 2. Implement FixedSize (provides EncodeSize automatically)
+//! impl FixedSize for Point {
+//!     const SIZE: usize = u32::SIZE + u32::SIZE;
+//! }
+//!
+//! // 3. Implement Read (uses default Cfg = ())
 //! impl Read for Point {
-//!     fn read_cfg(buf: &mut impl Buf, _: ()) -> Result<Self, Error> {
-//!         let x = <u32>::read(buf)?;
-//!         let y = <u32>::read(buf)?;
+//!     fn read_cfg(buf: &mut impl Buf, _cfg: ()) -> Result<Self, Error> {
+//!         // Use ReadExt::read for ergonomic reading when Cfg is ()
+//!         let x = u32::read(buf)?;
+//!         let y = u32::read(buf)?;
 //!         Ok(Self { x, y })
 //!     }
 //! }
 //!
-//! // Since `Point` has a fixed size, we implement `FixedSize`.
-//! // `Encode` is automatically implemented for `FixedSize` types.
-//! impl FixedSize for Point {
-//!     const SIZE: usize = u32::SIZE + u32::SIZE;
-//! }
+//! // Point now automatically implements Encode, Decode, Codec
+//! let point = Point { x: 1, y: 2 };
+//! let bytes = point.encode(); // Encode is available via FixedSize + Write
+//! assert_eq!(bytes.len(), Point::SIZE);
+//!
+//! let decoded_point = Point::decode(bytes).unwrap(); // Decode is available via Read<()>, use DecodeExt
+//! assert_eq!(point, decoded_point);
 //! ```
 
 pub mod codec;
