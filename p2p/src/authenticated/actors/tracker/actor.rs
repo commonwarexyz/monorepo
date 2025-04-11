@@ -639,7 +639,7 @@ mod tests {
             mailbox.construct(peer1.clone(), peer_mailbox.clone()).await;
             let msg = peer_receiver.next().await.unwrap();
             let bit_vec = match msg {
-                peer::Message::BitVec { bit_vec } => bit_vec,
+                peer::Message::BitVec(bit_vec) => bit_vec,
                 _ => panic!("unexpected message"),
             };
             assert!(bit_vec.index == 0);
@@ -667,7 +667,7 @@ mod tests {
             mailbox.construct(peer1.clone(), peer_mailbox.clone()).await;
             let msg = peer_receiver.next().await.unwrap();
             let bit_vec = match msg {
-                peer::Message::BitVec { bit_vec } => bit_vec,
+                peer::Message::BitVec(bit_vec) => bit_vec,
                 _ => panic!("unexpected message"),
             };
             assert!(bit_vec.index == 0);
@@ -689,7 +689,7 @@ mod tests {
                 mailbox.construct(peer1.clone(), peer_mailbox.clone()).await; // peer1 still allowed
                 let msg = peer_receiver.next().await.unwrap();
                 let bit_vec = match msg {
-                    peer::Message::BitVec { bit_vec } => bit_vec,
+                    peer::Message::BitVec(bit_vec) => bit_vec,
                     _ => panic!("unexpected message"),
                 };
                 match bit_vec.index {
@@ -728,7 +728,7 @@ mod tests {
                 mailbox.construct(peer2.clone(), peer_mailbox.clone()).await; // peer1 no longer allowed
                 let msg = peer_receiver.next().await.unwrap();
                 let bit_vec = match msg {
-                    peer::Message::BitVec { bit_vec } => bit_vec,
+                    peer::Message::BitVec(bit_vec) => bit_vec,
                     _ => panic!("unexpected message"),
                 };
                 match bit_vec.index {

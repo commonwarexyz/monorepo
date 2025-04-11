@@ -135,10 +135,10 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Ver
                                 None => return Err(Error::PeerDisconnected),
                             };
                             let (metric, payload) = match msg {
-                                Message::BitVec { bit_vec } =>
+                                Message::BitVec(bit_vec) =>
                                     (metrics::Message::new_bit_vec(&peer), types::Payload::BitVec(bit_vec)),
-                                Message::Peers { peers: msg } =>
-                                    (metrics::Message::new_peers(&peer), types::Payload::Peers(msg)),
+                                Message::Peers(peers) =>
+                                    (metrics::Message::new_peers(&peer), types::Payload::Peers(peers)),
                                 Message::Kill => {
                                     return Err(Error::PeerKilled(peer.to_string()))
                                 }
