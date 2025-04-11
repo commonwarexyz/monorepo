@@ -1,4 +1,4 @@
-//! Implementations of Codec for common types
+//! Codec implementation for tuples.
 
 use crate::{Config, EncodeSize, Error, Read, Write};
 use bytes::{Buf, BufMut};

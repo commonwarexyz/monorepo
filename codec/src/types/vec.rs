@@ -1,9 +1,11 @@
-//! Implementations of Codec for common types
+//! Codec implementation for [`Vec<T>`].
+//!
+//! For portability and consistency between architectures,
+//! the length of the vector must fit within a [`u32`].
 
 use crate::{varint, Config, EncodeSize, Error, RangeConfig, Read, Write};
 use bytes::{Buf, BufMut};
 
-// Vec implementation
 impl<T: Write> Write for Vec<T> {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {
