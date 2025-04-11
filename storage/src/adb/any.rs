@@ -31,7 +31,7 @@ use crate::{
     },
 };
 use commonware_cryptography::Hasher as CHasher;
-use commonware_runtime::{Blob, Clock, Metrics, Storage as RStorage};
+use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 use futures::{
     future::{try_join_all, TryFutureExt},

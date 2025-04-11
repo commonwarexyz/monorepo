@@ -1,5 +1,3 @@
-#[cfg(feature = "iouring")]
-use super::blob_linux::BlobStorage;
 use super::blob_non_linux::Storage as NonLinuxStorage;
 use crate::{utils::Signaler, Clock, Error, Handle, Signal, Storage, METRICS_PREFIX};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
@@ -23,7 +21,6 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{tcp::OwnedReadHalf, tcp::OwnedWriteHalf, TcpListener, TcpStream},
     runtime::{Builder, Runtime},
-    sync::Mutex as AsyncMutex,
     time::timeout,
 };
 use tracing::warn;
@@ -235,10 +232,15 @@ impl Executor {
             .build()
             .expect("failed to create Tokio runtime");
         let (signaler, signal) = Signaler::new();
+
+        let storage_max_buffer_size = cfg.maximum_buffer_size;
+        let metrics_clone = metrics.clone();
+        let storage_directory = cfg.storage_directory.clone();
+
         let executor = Arc::new(Self {
             cfg,
             registry: Mutex::new(registry),
-            metrics,
+            metrics: metrics.clone(), // TODO danlaine: confirm it's ok to clone this
             runtime,
             signaler: Mutex::new(signaler),
             signal,
@@ -251,7 +253,11 @@ impl Executor {
                 label: String::new(),
                 spawned: false,
                 executor,
-                storage: todo!(),
+                storage: NonLinuxStorage::new(
+                    storage_directory,
+                    metrics_clone,
+                    storage_max_buffer_size,
+                ),
             },
         )
     }

@@ -17,7 +17,7 @@ use crate::mmr::{
 };
 use bytes::Bytes;
 use commonware_cryptography::Hasher;
-use commonware_runtime::{Blob, Clock, Metrics, Storage as RStorage};
+use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::array::prefixed_u64::U64;
 use std::collections::HashMap;
 use tracing::{debug, error, warn};
@@ -476,7 +476,7 @@ mod tests {
     use crate::mmr::{iterator::leaf_num_to_pos, mem::tests::ROOTS};
     use commonware_cryptography::{hash, sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic::Executor, Runner};
+    use commonware_runtime::{deterministic::Executor, Blob, Runner};
     use commonware_utils::hex;
 
     fn test_digest(v: usize) -> Digest {

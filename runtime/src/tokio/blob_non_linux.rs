@@ -1,4 +1,4 @@
-use super::{Context, Metrics};
+use super::Metrics;
 use crate::Error;
 use commonware_utils::{from_hex, hex};
 use std::{io::SeekFrom, path::PathBuf, sync::Arc};
@@ -7,7 +7,6 @@ use tokio::{
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
     sync::Mutex as AsyncMutex,
 };
-
 /// Implementation of [`crate::Blob`] for the `tokio` runtime.
 pub struct Blob {
     metrics: Arc<Metrics>,
@@ -63,7 +62,11 @@ pub struct Storage {
 }
 
 impl Storage {
-    fn new(storage_directory: PathBuf, metrics: Arc<Metrics>, max_buffer_size: usize) -> Storage {
+    pub fn new(
+        storage_directory: PathBuf,
+        metrics: Arc<Metrics>,
+        max_buffer_size: usize,
+    ) -> Storage {
         Storage {
             lock: AsyncMutex::new(()).into(),
             metrics,

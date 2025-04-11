@@ -9,28 +9,89 @@ use commonware_utils::{from_hex, hex};
 use io_uring::{opcode, types, IoUring};
 use tokio::sync::Mutex;
 
-use super::Context;
 use crate::Error;
 
 #[derive(Clone)]
-pub struct BlobStorage {
+pub struct Storage {
     lock: Arc<Mutex<()>>,
     storage_directory: PathBuf,
 }
 
-impl crate::Storage for BlobStorage {
+impl crate::Storage for Storage {
     type Blob = Blob;
 
-    async fn open(&self, _partition: &str, _name: &[u8]) -> Result<Self::Blob, Error> {
-        todo!()
+    async fn open(&self, partition: &str, name: &[u8]) -> Result<Blob, Error> {
+        // Acquire the filesystem lock
+        let _guard = self.lock.lock().await;
+
+        // Construct the full path
+        let path = self.storage_directory.join(partition).join(hex(name));
+        let parent = match path.parent() {
+            Some(parent) => parent,
+            None => return Err(Error::PartitionCreationFailed(partition.into())),
+        };
+
+        // Create the partition directory if it does not exist
+        fs::create_dir_all(parent).map_err(|_| Error::PartitionCreationFailed(partition.into()))?;
+
+        // Open the file in read-write mode, create if it does not exist
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|_| Error::BlobOpenFailed(partition.into(), hex(name)))?;
+
+        // Get the file length
+        let len = file.metadata().map_err(|_| Error::ReadFailed)?.len();
+
+        // Construct the blob
+        Ok(Blob::new(
+            partition.into(),
+            name,
+            file,
+            len as u32, // TODO danlaine: handle overflow
+        ))
     }
 
-    async fn remove(&self, _partition: &str, _name: Option<&[u8]>) -> Result<(), Error> {
-        todo!()
+    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
+        // Acquire the filesystem lock
+        let _guard = self.lock.lock().await;
+
+        // Remove all related files
+        let path = self.storage_directory.join(partition);
+        if let Some(name) = name {
+            let blob_path = path.join(hex(name));
+            fs::remove_file(blob_path)
+                .map_err(|_| Error::BlobMissing(partition.into(), hex(name)))?;
+        } else {
+            fs::remove_dir_all(path).map_err(|_| Error::PartitionMissing(partition.into()))?;
+        }
+        Ok(())
     }
 
-    async fn scan(&self, _partition: &str) -> Result<Vec<Vec<u8>>, Error> {
-        todo!()
+    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
+        // Acquire the filesystem lock
+        let _guard = self.lock.lock().await;
+
+        // Scan the partition directory
+        let path = self.storage_directory.join(partition);
+        let mut entries = tokio::fs::read_dir(path)
+            .await
+            .map_err(|_| Error::PartitionMissing(partition.into()))?;
+        let mut blobs = Vec::new();
+        while let Some(entry) = entries.next_entry().await.map_err(|_| Error::ReadFailed)? {
+            let file_type = entry.file_type().await.map_err(|_| Error::ReadFailed)?;
+            if !file_type.is_file() {
+                return Err(Error::PartitionCorrupt(partition.into()));
+            }
+            if let Some(name) = entry.file_name().to_str() {
+                let name = from_hex(name).ok_or(Error::PartitionCorrupt(partition.into()))?;
+                blobs.push(name);
+            }
+        }
+        Ok(blobs)
     }
 }
 
@@ -51,87 +112,6 @@ impl Blob {
         }
     }
 }
-
-// impl crate::Storage for Context {
-//     async fn open(&self, partition: &str, name: &[u8]) -> Result<Blob, Error> {
-//         // Acquire the filesystem lock
-//         let _guard = self.executor.fs.lock().await;
-
-//         // Construct the full path
-//         let path = self
-//             .executor
-//             .cfg
-//             .storage_directory
-//             .join(partition)
-//             .join(hex(name));
-//         let parent = match path.parent() {
-//             Some(parent) => parent,
-//             None => return Err(Error::PartitionCreationFailed(partition.into())),
-//         };
-
-//         // Create the partition directory if it does not exist
-//         fs::create_dir_all(parent).map_err(|_| Error::PartitionCreationFailed(partition.into()))?;
-
-//         // Open the file in read-write mode, create if it does not exist
-//         let file = fs::OpenOptions::new()
-//             .read(true)
-//             .write(true)
-//             .create(true)
-//             .truncate(false)
-//             .open(&path)
-//             .map_err(|_| Error::BlobOpenFailed(partition.into(), hex(name)))?;
-
-//         // Get the file length
-//         let len = file.metadata().map_err(|_| Error::ReadFailed)?.len();
-
-//         // Construct the blob
-//         Ok(Blob::new(
-//             partition.into(),
-//             name,
-//             file,
-//             len as u32, // TODO danlaine: handle overflow
-//         ))
-//     }
-
-//     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
-//         // Acquire the filesystem lock
-//         let _guard = self.executor.fs.lock().await;
-
-//         // Remove all related files
-//         let path = self.executor.cfg.storage_directory.join(partition);
-//         if let Some(name) = name {
-//             let blob_path = path.join(hex(name));
-//             fs::remove_file(blob_path)
-//                 .map_err(|_| Error::BlobMissing(partition.into(), hex(name)))?;
-//         } else {
-//             fs::remove_dir_all(path).map_err(|_| Error::PartitionMissing(partition.into()))?;
-//         }
-//         Ok(())
-//     }
-
-//     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
-//         // Acquire the filesystem lock
-//         let _guard = self.executor.fs.lock().await;
-
-//         // Scan the partition directory
-//         let path = self.executor.cfg.storage_directory.join(partition);
-//         let mut entries = tokio::fs::read_dir(path)
-//             .await
-//             .map_err(|_| Error::PartitionMissing(partition.into()))?;
-//         let mut blobs = Vec::new();
-//         while let Some(entry) = entries.next_entry().await.map_err(|_| Error::ReadFailed)? {
-//             let file_type = entry.file_type().await.map_err(|_| Error::ReadFailed)?;
-//             if !file_type.is_file() {
-//                 return Err(Error::PartitionCorrupt(partition.into()));
-//             }
-//             if let Some(name) = entry.file_name().to_str() {
-//                 let name = from_hex(name).ok_or(Error::PartitionCorrupt(partition.into()))?;
-//                 blobs.push(name);
-//             }
-//         }
-//         Ok(blobs)
-//     }
-// }
 
 impl crate::Blob for Blob {
     async fn len(&self) -> Result<u64, Error> {

@@ -17,7 +17,7 @@ use crate::{
 use commonware_cryptography::{sha256::hash, sha256::Digest as Sha256Digest, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Blob, Clock, Handle, Metrics, Spawner, Storage};
+use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
 use commonware_storage::journal::variable::Journal;
 use commonware_utils::{quorum, Array};
 use futures::{
