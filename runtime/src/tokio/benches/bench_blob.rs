@@ -11,7 +11,7 @@ use tokio::runtime::Runtime;
 
 fn bench_blob_write_at(c: &mut Criterion) {
     // Example: Replace this with your actual Blob implementation.
-    for max_write_size in [32, 64, 128, 256, 512, 2048] {
+    for max_write_size in [32, 256, 512, 2048] {
         // Create a new blob for each benchmark iteration.
         let blob = create_test_blob();
         bench_blob_write_at_driver(c, blob, max_write_size);
@@ -30,11 +30,76 @@ fn bench_blob_write_at_driver<B: Blob>(c: &mut Criterion, blob: B, max_write_siz
 
             let len = blob.len().await.unwrap();
 
-            let offset = rng.gen_range(0..=len); // Random offset between 0 and 1024 bytes.
+            let offset = rng.gen_range(0..=len);
 
             blob.write_at(&buffer, offset)
                 .await
                 .expect("Failed to write to blob");
+        });
+    });
+}
+
+fn bench_blob_read_at(c: &mut Criterion) {
+    let mib = 1024 * 1024;
+
+    // Example: Replace this with your actual Blob implementation.
+    for (max_read_size, file_size) in [
+        (32, 8 * mib),
+        (256, 32 * mib),
+        (512, 64 * mib),
+        (2048, 64 * mib),
+    ] {
+        // Create a new blob for each benchmark iteration.
+        let blob = create_test_blob();
+        bench_blob_read_at_driver(c, blob, file_size, max_read_size);
+    }
+}
+
+fn bench_blob_read_at_driver<B: Blob>(
+    c: &mut Criterion,
+    blob: B,
+    file_size: usize,
+    max_read_size: usize,
+) {
+    let runtime = Runtime::new().unwrap();
+
+    // Write `file_size` bytes of random data to the blob.
+    let mut written = 0;
+    let mut buffer = vec![0u8; 1024];
+    let mut rng = thread_rng();
+    while written < file_size {
+        rng.fill_bytes(&mut buffer); // Read random bytes into the buffer.
+
+        runtime.block_on(async {
+            blob.write_at(&buffer, written as u64)
+                .await
+                .expect("Failed to write to blob")
+        });
+        written += buffer.len();
+    }
+
+    c.bench_function(&format!("Blob::read_at {:?}", max_read_size), |b| {
+        b.to_async(&runtime).iter(|| async {
+            let mut rng = thread_rng();
+
+            let len = blob.len().await.unwrap();
+
+            let buffer_size = rng.gen_range(1..=max_read_size);
+            let buffer_size = buffer_size.min(len as usize); // Ensure the buffer size does not exceed the blob length.
+            let mut buffer = vec![0u8; buffer_size]; // Create a buffer of size 1024 bytes.
+            rng.fill_bytes(&mut buffer); // Read random bytes into the buffer.
+
+            let offset = rng.gen_range(0..=len);
+
+            let offset = if offset + buffer_size as u64 > len {
+                len - buffer_size as u64
+            } else {
+                offset
+            };
+
+            blob.read_at(&mut buffer, offset)
+                .await
+                .expect("Failed to read from blob");
         });
     });
 }
@@ -64,5 +129,5 @@ fn create_test_blob() -> impl Blob {
     BlobImpl::new(metrics.into(), partition.into(), name, temp_file.into(), 0)
 }
 
-criterion_group!(benches, bench_blob_write_at);
+criterion_group!(benches, bench_blob_write_at, bench_blob_read_at);
 criterion_main!(benches);
