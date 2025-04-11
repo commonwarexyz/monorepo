@@ -25,7 +25,7 @@ use super::primitives::{
 };
 use crate::{Array, Error, Signer, Specification, Verifier};
 use bytes::{Buf, BufMut};
-use commonware_codec::{Codec, Error as CodecError, SizedCodec};
+use commonware_codec::{Error as CodecError, FixedSize, Read, Write};
 use commonware_utils::hex;
 use rand::{CryptoRng, Rng};
 use std::{
@@ -100,22 +100,20 @@ pub struct PrivateKey {
     key: group::Private,
 }
 
-impl Codec for PrivateKey {
+impl Write for PrivateKey {
     fn write(&self, buf: &mut impl BufMut) {
         self.raw.write(buf);
     }
+}
 
-    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
+impl Read for PrivateKey {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
-    }
-
-    fn len_encoded(&self) -> usize {
-        group::PRIVATE_KEY_LENGTH
     }
 }
 
-impl SizedCodec for PrivateKey {
-    const LEN_ENCODED: usize = group::PRIVATE_KEY_LENGTH;
+impl FixedSize for PrivateKey {
+    const SIZE: usize = group::PRIVATE_KEY_LENGTH;
 }
 
 impl Array for PrivateKey {
@@ -204,22 +202,20 @@ pub struct PublicKey {
     key: group::Public,
 }
 
-impl Codec for PublicKey {
+impl Write for PublicKey {
     fn write(&self, buf: &mut impl BufMut) {
         self.raw.write(buf);
     }
+}
 
-    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
+impl Read for PublicKey {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
-    }
-
-    fn len_encoded(&self) -> usize {
-        group::PUBLIC_KEY_LENGTH
     }
 }
 
-impl SizedCodec for PublicKey {
-    const LEN_ENCODED: usize = group::PUBLIC_KEY_LENGTH;
+impl FixedSize for PublicKey {
+    const SIZE: usize = group::PUBLIC_KEY_LENGTH;
 }
 
 impl Array for PublicKey {
@@ -308,22 +304,20 @@ pub struct Signature {
     signature: group::Signature,
 }
 
-impl Codec for Signature {
+impl Write for Signature {
     fn write(&self, buf: &mut impl BufMut) {
         self.raw.write(buf);
     }
+}
 
-    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
+impl Read for Signature {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
-    }
-
-    fn len_encoded(&self) -> usize {
-        group::SIGNATURE_LENGTH
     }
 }
 
-impl SizedCodec for Signature {
-    const LEN_ENCODED: usize = group::SIGNATURE_LENGTH;
+impl FixedSize for Signature {
+    const SIZE: usize = group::SIGNATURE_LENGTH;
 }
 
 impl Array for Signature {
@@ -409,6 +403,7 @@ impl Display for Signature {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_codec::{DecodeExt, Encode};
 
     #[test]
     fn test_codec_private_key() {
@@ -416,7 +411,7 @@ mod tests {
             parse_private_key("0x263dbd792f5b1be47ed85f8938c0f29586af0d3ac7b977f21c278fe1462040e3")
                 .unwrap();
         let encoded = original.encode();
-        assert_eq!(encoded.len(), PrivateKey::LEN_ENCODED);
+        assert_eq!(encoded.len(), PrivateKey::SIZE);
         let decoded = PrivateKey::decode(encoded).unwrap();
         assert_eq!(original, decoded);
     }
@@ -427,7 +422,7 @@ mod tests {
             parse_public_key("0xa491d1b0ecd9bb917989f0e74f0dea0422eac4a873e5e2644f368dffb9a6e20fd6e10c1b77654d067c0618f6e5a7f79a")
                 .unwrap();
         let encoded = original.encode();
-        assert_eq!(encoded.len(), PublicKey::LEN_ENCODED);
+        assert_eq!(encoded.len(), PublicKey::SIZE);
         let decoded = PublicKey::decode(encoded).unwrap();
         assert_eq!(original, decoded);
     }
@@ -438,7 +433,7 @@ mod tests {
             parse_signature("0x882730e5d03f6b42c3abc26d3372625034e1d871b65a8a6b900a56dae22da98abbe1b68f85e49fe7652a55ec3d0591c20767677e33e5cbb1207315c41a9ac03be39c2e7668edc043d6cb1d9fd93033caa8a1c5b0e84bedaeb6c64972503a43eb")
                 .unwrap();
         let encoded = original.encode();
-        assert_eq!(encoded.len(), Signature::LEN_ENCODED);
+        assert_eq!(encoded.len(), Signature::SIZE);
         let decoded = Signature::decode(encoded).unwrap();
         assert_eq!(original, decoded);
     }

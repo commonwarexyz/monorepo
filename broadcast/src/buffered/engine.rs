@@ -1,7 +1,7 @@
 use super::{metrics, Config, Mailbox, Message};
 use crate::buffered::metrics::SequencerLabel;
 use bytes::Bytes;
-use commonware_codec::Codec;
+use commonware_codec::{Codec, Config as CodecCfg};
 use commonware_cryptography::{Digest, Digestible};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
@@ -31,7 +31,8 @@ pub struct Engine<
     E: Clock + Spawner + Metrics,
     P: Array,
     D: Digest,
-    M: Digestible<D> + Codec,
+    Cfg: CodecCfg,
+    M: Digestible<D> + Codec<Cfg>,
     NetS: Sender<PublicKey = P>,
     NetR: Receiver<PublicKey = P>,
 > {
@@ -52,6 +53,9 @@ pub struct Engine<
 
     /// Number of messages to cache per sender
     deque_size: usize,
+
+    /// Configuration for decoding messages
+    decode_config: Cfg,
 
     ////////////////////////////////////////
     // Messaging
@@ -91,14 +95,15 @@ impl<
         E: Clock + Spawner + Metrics,
         P: Array,
         D: Digest,
-        M: Digestible<D> + Codec,
+        Cfg: CodecCfg,
+        M: Digestible<D> + Codec<Cfg>,
         NetS: Sender<PublicKey = P>,
         NetR: Receiver<PublicKey = P>,
-    > Engine<E, P, D, M, NetS, NetR>
+    > Engine<E, P, D, Cfg, M, NetS, NetR>
 {
     /// Creates a new engine with the given context and configuration.
     /// Returns the engine and a mailbox for sending messages to the engine.
-    pub fn new(context: E, cfg: Config<P>) -> (Self, Mailbox<D, M>) {
+    pub fn new(context: E, cfg: Config<Cfg, P>) -> (Self, Mailbox<D, M>) {
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::<D, M>::new(mailbox_sender);
         let metrics = metrics::Metrics::init(context.clone());
@@ -109,6 +114,7 @@ impl<
             public_key: cfg.public_key,
             priority: cfg.priority,
             deque_size: cfg.deque_size,
+            decode_config: cfg.decode_config,
             mailbox_receiver,
             waiters: HashMap::new(),
             deques: HashMap::new(),
@@ -171,7 +177,7 @@ impl<
                     };
 
                     // Decode the message
-                    let message = match M::decode(msg) {
+                    let message = match M::decode_cfg(msg, &self.decode_config) {
                         Ok(message) => message,
                         Err(err) => {
                             warn!(?err, ?peer, "failed to decode message");

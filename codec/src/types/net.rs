@@ -1,101 +1,91 @@
-use crate::{Codec, Error, SizedCodec};
+//! Codec implementations for network-related types
+
+use crate::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use bytes::{Buf, BufMut};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
-impl Codec for Ipv4Addr {
+impl Write for Ipv4Addr {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {
         self.to_bits().write(buf);
     }
+}
 
+impl Read for Ipv4Addr {
     #[inline]
-    fn len_encoded(&self) -> usize {
-        Self::LEN_ENCODED
-    }
-
-    #[inline]
-    fn read(buf: &mut impl Buf) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let bits = <u32>::read(buf)?;
         Ok(Ipv4Addr::from_bits(bits))
     }
 }
 
-impl SizedCodec for Ipv4Addr {
-    const LEN_ENCODED: usize = u32::LEN_ENCODED;
+impl FixedSize for Ipv4Addr {
+    const SIZE: usize = u32::SIZE;
 }
 
-impl Codec for Ipv6Addr {
+impl Write for Ipv6Addr {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {
         self.to_bits().write(buf);
     }
+}
 
+impl Read for Ipv6Addr {
     #[inline]
-    fn len_encoded(&self) -> usize {
-        Self::LEN_ENCODED
-    }
-
-    #[inline]
-    fn read(buf: &mut impl Buf) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let bits = <u128>::read(buf)?;
         Ok(Ipv6Addr::from_bits(bits))
     }
 }
 
-impl SizedCodec for Ipv6Addr {
-    const LEN_ENCODED: usize = u128::LEN_ENCODED;
+impl FixedSize for Ipv6Addr {
+    const SIZE: usize = u128::SIZE;
 }
 
-impl Codec for SocketAddrV4 {
+impl Write for SocketAddrV4 {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {
         self.ip().write(buf);
         self.port().write(buf);
     }
+}
 
+impl Read for SocketAddrV4 {
     #[inline]
-    fn len_encoded(&self) -> usize {
-        Self::LEN_ENCODED
-    }
-
-    #[inline]
-    fn read(buf: &mut impl Buf) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let ip = Ipv4Addr::read(buf)?;
         let port = u16::read(buf)?;
         Ok(Self::new(ip, port))
     }
 }
 
-impl SizedCodec for SocketAddrV4 {
-    const LEN_ENCODED: usize = Ipv4Addr::LEN_ENCODED + u16::LEN_ENCODED;
+impl FixedSize for SocketAddrV4 {
+    const SIZE: usize = Ipv4Addr::SIZE + u16::SIZE;
 }
 
-impl Codec for SocketAddrV6 {
+impl Write for SocketAddrV6 {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {
         self.ip().write(buf);
         self.port().write(buf);
     }
+}
 
+impl Read for SocketAddrV6 {
     #[inline]
-    fn len_encoded(&self) -> usize {
-        Self::LEN_ENCODED
-    }
-
-    #[inline]
-    fn read(buf: &mut impl Buf) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let address = Ipv6Addr::read(buf)?;
         let port = u16::read(buf)?;
         Ok(SocketAddrV6::new(address, port, 0, 0))
     }
 }
 
-impl SizedCodec for SocketAddrV6 {
-    const LEN_ENCODED: usize = Ipv6Addr::LEN_ENCODED + u16::LEN_ENCODED;
+impl FixedSize for SocketAddrV6 {
+    const SIZE: usize = Ipv6Addr::SIZE + u16::SIZE;
 }
 
 // SocketAddr implementation
-impl Codec for SocketAddr {
+impl Write for SocketAddr {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {
         match self {
@@ -109,17 +99,21 @@ impl Codec for SocketAddr {
             }
         }
     }
+}
 
+impl EncodeSize for SocketAddr {
     #[inline]
-    fn len_encoded(&self) -> usize {
+    fn encode_size(&self) -> usize {
         (match self {
-            SocketAddr::V4(_) => SocketAddrV4::LEN_ENCODED,
-            SocketAddr::V6(_) => SocketAddrV6::LEN_ENCODED,
-        }) + u8::LEN_ENCODED
+            SocketAddr::V4(_) => SocketAddrV4::SIZE,
+            SocketAddr::V6(_) => SocketAddrV6::SIZE,
+        }) + u8::SIZE
     }
+}
 
+impl Read for SocketAddr {
     #[inline]
-    fn read(buf: &mut impl Buf) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let version = u8::read(buf)?;
         match version {
             4 => Ok(SocketAddr::V4(SocketAddrV4::read(buf)?)),
@@ -132,6 +126,7 @@ impl Codec for SocketAddr {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::{DecodeExt, Encode};
     use bytes::Bytes;
 
     #[test]
@@ -228,7 +223,7 @@ mod test {
         let addr_v4 = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(196, 168, 0, 1), 8080));
         let encoded_v4 = addr_v4.encode();
         assert_eq!(encoded_v4.len(), 7);
-        assert_eq!(addr_v4.len_encoded(), 7);
+        assert_eq!(addr_v4.encode_size(), 7);
         let decoded_v4 = SocketAddr::decode(encoded_v4).unwrap();
         assert_eq!(addr_v4, decoded_v4);
 
@@ -241,7 +236,7 @@ mod test {
         ));
         let encoded_v6 = addr_v6.encode();
         assert_eq!(encoded_v6.len(), 19);
-        assert_eq!(addr_v6.len_encoded(), 19);
+        assert_eq!(addr_v6.encode_size(), 19);
         let decoded_v6 = SocketAddr::decode(encoded_v6).unwrap();
         assert_eq!(addr_v6, decoded_v6);
 

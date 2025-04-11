@@ -1,5 +1,5 @@
 use bytes::{Buf, BufMut};
-use commonware_codec::{Codec, Error as CodecError, SizedCodec};
+use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use rand::{CryptoRng, Rng};
 use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey};
 
@@ -29,23 +29,23 @@ impl AsRef<x25519_dalek::PublicKey> for PublicKey {
     }
 }
 
-impl Codec for PublicKey {
+impl Write for PublicKey {
     fn write(&self, buf: &mut impl BufMut) {
         self.inner.as_bytes().write(buf);
     }
-    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
-        let public_key = <[u8; Self::LEN_ENCODED]>::read(buf)?;
+}
+
+impl Read for PublicKey {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let public_key = <[u8; Self::SIZE]>::read(buf)?;
         Ok(PublicKey {
             inner: X25519PublicKey::from(public_key),
         })
     }
-    fn len_encoded(&self) -> usize {
-        Self::LEN_ENCODED
-    }
 }
 
-impl SizedCodec for PublicKey {
-    const LEN_ENCODED: usize = 32;
+impl FixedSize for PublicKey {
+    const SIZE: usize = 32;
 }
 
 pub fn new<R: Rng + CryptoRng>(rng: &mut R) -> EphemeralSecret {
@@ -56,20 +56,21 @@ pub fn new<R: Rng + CryptoRng>(rng: &mut R) -> EphemeralSecret {
 mod tests {
     use super::*;
     use bytes::Bytes;
+    use commonware_codec::{DecodeExt, Encode};
     use commonware_runtime::deterministic::Executor;
 
     #[test]
     fn test_codec() {
         // Create a random public key
         let (_, mut context, _) = Executor::default();
-        let mut buf = [0u8; PublicKey::LEN_ENCODED];
+        let mut buf = [0u8; PublicKey::SIZE];
         context.fill(&mut buf);
 
         let original = PublicKey {
             inner: X25519PublicKey::from(buf),
         };
         let encoded = original.encode();
-        assert_eq!(encoded.len(), PublicKey::LEN_ENCODED);
+        assert_eq!(encoded.len(), PublicKey::SIZE);
         let decoded = PublicKey::decode(encoded).unwrap();
         assert_eq!(original, decoded);
     }

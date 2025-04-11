@@ -41,7 +41,7 @@
 //! ```
 
 use bytes::Buf;
-use commonware_codec::SizedCodec;
+use commonware_codec::FixedSize;
 use commonware_cryptography::Hasher;
 use commonware_utils::Array;
 use thiserror::Error;
@@ -259,7 +259,7 @@ impl<H: Hasher> Proof<H> {
         );
 
         // Serialize the proof as the concatenation of each hash.
-        let bytes_len = self.siblings.len() * H::Digest::LEN_ENCODED;
+        let bytes_len = self.siblings.len() * H::Digest::SIZE;
         let mut bytes = Vec::with_capacity(bytes_len);
         for hash in &self.siblings {
             bytes.extend_from_slice(hash.as_ref());
@@ -272,12 +272,12 @@ impl<H: Hasher> Proof<H> {
         // It is ok to have an empty proof (just means the provided leaf is the root).
 
         // If the remaining buffer is not a multiple of the hash size, it's invalid.
-        if buf.remaining() % H::Digest::LEN_ENCODED != 0 {
+        if buf.remaining() % H::Digest::SIZE != 0 {
             return Err(Error::UnalignedProof);
         }
 
         // If the number of siblings is too large, it's invalid.
-        let num_siblings = buf.len() / H::Digest::LEN_ENCODED;
+        let num_siblings = buf.len() / H::Digest::SIZE;
         if num_siblings > u8::MAX as usize {
             return Err(Error::TooManySiblings(num_siblings));
         }

@@ -8,7 +8,7 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit},
     ChaCha20Poly1305,
 };
-use commonware_codec::Codec;
+use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::Scheme;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Sink, Spawner, Stream};

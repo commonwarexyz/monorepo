@@ -201,7 +201,7 @@ pub trait Hasher: Clone + Send + Sync + 'static {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::SizedCodec;
+    use commonware_codec::FixedSize;
     use rand::rngs::OsRng;
 
     fn test_validate<C: Scheme>() {
@@ -343,8 +343,8 @@ mod tests {
 
     #[test]
     fn test_ed25519_len() {
-        assert_eq!(<Ed25519 as Specification>::PublicKey::LEN_ENCODED, 32);
-        assert_eq!(<Ed25519 as Specification>::Signature::LEN_ENCODED, 64);
+        assert_eq!(<Ed25519 as Specification>::PublicKey::SIZE, 32);
+        assert_eq!(<Ed25519 as Specification>::Signature::SIZE, 64);
     }
 
     #[test]
@@ -394,8 +394,8 @@ mod tests {
 
     #[test]
     fn test_bls12381_len() {
-        assert_eq!(<Bls12381 as Specification>::PublicKey::LEN_ENCODED, 48);
-        assert_eq!(<Bls12381 as Specification>::Signature::LEN_ENCODED, 96);
+        assert_eq!(<Bls12381 as Specification>::PublicKey::SIZE, 48);
+        assert_eq!(<Bls12381 as Specification>::Signature::SIZE, 96);
     }
 
     #[test]
@@ -445,8 +445,8 @@ mod tests {
 
     #[test]
     fn test_secp256r1_len() {
-        assert_eq!(<Secp256r1 as Specification>::PublicKey::LEN_ENCODED, 33);
-        assert_eq!(<Secp256r1 as Specification>::Signature::LEN_ENCODED, 64);
+        assert_eq!(<Secp256r1 as Specification>::PublicKey::SIZE, 33);
+        assert_eq!(<Secp256r1 as Specification>::Signature::SIZE, 64);
     }
 
     fn test_hasher_multiple_runs<H: Hasher>() {
@@ -455,7 +455,7 @@ mod tests {
         hasher.update(b"hello world");
         let digest = hasher.finalize();
         assert!(H::Digest::try_from(digest.as_ref()).is_ok());
-        assert_eq!(digest.as_ref().len(), H::Digest::LEN_ENCODED);
+        assert_eq!(digest.as_ref().len(), H::Digest::SIZE);
 
         // Reuse hasher without reset
         hasher.update(b"hello world");

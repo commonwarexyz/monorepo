@@ -1,5 +1,5 @@
 use crate::Broadcaster;
-use commonware_codec::Codec;
+use commonware_codec::{Codec, Config};
 use commonware_cryptography::{Digest, Digestible};
 use futures::{
     channel::{mpsc, oneshot},
@@ -48,7 +48,7 @@ impl<D: Digest, M: Digestible<D>> Mailbox<D, M> {
     }
 }
 
-impl<D: Digest, M: Codec + Digestible<D>> Broadcaster for Mailbox<D, M> {
+impl<Cfg: Config, D: Digest, M: Codec<Cfg> + Digestible<D>> Broadcaster<Cfg> for Mailbox<D, M> {
     type Message = M;
 
     async fn broadcast(&mut self, message: Self::Message) {

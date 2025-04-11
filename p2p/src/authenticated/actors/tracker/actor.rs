@@ -6,10 +6,9 @@ pub use super::{
 };
 use crate::authenticated::{
     ip, metrics,
-    types::{self, SignedPeerInfo},
+    types::{self, PeerInfo},
 };
-use bitvec::prelude::*;
-use commonware_codec::Codec;
+use commonware_codec::Encode;
 use commonware_cryptography::Scheme;
 use commonware_runtime::{Clock, Handle, Metrics, Spawner};
 use commonware_utils::{union, SystemTimeExt};
@@ -43,6 +42,7 @@ pub struct Actor<E: Spawner + Rng + GClock + Metrics, C: Scheme> {
     allow_private_ips: bool,
     synchrony_bound: Duration,
     tracked_peer_sets: usize,
+    max_peer_set_size: usize,
     peer_gossip_max_count: usize,
 
     sender: mpsc::Sender<Message<E, C>>,
@@ -59,7 +59,7 @@ pub struct Actor<E: Spawner + Rng + GClock + Metrics, C: Scheme> {
     rate_limited_connections: Family<metrics::Peer, Counter>,
     updated_peers: Family<metrics::Peer, Counter>,
 
-    ip_signature: types::SignedPeerInfo<C>,
+    ip_signature: types::PeerInfo<C>,
 }
 
 impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
@@ -72,7 +72,7 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
         let signature = cfg
             .crypto
             .sign(Some(&ip_namespace), &(socket, timestamp).encode());
-        let ip_signature = types::SignedPeerInfo {
+        let ip_signature = types::PeerInfo {
             socket,
             timestamp,
             public_key: cfg.crypto.public_key(),
@@ -133,6 +133,7 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
                 synchrony_bound: cfg.synchrony_bound,
                 tracked_peer_sets,
                 peer_gossip_max_count: cfg.peer_gossip_max_count,
+                max_peer_set_size: cfg.max_peer_set_size,
 
                 ip_signature,
 
@@ -187,6 +188,15 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
             _ => {}
         }
 
+        // Ensure that peer set is not too large.
+        // Panic since there is no way to recover from this.
+        assert!(
+            peers.len() <= self.max_peer_set_size,
+            "peer set is too large: {} > {}",
+            peers.len(),
+            self.max_peer_set_size
+        );
+
         // Create and store new peer set
         let set = Set::new(index, peers.clone());
         self.sets.insert(index, set);
@@ -203,9 +213,6 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
 
         // Add self
         set.found(self.crypto.public_key());
-
-        // Update bit vector now that we have changed it
-        set.update_msg();
 
         // Remove oldest entries if necessary
         while self.sets.len() > self.tracked_peer_sets {
@@ -250,7 +257,7 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
         reserved
     }
 
-    fn handle_peer(&mut self, peer: &C::PublicKey, peer_info: SignedPeerInfo<C>) -> bool {
+    fn handle_peer(&mut self, peer: &C::PublicKey, peer_info: PeerInfo<C>) -> bool {
         // Check if peer is authorized
         if !self.allowed(peer) {
             return false;
@@ -273,14 +280,12 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
 
         // Update peer set knowledge
         for set in self.sets.values_mut() {
-            if set.found(peer.clone()) {
-                set.update_msg();
-            }
+            set.found(peer.clone());
         }
         true
     }
 
-    fn handle_peers(&mut self, peers: Vec<types::SignedPeerInfo<C>>) -> Result<(), Error> {
+    fn handle_peers(&mut self, peers: Vec<types::PeerInfo<C>>) -> Result<(), Error> {
         // Ensure there aren't too many peers sent
         if peers.len() > self.peer_gossip_max_count {
             return Err(Error::TooManyPeers(peers.len()));
@@ -289,7 +294,6 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
         // We allow peers to be sent in any order when responding to a bit vector (allows
         // for selecting a random subset of peers when there are too many) and allow
         // for duplicates (no need to create an additional set to check this)
-        let mut updated = false;
         for peer in peers {
             // Check if IP is allowed
             let ip = peer.socket.ip();
@@ -318,23 +322,16 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
             let public_key = peer.public_key.clone();
             if self.handle_peer(&public_key, peer) {
                 debug!(peer = ?public_key, "updated peer record");
-                updated = true;
             }
         }
 
-        // Update messages for bit vectors
-        if updated {
-            for set in self.sets.values_mut() {
-                set.update_msg();
-            }
-        }
         Ok(())
     }
 
     fn handle_bit_vec(
         &mut self,
         bit_vec: types::BitVec,
-    ) -> Result<Option<Vec<types::SignedPeerInfo<C>>>, Error> {
+    ) -> Result<Option<Vec<types::PeerInfo<C>>>, Error> {
         // Ensure we have the peerset requested
         let set = match self.sets.get(&bit_vec.index) {
             Some(set) => set,
@@ -344,18 +341,17 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
             }
         };
 
-        // Parse bit vector bytes
-        let bits: BitVec<u8, Lsb0> = BitVec::from_vec(bit_vec.bits);
-
-        // Calculate the required number of bits (padded to the nearest byte)
-        let required_bits = set.order.len().div_ceil(8) * 8;
-        if bits.len() != required_bits {
-            return Err(Error::BitVecLengthMismatch(required_bits, bits.len()));
+        // Ensure that the bit vector is the same size as the peer set
+        if bit_vec.bits.len() != set.order.len() {
+            return Err(Error::BitVecLengthMismatch(
+                set.order.len(),
+                bit_vec.bits.len(),
+            ));
         }
 
         // Compile peers to send
         let mut peers = Vec::new();
-        for (order, bit) in bits.iter().enumerate() {
+        for (order, bit) in bit_vec.bits.iter().enumerate() {
             // Check if we have exhausted our known peers
             let peer = match set.sorted.get(order) {
                 Some(peer) => peer,
@@ -457,7 +453,11 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
                     };
 
                     // Send bit vector if stored
-                    let _ = peer.bit_vec(set.msg()).await;
+                    let bitvec = types::BitVec {
+                        index: set.index,
+                        bits: set.knowledge.clone(),
+                    };
+                    let _ = peer.bit_vec(bitvec).await;
                 }
                 Message::BitVec { bit_vec, mut peer } => {
                     let result = self.handle_bit_vec(bit_vec);
@@ -546,6 +546,7 @@ mod tests {
             tracked_peer_sets: 2,
             allowed_connection_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
             peer_gossip_max_count: 32,
+            max_peer_set_size: 1 << 16, // 2^16
         }
     }
 
@@ -638,12 +639,11 @@ mod tests {
             mailbox.construct(peer1.clone(), peer_mailbox.clone()).await;
             let msg = peer_receiver.next().await.unwrap();
             let bit_vec = match msg {
-                peer::Message::BitVec { bit_vec } => bit_vec,
+                peer::Message::BitVec(bit_vec) => bit_vec,
                 _ => panic!("unexpected message"),
             };
             assert!(bit_vec.index == 0);
-            let bits: BitVec<u8, Lsb0> = BitVec::from_vec(bit_vec.bits);
-            for (idx, bit) in bits.iter().enumerate() {
+            for (idx, bit) in bit_vec.bits.iter().enumerate() {
                 if idx == me_idx {
                     assert!(*bit);
                 } else {
@@ -655,7 +655,7 @@ mod tests {
             let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
             let timestamp = 0;
             let signature = peer1_signer.sign(Some(&ip_namespace), &(socket, timestamp).encode());
-            let peers = vec![types::SignedPeerInfo {
+            let peers = vec![types::PeerInfo {
                 socket,
                 timestamp,
                 public_key: peer1.clone(),
@@ -667,12 +667,11 @@ mod tests {
             mailbox.construct(peer1.clone(), peer_mailbox.clone()).await;
             let msg = peer_receiver.next().await.unwrap();
             let bit_vec = match msg {
-                peer::Message::BitVec { bit_vec } => bit_vec,
+                peer::Message::BitVec(bit_vec) => bit_vec,
                 _ => panic!("unexpected message"),
             };
             assert!(bit_vec.index == 0);
-            let bits: BitVec<u8, Lsb0> = BitVec::from_vec(bit_vec.bits);
-            for (idx, bit) in bits.iter().enumerate() {
+            for (idx, bit) in bit_vec.bits.iter().enumerate() {
                 if idx == me_idx || idx == peer1_idx {
                     assert!(*bit);
                 } else {
@@ -690,13 +689,12 @@ mod tests {
                 mailbox.construct(peer1.clone(), peer_mailbox.clone()).await; // peer1 still allowed
                 let msg = peer_receiver.next().await.unwrap();
                 let bit_vec = match msg {
-                    peer::Message::BitVec { bit_vec } => bit_vec,
+                    peer::Message::BitVec(bit_vec) => bit_vec,
                     _ => panic!("unexpected message"),
                 };
-                let bits: BitVec<u8, Lsb0> = BitVec::from_vec(bit_vec.bits);
                 match bit_vec.index {
                     0 => {
-                        for (idx, bit) in bits.iter().enumerate() {
+                        for (idx, bit) in bit_vec.bits.iter().enumerate() {
                             if idx == me_idx || idx == peer1_idx {
                                 assert!(*bit);
                             } else {
@@ -706,7 +704,7 @@ mod tests {
                         index_0_returned = true
                     }
                     1 => {
-                        for bit in bits.iter() {
+                        for bit in bit_vec.bits.iter() {
                             assert!(!*bit);
                         }
                         index_1_returned = true
@@ -730,19 +728,18 @@ mod tests {
                 mailbox.construct(peer2.clone(), peer_mailbox.clone()).await; // peer1 no longer allowed
                 let msg = peer_receiver.next().await.unwrap();
                 let bit_vec = match msg {
-                    peer::Message::BitVec { bit_vec } => bit_vec,
+                    peer::Message::BitVec(bit_vec) => bit_vec,
                     _ => panic!("unexpected message"),
                 };
-                let bits: BitVec<u8, Lsb0> = BitVec::from_vec(bit_vec.bits);
                 match bit_vec.index {
                     1 => {
-                        for bit in bits.iter() {
+                        for bit in bit_vec.bits.iter() {
                             assert!(!*bit);
                         }
                         index_1_returned = true
                     }
                     2 => {
-                        for bit in bits.iter() {
+                        for bit in bit_vec.bits.iter() {
                             assert!(!*bit);
                         }
                         index_2_returned = true

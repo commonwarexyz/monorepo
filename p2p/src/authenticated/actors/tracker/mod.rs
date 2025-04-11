@@ -25,6 +25,7 @@ pub struct Config<C: Scheme> {
     pub mailbox_size: usize,
     pub synchrony_bound: Duration,
     pub tracked_peer_sets: usize,
+    pub max_peer_set_size: usize,
     pub allowed_connection_rate_per_peer: Quota,
     pub peer_gossip_max_count: usize,
 }

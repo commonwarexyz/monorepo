@@ -154,7 +154,7 @@ mod tests {
         super::{namespace, parsed, serializer},
         *,
     };
-    use commonware_codec::SizedCodec;
+    use commonware_codec::FixedSize;
     use commonware_cryptography::{bls12381::dkg::ops::generate_shares, ed25519, sha256};
     use commonware_runtime::deterministic::Executor;
 
@@ -172,7 +172,7 @@ mod tests {
 
         /// Generate a fixed public key for testing.
         pub fn gen_public_key(val: u8) -> ed25519::PublicKey {
-            ed25519::PublicKey::try_from(&[val; ed25519::PublicKey::LEN_ENCODED][..]).unwrap()
+            ed25519::PublicKey::try_from(&[val; ed25519::PublicKey::SIZE][..]).unwrap()
         }
 
         /// Create a chunk with the given sequencer, height, and payload.

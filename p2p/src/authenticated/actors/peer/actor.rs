@@ -1,6 +1,6 @@
 use super::{Config, Error, Mailbox, Message, Relay};
 use crate::authenticated::{actors::tracker, channels::Channels, metrics, types};
-use commonware_codec::Codec;
+use commonware_codec::{Decode, Encode};
 use commonware_cryptography::Verifier;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Metrics, Sink, Spawner, Stream};
@@ -21,6 +21,8 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: Verifier>
     gossip_bit_vec_frequency: Duration,
     allowed_bit_vec_rate: Quota,
     allowed_peers_rate: Quota,
+
+    codec_config: types::Config,
 
     mailbox: Mailbox<C>,
     control: mpsc::Receiver<Message<C>>,
@@ -48,6 +50,10 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Ver
                 gossip_bit_vec_frequency: cfg.gossip_bit_vec_frequency,
                 allowed_bit_vec_rate: cfg.allowed_bit_vec_rate,
                 allowed_peers_rate: cfg.allowed_peers_rate,
+                codec_config: types::Config {
+                    max_bitvec: cfg.max_peer_set_size,
+                    max_peers: cfg.peer_gossip_max_count,
+                },
                 control: control_receiver,
                 high: high_receiver,
                 low: low_receiver,
@@ -129,10 +135,10 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Ver
                                 None => return Err(Error::PeerDisconnected),
                             };
                             let (metric, payload) = match msg {
-                                Message::BitVec { bit_vec } =>
+                                Message::BitVec(bit_vec) =>
                                     (metrics::Message::new_bit_vec(&peer), types::Payload::BitVec(bit_vec)),
-                                Message::Peers { peers: msg } =>
-                                    (metrics::Message::new_peers(&peer), types::Payload::Peers(msg)),
+                                Message::Peers(peers) =>
+                                    (metrics::Message::new_peers(&peer), types::Payload::Peers(peers)),
                                 Message::Kill => {
                                     return Err(Error::PeerKilled(peer.to_string()))
                                 }
@@ -167,7 +173,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Ver
                         .receive()
                         .await
                         .map_err(Error::ReceiveFailed)?;
-                    let msg = match types::Payload::<C>::decode(msg) {
+                    let msg = match types::Payload::decode_cfg(msg, &self.codec_config) {
                         Ok(msg) => msg,
                         Err(err) => {
                             info!(?err, ?peer, "failed to decode message");

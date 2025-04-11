@@ -2,7 +2,7 @@ use crate::{
     Array, Error, Signer as CommonwareSigner, Specification, Verifier as CommonwareVerifier,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{Codec, Error as CodecError, SizedCodec};
+use commonware_codec::{Error as CodecError, FixedSize, Read, Write};
 use commonware_utils::{hex, union_unique};
 use p256::{
     ecdsa::{
@@ -97,22 +97,20 @@ pub struct PrivateKey {
     key: SigningKey,
 }
 
-impl Codec for PrivateKey {
+impl Write for PrivateKey {
     fn write(&self, buf: &mut impl BufMut) {
         self.raw.write(buf);
     }
+}
 
-    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
+impl Read for PrivateKey {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
-    }
-
-    fn len_encoded(&self) -> usize {
-        PRIVATE_KEY_LENGTH
     }
 }
 
-impl SizedCodec for PrivateKey {
-    const LEN_ENCODED: usize = PRIVATE_KEY_LENGTH;
+impl FixedSize for PrivateKey {
+    const SIZE: usize = PRIVATE_KEY_LENGTH;
 }
 
 impl Array for PrivateKey {
@@ -201,22 +199,20 @@ pub struct PublicKey {
     key: VerifyingKey,
 }
 
-impl Codec for PublicKey {
+impl Write for PublicKey {
     fn write(&self, buf: &mut impl BufMut) {
         self.raw.write(buf);
     }
+}
 
-    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
+impl Read for PublicKey {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
-    }
-
-    fn len_encoded(&self) -> usize {
-        PUBLIC_KEY_LENGTH
     }
 }
 
-impl SizedCodec for PublicKey {
-    const LEN_ENCODED: usize = PUBLIC_KEY_LENGTH;
+impl FixedSize for PublicKey {
+    const SIZE: usize = PUBLIC_KEY_LENGTH;
 }
 
 impl Array for PublicKey {
@@ -294,22 +290,20 @@ pub struct Signature {
     signature: p256::ecdsa::Signature,
 }
 
-impl Codec for Signature {
+impl Write for Signature {
     fn write(&self, buf: &mut impl BufMut) {
         self.raw.write(buf);
     }
+}
 
-    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
+impl Read for Signature {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
-    }
-
-    fn len_encoded(&self) -> usize {
-        SIGNATURE_LENGTH
     }
 }
 
-impl SizedCodec for Signature {
-    const LEN_ENCODED: usize = SIGNATURE_LENGTH;
+impl FixedSize for Signature {
+    const SIZE: usize = SIGNATURE_LENGTH;
 }
 
 impl Array for Signature {
@@ -402,6 +396,7 @@ impl Display for Signature {
 mod tests {
     use super::*;
     use bytes::Bytes;
+    use commonware_codec::{DecodeExt, Encode};
 
     fn create_private_key() -> PrivateKey {
         const HEX: &str = "519b423d715f8b581f4fa8ee59f4771a5b44c8130b4e3eacca54a56dda72b464";

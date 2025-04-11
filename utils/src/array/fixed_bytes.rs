@@ -1,6 +1,6 @@
 use crate::{hex, Array};
 use bytes::{Buf, BufMut};
-use commonware_codec::{Codec, Error as CodecError, SizedCodec};
+use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use std::{
     cmp::{Ord, PartialOrd},
     fmt::{Debug, Display},
@@ -28,22 +28,20 @@ impl<const N: usize> FixedBytes<N> {
     }
 }
 
-impl<const N: usize> Codec for FixedBytes<N> {
+impl<const N: usize> Write for FixedBytes<N> {
     fn write(&self, buf: &mut impl BufMut) {
         self.0.write(buf);
     }
+}
 
-    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
+impl<const N: usize> Read for FixedBytes<N> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         Ok(Self(<[u8; N]>::read(buf)?))
-    }
-
-    fn len_encoded(&self) -> usize {
-        N
     }
 }
 
-impl<const N: usize> SizedCodec for FixedBytes<N> {
-    const LEN_ENCODED: usize = N;
+impl<const N: usize> FixedSize for FixedBytes<N> {
+    const SIZE: usize = N;
 }
 
 impl<const N: usize> Array for FixedBytes<N> {
@@ -104,6 +102,7 @@ mod tests {
     use super::*;
     use crate::array::Error as ArrayError;
     use bytes::{Buf, BytesMut};
+    use commonware_codec::{DecodeExt, Encode};
 
     #[test]
     fn test_codec() {

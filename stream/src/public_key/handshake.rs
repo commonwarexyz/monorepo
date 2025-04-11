@@ -1,7 +1,7 @@
 use super::x25519;
 use crate::Error;
 use bytes::{Buf, BufMut};
-use commonware_codec::{Codec, Error as CodecError, SizedCodec};
+use commonware_codec::{Encode, Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_cryptography::Scheme;
 use commonware_runtime::Clock;
 use commonware_utils::SystemTimeExt;
@@ -28,14 +28,16 @@ impl<C: Scheme> Info<C> {
     }
 }
 
-impl<C: Scheme> Codec for Info<C> {
+impl<C: Scheme> Write for Info<C> {
     fn write(&self, buf: &mut impl BufMut) {
         self.recipient.write(buf);
         self.ephemeral_public_key.write(buf);
         self.timestamp.write(buf);
     }
+}
 
-    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
+impl<C: Scheme> Read for Info<C> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let recipient = C::PublicKey::read(buf)?;
         let ephemeral_public_key = x25519::PublicKey::read(buf)?;
         let timestamp = u64::read(buf)?;
@@ -45,15 +47,10 @@ impl<C: Scheme> Codec for Info<C> {
             timestamp,
         })
     }
-
-    fn len_encoded(&self) -> usize {
-        Self::LEN_ENCODED
-    }
 }
 
-impl<C: Scheme> SizedCodec for Info<C> {
-    const LEN_ENCODED: usize =
-        C::PublicKey::LEN_ENCODED + x25519::PublicKey::LEN_ENCODED + u64::LEN_ENCODED;
+impl<C: Scheme> FixedSize for Info<C> {
+    const SIZE: usize = C::PublicKey::SIZE + x25519::PublicKey::SIZE + u64::SIZE;
 }
 
 // Allows recipient to verify that the sender has the private key
@@ -141,14 +138,16 @@ impl<C: Scheme> Signed<C> {
     }
 }
 
-impl<C: Scheme> Codec for Signed<C> {
+impl<C: Scheme> Write for Signed<C> {
     fn write(&self, buf: &mut impl BufMut) {
         self.info.write(buf);
         self.signer.write(buf);
         self.signature.write(buf);
     }
+}
 
-    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
+impl<C: Scheme> Read for Signed<C> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let info = Info::<C>::read(buf)?;
         let signer = C::PublicKey::read(buf)?;
         let signature = C::Signature::read(buf)?;
@@ -158,15 +157,10 @@ impl<C: Scheme> Codec for Signed<C> {
             signature,
         })
     }
-
-    fn len_encoded(&self) -> usize {
-        Self::LEN_ENCODED
-    }
 }
 
-impl<C: Scheme> SizedCodec for Signed<C> {
-    const LEN_ENCODED: usize =
-        Info::<C>::LEN_ENCODED + C::PublicKey::LEN_ENCODED + C::Signature::LEN_ENCODED;
+impl<C: Scheme> FixedSize for Signed<C> {
+    const SIZE: usize = Info::<C>::SIZE + C::PublicKey::SIZE + C::Signature::SIZE;
 }
 
 #[cfg(test)]
@@ -176,6 +170,7 @@ mod tests {
         public_key::{Config, IncomingConnection},
         utils::codec::send_frame,
     };
+    use commonware_codec::DecodeExt;
     use commonware_cryptography::{Ed25519, Signer, Verifier};
     use commonware_runtime::{deterministic::Executor, mocks, Metrics, Runner, Spawner};
     use x25519::PublicKey;

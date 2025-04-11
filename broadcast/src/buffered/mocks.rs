@@ -1,7 +1,7 @@
 //! Mock implementations for testing.
 
 use bytes::{Buf, BufMut};
-use commonware_codec::{Codec, Error as CodecError};
+use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadRangeExt, Write};
 use commonware_cryptography::{
     sha256::{Digest as Sha256Digest, Sha256},
     Digestible, Hasher,
@@ -31,17 +31,21 @@ impl Digestible<Sha256Digest> for TestMessage {
     }
 }
 
-impl Codec for TestMessage {
+impl Write for TestMessage {
     fn write(&self, buf: &mut impl BufMut) {
         self.content.write(buf);
     }
+}
 
-    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
-        let content = Vec::<u8>::read(buf)?;
-        Ok(Self { content })
+impl EncodeSize for TestMessage {
+    fn encode_size(&self) -> usize {
+        self.content.encode_size()
     }
+}
 
-    fn len_encoded(&self) -> usize {
-        self.content.len_encoded()
+impl Read for TestMessage {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let content = Vec::<u8>::read_range(buf, ..)?;
+        Ok(Self { content })
     }
 }

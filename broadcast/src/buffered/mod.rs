@@ -120,9 +120,10 @@ mod tests {
                 mailbox_size: 1024,
                 deque_size: CACHE_SIZE,
                 priority: false,
+                decode_config: (),
             };
             let (engine, engine_mailbox) =
-                Engine::<_, PublicKey, Sha256Digest, TestMessage, _, _>::new(
+                Engine::<_, PublicKey, Sha256Digest, _, TestMessage, _, _>::new(
                     context.clone(),
                     config,
                 );

@@ -7,7 +7,7 @@ use super::{
 };
 use crate::Proof;
 use bytes::{Buf, BufMut};
-use commonware_codec::SizedCodec;
+use commonware_codec::FixedSize;
 use commonware_cryptography::bls12381::primitives::{
     group::{self, Element},
     ops,
@@ -75,8 +75,7 @@ impl<D: Digest> Prover<D> {
     /// Serialize a proposal proof.
     pub fn serialize_proposal(proposal: &wire::Proposal, partial_signature: &[u8]) -> Proof {
         // Setup proof
-        let len =
-            u64::LEN_ENCODED + u64::LEN_ENCODED + D::LEN_ENCODED + poly::PARTIAL_SIGNATURE_LENGTH;
+        let len = u64::SIZE + u64::SIZE + D::SIZE + poly::PARTIAL_SIGNATURE_LENGTH;
 
         // Encode proof
         let mut proof = Vec::with_capacity(len);
@@ -94,8 +93,7 @@ impl<D: Digest> Prover<D> {
         namespace: &[u8],
     ) -> Option<(View, View, D, Verifier)> {
         // Ensure proof is big enough
-        let expected_len =
-            u64::LEN_ENCODED + u64::LEN_ENCODED + D::LEN_ENCODED + poly::PARTIAL_SIGNATURE_LENGTH;
+        let expected_len = u64::SIZE + u64::SIZE + D::SIZE + poly::PARTIAL_SIGNATURE_LENGTH;
         if proof.len() != expected_len {
             return None;
         }
@@ -129,11 +127,8 @@ impl<D: Digest> Prover<D> {
     /// Serialize an aggregation proof.
     pub fn serialize_threshold(proposal: &wire::Proposal, signature: &[u8], seed: &[u8]) -> Proof {
         // Setup proof
-        let len = u64::LEN_ENCODED
-            + u64::LEN_ENCODED
-            + D::LEN_ENCODED
-            + group::SIGNATURE_LENGTH
-            + group::SIGNATURE_LENGTH;
+        let len =
+            u64::SIZE + u64::SIZE + D::SIZE + group::SIGNATURE_LENGTH + group::SIGNATURE_LENGTH;
 
         // Encode proof
         let mut proof = Vec::with_capacity(len);
@@ -152,11 +147,8 @@ impl<D: Digest> Prover<D> {
         namespace: &[u8],
     ) -> Option<(View, View, D, group::Signature, group::Signature)> {
         // Ensure proof prefix is big enough
-        let expected_len = u64::LEN_ENCODED
-            + u64::LEN_ENCODED
-            + D::LEN_ENCODED
-            + group::SIGNATURE_LENGTH
-            + group::SIGNATURE_LENGTH;
+        let expected_len =
+            u64::SIZE + u64::SIZE + D::SIZE + group::SIGNATURE_LENGTH + group::SIGNATURE_LENGTH;
         if proof.len() != expected_len {
             return None;
         }
@@ -219,12 +211,12 @@ impl<D: Digest> Prover<D> {
         signature_2: &[u8],
     ) -> Proof {
         // Setup proof
-        let len = u64::LEN_ENCODED
-            + u64::LEN_ENCODED
-            + D::LEN_ENCODED
+        let len = u64::SIZE
+            + u64::SIZE
+            + D::SIZE
             + poly::PARTIAL_SIGNATURE_LENGTH
-            + u64::LEN_ENCODED
-            + D::LEN_ENCODED
+            + u64::SIZE
+            + D::SIZE
             + poly::PARTIAL_SIGNATURE_LENGTH;
 
         // Encode proof
@@ -245,12 +237,12 @@ impl<D: Digest> Prover<D> {
         namespace: &[u8],
     ) -> Option<(View, Verifier)> {
         // Ensure proof is big enough
-        let expected_len = u64::LEN_ENCODED
-            + u64::LEN_ENCODED
-            + D::LEN_ENCODED
+        let expected_len = u64::SIZE
+            + u64::SIZE
+            + D::SIZE
             + poly::PARTIAL_SIGNATURE_LENGTH
-            + u64::LEN_ENCODED
-            + D::LEN_ENCODED
+            + u64::SIZE
+            + D::SIZE
             + poly::PARTIAL_SIGNATURE_LENGTH;
         if proof.len() != expected_len {
             return None;
@@ -361,9 +353,9 @@ impl<D: Digest> Prover<D> {
         signature_null: &[u8],
     ) -> Proof {
         // Setup proof
-        let len = u64::LEN_ENCODED
-            + u64::LEN_ENCODED
-            + D::LEN_ENCODED
+        let len = u64::SIZE
+            + u64::SIZE
+            + D::SIZE
             + poly::PARTIAL_SIGNATURE_LENGTH
             + poly::PARTIAL_SIGNATURE_LENGTH;
 
@@ -380,9 +372,9 @@ impl<D: Digest> Prover<D> {
     /// Deserialize a conflicting nullify and finalize proof.
     pub fn deserialize_nullify_finalize(&self, mut proof: Proof) -> Option<(View, Verifier)> {
         // Ensure proof is big enough
-        let expected_len = u64::LEN_ENCODED
-            + u64::LEN_ENCODED
-            + D::LEN_ENCODED
+        let expected_len = u64::SIZE
+            + u64::SIZE
+            + D::SIZE
             + poly::PARTIAL_SIGNATURE_LENGTH
             + poly::PARTIAL_SIGNATURE_LENGTH;
         if proof.len() != expected_len {

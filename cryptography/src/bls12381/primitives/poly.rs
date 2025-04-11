@@ -11,7 +11,7 @@ use crate::bls12381::primitives::{
     Error,
 };
 use bytes::BufMut;
-use commonware_codec::SizedCodec;
+use commonware_codec::FixedSize;
 use rand::{rngs::OsRng, RngCore};
 use std::collections::BTreeMap;
 
@@ -29,7 +29,7 @@ pub type Signature = Poly<group::Signature>;
 pub type PartialSignature = Eval<group::Signature>;
 
 /// The default partial signature length (G2).
-pub const PARTIAL_SIGNATURE_LENGTH: usize = u32::LEN_ENCODED + group::SIGNATURE_LENGTH;
+pub const PARTIAL_SIGNATURE_LENGTH: usize = u32::SIZE + group::SIGNATURE_LENGTH;
 
 /// A polynomial evaluation at a specific index.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -42,7 +42,7 @@ impl<C: Element> Eval<C> {
     /// Canonically serializes the evaluation.
     pub fn serialize(&self) -> Vec<u8> {
         let value_serialized = self.value.serialize();
-        let mut bytes = Vec::with_capacity(u32::LEN_ENCODED + value_serialized.len());
+        let mut bytes = Vec::with_capacity(u32::SIZE + value_serialized.len());
         bytes.put_u32(self.index);
         bytes.extend_from_slice(&value_serialized);
         bytes
@@ -51,7 +51,7 @@ impl<C: Element> Eval<C> {
     /// Deserializes a canonically encoded evaluation.
     pub fn deserialize(bytes: &[u8]) -> Option<Self> {
         let index = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-        let value = C::deserialize(&bytes[u32::LEN_ENCODED..])?;
+        let value = C::deserialize(&bytes[u32::SIZE..])?;
         Some(Self { index, value })
     }
 }

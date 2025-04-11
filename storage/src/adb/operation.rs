@@ -4,7 +4,7 @@
 //! based on a `crate::Journal`.
 
 use bytes::{Buf, BufMut};
-use commonware_codec::{util as CodecUtil, Codec, Error as CodecError, SizedCodec};
+use commonware_codec::{Error as CodecError, FixedSize, Read, Write};
 use commonware_utils::Array;
 use std::{
     cmp::{Ord, PartialOrd},
@@ -62,7 +62,7 @@ impl<K: Array, V: Array> Operation<K, V> {
     // operation, which requires 9 bytes.
     const _MIN_OPERATION_LEN: usize = 9;
     const _COMMIT_OP_ASSERT: () = assert!(
-        Self::LEN_ENCODED >= Self::_MIN_OPERATION_LEN,
+        Self::SIZE >= Self::_MIN_OPERATION_LEN,
         "array size too small for commit op"
     );
 
@@ -77,7 +77,7 @@ impl<K: Array, V: Array> Operation<K, V> {
 
     /// Create a new update operation that makes `key` have value `value`.
     pub fn update(key: K, value: V) -> Self {
-        let mut data = Vec::with_capacity(Self::LEN_ENCODED);
+        let mut data = Vec::with_capacity(Self::SIZE);
         data.push(Self::UPDATE_CONTEXT);
         data.extend_from_slice(&key);
         data.extend_from_slice(&value);
@@ -90,10 +90,10 @@ impl<K: Array, V: Array> Operation<K, V> {
 
     /// Create a new delete operation that removes any value assigned to `key`.
     pub fn delete(key: K) -> Self {
-        let mut data = Vec::with_capacity(Self::LEN_ENCODED);
+        let mut data = Vec::with_capacity(Self::SIZE);
         data.push(Self::DELETE_CONTEXT);
         data.extend_from_slice(&key);
-        data.resize(Self::LEN_ENCODED, 0);
+        data.resize(Self::SIZE, 0);
 
         Self {
             data,
@@ -104,10 +104,10 @@ impl<K: Array, V: Array> Operation<K, V> {
     /// Create a new commit operation that indicates the current floor on inactive operations is
     /// `loc`.
     pub fn commit(loc: u64) -> Self {
-        let mut data = Vec::with_capacity(Self::LEN_ENCODED);
+        let mut data = Vec::with_capacity(Self::SIZE);
         data.push(Self::COMMIT_CONTEXT);
         data.extend_from_slice(&loc.to_be_bytes());
-        data.resize(Self::LEN_ENCODED, 0);
+        data.resize(Self::SIZE, 0);
 
         Self {
             data,
@@ -116,15 +116,15 @@ impl<K: Array, V: Array> Operation<K, V> {
     }
 
     pub fn to_key(&self) -> K {
-        K::try_from(&self.data[1..K::LEN_ENCODED + 1]).unwrap()
+        K::try_from(&self.data[1..K::SIZE + 1]).unwrap()
     }
 
     pub fn to_type(&self) -> Type<K, V> {
-        let key = K::try_from(&self.data[1..K::LEN_ENCODED + 1]).unwrap();
+        let key = K::try_from(&self.data[1..K::SIZE + 1]).unwrap();
         match self.data[0] {
             Self::DELETE_CONTEXT => Type::Deleted(key),
             Self::UPDATE_CONTEXT => {
-                let value = V::try_from(&self.data[K::LEN_ENCODED + 1..]).unwrap();
+                let value = V::try_from(&self.data[K::SIZE + 1..]).unwrap();
                 Type::Update(key, value)
             }
             Self::COMMIT_CONTEXT => {
@@ -138,34 +138,30 @@ impl<K: Array, V: Array> Operation<K, V> {
     pub fn to_value(&self) -> Option<V> {
         match self.data[0] {
             Self::DELETE_CONTEXT => None,
-            Self::UPDATE_CONTEXT => Some(V::try_from(&self.data[K::LEN_ENCODED + 1..]).unwrap()),
+            Self::UPDATE_CONTEXT => Some(V::try_from(&self.data[K::SIZE + 1..]).unwrap()),
             Self::COMMIT_CONTEXT => None,
             _ => unreachable!(),
         }
     }
 }
 
-impl<K: Array, V: Array> Codec for Operation<K, V> {
+impl<K: Array, V: Array> Write for Operation<K, V> {
     fn write(&self, buf: &mut impl BufMut) {
-        assert!(self.data.len() == Self::LEN_ENCODED);
-        buf.put(&self.data[..]);
-    }
-
-    fn read(buf: &mut impl Buf) -> Result<Self, CodecError> {
-        CodecUtil::at_least(buf, Self::LEN_ENCODED)?;
-        let mut value = vec![0; Self::LEN_ENCODED];
-        buf.copy_to_slice(&mut value);
-        Self::try_from(value.as_slice())
-            .map_err(|e: Error<K, V>| CodecError::Wrapped("Operation", e.into()))
-    }
-
-    fn len_encoded(&self) -> usize {
-        Self::LEN_ENCODED
+        assert!(self.data.len() == Self::SIZE);
+        buf.put_slice(&self.data);
     }
 }
 
-impl<K: Array, V: Array> SizedCodec for Operation<K, V> {
-    const LEN_ENCODED: usize = K::LEN_ENCODED + 1 + V::LEN_ENCODED;
+impl<K: Array, V: Array> Read for Operation<K, V> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let mut value = vec![0u8; Self::SIZE];
+        buf.copy_to_slice(&mut value);
+        Self::try_from(&value).map_err(|e: Error<K, V>| CodecError::Wrapped("Operation", e.into()))
+    }
+}
+
+impl<K: Array, V: Array> FixedSize for Operation<K, V> {
+    const SIZE: usize = K::SIZE + 1 + V::SIZE;
 }
 
 impl<K: Array, V: Array> Array for Operation<K, V> {
@@ -176,20 +172,19 @@ impl<K: Array, V: Array> TryFrom<&[u8]> for Operation<K, V> {
     type Error = Error<K, V>;
 
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        if value.len() != Self::LEN_ENCODED {
+        if value.len() != Self::SIZE {
             return Err(Error::InvalidLength);
         }
 
-        let _ = K::try_from(&value[1..K::LEN_ENCODED + 1]).map_err(|e| Error::InvalidKey(e))?;
+        let _ = K::try_from(&value[1..K::SIZE + 1]).map_err(|e| Error::InvalidKey(e))?;
 
         match value[0] {
             Self::UPDATE_CONTEXT => {
-                let _ = V::try_from(&value[K::LEN_ENCODED + 1..])
-                    .map_err(|e| Error::InvalidValue(e))?;
+                let _ = V::try_from(&value[K::SIZE + 1..]).map_err(|e| Error::InvalidValue(e))?;
             }
             Self::DELETE_CONTEXT => {
                 // Check if the remaining bytes are all zeros
-                if !value[K::LEN_ENCODED + 1..].iter().all(|&b| b == 0) {
+                if !value[K::SIZE + 1..].iter().all(|&b| b == 0) {
                     return Err(Error::InvalidDeleteOp);
                 }
             }
@@ -253,6 +248,7 @@ impl<K: Array, V: Array> Display for Operation<K, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_codec::{DecodeExt, Encode};
     use commonware_utils::array::U64;
 
     #[test]
@@ -293,7 +289,7 @@ mod tests {
 
         // test non-zero byte detection in delete operation
         let mut invalid = delete_op.to_vec();
-        invalid[U64::LEN_ENCODED + 4] = 0xFF;
+        invalid[U64::SIZE + 4] = 0xFF;
         let try_from = Operation::<U64, U64>::try_from(&invalid);
         assert!(matches!(try_from.unwrap_err(), Error::InvalidDeleteOp));
 
@@ -335,7 +331,7 @@ mod tests {
         let update_op = Operation::update(key, value);
 
         let encoded = update_op.encode();
-        assert_eq!(encoded.len(), Operation::<U64, U64>::LEN_ENCODED);
+        assert_eq!(encoded.len(), Operation::<U64, U64>::SIZE);
         assert_eq!(encoded, update_op.as_ref());
 
         let decoded = Operation::decode(encoded).unwrap();
