@@ -72,6 +72,15 @@ impl<H: CHasher> Bitmap<H> {
         }
     }
 
+    /// Returns a mutable reference to the internal bitmap buffer.
+    ///
+    /// # Warning
+    /// This method is intended for testing and benchmarking purposes only.
+    #[cfg(feature = "bench_internal")]
+    pub fn get_bitmap_mut(&mut self) -> &mut Vec<u8> {
+        &mut self.bitmap
+    }
+
     /// Return the number of bits currently stored in the bitmap.
     pub fn bit_count(&self) -> u64 {
         (self.bitmap.len() * 8 - Self::CHUNK_SIZE * 8 + self.next_bit) as u64
@@ -181,11 +190,18 @@ impl<H: CHasher> Bitmap<H> {
 
         let byte_offset = bit_offset as usize / 8;
         let mask = Self::chunk_byte_bit_mask(bit_offset);
-        if bit {
-            self.bitmap[byte_offset] |= mask;
-        } else {
-            self.bitmap[byte_offset] &= !mask;
-        }
+
+        // Original branching implementation:
+        // if bit {
+        //     self.bitmap[byte_offset] |= mask;
+        // } else {
+        //     self.bitmap[byte_offset] &= !mask;
+        // }
+
+        // Branchless XOR variant:
+        //FROM: from: https://graphics.stanford.edu/~seander/bithacks.html#ConditionalSetOrClearBitsWithoutBranching
+        self.bitmap[byte_offset] ^= ((-(bit as i8) as u8) ^ self.bitmap[byte_offset]) & mask;
+
         if byte_offset >= self.bitmap.len() - Self::CHUNK_SIZE {
             // No need to update the Merkle tree since this bit is within the last (yet to be
             // inserted) chunk.
