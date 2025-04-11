@@ -35,13 +35,14 @@ pub trait DecodeExt: Decode<()> {
 // Automatically implement `DecodeExt` for types that implement `Decode` with no config.
 impl<T: Decode<()>> DecodeExt for T {}
 
-/// Extension trait for reading types whose config is `(RangeConfig, T)`,
-/// i.e., requiring a range but no specific inner configuration.
+/// Extension trait for reading types whose config is `(RangeConfig, T)` where `T` is a unit type
+/// (a type of one possible value, such as `()` or `((), ())`).
 ///
 /// Useful for reading collections like `Vec<T>` where `T` implements `Read<()>`.
 /// Import this trait to use the `.read_range()` method.
 pub trait ReadRangeExt<T: Config + Default, R: RangeConfig>: Read<(R, T)> {
-    /// Reads a value using only a range configuration, assuming the inner config is `()`.
+    /// Reads a value using only a range configuration.
+    /// Assumes the inner configuration is a unit type.
     fn read_range(buf: &mut impl Buf, range: R) -> Result<Self, Error> {
         Self::read_cfg(buf, &(range, T::default()))
     }
