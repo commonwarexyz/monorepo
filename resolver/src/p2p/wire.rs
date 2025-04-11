@@ -1,5 +1,5 @@
 use bytes::{Buf, BufMut, Bytes};
-use commonware_codec::{Encode, Error, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write};
 
 /// Represents a message sent between peers.
 pub struct PeerMsg {
@@ -18,14 +18,14 @@ impl Write for PeerMsg {
     }
 }
 
-impl Encode for PeerMsg {
-    fn len_encoded(&self) -> usize {
-        self.id.len_encoded() + self.payload.len_encoded()
+impl EncodeSize for PeerMsg {
+    fn encode_size(&self) -> usize {
+        self.id.encode_size() + self.payload.encode_size()
     }
 }
 
 impl Read for PeerMsg {
-    fn read_cfg(buf: &mut impl Buf, _: ()) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let id = buf.get_u64();
         let payload = Payload::read(buf)?;
         Ok(PeerMsg { id, payload })
@@ -64,18 +64,18 @@ impl Write for Payload {
     }
 }
 
-impl Encode for Payload {
-    fn len_encoded(&self) -> usize {
+impl EncodeSize for Payload {
+    fn encode_size(&self) -> usize {
         1 + match self {
-            Payload::Request(data) => data.len_encoded(),
-            Payload::Response(data) => data.len_encoded(),
+            Payload::Request(data) => data.encode_size(),
+            Payload::Response(data) => data.encode_size(),
             Payload::ResponseError => 0,
         }
     }
 }
 
 impl Read for Payload {
-    fn read_cfg(buf: &mut impl Buf, _: ()) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let payload_type = buf.get_u8();
         match payload_type {
             0 => {
@@ -83,11 +83,11 @@ impl Read for Payload {
                 Ok(Payload::Request(data))
             }
             1 => {
-                let data = Bytes::read(buf)?;
+                let data = Bytes::read_range(buf, ..)?;
                 Ok(Payload::Response(data))
             }
             2 => Ok(Payload::ResponseError),
-            _ => Err(Error::InvalidPayloadType(payload_type)),
+            _ => Err(Error::Invalid("Payload", "Invalid payload type")),
         }
     }
 }
