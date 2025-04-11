@@ -84,7 +84,7 @@
 //!
 //! // 3. Implement Read: How to deserialize the struct (uses default Cfg = ())
 //! impl Read for Point {
-//!     fn read_cfg(buf: &mut impl Buf, _cfg: ()) -> Result<Self, Error> {
+//!     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
 //!         // Use ReadExt::read for ergonomic reading when Cfg is ()
 //!         let x = u32::read(buf)?;
 //!         let y = u32::read(buf)?;
@@ -151,7 +151,7 @@
 //! // 3. Implement Read<Cfg>
 //! impl Read<ItemConfig> for Item {
 //!     // Use the config Cfg = ItemConfig
-//!     fn read_cfg(buf: &mut impl Buf, cfg: ItemConfig) -> Result<Self, Error> {
+//!     fn read_cfg(buf: &mut impl Buf, cfg: &ItemConfig) -> Result<Self, Error> {
 //!         // u64 requires Cfg = (), uses ReadExt::read
 //!         let id = <u64>::read(buf)?;
 //!
@@ -178,7 +178,7 @@
 //!
 //! // Decode the item (uses Read<ItemConfig>)
 //! // decode_cfg ensures all bytes are consumed.
-//! let decoded_item = Item::decode_cfg(bytes, config).unwrap();
+//! let decoded_item = Item::decode_cfg(bytes, &config).unwrap();
 //! assert_eq!(item, decoded_item);
 //! ```
 
