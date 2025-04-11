@@ -44,46 +44,34 @@ mod tests {
         encoder::{
             finalize_namespace, notarize_namespace, proposal_message, seed_message, seed_namespace,
         },
-        mocks,
-        wire::{self, backfiller},
-        Prover, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE, NOTARIZE,
-        NULLIFY_AND_FINALIZE,
+        mocks, wire, Prover,
     };
     use bytes::Bytes;
     use commonware_cryptography::{
         bls12381::{
             dkg::ops,
             primitives::{
-                group::{self, Element, Share, Signature},
-                ops::{partial_sign_message, sign_message, threshold_signature_recover},
-                poly::{self, Public},
+                group::Element,
+                ops::{partial_sign_message, threshold_signature_recover},
+                poly,
             },
         },
         hash,
         sha256::Digest,
-        Ed25519, Scheme as CryptoScheme, Sha256, Signer,
+        Ed25519, Sha256, Signer,
     };
     use commonware_macros::test_traced;
     use commonware_p2p::{
         simulated::{Config as NConfig, Link, Network},
         Recipients, Sender,
     };
-    use commonware_runtime::{
-        deterministic::{self, Context as DeterministicContext, Executor},
-        Blob, Clock, Metrics, Runner, Spawner, Storage,
-    };
+    use commonware_runtime::{deterministic::Executor, Metrics, Runner};
     use commonware_storage::journal::variable::{Config as JConfig, Journal};
-    use commonware_utils::{quorum, Array};
-    use futures::{
-        channel::mpsc::{self, UnboundedReceiver},
-        StreamExt,
-    };
+    use commonware_utils::quorum;
+    use futures::{channel::mpsc, StreamExt};
     use prost::Message;
     use std::time::Duration;
-    use std::{
-        collections::BTreeMap,
-        sync::{atomic::AtomicI64, Arc},
-    };
+    use std::{collections::BTreeMap, sync::Arc};
 
     // Mock Committer (no-op)
     #[derive(Clone)]
@@ -179,7 +167,7 @@ mod tests {
             let (mut actor, mut mailbox) = Actor::new(context.clone(), journal, cfg);
 
             // Create a dummy backfiller mailbox (not used in this path)
-            let (backfiller_sender, backfiller_receiver) = mpsc::channel(1);
+            let (backfiller_sender, mut backfiller_receiver) = mpsc::channel(1);
             let backfiller = resolver::Mailbox::new(backfiller_sender);
 
             // Create a dummy network mailbox
@@ -256,14 +244,16 @@ mod tests {
                 .expect("failed to send message");
 
             // Wait for application to be notified
-            let (_, progress) = done_receiver.next().await.expect("failed to receive done");
-            match progress {
-                mocks::application::Progress::Finalized(_, finalized_payload) => {
-                    assert_eq!(finalized_payload, payload);
+            let msg = backfiller_receiver
+                .next()
+                .await
+                .expect("failed to receive backfiller message");
+            match msg {
+                resolver::Message::Finalized { view } => {
+                    assert_eq!(view, 100);
                 }
-                _ => panic!("unexpected progress"),
+                _ => panic!("unexpected backfiller message"),
             }
-            panic!("expected panic");
 
             // Send old notarization from backfiller
             let payload = hash(b"test2");

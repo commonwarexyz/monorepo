@@ -5,7 +5,7 @@ use crate::Supervisor;
 pub use actor::Actor;
 use commonware_cryptography::Scheme;
 use governor::Quota;
-pub use ingress::Mailbox;
+pub use ingress::{Mailbox, Message};
 use std::time::Duration;
 
 pub struct Config<C: Scheme, S: Supervisor> {
