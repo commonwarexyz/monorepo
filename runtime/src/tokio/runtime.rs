@@ -292,6 +292,22 @@ pub struct Context<S: Storage> {
     storage: S,
 }
 
+impl<S: Storage> Storage for Context<S> {
+    type Blob = S::Blob;
+
+    async fn open(&self, partition: &str, name: &[u8]) -> Result<Self::Blob, Error> {
+        self.storage.open(partition, name).await
+    }
+
+    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
+        self.storage.remove(partition, name).await
+    }
+
+    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
+        self.storage.scan(partition).await
+    }
+}
+
 impl<S: Storage> Clone for Context<S> {
     fn clone(&self) -> Self {
         Self {

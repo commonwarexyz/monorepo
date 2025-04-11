@@ -60,10 +60,10 @@ pub struct Config {
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub struct Any<B: Blob, E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher> {
+pub struct Any<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher> {
     /// An MMR over digests of the operations applied to the db. The number of leaves in this MMR
     /// always equals the number of operations in the unpruned `log`.
-    ops: Mmr<B, E, H>,
+    ops: Mmr<E, H>,
 
     /// A (pruned) log of all operations applied to the db in order of occurrence. The position
     /// of each operation in the log is called its _location_, which is a stable identifier. Pruning
@@ -72,7 +72,7 @@ pub struct Any<B: Blob, E: RStorage + Clock + Metrics, K: Array, V: Array, H: CH
     ///
     /// Invariant: An operation's location is always equal to the number of the MMR leaf storing the
     /// digest of the operation.
-    log: Journal<B, E, Operation<K, V>>,
+    log: Journal<E, Operation<K, V>>,
 
     /// A location before which all operations are "inactive" (that is, operations before this point
     /// are over keys that have been updated by some operation at or after this point).
@@ -86,7 +86,7 @@ pub struct Any<B: Blob, E: RStorage + Clock + Metrics, K: Array, V: Array, H: CH
     uncommitted_ops: u64,
 }
 
-impl<B: Blob, E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher> Any<B, E, K, V, H> {
+impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher> Any<E, K, V, H> {
     /// Return an MMR initialized from `cfg`. Any uncommitted operations in the log will be
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(context: E, hasher: &mut H, cfg: Config) -> Result<Self, Error> {
@@ -386,7 +386,7 @@ impl<B: Blob, E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher> Any
 
         let digests = ops
             .iter()
-            .map(|op| Any::<_, E, _, _, _>::op_digest(hasher, op))
+            .map(|op| Any::<E, _, _, _>::op_digest(hasher, op))
             .collect::<Vec<_>>();
 
         proof.verify_range_inclusion(hasher, &digests, start_pos, end_pos, root_hash)
@@ -556,10 +556,10 @@ mod test {
     use std::collections::HashMap;
 
     /// Return an `Any` database initialized with a fixed config.
-    async fn open_db<B: Blob, E: RStorage + Clock + Metrics>(
+    async fn open_db<E: RStorage + Clock + Metrics>(
         context: E,
         hasher: &mut Sha256,
-    ) -> Any<B, E, Digest, Digest, Sha256> {
+    ) -> Any<E, Digest, Digest, Sha256> {
         let cfg = Config {
             mmr_journal_partition: "journal_partition".into(),
             mmr_metadata_partition: "metadata_partition".into(),
@@ -567,7 +567,7 @@ mod test {
             log_journal_partition: "log_journal_partition".into(),
             log_items_per_blob: 7,
         };
-        Any::<B, E, Digest, Digest, Sha256>::init(context, hasher, cfg)
+        Any::<E, Digest, Digest, Sha256>::init(context, hasher, cfg)
             .await
             .unwrap()
     }
@@ -820,7 +820,7 @@ mod test {
             assert!(start_loc < db.inactivity_floor_loc);
             for i in start_loc..end_loc {
                 let (proof, log) = db.proof(i, max_ops).await.unwrap();
-                assert!(Any::<_, Context, _, _, _>::verify_proof(
+                assert!(Any::<Context, _, _, _>::verify_proof(
                     &mut hasher,
                     &proof,
                     i,
