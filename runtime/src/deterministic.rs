@@ -1325,6 +1325,7 @@ impl Clone for Blob {
 }
 
 impl crate::Storage for Context {
+    type Config = ();
     type Blob = Blob;
 
     async fn open(&self, partition: &str, name: &[u8]) -> Result<Self::Blob, Error> {

@@ -1,4 +1,5 @@
-use super::blob_non_linux::Storage as NonLinuxStorage;
+use super::blob_linux::{Config as LinuxStorageConfig, Storage as LinuxStorage};
+use super::blob_non_linux::{Config as NonLinuxStorageConfig, Storage as NonLinuxStorage};
 use crate::{utils::Signaler, Clock, Error, Handle, Signal, Storage, METRICS_PREFIX};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
@@ -9,11 +10,9 @@ use prometheus_client::{
 
 use rand::{rngs::OsRng, CryptoRng, RngCore};
 use std::{
-    env,
     future::Future,
     io::{self},
     net::SocketAddr,
-    path::PathBuf,
     sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
@@ -139,7 +138,7 @@ impl Metrics {
 
 /// Configuration for the `tokio` runtime.
 #[derive(Clone)]
-pub struct Config {
+pub struct Config<S: Storage> {
     /// Number of threads to use for handling async tasks.
     ///
     /// Worker threads are always active (waiting for work).
@@ -177,21 +176,20 @@ pub struct Config {
     /// panics or unexpected behaviours are possible.
     pub tcp_nodelay: Option<bool>,
 
-    /// Base directory for all storage operations.
-    pub storage_directory: PathBuf,
+    pub storage_config: S::Config,
+    // TODO danlaine: remove
+    // Base directory for all storage operations.
+    // pub storage_directory: PathBuf,
 
-    /// Maximum buffer size for operations on blobs.
-    ///
-    /// Tokio sets the default value to 2MB.
-    pub maximum_buffer_size: usize,
+    // TODO danlaine: remove
+    // Maximum buffer size for operations on blobs.
+    //
+    // Tokio sets the default value to 2MB.
+    // pub maximum_buffer_size: usize,
 }
 
-impl Default for Config {
+impl Default for Config<NonLinuxStorage> {
     fn default() -> Self {
-        // Generate a random directory name to avoid conflicts (used in tests, so we shouldn't need to reload)
-        let rng = OsRng.next_u64();
-        let storage_directory = env::temp_dir().join(format!("commonware_tokio_runtime_{}", rng));
-
         // Return the configuration
         Self {
             worker_threads: 2,
@@ -200,15 +198,29 @@ impl Default for Config {
             read_timeout: Duration::from_secs(60),
             write_timeout: Duration::from_secs(30),
             tcp_nodelay: None,
-            storage_directory,
-            maximum_buffer_size: 2 * 1024 * 1024, // 2 MB
+            storage_config: NonLinuxStorageConfig::default(),
+        }
+    }
+}
+
+impl Default for Config<LinuxStorage> {
+    fn default() -> Self {
+        // Return the configuration
+        Self {
+            worker_threads: 2,
+            max_blocking_threads: 512,
+            catch_panics: true,
+            read_timeout: Duration::from_secs(60),
+            write_timeout: Duration::from_secs(30),
+            tcp_nodelay: None,
+            storage_config: LinuxStorageConfig::default(),
         }
     }
 }
 
 /// Runtime based on [Tokio](https://tokio.rs).
-pub struct Executor {
-    pub(crate) cfg: Config,
+pub struct Executor<S: Storage> {
+    pub(crate) cfg: Config<S>,
     registry: Mutex<Registry>,
     pub(crate) metrics: Arc<Metrics>,
     runtime: Runtime,
@@ -216,9 +228,9 @@ pub struct Executor {
     signal: Signal,
 }
 
-impl Executor {
+impl<S: Storage> Executor<S> {
     /// Initialize a new `tokio` runtime with the given number of threads.
-    pub fn init(cfg: Config) -> (Runner, Context<NonLinuxStorage>) {
+    pub fn init(cfg: Config<S>) -> (Runner<S>, Context<S>) {
         // Create a new registry
         let mut registry = Registry::default();
         let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
@@ -233,14 +245,10 @@ impl Executor {
             .expect("failed to create Tokio runtime");
         let (signaler, signal) = Signaler::new();
 
-        let storage_max_buffer_size = cfg.maximum_buffer_size;
-        let metrics_clone = metrics.clone();
-        let storage_directory = cfg.storage_directory.clone();
-
         let executor = Arc::new(Self {
             cfg,
             registry: Mutex::new(registry),
-            metrics: metrics.clone(), // TODO danlaine: confirm it's ok to clone this
+            metrics: metrics.clone(),
             runtime,
             signaler: Mutex::new(signaler),
             signal,
@@ -253,11 +261,7 @@ impl Executor {
                 label: String::new(),
                 spawned: false,
                 executor,
-                storage: NonLinuxStorage::new(
-                    storage_directory,
-                    metrics_clone,
-                    storage_max_buffer_size,
-                ),
+                storage: NonLinuxStorage::new(metrics, cfg.storage_config),
             },
         )
     }
@@ -265,18 +269,17 @@ impl Executor {
     /// Initialize a new `tokio` runtime with default configuration.
     // We'd love to implement the trait but we can't because of the return type.
     #[allow(clippy::should_implement_trait)]
-    #[cfg(feature = "iouring")]
-    pub fn default() -> (Runner, Context<NonLinuxStorage>) {
+    pub fn default() -> (Runner<NonLinuxStorage>, Context<NonLinuxStorage>) {
         Self::init(Config::default())
     }
 }
 
 /// Implementation of [`crate::Runner`] for the `tokio` runtime.
-pub struct Runner {
-    executor: Arc<Executor>,
+pub struct Runner<S: Storage> {
+    executor: Arc<Executor<S>>,
 }
 
-impl crate::Runner for Runner {
+impl<S: Storage> crate::Runner for Runner<S> {
     fn start<F>(self, f: F) -> F::Output
     where
         F: Future + Send + 'static,
@@ -294,12 +297,13 @@ impl crate::Runner for Runner {
 pub struct Context<S: Storage> {
     label: String,
     spawned: bool,
-    pub(crate) executor: Arc<Executor>,
+    pub(crate) executor: Arc<Executor<S>>,
     storage: S,
 }
 
 impl<S: Storage> Storage for Context<S> {
     type Blob = S::Blob;
+    type Config = S::Config;
 
     async fn open(&self, partition: &str, name: &[u8]) -> Result<Self::Blob, Error> {
         self.storage.open(partition, name).await

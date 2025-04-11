@@ -149,7 +149,7 @@ fn main() {
 
     // Initialize context
     let runtime_cfg = tokio::Config {
-        storage_directory: storage_directory.into(),
+        /// storage_directory: storage_directory.into(),
         ..Default::default()
     };
     let (executor, context) = Executor::init(runtime_cfg.clone());

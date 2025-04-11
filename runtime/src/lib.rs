@@ -260,6 +260,7 @@ pub trait Stream: Sync + Send + 'static {
 ///
 /// Storage can be backed by a local filesystem, cloud storage, etc.
 pub trait Storage: Clone + Send + Sync + 'static {
+    type Config: Sync + Send;
     type Blob: Blob;
 
     /// Open an existing blob in a given partition or create a new one.

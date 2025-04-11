@@ -1,7 +1,8 @@
 use super::Metrics;
 use crate::Error;
 use commonware_utils::{from_hex, hex};
-use std::{io::SeekFrom, path::PathBuf, sync::Arc};
+use rand::{rngs::OsRng, RngCore};
+use std::{env, io::SeekFrom, path::PathBuf, sync::Arc};
 use tokio::{
     fs,
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
@@ -55,6 +56,22 @@ impl Clone for Blob {
     }
 }
 
+pub struct Config {
+    pub storage_directory: PathBuf,
+    pub max_buffer_size: usize,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        // Generate a random directory name to avoid conflicts (used in tests, so we shouldn't need to reload)
+        let rng = OsRng.next_u64();
+        Self {
+            storage_directory: env::temp_dir().join(format!("commonware_tokio_runtime_{}", rng)),
+            max_buffer_size: 2 * 1024 * 1024, // 2 MiB
+        }
+    }
+}
+
 pub struct Storage {
     lock: Arc<AsyncMutex<()>>,
     metrics: Arc<Metrics>,
@@ -63,16 +80,12 @@ pub struct Storage {
 }
 
 impl Storage {
-    pub fn new(
-        storage_directory: PathBuf,
-        metrics: Arc<Metrics>,
-        max_buffer_size: usize,
-    ) -> Storage {
+    pub fn new(metrics: Arc<Metrics>, cfg: Config) -> Storage {
         Storage {
             lock: AsyncMutex::new(()).into(),
             metrics,
-            storage_directory,
-            max_buffer_size,
+            storage_directory: cfg.storage_directory,
+            max_buffer_size: cfg.max_buffer_size,
         }
     }
 }
@@ -90,6 +103,7 @@ impl Clone for Storage {
 }
 
 impl crate::Storage for Storage {
+    type Config = Config;
     type Blob = Blob;
 
     async fn open(&self, partition: &str, name: &[u8]) -> Result<Blob, Error> {

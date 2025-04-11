@@ -1,4 +1,5 @@
 use std::{
+    env,
     fs::{self, File},
     os::fd::AsRawFd,
     path::PathBuf,
@@ -7,9 +8,24 @@ use std::{
 
 use commonware_utils::{from_hex, hex};
 use io_uring::{opcode, types, IoUring};
+use rand::{rngs::OsRng, RngCore};
 use tokio::sync::Mutex;
 
 use crate::Error;
+
+pub struct Config {
+    _storage_directory: PathBuf,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        // Generate a random directory name to avoid conflicts (used in tests, so we shouldn't need to reload)
+        let rng = OsRng.next_u64();
+        Self {
+            _storage_directory: env::temp_dir().join(format!("commonware_tokio_runtime_{}", rng)),
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct Storage {
@@ -18,16 +34,17 @@ pub struct Storage {
 }
 
 impl Storage {
-    fn _new(storage_directory: PathBuf) -> Storage {
+    fn _new(cfg: Config) -> Storage {
         Storage {
             lock: Mutex::new(()).into(),
-            storage_directory,
+            storage_directory: cfg._storage_directory,
         }
     }
 }
 
 impl crate::Storage for Storage {
     type Blob = Blob;
+    type Config = Config;
 
     async fn open(&self, partition: &str, name: &[u8]) -> Result<Blob, Error> {
         let _ = self.lock.lock().await;

@@ -1248,6 +1248,7 @@ mod tests {
 
     impl Storage for MockStorage {
         type Blob = MockBlob;
+        type Config = ();
 
         async fn open(&self, _partition: &str, _name: &[u8]) -> Result<MockBlob, RError> {
             Ok(MockBlob { len: self.len })
