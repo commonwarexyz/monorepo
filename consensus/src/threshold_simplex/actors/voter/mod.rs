@@ -164,7 +164,7 @@ mod tests {
                 skip_timeout: 10,
                 replay_concurrency: 1,
             };
-            let (mut actor, mut mailbox) = Actor::new(context.clone(), journal, cfg);
+            let (actor, mut mailbox) = Actor::new(context.clone(), journal, cfg);
 
             // Create a dummy backfiller mailbox (not used in this path)
             let (backfiller_sender, mut backfiller_receiver) = mpsc::channel(1);
