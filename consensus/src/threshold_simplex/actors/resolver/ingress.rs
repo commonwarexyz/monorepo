@@ -24,7 +24,7 @@ pub struct Mailbox {
 }
 
 impl Mailbox {
-    pub(super) fn new(sender: mpsc::Sender<Message>) -> Self {
+    pub(crate) fn new(sender: mpsc::Sender<Message>) -> Self {
         Self { sender }
     }
 
