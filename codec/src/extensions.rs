@@ -4,7 +4,7 @@
 //! `decode_range()`) that simplify common use cases of the core [`Read`] and [`Decode`] traits,
 //! particularly when default configurations (`()`) or [`RangeConfig`] are involved.
 
-use crate::{Decode, Error, RangeConfig, Read};
+use crate::{Config, Decode, Error, RangeConfig, Read};
 use bytes::Buf;
 
 /// Extension trait providing ergonomic read method for types requiring no configuration
@@ -35,31 +35,39 @@ pub trait DecodeExt: Decode<()> {
 // Automatically implement `DecodeExt` for types that implement `Decode` with no config.
 impl<T: Decode<()>> DecodeExt for T {}
 
-/// Extension trait for reading types whose config is `(RangeConfig, ())`,
+/// Extension trait for reading types whose config is `(RangeConfig, T)`,
 /// i.e., requiring a range but no specific inner configuration.
 ///
 /// Useful for reading collections like `Vec<T>` where `T` implements `Read<()>`.
 /// Import this trait to use the `.read_range()` method.
-pub trait ReadRangeExt<R: RangeConfig>: Read<(R, ())> {
+pub trait ReadRangeExt<T: Config + Default, R: RangeConfig>: Read<(R, T)> {
     /// Reads a value using only a range configuration, assuming the inner config is `()`.
     fn read_range(buf: &mut impl Buf, range: R) -> Result<Self, Error> {
-        Self::read_cfg(buf, &(range, ()))
+        Self::read_cfg(buf, &(range, T::default()))
     }
 }
 
-// Automatically implement `ReadRangeExt` for types that implement `Read` with a range and no config.
-impl<R: RangeConfig, T: Read<(R, ())>> ReadRangeExt<R> for T {}
+// Blanket implementation ONLY for T = ()
+// Applies to types like Vec<U> where U: Read<()>
+impl<R: RangeConfig, U: Read<(R, ())>> ReadRangeExt<(), R> for U {}
 
-/// Extension trait for decoding types whose config is `(RangeConfig, ())`,
+// Blanket implementation ONLY for T = ((), ())
+// Applies to types like HashMap<K, V> where K: Read<()>, V: Read<()>
+impl<R: RangeConfig, U: Read<(R, ((), ()))>> ReadRangeExt<((), ()), R> for U {}
+
+/// Extension trait for decoding types whose config is `(RangeConfig, T)`,
 /// i.e., requiring a range but no specific inner configuration, ensuring the buffer is consumed.
 ///
 /// Useful for decoding collections like `Vec<T>` where `T` implements `Read<()>`.
 /// Import this trait to use the `.decode_range()` method.
-pub trait DecodeRangeExt<R: RangeConfig>: Decode<(R, ())> {
+pub trait DecodeRangeExt<T: Config + Default, R: RangeConfig>: Decode<(R, T)> {
     fn decode_range(buf: impl Buf, range: R) -> Result<Self, Error> {
-        Self::decode_cfg(buf, &(range, ()))
+        Self::decode_cfg(buf, &(range, T::default()))
     }
 }
 
-// Automatically implement `DecodeRangeExt` for types that implement `Decode` with a range and no config.
-impl<R: RangeConfig, T: Decode<(R, ())>> DecodeRangeExt<R> for T {}
+// Blanket implementation ONLY for T = ()
+impl<R: RangeConfig, U: Decode<(R, ())>> DecodeRangeExt<(), R> for U {}
+
+// Blanket implementation ONLY for T = ((), ())
+impl<R: RangeConfig, U: Decode<(R, ((), ()))>> DecodeRangeExt<((), ()), R> for U {}
