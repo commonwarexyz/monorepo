@@ -8,7 +8,7 @@ use commonware_cryptography::Verifier;
 use std::net::SocketAddr;
 
 #[derive(Clone)]
-pub struct PayloadCodecConfig {
+pub struct Config {
     /// The maximum number of peers that can be sent in a `Peers` message.
     pub max_peers: usize,
 
@@ -25,7 +25,7 @@ pub enum Payload<C: Verifier> {
     BitVec(BitVec),
 
     /// A vector of verifiable peer information.
-    Peers(Vec<SignedPeerInfo<C>>),
+    Peers(Vec<PeerInfo<C>>),
 
     /// Arbitrary data sent between peers.
     Data(Data),
@@ -60,8 +60,8 @@ impl<C: Verifier> Write for Payload<C> {
     }
 }
 
-impl<C: Verifier> Read<PayloadCodecConfig> for Payload<C> {
-    fn read_cfg(buf: &mut impl Buf, cfg: &PayloadCodecConfig) -> Result<Self, Error> {
+impl<C: Verifier> Read<Config> for Payload<C> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &Config) -> Result<Self, Error> {
         let payload_type = <u8>::read(buf)?;
         match payload_type {
             0 => {
@@ -69,7 +69,7 @@ impl<C: Verifier> Read<PayloadCodecConfig> for Payload<C> {
                 Ok(Payload::BitVec(bitvec))
             }
             1 => {
-                let peers = Vec::<SignedPeerInfo<C>>::read_range(buf, ..=cfg.max_peers)?;
+                let peers = Vec::<PeerInfo<C>>::read_range(buf, ..=cfg.max_peers)?;
                 Ok(Payload::Peers(peers))
             }
             2 => {
@@ -169,7 +169,7 @@ impl Read<usize> for BitVec {
 /// This is used to share the peer's socket address and public key with other peers in a verified
 /// manner.
 #[derive(Clone, Debug, PartialEq)]
-pub struct SignedPeerInfo<C: Verifier> {
+pub struct PeerInfo<C: Verifier> {
     /// The socket address of the peer.
     pub socket: SocketAddr,
 
@@ -183,7 +183,7 @@ pub struct SignedPeerInfo<C: Verifier> {
     pub signature: C::Signature,
 }
 
-impl<C: Verifier> SignedPeerInfo<C> {
+impl<C: Verifier> PeerInfo<C> {
     /// Verify the signature of the peer info.
     pub fn verify(&self, namespace: &[u8]) -> bool {
         C::verify(
@@ -195,7 +195,7 @@ impl<C: Verifier> SignedPeerInfo<C> {
     }
 }
 
-impl<C: Verifier> EncodeSize for SignedPeerInfo<C> {
+impl<C: Verifier> EncodeSize for PeerInfo<C> {
     fn encode_size(&self) -> usize {
         self.socket.encode_size()
             + self.timestamp.encode_size()
@@ -204,7 +204,7 @@ impl<C: Verifier> EncodeSize for SignedPeerInfo<C> {
     }
 }
 
-impl<C: Verifier> Write for SignedPeerInfo<C> {
+impl<C: Verifier> Write for PeerInfo<C> {
     fn write(&self, buf: &mut impl BufMut) {
         self.socket.write(buf);
         self.timestamp.write(buf);
@@ -213,13 +213,13 @@ impl<C: Verifier> Write for SignedPeerInfo<C> {
     }
 }
 
-impl<C: Verifier> Read for SignedPeerInfo<C> {
+impl<C: Verifier> Read for PeerInfo<C> {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let socket = SocketAddr::read(buf)?;
         let timestamp = u64::read(buf)?;
         let public_key = C::PublicKey::read(buf)?;
         let signature = C::Signature::read(buf)?;
-        Ok(SignedPeerInfo {
+        Ok(PeerInfo {
             socket,
             timestamp,
             public_key,
@@ -268,10 +268,10 @@ mod tests {
     use commonware_codec::{Decode, DecodeRangeExt};
     use commonware_cryptography::{Secp256r1, Signer};
 
-    fn signed_peer_info() -> SignedPeerInfo<Secp256r1> {
+    fn signed_peer_info() -> PeerInfo<Secp256r1> {
         let mut rng = rand::thread_rng();
         let mut c = Secp256r1::new(&mut rng);
-        SignedPeerInfo {
+        PeerInfo {
             socket: SocketAddr::from(([127, 0, 0, 1], 8080)),
             timestamp: 1234567890,
             public_key: c.public_key(),
@@ -313,7 +313,7 @@ mod tests {
     fn test_signed_peer_info_codec() {
         let original = vec![signed_peer_info(), signed_peer_info(), signed_peer_info()];
         let encoded = original.encode();
-        let decoded = Vec::<SignedPeerInfo<Secp256r1>>::decode_range(encoded, 3..=3).unwrap();
+        let decoded = Vec::<PeerInfo<Secp256r1>>::decode_range(encoded, 3..=3).unwrap();
         for (original, decoded) in original.iter().zip(decoded.iter()) {
             assert_eq!(original.socket, decoded.socket);
             assert_eq!(original.timestamp, decoded.timestamp);
@@ -321,10 +321,10 @@ mod tests {
             assert_eq!(original.signature, decoded.signature);
         }
 
-        let too_short = Vec::<SignedPeerInfo<Secp256r1>>::decode_range(original.encode(), ..3);
+        let too_short = Vec::<PeerInfo<Secp256r1>>::decode_range(original.encode(), ..3);
         assert!(matches!(too_short, Err(Error::InvalidLength(3))));
 
-        let too_long = Vec::<SignedPeerInfo<Secp256r1>>::decode_range(original.encode(), 4..);
+        let too_long = Vec::<PeerInfo<Secp256r1>>::decode_range(original.encode(), 4..);
         assert!(matches!(too_long, Err(Error::InvalidLength(3))));
     }
 
@@ -348,7 +348,7 @@ mod tests {
     #[test]
     fn test_payload_codec() {
         // Config for the codec
-        let cfg = PayloadCodecConfig {
+        let cfg = Config {
             max_peers: 10,
             max_bitvec: 1024,
         };
@@ -395,7 +395,7 @@ mod tests {
 
     #[test]
     fn test_payload_decode_invalid_type() {
-        let cfg = PayloadCodecConfig {
+        let cfg = Config {
             max_peers: 10,
             max_bitvec: 1024,
         };

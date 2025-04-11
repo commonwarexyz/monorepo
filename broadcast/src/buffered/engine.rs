@@ -28,10 +28,10 @@ use tracing::{debug, error, trace, warn};
 /// - Storing messages in the cache
 /// - Responding to requests from the application
 pub struct Engine<
-    Cfg: CodecCfg,
     E: Clock + Spawner + Metrics,
     P: Array,
     D: Digest,
+    Cfg: CodecCfg,
     M: Digestible<D> + Codec<Cfg>,
     NetS: Sender<PublicKey = P>,
     NetR: Receiver<PublicKey = P>,
@@ -92,14 +92,14 @@ pub struct Engine<
 }
 
 impl<
-        Cfg: CodecCfg,
         E: Clock + Spawner + Metrics,
         P: Array,
         D: Digest,
+        Cfg: CodecCfg,
         M: Digestible<D> + Codec<Cfg>,
         NetS: Sender<PublicKey = P>,
         NetR: Receiver<PublicKey = P>,
-    > Engine<Cfg, E, P, D, M, NetS, NetR>
+    > Engine<E, P, D, Cfg, M, NetS, NetR>
 {
     /// Creates a new engine with the given context and configuration.
     /// Returns the engine and a mailbox for sending messages to the engine.

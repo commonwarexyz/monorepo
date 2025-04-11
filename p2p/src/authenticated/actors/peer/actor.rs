@@ -1,10 +1,5 @@
 use super::{Config, Error, Mailbox, Message, Relay};
-use crate::authenticated::{
-    actors::tracker,
-    channels::Channels,
-    metrics,
-    types::{self},
-};
+use crate::authenticated::{actors::tracker, channels::Channels, metrics, types};
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::Verifier;
 use commonware_macros::select;
@@ -27,7 +22,7 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: Verifier>
     allowed_bit_vec_rate: Quota,
     allowed_peers_rate: Quota,
 
-    codec_config: types::PayloadCodecConfig,
+    codec_config: types::Config,
 
     mailbox: Mailbox<C>,
     control: mpsc::Receiver<Message<C>>,
@@ -55,7 +50,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Ver
                 gossip_bit_vec_frequency: cfg.gossip_bit_vec_frequency,
                 allowed_bit_vec_rate: cfg.allowed_bit_vec_rate,
                 allowed_peers_rate: cfg.allowed_peers_rate,
-                codec_config: types::PayloadCodecConfig {
+                codec_config: types::Config {
                     max_bitvec: cfg.max_peer_set_size,
                     max_peers: cfg.peer_gossip_max_count,
                 },

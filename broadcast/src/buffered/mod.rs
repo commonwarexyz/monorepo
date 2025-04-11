@@ -123,7 +123,7 @@ mod tests {
                 decode_config: (),
             };
             let (engine, engine_mailbox) =
-                Engine::<_, _, PublicKey, Sha256Digest, TestMessage, _, _>::new(
+                Engine::<_, PublicKey, Sha256Digest, _, TestMessage, _, _>::new(
                     context.clone(),
                     config,
                 );

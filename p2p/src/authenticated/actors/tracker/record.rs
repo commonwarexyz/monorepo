@@ -1,4 +1,4 @@
-use crate::authenticated::types::SignedPeerInfo;
+use crate::authenticated::types::PeerInfo;
 use commonware_cryptography::Verifier;
 use std::net::SocketAddr;
 
@@ -16,11 +16,11 @@ pub enum Record<C: Verifier> {
 
     /// Discovered this peer's address from other peers.
     /// Tracks the number of peer sets this peer is part of.
-    Discovered(usize, SignedPeerInfo<C>),
+    Discovered(usize, PeerInfo<C>),
 
     /// Discovered this peer's address from other peers after it was bootstrapped.
     /// Will continuously be tracked.
-    Persistent(SignedPeerInfo<C>),
+    Persistent(PeerInfo<C>),
 }
 
 impl<C: Verifier> Record<C> {
@@ -37,7 +37,7 @@ impl<C: Verifier> Record<C> {
     }
 
     /// Get the peer information if available.
-    pub fn get_peer_info(&self) -> Option<&SignedPeerInfo<C>> {
+    pub fn get_peer_info(&self) -> Option<&PeerInfo<C>> {
         match &self {
             Self::Unknown(_) => None,
             Self::Bootstrapper(_) => None,
@@ -49,7 +49,7 @@ impl<C: Verifier> Record<C> {
     /// Attempt to set the address of a discovered peer.
     ///
     /// Returns true if the update was successful.
-    pub fn set_discovered(&mut self, peer_info: SignedPeerInfo<C>) -> bool {
+    pub fn set_discovered(&mut self, peer_info: PeerInfo<C>) -> bool {
         match self {
             Self::Unknown(count) => {
                 // Upgrade to Discovered.
@@ -117,12 +117,12 @@ mod tests {
     use std::net::SocketAddr;
 
     // Helper function to create signed peer info
-    fn create_signed_peer_info(timestamp: u64) -> SignedPeerInfo<Secp256r1> {
+    fn create_signed_peer_info(timestamp: u64) -> PeerInfo<Secp256r1> {
         let mut rng = rand::thread_rng();
         let mut c = Secp256r1::new(&mut rng);
         let socket = SocketAddr::from(([127, 0, 0, 1], 8080));
         let signature = c.sign(None, &(socket, timestamp).encode());
-        SignedPeerInfo {
+        PeerInfo {
             socket,
             timestamp,
             public_key: c.public_key(),

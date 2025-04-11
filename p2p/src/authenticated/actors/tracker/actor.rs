@@ -6,7 +6,7 @@ pub use super::{
 };
 use crate::authenticated::{
     ip, metrics,
-    types::{self, SignedPeerInfo},
+    types::{self, PeerInfo},
 };
 use commonware_codec::Encode;
 use commonware_cryptography::Scheme;
@@ -59,7 +59,7 @@ pub struct Actor<E: Spawner + Rng + GClock + Metrics, C: Scheme> {
     rate_limited_connections: Family<metrics::Peer, Counter>,
     updated_peers: Family<metrics::Peer, Counter>,
 
-    ip_signature: types::SignedPeerInfo<C>,
+    ip_signature: types::PeerInfo<C>,
 }
 
 impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
@@ -72,7 +72,7 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
         let signature = cfg
             .crypto
             .sign(Some(&ip_namespace), &(socket, timestamp).encode());
-        let ip_signature = types::SignedPeerInfo {
+        let ip_signature = types::PeerInfo {
             socket,
             timestamp,
             public_key: cfg.crypto.public_key(),
@@ -257,7 +257,7 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
         reserved
     }
 
-    fn handle_peer(&mut self, peer: &C::PublicKey, peer_info: SignedPeerInfo<C>) -> bool {
+    fn handle_peer(&mut self, peer: &C::PublicKey, peer_info: PeerInfo<C>) -> bool {
         // Check if peer is authorized
         if !self.allowed(peer) {
             return false;
@@ -285,7 +285,7 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
         true
     }
 
-    fn handle_peers(&mut self, peers: Vec<types::SignedPeerInfo<C>>) -> Result<(), Error> {
+    fn handle_peers(&mut self, peers: Vec<types::PeerInfo<C>>) -> Result<(), Error> {
         // Ensure there aren't too many peers sent
         if peers.len() > self.peer_gossip_max_count {
             return Err(Error::TooManyPeers(peers.len()));
@@ -331,7 +331,7 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
     fn handle_bit_vec(
         &mut self,
         bit_vec: types::BitVec,
-    ) -> Result<Option<Vec<types::SignedPeerInfo<C>>>, Error> {
+    ) -> Result<Option<Vec<types::PeerInfo<C>>>, Error> {
         // Ensure we have the peerset requested
         let set = match self.sets.get(&bit_vec.index) {
             Some(set) => set,
@@ -655,7 +655,7 @@ mod tests {
             let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
             let timestamp = 0;
             let signature = peer1_signer.sign(Some(&ip_namespace), &(socket, timestamp).encode());
-            let peers = vec![types::SignedPeerInfo {
+            let peers = vec![types::PeerInfo {
                 socket,
                 timestamp,
                 public_key: peer1.clone(),

@@ -5,12 +5,8 @@ use commonware_cryptography::Verifier;
 use futures::{channel::mpsc, SinkExt};
 
 pub enum Message<C: Verifier> {
-    BitVec {
-        bit_vec: types::BitVec,
-    },
-    Peers {
-        peers: Vec<types::SignedPeerInfo<C>>,
-    },
+    BitVec { bit_vec: types::BitVec },
+    Peers { peers: Vec<types::PeerInfo<C>> },
     Kill,
 }
 
@@ -34,7 +30,7 @@ impl<C: Verifier> Mailbox<C> {
         let _ = self.sender.send(Message::BitVec { bit_vec }).await;
     }
 
-    pub async fn peers(&mut self, peers: Vec<types::SignedPeerInfo<C>>) {
+    pub async fn peers(&mut self, peers: Vec<types::PeerInfo<C>>) {
         let _ = self.sender.send(Message::Peers { peers }).await;
     }
 

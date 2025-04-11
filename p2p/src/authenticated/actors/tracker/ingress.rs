@@ -24,7 +24,7 @@ pub enum Message<E: Spawner + Metrics, C: Verifier> {
         peer: peer::Mailbox<C>,
     },
     Peers {
-        peers: Vec<types::SignedPeerInfo<C>>,
+        peers: Vec<types::PeerInfo<C>>,
         peer: peer::Mailbox<C>,
     },
 
@@ -70,7 +70,7 @@ impl<E: Spawner + Metrics, C: Verifier> Mailbox<E, C> {
             .unwrap();
     }
 
-    pub async fn peers(&mut self, peers: Vec<types::SignedPeerInfo<C>>, peer: peer::Mailbox<C>) {
+    pub async fn peers(&mut self, peers: Vec<types::PeerInfo<C>>, peer: peer::Mailbox<C>) {
         self.sender
             .send(Message::Peers { peers, peer })
             .await

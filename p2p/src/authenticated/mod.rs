@@ -423,7 +423,7 @@ mod tests {
 
     #[test_traced]
     fn test_determinism_one() {
-        for i in 0..1 {
+        for i in 0..10 {
             run_deterministic_test(i, Mode::One);
         }
     }
