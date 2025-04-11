@@ -1,10 +1,14 @@
-use crate::{utils::Signaler, Clock, Error, Handle, Signal, METRICS_PREFIX};
+#[cfg(feature = "iouring")]
+use super::blob_linux::BlobStorage;
+use super::blob_non_linux::Storage as NonLinuxStorage;
+use crate::{utils::Signaler, Clock, Error, Handle, Signal, Storage, METRICS_PREFIX};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
     encoding::{text::encode, EncodeLabelSet},
     metrics::{counter::Counter, family::Family, gauge::Gauge},
     registry::{Metric, Registry},
 };
+
 use rand::{rngs::OsRng, CryptoRng, RngCore};
 use std::{
     env,
@@ -211,14 +215,13 @@ pub struct Executor {
     registry: Mutex<Registry>,
     pub(crate) metrics: Arc<Metrics>,
     runtime: Runtime,
-    pub(crate) fs: AsyncMutex<()>,
     signaler: Mutex<Signaler>,
     signal: Signal,
 }
 
 impl Executor {
     /// Initialize a new `tokio` runtime with the given number of threads.
-    pub fn init(cfg: Config) -> (Runner, Context) {
+    pub fn init(cfg: Config) -> (Runner, Context<NonLinuxStorage>) {
         // Create a new registry
         let mut registry = Registry::default();
         let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
@@ -237,7 +240,6 @@ impl Executor {
             registry: Mutex::new(registry),
             metrics,
             runtime,
-            fs: AsyncMutex::new(()),
             signaler: Mutex::new(signaler),
             signal,
         });
@@ -249,6 +251,7 @@ impl Executor {
                 label: String::new(),
                 spawned: false,
                 executor,
+                storage: todo!(),
             },
         )
     }
@@ -256,7 +259,8 @@ impl Executor {
     /// Initialize a new `tokio` runtime with default configuration.
     // We'd love to implement the trait but we can't because of the return type.
     #[allow(clippy::should_implement_trait)]
-    pub fn default() -> (Runner, Context) {
+    #[cfg(feature = "iouring")]
+    pub fn default() -> (Runner, Context<NonLinuxStorage>) {
         Self::init(Config::default())
     }
 }
@@ -279,23 +283,27 @@ impl crate::Runner for Runner {
 /// Implementation of [`crate::Spawner`], [`crate::Clock`],
 /// [`crate::Network`], and [`crate::Storage`] for the `tokio`
 /// runtime.
-pub struct Context {
+/// TODO danlaine: refactor code to reduce number of places we
+/// need to paramterize on S:Storage. e.g. Stream.
+pub struct Context<S: Storage> {
     label: String,
     spawned: bool,
     pub(crate) executor: Arc<Executor>,
+    storage: S,
 }
 
-impl Clone for Context {
+impl<S: Storage> Clone for Context<S> {
     fn clone(&self) -> Self {
         Self {
             label: self.label.clone(),
             spawned: false,
             executor: self.executor.clone(),
+            storage: self.storage.clone(),
         }
     }
 }
 
-impl crate::Spawner for Context {
+impl<S: Storage> crate::Spawner for Context<S> {
     fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
@@ -409,7 +417,7 @@ impl crate::Spawner for Context {
     }
 }
 
-impl crate::Metrics for Context {
+impl<S: Storage> crate::Metrics for Context<S> {
     fn with_label(&self, label: &str) -> Self {
         let label = {
             let prefix = self.label.clone();
@@ -427,6 +435,7 @@ impl crate::Metrics for Context {
             label,
             spawned: false,
             executor: self.executor.clone(),
+            storage: self.storage.clone(),
         }
     }
 
@@ -458,7 +467,7 @@ impl crate::Metrics for Context {
     }
 }
 
-impl Clock for Context {
+impl<S: Storage> Clock for Context<S> {
     fn current(&self) -> SystemTime {
         SystemTime::now()
     }
@@ -478,7 +487,7 @@ impl Clock for Context {
     }
 }
 
-impl GClock for Context {
+impl<S: Storage> GClock for Context<S> {
     type Instant = SystemTime;
 
     fn now(&self) -> Self::Instant {
@@ -486,10 +495,10 @@ impl GClock for Context {
     }
 }
 
-impl ReasonablyRealtime for Context {}
+impl<S: Storage> ReasonablyRealtime for Context<S> {}
 
-impl crate::Network<Listener, Sink, Stream> for Context {
-    async fn bind(&self, socket: SocketAddr) -> Result<Listener, Error> {
+impl<S: Storage> crate::Network<Listener<S>, Sink<S>, Stream<S>> for Context<S> {
+    async fn bind(&self, socket: SocketAddr) -> Result<Listener<S>, Error> {
         TcpListener::bind(socket)
             .await
             .map_err(|_| Error::BindFailed)
@@ -499,7 +508,7 @@ impl crate::Network<Listener, Sink, Stream> for Context {
             })
     }
 
-    async fn dial(&self, socket: SocketAddr) -> Result<(Sink, Stream), Error> {
+    async fn dial(&self, socket: SocketAddr) -> Result<(Sink<S>, Stream<S>), Error> {
         // Create a new TCP stream
         let stream = TcpStream::connect(socket)
             .await
@@ -527,13 +536,13 @@ impl crate::Network<Listener, Sink, Stream> for Context {
 }
 
 /// Implementation of [`crate::Listener`] for the `tokio` runtime.
-pub struct Listener {
-    context: Context,
+pub struct Listener<S: Storage> {
+    context: Context<S>,
     listener: TcpListener,
 }
 
-impl crate::Listener<Sink, Stream> for Listener {
-    async fn accept(&mut self) -> Result<(SocketAddr, Sink, Stream), Error> {
+impl<S: Storage> crate::Listener<Sink<S>, Stream<S>> for Listener<S> {
+    async fn accept(&mut self) -> Result<(SocketAddr, Sink<S>, Stream<S>), Error> {
         // Accept a new TCP stream
         let (stream, addr) = self.listener.accept().await.map_err(|_| Error::Closed)?;
         self.context.executor.metrics.inbound_connections.inc();
@@ -559,7 +568,7 @@ impl crate::Listener<Sink, Stream> for Listener {
     }
 }
 
-impl axum::serve::Listener for Listener {
+impl<S: Storage> axum::serve::Listener for Listener<S> {
     type Io = TcpStream;
     type Addr = SocketAddr;
 
@@ -574,12 +583,12 @@ impl axum::serve::Listener for Listener {
 }
 
 /// Implementation of [`crate::Sink`] for the `tokio` runtime.
-pub struct Sink {
-    context: Context,
+pub struct Sink<S: Storage> {
+    context: Context<S>,
     sink: OwnedWriteHalf,
 }
 
-impl crate::Sink for Sink {
+impl<S: Storage> crate::Sink for Sink<S> {
     async fn send(&mut self, msg: &[u8]) -> Result<(), Error> {
         let len = msg.len();
         timeout(
@@ -599,12 +608,12 @@ impl crate::Sink for Sink {
 }
 
 /// Implementation of [`crate::Stream`] for the `tokio` runtime.
-pub struct Stream {
-    context: Context,
+pub struct Stream<S: Storage> {
+    context: Context<S>,
     stream: OwnedReadHalf,
 }
 
-impl crate::Stream for Stream {
+impl<S: Storage> crate::Stream for Stream<S> {
     async fn recv(&mut self, buf: &mut [u8]) -> Result<(), Error> {
         // Wait for the stream to be readable
         timeout(
@@ -626,7 +635,7 @@ impl crate::Stream for Stream {
     }
 }
 
-impl RngCore for Context {
+impl<S: Storage> RngCore for Context<S> {
     fn next_u32(&mut self) -> u32 {
         OsRng.next_u32()
     }
@@ -644,4 +653,4 @@ impl RngCore for Context {
     }
 }
 
-impl CryptoRng for Context {}
+impl<S: Storage> CryptoRng for Context<S> {}

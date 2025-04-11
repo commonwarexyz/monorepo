@@ -1,7 +1,7 @@
 use super::{Context, Metrics};
 use crate::Error;
 use commonware_utils::{from_hex, hex};
-use std::{io::SeekFrom, sync::Arc};
+use std::{io::SeekFrom, path::PathBuf, sync::Arc};
 use tokio::{
     fs,
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
@@ -55,18 +55,45 @@ impl Clone for Blob {
     }
 }
 
-impl crate::Storage<Blob> for Context {
+pub struct Storage {
+    lock: Arc<AsyncMutex<()>>,
+    metrics: Arc<Metrics>,
+    storage_directory: PathBuf,
+    max_buffer_size: usize,
+}
+
+impl Storage {
+    fn new(storage_directory: PathBuf, metrics: Arc<Metrics>, max_buffer_size: usize) -> Storage {
+        Storage {
+            lock: AsyncMutex::new(()).into(),
+            metrics,
+            storage_directory,
+            max_buffer_size,
+        }
+    }
+}
+
+impl Clone for Storage {
+    fn clone(&self) -> Self {
+        self.metrics.open_blobs.inc();
+        Self {
+            lock: self.lock.clone(),
+            metrics: self.metrics.clone(),
+            storage_directory: self.storage_directory.clone(),
+            max_buffer_size: self.max_buffer_size.clone(),
+        }
+    }
+}
+
+impl crate::Storage for Storage {
+    type Blob = Blob;
+
     async fn open(&self, partition: &str, name: &[u8]) -> Result<Blob, Error> {
         // Acquire the filesystem lock
-        let _guard = self.executor.fs.lock().await;
+        let _guard = self.lock.lock().await;
 
         // Construct the full path
-        let path = self
-            .executor
-            .cfg
-            .storage_directory
-            .join(partition)
-            .join(hex(name));
+        let path = self.storage_directory.join(partition).join(hex(name));
         let parent = match path.parent() {
             Some(parent) => parent,
             None => return Err(Error::PartitionCreationFailed(partition.into())),
@@ -88,14 +115,14 @@ impl crate::Storage<Blob> for Context {
             .map_err(|_| Error::BlobOpenFailed(partition.into(), hex(name)))?;
 
         // Set the maximum buffer size
-        file.set_max_buf_size(self.executor.cfg.maximum_buffer_size);
+        file.set_max_buf_size(self.max_buffer_size);
 
         // Get the file length
         let len = file.metadata().await.map_err(|_| Error::ReadFailed)?.len();
 
         // Construct the blob
         Ok(Blob::new(
-            self.executor.metrics.clone(),
+            self.metrics.clone(),
             partition.into(),
             name,
             file,
@@ -105,10 +132,10 @@ impl crate::Storage<Blob> for Context {
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
         // Acquire the filesystem lock
-        let _guard = self.executor.fs.lock().await;
+        let _guard = self.lock.lock().await;
 
         // Remove all related files
-        let path = self.executor.cfg.storage_directory.join(partition);
+        let path = self.storage_directory.join(partition);
         if let Some(name) = name {
             let blob_path = path.join(hex(name));
             fs::remove_file(blob_path)
@@ -124,10 +151,10 @@ impl crate::Storage<Blob> for Context {
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
         // Acquire the filesystem lock
-        let _guard = self.executor.fs.lock().await;
+        let _guard = self.lock.lock().await;
 
         // Scan the partition directory
-        let path = self.executor.cfg.storage_directory.join(partition);
+        let path = self.storage_directory.join(partition);
         let mut entries = fs::read_dir(path)
             .await
             .map_err(|_| Error::PartitionMissing(partition.into()))?;

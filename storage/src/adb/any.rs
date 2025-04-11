@@ -60,7 +60,7 @@ pub struct Config {
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub struct Any<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher> {
+pub struct Any<B: Blob, E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher> {
     /// An MMR over digests of the operations applied to the db. The number of leaves in this MMR
     /// always equals the number of operations in the unpruned `log`.
     ops: Mmr<B, E, H>,
@@ -86,7 +86,7 @@ pub struct Any<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H:
     uncommitted_ops: u64,
 }
 
-impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher> Any<B, E, K, V, H> {
+impl<B: Blob, E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher> Any<B, E, K, V, H> {
     /// Return an MMR initialized from `cfg`. Any uncommitted operations in the log will be
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(context: E, hasher: &mut H, cfg: Config) -> Result<Self, Error> {
@@ -556,7 +556,7 @@ mod test {
     use std::collections::HashMap;
 
     /// Return an `Any` database initialized with a fixed config.
-    async fn open_db<B: Blob, E: RStorage<B> + Clock + Metrics>(
+    async fn open_db<B: Blob, E: RStorage + Clock + Metrics>(
         context: E,
         hasher: &mut Sha256,
     ) -> Any<B, E, Digest, Digest, Sha256> {

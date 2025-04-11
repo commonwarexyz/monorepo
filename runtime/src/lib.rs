@@ -259,15 +259,18 @@ pub trait Stream: Sync + Send + 'static {
 /// writes, blobs are responsible for maintaining synchronization.
 ///
 /// Storage can be backed by a local filesystem, cloud storage, etc.
-pub trait Storage<B>: Clone + Send + Sync + 'static
-where
-    B: Blob,
-{
+pub trait Storage: Clone + Send + Sync + 'static {
+    type Blob: Blob;
+
     /// Open an existing blob in a given partition or create a new one.
     ///
     /// Multiple instances of the same blob can be opened concurrently, however,
     /// writing to the same blob concurrently may lead to undefined behavior.
-    fn open(&self, partition: &str, name: &[u8]) -> impl Future<Output = Result<B, Error>> + Send;
+    fn open(
+        &self,
+        partition: &str,
+        name: &[u8],
+    ) -> impl Future<Output = Result<Self::Blob, Error>> + Send;
 
     /// Remove a blob from a given partition.
     ///
@@ -483,10 +486,7 @@ mod tests {
         });
     }
 
-    fn test_storage_operations<B>(runner: impl Runner, context: impl Spawner + Storage<B>)
-    where
-        B: Blob,
-    {
+    fn test_storage_operations(runner: impl Runner, context: impl Spawner + Storage) {
         runner.start(async move {
             let partition = "test_partition";
             let name = b"test_blob";
@@ -568,10 +568,7 @@ mod tests {
         });
     }
 
-    fn test_blob_read_write<B>(runner: impl Runner, context: impl Spawner + Storage<B>)
-    where
-        B: Blob,
-    {
+    fn test_blob_read_write(runner: impl Runner, context: impl Spawner + Storage) {
         runner.start(async move {
             let partition = "test_partition";
             let name = b"test_blob_rw";
@@ -644,10 +641,7 @@ mod tests {
         });
     }
 
-    fn test_many_partition_read_write<B>(runner: impl Runner, context: impl Spawner + Storage<B>)
-    where
-        B: Blob,
-    {
+    fn test_many_partition_read_write(runner: impl Runner, context: impl Spawner + Storage) {
         runner.start(async move {
             let partitions = ["partition1", "partition2", "partition3"];
             let name = b"test_blob_rw";
@@ -694,10 +688,7 @@ mod tests {
         });
     }
 
-    fn test_blob_read_past_length<B>(runner: impl Runner, context: impl Spawner + Storage<B>)
-    where
-        B: Blob,
-    {
+    fn test_blob_read_past_length(runner: impl Runner, context: impl Spawner + Storage) {
         runner.start(async move {
             let partition = "test_partition";
             let name = b"test_blob_rw";
@@ -726,12 +717,10 @@ mod tests {
         })
     }
 
-    fn test_blob_clone_and_concurrent_read<B>(
+    fn test_blob_clone_and_concurrent_read(
         runner: impl Runner,
-        context: impl Spawner + Storage<B> + Metrics,
-    ) where
-        B: Blob,
-    {
+        context: impl Spawner + Storage + Metrics,
+    ) {
         runner.start(async move {
             let partition = "test_partition";
             let name = b"test_blob_rw";

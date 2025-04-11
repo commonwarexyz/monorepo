@@ -1324,8 +1324,10 @@ impl Clone for Blob {
     }
 }
 
-impl crate::Storage<Blob> for Context {
-    async fn open(&self, partition: &str, name: &[u8]) -> Result<Blob, Error> {
+impl crate::Storage for Context {
+    type Blob = Blob;
+
+    async fn open(&self, partition: &str, name: &[u8]) -> Result<Self::Blob, Error> {
         self.executor.auditor.open(partition, name);
         let mut partitions = self.executor.partitions.lock().unwrap();
         let partition_entry = partitions.entry(partition.into()).or_default();
@@ -1372,6 +1374,8 @@ impl crate::Storage<Blob> for Context {
         Ok(results)
     }
 }
+
+pub struct VecStorage {}
 
 impl crate::Blob for Blob {
     async fn len(&self) -> Result<u64, Error> {
