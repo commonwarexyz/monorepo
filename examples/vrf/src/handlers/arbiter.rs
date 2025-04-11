@@ -16,7 +16,6 @@ use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};
 use commonware_utils::hex;
-use prost::Message;
 use std::{
     collections::{HashMap, HashSet},
     time::Duration,
@@ -78,11 +77,11 @@ impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
         sender
             .send(
                 Recipients::All,
-                wire::Dkg {
+                wire::DKG {
                     round,
-                    payload: Some(wire::dkg::Payload::Start(wire::Start { group })),
+                    payload: wire::Payload::Start(wire::Start { group }),
                 }
-                .encode_to_vec()
+                .encode()
                 .into(),
                 true,
             )
@@ -106,7 +105,7 @@ impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
                     match result {
                         Ok((sender, msg)) =>{
                             // Parse msg
-                            let msg = match wire::Dkg::decode(msg) {
+                            let msg = match wire::DKG::decode(msg) {
                                 Ok(msg) => msg,
                                 Err(_) => {
                                     arbiter.disqualify(sender);
@@ -117,7 +116,7 @@ impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
                                 continue;
                             }
                             let msg = match msg.payload {
-                                Some(wire::dkg::Payload::Commitment(msg)) => msg,
+                                Some(wire::Payload::Commitment(msg)) => msg,
                                 _ => {
                                     // Useless message from previous step
                                     continue;
@@ -206,11 +205,11 @@ impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
                 sender
                     .send(
                         Recipients::All,
-                        wire::Dkg {
+                        wire::DKG {
                             round,
-                            payload: Some(wire::dkg::Payload::Abort(wire::Abort {})),
+                            payload: wire::Payload::Abort(),
                         }
-                        .encode_to_vec()
+                        .encode()
                         .into(),
                         true,
                     )
@@ -250,14 +249,14 @@ impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
             sender
                 .send(
                     Recipients::One(player.clone()),
-                    wire::Dkg {
+                    wire::DKG {
                         round,
-                        payload: Some(wire::dkg::Payload::Success(wire::Success {
+                        payload: wire::Payload::Success(wire::Success {
                             commitments: commitments.clone(),
                             reveals: reveals.clone(),
-                        })),
+                        }),
                     }
-                    .encode_to_vec()
+                    .encode()
                     .into(),
                     true,
                 )

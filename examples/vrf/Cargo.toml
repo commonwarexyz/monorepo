@@ -20,15 +20,11 @@ commonware-utils = { workspace = true }
 bytes = { workspace = true }
 rand = { workspace = true }
 tracing = { workspace = true }
-prost = { workspace = true }
 futures = { workspace = true }
 clap = { workspace = true }
 tracing-subscriber = { workspace = true }
 prometheus-client = { workspace = true }
 governor = { workspace = true }
-
-[build-dependencies]
-prost-build = { workspace = true }
 
 [[bin]]
 name = "commonware-vrf"
