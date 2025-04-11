@@ -167,27 +167,20 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher> 
             let op: Operation<K, V> = log.read(i).await?;
             match op.to_type() {
                 Type::Deleted(key) => {
-                    snapshot.remove(&key, |loc| *loc == i);
-                }
-                Type::Update(key, _) => {
-                    // If the key is already in the snapshot, then update its location.
-                    let mut snapshot_updated = false;
-                    for loc in snapshot.get_mut(&key) {
+                    let mut loc_iter = snapshot.remove_iter(&key);
+                    while let Some(loc) = loc_iter.next() {
                         let op = log.read(*loc).await?;
                         if op.to_key() == key {
-                            snapshot_updated = true;
-                            *loc = i;
+                            loc_iter.remove();
                             break;
                         }
                     }
-                    if !snapshot_updated {
-                        // The key was not already in the snapshot, so add it.
-                        snapshot.insert(&key, i);
-                    }
                 }
-                Type::Commit(loc) => {
-                    inactivity_floor_loc = loc;
+                Type::Update(key, _) => {
+                    _ = Any::<B, E, K, V, H>::update_loc(&mut snapshot, &mut log, key, None, i)
+                        .await?;
                 }
+                Type::Commit(loc) => inactivity_floor_loc = loc,
             }
         }
 
@@ -202,6 +195,37 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher> 
         Ok(db)
     }
 
+    /// Update the location of `key` to `new_loc` in the snapshot, or insert it if the key isn't
+    /// already present.  If a `value` is provided, then it is used to see if the key is already
+    /// assigned that value, in which case this is a no-op, and `false` is returned.
+    async fn update_loc(
+        snapshot: &mut Index<EightCap, u64>,
+        log: &mut Journal<B, E, Operation<K, V>>,
+        key: K,
+        value: Option<&V>,
+        new_loc: u64,
+    ) -> Result<bool, Error> {
+        let mut loc_iter = snapshot.update_iter(&key);
+        for loc in &mut loc_iter {
+            let op = log.read(*loc).await?;
+            if op.to_key() == key {
+                if let Some(v) = value {
+                    if op.to_value().unwrap() == *v {
+                        // The key value is the same as the previous one: treat as a no-op.
+                        return Ok(false);
+                    }
+                }
+                *loc = new_loc;
+                return Ok(true);
+            }
+        }
+
+        // The key wasn't in the snapshot, so add it.
+        loc_iter.insert(new_loc);
+
+        Ok(true)
+    }
+
     /// Return a digest of the operation.
     pub fn op_digest(hasher: &mut H, op: &Operation<K, V>) -> H::Digest {
         hasher.update(op);
@@ -210,9 +234,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher> 
 
     /// Get the value of `key` in the db, or None if it has no value.
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
-        let loc_iter = self.snapshot.get(key);
-
-        for loc in loc_iter {
+        for loc in self.snapshot.get_iter(key) {
             let op = self.log.read(*loc).await?;
             match op.to_type() {
                 Type::Update(k, v) => {
@@ -221,7 +243,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher> 
                     }
                 }
                 _ => {
-                    panic!(
+                    unreachable!(
                         "snapshot should only reference update operations. key={}",
                         key
                     );
@@ -250,37 +272,19 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher> 
     /// next successful `commit`.
     pub async fn update(&mut self, hasher: &mut H, key: K, value: V) -> Result<(), Error> {
         let new_loc = self.op_count();
-
-        // Update the snapshot if the key is already in it.
-        let mut snapshot_updated = false;
-        let loc_iter = self.snapshot.get_mut(&key);
-        for loc in loc_iter {
-            let op = self.log.read(*loc).await?;
-            match op.to_type() {
-                Type::Update(k, v) => {
-                    if k == key {
-                        if v == value {
-                            // Trying to assign the same value is a no-op.
-                            return Ok(());
-                        }
-                        *loc = new_loc;
-                        snapshot_updated = true;
-                        break;
-                    }
-                }
-                _ => {
-                    panic!(
-                        "snapshot should only reference update operations. key={}",
-                        key
-                    );
-                }
-            }
+        if !Any::<B, E, K, V, H>::update_loc(
+            &mut self.snapshot,
+            &mut self.log,
+            key.clone(),
+            Some(&value),
+            new_loc,
+        )
+        .await?
+        {
+            // Don't apply the operation if the update was a no-op
+            return Ok(());
         }
 
-        if !snapshot_updated {
-            // The key was not already in the snapshot, so add it.
-            self.snapshot.insert(&key, new_loc);
-        }
         let op = Operation::update(key, value);
         self.apply_op(hasher, op).await?;
 
@@ -291,18 +295,19 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher> 
     /// The operation is reflected in the snapshot, but will be subject to rollback until the next
     /// successful `commit`.
     pub async fn delete(&mut self, hasher: &mut H, key: K) -> Result<(), Error> {
-        let mut old_loc: Option<u64> = None;
-        for loc in self.snapshot.get(&key) {
+        let mut loc_iter = self.snapshot.remove_iter(&key);
+        for loc in &mut loc_iter {
             let op = self.log.read(*loc).await?;
             match op.to_type() {
                 Type::Update(k, _) => {
                     if k == key {
-                        old_loc = Some(*loc);
-                        break;
+                        loc_iter.remove();
+                        self.apply_op(hasher, Operation::delete(key)).await?;
+                        return Ok(());
                     }
                 }
                 _ => {
-                    panic!(
+                    unreachable!(
                         "snapshot should only reference update operations. key={}",
                         key
                     );
@@ -310,14 +315,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher> 
             }
         }
 
-        let Some(old_loc) = old_loc else {
-            // The key wasn't in the snapshot, so this is a no-op.
-            return Ok(());
-        };
-
-        self.snapshot.remove(&key, |loc| *loc == old_loc);
-        self.apply_op(hasher, Operation::delete(key)).await?;
-
+        // The key wasn't in the snapshot, so this is a no-op.
         Ok(())
     }
 
@@ -396,7 +394,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher> 
     /// recoverable upon return from this function.
     pub async fn commit(&mut self, hasher: &mut H) -> Result<(), Error> {
         // Raise the inactivity floor by the # of uncommitted operations, plus 1 to account for the
-        // floor op that will be appended.
+        // commit op that will be appended.
         self.raise_inactivity_floor(hasher, self.uncommitted_ops + 1)
             .await?;
         self.uncommitted_ops = 0;
@@ -444,9 +442,9 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher> 
     ) -> Result<(), Error> {
         let key = op.to_key();
         let new_loc = self.op_count();
-        let iter = self.snapshot.get_mut(&key);
+        let loc_iter = self.snapshot.update_iter(&key);
         let mut loc_found = false;
-        for loc in iter {
+        for loc in loc_iter {
             if *loc == old_loc {
                 loc_found = true;
                 *loc = new_loc;
@@ -861,7 +859,7 @@ mod test {
                 .await
                 .unwrap();
 
-            // Journaled MMR recovery should redb the orphaned leaf & its parents, then log
+            // Journaled MMR recovery should read the orphaned leaf & its parents, then log
             // replaying will restore the rest.
             let mut db = open_db(context.clone(), &mut hasher).await;
             assert_eq!(db.root(&mut hasher), root);
@@ -900,9 +898,45 @@ mod test {
 
             // Simulate a failed commit and test that the log replay doesn't leave behind old data.
             let db = open_db(context.clone(), &mut hasher).await;
-            let iter = db.snapshot.get(&k);
+            let iter = db.snapshot.get_iter(&k);
             assert_eq!(iter.cloned().collect::<Vec<_>>().len(), 1);
             assert_eq!(db.root(&mut hasher), root);
+        });
+    }
+
+    #[test_traced("WARN")]
+    pub fn test_any_multiple_commits_delete_gets_replayed() {
+        let (executor, context, _) = Executor::default();
+        executor.start(async move {
+            let mut hasher = Sha256::new();
+            let mut db = open_db(context.clone(), &mut hasher).await;
+
+            let mut map = HashMap::<Digest, Digest>::default();
+            const ELEMENTS: u64 = 10;
+            // insert & commit multiple batches to ensure repeated inactivity floor raising.
+            for j in 0u64..ELEMENTS {
+                for i in 0u64..ELEMENTS {
+                    let k = hash(&(j * 1000 + i).to_be_bytes());
+                    let v = hash(&(i * 1000).to_be_bytes());
+                    db.update(&mut hasher, k, v).await.unwrap();
+                    map.insert(k, v);
+                }
+                db.commit(&mut hasher).await.unwrap();
+            }
+            let k = hash(&((ELEMENTS - 1) * 1000 + (ELEMENTS - 1)).to_be_bytes());
+
+            // Do one last delete operation which will be above the inactivity
+            // floor, to make sure it gets replayed on restart.
+            db.delete(&mut hasher, k).await.unwrap();
+            db.commit(&mut hasher).await.unwrap();
+            assert!(db.get(&k).await.unwrap().is_none());
+
+            // Close & reopen the db, making sure the re-opened db has exactly the same state.
+            let root_hash = db.root(&mut hasher);
+            db.close().await.unwrap();
+            let db = open_db(context.clone(), &mut hasher).await;
+            assert_eq!(root_hash, db.root(&mut hasher));
+            assert!(db.get(&k).await.unwrap().is_none());
         });
     }
 }
