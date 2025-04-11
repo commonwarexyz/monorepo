@@ -19,6 +19,7 @@ use commonware_utils::Array;
 use futures::{channel::mpsc, future::Either, StreamExt};
 use governor::clock::Clock as GClock;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
+use prost::Message as _;
 use rand::{seq::IteratorRandom, Rng};
 use std::{
     cmp::Ordering,

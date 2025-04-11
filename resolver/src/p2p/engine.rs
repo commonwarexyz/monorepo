@@ -10,7 +10,7 @@ use super::{
 };
 use crate::Consumer;
 use bytes::Bytes;
-use commonware_codec::{Decode, DecodeExt, Encode};
+use commonware_codec::{DecodeExt, Encode};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{
@@ -264,7 +264,7 @@ impl<
                     match msg.payload {
                         Payload::Request(request) => self.handle_network_request(peer, msg.id, request).await,
                         Payload::Response(response) => self.handle_network_response(&mut sender, peer, msg.id, response).await,
-                        Payload::ResponseError => self.handle_network_response_error(&mut sender, peer, msg.id).await,
+                        Payload::ErrorResponse => self.handle_network_error_response(&mut sender, peer, msg.id).await,
                     };
                 },
 
@@ -300,7 +300,7 @@ impl<
         // Encode message
         let payload = match response {
             Ok(data) => Payload::Response(data),
-            Err(_) => Payload::ResponseError,
+            Err(_) => Payload::ErrorResponse,
         };
         let msg: Bytes = PeerMsg { id, payload }.encode().into();
 
@@ -373,7 +373,7 @@ impl<
     }
 
     /// Handle a network response from a peer that did not have the data.
-    async fn handle_network_response_error(&mut self, sender: &mut NetS, peer: P, id: u64) {
+    async fn handle_network_error_response(&mut self, sender: &mut NetS, peer: P, id: u64) {
         trace!(?peer, ?id, "peer response: error");
 
         // Get the key associated with the response, if any
