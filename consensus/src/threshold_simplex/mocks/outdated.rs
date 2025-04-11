@@ -103,6 +103,7 @@ impl<
 
                     // Nullify provided view
                     let view = view.saturating_sub(self.view_delta);
+                    debug!(?view, "nullifying outdated view");
                     let message = nullify_message(view);
                     let view_signature =
                         ops::partial_sign_message(share, Some(&self.nullify_namespace), &message)
@@ -147,6 +148,7 @@ impl<
                     let Some(proposal) = self.history.get(&view) else {
                         continue;
                     };
+                    debug!(?view, "notarizing outdated proposal");
                     let parent = proposal.parent;
                     let message = proposal_message(proposal.view, parent, &payload);
                     let proposal_signature =
@@ -193,6 +195,7 @@ impl<
                     let Some(proposal) = self.history.get(&view) else {
                         continue;
                     };
+                    debug!(?view, "finalizing outdated proposal");
                     let parent = proposal.parent;
                     let message = proposal_message(view, parent, &payload);
                     let proposal_signature =
