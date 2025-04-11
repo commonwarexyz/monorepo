@@ -17,12 +17,20 @@ pub struct Storage {
     storage_directory: PathBuf,
 }
 
+impl Storage {
+    fn _new(storage_directory: PathBuf) -> Storage {
+        Storage {
+            lock: Mutex::new(()).into(),
+            storage_directory,
+        }
+    }
+}
+
 impl crate::Storage for Storage {
     type Blob = Blob;
 
     async fn open(&self, partition: &str, name: &[u8]) -> Result<Blob, Error> {
-        // Acquire the filesystem lock
-        let _guard = self.lock.lock().await;
+        let _ = self.lock.lock().await;
 
         // Construct the full path
         let path = self.storage_directory.join(partition).join(hex(name));
@@ -47,17 +55,12 @@ impl crate::Storage for Storage {
         let len = file.metadata().map_err(|_| Error::ReadFailed)?.len();
 
         // Construct the blob
-        Ok(Blob::new(
-            partition.into(),
-            name,
-            file,
-            len as u32, // TODO danlaine: handle overflow
-        ))
+        Ok(Blob::new(partition.into(), name, file, len as u32))
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
         // Acquire the filesystem lock
-        let _guard = self.lock.lock().await;
+        let _ = self.lock.lock().await;
 
         // Remove all related files
         let path = self.storage_directory.join(partition);
@@ -72,8 +75,7 @@ impl crate::Storage for Storage {
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
-        // Acquire the filesystem lock
-        let _guard = self.lock.lock().await;
+        let _ = self.lock.lock().await;
 
         // Scan the partition directory
         let path = self.storage_directory.join(partition);
@@ -99,6 +101,7 @@ impl crate::Storage for Storage {
 pub struct Blob {
     partition: String,
     name: Vec<u8>,
+    // (underlying file, iouring, blob length)
     file: Arc<Mutex<(File, IoUring, u32)>>,
 }
 
@@ -120,9 +123,9 @@ impl crate::Blob for Blob {
 
     async fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
         // Lock the file to ensure safe access
-        let mut foo = self.file.lock().await;
+        let mut inner = self.file.lock().await;
 
-        let (file, ring, len) = &mut *foo;
+        let (file, ring, len) = &mut *inner;
 
         if offset + buf.len() as u64 > *len as u64 {
             return Err(Error::BlobInsufficientLength);
@@ -169,9 +172,9 @@ impl crate::Blob for Blob {
     }
 
     async fn write_at(&self, buf: &[u8], offset: u64) -> Result<(), Error> {
-        let mut file = self.file.lock().await;
+        let mut inner = self.file.lock().await;
 
-        let (file, ring, len) = &mut *file;
+        let (file, ring, len) = &mut *inner;
 
         // Get the raw file descriptor
         let fd = file.as_raw_fd();
@@ -181,7 +184,7 @@ impl crate::Blob for Blob {
             let remaining = &buf[total_written..];
 
             // Prepare the write operation
-            let write_e =
+            let write_op =
                 opcode::Write::new(types::Fd(fd), remaining.as_ptr(), remaining.len() as _)
                     .offset(offset as _)
                     .build();
@@ -189,7 +192,7 @@ impl crate::Blob for Blob {
             // Submit the operation to the ring
             unsafe {
                 ring.submission()
-                    .push(&write_e)
+                    .push(&write_op)
                     .map_err(|_| Error::WriteFailed)?; // TODO danlaine: consider changing error values.
             }
 
@@ -197,8 +200,11 @@ impl crate::Blob for Blob {
             ring.submit_and_wait(1).map_err(|_| Error::WriteFailed)?;
 
             // Process the completion event
-            let cqe = ring.completion().next().ok_or(Error::ReadFailed)?;
-            let bytes_written: usize = cqe.result().try_into().map_err(|_| Error::ReadFailed)?;
+            let completed_op = ring.completion().next().ok_or(Error::ReadFailed)?;
+            let bytes_written: usize = completed_op
+                .result()
+                .try_into()
+                .map_err(|_| Error::ReadFailed)?;
             if bytes_written == 0 {
                 return Err(Error::WriteFailed);
             }
@@ -226,8 +232,9 @@ impl crate::Blob for Blob {
     }
 
     async fn sync(&self) -> Result<(), Error> {
-        let file = self.file.lock().await;
-        file.0
+        let inner = self.file.lock().await;
+        inner
+            .0
             .sync_all()
             .map_err(|_| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name)))
     }

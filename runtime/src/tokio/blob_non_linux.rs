@@ -7,6 +7,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
     sync::Mutex as AsyncMutex,
 };
+
 /// Implementation of [`crate::Blob`] for the `tokio` runtime.
 pub struct Blob {
     metrics: Arc<Metrics>,
@@ -93,7 +94,7 @@ impl crate::Storage for Storage {
 
     async fn open(&self, partition: &str, name: &[u8]) -> Result<Blob, Error> {
         // Acquire the filesystem lock
-        let _guard = self.lock.lock().await;
+        let _ = self.lock.lock().await;
 
         // Construct the full path
         let path = self.storage_directory.join(partition).join(hex(name));
@@ -135,7 +136,7 @@ impl crate::Storage for Storage {
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
         // Acquire the filesystem lock
-        let _guard = self.lock.lock().await;
+        let _ = self.lock.lock().await;
 
         // Remove all related files
         let path = self.storage_directory.join(partition);
@@ -154,7 +155,7 @@ impl crate::Storage for Storage {
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
         // Acquire the filesystem lock
-        let _guard = self.lock.lock().await;
+        let _ = self.lock.lock().await;
 
         // Scan the partition directory
         let path = self.storage_directory.join(partition);
@@ -204,12 +205,12 @@ impl crate::Blob for Blob {
     }
 
     async fn write_at(&self, buf: &[u8], offset: u64) -> Result<(), Error> {
-        // Perform the write
         let mut file = self.file.lock().await;
         file.0
             .seek(SeekFrom::Start(offset))
             .await
             .map_err(|_| Error::WriteFailed)?;
+        // Perform the write
         file.0
             .write_all(buf)
             .await
