@@ -166,7 +166,6 @@ impl crate::Blob for Blob {
     }
 
     async fn write_at(&self, buf: &[u8], offset: u64) -> Result<(), Error> {
-        // Perform the write
         let mut file = self.file.lock().await;
 
         let (file, ring, len) = &mut *file;
