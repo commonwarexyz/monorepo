@@ -2559,6 +2559,8 @@ impl<
                         Message::Notarization{ notarization }  => {
                             view = notarization.message.proposal.as_ref().unwrap().view;
                             if !self.interesting(view, false) {
+                                // It is possible that we receive a notarization for a view
+                                // that we have pruned. We should ignore this.
                                 debug!(view, "backfilled notarization is not interesting");
                                 continue;
                             }
@@ -2568,6 +2570,8 @@ impl<
                         Message::Nullification { nullification } => {
                             view = nullification.view;
                             if !self.interesting(view, false) {
+                                // It is possible that we receive a notarization for a view
+                                // that we have pruned. We should ignore this.
                                 debug!(view, "backfilled nullification is not interesting");
                                 continue;
                             }
