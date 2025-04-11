@@ -63,9 +63,9 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_p2p::{
         simulated::{Config as NConfig, Link, Network},
-        Recipients, Sender,
+        Receiver, Recipients, Sender,
     };
-    use commonware_runtime::{deterministic::Executor, Metrics, Runner};
+    use commonware_runtime::{deterministic::Executor, Metrics, Runner, Spawner};
     use commonware_storage::journal::variable::{Config as JConfig, Journal};
     use commonware_utils::quorum;
     use futures::{channel::mpsc, StreamExt};
@@ -84,7 +84,7 @@ mod tests {
 
     // Test for late notarization causing a panic
     #[test_traced]
-    fn test_late_notarization_panic() {
+    fn test_old_backfill() {
         let n = 5;
         let threshold = quorum(n).expect("unable to calculate threshold");
         let namespace = b"consensus".to_vec();
@@ -174,7 +174,8 @@ mod tests {
             let peer = schemes[1].public_key();
             let (voter_sender, voter_receiver) =
                 oracle.register(validator.clone(), 0).await.unwrap();
-            let (mut peer_sender, _) = oracle.register(peer.clone(), 0).await.unwrap();
+            let (mut peer_sender, mut peer_receiver) =
+                oracle.register(peer.clone(), 0).await.unwrap();
             oracle
                 .add_link(
                     validator.clone(),
@@ -199,6 +200,13 @@ mod tests {
                 )
                 .await
                 .unwrap();
+
+            // Drain peer receiver
+            context.with_label("peer_receiver").spawn(|_| async move {
+                loop {
+                    peer_receiver.recv().await.unwrap();
+                }
+            });
 
             // Run the actor, expecting it to panic
             actor.start(backfiller, voter_sender, voter_receiver);

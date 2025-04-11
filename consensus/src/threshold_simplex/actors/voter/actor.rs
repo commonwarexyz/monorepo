@@ -1367,6 +1367,7 @@ impl<
         round.advance_deadline = Some(self.context.current() + self.notarization_timeout);
         round.set_leader(seed);
         self.view = view;
+        self.current_view.set(view as i64);
 
         // If we are backfilling, exit early
         if self.journal.is_none() {
@@ -1452,6 +1453,9 @@ impl<
                 .await
                 .expect("unable to prune journal");
         }
+
+        // Update metrics
+        self.tracked_views.set(self.views.len() as i64);
     }
 
     async fn notarize(&mut self, sender: &C::PublicKey, notarize: wire::Notarize) {
@@ -2554,11 +2558,19 @@ impl<
                     match msg {
                         Message::Notarization{ notarization }  => {
                             view = notarization.message.proposal.as_ref().unwrap().view;
+                            if !self.interesting(view, false) {
+                                debug!(view, "backfilled notarization is not interesting");
+                                continue;
+                            }
                             debug!(view, "received notarization from backfiller");
                             self.handle_notarization(notarization).await;
                         },
                         Message::Nullification { nullification } => {
                             view = nullification.view;
+                            if !self.interesting(view, false) {
+                                debug!(view, "backfilled nullification is not interesting");
+                                continue;
+                            }
                             debug!(view, "received nullification from backfiller");
                             self.handle_nullification(nullification).await;
                         },
@@ -2638,10 +2650,6 @@ impl<
             // After sending all required messages, prune any views
             // we no longer need
             self.prune_views().await;
-
-            // Update metrics
-            self.current_view.set(view as i64);
-            self.tracked_views.set(self.views.len() as i64);
         }
     }
 }
