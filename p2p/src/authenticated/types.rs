@@ -75,7 +75,7 @@ impl<C: Verifier> Read<PayloadCodecConfig> for Payload<C> {
             2 => {
                 // Don't limit the size of the data to be read.
                 // The max message size should already be limited by the p2p layer.
-                let data = Data::read_cfg(buf, &..)?;
+                let data = Data::read_cfg(buf, &(..))?;
                 Ok(Payload::Data(data))
             }
             _ => Err(Error::Invalid(
@@ -286,10 +286,10 @@ mod tests {
             bits.set_len(71);
         }
         let mut original = BitVec { index: 1234, bits };
-        let decoded = BitVec::decode_cfg(original.encode(), 71).unwrap();
+        let decoded = BitVec::decode_cfg(original.encode(), &71).unwrap();
         assert_eq!(original, decoded);
 
-        let too_short = BitVec::decode_cfg(original.encode(), 70);
+        let too_short = BitVec::decode_cfg(original.encode(), &70);
         assert!(matches!(too_short, Err(Error::InvalidLength(71))));
 
         // Test with a bit vector aligned with the byte size
@@ -297,7 +297,7 @@ mod tests {
             original.bits.set_len(64);
         }
         let encoded = original.encode();
-        let decoded = BitVec::decode_cfg(encoded, 64).unwrap();
+        let decoded = BitVec::decode_cfg(encoded, &64).unwrap();
         assert_eq!(original, decoded);
 
         // Test a zero-length bit vector
@@ -305,7 +305,7 @@ mod tests {
             original.bits.set_len(0);
         }
         let encoded = original.encode();
-        let decoded = BitVec::decode_cfg(encoded, 0).unwrap();
+        let decoded = BitVec::decode_cfg(encoded, &0).unwrap();
         assert_eq!(original, decoded);
     }
 
@@ -335,13 +335,13 @@ mod tests {
             message: Bytes::from("Hello, world!"),
         };
         let encoded = original.encode();
-        let decoded = Data::decode_cfg(encoded, 13..=13).unwrap();
+        let decoded = Data::decode_cfg(encoded, &(13..=13)).unwrap();
         assert_eq!(original, decoded);
 
-        let too_short = Data::decode_cfg(original.encode(), 0..13);
+        let too_short = Data::decode_cfg(original.encode(), &(0..13));
         assert!(matches!(too_short, Err(Error::InvalidLength(13))));
 
-        let too_long = Data::decode_cfg(original.encode(), 14..);
+        let too_long = Data::decode_cfg(original.encode(), &(14..));
         assert!(matches!(too_long, Err(Error::InvalidLength(13))));
     }
 
@@ -360,7 +360,7 @@ mod tests {
         }
         let original = BitVec { index: 1234, bits };
         let encoded: BytesMut = Payload::<Secp256r1>::BitVec(original.clone()).encode();
-        let decoded = match Payload::<Secp256r1>::decode_cfg(encoded, cfg.clone()) {
+        let decoded = match Payload::<Secp256r1>::decode_cfg(encoded, &cfg) {
             Ok(Payload::<Secp256r1>::BitVec(b)) => b,
             _ => panic!(),
         };
@@ -369,7 +369,7 @@ mod tests {
         // Test Peers
         let original = vec![signed_peer_info(), signed_peer_info()];
         let encoded = Payload::Peers(original.clone()).encode();
-        let decoded = match Payload::<Secp256r1>::decode_cfg(encoded, cfg.clone()) {
+        let decoded = match Payload::<Secp256r1>::decode_cfg(encoded, &cfg) {
             Ok(Payload::<Secp256r1>::Peers(p)) => p,
             _ => panic!(),
         };
@@ -386,7 +386,7 @@ mod tests {
             message: Bytes::from("Hello, world!"),
         };
         let encoded = Payload::<Secp256r1>::Data(original.clone()).encode();
-        let decoded = match Payload::<Secp256r1>::decode_cfg(encoded, cfg) {
+        let decoded = match Payload::<Secp256r1>::decode_cfg(encoded, &cfg) {
             Ok(Payload::<Secp256r1>::Data(d)) => d,
             _ => panic!(),
         };
@@ -400,7 +400,7 @@ mod tests {
             max_bitvec: 1024,
         };
         let invalid_payload = [3, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
-        let result = Payload::<Secp256r1>::decode_cfg(&invalid_payload[..], cfg);
+        let result = Payload::<Secp256r1>::decode_cfg(&invalid_payload[..], &cfg);
         assert!(result.is_err());
     }
 }

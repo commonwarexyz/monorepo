@@ -58,18 +58,18 @@ mod tests {
             let len = value.len();
 
             // Valid decoding
-            let decoded = Bytes::decode_cfg(encoded, len..=len).unwrap();
+            let decoded = Bytes::decode_cfg(encoded, &(len..=len)).unwrap();
             assert_eq!(value, decoded);
 
             // Failure for too long
             matches!(
-                Bytes::decode_cfg(value.encode(), 0..len),
+                Bytes::decode_cfg(value.encode(), &(0..len)),
                 Err(Error::InvalidLength(_))
             );
 
             // Failure for too short
             matches!(
-                Bytes::decode_cfg(value.encode(), len + 1..),
+                Bytes::decode_cfg(value.encode(), &(len + 1..)),
                 Err(Error::InvalidLength(_))
             );
         }

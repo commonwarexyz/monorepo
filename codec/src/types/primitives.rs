@@ -121,7 +121,7 @@ impl<Cfg: Config, T: Read<Cfg>> Read<Cfg> for Option<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Decode, DecodeExt, Encode, EncodeFixed};
+    use crate::{DecodeExt, Encode, EncodeFixed};
     use bytes::Bytes;
     use paste::paste;
 
