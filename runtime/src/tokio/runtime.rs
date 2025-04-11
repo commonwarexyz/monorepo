@@ -1,5 +1,3 @@
-use super::blob_linux::{Config as LinuxStorageConfig, Storage as LinuxStorage};
-use super::blob_non_linux::{Config as NonLinuxStorageConfig, Storage as NonLinuxStorage};
 use crate::{utils::Signaler, Clock, Error, Handle, Signal, Storage, METRICS_PREFIX};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
@@ -23,6 +21,11 @@ use tokio::{
     time::timeout,
 };
 use tracing::warn;
+
+#[cfg(feature = "iouring")]
+// This exists so my rust-analyzer won't complain
+// that nobody is using the iouring feature
+struct TODODELETE {}
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct Work {
@@ -188,7 +191,7 @@ pub struct Config<S: Storage> {
     // pub maximum_buffer_size: usize,
 }
 
-impl Default for Config<NonLinuxStorage> {
+impl<S: Storage> Default for Config<S> {
     fn default() -> Self {
         // Return the configuration
         Self {
@@ -198,22 +201,7 @@ impl Default for Config<NonLinuxStorage> {
             read_timeout: Duration::from_secs(60),
             write_timeout: Duration::from_secs(30),
             tcp_nodelay: None,
-            storage_config: NonLinuxStorageConfig::default(),
-        }
-    }
-}
-
-impl Default for Config<LinuxStorage> {
-    fn default() -> Self {
-        // Return the configuration
-        Self {
-            worker_threads: 2,
-            max_blocking_threads: 512,
-            catch_panics: true,
-            read_timeout: Duration::from_secs(60),
-            write_timeout: Duration::from_secs(30),
-            tcp_nodelay: None,
-            storage_config: LinuxStorageConfig::default(),
+            storage_config: S::Config::default(),
         }
     }
 }
@@ -245,6 +233,8 @@ impl<S: Storage> Executor<S> {
             .expect("failed to create Tokio runtime");
         let (signaler, signal) = Signaler::new();
 
+        let storage_config = cfg.storage_config.clone();
+
         let executor = Arc::new(Self {
             cfg,
             registry: Mutex::new(registry),
@@ -261,7 +251,7 @@ impl<S: Storage> Executor<S> {
                 label: String::new(),
                 spawned: false,
                 executor,
-                storage: NonLinuxStorage::new(metrics, cfg.storage_config),
+                storage: S::new(storage_config),
             },
         )
     }
@@ -269,7 +259,7 @@ impl<S: Storage> Executor<S> {
     /// Initialize a new `tokio` runtime with default configuration.
     // We'd love to implement the trait but we can't because of the return type.
     #[allow(clippy::should_implement_trait)]
-    pub fn default() -> (Runner<NonLinuxStorage>, Context<NonLinuxStorage>) {
+    pub fn default() -> (Runner<S>, Context<S>) {
         Self::init(Config::default())
     }
 }
@@ -315,6 +305,10 @@ impl<S: Storage> Storage for Context<S> {
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
         self.storage.scan(partition).await
+    }
+
+    fn new(_config: Self::Config) -> Self {
+        todo!()
     }
 }
 

@@ -1261,6 +1261,10 @@ mod tests {
         async fn scan(&self, _partition: &str) -> Result<Vec<Vec<u8>>, RError> {
             Ok(vec![])
         }
+
+        fn new(config: Self::Config) -> Self {
+            todo!()
+        }
     }
 
     impl Metrics for MockStorage {

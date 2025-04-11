@@ -7,7 +7,10 @@ use commonware_cryptography::{
     sha256::Digest as Sha256Digest,
     Ed25519, Hasher, Sha256, Signer,
 };
-use commonware_runtime::{tokio::Executor, Listener, Metrics, Network, Runner, Spawner};
+use commonware_runtime::{
+    tokio::blob_non_linux::Storage as NonLinuxStorage, tokio::Executor, Listener, Metrics, Network,
+    Runner, Spawner,
+};
 use commonware_stream::{
     public_key::{Config, Connection, IncomingConnection},
     Receiver, Sender,
@@ -125,91 +128,94 @@ fn main() {
     }
 
     // Create context
-    let (executor, context) = Executor::default();
+    let (executor, context) = Executor::<NonLinuxStorage>::default();
     executor.start(async move {
         // Create message handler
         let (handler, mut receiver) = mpsc::unbounded();
 
         // Start handler
         let mut hasher = Sha256::new();
-        context.with_label("handler").spawn(|_| async move {
-            while let Some(msg) = receiver.next().await {
-                match msg {
-                    Message::PutBlock { incoming, response } => {
-                        // Ensure we care
-                        let Some(network) = blocks.get_mut(&incoming.network) else {
-                            let _ = response.send(false);
-                            continue;
-                        };
+        context
+            .with_label("handler")
+            .spawn(|_| async move {
+                while let Some(msg) = receiver.next().await {
+                    match msg {
+                        Message::PutBlock { incoming, response } => {
+                            // Ensure we care
+                            let Some(network) = blocks.get_mut(&incoming.network) else {
+                                let _ = response.send(false);
+                                continue;
+                            };
 
-                        // Compute digest
-                        hasher.update(&incoming.data);
-                        let digest = hasher.finalize();
+                            // Compute digest
+                            hasher.update(&incoming.data);
+                            let digest = hasher.finalize();
 
-                        // Store block
-                        network.insert(digest, incoming.data);
-                        let _ = response.send(true);
-                        info!(
-                            network = hex(&incoming.network),
-                            block = ?digest,
-                            "stored block"
-                        );
-                    }
-                    Message::GetBlock { incoming, response } => {
-                        let Some(network) = blocks.get(&incoming.network) else {
-                            let _ = response.send(None);
-                            continue;
-                        };
-                        let Ok(digest) = Sha256Digest::try_from(&incoming.digest) else {
-                            let _ = response.send(None);
-                            continue;
-                        };
-                        let data = network.get(&digest);
-                        let _ = response.send(data.cloned());
-                    }
-                    Message::PutFinalization { incoming, response } => {
-                        // Ensure we care
-                        let Some(network) = finalizations.get_mut(&incoming.network) else {
-                            let _ = response.send(false);
-                            continue;
-                        };
+                            // Store block
+                            network.insert(digest, incoming.data);
+                            let _ = response.send(true);
+                            info!(
+                                network = hex(&incoming.network),
+                                block = ?digest,
+                                "stored block"
+                            );
+                        }
+                        Message::GetBlock { incoming, response } => {
+                            let Some(network) = blocks.get(&incoming.network) else {
+                                let _ = response.send(None);
+                                continue;
+                            };
+                            let Ok(digest) = Sha256Digest::try_from(&incoming.digest) else {
+                                let _ = response.send(None);
+                                continue;
+                            };
+                            let data = network.get(&digest);
+                            let _ = response.send(data.cloned());
+                        }
+                        Message::PutFinalization { incoming, response } => {
+                            // Ensure we care
+                            let Some(network) = finalizations.get_mut(&incoming.network) else {
+                                let _ = response.send(false);
+                                continue;
+                            };
 
-                        // Verify signature
-                        let prover = provers.get(&incoming.network).expect("missing prover");
-                        let Some((view, _, _, _, _)) =
-                            prover.deserialize_finalization(incoming.data.clone())
-                        else {
-                            let _ = response.send(false);
-                            continue;
-                        };
+                            // Verify signature
+                            let prover = provers.get(&incoming.network).expect("missing prover");
+                            let Some((view, _, _, _, _)) =
+                                prover.deserialize_finalization(incoming.data.clone())
+                            else {
+                                let _ = response.send(false);
+                                continue;
+                            };
 
-                        // Store finalization
-                        network.insert(view, incoming.data);
-                        let _ = response.send(true);
-                        info!(
-                            network = hex(&incoming.network),
-                            view = view,
-                            "stored finalization"
-                        );
-                    }
-                    Message::GetFinalization { incoming, response } => {
-                        // Ensure we care
-                        let Some(network) = finalizations.get(&incoming.network) else {
-                            let _ = response.send(None);
-                            continue;
-                        };
+                            // Store finalization
+                            network.insert(view, incoming.data);
+                            let _ = response.send(true);
+                            info!(
+                                network = hex(&incoming.network),
+                                view = view,
+                                "stored finalization"
+                            );
+                        }
+                        Message::GetFinalization { incoming, response } => {
+                            // Ensure we care
+                            let Some(network) = finalizations.get(&incoming.network) else {
+                                let _ = response.send(None);
+                                continue;
+                            };
 
-                        // Get latest finalization
-                        let Some(data) = network.iter().next_back().map(|(_, data)| data.clone())
-                        else {
-                            let _ = response.send(None);
-                            continue;
-                        };
-                        let _ = response.send(Some(data));
+                            // Get latest finalization
+                            let Some(data) =
+                                network.iter().next_back().map(|(_, data)| data.clone())
+                            else {
+                                let _ = response.send(None);
+                                continue;
+                            };
+                            let _ = response.send(Some(data));
+                        }
                     }
                 }
-            }
-        });
+            });
 
         // Start listener
         let mut listener = context.bind(socket).await.expect("failed to bind listener");

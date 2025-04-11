@@ -13,6 +13,7 @@ use tokio::sync::Mutex;
 
 use crate::Error;
 
+#[derive(Clone)]
 pub struct Config {
     _storage_directory: PathBuf,
 }
@@ -111,6 +112,10 @@ impl crate::Storage for Storage {
             }
         }
         Ok(blobs)
+    }
+
+    fn new(_config: Self::Config) -> Self {
+        todo!()
     }
 }
 

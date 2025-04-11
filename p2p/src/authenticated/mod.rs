@@ -444,7 +444,7 @@ mod tests {
 
     #[test_traced]
     fn test_tokio_connectivity() {
-        let cfg = tokio::Config::default();
+        let cfg = tokio::Config::<NonLinuxStorage>::default();
         let (executor, context) = tokio::Executor::init(cfg.clone());
         executor.start(async move {
             const MAX_MESSAGE_SIZE: usize = 1_024 * 1_024; // 1MB

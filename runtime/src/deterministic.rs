@@ -1374,6 +1374,10 @@ impl crate::Storage for Context {
         results.sort(); // deterministic output
         Ok(results)
     }
+
+    fn new(_config: Self::Config) -> Self {
+        todo!()
+    }
 }
 
 pub struct VecStorage {}

@@ -12,7 +12,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::authenticated;
 use commonware_runtime::{
-    tokio::{self, Executor},
+    tokio::{blob_non_linux::Storage as NonLinuxStorage, Config as ExecutorConfig, Executor},
     Metrics, Network, Runner,
 };
 use commonware_storage::journal::variable::{Config, Journal};
@@ -148,10 +148,8 @@ fn main() {
         group::Public::deserialize(&other_identity).expect("Other identity not well-formed");
 
     // Initialize context
-    let runtime_cfg = tokio::Config {
-        /// storage_directory: storage_directory.into(),
-        ..Default::default()
-    };
+    let mut runtime_cfg: ExecutorConfig<NonLinuxStorage> = Default::default();
+    runtime_cfg.storage_config.storage_directory = storage_directory.into();
     let (executor, context) = Executor::init(runtime_cfg.clone());
 
     // Configure indexer

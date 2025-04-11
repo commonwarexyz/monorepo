@@ -56,6 +56,7 @@ impl Clone for Blob {
     }
 }
 
+#[derive(Clone)]
 pub struct Config {
     pub storage_directory: PathBuf,
     pub max_buffer_size: usize,
@@ -188,6 +189,10 @@ impl crate::Storage for Storage {
             }
         }
         Ok(blobs)
+    }
+
+    fn new(_config: Self::Config) -> Self {
+        todo!()
     }
 }
 
