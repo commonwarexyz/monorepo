@@ -41,6 +41,9 @@ mod tests {
     use super::*;
     use crate::threshold_simplex::{
         actors::resolver,
+        encoder::{
+            finalize_namespace, notarize_namespace, proposal_message, seed_message, seed_namespace,
+        },
         mocks,
         wire::{self, backfiller},
         Prover, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE, NOTARIZE,
@@ -51,15 +54,20 @@ mod tests {
         bls12381::{
             dkg::ops,
             primitives::{
-                group::{self, Share, Signature},
+                group::{self, Element, Share, Signature},
+                ops::{partial_sign_message, sign_message, threshold_signature_recover},
                 poly::{self, Public},
             },
         },
+        hash,
         sha256::Digest,
         Ed25519, Scheme as CryptoScheme, Sha256, Signer,
     };
     use commonware_macros::test_traced;
-    use commonware_p2p::simulated::{Config as NConfig, Network};
+    use commonware_p2p::{
+        simulated::{Config as NConfig, Link, Network},
+        Recipients, Sender,
+    };
     use commonware_runtime::{
         deterministic::{self, Context as DeterministicContext, Executor},
         Blob, Clock, Metrics, Runner, Spawner, Storage,
@@ -159,7 +167,7 @@ mod tests {
                 committer: MockCommitter,
                 supervisor,
 
-                namespace,
+                namespace: namespace.clone(),
                 mailbox_size: 10,
                 leader_timeout: Duration::from_secs(5),
                 notarization_timeout: Duration::from_secs(5),
@@ -175,10 +183,169 @@ mod tests {
             let backfiller = resolver::Mailbox::new(backfiller_sender);
 
             // Create a dummy network mailbox
-            let (voter_sender, voter_receiver) = oracle.register(validator, 0).await.unwrap();
+            let peer = schemes[1].public_key();
+            let (voter_sender, voter_receiver) =
+                oracle.register(validator.clone(), 0).await.unwrap();
+            let (mut peer_sender, _) = oracle.register(peer.clone(), 0).await.unwrap();
+            oracle
+                .add_link(
+                    validator.clone(),
+                    peer.clone(),
+                    Link {
+                        latency: 0.0,
+                        jitter: 0.0,
+                        success_rate: 1.0,
+                    },
+                )
+                .await
+                .unwrap();
+            oracle
+                .add_link(
+                    peer,
+                    validator,
+                    Link {
+                        latency: 0.0,
+                        jitter: 0.0,
+                        success_rate: 1.0,
+                    },
+                )
+                .await
+                .unwrap();
 
             // Run the actor, expecting it to panic
             actor.start(backfiller, voter_sender, voter_receiver);
+
+            // Send finalization over network
+            let payload = hash(b"test");
+            let proposal = wire::Proposal {
+                view: 100,
+                parent: 50,
+                payload: payload.to_vec(),
+            };
+            let message = proposal_message(proposal.view, proposal.parent, &payload);
+            let finalize_namespace = finalize_namespace(&namespace);
+            let partials: Vec<_> = shares
+                .iter()
+                .map(|share| partial_sign_message(share, Some(&finalize_namespace), &message))
+                .collect();
+            let proposal_signature = threshold_signature_recover(threshold, partials)
+                .unwrap()
+                .serialize();
+            let seed_namespace = seed_namespace(&namespace);
+            let message = seed_message(proposal.view);
+            let partials: Vec<_> = shares
+                .iter()
+                .map(|share| partial_sign_message(share, Some(&seed_namespace), &message))
+                .collect();
+            let seed_signature = threshold_signature_recover(threshold, partials)
+                .unwrap()
+                .serialize();
+            let finalization = wire::Finalization {
+                proposal: Some(proposal),
+                proposal_signature,
+                seed_signature,
+            };
+            let msg = wire::Voter {
+                payload: Some(wire::voter::Payload::Finalization(finalization)),
+            }
+            .encode_to_vec()
+            .into();
+            peer_sender
+                .send(Recipients::All, msg, true)
+                .await
+                .expect("failed to send message");
+
+            // Wait for application to be notified
+            let (_, progress) = done_receiver.next().await.expect("failed to receive done");
+            match progress {
+                mocks::application::Progress::Finalized(_, finalized_payload) => {
+                    assert_eq!(finalized_payload, payload);
+                }
+                _ => panic!("unexpected progress"),
+            }
+            panic!("expected panic");
+
+            // Send old notarization from backfiller
+            let payload = hash(b"test2");
+            let proposal = wire::Proposal {
+                view: 50,
+                parent: 49,
+                payload: payload.to_vec(),
+            };
+            let message = proposal_message(proposal.view, proposal.parent, &payload);
+            let notarize_namespace = notarize_namespace(&namespace);
+            let partials: Vec<_> = shares
+                .iter()
+                .map(|share| partial_sign_message(share, Some(&notarize_namespace), &message))
+                .collect();
+            let proposal_signature = threshold_signature_recover(threshold, partials)
+                .unwrap()
+                .serialize();
+            let message = seed_message(proposal.view);
+            let partials: Vec<_> = shares
+                .iter()
+                .map(|share| partial_sign_message(share, Some(&seed_namespace), &message))
+                .collect();
+            let seed_signature = threshold_signature_recover(threshold, partials)
+                .unwrap()
+                .serialize();
+            let notarization = wire::Notarization {
+                proposal: Some(proposal),
+                proposal_signature,
+                seed_signature,
+            };
+            let notarization = crate::Parsed {
+                message: notarization,
+                digest: payload,
+            };
+            mailbox.notarization(notarization).await;
+
+            // Send new finalization
+            let payload = hash(b"test3");
+            let proposal = wire::Proposal {
+                view: 300,
+                parent: 100,
+                payload: payload.to_vec(),
+            };
+            let message = proposal_message(proposal.view, proposal.parent, &payload);
+            let partials: Vec<_> = shares
+                .iter()
+                .map(|share| partial_sign_message(share, Some(&finalize_namespace), &message))
+                .collect();
+            let proposal_signature = threshold_signature_recover(threshold, partials)
+                .unwrap()
+                .serialize();
+            let message = seed_message(proposal.view);
+            let partials: Vec<_> = shares
+                .iter()
+                .map(|share| partial_sign_message(share, Some(&seed_namespace), &message))
+                .collect();
+            let seed_signature = threshold_signature_recover(threshold, partials)
+                .unwrap()
+                .serialize();
+            let finalization = wire::Finalization {
+                proposal: Some(proposal),
+                proposal_signature,
+                seed_signature,
+            };
+            let msg = wire::Voter {
+                payload: Some(wire::voter::Payload::Finalization(finalization)),
+            }
+            .encode_to_vec()
+            .into();
+            peer_sender
+                .send(Recipients::All, msg, true)
+                .await
+                .expect("failed to send message");
+
+            // Wait for application to be notified
+            let (_, progress) = done_receiver.next().await.expect("failed to receive done");
+            match progress {
+                mocks::application::Progress::Finalized(_, finalized_payload) => {
+                    assert_eq!(finalized_payload, payload);
+                }
+                _ => panic!("unexpected progress"),
+            }
         });
     }
 }
