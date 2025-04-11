@@ -27,3 +27,8 @@ mod runtime;
 pub use runtime::*;
 pub mod telemetry;
 pub mod tracing;
+
+#[cfg(feature = "iouring")]
+pub mod blob_linux; // TODO can this be less public?
+#[cfg(not(feature = "iouring"))]
+pub mod blob_non_linux;
