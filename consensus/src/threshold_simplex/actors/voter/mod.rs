@@ -117,7 +117,7 @@ mod tests {
             let prover = Prover::<Digest>::new(*pk, &namespace);
 
             // Initialize voter actor
-            let (done_sender, mut done_receiver) = mpsc::unbounded();
+            let (done_sender, _) = mpsc::unbounded();
             let scheme = schemes[0].clone();
             let validator = scheme.public_key();
             let mut participants = BTreeMap::new();
@@ -243,7 +243,7 @@ mod tests {
                 .await
                 .expect("failed to send message");
 
-            // Wait for application to be notified
+            // Wait for backfiller to be notified
             let msg = backfiller_receiver
                 .next()
                 .await
@@ -328,11 +328,14 @@ mod tests {
                 .await
                 .expect("failed to send message");
 
-            // Wait for application to be notified
-            let (_, progress) = done_receiver.next().await.expect("failed to receive done");
-            match progress {
-                mocks::application::Progress::Finalized(_, finalized_payload) => {
-                    assert_eq!(finalized_payload, payload);
+            // Wait for backfiller to be notified
+            let msg = backfiller_receiver
+                .next()
+                .await
+                .expect("failed to receive backfiller message");
+            match msg {
+                resolver::Message::Finalized { view } => {
+                    assert_eq!(view, 300);
                 }
                 _ => panic!("unexpected progress"),
             }
