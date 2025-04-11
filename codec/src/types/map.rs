@@ -74,8 +74,11 @@ impl<
 
             // Check if keys are in ascending order relative to the previous key
             if let Some(ref last) = last_key {
-                if key <= *last {
-                    return Err(Error::Invalid("HashMap", "Keys must be in ascending order"));
+                use std::cmp::Ordering;
+                match key.cmp(last) {
+                    Ordering::Equal => return Err(Error::Invalid("HashMap", "Duplicate key")),
+                    Ordering::Less => return Err(Error::Invalid("HashMap", "Keys must ascend")),
+                    _ => {}
                 }
             }
             last_key = Some(key.clone());
@@ -212,7 +215,29 @@ mod tests {
         let config_tuple = (range, ((), ()));
 
         let result = HashMap::<u32, u64>::decode_cfg(encoded, &config_tuple);
-        assert!(matches!(result, Err(Error::Invalid("HashMap", _))));
+        assert!(matches!(
+            result,
+            Err(Error::Invalid("HashMap", "Keys must ascend"))
+        ));
+    }
+
+    #[test]
+    fn test_decode_duplicate_key() {
+        let mut encoded = BytesMut::new();
+        varint::write(2u32, &mut encoded); // Map length = 2
+        1u32.write(&mut encoded); // Key 1
+        100u64.write(&mut encoded); // Value 100
+        1u32.write(&mut encoded); // Duplicate Key 1
+        200u64.write(&mut encoded); // Value 200
+
+        let range = allow_any_len();
+        let config_tuple = (range, ((), ()));
+
+        let result = HashMap::<u32, u64>::decode_cfg(encoded, &config_tuple);
+        assert!(matches!(
+            result,
+            Err(Error::Invalid("HashMap", "Duplicate key"))
+        ));
     }
 
     #[test]
