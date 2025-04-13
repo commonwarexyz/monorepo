@@ -2140,6 +2140,9 @@ impl<
                     };
 
                     // Process message
+                    //
+                    // We opt to not filter by `interesting()` here because each message type has a different
+                    // configuration for handling `future` messages.
                     view = msg.view();
                     let handled = match msg {
                         Voter::Notarize(notarize) => {
