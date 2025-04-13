@@ -7,7 +7,7 @@ use crate::{
         actors::voter,
         types::{
             notarize_namespace, nullify_namespace, seed_namespace, Backfiller, Notarization,
-            Nullification, Request, Response, View,
+            Nullification, Request, Response, View, Viewable,
         },
     },
     ThresholdSupervisor,

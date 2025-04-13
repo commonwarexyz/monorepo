@@ -30,6 +30,14 @@ pub struct Context<D: Digest> {
     pub parent: (View, D),
 }
 
+pub trait Viewable {
+    fn view(&self) -> View;
+}
+
+pub trait Attributable {
+    fn signer(&self) -> u32;
+}
+
 pub const SEED_SUFFIX: &[u8] = b"_SEED";
 pub const NOTARIZE_SUFFIX: &[u8] = b"_NOTARIZE";
 pub const NULLIFY_SUFFIX: &[u8] = b"_NULLIFY";
@@ -138,6 +146,19 @@ impl<D: Digest> Codec for Voter<D> {
     }
 }
 
+impl<D: Digest> Viewable for Voter<D> {
+    fn view(&self) -> View {
+        match self {
+            Voter::Notarize(v) => v.view(),
+            Voter::Notarization(v) => v.view(),
+            Voter::Nullify(v) => v.view(),
+            Voter::Nullification(v) => v.view(),
+            Voter::Finalize(v) => v.view(),
+            Voter::Finalization(v) => v.view(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Proposal<D: Digest> {
     pub view: View,
@@ -182,6 +203,12 @@ impl<D: Digest> SizedCodec for Proposal<D> {
     const LEN_ENCODED: usize = View::LEN_ENCODED + View::LEN_ENCODED + D::LEN_ENCODED;
 }
 
+impl<D: Digest> Viewable for Proposal<D> {
+    fn view(&self) -> View {
+        self.view
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub struct Notarize<D: Digest> {
     pub proposal: Proposal<D>,
@@ -222,13 +249,17 @@ impl<D: Digest> Notarize<D> {
         )
         .is_ok()
     }
+}
 
-    pub fn signer(&self) -> u32 {
+impl<D: Digest> Attributable for Notarize<D> {
+    fn signer(&self) -> u32 {
         self.proposal_signature.index
     }
+}
 
-    pub fn view(&self) -> View {
-        self.proposal.view
+impl<D: Digest> Viewable for Notarize<D> {
+    fn view(&self) -> View {
+        self.proposal.view()
     }
 }
 
@@ -303,9 +334,11 @@ impl<D: Digest> Notarization<D> {
         )
         .is_ok()
     }
+}
 
-    pub fn view(&self) -> View {
-        self.proposal.view
+impl<D: Digest> Viewable for Notarization<D> {
+    fn view(&self) -> View {
+        self.proposal.view()
     }
 }
 
@@ -376,12 +409,16 @@ impl Nullify {
         )
         .is_ok()
     }
+}
 
-    pub fn signer(&self) -> u32 {
+impl Attributable for Nullify {
+    fn signer(&self) -> u32 {
         self.view_signature.index
     }
+}
 
-    pub fn view(&self) -> View {
+impl Viewable for Nullify {
+    fn view(&self) -> View {
         self.view
     }
 }
@@ -451,8 +488,10 @@ impl Nullification {
         )
         .is_ok()
     }
+}
 
-    pub fn view(&self) -> View {
+impl Viewable for Nullification {
+    fn view(&self) -> View {
         self.view
     }
 }
@@ -518,13 +557,17 @@ impl<D: Digest> Finalize<D> {
         )
         .is_ok()
     }
+}
 
-    pub fn signer(&self) -> u32 {
+impl<D: Digest> Attributable for Finalize<D> {
+    fn signer(&self) -> u32 {
         self.proposal_signature.index
     }
+}
 
-    pub fn view(&self) -> View {
-        self.proposal.view
+impl<D: Digest> Viewable for Finalize<D> {
+    fn view(&self) -> View {
+        self.proposal.view()
     }
 }
 
@@ -591,9 +634,11 @@ impl<D: Digest> Finalization<D> {
         )
         .is_ok()
     }
+}
 
-    pub fn view(&self) -> View {
-        self.proposal.view
+impl<D: Digest> Viewable for Finalization<D> {
+    fn view(&self) -> View {
+        self.proposal.view()
     }
 }
 
@@ -881,6 +926,22 @@ impl<D: Digest> Codec for Activity<D> {
     }
 }
 
+impl<D: Digest> Viewable for Activity<D> {
+    fn view(&self) -> View {
+        match self {
+            Activity::Notarize(v) => v.view(),
+            Activity::Notarization(v) => v.view(),
+            Activity::Nullify(v) => v.view(),
+            Activity::Nullification(v) => v.view(),
+            Activity::Finalize(v) => v.view(),
+            Activity::Finalization(v) => v.view(),
+            Activity::ConflictingNotarize(v) => v.view(),
+            Activity::ConflictingFinalize(v) => v.view(),
+            Activity::NullifyFinalize(v) => v.view(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ConflictingNotarize<D: Digest> {
     pub proposal_1: Proposal<D>,
@@ -923,13 +984,17 @@ impl<D: Digest> ConflictingNotarize<D> {
         )
         .is_ok()
     }
+}
 
-    pub fn signer(&self) -> u32 {
+impl<D: Digest> Attributable for ConflictingNotarize<D> {
+    fn signer(&self) -> u32 {
         self.signature_1.index
     }
+}
 
-    pub fn view(&self) -> View {
-        self.proposal_1.view
+impl<D: Digest> Viewable for ConflictingNotarize<D> {
+    fn view(&self) -> View {
+        self.proposal_1.view()
     }
 }
 
@@ -1017,13 +1082,17 @@ impl<D: Digest> ConflictingFinalize<D> {
         )
         .is_ok()
     }
+}
 
-    pub fn signer(&self) -> u32 {
+impl<D: Digest> Attributable for ConflictingFinalize<D> {
+    fn signer(&self) -> u32 {
         self.signature_1.index
     }
+}
 
-    pub fn view(&self) -> View {
-        self.proposal_1.view
+impl<D: Digest> Viewable for ConflictingFinalize<D> {
+    fn view(&self) -> View {
+        self.proposal_1.view()
     }
 }
 
@@ -1109,13 +1178,17 @@ impl<D: Digest> NullifyFinalize<D> {
         )
         .is_ok()
     }
+}
 
-    pub fn view(&self) -> View {
-        self.proposal.view
-    }
-
-    pub fn signer(&self) -> u32 {
+impl<D: Digest> Attributable for NullifyFinalize<D> {
+    fn signer(&self) -> u32 {
         self.view_signature.index
+    }
+}
+
+impl<D: Digest> Viewable for NullifyFinalize<D> {
+    fn view(&self) -> View {
+        self.proposal.view()
     }
 }
 

@@ -3,7 +3,7 @@
 use crate::{
     threshold_simplex::types::{
         finalize_namespace, notarize_namespace, seed_namespace, view_message, Finalize, Notarize,
-        Proposal, View, Voter,
+        Proposal, View, Viewable, Voter,
     },
     ThresholdSupervisor,
 };

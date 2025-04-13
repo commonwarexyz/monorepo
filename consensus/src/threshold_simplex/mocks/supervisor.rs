@@ -1,7 +1,7 @@
 use crate::{
     threshold_simplex::types::{
         finalize_namespace, notarize_namespace, nullify_namespace, seed_namespace, Activity,
-        Finalization, Notarization, Nullification, View,
+        Attributable, Finalization, Notarization, Nullification, View, Viewable,
     },
     Monitor, Reporter, Supervisor as Su, ThresholdSupervisor as TSu,
 };

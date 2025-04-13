@@ -5,9 +5,9 @@ use crate::{
         metrics,
         types::{
             finalize_namespace, notarize_namespace, nullify_namespace, seed_namespace,
-            view_message, Activity, ConflictingFinalize, ConflictingNotarize, Context,
-            Finalization, Finalize, Notarization, Notarize, Nullification, Nullify,
-            NullifyFinalize, Proposal, View, Voter,
+            view_message, Activity, Attributable, ConflictingFinalize, ConflictingNotarize,
+            Context, Finalization, Finalize, Notarization, Notarize, Nullification, Nullify,
+            NullifyFinalize, Proposal, View, Viewable, Voter,
         },
     },
     Automaton, Relay, Reporter, ThresholdSupervisor, LATENCY,
