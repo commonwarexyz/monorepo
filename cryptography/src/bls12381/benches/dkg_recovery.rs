@@ -12,7 +12,7 @@ const CONCURRENCY: usize = 1;
 
 fn benchmark_dkg_recovery(c: &mut Criterion) {
     let mut rng = StdRng::seed_from_u64(0);
-    for &n in &[5, 10, 20, 50, 100, 250, 500] {
+    for &n in &[5, 10, 20, 50, 100, 250, 500, 1000, 1500, 2000] {
         let t = quorum(n).unwrap();
         c.bench_function(&format!("{}/n={} t={}", module_path!(), n, t), |b| {
             b.iter_batched(

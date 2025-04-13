@@ -42,7 +42,7 @@ crate-type = ["rlib", "cdylib"]
 portable = ["blst/portable"]
 
 [[bench]]
-name="bls12381"
+name = "bls12381"
 harness = false
 path = "src/bls12381/benches/bench.rs"
 
