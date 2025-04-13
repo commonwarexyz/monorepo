@@ -1,12 +1,21 @@
 use commonware_cryptography::Digest;
 use futures::{channel::mpsc, SinkExt};
 
-use crate::threshold_simplex::types::{Notarization, Nullification};
+use crate::threshold_simplex::types::{Notarization, Nullification, View, Viewable};
 
 // If either of these requests fails, it will not send a reply.
 pub enum Message<D: Digest> {
-    Notarization { notarization: Notarization<D> },
-    Nullification { nullification: Nullification },
+    Notarization(Notarization<D>),
+    Nullification(Nullification),
+}
+
+impl<D: Digest> Viewable for Message<D> {
+    fn view(&self) -> View {
+        match self {
+            Message::Notarization(notarization) => notarization.view(),
+            Message::Nullification(nullification) => nullification.view(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -21,14 +30,14 @@ impl<D: Digest> Mailbox<D> {
 
     pub async fn notarization(&mut self, notarization: Notarization<D>) {
         self.sender
-            .send(Message::Notarization { notarization })
+            .send(Message::Notarization(notarization))
             .await
             .expect("Failed to send notarization");
     }
 
     pub async fn nullification(&mut self, nullification: Nullification) {
         self.sender
-            .send(Message::Nullification { nullification })
+            .send(Message::Nullification(nullification))
             .await
             .expect("Failed to send nullification");
     }

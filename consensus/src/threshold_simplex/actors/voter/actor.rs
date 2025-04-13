@@ -925,18 +925,18 @@ impl<
         debug!(view = self.view, "broadcasted nullify");
     }
 
-    async fn nullify(&mut self, sender: &C::PublicKey, nullify: Nullify) {
+    async fn nullify(&mut self, sender: &C::PublicKey, nullify: Nullify) -> bool {
         // Ensure we are in the right view to process this message
         if !self.interesting(nullify.view, false) {
-            return;
+            return false;
         }
 
         // Verify that signer is a validator
         let Some(public_key_index) = self.supervisor.is_participant(nullify.view, sender) else {
-            return;
+            return false;
         };
         let Some(identity) = self.supervisor.identity(nullify.view) else {
-            return;
+            return false;
         };
 
         // Verify signatures
@@ -946,11 +946,12 @@ impl<
             &self.nullify_namespace,
             &self.seed_namespace,
         ) {
-            return;
+            return false;
         }
 
         // Handle nullify
         self.handle_nullify(public_key_index, nullify).await;
+        true
     }
 
     async fn handle_nullify(&mut self, public_key_index: u32, nullify: Nullify) {
@@ -1256,19 +1257,19 @@ impl<
         }
     }
 
-    async fn notarize(&mut self, sender: &C::PublicKey, notarize: Notarize<D>) {
+    async fn notarize(&mut self, sender: &C::PublicKey, notarize: Notarize<D>) -> bool {
         // Ensure we are in the right view to process this message
         let view = notarize.view();
         if !self.interesting(view, false) {
-            return;
+            return false;
         }
 
         // Verify that signer is a validator
         let Some(public_key_index) = self.supervisor.is_participant(view, sender) else {
-            return;
+            return false;
         };
         let Some(identity) = self.supervisor.identity(view) else {
-            return;
+            return false;
         };
 
         // Verify signatures
@@ -1278,11 +1279,12 @@ impl<
             &self.notarize_namespace,
             &self.seed_namespace,
         ) {
-            return;
+            return false;
         }
 
         // Handle notarize
         self.handle_notarize(public_key_index, notarize).await;
+        true
     }
 
     async fn handle_notarize(&mut self, public_key_index: u32, notarize: Notarize<D>) {
@@ -1313,32 +1315,33 @@ impl<
         }
     }
 
-    async fn notarization(&mut self, notarization: Notarization<D>) {
+    async fn notarization(&mut self, notarization: Notarization<D>) -> bool {
         // Check if we are still in a view where this notarization could help
         let view = notarization.view();
         if !self.interesting(view, true) {
-            return;
+            return false;
         }
 
         // Determine if we already broadcast notarization for this view (in which
         // case we can ignore this message)
         if let Some(ref round) = self.views.get_mut(&view) {
             if round.broadcast_notarization {
-                return;
+                return false;
             }
         }
 
         // Verify notarization
         let Some(identity) = self.supervisor.identity(view) else {
-            return;
+            return false;
         };
         let public_key = poly::public(identity);
         if !notarization.verify(public_key, &self.notarize_namespace, &self.seed_namespace) {
-            return;
+            return false;
         }
 
         // Handle notarization
         self.handle_notarization(notarization).await;
+        true
     }
 
     async fn handle_notarization(&mut self, notarization: Notarization<D>) {
@@ -1369,31 +1372,32 @@ impl<
         self.enter_view(view + 1, seed);
     }
 
-    async fn nullification(&mut self, nullification: Nullification) {
+    async fn nullification(&mut self, nullification: Nullification) -> bool {
         // Check if we are still in a view where this notarization could help
         if !self.interesting(nullification.view, true) {
-            return;
+            return false;
         }
 
         // Determine if we already broadcast nullification for this view (in which
         // case we can ignore this message)
         if let Some(ref round) = self.views.get_mut(&nullification.view) {
             if round.broadcast_nullification {
-                return;
+                return false;
             }
         }
 
         // Verify nullification
         let Some(identity) = self.supervisor.identity(nullification.view) else {
-            return;
+            return false;
         };
         let public_key = poly::public(identity);
         if !nullification.verify(public_key, &self.nullify_namespace, &self.seed_namespace) {
-            return;
+            return false;
         }
 
         // Handle notarization
         self.handle_nullification(nullification).await;
+        true
     }
 
     async fn handle_nullification(&mut self, nullification: Nullification) {
@@ -1426,28 +1430,29 @@ impl<
         self.enter_view(view + 1, seed);
     }
 
-    async fn finalize(&mut self, sender: &C::PublicKey, finalize: Finalize<D>) {
+    async fn finalize(&mut self, sender: &C::PublicKey, finalize: Finalize<D>) -> bool {
         // Ensure we are in the right view to process this message
         let view = finalize.view();
         if !self.interesting(view, false) {
-            return;
+            return false;
         }
 
         // Verify that signer is a validator
         let Some(public_key_index) = self.supervisor.is_participant(view, sender) else {
-            return;
+            return false;
         };
         let Some(identity) = self.supervisor.identity(view) else {
-            return;
+            return false;
         };
 
         // Verify signature
         if !finalize.verify(identity, Some(public_key_index), &self.finalize_namespace) {
-            return;
+            return false;
         }
 
         // Handle finalize
         self.handle_finalize(public_key_index, finalize).await;
+        true
     }
 
     async fn handle_finalize(&mut self, public_key_index: u32, finalize: Finalize<D>) {
@@ -1478,32 +1483,33 @@ impl<
         }
     }
 
-    async fn finalization(&mut self, finalization: Finalization<D>) {
+    async fn finalization(&mut self, finalization: Finalization<D>) -> bool {
         // Check if we are still in a view where this finalization could help
         let view = finalization.view();
         if !self.interesting(view, true) {
-            return;
+            return false;
         }
 
         // Determine if we already broadcast finalization for this view (in which
         // case we can ignore this message)
         if let Some(ref round) = self.views.get_mut(&view) {
             if round.broadcast_finalization {
-                return;
+                return false;
             }
         }
 
         // Verify finalization
         let Some(identity) = self.supervisor.identity(view) else {
-            return;
+            return false;
         };
         let public_key = poly::public(identity);
         if !finalization.verify(public_key, &self.finalize_namespace, &self.seed_namespace) {
-            return;
+            return false;
         }
 
         // Process finalization
         self.handle_finalization(finalization).await;
+        true
     }
 
     async fn handle_finalization(&mut self, finalization: Finalization<D>) {
@@ -2101,15 +2107,24 @@ impl<
                     }
                 },
                 mailbox = self.mailbox_receiver.next() => {
+                    // Ensure view is still useful
+                    //
+                    // It is possible that we make a request to the backfiller and prune the view
+                    // before we receive the response. In this case, we should ignore the response (not
+                    // doing so may result in attempting to store before the prune boundary).
                     let msg = mailbox.unwrap();
+                    view = msg.view();
+                    if !self.interesting(view, false) {
+                        continue;
+                    }
+
+                    // Handle backfill
                     match msg {
-                        Message::Notarization{ notarization }  => {
-                            view = notarization.view();
+                        Message::Notarization(notarization)  => {
                             debug!(view, "received notarization from backfiller");
                             self.handle_notarization(notarization).await;
                         },
-                        Message::Nullification { nullification } => {
-                            view = nullification.view();
+                        Message::Nullification(nullification) => {
                             debug!(view, "received nullification from backfiller");
                             self.handle_nullification(nullification).await;
                         },
@@ -2125,38 +2140,37 @@ impl<
                     };
 
                     // Process message
-                    match msg {
+                    view = msg.view();
+                    let handled = match msg {
                         Voter::Notarize(notarize) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::notarize(&s)).inc();
-                            view = notarize.view();
-                            self.notarize(&s, notarize).await;
+                            self.notarize(&s, notarize).await
                         }
                         Voter::Notarization(notarization) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::notarization(&s)).inc();
-                            view = notarization.view();
-                            self.notarization(notarization).await;
+                            self.notarization(notarization).await
                         }
                         Voter::Nullify(nullify) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::nullify(&s)).inc();
-                            view = nullify.view;
-                            self.nullify(&s, nullify).await;
+                            self.nullify(&s, nullify).await
                         }
                         Voter::Nullification(nullification) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::nullification(&s)).inc();
-                            view = nullification.view;
-                            self.nullification(nullification).await;
+                            self.nullification(nullification).await
                         }
                         Voter::Finalize(finalize) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::finalize(&s)).inc();
-                            view = finalize.view();
-                            self.finalize(&s, finalize).await;
+                            self.finalize(&s, finalize).await
                         }
                         Voter::Finalization(finalization) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::finalization(&s)).inc();
-                            view = finalization.view();
-                            self.finalization(finalization).await;
+                            self.finalization(finalization).await
                         }
                     };
+                    if !handled {
+                        debug!(sender=?s, view, "failed to handle message");
+                        continue;
+                    }
                 },
             };
 
