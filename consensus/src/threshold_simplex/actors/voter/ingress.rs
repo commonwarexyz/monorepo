@@ -1,7 +1,6 @@
+use crate::threshold_simplex::types::{Notarization, Nullification, View, Viewable};
 use commonware_cryptography::Digest;
 use futures::{channel::mpsc, SinkExt};
-
-use crate::threshold_simplex::types::{Notarization, Nullification, View, Viewable};
 
 // If either of these requests fails, it will not send a reply.
 pub enum Message<D: Digest> {
@@ -24,7 +23,7 @@ pub struct Mailbox<D: Digest> {
 }
 
 impl<D: Digest> Mailbox<D> {
-    pub(super) fn new(sender: mpsc::Sender<Message<D>>) -> Self {
+    pub fn new(sender: mpsc::Sender<Message<D>>) -> Self {
         Self { sender }
     }
 
