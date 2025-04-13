@@ -2387,72 +2387,40 @@ mod tests {
 
             // Send old notarization from backfiller (view 50)
             let payload = hash(b"test2");
-            let proposal = wire::Proposal {
-                view: 50,
-                parent: 49,
-                payload: payload.to_vec(),
-            };
-            let message = proposal_message(proposal.view, proposal.parent, &payload);
+            let proposal = Proposal::new(50, 49, payload);
+            let message = proposal.encode();
             let notarize_namespace = notarize_namespace(&namespace);
             let partials: Vec<_> = shares
                 .iter()
                 .map(|share| partial_sign_message(share, Some(&notarize_namespace), &message))
                 .collect();
-            let proposal_signature = threshold_signature_recover(threshold, partials)
-                .unwrap()
-                .serialize();
-            let message = seed_message(proposal.view);
+            let proposal_signature = threshold_signature_recover(threshold, partials).unwrap();
+            let message = view_message(proposal.view);
             let partials: Vec<_> = shares
                 .iter()
                 .map(|share| partial_sign_message(share, Some(&seed_namespace), &message))
                 .collect();
-            let seed_signature = threshold_signature_recover(threshold, partials)
-                .unwrap()
-                .serialize();
-            let notarization = wire::Notarization {
-                proposal: Some(proposal),
-                proposal_signature,
-                seed_signature,
-            };
-            let notarization = crate::Parsed {
-                message: notarization,
-                digest: payload,
-            };
+            let seed_signature = threshold_signature_recover(threshold, partials).unwrap();
+            let notarization = Notarization::new(proposal, proposal_signature, seed_signature);
             mailbox.notarization(notarization).await;
 
             // Send new finalization (view 300)
             let payload = hash(b"test3");
-            let proposal = wire::Proposal {
-                view: 300,
-                parent: 100,
-                payload: payload.to_vec(),
-            };
-            let message = proposal_message(proposal.view, proposal.parent, &payload);
+            let proposal = Proposal::new(300, 100, payload);
+            let message = proposal.encode();
             let partials: Vec<_> = shares
                 .iter()
                 .map(|share| partial_sign_message(share, Some(&finalize_namespace), &message))
                 .collect();
-            let proposal_signature = threshold_signature_recover(threshold, partials)
-                .unwrap()
-                .serialize();
-            let message = seed_message(proposal.view);
+            let proposal_signature = threshold_signature_recover(threshold, partials).unwrap();
+            let message = view_message(proposal.view);
             let partials: Vec<_> = shares
                 .iter()
                 .map(|share| partial_sign_message(share, Some(&seed_namespace), &message))
                 .collect();
-            let seed_signature = threshold_signature_recover(threshold, partials)
-                .unwrap()
-                .serialize();
-            let finalization = wire::Finalization {
-                proposal: Some(proposal),
-                proposal_signature,
-                seed_signature,
-            };
-            let msg = wire::Voter {
-                payload: Some(wire::voter::Payload::Finalization(finalization)),
-            }
-            .encode_to_vec()
-            .into();
+            let seed_signature = threshold_signature_recover(threshold, partials).unwrap();
+            let finalization = Finalization::new(proposal, proposal_signature, seed_signature);
+            let msg = Voter::Finalization(finalization).encode().into();
             peer_sender
                 .send(Recipients::All, msg, true)
                 .await
