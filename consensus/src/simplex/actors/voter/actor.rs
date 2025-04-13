@@ -1,20 +1,15 @@
-use super::{Config, Mailbox, Message};
-use crate::{
-    simplex::{
-        actors::resolver,
-        encoder::{
-            finalize_namespace, notarize_namespace, nullify_message, nullify_namespace,
-            proposal_message,
-        },
-        metrics,
-        prover::Prover,
-        verifier::{threshold, verify_finalization, verify_notarization, verify_nullification},
-        wire, Context, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE, NOTARIZE,
-        NULLIFY_AND_FINALIZE,
-    },
-    Automaton, Committer, Parsed, Relay, Supervisor, LATENCY,
+use std::{
+    cmp::max,
+    collections::{BTreeMap, HashMap},
+    sync::atomic::AtomicI64,
+    time::{Duration, SystemTime},
 };
-use commonware_cryptography::{sha256::hash, sha256::Digest as Sha256Digest, Scheme};
+
+use commonware_codec::ReadExt;
+use commonware_cryptography::{
+    sha256::{hash, Digest as Sha256Digest},
+    Scheme,
+};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
@@ -23,21 +18,49 @@ use commonware_utils::{quorum, Array};
 use futures::{
     channel::{mpsc, oneshot},
     future::Either,
-    pin_mut, StreamExt,
+    pin_mut,
+    StreamExt,
 };
 use prometheus_client::metrics::{
-    counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
+    counter::Counter,
+    family::Family,
+    gauge::Gauge,
+    histogram::Histogram,
 };
 use prost::Message as _;
 use rand::Rng;
-use std::sync::atomic::AtomicI64;
-use std::{
-    cmp::max,
-    collections::{BTreeMap, HashMap},
-    time::{Duration, SystemTime},
-};
 use tracing::{debug, info, trace, warn};
 
+use super::{Config, Mailbox, Message};
+use crate::{
+    simplex::{
+        actors::resolver,
+        encoder::{
+            finalize_namespace,
+            notarize_namespace,
+            nullify_message,
+            nullify_namespace,
+            proposal_message,
+        },
+        metrics,
+        prover::Prover,
+        verifier::{threshold, verify_finalization, verify_notarization, verify_nullification},
+        wire,
+        Context,
+        View,
+        CONFLICTING_FINALIZE,
+        CONFLICTING_NOTARIZE,
+        FINALIZE,
+        NOTARIZE,
+        NULLIFY_AND_FINALIZE,
+    },
+    Automaton,
+    Committer,
+    Parsed,
+    Relay,
+    Supervisor,
+    LATENCY,
+};
 type Notarizable<'a, D> = Option<(wire::Proposal, &'a HashMap<u32, Parsed<wire::Notarize, D>>)>;
 type Nullifiable<'a> = Option<(View, &'a HashMap<u32, wire::Nullify>)>;
 type Finalizable<'a, D> = Option<(wire::Proposal, &'a HashMap<u32, Parsed<wire::Finalize, D>>)>;
@@ -123,9 +146,15 @@ impl<C: Scheme, D: Array, S: Supervisor<Index = View, PublicKey = C::PublicKey>>
         let proposal_digest = hash(&message);
 
         // Get Signature
-        let Ok(notarize_signature) =
-            C::Signature::try_from(&notarize.message.signature.as_ref().unwrap().signature)
-        else {
+        let Ok(notarize_signature) = C::Signature::read(
+            &mut notarize
+                .message
+                .signature
+                .as_ref()
+                .unwrap()
+                .signature
+                .as_ref(),
+        ) else {
             return false;
         };
 
@@ -150,13 +179,14 @@ impl<C: Scheme, D: Array, S: Supervisor<Index = View, PublicKey = C::PublicKey>>
                 .get(&public_key_index)
                 .unwrap();
             let previous_proposal = previous_notarize.message.proposal.as_ref().unwrap();
-            let Ok(previous_notarize_signature) = C::Signature::try_from(
-                &previous_notarize
+            let Ok(previous_notarize_signature) = C::Signature::read(
+                &mut previous_notarize
                     .message
                     .signature
                     .as_ref()
                     .unwrap()
-                    .signature,
+                    .signature
+                    .as_ref(),
             ) else {
                 return false;
             };
@@ -217,13 +247,19 @@ impl<C: Scheme, D: Array, S: Supervisor<Index = View, PublicKey = C::PublicKey>>
             .unwrap()
             .get(&public_key_index)
             .unwrap();
-        let Ok(finalize_signature) =
-            C::Signature::try_from(&finalize.message.signature.as_ref().unwrap().signature)
-        else {
+        let Ok(finalize_signature) = C::Signature::read(
+            &mut finalize
+                .message
+                .signature
+                .as_ref()
+                .unwrap()
+                .signature
+                .as_ref(),
+        ) else {
             return false;
         };
         let Ok(nullify_signature) =
-            C::Signature::try_from(&nullify.signature.as_ref().unwrap().signature)
+            C::Signature::read(&mut nullify.signature.as_ref().unwrap().signature.as_ref())
         else {
             return false;
         };
@@ -299,16 +335,22 @@ impl<C: Scheme, D: Array, S: Supervisor<Index = View, PublicKey = C::PublicKey>>
         // Check if also issued nullify
         let proposal = finalize.message.proposal.as_ref().unwrap();
         let public_key_index = finalize.message.signature.as_ref().unwrap().public_key;
-        let Ok(finalize_signature) =
-            C::Signature::try_from(&finalize.message.signature.as_ref().unwrap().signature)
-        else {
+        let Ok(finalize_signature) = C::Signature::read(
+            &mut finalize
+                .message
+                .signature
+                .as_ref()
+                .unwrap()
+                .signature
+                .as_ref(),
+        ) else {
             return false;
         };
         let null = self.nullifies.get(&public_key_index);
         if let Some(null) = null {
             // Create fault
             let Ok(null_signature) =
-                C::Signature::try_from(&null.signature.as_ref().unwrap().signature)
+                C::Signature::read(&mut null.signature.as_ref().unwrap().signature.as_ref())
             else {
                 return false;
             };
@@ -354,13 +396,14 @@ impl<C: Scheme, D: Array, S: Supervisor<Index = View, PublicKey = C::PublicKey>>
                 .get(&public_key_index)
                 .unwrap();
             let previous_proposal = previous_finalize.message.proposal.as_ref().unwrap();
-            let Ok(previous_finalize_signature) = C::Signature::try_from(
-                &previous_finalize
+            let Ok(previous_finalize_signature) = C::Signature::read(
+                &mut previous_finalize
                     .message
                     .signature
                     .as_ref()
                     .unwrap()
-                    .signature,
+                    .signature
+                    .as_ref(),
             ) else {
                 return false;
             };
@@ -867,7 +910,7 @@ impl<
 
         // Verify the signature
         let nullify_message = nullify_message(nullify.view);
-        let Ok(signature) = C::Signature::try_from(&signature.signature) else {
+        let Ok(signature) = C::Signature::read(&mut signature.signature.as_ref()) else {
             return;
         };
         if !C::verify(
@@ -1194,7 +1237,7 @@ impl<
         }
 
         // Ensure digest is well-formed
-        let Ok(payload) = D::try_from(&proposal.payload) else {
+        let Ok(payload) = D::read(&mut proposal.payload.as_ref()) else {
             return;
         };
 
@@ -1215,7 +1258,7 @@ impl<
         };
 
         // Verify the signature
-        let Ok(signature) = C::Signature::try_from(&signature.signature) else {
+        let Ok(signature) = C::Signature::read(&mut signature.signature.as_ref()) else {
             return;
         };
         let notarize_message = proposal_message(proposal.view, proposal.parent, &payload);
@@ -1279,7 +1322,7 @@ impl<
         }
 
         // Ensure digest is well-formed
-        let Ok(payload) = D::try_from(&proposal.payload) else {
+        let Ok(payload) = D::read(&mut proposal.payload.as_ref()) else {
             return;
         };
 
@@ -1450,7 +1493,7 @@ impl<
         }
 
         // Ensure digest is well-formed
-        let Ok(payload) = D::try_from(&proposal.payload) else {
+        let Ok(payload) = D::read(&mut proposal.payload.as_ref()) else {
             return;
         };
 
@@ -1471,7 +1514,7 @@ impl<
         };
 
         // Verify the signature
-        let Ok(signature) = C::Signature::try_from(&signature.signature) else {
+        let Ok(signature) = C::Signature::read(&mut signature.signature.as_ref()) else {
             return;
         };
         let finalize_message = proposal_message(proposal.view, proposal.parent, &payload);
@@ -1535,7 +1578,7 @@ impl<
         }
 
         // Ensure digest is well-formed
-        let Ok(payload) = D::try_from(&proposal.payload) else {
+        let Ok(payload) = D::read(&mut proposal.payload.as_ref()) else {
             return;
         };
 
@@ -1896,7 +1939,7 @@ impl<
             let mut signatures = Vec::with_capacity(notarization.message.signatures.len());
             for signature in &notarization.message.signatures {
                 let public_key = validators.get(signature.public_key as usize).unwrap();
-                let signature = C::Signature::try_from(&signature.signature).unwrap();
+                let signature = C::Signature::read(&mut signature.signature.as_ref()).unwrap();
                 signatures.push((public_key, signature));
             }
             let proof = Prover::<C, D>::serialize_aggregation(proposal, signatures);
@@ -2054,7 +2097,7 @@ impl<
             let mut signatures = Vec::with_capacity(finalization.message.signatures.len());
             for signature in &finalization.message.signatures {
                 let public_key = validators.get(signature.public_key as usize).unwrap();
-                let signature = C::Signature::try_from(&signature.signature).unwrap();
+                let signature = C::Signature::read(&mut signature.signature.as_ref()).unwrap();
                 signatures.push((public_key, signature));
             }
             let proof = Prover::<C, D>::serialize_aggregation(proposal, signatures);
@@ -2118,7 +2161,7 @@ impl<
                     wire::voter::Payload::Notarize(notarize) => {
                         // Handle notarize
                         let proposal = notarize.proposal.as_ref().unwrap().clone();
-                        let payload = D::try_from(&proposal.payload).unwrap();
+                        let payload = D::read(&mut proposal.payload.as_ref()).unwrap();
                         let public_key = notarize.signature.as_ref().unwrap().public_key;
                         let public_key = self
                             .supervisor
@@ -2178,7 +2221,7 @@ impl<
                         // Handle finalize
                         let proposal = finalize.proposal.as_ref().unwrap();
                         let view = proposal.view;
-                        let payload = D::try_from(&proposal.payload).unwrap();
+                        let payload = D::read(&mut proposal.payload.as_ref()).unwrap();
                         let public_key = finalize.signature.as_ref().unwrap().public_key;
                         let public_key = self
                             .supervisor

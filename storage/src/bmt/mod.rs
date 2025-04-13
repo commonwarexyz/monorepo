@@ -41,11 +41,9 @@
 //! ```
 
 use bytes::Buf;
-use commonware_codec::FixedSize;
+use commonware_codec::{FixedSize, ReadExt};
 use commonware_cryptography::Hasher;
-use commonware_utils::Array;
 use thiserror::Error;
-
 /// Errors that can occur when working with a Binary Merkle Tree (BMT).
 #[derive(Error, Debug)]
 pub enum Error {
@@ -285,7 +283,7 @@ impl<H: Hasher> Proof<H> {
         // Deserialize the siblings
         let mut siblings = Vec::with_capacity(num_siblings);
         for _ in 0..num_siblings {
-            let hash = H::Digest::read_from(&mut buf).map_err(|_| Error::InvalidDigest)?;
+            let hash = H::Digest::read(&mut buf).map_err(|_| Error::InvalidDigest)?;
             siblings.push(hash);
         }
         Ok(Self { siblings })
@@ -294,12 +292,13 @@ impl<H: Hasher> Proof<H> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use commonware_cryptography::{
         hash,
         sha256::{Digest, Sha256},
     };
     use commonware_utils::hex;
+
+    use super::*;
 
     fn test_merkle_tree(n: usize) -> Digest {
         // Build tree

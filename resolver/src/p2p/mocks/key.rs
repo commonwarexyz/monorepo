@@ -1,7 +1,8 @@
+use std::{fmt, ops::Deref};
+
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_utils::Array;
-use std::{fmt, ops::Deref};
 use thiserror::Error;
 
 /// A key that can be used for testing
@@ -67,9 +68,7 @@ impl FixedSize for Key {
     const SIZE: usize = u8::SIZE;
 }
 
-impl Array for Key {
-    type Error = Error;
-}
+impl Array for Key {}
 
 /// Error type for the Array trait
 #[derive(Error, Debug, PartialEq)]

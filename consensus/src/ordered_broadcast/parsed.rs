@@ -1,15 +1,18 @@
 //! Parsed wrappers around wire types.
 
-use super::{wire, Epoch};
+use commonware_codec::ReadExt;
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{Element, Signature as ThresholdSignature},
         poly::PartialSignature,
     },
-    Digest, Scheme,
+    Digest,
+    Scheme,
 };
 use commonware_utils::Array;
 use prost::Message;
+
+use super::{wire, Epoch};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -45,9 +48,10 @@ impl<D: Digest, P: Array> Chunk<D, P> {
     /// Returns a `Chunk` from a `wire::Chunk`.
     pub fn from_wire(chunk: wire::Chunk) -> Result<Self, Error> {
         Ok(Self {
-            sequencer: P::try_from(chunk.sequencer).map_err(|_| Error::InvalidSequencer)?,
+            sequencer: P::read(&mut chunk.sequencer.as_ref())
+                .map_err(|_| Error::InvalidSequencer)?,
             height: chunk.height,
-            payload: D::try_from(chunk.payload).map_err(|_| Error::InvalidPayload)?,
+            payload: D::read(&mut chunk.payload.as_ref()).map_err(|_| Error::InvalidPayload)?,
         })
     }
 
@@ -73,7 +77,7 @@ impl<D: Digest> Parent<D> {
     /// Returns a `Parent` from a `wire::Parent`.
     pub fn from_wire(parent: wire::Parent) -> Result<Self, Error> {
         Ok(Self {
-            payload: D::try_from(parent.payload).map_err(|_| Error::InvalidPayload)?,
+            payload: D::read(&mut parent.payload.as_ref()).map_err(|_| Error::InvalidPayload)?,
             epoch: parent.epoch,
             threshold: ThresholdSignature::deserialize(&parent.threshold)
                 .ok_or(Error::InvalidThreshold)?,
@@ -110,8 +114,8 @@ impl<C: Scheme, D: Digest> Node<C, D> {
         } else if chunk.height > 0 && parent.is_none() {
             return Err(Error::ParentMissing);
         }
-        let signature =
-            C::Signature::try_from(node.signature).map_err(|_| Error::InvalidSignature)?;
+        let signature = C::Signature::read(&mut node.signature.as_ref())
+            .map_err(|_| Error::InvalidSignature)?;
         Ok(Self {
             chunk,
             signature,

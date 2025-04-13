@@ -1,22 +1,25 @@
-use super::relay::Relay;
-use crate::{simplex::Context, Automaton as Au, Committer as Co, Proof, Relay as Re};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
+
 use bytes::{Buf, BufMut, Bytes};
-use commonware_codec::FixedSize;
+use commonware_codec::{FixedSize, ReadExt};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Spawner};
 use commonware_utils::Array;
 use futures::{
     channel::{mpsc, oneshot},
-    SinkExt, StreamExt,
+    SinkExt,
+    StreamExt,
 };
 use rand::{Rng, RngCore};
 use rand_distr::{Distribution, Normal};
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-    time::Duration,
-};
+
+use super::relay::Relay;
+use crate::{simplex::Context, Automaton as Au, Committer as Co, Proof, Relay as Re};
 
 pub enum Message<D: Array> {
     Genesis {
@@ -269,7 +272,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: Array> Application<E, H, P> {
                 parsed_view, context.view
             ));
         }
-        let Ok(parent) = H::Digest::read_from(&mut contents) else {
+        let Ok(parent) = H::Digest::read(&mut contents) else {
             self.panic("invalid parent");
         };
         if parent != context.parent.1 {

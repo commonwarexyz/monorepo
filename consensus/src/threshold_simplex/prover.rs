@@ -1,20 +1,30 @@
+use std::marker::PhantomData;
+
+use bytes::{Buf, BufMut};
+use commonware_codec::{FixedSize, ReadExt};
+use commonware_cryptography::{
+    bls12381::primitives::{
+        group::{self, Element},
+        ops,
+        poly::{self, Eval},
+    },
+    Digest,
+};
+
 use super::{
     encoder::{
-        finalize_namespace, notarize_namespace, nullify_message, nullify_namespace,
-        proposal_message, seed_message, seed_namespace,
+        finalize_namespace,
+        notarize_namespace,
+        nullify_message,
+        nullify_namespace,
+        proposal_message,
+        seed_message,
+        seed_namespace,
     },
-    wire, View,
+    wire,
+    View,
 };
 use crate::Proof;
-use bytes::{Buf, BufMut};
-use commonware_codec::FixedSize;
-use commonware_cryptography::bls12381::primitives::{
-    group::{self, Element},
-    ops,
-    poly::{self, Eval},
-};
-use commonware_cryptography::Digest;
-use std::marker::PhantomData;
 
 type Callback = Box<dyn Fn(&poly::Poly<group::Public>) -> Option<u32>>;
 
@@ -101,7 +111,7 @@ impl<D: Digest> Prover<D> {
         // Decode proof
         let view = proof.get_u64();
         let parent = proof.get_u64();
-        let payload = D::read_from(&mut proof).ok()?;
+        let payload = D::read(&mut proof).ok()?;
         let signature = proof.copy_to_bytes(poly::PARTIAL_SIGNATURE_LENGTH);
         let signature = poly::Eval::deserialize(&signature)?;
 
@@ -156,7 +166,7 @@ impl<D: Digest> Prover<D> {
         // Verify signature
         let view = proof.get_u64();
         let parent = proof.get_u64();
-        let payload = D::read_from(&mut proof).ok()?;
+        let payload = D::read(&mut proof).ok()?;
         let message = proposal_message(view, parent, &payload);
         let signature = proof.copy_to_bytes(group::SIGNATURE_LENGTH);
         let signature = group::Signature::deserialize(&signature)?;
@@ -251,11 +261,11 @@ impl<D: Digest> Prover<D> {
         // Decode proof
         let view = proof.get_u64();
         let parent_1 = proof.get_u64();
-        let payload_1 = D::read_from(&mut proof).ok()?;
+        let payload_1 = D::read(&mut proof).ok()?;
         let signature_1 = proof.copy_to_bytes(poly::PARTIAL_SIGNATURE_LENGTH);
         let signature_1 = Eval::deserialize(&signature_1)?;
         let parent_2 = proof.get_u64();
-        let payload_2 = D::read_from(&mut proof).ok()?;
+        let payload_2 = D::read(&mut proof).ok()?;
         let signature_2 = proof.copy_to_bytes(poly::PARTIAL_SIGNATURE_LENGTH);
         let signature_2 = Eval::deserialize(&signature_2)?;
         if signature_1.index != signature_2.index {
@@ -384,7 +394,7 @@ impl<D: Digest> Prover<D> {
         // Decode proof
         let view = proof.get_u64();
         let parent = proof.get_u64();
-        let payload = D::read_from(&mut proof).ok()?;
+        let payload = D::read(&mut proof).ok()?;
         let signature_finalize = proof.copy_to_bytes(poly::PARTIAL_SIGNATURE_LENGTH);
         let signature_finalize = Eval::deserialize(&signature_finalize)?;
         let signature_null = proof.copy_to_bytes(poly::PARTIAL_SIGNATURE_LENGTH);
@@ -425,17 +435,19 @@ impl<D: Digest> Prover<D> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use commonware_cryptography::{
         bls12381::{
             dkg::ops::generate_shares,
             primitives::group::{self, Share},
         },
         sha256::Digest as Sha256Digest,
-        Hasher, Sha256,
+        Hasher,
+        Sha256,
     };
     use ops::{keypair, partial_sign_message, sign_message};
     use rand::{rngs::StdRng, SeedableRng};
+
+    use super::*;
 
     fn generate_threshold() -> (group::Public, poly::Public, Vec<Share>) {
         let mut sampler = StdRng::seed_from_u64(0);

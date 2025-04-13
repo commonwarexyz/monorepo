@@ -1,31 +1,25 @@
-use super::{Config, Mailbox, Message};
-use crate::{
-    threshold_simplex::{
-        actors::resolver,
-        encoder::{
-            finalize_namespace, notarize_namespace, nullify_message, nullify_namespace,
-            proposal_message, seed_message, seed_namespace,
-        },
-        metrics,
-        prover::Prover,
-        verifier::{verify_finalization, verify_notarization, verify_nullification},
-        wire, Context, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE, NOTARIZE,
-        NULLIFY_AND_FINALIZE,
-    },
-    Automaton, Committer, Parsed, Relay, ThresholdSupervisor, LATENCY,
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::atomic::AtomicI64,
+    time::{Duration, SystemTime},
 };
+
+use commonware_codec::ReadExt;
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{self, Element},
         ops::{
-            partial_sign_message, partial_verify_message, partial_verify_multiple_messages,
+            partial_sign_message,
+            partial_verify_message,
+            partial_verify_multiple_messages,
             threshold_signature_recover,
         },
         poly::{self, Eval},
     },
     hash,
     sha256::Digest as Sha256Digest,
-    Digest, Scheme,
+    Digest,
+    Scheme,
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
@@ -35,19 +29,51 @@ use commonware_utils::quorum;
 use futures::{
     channel::{mpsc, oneshot},
     future::{join, Either},
-    pin_mut, StreamExt,
+    pin_mut,
+    StreamExt,
 };
 use prometheus_client::metrics::{
-    counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
+    counter::Counter,
+    family::Family,
+    gauge::Gauge,
+    histogram::Histogram,
 };
 use prost::Message as _;
 use rand::Rng;
-use std::sync::atomic::AtomicI64;
-use std::{
-    collections::{BTreeMap, HashMap},
-    time::{Duration, SystemTime},
-};
 use tracing::{debug, trace, warn};
+
+use super::{Config, Mailbox, Message};
+use crate::{
+    threshold_simplex::{
+        actors::resolver,
+        encoder::{
+            finalize_namespace,
+            notarize_namespace,
+            nullify_message,
+            nullify_namespace,
+            proposal_message,
+            seed_message,
+            seed_namespace,
+        },
+        metrics,
+        prover::Prover,
+        verifier::{verify_finalization, verify_notarization, verify_nullification},
+        wire,
+        Context,
+        View,
+        CONFLICTING_FINALIZE,
+        CONFLICTING_NOTARIZE,
+        FINALIZE,
+        NOTARIZE,
+        NULLIFY_AND_FINALIZE,
+    },
+    Automaton,
+    Committer,
+    Parsed,
+    Relay,
+    ThresholdSupervisor,
+    LATENCY,
+};
 
 const GENESIS_VIEW: View = 0;
 
@@ -1464,7 +1490,7 @@ impl<
         }
 
         // Ensure digest is well-formed
-        let Ok(payload) = D::try_from(&proposal.payload) else {
+        let Ok(payload) = D::read(&mut proposal.payload.as_ref()) else {
             return;
         };
 
@@ -1561,7 +1587,7 @@ impl<
         }
 
         // Ensure digest is well-formed
-        let Ok(payload) = D::try_from(&proposal.payload) else {
+        let Ok(payload) = D::read(&mut proposal.payload.as_ref()) else {
             return;
         };
 
@@ -1695,7 +1721,7 @@ impl<
         }
 
         // Ensure digest is well-formed
-        let Ok(payload) = D::try_from(&proposal.payload) else {
+        let Ok(payload) = D::read(&mut proposal.payload.as_ref()) else {
             return;
         };
 
@@ -1784,7 +1810,7 @@ impl<
         }
 
         // Ensure digest is well-formed
-        let Ok(payload) = D::try_from(&proposal.payload) else {
+        let Ok(payload) = D::read(&mut proposal.payload.as_ref()) else {
             return;
         };
 
@@ -2272,7 +2298,7 @@ impl<
                     wire::voter::Payload::Notarize(notarize) => {
                         // Handle notarize
                         let proposal = notarize.proposal.as_ref().unwrap().clone();
-                        let payload = D::try_from(&proposal.payload).unwrap();
+                        let payload = D::read(&mut proposal.payload.as_ref()).unwrap();
                         let signature: Eval<group::Signature> =
                             Eval::deserialize(&notarize.proposal_signature).unwrap();
                         let public_key_index = signature.index;
@@ -2312,7 +2338,7 @@ impl<
                     wire::voter::Payload::Notarization(notarization) => {
                         // Handle notarization
                         let proposal = notarization.proposal.as_ref().unwrap().clone();
-                        let payload = D::try_from(&proposal.payload).unwrap();
+                        let payload = D::read(&mut proposal.payload.as_ref()).unwrap();
                         self.handle_notarization(Parsed {
                             message: notarization,
                             digest: payload,
@@ -2357,7 +2383,7 @@ impl<
                         // Handle finalize
                         let proposal = finalize.proposal.as_ref().unwrap();
                         let view = proposal.view;
-                        let payload = D::try_from(&proposal.payload).unwrap();
+                        let payload = D::read(&mut proposal.payload.as_ref()).unwrap();
                         let signature: Eval<group::Signature> =
                             Eval::deserialize(&finalize.proposal_signature).unwrap();
                         let public_key_index = signature.index;
@@ -2389,7 +2415,7 @@ impl<
                         // Handle finalization
                         let proposal = finalization.proposal.as_ref().unwrap();
                         let view = proposal.view;
-                        let payload = D::try_from(&proposal.payload).unwrap();
+                        let payload = D::read(&mut proposal.payload.as_ref()).unwrap();
                         self.handle_finalization(Parsed {
                             message: finalization,
                             digest: payload,

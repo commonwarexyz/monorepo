@@ -1,12 +1,15 @@
+use std::collections::HashSet;
+
+use commonware_codec::ReadExt;
+use commonware_cryptography::Scheme;
+use commonware_utils::{quorum, Array};
+use tracing::debug;
+
 use super::{wire, View};
 use crate::{
     simplex::encoder::{nullify_message, proposal_message},
     Supervisor,
 };
-use commonware_cryptography::Scheme;
-use commonware_utils::{quorum, Array};
-use std::collections::HashSet;
-use tracing::debug;
 
 pub fn threshold<P: Array>(validators: &[P]) -> Option<(u32, u32)> {
     let len = validators.len() as u32;
@@ -33,7 +36,7 @@ pub fn verify_notarization<
     };
 
     // Ensure payload is well-formed
-    let Ok(payload) = D::try_from(&proposal.payload) else {
+    let Ok(payload) = D::read(&mut proposal.payload.as_ref()) else {
         debug!(reason = "invalid payload", "dropping notarization");
         return false;
     };
@@ -110,7 +113,7 @@ pub fn verify_notarization<
         seen.insert(signature.public_key);
 
         // Verify signature
-        let Ok(signature) = C::Signature::try_from(&signature.signature) else {
+        let Ok(signature) = C::Signature::read(&mut signature.signature.as_ref()) else {
             return false;
         };
         if !C::verify(Some(namespace), &message, public_key, &signature) {
@@ -199,7 +202,7 @@ pub fn verify_nullification<S: Supervisor<Index = View, PublicKey = C::PublicKey
         seen.insert(signature.public_key);
 
         // Verify signature
-        let Ok(signature) = C::Signature::try_from(&signature.signature) else {
+        let Ok(signature) = C::Signature::read(&mut signature.signature.as_ref()) else {
             return false;
         };
         if !C::verify(Some(namespace), &message, public_key, &signature) {
@@ -230,7 +233,7 @@ pub fn verify_finalization<
     };
 
     // Ensure payload is well-formed
-    let Ok(payload) = D::try_from(&proposal.payload) else {
+    let Ok(payload) = D::read(&mut proposal.payload.as_ref()) else {
         debug!(reason = "invalid payload", "dropping finalization");
         return false;
     };
@@ -307,7 +310,7 @@ pub fn verify_finalization<
         seen.insert(signature.public_key);
 
         // Verify signature
-        let Ok(signature) = C::Signature::try_from(&signature.signature) else {
+        let Ok(signature) = C::Signature::read(&mut signature.signature.as_ref()) else {
             return false;
         };
         if !C::verify(Some(namespace), &message, public_key, &signature) {

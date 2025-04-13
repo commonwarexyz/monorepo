@@ -19,20 +19,22 @@
 //! assert!(Bls12381::verify(namespace, msg, &signer.public_key(), &signature));
 //! ```
 
-use super::primitives::{
-    group::{self, Element, Scalar},
-    ops,
-};
-use crate::{Array, Error, Signer, Specification, Verifier};
-use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedSize, Read, Write};
-use commonware_utils::hex;
-use rand::{CryptoRng, Rng};
 use std::{
     fmt::{Debug, Display},
     hash::{Hash, Hasher},
     ops::Deref,
 };
+
+use bytes::{Buf, BufMut};
+use commonware_codec::{Error as CodecError, FixedSize, Read, Write};
+use commonware_utils::hex;
+use rand::{CryptoRng, Rng};
+
+use super::primitives::{
+    group::{self, Element, Scalar},
+    ops,
+};
+use crate::{Array, Error, Signer, Specification, Verifier};
 
 const CURVE_NAME: &str = "bls12381";
 
@@ -108,7 +110,22 @@ impl Write for PrivateKey {
 
 impl Read for PrivateKey {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
+        let len = Self::SIZE;
+        if buf.remaining() < len {
+            return Err(CodecError::EndOfBuffer);
+        }
+
+        let chunk = buf.chunk();
+        if chunk.len() >= len {
+            let array = Self::try_from(&chunk[..len])
+                .map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
+            buf.advance(len);
+            return Ok(array);
+        }
+
+        let mut temp = vec![0u8; len];
+        buf.copy_to_slice(&mut temp);
+        Self::try_from(temp).map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))
     }
 }
 
@@ -116,9 +133,7 @@ impl FixedSize for PrivateKey {
     const SIZE: usize = group::PRIVATE_KEY_LENGTH;
 }
 
-impl Array for PrivateKey {
-    type Error = Error;
-}
+impl Array for PrivateKey {}
 
 impl Hash for PrivateKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
@@ -210,7 +225,22 @@ impl Write for PublicKey {
 
 impl Read for PublicKey {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
+        let len = Self::SIZE;
+        if buf.remaining() < len {
+            return Err(CodecError::EndOfBuffer);
+        }
+
+        let chunk = buf.chunk();
+        if chunk.len() >= len {
+            let array = Self::try_from(&chunk[..len])
+                .map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
+            buf.advance(len);
+            return Ok(array);
+        }
+
+        let mut temp = vec![0u8; len];
+        buf.copy_to_slice(&mut temp);
+        Self::try_from(temp).map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))
     }
 }
 
@@ -218,9 +248,7 @@ impl FixedSize for PublicKey {
     const SIZE: usize = group::PUBLIC_KEY_LENGTH;
 }
 
-impl Array for PublicKey {
-    type Error = Error;
-}
+impl Array for PublicKey {}
 
 impl Hash for PublicKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
@@ -312,7 +340,22 @@ impl Write for Signature {
 
 impl Read for Signature {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
+        let len = Self::SIZE;
+        if buf.remaining() < len {
+            return Err(CodecError::EndOfBuffer);
+        }
+
+        let chunk = buf.chunk();
+        if chunk.len() >= len {
+            let array = Self::try_from(&chunk[..len])
+                .map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
+            buf.advance(len);
+            return Ok(array);
+        }
+
+        let mut temp = vec![0u8; len];
+        buf.copy_to_slice(&mut temp);
+        Self::try_from(temp).map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))
     }
 }
 
@@ -320,9 +363,7 @@ impl FixedSize for Signature {
     const SIZE: usize = group::SIGNATURE_LENGTH;
 }
 
-impl Array for Signature {
-    type Error = Error;
-}
+impl Array for Signature {}
 
 impl Hash for Signature {
     fn hash<H: Hasher>(&self, state: &mut H) {
@@ -402,8 +443,9 @@ impl Display for Signature {
 /// Test vectors sourced from https://github.com/ethereum/bls12-381-tests/releases/tag/v0.1.2.
 #[cfg(test)]
 mod tests {
-    use super::*;
     use commonware_codec::{DecodeExt, Encode};
+
+    use super::*;
 
     #[test]
     fn test_codec_private_key() {

@@ -1,15 +1,8 @@
 //! Byzantine participant that sends nullify and finalize messages for the same view.
 
-use crate::{
-    threshold_simplex::{
-        encoder::{
-            finalize_namespace, nullify_message, nullify_namespace, proposal_message, seed_message,
-            seed_namespace,
-        },
-        wire, View,
-    },
-    ThresholdSupervisor,
-};
+use std::marker::PhantomData;
+
+use commonware_codec::ReadExt;
 use commonware_cryptography::{
     bls12381::primitives::{group, ops},
     Hasher,
@@ -17,8 +10,23 @@ use commonware_cryptography::{
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Handle, Spawner};
 use prost::Message;
-use std::marker::PhantomData;
 use tracing::debug;
+
+use crate::{
+    threshold_simplex::{
+        encoder::{
+            finalize_namespace,
+            nullify_message,
+            nullify_namespace,
+            proposal_message,
+            seed_message,
+            seed_namespace,
+        },
+        wire,
+        View,
+    },
+    ThresholdSupervisor,
+};
 
 pub struct Config<
     S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
@@ -93,7 +101,7 @@ impl<
                             continue;
                         }
                     };
-                    let Ok(payload) = H::Digest::try_from(&proposal.payload) else {
+                    let Ok(payload) = H::Digest::read(&mut proposal.payload.as_ref()) else {
                         debug!(sender = ?s, "invalid payload");
                         continue;
                     };

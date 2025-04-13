@@ -1,19 +1,22 @@
 //! Byzantine participant that sends nullify and finalize messages for the same view.
 
-use crate::{
-    simplex::{
-        encoder::{finalize_namespace, nullify_message, nullify_namespace, proposal_message},
-        wire, View,
-    },
-    Supervisor,
-};
+use std::marker::PhantomData;
+
+use commonware_codec::ReadExt;
 use commonware_cryptography::{Hasher, Scheme};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Handle, Spawner};
 use prost::Message;
-use std::marker::PhantomData;
 use tracing::debug;
 
+use crate::{
+    simplex::{
+        encoder::{finalize_namespace, nullify_message, nullify_namespace, proposal_message},
+        wire,
+        View,
+    },
+    Supervisor,
+};
 pub struct Config<C: Scheme, S: Supervisor<Index = View, PublicKey = C::PublicKey>> {
     pub crypto: C,
     pub supervisor: S,
@@ -84,7 +87,7 @@ impl<E: Spawner, C: Scheme, H: Hasher, S: Supervisor<Index = View, PublicKey = C
                             continue;
                         }
                     };
-                    let Ok(payload) = H::Digest::try_from(&proposal.payload) else {
+                    let Ok(payload) = H::Digest::read(&mut proposal.payload.as_ref()) else {
                         debug!(sender = ?s, "failed to decode proposal payload");
                         continue;
                     };

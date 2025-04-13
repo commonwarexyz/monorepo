@@ -1,10 +1,14 @@
 //! An authenticatable bitmap.
 
-use crate::mmr::{
-    iterator::leaf_num_to_pos, mem::Mmr, verification::Proof, verification::Storage, Error,
-};
-use commonware_codec::FixedSize;
+use commonware_codec::{FixedSize, ReadExt};
 use commonware_cryptography::Hasher as CHasher;
+
+use crate::mmr::{
+    iterator::leaf_num_to_pos,
+    mem::Mmr,
+    verification::{Proof, Storage},
+    Error,
+};
 
 /// Implements the [Storage] trait for generating inclusion proofs over the bitmap.
 struct BitmapStorage<'a, H: CHasher> {
@@ -98,7 +102,7 @@ impl<H: CHasher> Bitmap<H> {
     /// Return the last chunk of the bitmap as a digest.
     fn last_chunk(&self) -> H::Digest {
         let len = self.bitmap.len();
-        H::Digest::try_from(&self.bitmap[len - Self::CHUNK_SIZE..len]).unwrap()
+        H::Digest::read(&mut &self.bitmap[len - Self::CHUNK_SIZE..len]).unwrap()
     }
 
     /// Return the last chunk of the bitmap as a mutable slice.
@@ -114,7 +118,7 @@ impl<H: CHasher> Bitmap<H> {
         let pruned_bytes = self.pruned_bytes();
         assert!(byte_offset >= pruned_bytes, "bit pruned");
         byte_offset -= pruned_bytes;
-        H::Digest::try_from(&self.bitmap[byte_offset..byte_offset + Self::CHUNK_SIZE]).unwrap()
+        H::Digest::read(&mut &self.bitmap[byte_offset..byte_offset + Self::CHUNK_SIZE]).unwrap()
     }
 
     /// Commit the last chunk of the bitmap to the Merkle tree and initialize the next chunk.
@@ -293,9 +297,10 @@ impl<H: CHasher> Bitmap<H> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use commonware_cryptography::{hash, Sha256};
     use commonware_runtime::{deterministic::Executor, Runner};
+
+    use super::*;
 
     #[test]
     fn test_bitmap_empty_then_one() {
