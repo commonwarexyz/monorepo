@@ -2195,9 +2195,8 @@ impl<
 
 #[cfg(test)]
 mod tests {
-    use crate::threshold_simplex::mocks;
-
     use super::*;
+    use crate::threshold_simplex::mocks;
     use commonware_cryptography::{
         bls12381::{
             dkg::ops,
