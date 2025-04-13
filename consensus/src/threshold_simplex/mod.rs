@@ -2137,4 +2137,145 @@ mod tests {
             assert!(count_nullify_and_finalize > 0);
         });
     }
+
+    #[test_traced]
+    fn test_outdated() {
+        // Create context
+        let n = 4;
+        let threshold = quorum(n).expect("unable to calculate threshold");
+        let required_containers = 100;
+        let activity_timeout = 10;
+        let skip_timeout = 5;
+        let namespace = b"consensus".to_vec();
+        let (executor, mut context, _) = Executor::timed(Duration::from_secs(30));
+        executor.start(async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                },
+            );
+
+            // Start network
+            network.start();
+
+            // Register participants
+            let mut schemes = Vec::new();
+            let mut validators = Vec::new();
+            for i in 0..n {
+                let scheme = Ed25519::from_seed(i as u64);
+                let pk = scheme.public_key();
+                schemes.push(scheme);
+                validators.push(pk);
+            }
+            validators.sort();
+            schemes.sort_by_key(|s| s.public_key());
+            let mut registrations = register_validators(&mut oracle, &validators).await;
+
+            // Link all validators
+            let link = Link {
+                latency: 10.0,
+                jitter: 1.0,
+                success_rate: 1.0,
+            };
+            link_validators(&mut oracle, &validators, Action::Link(link), None).await;
+
+            // Derive threshold
+            let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
+
+            // Create engines
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let mut supervisors = Vec::new();
+            for (idx_scheme, scheme) in schemes.into_iter().enumerate() {
+                // Create scheme context
+                let context = context.with_label(&format!("validator-{}", scheme.public_key()));
+
+                // Start engine
+                let validator = scheme.public_key();
+                let mut participants = BTreeMap::new();
+                participants.insert(0, (public.clone(), validators.clone(), shares[idx_scheme]));
+                let supervisor_config = mocks::supervisor::Config {
+                    namespace: namespace.clone(),
+                    participants,
+                };
+                let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
+                let (voter, resolver) = registrations
+                    .remove(&validator)
+                    .expect("validator should be registered");
+                if idx_scheme == 0 {
+                    let cfg = mocks::outdated::Config {
+                        supervisor,
+                        namespace: namespace.clone(),
+                        view_delta: activity_timeout * 4,
+                    };
+                    let engine: mocks::outdated::Outdated<_, Sha256, _> =
+                        mocks::outdated::Outdated::new(context.with_label("byzantine_engine"), cfg);
+                    engine.start(voter);
+                } else {
+                    supervisors.push(supervisor.clone());
+                    let application_cfg = mocks::application::Config {
+                        hasher: Sha256::default(),
+                        relay: relay.clone(),
+                        participant: validator.clone(),
+                        propose_latency: (10.0, 5.0),
+                        verify_latency: (10.0, 5.0),
+                    };
+                    let (actor, application) = mocks::application::Application::new(
+                        context.with_label("application"),
+                        application_cfg,
+                    );
+                    actor.start();
+                    let cfg = JConfig {
+                        partition: validator.to_string(),
+                    };
+                    let journal = Journal::init(context.with_label("journal"), cfg)
+                        .await
+                        .expect("unable to create journal");
+                    let cfg = config::Config {
+                        crypto: scheme,
+                        automaton: application.clone(),
+                        relay: application.clone(),
+                        reporter: supervisor.clone(),
+                        supervisor,
+                        mailbox_size: 1024,
+                        namespace: namespace.clone(),
+                        leader_timeout: Duration::from_secs(1),
+                        notarization_timeout: Duration::from_secs(2),
+                        nullify_retry: Duration::from_secs(10),
+                        fetch_timeout: Duration::from_secs(1),
+                        activity_timeout,
+                        skip_timeout,
+                        max_fetch_count: 1,
+                        max_fetch_size: 1024 * 512,
+                        fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                        fetch_concurrent: 1,
+                        replay_concurrency: 1,
+                    };
+                    let engine = Engine::new(context.with_label("engine"), journal, cfg);
+                    engine.start(voter, resolver);
+                }
+            }
+
+            // Wait for all engines to finish
+            let mut finalizers = Vec::new();
+            for supervisor in supervisors.iter_mut() {
+                let (mut latest, mut monitor) = supervisor.subscribe().await;
+                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                    while latest < required_containers {
+                        latest = monitor.next().await.expect("event missing");
+                    }
+                }));
+            }
+            join_all(finalizers).await;
+
+            // Ensure no faults
+            for supervisor in supervisors.iter() {
+                {
+                    let faults = supervisor.faults.lock().unwrap();
+                    assert!(faults.is_empty());
+                }
+            }
+        });
+    }
 }
