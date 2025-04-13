@@ -1171,6 +1171,9 @@ impl<
         round.set_leader(seed);
         self.view = view;
 
+        // Update metrics
+        self.current_view.set(view as i64);
+
         // If we are backfilling, exit early
         if self.journal.is_none() {
             return;
@@ -1255,6 +1258,9 @@ impl<
                 .await
                 .expect("unable to prune journal");
         }
+
+        // Update metrics
+        self.tracked_views.set(self.views.len() as i64);
     }
 
     async fn notarize(&mut self, sender: &C::PublicKey, notarize: Notarize<D>) -> bool {
@@ -2183,10 +2189,6 @@ impl<
             // After sending all required messages, prune any views
             // we no longer need
             self.prune_views().await;
-
-            // Update metrics
-            self.current_view.set(view as i64);
-            self.tracked_views.set(self.views.len() as i64);
         }
     }
 }
