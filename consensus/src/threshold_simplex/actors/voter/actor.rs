@@ -2201,15 +2201,9 @@ mod tests {
     use commonware_cryptography::{
         bls12381::{
             dkg::ops,
-            primitives::{
-                group::Element,
-                ops::{partial_sign_message, threshold_signature_recover},
-                poly,
-            },
+            primitives::ops::{partial_sign_message, threshold_signature_recover},
         },
-        hash,
-        sha256::Digest,
-        Ed25519, Sha256, Signer,
+        hash, Ed25519, Sha256, Signer,
     };
     use commonware_macros::test_traced;
     use commonware_p2p::{
@@ -2220,7 +2214,6 @@ mod tests {
     use commonware_storage::journal::variable::{Config as JConfig, Journal};
     use commonware_utils::quorum;
     use futures::{channel::mpsc, StreamExt};
-    use prost::Message;
     use std::time::Duration;
     use std::{collections::BTreeMap, sync::Arc};
 
@@ -2257,7 +2250,6 @@ mod tests {
             let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
 
             // Initialize voter actor
-            let (done_sender, _) = mpsc::unbounded();
             let scheme = schemes[0].clone();
             let validator = scheme.public_key();
             let mut participants = BTreeMap::new();
