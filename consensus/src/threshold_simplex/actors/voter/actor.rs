@@ -2121,6 +2121,7 @@ impl<
                     let msg = mailbox.unwrap();
                     view = msg.view();
                     if !self.interesting(view, false) {
+                        debug!(view, "backfilled message is not interesting");
                         continue;
                     }
 
