@@ -619,16 +619,17 @@ impl<
             let proposal = finalize.message.proposal.as_ref().unwrap().clone();
 
             // Recover threshold signature
-            let mut finalization = Vec::new();
+            let mut finalizations = Vec::new();
             for finalize in finalizes.values() {
                 let eval = Eval::deserialize(&finalize.message.proposal_signature).unwrap();
-                finalization.push(eval);
+                finalizations.push(eval);
             }
+            let finalization_refs = finalizations.iter().collect::<Vec<_>>();
             let proposal_signature = self
                 .context
                 .with_label("finalization_recovery")
                 .spawn_blocking(move || {
-                    threshold_signature_recover(threshold, finalization)
+                    threshold_signature_recover(threshold, &finalization_refs)
                         .unwrap()
                         .serialize()
                 })

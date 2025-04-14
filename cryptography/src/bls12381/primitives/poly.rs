@@ -219,7 +219,7 @@ impl<C: Element> Poly<C> {
 
         // Convert the first `t` sorted shares into scalars
         let mut err = None;
-        let xs = evals.into_iter().fold(BTreeMap::new(), |mut m, sh| {
+        let xs = evals.iter().fold(BTreeMap::new(), |mut m, sh| {
             let mut xi = Scalar::zero();
             xi.set_int(sh.index + 1);
             if m.insert(sh.index, (xi, &sh.value)).is_some() {
