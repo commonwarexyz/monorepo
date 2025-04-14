@@ -179,61 +179,6 @@ fn bits(scalar: &blst_scalar) -> usize {
     bits
 }
 
-/// A share of a threshold signing key.
-#[derive(Debug, Clone, PartialEq, Copy)]
-pub struct Share {
-    /// The share's index in the polynomial.
-    pub index: u32,
-    /// The scalar corresponding to the share's secret.
-    pub private: Private,
-}
-
-impl Share {
-    /// Returns the public key corresponding to the share.
-    ///
-    /// This can be verified against the public polynomial.
-    pub fn public(&self) -> Public {
-        let mut public = <Public as Element>::one();
-        public.mul(&self.private);
-        public
-    }
-
-    /// Canonically serializes the share.
-    pub fn serialize(&self) -> Vec<u8> {
-        self.encode().into()
-    }
-
-    /// Deserializes a canonically encoded share.
-    pub fn deserialize(bytes: &[u8]) -> Option<Self> {
-        Self::decode(bytes).ok()
-    }
-}
-
-impl Write for Share {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.index.write(buf);
-        self.private.write(buf);
-    }
-}
-
-impl Read for Share {
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let index = u32::read(buf)?;
-        let private = Private::read(buf)?;
-        Ok(Self { index, private })
-    }
-}
-
-impl FixedSize for Share {
-    const SIZE: usize = u32::SIZE + Private::SIZE;
-}
-
-impl Hash for Share {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        state.write(&self.encode());
-    }
-}
-
 impl Scalar {
     /// Generates a random scalar using the provided RNG.
     pub fn rand<R: RngCore>(rng: &mut R) -> Self {
@@ -362,6 +307,61 @@ impl FixedSize for Scalar {
 }
 
 impl Hash for Scalar {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        state.write(&self.encode());
+    }
+}
+
+/// A share of a threshold signing key.
+#[derive(Debug, Clone, PartialEq, Copy)]
+pub struct Share {
+    /// The share's index in the polynomial.
+    pub index: u32,
+    /// The scalar corresponding to the share's secret.
+    pub private: Private,
+}
+
+impl Share {
+    /// Returns the public key corresponding to the share.
+    ///
+    /// This can be verified against the public polynomial.
+    pub fn public(&self) -> Public {
+        let mut public = <Public as Element>::one();
+        public.mul(&self.private);
+        public
+    }
+
+    /// Canonically serializes the share.
+    pub fn serialize(&self) -> Vec<u8> {
+        self.encode().into()
+    }
+
+    /// Deserializes a canonically encoded share.
+    pub fn deserialize(bytes: &[u8]) -> Option<Self> {
+        Self::decode(bytes).ok()
+    }
+}
+
+impl Write for Share {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.index.write(buf);
+        self.private.write(buf);
+    }
+}
+
+impl Read for Share {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        let index = u32::read(buf)?;
+        let private = Private::read(buf)?;
+        Ok(Self { index, private })
+    }
+}
+
+impl FixedSize for Share {
+    const SIZE: usize = u32::SIZE + Private::SIZE;
+}
+
+impl Hash for Share {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         state.write(&self.encode());
     }
