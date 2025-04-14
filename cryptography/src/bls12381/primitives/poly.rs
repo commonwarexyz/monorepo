@@ -11,7 +11,9 @@ use crate::bls12381::primitives::{
     Error,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{
+    Decode, DecodeExt, Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write,
+};
 use rand::{rngs::OsRng, RngCore};
 use std::collections::BTreeMap;
 
@@ -36,6 +38,18 @@ pub const PARTIAL_SIGNATURE_LENGTH: usize = u32::SIZE + group::SIGNATURE_LENGTH;
 pub struct Eval<C: Element> {
     pub index: u32,
     pub value: C,
+}
+
+impl<C: Element> Eval<C> {
+    /// Canonically serializes the evaluation.
+    pub fn serialize(&self) -> Vec<u8> {
+        self.encode().into()
+    }
+
+    /// Deserializes a canonically encoded evaluation.
+    pub fn deserialize(bytes: &[u8]) -> Option<Self> {
+        Self::decode(bytes).ok()
+    }
 }
 
 impl<C: Element> Write for Eval<C> {
@@ -161,6 +175,16 @@ impl<C: Element> Poly<C> {
         self.0.iter_mut().zip(&other.0).for_each(|(a, b)| a.add(b))
     }
 
+    /// Canonically serializes the polynomial.
+    pub fn serialize(&self) -> Vec<u8> {
+        self.encode().into()
+    }
+
+    /// Deserializes a canonically encoded polynomial.
+    pub fn deserialize(bytes: &[u8], expected: u32) -> Option<Self> {
+        Self::decode_cfg(bytes, &(expected as usize)).ok()
+    }
+
     /// Evaluates the polynomial at the specified value.
     pub fn evaluate(&self, i: u32) -> Eval<C> {
         // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/a714310be76620e10e8797d6637df64011926430/crates/threshold-bls/src/poly.rs#L111-L129
@@ -243,7 +267,6 @@ impl<C: Element> Poly<C> {
 }
 
 impl<C: Element> Write for Poly<C> {
-    /// Canonically serializes the polynomial.
     fn write(&self, buf: &mut impl BufMut) {
         for c in &self.0 {
             c.write(buf);
@@ -252,7 +275,6 @@ impl<C: Element> Write for Poly<C> {
 }
 
 impl<C: Element> Read<usize> for Poly<C> {
-    /// Deserializes a canonically encoded polynomial.
     fn read_cfg(buf: &mut impl Buf, expected: &usize) -> Result<Self, CodecError> {
         let expected_size = C::SIZE * (*expected);
         if buf.remaining() < expected_size {
@@ -263,6 +285,12 @@ impl<C: Element> Read<usize> for Poly<C> {
             coeffs.push(C::read(buf)?);
         }
         Ok(Self(coeffs))
+    }
+}
+
+impl<C: Element> EncodeSize for Poly<C> {
+    fn encode_size(&self) -> usize {
+        C::SIZE * self.0.len()
     }
 }
 
@@ -424,5 +452,13 @@ pub mod tests {
                 assert_eq!(sum, evaluation, "degree={}, idx={}", d, idx);
             }
         }
+    }
+
+    #[test]
+    fn test_codec() {
+        let original = new(5);
+        let encoded = original.serialize();
+        let decoded = Poly::<Scalar>::deserialize(&encoded, original.required()).unwrap();
+        assert_eq!(original, decoded);
     }
 }

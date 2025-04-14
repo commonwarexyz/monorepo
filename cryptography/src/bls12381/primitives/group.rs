@@ -21,7 +21,11 @@ use blst::{
     Pairing, BLS12_381_G1, BLS12_381_G2, BLS12_381_NEG_G1, BLST_ERROR,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeFixed, Error::{self, Invalid} FixedSize, Read, ReadExt, Write};
+use commonware_codec::{
+    DecodeExt, Encode,
+    Error::{self, Invalid},
+    FixedSize, Read, ReadExt, Write,
+};
 use rand::RngCore;
 use std::ptr;
 use zeroize::Zeroize;
@@ -32,7 +36,7 @@ use zeroize::Zeroize;
 pub type DST = &'static [u8];
 
 /// An element of a group.
-pub trait Element: EncodeFixed + Clone + Eq + PartialEq + Send + Sync {
+pub trait Element: Read + Write + FixedSize + Clone + Eq + PartialEq + Send + Sync {
     /// Returns the additive identity.
     fn zero() -> Self;
 
@@ -44,6 +48,18 @@ pub trait Element: EncodeFixed + Clone + Eq + PartialEq + Send + Sync {
 
     /// Multiplies self in-place.
     fn mul(&mut self, rhs: &Scalar);
+
+    /// Canonically serializes the element.
+    fn serialize(&self) -> Vec<u8>;
+
+    /// Serialized size of the element.
+    fn size() -> usize;
+
+    /// Deserializes an untrusted, canonically-encoded element.
+    ///
+    /// This function performs any validation necessary to ensure the decoded
+    /// element is valid (like an infinity or group check).
+    fn deserialize(bytes: &[u8]) -> Option<Self>;
 }
 
 /// An element of a group that supports message hashing.
@@ -181,6 +197,16 @@ impl Share {
         public.mul(&self.private);
         public
     }
+
+    /// Canonically serializes the share.
+    pub fn serialize(&self) -> Vec<u8> {
+        self.encode().into()
+    }
+
+    /// Deserializes a canonically encoded share.
+    pub fn deserialize(bytes: &[u8]) -> Option<Self> {
+        Self::decode(bytes).ok()
+    }
 }
 
 impl Write for Share {
@@ -274,11 +300,23 @@ impl Element for Scalar {
             blst_fr_mul(&mut self.0, &self.0, &rhs.0);
         }
     }
+
+    fn serialize(&self) -> Vec<u8> {
+        self.encode().into()
+    }
+
+    fn deserialize(bytes: &[u8]) -> Option<Self> {
+        Self::decode(bytes).ok()
+    }
+
+    fn size() -> usize {
+        Self::SIZE
+    }
 }
 
 impl Write for Scalar {
     fn write(&self, buf: &mut impl BufMut) {
-        let mut bytes: [u8; Self::SIZE];
+        let mut bytes = [0u8; Self::SIZE];
         unsafe {
             let mut scalar = blst_scalar::default();
             blst_scalar_from_fr(&mut scalar, &self.0);
@@ -343,11 +381,23 @@ impl Element for G1 {
             blst_p1_mult(&mut self.0, &self.0, scalar.b.as_ptr(), bits(&scalar));
         }
     }
+
+    fn serialize(&self) -> Vec<u8> {
+        self.encode().into()
+    }
+
+    fn deserialize(bytes: &[u8]) -> Option<Self> {
+        Self::decode(bytes).ok()
+    }
+
+    fn size() -> usize {
+        Self::SIZE
+    }
 }
 
 impl Write for G1 {
     fn write(&self, buf: &mut impl BufMut) {
-        let mut bytes: [u8; Self::SIZE];
+        let mut bytes = [0u8; Self::SIZE];
         unsafe {
             blst_p1_compress(bytes.as_mut_ptr(), &self.0);
         }
@@ -362,7 +412,7 @@ impl Read for G1 {
         unsafe {
             let mut affine = blst_p1_affine::default();
             match blst_p1_uncompress(&mut affine, bytes.as_ptr()) {
-                BLST_ERROR::BLST_SUCCESS => {},
+                BLST_ERROR::BLST_SUCCESS => {}
                 BLST_ERROR::BLST_BAD_ENCODING => return Err(Invalid("G1", "Bad encoding")),
                 BLST_ERROR::BLST_POINT_NOT_ON_CURVE => return Err(Invalid("G1", "Not on curve")),
                 BLST_ERROR::BLST_POINT_NOT_IN_GROUP => return Err(Invalid("G1", "Not in group")),
@@ -433,11 +483,23 @@ impl Element for G2 {
             blst_p2_mult(&mut self.0, &self.0, scalar.b.as_ptr(), bits(&scalar));
         }
     }
+
+    fn serialize(&self) -> Vec<u8> {
+        self.encode().into()
+    }
+
+    fn deserialize(bytes: &[u8]) -> Option<Self> {
+        Self::decode(bytes).ok()
+    }
+
+    fn size() -> usize {
+        Self::SIZE
+    }
 }
 
 impl Write for G2 {
     fn write(&self, buf: &mut impl BufMut) {
-        let mut bytes: [u8; Self::SIZE];
+        let mut bytes = [0u8; Self::SIZE];
         unsafe {
             blst_p2_compress(bytes.as_mut_ptr(), &self.0);
         }
@@ -452,7 +514,7 @@ impl Read for G2 {
         unsafe {
             let mut affine = blst_p2_affine::default();
             match blst_p2_uncompress(&mut affine, bytes.as_ptr()) {
-                BLST_ERROR::BLST_SUCCESS => {},
+                BLST_ERROR::BLST_SUCCESS => {}
                 BLST_ERROR::BLST_BAD_ENCODING => return Err(Invalid("G2", "Bad encoding")),
                 BLST_ERROR::BLST_POINT_NOT_ON_CURVE => return Err(Invalid("G2", "Not on curve")),
                 BLST_ERROR::BLST_POINT_NOT_IN_GROUP => return Err(Invalid("G2", "Not in group")),
@@ -557,5 +619,34 @@ mod tests {
         p2.mul(&s);
         p2.add(&p2.clone());
         assert_eq!(p1, p2);
+    }
+
+    #[test]
+    fn test_scalar_codec() {
+        let original = Scalar::rand(&mut thread_rng());
+        let mut encoded = original.encode();
+        assert_eq!(encoded.len(), Scalar::SIZE);
+        let decoded = Scalar::decode(&mut encoded).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_g1_codec() {
+        let mut original = G1::one();
+        original.mul(&Scalar::rand(&mut thread_rng()));
+        let mut encoded = original.encode();
+        assert_eq!(encoded.len(), G1::SIZE);
+        let decoded = G1::decode(&mut encoded).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_g2_codec() {
+        let mut original = G2::one();
+        original.mul(&Scalar::rand(&mut thread_rng()));
+        let mut encoded = original.encode();
+        assert_eq!(encoded.len(), G2::SIZE);
+        let decoded = G2::decode(&mut encoded).unwrap();
+        assert_eq!(original, decoded);
     }
 }
