@@ -108,7 +108,9 @@ mod tests {
             let cfg = Config {
                 partition: "test".to_string(),
             };
-            let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            let mut metadata = Metadata::init(&context, &context, context.clone(), cfg)
+                .await
+                .unwrap();
 
             // Check last update
             let last_update = metadata.last_update();
@@ -149,7 +151,9 @@ mod tests {
             let cfg = Config {
                 partition: "test".to_string(),
             };
-            let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            let mut metadata = Metadata::init(&context, &context, context.clone(), cfg)
+                .await
+                .unwrap();
 
             // Check last update (increment by 1 over the previous)
             let last_update = metadata.last_update().unwrap();
@@ -188,7 +192,9 @@ mod tests {
             let cfg = Config {
                 partition: "test".to_string(),
             };
-            let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            let mut metadata = Metadata::init(&context, &context, context.clone(), cfg)
+                .await
+                .unwrap();
 
             // Put a key
             let key = U64::new(42);
@@ -227,7 +233,9 @@ mod tests {
             let cfg = Config {
                 partition: "test".to_string(),
             };
-            let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            let mut metadata = Metadata::init(&context, &context, context.clone(), cfg)
+                .await
+                .unwrap();
 
             // Check metrics
             let buffer = context.encode();
@@ -263,7 +271,9 @@ mod tests {
             let cfg = Config {
                 partition: "test".to_string(),
             };
-            let metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            let metadata = Metadata::init(&context, &context, context.clone(), cfg)
+                .await
+                .unwrap();
 
             // Check metrics
             let buffer = context.encode();
@@ -287,7 +297,9 @@ mod tests {
             let cfg = Config {
                 partition: "test".to_string(),
             };
-            let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            let mut metadata = Metadata::init(&context, &context, context.clone(), cfg)
+                .await
+                .unwrap();
 
             // Put a key
             let key = U64::new(42);
@@ -316,7 +328,9 @@ mod tests {
             let cfg = Config {
                 partition: "test".to_string(),
             };
-            let metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            let metadata = Metadata::init(&context, &context, context.clone(), cfg)
+                .await
+                .unwrap();
 
             // Get the key (falls back to non-corrupt)
             let value = metadata.get(&key).unwrap();
@@ -333,7 +347,9 @@ mod tests {
             let cfg = Config {
                 partition: "test".to_string(),
             };
-            let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            let mut metadata = Metadata::init(&context, &context, context.clone(), cfg)
+                .await
+                .unwrap();
 
             // Put a key
             let key = U64::new(42);
@@ -365,7 +381,9 @@ mod tests {
             let cfg = Config {
                 partition: "test".to_string(),
             };
-            let metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            let metadata = Metadata::init(&context, &context, context.clone(), cfg)
+                .await
+                .unwrap();
 
             // Get the key (falls back to non-corrupt)
             let value = metadata.get(&key);
@@ -387,7 +405,9 @@ mod tests {
             let cfg = Config {
                 partition: "test".to_string(),
             };
-            let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            let mut metadata = Metadata::init(&context, &context, context.clone(), cfg)
+                .await
+                .unwrap();
 
             // Put a key
             let key = U64::new(42);
@@ -417,7 +437,9 @@ mod tests {
             let cfg = Config {
                 partition: "test".to_string(),
             };
-            let metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            let metadata = Metadata::init(&context, &context, context.clone(), cfg)
+                .await
+                .unwrap();
 
             // Get the key (falls back to non-corrupt)
             let value = metadata.get(&key).unwrap();
@@ -434,7 +456,9 @@ mod tests {
             let cfg = Config {
                 partition: "test".to_string(),
             };
-            let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            let mut metadata = Metadata::init(&context, &context, context.clone(), cfg)
+                .await
+                .unwrap();
 
             // Put a key
             let key = U64::new(42);
@@ -463,7 +487,9 @@ mod tests {
             let cfg = Config {
                 partition: "test".to_string(),
             };
-            let metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            let metadata = Metadata::init(&context, &context, context.clone(), cfg)
+                .await
+                .unwrap();
 
             // Get the key (falls back to non-corrupt)
             let value = metadata.get(&key).unwrap();
@@ -483,7 +509,9 @@ mod tests {
                 let cfg = Config {
                     partition: "test".to_string(),
                 };
-                let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+                let mut metadata = Metadata::init(&context, &context, context.clone(), cfg)
+                    .await
+                    .unwrap();
 
                 // Put a key
                 metadata.put(key.clone(), hello.clone());
@@ -495,7 +523,9 @@ mod tests {
             let cfg = Config {
                 partition: "test".to_string(),
             };
-            let metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            let metadata = Metadata::init(&context, &context, context.clone(), cfg)
+                .await
+                .unwrap();
 
             // Get the key
             let value = metadata.get(&key);
@@ -517,7 +547,9 @@ mod tests {
             let cfg = Config {
                 partition: "test".to_string(),
             };
-            let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            let mut metadata = Metadata::init(&context, &context, context.clone(), cfg)
+                .await
+                .unwrap();
 
             // Create a value that exceeds u32::MAX bytes
             let value = vec![0u8; (u32::MAX as usize) + 1];

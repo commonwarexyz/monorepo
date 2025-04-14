@@ -232,6 +232,7 @@ mod tests {
             // Initialize an empty journal
             let journal = Journal::init(
                 context.clone(),
+                &context,
                 JConfig {
                     partition: "test_partition".into(),
                 },
@@ -338,6 +339,7 @@ mod tests {
             // Initialize an empty journal
             let journal = Journal::init(
                 context.clone(),
+                &context,
                 JConfig {
                     partition: "test_partition".into(),
                 },
@@ -372,6 +374,7 @@ mod tests {
             // Initialize the archive again without compression
             let journal = Journal::init(
                 context.clone(),
+                &context,
                 JConfig {
                     partition: "test_partition".into(),
                 },
@@ -413,6 +416,7 @@ mod tests {
             // Initialize an empty journal
             let journal = Journal::init(
                 context.clone(),
+                &context,
                 JConfig {
                     partition: "test_partition".into(),
                 },
@@ -458,6 +462,7 @@ mod tests {
             // Initialize the archive again
             let journal = Journal::init(
                 context.clone(),
+                &context,
                 JConfig {
                     partition: "test_partition".into(),
                 },
@@ -495,6 +500,7 @@ mod tests {
             // Initialize an empty journal
             let journal = Journal::init(
                 context.clone(),
+                &context,
                 JConfig {
                     partition: "test_partition".into(),
                 },
@@ -561,6 +567,7 @@ mod tests {
             // Initialize an empty journal
             let journal = Journal::init(
                 context.clone(),
+                &context,
                 JConfig {
                     partition: "test_partition".into(),
                 },
@@ -612,6 +619,7 @@ mod tests {
             // Initialize an empty journal
             let journal = Journal::init(
                 context.clone(),
+                &context,
                 JConfig {
                     partition: "test_partition".into(),
                 },
@@ -682,6 +690,7 @@ mod tests {
             // Initialize an empty journal
             let journal = Journal::init(
                 context.clone(),
+                &context,
                 JConfig {
                     partition: "test_partition".into(),
                 },
@@ -746,6 +755,7 @@ mod tests {
             // Initialize an empty journal
             let journal = Journal::init(
                 context.clone(),
+                &context,
                 JConfig {
                     partition: "test_partition".into(),
                 },
@@ -840,6 +850,7 @@ mod tests {
             // Initialize an empty journal
             let journal = Journal::init(
                 context.clone(),
+                &context,
                 JConfig {
                     partition: "test_partition".into(),
                 },
@@ -906,6 +917,7 @@ mod tests {
             // Reinitialize the archive
             let journal = Journal::init(
                 context.clone(),
+                &context,
                 JConfig {
                     partition: "test_partition".into(),
                 },
@@ -1005,6 +1017,7 @@ mod tests {
             // Initialize an empty journal
             let journal = Journal::init(
                 context.clone(),
+                &context,
                 JConfig {
                     partition: "test_partition".into(),
                 },
@@ -1068,6 +1081,7 @@ mod tests {
 
             let journal = Journal::init(
                 context.clone(),
+                &context,
                 JConfig {
                     partition: "test_partition".into(),
                 },

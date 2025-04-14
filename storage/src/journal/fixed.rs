@@ -475,7 +475,7 @@ mod tests {
                 partition: "test_partition".into(),
                 items_per_blob: 2,
             };
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.clone(), &context, cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
@@ -497,7 +497,7 @@ mod tests {
                 partition: "test_partition".into(),
                 items_per_blob: 2,
             };
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.clone(), &context, cfg.clone())
                 .await
                 .expect("failed to re-initialize journal");
 
@@ -626,7 +626,7 @@ mod tests {
                 partition: "test_partition".into(),
                 items_per_blob: ITEMS_PER_BLOB,
             };
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.clone(), &context, cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
@@ -685,7 +685,7 @@ mod tests {
             blob.close().await.expect("Failed to close blob");
 
             // Re-initialize the journal to simulate a restart
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.clone(), &context, cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
             let err = journal.read(corrupted_item_pos).await.unwrap_err();
@@ -731,7 +731,7 @@ mod tests {
             blob.close().await.expect("Failed to close blob");
 
             // Re-initialize the journal to simulate a restart
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.clone(), &context, cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
             let err = journal.read(corrupted_item_pos).await.unwrap_err();
@@ -769,7 +769,8 @@ mod tests {
                 .await
                 .expect("Failed to remove blob");
             // Re-initialize the journal to simulate a restart
-            let result = Journal::<_, _, Digest>::init(context.clone(), cfg.clone()).await;
+            let result =
+                Journal::<_, _, Digest>::init(context.clone(), &context, cfg.clone()).await;
             assert!(matches!(result.err().unwrap(), Error::MissingBlob(n) if n == 40));
         });
     }
@@ -786,7 +787,7 @@ mod tests {
                 partition: "test_partition".into(),
                 items_per_blob: 3,
             };
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.clone(), &context, cfg.clone())
                 .await
                 .expect("failed to initialize journal");
             for i in 0..5 {
@@ -813,7 +814,7 @@ mod tests {
             blob.close().await.expect("Failed to close blob");
 
             // Re-initialize the journal to simulate a restart
-            let journal = Journal::<_, _, Digest>::init(context.clone(), cfg.clone())
+            let journal = Journal::<_, _, Digest>::init(context.clone(), &context, cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
             // the last corrupted item should get discarded
@@ -828,7 +829,7 @@ mod tests {
                 .remove(&cfg.partition, Some(&1u64.to_be_bytes()))
                 .await
                 .expect("Failed to remove blob");
-            let journal = Journal::<_, _, Digest>::init(context.clone(), cfg.clone())
+            let journal = Journal::<_, _, Digest>::init(context.clone(), &context, cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
             assert_eq!(journal.size().await.unwrap(), 3);
@@ -846,7 +847,7 @@ mod tests {
                 partition: "test_partition".into(),
                 items_per_blob: 10,
             };
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.clone(), &context, cfg.clone())
                 .await
                 .expect("failed to initialize journal");
             // Add only a single item
@@ -870,7 +871,7 @@ mod tests {
             blob.close().await.expect("Failed to close blob");
 
             // Re-initialize the journal to simulate a restart
-            let mut journal = Journal::<_, _, Digest>::init(context.clone(), cfg.clone())
+            let mut journal = Journal::<_, _, Digest>::init(context.clone(), &context, cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
 
@@ -896,7 +897,7 @@ mod tests {
                 partition: "test_partition".into(),
                 items_per_blob: 2,
             };
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.clone(), &context, cfg.clone())
                 .await
                 .expect("failed to initialize journal");
             assert!(matches!(journal.rewind(0).await, Ok(())));
@@ -962,7 +963,7 @@ mod tests {
                 partition: "test_partition_2".into(),
                 items_per_blob: 3,
             };
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.clone(), &context, cfg.clone())
                 .await
                 .expect("failed to initialize journal");
             for _ in 0..10 {
@@ -982,9 +983,10 @@ mod tests {
             journal.close().await.expect("Failed to close journal");
 
             // Make sure re-opened journal is as expected
-            let mut journal: Journal<_, _, Digest> = Journal::init(context.clone(), cfg.clone())
-                .await
-                .expect("failed to re-initialize journal");
+            let mut journal: Journal<_, _, Digest> =
+                Journal::init(context.clone(), &context, cfg.clone())
+                    .await
+                    .expect("failed to re-initialize journal");
             assert_eq!(journal.size().await.unwrap(), 10 * (100 - 49));
 
             // Make sure rewinding works after pruning
