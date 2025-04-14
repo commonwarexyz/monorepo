@@ -8,19 +8,19 @@ use commonware_utils::Array;
 use std::collections::HashMap;
 
 // All messages that can be sent over DKG_CHANNEL.
-pub struct DKG<Sig: Array> {
+pub struct Dkg<Sig: Array> {
     pub round: u64,
     pub payload: Payload<Sig>,
 }
 
-impl<Sig: Array> Write for DKG<Sig> {
+impl<Sig: Array> Write for Dkg<Sig> {
     fn write(&self, buf: &mut impl BufMut) {
         self.round.write(buf);
         self.payload.write(buf);
     }
 }
 
-impl<Sig: Array> Read<usize> for DKG<Sig> {
+impl<Sig: Array> Read<usize> for Dkg<Sig> {
     fn read_cfg(buf: &mut impl Buf, poly_size: &usize) -> Result<Self, Error> {
         let round = u64::read(buf)?;
         let payload = Payload::<Sig>::read_cfg(buf, poly_size)?;
@@ -28,7 +28,7 @@ impl<Sig: Array> Read<usize> for DKG<Sig> {
     }
 }
 
-impl<Sig: Array> EncodeSize for DKG<Sig> {
+impl<Sig: Array> EncodeSize for Dkg<Sig> {
     fn encode_size(&self) -> usize {
         self.round.encode_size() + self.payload.encode_size()
     }
@@ -184,19 +184,19 @@ impl<S: Array> FixedSize for Ack<S> {
 }
 
 // All messages that can be sent over VRF_CHANNEL.
-pub struct VRF {
+pub struct Vrf {
     pub round: u64,
     pub signature: Eval<group::Signature>,
 }
 
-impl Write for VRF {
+impl Write for Vrf {
     fn write(&self, buf: &mut impl BufMut) {
         self.round.write(buf);
         self.signature.write(buf);
     }
 }
 
-impl Read for VRF {
+impl Read for Vrf {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let round = u64::read(buf)?;
         let signature = Eval::<group::Signature>::read(buf)?;
@@ -204,6 +204,6 @@ impl Read for VRF {
     }
 }
 
-impl FixedSize for VRF {
+impl FixedSize for Vrf {
     const SIZE: usize = u64::SIZE + Eval::<group::Signature>::SIZE;
 }

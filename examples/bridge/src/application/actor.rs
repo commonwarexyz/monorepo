@@ -103,12 +103,18 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                             };
 
                             // Verify certificate
+<<<<<<< HEAD
                             let finalization = Finalization::<H::Digest>::decode(proof.as_ref())
                                 .expect("failed to decode finalization");
                             assert!(
                                 finalization.verify(&self.namespace, &self.other_public),
                                 "indexer is corrupt"
                             );
+=======
+                            self.other_prover
+                                .deserialize_finalization(proof.clone())
+                                .expect("indexer is corrupt");
+>>>>>>> 79b4084c (more cleanup)
 
                             // Use certificate as message
                             let mut msg = Vec::with_capacity(u8::SIZE + proof.len());

@@ -71,7 +71,7 @@ impl<E: Clock + Spawner, P: Array> Vrf<E, P> {
         sender
             .send(
                 Recipients::Some(self.contributors.clone()),
-                wire::VRF { round, signature }.encode().into(),
+                wire::Vrf { round, signature }.encode().into(),
                 true,
             )
             .await
@@ -101,7 +101,7 @@ impl<E: Clock + Spawner, P: Array> Vrf<E, P> {
                                 warn!(round, dealer, "received duplicate signature");
                                 continue;
                             }
-                            let msg = match wire::VRF::decode(msg) {
+                            let msg = match wire::Vrf::decode(msg) {
                                 Ok(msg) => msg,
                                 Err(_) => {
                                     warn!(round, "received invalid message from player");

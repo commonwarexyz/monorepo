@@ -94,7 +94,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
                         debug!("dropping messages until receive start message from arbiter");
                         continue;
                     }
-                    let msg = match wire::DKG::decode_cfg(msg, &(self.t as usize)) {
+                    let msg = match wire::Dkg::<C::Signature>::decode_cfg(msg, &(self.t as usize)) {
                         Ok(msg) => msg,
                         Err(err) => {
                             warn!(?err, "received invalid message from arbiter");
@@ -176,7 +176,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
             let mut sent = 0;
             for (idx, player) in self.contributors.iter().enumerate() {
                 // Send to self
-                let share = shares[idx];
+                let mut share = shares[idx];
                 if idx == me_idx as usize {
                     player_obj
                         .share(me.clone(), commitment.clone(), share)
@@ -214,7 +214,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
                 let success = sender
                     .send(
                         Recipients::One(player.clone()),
-                        wire::DKG {
+                        wire::Dkg::<C::Signature> {
                             round,
                             payload: wire::Payload::Share {
                                 commitment: commitment.clone(),
@@ -247,7 +247,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
                     result = receiver.recv() => {
                         match result {
                             Ok((s, msg)) => {
-                                let msg = match wire::DKG::decode_cfg(msg, &(self.t as usize)) {
+                                let msg = match wire::Dkg::<C::Signature>::decode_cfg(msg, &(self.t as usize)) {
                                     Ok(msg) => msg,
                                     Err(_) => {
                                         warn!("received invalid message from arbiter");
@@ -265,7 +265,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
                                 match msg.payload {
                                     wire::Payload::Ack(msg) => {
                                         // Skip if not dealing
-                                        let Some((dealer, _, commitment, acks)) = &mut dealer_obj else {
+                                        let Some((dealer, commitment, _, acks)) = &mut dealer_obj else {
                                             continue;
                                         };
 
@@ -285,11 +285,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
 
                                         // Verify signature on incoming ack
                                         let payload = payload(round, &me, commitment);
-                                        let Ok(signature) = C::Signature::try_from(&msg.signature) else {
-                                            warn!(round, sender = ?s, "received invalid ack signature");
-                                            continue;
-                                        };
-                                        if !C::verify(Some(ACK_NAMESPACE), &payload, &s, &signature) {
+                                        if !C::verify(Some(ACK_NAMESPACE), &payload, &s, &msg.signature) {
                                             warn!(round, sender = ?s, "received invalid ack signature");
                                             continue;
                                         }
@@ -299,12 +295,12 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
                                             warn!(round, error = ?e, sender = ?s, "failed to record ack");
                                             continue;
                                         }
-                                        acks.insert(msg.public_key, signature);
+                                        acks.insert(msg.public_key, msg.signature);
 
                                     },
                                     wire::Payload::Share{ commitment, share } => {
                                         // Store share
-                                        if let Err(e) = player_obj.share(s.clone(), commitment, share){
+                                        if let Err(e) = player_obj.share(s.clone(), commitment.clone(), share){
                                             warn!(round, error = ?e, "failed to store share");
                                             continue;
                                         }
@@ -315,7 +311,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
                                         sender
                                             .send(
                                                 Recipients::One(s),
-                                                wire::DKG {
+                                                wire::Dkg {
                                                     round,
                                                     payload: wire::Payload::Ack(wire::Ack {
                                                         public_key: me_idx,
@@ -370,7 +366,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
             sender
                 .send(
                     Recipients::One(self.arbiter.clone()),
-                    wire::DKG {
+                    wire::Dkg {
                         round,
                         payload: wire::Payload::Commitment {
                             commitment,
@@ -390,7 +386,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
         loop {
             match receiver.recv().await {
                 Ok((s, msg)) => {
-                    let msg = match wire::DKG::decode_cfg(msg, &(self.t as usize)) {
+                    let msg = match wire::Dkg::<C::Signature>::decode_cfg(msg, &(self.t as usize)) {
                         Ok(msg) => msg,
                         Err(_) => {
                             warn!("received invalid message from arbiter");

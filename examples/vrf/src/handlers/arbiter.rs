@@ -69,9 +69,11 @@ impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
         sender
             .send(
                 Recipients::All,
-                wire::DKG {
+                wire::Dkg::<C::Signature> {
                     round,
-                    payload: wire::Payload::Start { group: previous },
+                    payload: wire::Payload::Start {
+                        group: previous.clone(),
+                    },
                 }
                 .encode()
                 .into(),
@@ -97,7 +99,7 @@ impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
                     match result {
                         Ok((sender, msg)) =>{
                             // Parse msg
-                            let msg = match wire::DKG::decode_cfg(msg, &(self.t as usize)) {
+                            let msg = match wire::Dkg::decode_cfg(msg, &(self.t as usize)) {
                                 Ok(msg) => msg,
                                 Err(_) => {
                                     arbiter.disqualify(sender);
@@ -114,7 +116,7 @@ impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
 
                             // Parse acks
                             let mut disqualify = false;
-                            let mut acks = Vec::new();
+                            let mut ack_indices: Vec<u32> = Vec::new();
                             for ack in acks {
                                 let Some(public_key) = self.contributors.get(ack.public_key as usize) else {
                                     disqualify = true;
@@ -125,7 +127,7 @@ impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
                                     disqualify = true;
                                     break;
                                 }
-                                acks.push(ack.public_key);
+                                ack_indices.push(ack.public_key);
                             }
                             if disqualify {
                                 arbiter.disqualify(sender);
@@ -135,7 +137,7 @@ impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
                             // Check dealer commitment
                             //
                             // Any faults here will be considered as a disqualification.
-                            if let Err(e) = arbiter.commitment(sender.clone(), commitment, acks, reveals) {
+                            if let Err(e) = arbiter.commitment(sender.clone(), commitment, ack_indices, reveals) {
                                 warn!(round, error = ?e, ?sender, "failed to process commitment");
                                 break;
                             }
@@ -164,9 +166,9 @@ impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
                 sender
                     .send(
                         Recipients::All,
-                        wire::DKG {
+                        wire::Dkg {
                             round,
-                            payload: wire::Payload::Abort,
+                            payload: wire::Payload::<C::Signature>::Abort,
                         }
                         .encode()
                         .into(),
@@ -208,10 +210,10 @@ impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
             sender
                 .send(
                     Recipients::One(player.clone()),
-                    wire::DKG {
+                    wire::Dkg {
                         round,
-                        payload: wire::Payload::Success {
-                            commitments,
+                        payload: wire::Payload::<C::Signature>::Success {
+                            commitments: commitments.clone(),
                             reveals,
                         },
                     }

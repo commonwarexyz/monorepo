@@ -159,11 +159,7 @@ fn main() {
                             let _ = response.send(None);
                             continue;
                         };
-                        let Ok(digest) = Sha256Digest::try_from(&incoming.digest) else {
-                            let _ = response.send(None);
-                            continue;
-                        };
-                        let data = network.get(&digest);
+                        let data = network.get(&incoming.digest);
                         let _ = response.send(data.cloned());
                     }
                     Message::PutFinalization { incoming, response } => {
@@ -331,8 +327,11 @@ fn main() {
                                     .await
                                     .expect("failed to send message");
                                 let success = receiver.await.expect("failed to receive response");
-                                let msg = wire::Outbound::Success(success).encode().as_ref();
-                                if sender.send(msg).await.is_err() {
+                                if sender
+                                    .send(wire::Outbound::Success(success).encode().as_ref())
+                                    .await
+                                    .is_err()
+                                {
                                     debug!(?peer, "failed to send message");
                                     return;
                                 }
