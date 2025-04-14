@@ -31,9 +31,6 @@ features = ["js"]
 [dev-dependencies]
 criterion = { workspace = true }
 
-[build-dependencies]
-prost-build = { workspace = true }
-
 [lib]
 bench = false
 crate-type = ["rlib", "cdylib"]

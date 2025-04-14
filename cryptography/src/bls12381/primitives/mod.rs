@@ -35,7 +35,7 @@
 //! }
 //!
 //! // Aggregate partial signatures
-//! let threshold_sig = threshold_signature_recover(t, partials).unwrap();
+//! let threshold_sig = threshold_signature_recover(t, &partials).unwrap();
 //!
 //! // Verify threshold signature
 //! let threshold_pub = public(&commitment);
@@ -52,7 +52,7 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("not enough partial signatures: {0}/{1}")]
-    NotEnoughPartialSignatures(u32, u32),
+    NotEnoughPartialSignatures(usize, usize),
     #[error("invalid signature")]
     InvalidSignature,
     #[error("invalid recovery")]
