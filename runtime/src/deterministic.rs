@@ -1380,8 +1380,6 @@ impl crate::Storage for Context {
     }
 }
 
-pub struct VecStorage {}
-
 impl crate::Blob for Blob {
     async fn len(&self) -> Result<u64, Error> {
         self.executor.auditor.len(&self.partition, &self.name);

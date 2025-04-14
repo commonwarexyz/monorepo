@@ -17,6 +17,10 @@
 //! `commonware-runtime` is **ALPHA** software and is not yet recommended for production use. Developers should
 //! expect breaking changes and occasional instability.
 
+#[cfg(feature = "iouring")]
+use crate::tokio::blob_linux::Storage as LinuxStorage;
+#[cfg(not(feature = "iouring"))]
+use crate::tokio::blob_linux::Storage as NonLinuxStorage;
 use prometheus_client::registry::Metric;
 use std::{
     future::Future,
@@ -252,6 +256,12 @@ pub trait Stream: Sync + Send + 'static {
     fn recv(&mut self, buf: &mut [u8]) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
+#[cfg(feature = "iouring")]
+pub type DefaultStorage = LinuxStorage;
+
+#[cfg(not(feature = "iouring"))]
+pub type DefaultStorage = NonLinuxStorage;
+
 /// Interface to interact with storage.
 ///
 ///
@@ -328,8 +338,6 @@ pub trait Blob: Clone + Send + Sync + 'static {
 
 #[cfg(test)]
 mod tests {
-    use crate::tokio::blob_non_linux::Storage as NonLinuxStorage;
-
     use super::*;
     use commonware_macros::select;
     use futures::channel::oneshot;
@@ -1211,86 +1219,86 @@ mod tests {
 
     #[test]
     fn test_tokio_error_future() {
-        let (runner, _) = tokio::Executor::<NonLinuxStorage>::default();
+        let (runner, _) = tokio::Executor::<DefaultStorage>::default();
         test_error_future(runner);
     }
 
     #[test]
     fn test_tokio_clock_sleep() {
-        let (executor, context) = tokio::Executor::<NonLinuxStorage>::default();
+        let (executor, context) = tokio::Executor::<DefaultStorage>::default();
         test_clock_sleep(executor, context);
     }
 
     #[test]
     fn test_tokio_clock_sleep_until() {
-        let (executor, context) = tokio::Executor::<NonLinuxStorage>::default();
+        let (executor, context) = tokio::Executor::<DefaultStorage>::default();
         test_clock_sleep_until(executor, context);
     }
 
     #[test]
     fn test_tokio_root_finishes() {
-        let (executor, context) = tokio::Executor::<NonLinuxStorage>::default();
+        let (executor, context) = tokio::Executor::<DefaultStorage>::default();
         test_root_finishes(executor, context);
     }
 
     #[test]
     fn test_tokio_spawn_abort() {
-        let (executor, context) = tokio::Executor::<NonLinuxStorage>::default();
+        let (executor, context) = tokio::Executor::<DefaultStorage>::default();
         test_spawn_abort(executor, context);
     }
 
     #[test]
     fn test_tokio_panic_aborts_root() {
-        let (runner, _) = tokio::Executor::<NonLinuxStorage>::default();
+        let (runner, _) = tokio::Executor::<DefaultStorage>::default();
         test_panic_aborts_root(runner);
     }
 
     #[test]
     fn test_tokio_panic_aborts_spawn() {
-        let (executor, context) = tokio::Executor::<NonLinuxStorage>::default();
+        let (executor, context) = tokio::Executor::<DefaultStorage>::default();
         test_panic_aborts_spawn(executor, context);
     }
 
     #[test]
     fn test_tokio_select() {
-        let (executor, _) = tokio::Executor::<NonLinuxStorage>::default();
+        let (executor, _) = tokio::Executor::<DefaultStorage>::default();
         test_select(executor);
     }
 
     #[test]
     fn test_tokio_select_loop() {
-        let (executor, context) = tokio::Executor::<NonLinuxStorage>::default();
+        let (executor, context) = tokio::Executor::<DefaultStorage>::default();
         test_select_loop(executor, context);
     }
 
     #[test]
     fn test_tokio_storage_operations() {
-        let (executor, context) = tokio::Executor::<NonLinuxStorage>::default();
+        let (executor, context) = tokio::Executor::<DefaultStorage>::default();
         test_storage_operations(executor, context);
     }
 
     #[test]
     fn test_tokio_blob_read_write() {
-        let (executor, context) = tokio::Executor::<NonLinuxStorage>::default();
+        let (executor, context) = tokio::Executor::<DefaultStorage>::default();
         test_blob_read_write(executor, context);
     }
 
     #[test]
     fn test_tokio_many_partition_read_write() {
-        let (executor, context) = tokio::Executor::<NonLinuxStorage>::default();
+        let (executor, context) = tokio::Executor::<DefaultStorage>::default();
         test_many_partition_read_write(executor, context);
     }
 
     #[test]
     fn test_tokio_blob_read_past_length() {
-        let (executor, context) = tokio::Executor::<NonLinuxStorage>::default();
+        let (executor, context) = tokio::Executor::<DefaultStorage>::default();
         test_blob_read_past_length(executor, context);
     }
 
     #[test]
     fn test_tokio_blob_clone_and_concurrent_read() {
         // Run test
-        let (executor, context) = tokio::Executor::<NonLinuxStorage>::default();
+        let (executor, context) = tokio::Executor::<DefaultStorage>::default();
         test_blob_clone_and_concurrent_read(executor, context.clone());
 
         // Ensure no blobs still open
@@ -1300,39 +1308,39 @@ mod tests {
 
     #[test]
     fn test_tokio_shutdown() {
-        let (executor, context) = tokio::Executor::<NonLinuxStorage>::default();
+        let (executor, context) = tokio::Executor::<DefaultStorage>::default();
         test_shutdown(executor, context);
     }
 
     #[test]
     fn test_tokio_spawn_ref() {
-        let (executor, context) = tokio::Executor::<NonLinuxStorage>::default();
+        let (executor, context) = tokio::Executor::<DefaultStorage>::default();
         test_spawn_ref(executor, context);
     }
 
     #[test]
     #[should_panic]
     fn test_tokio_spawn_ref_duplicate() {
-        let (executor, context) = tokio::Executor::<NonLinuxStorage>::default();
+        let (executor, context) = tokio::Executor::<DefaultStorage>::default();
         test_spawn_ref_duplicate(executor, context);
     }
 
     #[test]
     #[should_panic]
     fn test_tokio_spawn_duplicate() {
-        let (executor, context) = tokio::Executor::<NonLinuxStorage>::default();
+        let (executor, context) = tokio::Executor::<DefaultStorage>::default();
         test_spawn_duplicate(executor, context);
     }
 
     #[test]
     fn test_tokio_spawn_blocking() {
-        let (executor, context) = tokio::Executor::<NonLinuxStorage>::default();
+        let (executor, context) = tokio::Executor::<DefaultStorage>::default();
         test_spawn_blocking(executor, context);
     }
 
     #[test]
     fn test_tokio_spawn_blocking_panic() {
-        let (executor, context) = tokio::Executor::<NonLinuxStorage>::default();
+        let (executor, context) = tokio::Executor::<DefaultStorage>::default();
         executor.start(async move {
             let handle = context.spawn_blocking(|| {
                 panic!("blocking task panicked");
@@ -1344,26 +1352,26 @@ mod tests {
 
     #[test]
     fn test_tokio_spawn_blocking_abort() {
-        let (executor, context) = tokio::Executor::<NonLinuxStorage>::default();
+        let (executor, context) = tokio::Executor::<DefaultStorage>::default();
         test_spawn_blocking_abort(executor, context);
     }
 
     #[test]
     fn test_tokio_metrics() {
-        let (executor, context) = tokio::Executor::<NonLinuxStorage>::default();
+        let (executor, context) = tokio::Executor::<DefaultStorage>::default();
         test_metrics(executor, context);
     }
 
     #[test]
     #[should_panic]
     fn test_tokio_metrics_label() {
-        let (executor, context) = tokio::Executor::<NonLinuxStorage>::default();
+        let (executor, context) = tokio::Executor::<DefaultStorage>::default();
         test_metrics_label(executor, context);
     }
 
     #[test]
     fn test_tokio_metrics_serve() {
-        let (executor, context) = tokio::Executor::<NonLinuxStorage>::default();
+        let (executor, context) = tokio::Executor::<DefaultStorage>::default();
         test_metrics_serve(executor, context);
     }
 }

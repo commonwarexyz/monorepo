@@ -82,8 +82,8 @@ use clap::{value_parser, Arg, Command};
 use commonware_cryptography::{Ed25519, Signer};
 use commonware_p2p::authenticated::{self, Network};
 use commonware_runtime::{
-    tokio::{self, blob_non_linux::Storage as NonLinuxStorage, Executor},
-    Metrics, Runner,
+    tokio::{self, Executor},
+    DefaultStorage, Metrics, Runner,
 };
 use commonware_utils::quorum;
 use governor::Quota;
@@ -99,7 +99,7 @@ const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_VRF_";
 
 fn main() {
     // Initialize context
-    let runtime_cfg = tokio::Config::<NonLinuxStorage>::default();
+    let runtime_cfg = tokio::Config::<DefaultStorage>::default();
     let (executor, context) = Executor::init(runtime_cfg.clone());
 
     // Parse arguments

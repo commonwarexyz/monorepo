@@ -31,7 +31,7 @@ impl Default for Config {
 #[derive(Clone)]
 pub struct Storage {
     lock: Arc<Mutex<()>>,
-    storage_directory: PathBuf,
+    pub storage_directory: PathBuf,
 }
 
 impl Storage {

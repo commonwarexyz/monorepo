@@ -1262,7 +1262,7 @@ mod tests {
             Ok(vec![])
         }
 
-        fn new(config: Self::Config) -> Self {
+        fn new(_config: Self::Config) -> Self {
             todo!()
         }
     }

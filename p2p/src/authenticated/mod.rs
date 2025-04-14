@@ -197,8 +197,8 @@ mod tests {
     use commonware_cryptography::{Ed25519, Signer};
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        deterministic, tokio, Clock, Listener, Metrics, Network as RNetwork, Runner, Sink, Spawner,
-        Stream,
+        deterministic, tokio, Clock, DefaultStorage, Listener, Metrics, Network as RNetwork,
+        Runner, Sink, Spawner, Stream,
     };
     use governor::{clock::ReasonablyRealtime, Quota};
     use rand::{CryptoRng, Rng};
@@ -444,7 +444,7 @@ mod tests {
 
     #[test_traced]
     fn test_tokio_connectivity() {
-        let cfg = tokio::Config::<NonLinuxStorage>::default();
+        let cfg = tokio::Config::<DefaultStorage>::default();
         let (executor, context) = tokio::Executor::init(cfg.clone());
         executor.start(async move {
             const MAX_MESSAGE_SIZE: usize = 1_024 * 1_024; // 1MB

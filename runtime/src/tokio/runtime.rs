@@ -22,11 +22,6 @@ use tokio::{
 };
 use tracing::warn;
 
-#[cfg(feature = "iouring")]
-// This exists so my rust-analyzer won't complain
-// that nobody is using the iouring feature
-struct TODODELETE {}
-
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct Work {
     label: String,
