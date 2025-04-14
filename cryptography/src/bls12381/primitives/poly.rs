@@ -153,7 +153,7 @@ impl<C: Element> Poly<C> {
     ///
     /// It panics if the index is out of range.
     pub fn get(&self, i: u32) -> C {
-        self.0[i as usize].clone()
+        self.0[i as usize]
     }
 
     /// Set the given element at the specified index.
@@ -207,11 +207,16 @@ impl<C: Element> Poly<C> {
         }
     }
 
-    /// Recover the polynomial's constant term given at least `t` polynomial evaluations.
+    /// Recovers the constant term of a polynomial of degree less than `t` using at least `t` evaluations of the polynomial.
+    ///
+    /// This function uses Lagrange interpolation to compute the constant term (i.e., the value of the polynomial at x=0)
+    /// given at least `t` distinct evaluations of the polynomial. Each evaluation is assumed to have a unique index,
+    /// which is mapped to a unique x-value as x = index + 1.
     ///
     /// # Warning
     ///
-    /// This function assumes that each evaluation is unique.
+    /// This function assumes that each evaluation has a unique index. If there are duplicate indices, the function may
+    /// fail with an error when attempting to compute the inverse of zero.
     pub fn recover<'a, I>(t: u32, evals: I) -> Result<C, Error>
     where
         C: 'a,
@@ -219,7 +224,7 @@ impl<C: Element> Poly<C> {
     {
         // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/a714310be76620e10e8797d6637df64011926430/crates/threshold-bls/src/poly.rs#L131-L165
 
-        // Ensure we have enough shares
+        // Check if we have at least `t` evaluations; if not, return an error
         let t = t as usize;
         let mut evals = evals.into_iter().collect::<Vec<_>>();
         if evals.len() < t {
@@ -227,7 +232,14 @@ impl<C: Element> Poly<C> {
         }
 
         // Convert the first `t` sorted shares into scalars
+        //
+        // We sort the evaluations by index to ensure that two invocations of
+        // `recover` select the same evals.
         evals.sort_by_key(|e| e.index);
+
+        // Take the first `t` evaluations and prepare them for interpolation
+        //
+        // Each index `i` is mapped to `x = i + 1` to avoid `x=0` (the constant term we’re recovering).
         let xs = evals
             .into_iter()
             .take(t)
@@ -238,17 +250,18 @@ impl<C: Element> Poly<C> {
                 m
             });
 
-        // Iterate over all indices and for each multiply the lagrange basis
-        // with the value of the share
+        // Use Lagrange interpolation to compute the constant term at `x=0`
+        //
+        // The constant term is `sum_{i=1 to t} yi * l_i(0)`, where `l_i(0) = product_{j != i} (xj / (xj - xi))`.
         xs.iter().try_fold(C::zero(), |mut acc, (i, (xi, yi))| {
             let (mut num, den) = xs.iter().fold(
                 (Scalar::one(), Scalar::one()),
                 |(mut num, mut den), (j, (xj, _))| {
                     if i != j {
-                        // (xj - 0)
+                        // Include `xj` in the numerator product for `l_i(0)`
                         num.mul(xj);
 
-                        // 1 / (xj - xi)
+                        // Compute `xj - xi` and include it in the denominator product
                         let mut tmp = *xj;
                         tmp.sub(xi);
                         den.mul(&tmp);
@@ -257,11 +270,17 @@ impl<C: Element> Poly<C> {
                 },
             );
 
+            // Compute the inverse of the denominator product; fails if den is zero (e.g., duplicate `xj`)
             let inv = den.inverse().ok_or(Error::NoInverse)?;
+
+            // Compute `l_i(0) = num * inv`, the Lagrange basis coefficient at `x=0`
             num.mul(&inv);
 
-            let mut yi_scaled = (*yi).clone();
+            // Scale `yi` by `l_i(0)` to contribute to the constant term
+            let mut yi_scaled = **yi;
             yi_scaled.mul(&num);
+
+            // Add `yi * l_i(0)` to the running sum
             acc.add(&yi_scaled);
             Ok(acc)
         })

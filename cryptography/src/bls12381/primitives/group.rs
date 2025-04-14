@@ -39,7 +39,7 @@ use zeroize::Zeroize;
 pub type DST = &'static [u8];
 
 /// An element of a group.
-pub trait Element: Read + Write + FixedSize + Clone + Eq + PartialEq + Send + Sync {
+pub trait Element: Read + Write + FixedSize + Copy + Clone + Eq + PartialEq + Send + Sync {
     /// Returns the additive identity.
     fn zero() -> Self;
 
