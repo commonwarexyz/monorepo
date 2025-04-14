@@ -217,8 +217,6 @@ impl<C: Element> Poly<C> {
         C: 'a,
         I: IntoIterator<Item = &'a Eval<C>>,
     {
-        // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/a714310be76620e10e8797d6637df64011926430/crates/threshold-bls/src/poly.rs#L131-L165
-
         // Ensure we have enough shares
         let t = t as usize;
         let mut evals = evals.into_iter().collect::<Vec<_>>();
@@ -228,43 +226,69 @@ impl<C: Element> Poly<C> {
 
         // Convert the first `t` sorted shares into scalars
         evals.sort_by_key(|e| e.index);
-        let xs = evals
+        let xs: Vec<(u32, Scalar, &C)> = evals
             .into_iter()
             .take(t)
-            .fold(Vec::with_capacity(t), |mut m, sh| {
+            .map(|sh| {
                 let mut xi = Scalar::zero();
                 xi.set_int(sh.index + 1);
-                m.push((sh.index, (xi, &sh.value)));
-                m
-            });
+                (sh.index, xi, &sh.value)
+            })
+            .collect();
 
-        // Iterate over all indices and for each multiply the lagrange basis
-        // with the value of the share
-        xs.iter().try_fold(C::zero(), |mut acc, (i, (xi, yi))| {
-            let (mut num, den) = xs.iter().fold(
-                (Scalar::one(), Scalar::one()),
-                |(mut num, mut den), (j, (xj, _))| {
+        // Extract x values for prefix and suffix computation
+        let x_vals: Vec<Scalar> = xs.iter().map(|&(_, ref xi, _)| *xi).collect();
+
+        // Compute prefix products: prefix[i] = prod_{j=0}^{i-1} x_j
+        let mut prefix = vec![Scalar::one(); t + 1];
+        for i in 1..=t {
+            prefix[i] = prefix[i - 1];
+            prefix[i].mul(&x_vals[i - 1]);
+        }
+
+        // Compute suffix products: suffix[i] = prod_{j=i}^{t-1} x_j
+        let mut suffix = vec![Scalar::one(); t + 1];
+        for i in (0..t).rev() {
+            suffix[i] = suffix[i + 1];
+            suffix[i].mul(&x_vals[i]);
+        }
+
+        // Compute the constant term using optimized numerator
+        xs.iter()
+            .enumerate()
+            .try_fold(C::zero(), |mut acc, (i, &(_, ref xi, yi))| {
+                // Numerator: prod_{j != i} x_j = prefix[i] * suffix[i+1]
+                let num = if i == 0 {
+                    suffix[1]
+                } else if i == t - 1 {
+                    prefix[t - 1]
+                } else {
+                    let mut num = prefix[i];
+                    num.mul(&suffix[i + 1]);
+                    num
+                };
+
+                // Denominator: prod_{j != i} (x_j - x_i)
+                let mut den = Scalar::one();
+                for j in 0..t {
                     if i != j {
-                        // (xj - 0)
-                        num.mul(xj);
-
-                        // 1 / (xj - xi)
-                        let mut tmp = *xj;
+                        let mut tmp = x_vals[j];
                         tmp.sub(xi);
                         den.mul(&tmp);
                     }
-                    (num, den)
-                },
-            );
+                }
 
-            let inv = den.inverse().ok_or(Error::NoInverse)?;
-            num.mul(&inv);
+                // Compute l_i(0) = num / den
+                let inv = den.inverse().ok_or(Error::NoInverse)?;
+                let mut lagrange_coeff = num;
+                lagrange_coeff.mul(&inv);
 
-            let mut yi_scaled = (*yi).clone();
-            yi_scaled.mul(&num);
-            acc.add(&yi_scaled);
-            Ok(acc)
-        })
+                // Scale yi by l_i(0) and accumulate
+                let mut yi_scaled = yi.clone();
+                yi_scaled.mul(&lagrange_coeff);
+                acc.add(&yi_scaled);
+                Ok(acc)
+            })
     }
 }
 
