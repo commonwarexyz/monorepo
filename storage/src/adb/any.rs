@@ -818,7 +818,7 @@ mod test {
             assert!(start_loc < db.inactivity_floor_loc);
             for i in start_loc..end_loc {
                 let (proof, log) = db.proof(i, max_ops).await.unwrap();
-                assert!(Any::<_, Context, _, _, _>::verify_proof(
+                assert!(Any::<Context, _, _, _>::verify_proof(
                     &mut hasher,
                     &proof,
                     i,

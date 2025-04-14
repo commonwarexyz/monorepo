@@ -476,7 +476,7 @@ mod tests {
     use crate::mmr::{iterator::leaf_num_to_pos, mem::tests::ROOTS};
     use commonware_cryptography::{hash, sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic::Executor, Runner};
+    use commonware_runtime::{deterministic::Executor, Blob as _, Runner};
     use commonware_utils::hex;
 
     fn test_digest(v: usize) -> Digest {
@@ -492,7 +492,7 @@ mod tests {
                 metadata_partition: "metadata_partition".into(),
                 items_per_blob: 7,
             };
-            let mut mmr = Mmr::<_, _, Sha256>::init(context.clone(), cfg.clone())
+            let mut mmr = Mmr::<_, Sha256>::init(context.clone(), cfg.clone())
                 .await
                 .unwrap();
             assert_eq!(mmr.size(), 0);
@@ -516,7 +516,7 @@ mod tests {
             };
 
             let mut hasher = Sha256::new();
-            let mut mmr = Mmr::<_, _, Sha256>::init(context.clone(), cfg.clone())
+            let mut mmr = Mmr::<_, Sha256>::init(context.clone(), cfg.clone())
                 .await
                 .unwrap();
 
@@ -583,7 +583,7 @@ mod tests {
                 items_per_blob: 7,
             };
             // Build a test MMR with 255 leaves
-            let mut mmr = Mmr::<_, _, Sha256>::init(context.clone(), cfg.clone())
+            let mut mmr = Mmr::<_, Sha256>::init(context.clone(), cfg.clone())
                 .await
                 .unwrap();
             const LEAF_COUNT: usize = 255;
@@ -651,7 +651,7 @@ mod tests {
                 metadata_partition: "metadata_partition".into(),
                 items_per_blob: 7,
             };
-            let mut mmr = Mmr::<_, _, Sha256>::init(context.clone(), cfg.clone())
+            let mut mmr = Mmr::<_, Sha256>::init(context.clone(), cfg.clone())
                 .await
                 .unwrap();
             assert_eq!(mmr.size(), 0);
@@ -688,7 +688,7 @@ mod tests {
                 .expect("Failed to corrupt blob");
             blob.close().await.expect("Failed to close blob");
 
-            let mmr = Mmr::<_, _, Sha256>::init(context.clone(), cfg.clone())
+            let mmr = Mmr::<_, Sha256>::init(context.clone(), cfg.clone())
                 .await
                 .unwrap();
             // Since we didn't corrupt the leaf, the MMR is able to replay the leaf and recover to
@@ -698,7 +698,7 @@ mod tests {
 
             // Make sure closing it and re-opening it persists the recovered state.
             mmr.close().await.unwrap();
-            let mmr = Mmr::<_, _, Sha256>::init(context.clone(), cfg.clone())
+            let mmr = Mmr::<_, Sha256>::init(context.clone(), cfg.clone())
                 .await
                 .unwrap();
             assert_eq!(mmr.size(), 498);
@@ -724,7 +724,7 @@ mod tests {
                 .expect("Failed to corrupt blob");
             blob.close().await.expect("Failed to close blob");
 
-            let mmr = Mmr::<_, _, Sha256>::init(context.clone(), cfg.clone())
+            let mmr = Mmr::<_, Sha256>::init(context.clone(), cfg.clone())
                 .await
                 .unwrap();
             // Since the leaf was corrupted, it should not have been recovered, and the journal's
@@ -746,7 +746,7 @@ mod tests {
             // Build two test MMRs with 2000 leaves, one that will be pruned and one that won't, and
             // make sure pruning doesn't break root hashing, adding of new nodes, etc.
             const LEAF_COUNT: usize = 2000;
-            let mut pruned_mmr = Mmr::<_, _, Sha256>::init(context.clone(), cfg.clone())
+            let mut pruned_mmr = Mmr::<_, Sha256>::init(context.clone(), cfg.clone())
                 .await
                 .unwrap();
             let cfg_unpruned = Config {
@@ -754,7 +754,7 @@ mod tests {
                 metadata_partition: "unpruned_metadata_partition".into(),
                 items_per_blob: 7,
             };
-            let mut mmr = Mmr::<_, _, Sha256>::init(context.clone(), cfg_unpruned)
+            let mut mmr = Mmr::<_, Sha256>::init(context.clone(), cfg_unpruned)
                 .await
                 .unwrap();
             let mut hasher = Sha256::new();
@@ -792,7 +792,7 @@ mod tests {
 
             // Close the MMR & reopen.
             pruned_mmr.close().await.unwrap();
-            let mut pruned_mmr = Mmr::<_, _, Sha256>::init(context.clone(), cfg.clone())
+            let mut pruned_mmr = Mmr::<_, Sha256>::init(context.clone(), cfg.clone())
                 .await
                 .unwrap();
             assert_eq!(pruned_mmr.root(&mut hasher), mmr.root(&mut hasher));
@@ -808,7 +808,7 @@ mod tests {
             pruned_mmr.add(&mut hasher, &test_digest(LEAF_COUNT));
             assert!(pruned_mmr.size() % cfg.items_per_blob != 0);
             pruned_mmr.close().await.unwrap();
-            let mut pruned_mmr = Mmr::<_, _, Sha256>::init(context.clone(), cfg.clone())
+            let mut pruned_mmr = Mmr::<_, Sha256>::init(context.clone(), cfg.clone())
                 .await
                 .unwrap();
             assert_eq!(pruned_mmr.root(&mut hasher), mmr.root(&mut hasher));
@@ -836,7 +836,7 @@ mod tests {
 
             // Build MMR with 2000 leaves.
             const LEAF_COUNT: usize = 2000;
-            let mut mmr = Mmr::<_, _, Sha256>::init(context.clone(), cfg.clone())
+            let mut mmr = Mmr::<_, Sha256>::init(context.clone(), cfg.clone())
                 .await
                 .unwrap();
             let mut hasher = Sha256::new();
@@ -855,7 +855,7 @@ mod tests {
             // Prune the MMR in increments of 50, simulating a partial write after each prune.
             let mut hasher = Sha256::new();
             for i in 0usize..200 {
-                let mut mmr = Mmr::<_, _, Sha256>::init(context.clone(), cfg.clone())
+                let mut mmr = Mmr::<_, Sha256>::init(context.clone(), cfg.clone())
                     .await
                     .unwrap();
                 let start_size = mmr.size();
