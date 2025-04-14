@@ -5,6 +5,7 @@ use commonware_cryptography::{
 use commonware_utils::quorum;
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, SeedableRng};
+use rayon::ThreadPoolBuilder;
 use std::collections::HashMap;
 use std::hint::black_box;
 
@@ -30,7 +31,7 @@ fn benchmark_dkg_reshare_recovery(c: &mut Criterion) {
                 None,
                 contributors.clone(),
                 contributors.clone(),
-                1,
+                None,
             );
             players.push(player);
         }
@@ -64,6 +65,12 @@ fn benchmark_dkg_reshare_recovery(c: &mut Criterion) {
                 |b| {
                     b.iter_batched(
                         || {
+                            // Create pool
+                            let pool = ThreadPoolBuilder::new()
+                                .num_threads(concurrency)
+                                .build()
+                                .unwrap();
+
                             // Create player
                             let me = contributors[0].clone();
                             let mut player = Player::new(
@@ -71,7 +78,7 @@ fn benchmark_dkg_reshare_recovery(c: &mut Criterion) {
                                 Some(outputs[0].public.clone()),
                                 contributors.clone(),
                                 contributors.clone(),
-                                concurrency,
+                                Some(pool),
                             );
 
                             // Create commitments and send shares to player

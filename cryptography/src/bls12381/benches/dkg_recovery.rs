@@ -7,9 +7,6 @@ use rand::SeedableRng;
 use std::collections::HashMap;
 use std::hint::black_box;
 
-/// Concurrency isn't used in DKG recovery, so we set it to 1.
-const CONCURRENCY: usize = 1;
-
 fn benchmark_dkg_recovery(c: &mut Criterion) {
     let mut rng = StdRng::seed_from_u64(0);
     for &n in &[5, 10, 20, 50, 100, 250, 500, 1000, 1500, 2000] {
@@ -25,13 +22,8 @@ fn benchmark_dkg_recovery(c: &mut Criterion) {
 
                     // Create player
                     let me = contributors[0].clone();
-                    let mut player = Player::new(
-                        me,
-                        None,
-                        contributors.clone(),
-                        contributors.clone(),
-                        CONCURRENCY,
-                    );
+                    let mut player =
+                        Player::new(me, None, contributors.clone(), contributors.clone(), None);
 
                     // Create commitments and send shares to player
                     let mut commitments = HashMap::new();
