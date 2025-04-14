@@ -92,7 +92,13 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
         let metadata_cfg = MConfig {
             partition: cfg.metadata_partition,
         };
-        let metadata = Metadata::init(context.with_label("mmr_metadata"), metadata_cfg).await?;
+        let metadata = Metadata::init(
+            &context,
+            &context,
+            context.with_label("mmr_metadata"),
+            metadata_cfg,
+        )
+        .await?;
 
         if journal_size == 0 {
             return Ok(Self {
