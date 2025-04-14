@@ -18,11 +18,13 @@ fn benchmark_aggregate_verify_multiple_public_keys(c: &mut Criterion) {
                         public_keys.push(public);
                         signatures.push(signature);
                     }
-                    (public_keys, ops::aggregate_signatures(&signatures))
+                    let signature_refs = signatures.iter().collect::<Vec<_>>();
+                    (public_keys, ops::aggregate_signatures(&signature_refs))
                 },
                 |(public_keys, signature)| {
+                    let public_key_refs = public_keys.iter().collect::<Vec<_>>();
                     ops::aggregate_verify_multiple_public_keys(
-                        &public_keys,
+                        &public_key_refs,
                         Some(namespace),
                         &msg,
                         &signature,
