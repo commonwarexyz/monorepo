@@ -84,9 +84,12 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
             partition: cfg.journal_partition,
             items_per_blob: cfg.items_per_blob,
         };
-        let mut journal =
-            Journal::<B, E, H::Digest>::init(context.with_label("mmr_journal"), journal_cfg)
-                .await?;
+        let mut journal = Journal::<B, _, H::Digest>::init(
+            context.with_label("mmr_journal"),
+            &context,
+            journal_cfg,
+        )
+        .await?;
         let mut journal_size = journal.size().await?;
 
         let metadata_cfg = MConfig {

@@ -102,6 +102,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, K: Array, V: Array, H: CHasher> 
 
         let mut log = Journal::init(
             context.with_label("log"),
+            &context,
             JConfig {
                 partition: cfg.log_journal_partition,
                 items_per_blob: cfg.log_items_per_blob,

@@ -74,7 +74,7 @@ pub struct Config {
 
 /// Implementation of `Journal` storage.
 pub struct Journal<B: Blob, E: Storage<B>, A: Array> {
-    context: E,
+    storage: E,
     cfg: Config,
 
     // Blobs are stored in a BTreeMap to ensure they are always iterated in order of their indices.
@@ -91,7 +91,7 @@ pub struct Journal<B: Blob, E: Storage<B>, A: Array> {
     _array: PhantomData<A>,
 }
 
-impl<B: Blob, E: Storage<B> + Metrics, A: Array> Journal<B, E, A> {
+impl<B: Blob, E: Storage<B>, A: Array> Journal<B, E, A> {
     const CHUNK_SIZE: usize = u32::SIZE + A::SIZE;
     const CHUNK_SIZE_U64: u64 = Self::CHUNK_SIZE as u64;
 
@@ -99,16 +99,16 @@ impl<B: Blob, E: Storage<B> + Metrics, A: Array> Journal<B, E, A> {
     ///
     /// All backing blobs are opened but not read during initialization. The `replay` method can be
     /// used to iterate over all items in the `Journal`.
-    pub async fn init(context: E, cfg: Config) -> Result<Self, Error> {
+    pub async fn init(storage: E, metrics: &impl Metrics, cfg: Config) -> Result<Self, Error> {
         // Iterate over blobs in partition
         let mut blobs = BTreeMap::new();
-        let stored_blobs = match context.scan(&cfg.partition).await {
+        let stored_blobs = match storage.scan(&cfg.partition).await {
             Ok(blobs) => blobs,
             Err(RError::PartitionMissing(_)) => Vec::new(),
             Err(err) => return Err(Error::Runtime(err)),
         };
         for name in stored_blobs {
-            let blob = context
+            let blob = storage
                 .open(&cfg.partition, &name)
                 .await
                 .map_err(Error::Runtime)?;
@@ -131,7 +131,7 @@ impl<B: Blob, E: Storage<B> + Metrics, A: Array> Journal<B, E, A> {
             }
         } else {
             debug!("no blobs found");
-            let blob = context.open(&cfg.partition, &0u64.to_be_bytes()).await?;
+            let blob = storage.open(&cfg.partition, &0u64.to_be_bytes()).await?;
             blobs.insert(0, blob);
         }
 
@@ -139,9 +139,9 @@ impl<B: Blob, E: Storage<B> + Metrics, A: Array> Journal<B, E, A> {
         let tracked = Gauge::default();
         let synced = Counter::default();
         let pruned = Counter::default();
-        context.register("tracked", "Number of blobs", tracked.clone());
-        context.register("synced", "Number of syncs", synced.clone());
-        context.register("pruned", "Number of blobs pruned", pruned.clone());
+        metrics.register("tracked", "Number of blobs", tracked.clone());
+        metrics.register("synced", "Number of syncs", synced.clone());
+        metrics.register("pruned", "Number of blobs pruned", pruned.clone());
         tracked.set(blobs.len() as i64);
 
         // truncate the last blob if it's not the expected length, which might happen from unclean
@@ -165,7 +165,7 @@ impl<B: Blob, E: Storage<B> + Metrics, A: Array> Journal<B, E, A> {
                 "blob is full, creating a new empty one"
             );
             let next_blob_index = newest_blob_index + 1;
-            let next_blob = context
+            let next_blob = storage
                 .open(&cfg.partition, &next_blob_index.to_be_bytes())
                 .await?;
             blobs.insert(next_blob_index, next_blob);
@@ -173,7 +173,7 @@ impl<B: Blob, E: Storage<B> + Metrics, A: Array> Journal<B, E, A> {
         }
 
         Ok(Self {
-            context,
+            storage,
             cfg,
             blobs,
             tracked,
@@ -229,7 +229,7 @@ impl<B: Blob, E: Storage<B> + Metrics, A: Array> Journal<B, E, A> {
             newest_blob.1.sync().await?;
             debug!(blob = next_blob_index, "creating next blob");
             let next_blob = self
-                .context
+                .storage
                 .open(&self.cfg.partition, &next_blob_index.to_be_bytes())
                 .await?;
             assert!(self.blobs.insert(next_blob_index, next_blob).is_none());
@@ -263,7 +263,7 @@ impl<B: Blob, E: Storage<B> + Metrics, A: Array> Journal<B, E, A> {
                 None => return Err(Error::MissingBlob(current_blob_index)),
             };
             blob.close().await?;
-            self.context
+            self.storage
                 .remove(&self.cfg.partition, Some(&current_blob_index.to_be_bytes()))
                 .await?;
             debug!(blob = current_blob_index, "unwound over blob");
@@ -429,7 +429,7 @@ impl<B: Blob, E: Storage<B> + Metrics, A: Array> Journal<B, E, A> {
             let blob = self.blobs.remove(&index).unwrap();
             // Close the blob and remove it from storage
             blob.close().await?;
-            self.context
+            self.storage
                 .remove(&self.cfg.partition, Some(&index.to_be_bytes()))
                 .await?;
             debug!(blob = index, "pruned blob");
