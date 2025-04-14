@@ -27,6 +27,52 @@ struct Work {
     label: String,
 }
 
+pub struct StorageMetrics {
+    pub(crate) open_blobs: Gauge,
+    pub(crate) storage_reads: Counter,
+    pub(crate) storage_read_bytes: Counter,
+    pub(crate) storage_writes: Counter,
+    pub(crate) storage_write_bytes: Counter,
+}
+
+impl StorageMetrics {
+    pub fn new(registry: &impl crate::Metrics) -> Self {
+        let metrics = Self {
+            open_blobs: Gauge::default(),
+            storage_reads: Counter::default(),
+            storage_read_bytes: Counter::default(),
+            storage_writes: Counter::default(),
+            storage_write_bytes: Counter::default(),
+        };
+        registry.register(
+            "open_blobs",
+            "Number of open blobs",
+            metrics.open_blobs.clone(),
+        );
+        registry.register(
+            "storage_reads",
+            "Total number of disk reads",
+            metrics.storage_reads.clone(),
+        );
+        registry.register(
+            "storage_read_bytes",
+            "Total amount of data read from disk",
+            metrics.storage_read_bytes.clone(),
+        );
+        registry.register(
+            "storage_writes",
+            "Total number of disk writes",
+            metrics.storage_writes.clone(),
+        );
+        registry.register(
+            "storage_write_bytes",
+            "Total amount of data written to disk",
+            metrics.storage_write_bytes.clone(),
+        );
+        metrics
+    }
+}
+
 #[derive(Debug)]
 pub struct Metrics {
     tasks_spawned: Family<Work, Counter>,
@@ -40,12 +86,6 @@ pub struct Metrics {
     outbound_connections: Counter,
     inbound_bandwidth: Counter,
     outbound_bandwidth: Counter,
-
-    pub(crate) open_blobs: Gauge,
-    pub(crate) storage_reads: Counter,
-    pub(crate) storage_read_bytes: Counter,
-    pub(crate) storage_writes: Counter,
-    pub(crate) storage_write_bytes: Counter,
 }
 
 impl Metrics {
@@ -59,11 +99,6 @@ impl Metrics {
             outbound_connections: Counter::default(),
             inbound_bandwidth: Counter::default(),
             outbound_bandwidth: Counter::default(),
-            open_blobs: Gauge::default(),
-            storage_reads: Counter::default(),
-            storage_read_bytes: Counter::default(),
-            storage_writes: Counter::default(),
-            storage_write_bytes: Counter::default(),
         };
         registry.register(
             "tasks_spawned",
@@ -104,31 +139,6 @@ impl Metrics {
             "outbound_bandwidth",
             "Bandwidth used by sending data to others",
             metrics.outbound_bandwidth.clone(),
-        );
-        registry.register(
-            "open_blobs",
-            "Number of open blobs",
-            metrics.open_blobs.clone(),
-        );
-        registry.register(
-            "storage_reads",
-            "Total number of disk reads",
-            metrics.storage_reads.clone(),
-        );
-        registry.register(
-            "storage_read_bytes",
-            "Total amount of data read from disk",
-            metrics.storage_read_bytes.clone(),
-        );
-        registry.register(
-            "storage_writes",
-            "Total number of disk writes",
-            metrics.storage_writes.clone(),
-        );
-        registry.register(
-            "storage_write_bytes",
-            "Total amount of data written to disk",
-            metrics.storage_write_bytes.clone(),
         );
         metrics
     }

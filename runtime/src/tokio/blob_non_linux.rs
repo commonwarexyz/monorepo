@@ -1,6 +1,7 @@
-use super::Metrics;
+use super::{Metrics, StorageMetrics};
 use crate::Error;
 use commonware_utils::{from_hex, hex};
+use prometheus_client::registry::Registry;
 use rand::{rngs::OsRng, RngCore};
 use std::{env, io::SeekFrom, path::PathBuf, sync::Arc};
 use tokio::{
@@ -11,7 +12,7 @@ use tokio::{
 
 /// Implementation of [`crate::Blob`] for the `tokio` runtime.
 pub struct Blob {
-    metrics: Arc<Metrics>,
+    metrics: Arc<StorageMetrics>,
 
     partition: String,
     name: Vec<u8>,
@@ -27,7 +28,7 @@ pub struct Blob {
 
 impl Blob {
     pub fn new(
-        metrics: Arc<Metrics>,
+        metrics: Arc<StorageMetrics>,
         partition: String,
         name: &[u8],
         file: fs::File,
@@ -75,16 +76,16 @@ impl Default for Config {
 
 pub struct Storage {
     lock: Arc<AsyncMutex<()>>,
-    metrics: Arc<Metrics>,
+    metrics: Arc<StorageMetrics>,
     storage_directory: PathBuf,
     max_buffer_size: usize,
 }
 
 impl Storage {
-    pub fn new(metrics: Arc<Metrics>, cfg: Config) -> Storage {
+    pub fn new(metrics_reg: &impl crate::Metrics, cfg: Config) -> Storage {
         Storage {
             lock: AsyncMutex::new(()).into(),
-            metrics,
+            metrics: StorageMetrics::new(metrics_reg).into(),
             storage_directory: cfg.storage_directory,
             max_buffer_size: cfg.max_buffer_size,
         }

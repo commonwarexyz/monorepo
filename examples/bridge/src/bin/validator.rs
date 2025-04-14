@@ -154,7 +154,7 @@ fn main() {
     let (executor, context) = Executor::init(Default::default());
     let mut storage_cfg = NonLinuxStorageConfig::default();
     storage_cfg.storage_directory = storage_directory.into();
-    let storage = NonLinuxStorage::new(todo!(), storage_cfg);
+    let storage = NonLinuxStorage::new(&context, storage_cfg);
 
     // Configure indexer
     let indexer_cfg = public_key::Config {

@@ -149,7 +149,7 @@ fn main() {
     let (executor, context) = Executor::init(Default::default());
     let mut storage_config = NonLinuxStorageConfig::default();
     storage_config.storage_directory = storage_directory.into();
-    let storage = NonLinuxStorage::new(todo!(), storage_config);
+    let storage = NonLinuxStorage::new(&context, storage_config);
 
     // Configure network
     let p2p_cfg = authenticated::Config::aggressive(
