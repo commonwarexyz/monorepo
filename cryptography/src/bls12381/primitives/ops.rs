@@ -186,22 +186,16 @@ pub fn partial_aggregate_signatures<'a, I>(partials: I) -> Option<(u32, group::S
 where
     I: IntoIterator<Item = &'a PartialSignature>,
 {
-    let mut index = None;
+    let mut iter = partials.into_iter().peekable();
+    let index = iter.peek()?.index;
     let mut s = group::Signature::zero();
-    for partial in partials {
-        if let Some(index) = index {
-            if partial.index != index {
-                return None;
-            }
-        } else {
-            index = Some(partial.index);
+    for partial in iter {
+        if partial.index != index {
+            return None;
         }
         s.add(&partial.value);
     }
-    if let Some(index) = index {
-        return Some((index, s));
-    }
-    None
+    Some((index, s))
 }
 
 /// Verifies the signatures from multiple partial signatures over multiple unique messages from a single
