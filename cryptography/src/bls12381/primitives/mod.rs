@@ -35,7 +35,7 @@
 //! }
 //!
 //! // Aggregate partial signatures
-//! let threshold_sig = threshold_signature_recover(t, partials).unwrap();
+//! let threshold_sig = threshold_signature_recover(t, &partials).unwrap();
 //!
 //! // Verify threshold signature
 //! let threshold_pub = public(&commitment);
