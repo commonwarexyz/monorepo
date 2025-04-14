@@ -1,8 +1,8 @@
 //! Utility functions for interacting with any runtime.
 
-use crate::Error;
 #[cfg(test)]
-use crate::{Runner, Spawner};
+use crate::Runner;
+use crate::{Error, Spawner};
 #[cfg(test)]
 use futures::stream::{FuturesUnordered, StreamExt};
 use futures::{
@@ -12,6 +12,7 @@ use futures::{
     FutureExt,
 };
 use prometheus_client::metrics::gauge::Gauge;
+use rayon::{ThreadPool, ThreadPoolBuildError, ThreadPoolBuilder};
 use std::{
     any::Any,
     future::Future,
@@ -320,6 +321,27 @@ impl Signaler {
             let _ = stop_tx.send(value);
         }
     }
+}
+
+/// Creates a Rayon thread pool that uses the runtime's `spawn_blocking` to spawn threads.
+///
+/// # Arguments
+/// - `context`: The runtime context implementing the `Spawner` trait.
+/// - `concurrency`: The number of tasks to spawn in the pool.
+///
+/// # Returns
+/// A `Result` containing the configured `ThreadPool` or an error if the pool cannot be built.
+pub fn create_rayon_pool<S: Spawner>(
+    context: S,
+    concurrency: usize,
+) -> Result<ThreadPool, ThreadPoolBuildError> {
+    ThreadPoolBuilder::new()
+        .num_threads(concurrency)
+        .spawn_handler(move |thread| {
+            context.clone().spawn_blocking(move || thread.run());
+            Ok(())
+        })
+        .build()
 }
 
 #[cfg(test)]
