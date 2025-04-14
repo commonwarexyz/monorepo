@@ -27,7 +27,7 @@ use commonware_codec::{
     FixedSize, Read, ReadExt, Write,
 };
 use rand::RngCore;
-use std::ptr;
+use std::{hash::Hash, ptr};
 use zeroize::Zeroize;
 
 /// Domain separation tag used when hashing a message to a curve (G1 or G2).
@@ -228,6 +228,12 @@ impl FixedSize for Share {
     const SIZE: usize = u32::SIZE + Private::SIZE;
 }
 
+impl Hash for Share {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        state.write(&self.encode());
+    }
+}
+
 impl Scalar {
     /// Generates a random scalar using the provided RNG.
     pub fn rand<R: RngCore>(rng: &mut R) -> Self {
@@ -355,6 +361,12 @@ impl FixedSize for Scalar {
     const SIZE: usize = SCALAR_LENGTH;
 }
 
+impl Hash for Scalar {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        state.write(&self.encode());
+    }
+}
+
 impl Element for G1 {
     fn zero() -> Self {
         Self(blst_p1::default())
@@ -439,6 +451,12 @@ impl Read for G1 {
 
 impl FixedSize for G1 {
     const SIZE: usize = G1_ELEMENT_BYTE_LENGTH;
+}
+
+impl Hash for G1 {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        state.write(&self.encode());
+    }
 }
 
 impl Point for G1 {
@@ -541,6 +559,12 @@ impl Read for G2 {
 
 impl FixedSize for G2 {
     const SIZE: usize = G2_ELEMENT_BYTE_LENGTH;
+}
+
+impl Hash for G2 {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        state.write(&self.encode());
+    }
 }
 
 impl Point for G2 {

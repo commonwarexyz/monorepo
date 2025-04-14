@@ -15,7 +15,7 @@ use commonware_codec::{
     Decode, DecodeExt, Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write,
 };
 use rand::{rngs::OsRng, RngCore};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, hash::Hash};
 
 /// Private polynomials are used to generate secret shares.
 pub type Private = Poly<group::Private>;
@@ -69,6 +69,12 @@ impl<C: Element> Read for Eval<C> {
 
 impl<C: Element> FixedSize for Eval<C> {
     const SIZE: usize = u32::SIZE + C::SIZE;
+}
+
+impl<C: Element> Hash for Eval<C> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        state.write(&self.encode());
+    }
 }
 
 /// A polynomial that is using a scalar for the variable x and a generic
