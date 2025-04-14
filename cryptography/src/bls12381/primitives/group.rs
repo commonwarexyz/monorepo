@@ -227,6 +227,7 @@ impl Scalar {
         unsafe { blst_fr_sub(&mut self.0, &self.0, &rhs.0) }
     }
 
+    /// Encodes the scalar into a slice.
     fn as_slice(&self) -> [u8; Self::SIZE] {
         let mut slice = [0u8; Self::SIZE];
         unsafe {
@@ -371,6 +372,7 @@ impl FixedSize for Share {
 }
 
 impl G1 {
+    /// Encodes the G1 element into a slice.
     fn as_slice(&self) -> [u8; Self::SIZE] {
         let mut slice = [0u8; Self::SIZE];
         unsafe {
@@ -487,6 +489,7 @@ impl Point for G1 {
 }
 
 impl G2 {
+    /// Encodes the G2 element into a slice.
     fn as_slice(&self) -> [u8; Self::SIZE] {
         let mut slice = [0u8; Self::SIZE];
         unsafe {
