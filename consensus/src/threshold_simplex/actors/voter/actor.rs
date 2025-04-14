@@ -474,7 +474,8 @@ impl<
                 .context
                 .with_label("notarization_recovery")
                 .spawn_blocking(move || {
-                    threshold_signature_recover(threshold, notarization)
+                    let notarization_refs = notarization.iter().collect::<Vec<_>>();
+                    threshold_signature_recover(threshold, &notarization_refs)
                         .unwrap()
                         .serialize()
                 });
@@ -482,7 +483,8 @@ impl<
                 self.context
                     .with_label("seed_recovery")
                     .spawn_blocking(move || {
-                        threshold_signature_recover(threshold, seed)
+                        let seed_refs = seed.iter().collect::<Vec<_>>();
+                        threshold_signature_recover(threshold, &seed_refs)
                             .unwrap()
                             .serialize()
                     });
@@ -535,7 +537,8 @@ impl<
             .context
             .with_label("nullification_recovery")
             .spawn_blocking(move || {
-                threshold_signature_recover(threshold, nullification)
+                let nullification_refs = nullification.iter().collect::<Vec<_>>();
+                threshold_signature_recover(threshold, &nullification_refs)
                     .unwrap()
                     .serialize()
             });
@@ -543,7 +546,8 @@ impl<
             .context
             .with_label("seed_recovery")
             .spawn_blocking(move || {
-                threshold_signature_recover(threshold, seed)
+                let seed_refs = seed.iter().collect::<Vec<_>>();
+                threshold_signature_recover(threshold, &seed_refs)
                     .unwrap()
                     .serialize()
             });
@@ -619,16 +623,16 @@ impl<
             let proposal = finalize.message.proposal.as_ref().unwrap().clone();
 
             // Recover threshold signature
-            let mut finalizations = Vec::new();
+            let mut finalization = Vec::new();
             for finalize in finalizes.values() {
                 let eval = Eval::deserialize(&finalize.message.proposal_signature).unwrap();
-                finalizations.push(eval);
+                finalization.push(eval);
             }
-            let finalization_refs = finalizations.iter().collect::<Vec<_>>();
             let proposal_signature = self
                 .context
                 .with_label("finalization_recovery")
                 .spawn_blocking(move || {
+                    let finalization_refs = finalization.iter().collect::<Vec<_>>();
                     threshold_signature_recover(threshold, &finalization_refs)
                         .unwrap()
                         .serialize()

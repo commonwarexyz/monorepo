@@ -90,7 +90,8 @@ impl<D: Digest, P: Array> AckManager<D, P> {
                 let partials = p.sigs.remove(&ack.chunk.payload).unwrap();
 
                 // Construct the threshold signature
-                let threshold = ops::threshold_signature_recover(quorum, partials).unwrap();
+                let partial_refs = partials.iter().collect::<Vec<_>>();
+                let threshold = ops::threshold_signature_recover(quorum, &partial_refs).unwrap();
                 Some(threshold)
             }
         }
@@ -220,7 +221,8 @@ mod tests {
             quorum: u32,
             partials: Vec<commonware_cryptography::bls12381::primitives::poly::PartialSignature>,
         ) -> commonware_cryptography::bls12381::primitives::group::Signature {
-            ops::threshold_signature_recover(quorum, partials).unwrap()
+            let partial_refs = partials.iter().collect::<Vec<_>>();
+            ops::threshold_signature_recover(quorum, &partial_refs).unwrap()
         }
 
         /// Generate a threshold signature directly from the shares specified by `indices`.
