@@ -5,7 +5,6 @@ use crate::bls12381::{
     primitives::{group::Share, poly},
 };
 use rand::RngCore;
-use rayon::{prelude::*, ThreadPoolBuilder};
 use std::collections::BTreeMap;
 
 /// Generate shares and a commitment.
@@ -113,53 +112,21 @@ pub fn recover_public(
     }
 
     // Perform interpolation over each coefficient
-    let new = if concurrency == 1 {
-        // Interpolate each coefficient sequentially
-        let mut points = Vec::with_capacity(threshold as usize);
-        for coeff in 0..threshold {
-            let evals: Vec<_> = commitments
-                .iter()
-                .map(|(dealer, commitment)| poly::Eval {
-                    index: *dealer,
-                    value: commitment.get(coeff),
-                })
-                .collect();
-            match poly::Public::recover(required, evals) {
-                Ok(point) => points.push(point),
-                Err(_) => return Err(Error::PublicKeyInterpolationFailed),
-            };
-        }
-        poly::Public::from(points)
-    } else {
-        // Construct pool to perform interpolation
-        let pool = ThreadPoolBuilder::new()
-            .num_threads(concurrency)
-            .build()
-            .expect("unable to build thread pool");
-
-        // Interpolate each coefficient in parallel
-        match pool.install(|| {
-            (0..threshold)
-                .into_par_iter()
-                .map(|coeff| {
-                    let evals: Vec<_> = commitments
-                        .iter()
-                        .map(|(dealer, commitment)| poly::Eval {
-                            index: *dealer,
-                            value: commitment.get(coeff),
-                        })
-                        .collect();
-                    match poly::Public::recover(required, evals) {
-                        Ok(point) => Ok(point),
-                        Err(_) => Err(Error::PublicKeyInterpolationFailed),
-                    }
-                })
-                .collect::<Result<Vec<_>, _>>()
-        }) {
-            Ok(points) => poly::Public::from(points),
-            Err(e) => return Err(e),
-        }
-    };
+    let mut points = Vec::with_capacity(threshold as usize);
+    for coeff in 0..threshold {
+        let evals: Vec<_> = commitments
+            .iter()
+            .map(|(dealer, commitment)| poly::Eval {
+                index: *dealer,
+                value: commitment.get(coeff),
+            })
+            .collect();
+        match poly::Public::recover(required, evals, concurrency) {
+            Ok(point) => points.push(point),
+            Err(_) => return Err(Error::PublicKeyInterpolationFailed),
+        };
+    }
+    let new = poly::Public::from(points);
 
     // Ensure public key matches
     if previous.constant() != new.constant() {

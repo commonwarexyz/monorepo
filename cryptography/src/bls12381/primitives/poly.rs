@@ -13,6 +13,7 @@ use crate::bls12381::primitives::{
 use bytes::BufMut;
 use commonware_codec::FixedSize;
 use rand::{rngs::OsRng, RngCore};
+use rayon::{prelude::*, ThreadPoolBuilder};
 use std::collections::BTreeMap;
 
 /// Private polynomials are used to generate secret shares.
@@ -209,7 +210,7 @@ impl<C: Element> Poly<C> {
     }
 
     /// Recover the polynomial's constant term given at least `t` polynomial evaluations.
-    pub fn recover(t: u32, mut evals: Vec<Eval<C>>) -> Result<C, Error> {
+    pub fn recover(t: u32, mut evals: Vec<Eval<C>>, concurrency: usize) -> Result<C, Error> {
         // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/a714310be76620e10e8797d6637df64011926430/crates/threshold-bls/src/poly.rs#L131-L165
 
         // Ensure there are enough shares
@@ -238,32 +239,80 @@ impl<C: Element> Poly<C> {
 
         // Iterate over all indices and for each multiply the lagrange basis
         // with the value of the share
-        let mut acc = C::zero();
-        for (i, xi) in &xs {
-            let mut yi = xi.1.clone();
-            let mut num = Scalar::one();
-            let mut den = Scalar::one();
+        if concurrency == 1 {
+            // Sequentially compute the polynomial
+            let mut acc = C::zero();
+            for (i, xi) in &xs {
+                let mut yi = xi.1.clone();
+                let mut num = Scalar::one();
+                let mut den = Scalar::one();
 
-            for (j, xj) in &xs {
-                if i == j {
-                    continue;
+                for (j, xj) in &xs {
+                    if i == j {
+                        continue;
+                    }
+
+                    // xj - 0
+                    num.mul(&xj.0);
+
+                    // 1 / (xj - xi)
+                    let mut tmp = xj.0;
+                    tmp.sub(&xi.0);
+                    den.mul(&tmp);
                 }
 
-                // xj - 0
-                num.mul(&xj.0);
-
-                // 1 / (xj - xi)
-                let mut tmp = xj.0;
-                tmp.sub(&xi.0);
-                den.mul(&tmp);
+                let inv = den.inverse().ok_or(Error::NoInverse)?;
+                num.mul(&inv);
+                yi.mul(&num);
+                acc.add(&yi);
             }
+            Ok(acc)
+        } else {
+            // Build thread pool
+            let pool = ThreadPoolBuilder::new()
+                .num_threads(concurrency)
+                .build()
+                .expect("unable to build thread pool");
 
-            let inv = den.inverse().ok_or(Error::NoInverse)?;
-            num.mul(&inv);
-            yi.mul(&num);
-            acc.add(&yi);
+            // Compute each term in parallel
+            pool.install(|| {
+                let terms: Vec<Result<C, Error>> = xs
+                    .par_iter()
+                    .map(|(i, xi)| {
+                        let mut yi = xi.1.clone();
+                        let mut num = Scalar::one();
+                        let mut den = Scalar::one();
+
+                        for (j, xj) in &xs {
+                            if i == j {
+                                continue;
+                            }
+
+                            // xj - 0
+                            num.mul(&xj.0);
+
+                            // 1 / (xj - xi)
+                            let mut tmp = xj.0;
+                            tmp.sub(&xi.0);
+                            den.mul(&tmp);
+                        }
+
+                        let inv = den.inverse().ok_or(Error::NoInverse)?;
+                        num.mul(&inv);
+                        yi.mul(&num);
+                        Ok(yi)
+                    })
+                    .collect();
+                let mut acc = C::zero();
+                for yi in terms {
+                    if let Err(e) = yi {
+                        return Err(e);
+                    }
+                    acc.add(&yi.unwrap());
+                }
+                Ok(acc)
+            })
         }
-        Ok(acc)
     }
 }
 
