@@ -4,14 +4,10 @@ use super::{
     ingress::{Mailbox, Message},
     metrics,
 };
-use crate::{
-    p2p::{
-        wire::{self, peer_msg::Payload},
-        Coordinator, Producer,
-    },
-    Consumer,
-};
+use super::{wire, Coordinator, Producer};
+use crate::Consumer;
 use bytes::Bytes;
+use commonware_codec::{DecodeExt, Encode};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{
@@ -28,7 +24,6 @@ use futures::{
     StreamExt,
 };
 use governor::clock::Clock as GClock;
-use prost::Message as _;
 use rand::Rng;
 use std::{collections::HashMap, marker::PhantomData};
 use tracing::{debug, error, trace, warn};
@@ -256,7 +251,7 @@ impl<
                             return;
                         }
                     };
-                    let msg = match wire::PeerMsg::decode(msg) {
+                    let msg = match wire::Message::decode(msg) {
                         Ok(msg) => msg,
                         Err(err) => {
                             trace!(?err, ?peer, "decode failed");
@@ -264,9 +259,9 @@ impl<
                         }
                     };
                     match msg.payload {
-                        Some(Payload::Request(request)) => self.handle_network_request(peer, msg.id, request).await,
-                        Some(Payload::Response(response)) => self.handle_network_response(&mut sender, peer, msg.id, response).await,
-                        None => self.handle_network_response_empty(&mut sender, peer, msg.id).await,
+                        wire::Payload::Request(key) => self.handle_network_request(peer, msg.id, key).await,
+                        wire::Payload::Response(response) => self.handle_network_response(&mut sender, peer, msg.id, response).await,
+                        wire::Payload::ErrorResponse => self.handle_network_error_response(&mut sender, peer, msg.id).await,
                     };
                 },
 
@@ -299,13 +294,12 @@ impl<
         response: Result<Bytes, oneshot::Canceled>,
         priority: bool,
     ) {
-        // Encode message. If the response is an error, send an empty response.
-        let msg = wire::PeerMsg {
-            id,
-            payload: response.ok().map(Payload::Response),
-        }
-        .encode_to_vec()
-        .into();
+        // Encode message
+        let payload: wire::Payload<Key> = match response {
+            Ok(data) => wire::Payload::Response(data),
+            Err(_) => wire::Payload::ErrorResponse,
+        };
+        let msg: Bytes = wire::Message { id, payload }.encode().into();
 
         // Send message to peer
         let result = sender
@@ -321,14 +315,7 @@ impl<
     }
 
     /// Handle a network request from a peer.
-    async fn handle_network_request(&mut self, peer: P, id: u64, request: Bytes) {
-        // Parse request
-        let Ok(key) = Key::try_from(request.to_vec()) else {
-            trace!(?peer, ?id, "peer invalid request");
-            self.metrics.serve.inc(Status::Invalid);
-            return;
-        };
-
+    async fn handle_network_request(&mut self, peer: P, id: u64, key: Key) {
         // Serve the request
         trace!(?peer, ?id, "peer request");
         let mut producer = self.producer.clone();
@@ -376,8 +363,8 @@ impl<
     }
 
     /// Handle a network response from a peer that did not have the data.
-    async fn handle_network_response_empty(&mut self, sender: &mut NetS, peer: P, id: u64) {
-        trace!(?peer, ?id, "peer response: empty");
+    async fn handle_network_error_response(&mut self, sender: &mut NetS, peer: P, id: u64) {
+        trace!(?peer, ?id, "peer response: error");
 
         // Get the key associated with the response, if any
         let Some(key) = self.fetcher.pop_by_id(id, &peer, false) else {

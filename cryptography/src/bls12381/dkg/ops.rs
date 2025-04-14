@@ -123,14 +123,14 @@ pub fn recover_public(
         (0..threshold)
             .into_par_iter()
             .map(|coeff| {
-                let evals: Vec<_> = commitments
+                let evals = commitments
                     .iter()
                     .map(|(dealer, commitment)| poly::Eval {
                         index: *dealer,
                         value: commitment.get(coeff),
                     })
-                    .collect();
-                match poly::Public::recover(required, evals) {
+                    .collect::<Vec<_>>();
+                match poly::Public::recover(required, &evals) {
                     Ok(point) => Ok(point),
                     Err(_) => Err(Error::PublicKeyInterpolationFailed),
                 }
