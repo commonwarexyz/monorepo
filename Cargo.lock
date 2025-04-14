@@ -1191,6 +1191,7 @@ dependencies = [
  "rand",
  "rangemap",
  "thiserror 2.0.12",
+ "tokio",
  "tracing",
  "tracing-subscriber",
  "zstd",
@@ -1333,6 +1334,7 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "tinytemplate",
+ "tokio",
  "walkdir",
 ]
 
