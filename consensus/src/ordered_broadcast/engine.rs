@@ -1022,7 +1022,7 @@ impl<
         let cfg = journal::variable::Config {
             partition: format!("{}{}", &self.journal_name_prefix, sequencer),
         };
-        let mut journal = Journal::init(self.context.clone(), cfg)
+        let mut journal = Journal::init(self.context.clone(), &self.context, cfg)
             .await
             .expect("unable to init journal");
 
