@@ -10,8 +10,10 @@ use crate::bls12381::primitives::{
     group::{self, Element, Scalar},
     Error,
 };
-use bytes::BufMut;
-use commonware_codec::FixedSize;
+use bytes::{Buf, BufMut};
+use commonware_codec::{
+    Decode, DecodeExt, Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write,
+};
 use rand::{rngs::OsRng, RngCore};
 use std::collections::BTreeMap;
 
@@ -41,19 +43,32 @@ pub struct Eval<C: Element> {
 impl<C: Element> Eval<C> {
     /// Canonically serializes the evaluation.
     pub fn serialize(&self) -> Vec<u8> {
-        let value_serialized = self.value.serialize();
-        let mut bytes = Vec::with_capacity(u32::SIZE + value_serialized.len());
-        bytes.put_u32(self.index);
-        bytes.extend_from_slice(&value_serialized);
-        bytes
+        self.encode().into()
     }
 
     /// Deserializes a canonically encoded evaluation.
     pub fn deserialize(bytes: &[u8]) -> Option<Self> {
-        let index = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-        let value = C::deserialize(&bytes[u32::SIZE..])?;
-        Some(Self { index, value })
+        Self::decode(bytes).ok()
     }
+}
+
+impl<C: Element> Write for Eval<C> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.index.write(buf);
+        self.value.write(buf);
+    }
+}
+
+impl<C: Element> Read for Eval<C> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let index = buf.get_u32();
+        let value = C::read(buf)?;
+        Ok(Self { index, value })
+    }
+}
+
+impl<C: Element> FixedSize for Eval<C> {
+    const SIZE: usize = u32::SIZE + C::SIZE;
 }
 
 /// A polynomial that is using a scalar for the variable x and a generic
@@ -162,28 +177,12 @@ impl<C: Element> Poly<C> {
 
     /// Canonically serializes the polynomial.
     pub fn serialize(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        for c in &self.0 {
-            bytes.extend_from_slice(&c.serialize());
-        }
-        bytes
+        self.encode().into()
     }
 
     /// Deserializes a canonically encoded polynomial.
     pub fn deserialize(bytes: &[u8], expected: u32) -> Option<Self> {
-        let expected = expected as usize;
-        let mut coeffs = Vec::with_capacity(expected);
-        for chunk in bytes.chunks_exact(C::size()) {
-            if coeffs.len() >= expected {
-                return None;
-            }
-            let c = C::deserialize(chunk)?;
-            coeffs.push(c);
-        }
-        if coeffs.len() != expected {
-            return None;
-        }
-        Some(Self(coeffs))
+        Self::decode_cfg(bytes, &(expected as usize)).ok()
     }
 
     /// Evaluates the polynomial at the specified value.
@@ -264,6 +263,34 @@ impl<C: Element> Poly<C> {
             acc.add(&yi);
         }
         Ok(acc)
+    }
+}
+
+impl<C: Element> Write for Poly<C> {
+    fn write(&self, buf: &mut impl BufMut) {
+        for c in &self.0 {
+            c.write(buf);
+        }
+    }
+}
+
+impl<C: Element> Read<usize> for Poly<C> {
+    fn read_cfg(buf: &mut impl Buf, expected: &usize) -> Result<Self, CodecError> {
+        let expected_size = C::SIZE * (*expected);
+        if buf.remaining() < expected_size {
+            return Err(CodecError::EndOfBuffer);
+        }
+        let mut coeffs = Vec::with_capacity(*expected);
+        for _ in 0..*expected {
+            coeffs.push(C::read(buf)?);
+        }
+        Ok(Self(coeffs))
+    }
+}
+
+impl<C: Element> EncodeSize for Poly<C> {
+    fn encode_size(&self) -> usize {
+        C::SIZE * self.0.len()
     }
 }
 
@@ -425,5 +452,13 @@ pub mod tests {
                 assert_eq!(sum, evaluation, "degree={}, idx={}", d, idx);
             }
         }
+    }
+
+    #[test]
+    fn test_codec() {
+        let original = new(5);
+        let encoded = original.serialize();
+        let decoded = Poly::<Scalar>::deserialize(&encoded, original.required()).unwrap();
+        assert_eq!(original, decoded);
     }
 }

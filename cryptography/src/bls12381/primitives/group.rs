@@ -20,7 +20,12 @@ use blst::{
     blst_p2_uncompress, blst_scalar, blst_scalar_from_bendian, blst_scalar_from_fr, blst_sk_check,
     Pairing, BLS12_381_G1, BLS12_381_G2, BLS12_381_NEG_G1, BLST_ERROR,
 };
-use commonware_codec::FixedSize;
+use bytes::{Buf, BufMut};
+use commonware_codec::{
+    DecodeExt, Encode,
+    Error::{self, Invalid},
+    FixedSize, Read, ReadExt, Write,
+};
 use rand::RngCore;
 use std::ptr;
 use zeroize::Zeroize;
@@ -31,7 +36,7 @@ use zeroize::Zeroize;
 pub type DST = &'static [u8];
 
 /// An element of a group.
-pub trait Element: Clone + Eq + PartialEq + Send + Sync {
+pub trait Element: Read + Write + FixedSize + Clone + Eq + PartialEq + Send + Sync {
     /// Returns the additive identity.
     fn zero() -> Self;
 
@@ -195,21 +200,32 @@ impl Share {
 
     /// Canonically serializes the share.
     pub fn serialize(&self) -> Vec<u8> {
-        let mut bytes = [0u8; u32::SIZE + SCALAR_LENGTH];
-        bytes[..u32::SIZE].copy_from_slice(&self.index.to_be_bytes());
-        bytes[u32::SIZE..].copy_from_slice(&self.private.serialize());
-        bytes.to_vec()
+        self.encode().into()
     }
 
     /// Deserializes a canonically encoded share.
     pub fn deserialize(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() != u32::SIZE + SCALAR_LENGTH {
-            return None;
-        }
-        let index = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-        let private = Private::deserialize(&bytes[u32::SIZE..])?;
-        Some(Self { index, private })
+        Self::decode(bytes).ok()
     }
+}
+
+impl Write for Share {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.index.write(buf);
+        self.private.write(buf);
+    }
+}
+
+impl Read for Share {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        let index = u32::read(buf)?;
+        let private = Private::read(buf)?;
+        Ok(Self { index, private })
+    }
+}
+
+impl FixedSize for Share {
+    const SIZE: usize = u32::SIZE + Private::SIZE;
 }
 
 impl Scalar {
@@ -286,19 +302,33 @@ impl Element for Scalar {
     }
 
     fn serialize(&self) -> Vec<u8> {
-        let mut bytes = [0u8; SCALAR_LENGTH];
+        self.encode().into()
+    }
+
+    fn deserialize(bytes: &[u8]) -> Option<Self> {
+        Self::decode(bytes).ok()
+    }
+
+    fn size() -> usize {
+        Self::SIZE
+    }
+}
+
+impl Write for Scalar {
+    fn write(&self, buf: &mut impl BufMut) {
+        let mut bytes = [0u8; Self::SIZE];
         unsafe {
             let mut scalar = blst_scalar::default();
             blst_scalar_from_fr(&mut scalar, &self.0);
             blst_bendian_from_scalar(bytes.as_mut_ptr(), &scalar);
         }
-        bytes.to_vec()
+        buf.put_slice(&bytes);
     }
+}
 
-    fn deserialize(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() != SCALAR_LENGTH {
-            return None;
-        }
+impl Read for Scalar {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        let bytes = <[u8; Self::SIZE]>::read(buf)?;
         let mut ret = blst_fr::default();
         unsafe {
             let mut scalar = blst_scalar::default();
@@ -313,16 +343,16 @@ impl Element for Scalar {
             // * https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-03#section-2.3
             // * https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-04#section-2.3
             if !blst_sk_check(&scalar) {
-                return None;
+                return Err(Invalid("Scalar", "Invalid"));
             }
             blst_fr_from_scalar(&mut ret, &scalar);
         }
-        Some(Self(ret))
+        Ok(Self(ret))
     }
+}
 
-    fn size() -> usize {
-        SCALAR_LENGTH
-    }
+impl FixedSize for Scalar {
+    const SIZE: usize = SCALAR_LENGTH;
 }
 
 impl Element for G1 {
@@ -353,41 +383,62 @@ impl Element for G1 {
     }
 
     fn serialize(&self) -> Vec<u8> {
-        let mut bytes = [0u8; G1_ELEMENT_BYTE_LENGTH];
-        unsafe {
-            blst_p1_compress(bytes.as_mut_ptr(), &self.0);
-        }
-        bytes.to_vec()
+        self.encode().into()
     }
 
     fn deserialize(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() != G1_ELEMENT_BYTE_LENGTH {
-            return None;
+        Self::decode(bytes).ok()
+    }
+
+    fn size() -> usize {
+        Self::SIZE
+    }
+}
+
+impl Write for G1 {
+    fn write(&self, buf: &mut impl BufMut) {
+        let mut bytes = [0u8; Self::SIZE];
+        unsafe {
+            blst_p1_compress(bytes.as_mut_ptr(), &self.0);
         }
+        buf.put_slice(&bytes);
+    }
+}
+
+impl Read for G1 {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        let bytes = <[u8; Self::SIZE]>::read(buf)?;
         let mut ret = blst_p1::default();
         unsafe {
             let mut affine = blst_p1_affine::default();
-            if blst_p1_uncompress(&mut affine, bytes.as_ptr()) != BLST_ERROR::BLST_SUCCESS {
-                return None;
+            match blst_p1_uncompress(&mut affine, bytes.as_ptr()) {
+                BLST_ERROR::BLST_SUCCESS => {}
+                BLST_ERROR::BLST_BAD_ENCODING => return Err(Invalid("G1", "Bad encoding")),
+                BLST_ERROR::BLST_POINT_NOT_ON_CURVE => return Err(Invalid("G1", "Not on curve")),
+                BLST_ERROR::BLST_POINT_NOT_IN_GROUP => return Err(Invalid("G1", "Not in group")),
+                BLST_ERROR::BLST_AGGR_TYPE_MISMATCH => return Err(Invalid("G1", "Type mismatch")),
+                BLST_ERROR::BLST_VERIFY_FAIL => return Err(Invalid("G1", "Verify fail")),
+                BLST_ERROR::BLST_PK_IS_INFINITY => return Err(Invalid("G1", "PK is Infinity")),
+                BLST_ERROR::BLST_BAD_SCALAR => return Err(Invalid("G1", "Bad scalar")),
             }
             blst_p1_from_affine(&mut ret, &affine);
 
             // Verify that deserialized element isn't infinite
             if blst_p1_is_inf(&ret) {
-                return None;
+                return Err(Invalid("G1", "Infinity"));
             }
 
             // Verify that the deserialized element is in G1
             if !blst_p1_in_g1(&ret) {
-                return None;
+                return Err(Invalid("G1", "Outside G1"));
             }
         }
-        Some(Self(ret))
+        Ok(Self(ret))
     }
+}
 
-    fn size() -> usize {
-        G1_ELEMENT_BYTE_LENGTH
-    }
+impl FixedSize for G1 {
+    const SIZE: usize = G1_ELEMENT_BYTE_LENGTH;
 }
 
 impl Point for G1 {
@@ -434,41 +485,62 @@ impl Element for G2 {
     }
 
     fn serialize(&self) -> Vec<u8> {
-        let mut bytes = [0u8; G2_ELEMENT_BYTE_LENGTH];
-        unsafe {
-            blst_p2_compress(bytes.as_mut_ptr(), &self.0);
-        }
-        bytes.to_vec()
+        self.encode().into()
     }
 
     fn deserialize(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() != G2_ELEMENT_BYTE_LENGTH {
-            return None;
+        Self::decode(bytes).ok()
+    }
+
+    fn size() -> usize {
+        Self::SIZE
+    }
+}
+
+impl Write for G2 {
+    fn write(&self, buf: &mut impl BufMut) {
+        let mut bytes = [0u8; Self::SIZE];
+        unsafe {
+            blst_p2_compress(bytes.as_mut_ptr(), &self.0);
         }
+        buf.put_slice(&bytes);
+    }
+}
+
+impl Read for G2 {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        let bytes = <[u8; Self::SIZE]>::read(buf)?;
         let mut ret = blst_p2::default();
         unsafe {
             let mut affine = blst_p2_affine::default();
-            if blst_p2_uncompress(&mut affine, bytes.as_ptr()) != BLST_ERROR::BLST_SUCCESS {
-                return None;
+            match blst_p2_uncompress(&mut affine, bytes.as_ptr()) {
+                BLST_ERROR::BLST_SUCCESS => {}
+                BLST_ERROR::BLST_BAD_ENCODING => return Err(Invalid("G2", "Bad encoding")),
+                BLST_ERROR::BLST_POINT_NOT_ON_CURVE => return Err(Invalid("G2", "Not on curve")),
+                BLST_ERROR::BLST_POINT_NOT_IN_GROUP => return Err(Invalid("G2", "Not in group")),
+                BLST_ERROR::BLST_AGGR_TYPE_MISMATCH => return Err(Invalid("G2", "Type mismatch")),
+                BLST_ERROR::BLST_VERIFY_FAIL => return Err(Invalid("G2", "Verify fail")),
+                BLST_ERROR::BLST_PK_IS_INFINITY => return Err(Invalid("G2", "PK is Infinity")),
+                BLST_ERROR::BLST_BAD_SCALAR => return Err(Invalid("G2", "Bad scalar")),
             }
             blst_p2_from_affine(&mut ret, &affine);
 
             // Verify that deserialized element isn't infinite
             if blst_p2_is_inf(&ret) {
-                return None;
+                return Err(Invalid("G2", "Infinity"));
             }
 
             // Verify that the deserialized element is in G2
             if !blst_p2_in_g2(&ret) {
-                return None;
+                return Err(Invalid("G2", "Outside G2"));
             }
         }
-        Some(Self(ret))
+        Ok(Self(ret))
     }
+}
 
-    fn size() -> usize {
-        G2_ELEMENT_BYTE_LENGTH
-    }
+impl FixedSize for G2 {
+    const SIZE: usize = G2_ELEMENT_BYTE_LENGTH;
 }
 
 impl Point for G2 {
@@ -547,5 +619,34 @@ mod tests {
         p2.mul(&s);
         p2.add(&p2.clone());
         assert_eq!(p1, p2);
+    }
+
+    #[test]
+    fn test_scalar_codec() {
+        let original = Scalar::rand(&mut thread_rng());
+        let mut encoded = original.encode();
+        assert_eq!(encoded.len(), Scalar::SIZE);
+        let decoded = Scalar::decode(&mut encoded).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_g1_codec() {
+        let mut original = G1::one();
+        original.mul(&Scalar::rand(&mut thread_rng()));
+        let mut encoded = original.encode();
+        assert_eq!(encoded.len(), G1::SIZE);
+        let decoded = G1::decode(&mut encoded).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_g2_codec() {
+        let mut original = G2::one();
+        original.mul(&Scalar::rand(&mut thread_rng()));
+        let mut encoded = original.encode();
+        assert_eq!(encoded.len(), G2::SIZE);
+        let decoded = G2::decode(&mut encoded).unwrap();
+        assert_eq!(original, decoded);
     }
 }
