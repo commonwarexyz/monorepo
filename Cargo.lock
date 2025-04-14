@@ -1158,6 +1158,7 @@ dependencies = [
  "cfg-if",
  "commonware-macros",
  "commonware-utils",
+ "criterion",
  "futures",
  "getrandom 0.2.15",
  "governor",
@@ -1192,6 +1193,7 @@ dependencies = [
  "rand",
  "rangemap",
  "thiserror 2.0.12",
+ "tokio",
  "tracing",
  "tracing-subscriber",
  "zstd",
@@ -1323,6 +1325,7 @@ dependencies = [
  "ciborium",
  "clap",
  "criterion-plot",
+ "futures",
  "is-terminal",
  "itertools 0.10.5",
  "num-traits",
@@ -1335,6 +1338,7 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "tinytemplate",
+ "tokio",
  "walkdir",
 ]
 
