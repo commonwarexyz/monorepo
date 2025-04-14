@@ -474,7 +474,7 @@ impl<
                 .context
                 .with_label("notarization_recovery")
                 .spawn_blocking(move || {
-                    threshold_signature_recover(threshold, notarization)
+                    threshold_signature_recover(threshold, &notarization)
                         .unwrap()
                         .serialize()
                 });
@@ -482,7 +482,7 @@ impl<
                 self.context
                     .with_label("seed_recovery")
                     .spawn_blocking(move || {
-                        threshold_signature_recover(threshold, seed)
+                        threshold_signature_recover(threshold, &seed)
                             .unwrap()
                             .serialize()
                     });
@@ -535,7 +535,7 @@ impl<
             .context
             .with_label("nullification_recovery")
             .spawn_blocking(move || {
-                threshold_signature_recover(threshold, nullification)
+                threshold_signature_recover(threshold, &nullification)
                     .unwrap()
                     .serialize()
             });
@@ -543,7 +543,7 @@ impl<
             .context
             .with_label("seed_recovery")
             .spawn_blocking(move || {
-                threshold_signature_recover(threshold, seed)
+                threshold_signature_recover(threshold, &seed)
                     .unwrap()
                     .serialize()
             });
@@ -628,7 +628,7 @@ impl<
                 .context
                 .with_label("finalization_recovery")
                 .spawn_blocking(move || {
-                    threshold_signature_recover(threshold, finalization)
+                    threshold_signature_recover(threshold, &finalization)
                         .unwrap()
                         .serialize()
                 })

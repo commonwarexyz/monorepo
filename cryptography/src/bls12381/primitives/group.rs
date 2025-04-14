@@ -27,7 +27,10 @@ use commonware_codec::{
     FixedSize, Read, ReadExt, Write,
 };
 use rand::RngCore;
-use std::ptr;
+use std::{
+    hash::{Hash, Hasher},
+    ptr,
+};
 use zeroize::Zeroize;
 
 /// Domain separation tag used when hashing a message to a curve (G1 or G2).
@@ -36,7 +39,7 @@ use zeroize::Zeroize;
 pub type DST = &'static [u8];
 
 /// An element of a group.
-pub trait Element: Read + Write + FixedSize + Clone + Eq + PartialEq + Send + Sync {
+pub trait Element: Read + Write + FixedSize + Copy + Clone + Eq + PartialEq + Send + Sync {
     /// Returns the additive identity.
     fn zero() -> Self;
 
@@ -179,8 +182,148 @@ fn bits(scalar: &blst_scalar) -> usize {
     bits
 }
 
+impl Scalar {
+    /// Generates a random scalar using the provided RNG.
+    pub fn rand<R: RngCore>(rng: &mut R) -> Self {
+        // Generate a random 64 byte buffer
+        let mut ikm = [0u8; 64];
+        rng.fill_bytes(&mut ikm);
+
+        // Generate a scalar from the randomly populated buffer
+        let mut ret = blst_fr::default();
+        unsafe {
+            let mut sc = blst_scalar::default();
+            blst_keygen(&mut sc, ikm.as_ptr(), ikm.len(), ptr::null(), 0);
+            blst_fr_from_scalar(&mut ret, &sc);
+        }
+
+        // Zeroize the ikm buffer
+        ikm.zeroize();
+        Self(ret)
+    }
+
+    /// Sets the scalar to be the provided integer.
+    pub fn set_int(&mut self, i: u32) {
+        // blst requires a buffer of 4 uint64 values. Failure to provide one will
+        // result in unexpected behavior (will read past the provided buffer).
+        //
+        // Reference: https://github.com/supranational/blst/blob/415d4f0e2347a794091836a3065206edfd9c72f3/bindings/blst.h#L102
+        let buffer = [i as u64, 0, 0, 0];
+        unsafe { blst_fr_from_uint64(&mut self.0, buffer.as_ptr()) };
+    }
+
+    /// Computes the inverse of the scalar.
+    pub fn inverse(&self) -> Option<Self> {
+        if *self == Self::zero() {
+            return None;
+        }
+        let mut ret = blst_fr::default();
+        unsafe { blst_fr_inverse(&mut ret, &self.0) };
+        Some(Self(ret))
+    }
+
+    /// Subtracts the provided scalar from self in-place.
+    pub fn sub(&mut self, rhs: &Self) {
+        unsafe { blst_fr_sub(&mut self.0, &self.0, &rhs.0) }
+    }
+
+    /// Encodes the scalar into a slice.
+    fn as_slice(&self) -> [u8; Self::SIZE] {
+        let mut slice = [0u8; Self::SIZE];
+        unsafe {
+            let mut scalar = blst_scalar::default();
+            blst_scalar_from_fr(&mut scalar, &self.0);
+            blst_bendian_from_scalar(slice.as_mut_ptr(), &scalar);
+        }
+        slice
+    }
+}
+
+impl Zeroize for Scalar {
+    fn zeroize(&mut self) {
+        self.0.l.zeroize();
+    }
+}
+
+impl Element for Scalar {
+    fn zero() -> Self {
+        Self(blst_fr::default())
+    }
+
+    fn one() -> Self {
+        BLST_FR_ONE
+    }
+
+    fn add(&mut self, rhs: &Self) {
+        unsafe {
+            blst_fr_add(&mut self.0, &self.0, &rhs.0);
+        }
+    }
+
+    fn mul(&mut self, rhs: &Self) {
+        unsafe {
+            blst_fr_mul(&mut self.0, &self.0, &rhs.0);
+        }
+    }
+
+    fn serialize(&self) -> Vec<u8> {
+        self.encode().into()
+    }
+
+    fn deserialize(bytes: &[u8]) -> Option<Self> {
+        Self::decode(bytes).ok()
+    }
+
+    fn size() -> usize {
+        Self::SIZE
+    }
+}
+
+impl Write for Scalar {
+    fn write(&self, buf: &mut impl BufMut) {
+        let slice = self.as_slice();
+        buf.put_slice(&slice);
+    }
+}
+
+impl Read for Scalar {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        let bytes = <[u8; Self::SIZE]>::read(buf)?;
+        let mut ret = blst_fr::default();
+        unsafe {
+            let mut scalar = blst_scalar::default();
+            blst_scalar_from_bendian(&mut scalar, bytes.as_ptr());
+            // We use `blst_sk_check` instead of `blst_scalar_fr_check` because the former
+            // performs a non-zero check.
+            //
+            // The IETF BLS12-381 specification allows for zero scalars up to (inclusive) Draft 3
+            // but disallows them after.
+            //
+            // References:
+            // * https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-03#section-2.3
+            // * https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-04#section-2.3
+            if !blst_sk_check(&scalar) {
+                return Err(Invalid("Scalar", "Invalid"));
+            }
+            blst_fr_from_scalar(&mut ret, &scalar);
+        }
+        Ok(Self(ret))
+    }
+}
+
+impl FixedSize for Scalar {
+    const SIZE: usize = SCALAR_LENGTH;
+}
+
+impl Hash for Scalar {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let slice = self.as_slice();
+        state.write(&slice);
+    }
+}
+
 /// A share of a threshold signing key.
-#[derive(Debug, Clone, PartialEq, Copy)]
+#[derive(Debug, Clone, PartialEq, Copy, Hash)]
 pub struct Share {
     /// The share's index in the polynomial.
     pub index: u32,
@@ -228,131 +371,15 @@ impl FixedSize for Share {
     const SIZE: usize = u32::SIZE + Private::SIZE;
 }
 
-impl Scalar {
-    /// Generates a random scalar using the provided RNG.
-    pub fn rand<R: RngCore>(rng: &mut R) -> Self {
-        // Generate a random 64 byte buffer
-        let mut ikm = [0u8; 64];
-        rng.fill_bytes(&mut ikm);
-
-        // Generate a scalar from the randomly populated buffer
-        let mut ret = blst_fr::default();
+impl G1 {
+    /// Encodes the G1 element into a slice.
+    fn as_slice(&self) -> [u8; Self::SIZE] {
+        let mut slice = [0u8; Self::SIZE];
         unsafe {
-            let mut sc = blst_scalar::default();
-            blst_keygen(&mut sc, ikm.as_ptr(), ikm.len(), ptr::null(), 0);
-            blst_fr_from_scalar(&mut ret, &sc);
+            blst_p1_compress(slice.as_mut_ptr(), &self.0);
         }
-
-        // Zeroize the ikm buffer
-        ikm.zeroize();
-        Self(ret)
+        slice
     }
-
-    /// Sets the scalar to be the provided integer.
-    pub fn set_int(&mut self, i: u32) {
-        // blst requires a buffer of 4 uint64 values. Failure to provide one will
-        // result in unexpected behavior (will read past the provided buffer).
-        //
-        // Reference: https://github.com/supranational/blst/blob/415d4f0e2347a794091836a3065206edfd9c72f3/bindings/blst.h#L102
-        let buffer = [i as u64, 0, 0, 0];
-        unsafe { blst_fr_from_uint64(&mut self.0, buffer.as_ptr()) };
-    }
-
-    /// Computes the inverse of the scalar.
-    pub fn inverse(&self) -> Option<Self> {
-        if *self == Self::zero() {
-            return None;
-        }
-        let mut ret = blst_fr::default();
-        unsafe { blst_fr_inverse(&mut ret, &self.0) };
-        Some(Self(ret))
-    }
-
-    /// Subtracts the provided scalar from self in-place.
-    pub fn sub(&mut self, rhs: &Self) {
-        unsafe { blst_fr_sub(&mut self.0, &self.0, &rhs.0) }
-    }
-}
-
-impl Zeroize for Scalar {
-    fn zeroize(&mut self) {
-        self.0.l.zeroize();
-    }
-}
-
-impl Element for Scalar {
-    fn zero() -> Self {
-        Self(blst_fr::default())
-    }
-
-    fn one() -> Self {
-        BLST_FR_ONE
-    }
-
-    fn add(&mut self, rhs: &Self) {
-        unsafe {
-            blst_fr_add(&mut self.0, &self.0, &rhs.0);
-        }
-    }
-
-    fn mul(&mut self, rhs: &Self) {
-        unsafe {
-            blst_fr_mul(&mut self.0, &self.0, &rhs.0);
-        }
-    }
-
-    fn serialize(&self) -> Vec<u8> {
-        self.encode().into()
-    }
-
-    fn deserialize(bytes: &[u8]) -> Option<Self> {
-        Self::decode(bytes).ok()
-    }
-
-    fn size() -> usize {
-        Self::SIZE
-    }
-}
-
-impl Write for Scalar {
-    fn write(&self, buf: &mut impl BufMut) {
-        let mut bytes = [0u8; Self::SIZE];
-        unsafe {
-            let mut scalar = blst_scalar::default();
-            blst_scalar_from_fr(&mut scalar, &self.0);
-            blst_bendian_from_scalar(bytes.as_mut_ptr(), &scalar);
-        }
-        buf.put_slice(&bytes);
-    }
-}
-
-impl Read for Scalar {
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let bytes = <[u8; Self::SIZE]>::read(buf)?;
-        let mut ret = blst_fr::default();
-        unsafe {
-            let mut scalar = blst_scalar::default();
-            blst_scalar_from_bendian(&mut scalar, bytes.as_ptr());
-            // We use `blst_sk_check` instead of `blst_scalar_fr_check` because the former
-            // performs a non-zero check.
-            //
-            // The IETF BLS12-381 specification allows for zero scalars up to (inclusive) Draft 3
-            // but disallows them after.
-            //
-            // References:
-            // * https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-03#section-2.3
-            // * https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-04#section-2.3
-            if !blst_sk_check(&scalar) {
-                return Err(Invalid("Scalar", "Invalid"));
-            }
-            blst_fr_from_scalar(&mut ret, &scalar);
-        }
-        Ok(Self(ret))
-    }
-}
-
-impl FixedSize for Scalar {
-    const SIZE: usize = SCALAR_LENGTH;
 }
 
 impl Element for G1 {
@@ -397,11 +424,8 @@ impl Element for G1 {
 
 impl Write for G1 {
     fn write(&self, buf: &mut impl BufMut) {
-        let mut bytes = [0u8; Self::SIZE];
-        unsafe {
-            blst_p1_compress(bytes.as_mut_ptr(), &self.0);
-        }
-        buf.put_slice(&bytes);
+        let slice = self.as_slice();
+        buf.put_slice(&slice);
     }
 }
 
@@ -441,6 +465,13 @@ impl FixedSize for G1 {
     const SIZE: usize = G1_ELEMENT_BYTE_LENGTH;
 }
 
+impl Hash for G1 {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let slice = self.as_slice();
+        state.write(&slice);
+    }
+}
+
 impl Point for G1 {
     fn map(&mut self, dst: DST, data: &[u8]) {
         unsafe {
@@ -454,6 +485,17 @@ impl Point for G1 {
                 0,
             );
         }
+    }
+}
+
+impl G2 {
+    /// Encodes the G2 element into a slice.
+    fn as_slice(&self) -> [u8; Self::SIZE] {
+        let mut slice = [0u8; Self::SIZE];
+        unsafe {
+            blst_p2_compress(slice.as_mut_ptr(), &self.0);
+        }
+        slice
     }
 }
 
@@ -499,11 +541,8 @@ impl Element for G2 {
 
 impl Write for G2 {
     fn write(&self, buf: &mut impl BufMut) {
-        let mut bytes = [0u8; Self::SIZE];
-        unsafe {
-            blst_p2_compress(bytes.as_mut_ptr(), &self.0);
-        }
-        buf.put_slice(&bytes);
+        let slice = self.as_slice();
+        buf.put_slice(&slice);
     }
 }
 
@@ -541,6 +580,13 @@ impl Read for G2 {
 
 impl FixedSize for G2 {
     const SIZE: usize = G2_ELEMENT_BYTE_LENGTH;
+}
+
+impl Hash for G2 {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let slice = self.as_slice();
+        state.write(&slice);
+    }
 }
 
 impl Point for G2 {

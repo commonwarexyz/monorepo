@@ -15,7 +15,7 @@ use commonware_codec::{
     Decode, DecodeExt, Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write,
 };
 use rand::{rngs::OsRng, RngCore};
-use std::collections::BTreeMap;
+use std::hash::Hash;
 
 /// Private polynomials are used to generate secret shares.
 pub type Private = Poly<group::Private>;
@@ -34,7 +34,7 @@ pub type PartialSignature = Eval<group::Signature>;
 pub const PARTIAL_SIGNATURE_LENGTH: usize = u32::SIZE + group::SIGNATURE_LENGTH;
 
 /// A polynomial evaluation at a specific index.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Eval<C: Element> {
     pub index: u32,
     pub value: C,
@@ -153,7 +153,7 @@ impl<C: Element> Poly<C> {
     ///
     /// It panics if the index is out of range.
     pub fn get(&self, i: u32) -> C {
-        self.0[i as usize].clone()
+        self.0[i as usize]
     }
 
     /// Set the given element at the specified index.
@@ -207,62 +207,83 @@ impl<C: Element> Poly<C> {
         }
     }
 
-    /// Recover the polynomial's constant term given at least `t` polynomial evaluations.
-    pub fn recover(t: u32, mut evals: Vec<Eval<C>>) -> Result<C, Error> {
+    /// Recovers the constant term of a polynomial of degree less than `t` using at least `t` evaluations of the polynomial.
+    ///
+    /// This function uses Lagrange interpolation to compute the constant term (i.e., the value of the polynomial at `x=0`)
+    /// given at least `t` distinct evaluations of the polynomial. Each evaluation is assumed to have a unique index,
+    /// which is mapped to a unique x-value as `x = index + 1`.
+    ///
+    /// # Warning
+    ///
+    /// This function assumes that each evaluation has a unique index. If there are duplicate indices, the function may
+    /// fail with an error when attempting to compute the inverse of zero.
+    pub fn recover<'a, I>(t: u32, evals: I) -> Result<C, Error>
+    where
+        C: 'a,
+        I: IntoIterator<Item = &'a Eval<C>>,
+    {
         // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/a714310be76620e10e8797d6637df64011926430/crates/threshold-bls/src/poly.rs#L131-L165
 
-        // Ensure there are enough shares
+        // Check if we have at least `t` evaluations; if not, return an error
         let t = t as usize;
+        let mut evals = evals.into_iter().collect::<Vec<_>>();
         if evals.len() < t {
-            return Err(Error::InvalidRecovery);
+            return Err(Error::NotEnoughPartialSignatures(t, evals.len()));
         }
 
         // Convert the first `t` sorted shares into scalars
-        let mut err = None;
-        evals.sort_by(|a, b| a.index.cmp(&b.index));
+        //
+        // We sort the evaluations by index to ensure that two invocations of
+        // `recover` select the same evals.
+        evals.sort_by_key(|e| e.index);
+
+        // Take the first `t` evaluations and prepare them for interpolation
+        //
+        // Each index `i` is mapped to `x = i + 1` to avoid `x=0` (the constant term we’re recovering).
         let xs = evals
             .into_iter()
             .take(t)
-            .fold(BTreeMap::new(), |mut m, sh| {
+            .fold(Vec::with_capacity(t), |mut m, sh| {
                 let mut xi = Scalar::zero();
                 xi.set_int(sh.index + 1);
-                if m.insert(sh.index, (xi, sh.value)).is_some() {
-                    err = Some(Error::DuplicateEval);
-                }
+                m.push((sh.index, (xi, &sh.value)));
                 m
             });
-        if let Some(e) = err {
-            return Err(e);
-        }
 
-        // Iterate over all indices and for each multiply the lagrange basis
-        // with the value of the share
-        let mut acc = C::zero();
-        for (i, xi) in &xs {
-            let mut yi = xi.1.clone();
-            let mut num = Scalar::one();
-            let mut den = Scalar::one();
+        // Use Lagrange interpolation to compute the constant term at `x=0`
+        //
+        // The constant term is `sum_{i=1 to t} yi * l_i(0)`, where `l_i(0) = product_{j != i} (xj / (xj - xi))`.
+        xs.iter().try_fold(C::zero(), |mut acc, (i, (xi, yi))| {
+            let (mut num, den) = xs.iter().fold(
+                (Scalar::one(), Scalar::one()),
+                |(mut num, mut den), (j, (xj, _))| {
+                    if i != j {
+                        // Include `xj` in the numerator product for `l_i(0)`
+                        num.mul(xj);
 
-            for (j, xj) in &xs {
-                if i == j {
-                    continue;
-                }
+                        // Compute `xj - xi` and include it in the denominator product
+                        let mut tmp = *xj;
+                        tmp.sub(xi);
+                        den.mul(&tmp);
+                    }
+                    (num, den)
+                },
+            );
 
-                // xj - 0
-                num.mul(&xj.0);
-
-                // 1 / (xj - xi)
-                let mut tmp = xj.0;
-                tmp.sub(&xi.0);
-                den.mul(&tmp);
-            }
-
+            // Compute the inverse of the denominator product; fails if den is zero (e.g., duplicate `xj`)
             let inv = den.inverse().ok_or(Error::NoInverse)?;
+
+            // Compute `l_i(0) = num * inv`, the Lagrange basis coefficient at `x=0`
             num.mul(&inv);
-            yi.mul(&num);
-            acc.add(&yi);
-        }
-        Ok(acc)
+
+            // Scale `yi` by `l_i(0)` to contribute to the constant term
+            let mut yi_scaled = **yi;
+            yi_scaled.mul(&num);
+
+            // Add `yi * l_i(0)` to the running sum
+            acc.add(&yi_scaled);
+            Ok(acc)
+        })
     }
 }
 
@@ -335,7 +356,7 @@ pub mod tests {
         let shares = (0..threshold - 1)
             .map(|i| poly.evaluate(i))
             .collect::<Vec<_>>();
-        Poly::recover(threshold, shares).unwrap_err();
+        Poly::recover(threshold, &shares).unwrap_err();
     }
 
     #[test]
@@ -406,7 +427,7 @@ pub mod tests {
                 let expected = poly.0[0];
 
                 let shares = (0..num_evals).map(|i| poly.evaluate(i)).collect::<Vec<_>>();
-                let recovered_constant = Poly::recover(num_evals, shares).unwrap();
+                let recovered_constant = Poly::recover(num_evals, &shares).unwrap();
 
                 if num_evals > degree {
                     assert_eq!(
