@@ -313,7 +313,7 @@ impl Hash for Scalar {
 }
 
 /// A share of a threshold signing key.
-#[derive(Debug, Clone, PartialEq, Copy)]
+#[derive(Debug, Clone, PartialEq, Copy, Hash)]
 pub struct Share {
     /// The share's index in the polynomial.
     pub index: u32,
@@ -359,12 +359,6 @@ impl Read for Share {
 
 impl FixedSize for Share {
     const SIZE: usize = u32::SIZE + Private::SIZE;
-}
-
-impl Hash for Share {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        state.write(&self.encode());
-    }
 }
 
 impl Element for G1 {

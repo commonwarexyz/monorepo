@@ -34,7 +34,7 @@ pub type PartialSignature = Eval<group::Signature>;
 pub const PARTIAL_SIGNATURE_LENGTH: usize = u32::SIZE + group::SIGNATURE_LENGTH;
 
 /// A polynomial evaluation at a specific index.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Eval<C: Element> {
     pub index: u32,
     pub value: C,
@@ -69,12 +69,6 @@ impl<C: Element> Read for Eval<C> {
 
 impl<C: Element> FixedSize for Eval<C> {
     const SIZE: usize = u32::SIZE + C::SIZE;
-}
-
-impl<C: Element> Hash for Eval<C> {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        state.write(&self.encode());
-    }
 }
 
 /// A polynomial that is using a scalar for the variable x and a generic
