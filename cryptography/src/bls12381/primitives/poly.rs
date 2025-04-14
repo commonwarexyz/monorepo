@@ -208,7 +208,7 @@ impl<C: Element> Poly<C> {
     }
 
     /// Recover the polynomial's constant term given at least `t` polynomial evaluations.
-    pub fn recover(t: u32, mut evals: Vec<Eval<C>>) -> Result<C, Error> {
+    pub fn recover(t: u32, evals: &[&Eval<C>]) -> Result<C, Error> {
         // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/a714310be76620e10e8797d6637df64011926430/crates/threshold-bls/src/poly.rs#L131-L165
 
         // Ensure there are enough shares
@@ -219,18 +219,14 @@ impl<C: Element> Poly<C> {
 
         // Convert the first `t` sorted shares into scalars
         let mut err = None;
-        evals.sort_by(|a, b| a.index.cmp(&b.index));
-        let xs = evals
-            .into_iter()
-            .take(t)
-            .fold(BTreeMap::new(), |mut m, sh| {
-                let mut xi = Scalar::zero();
-                xi.set_int(sh.index + 1);
-                if m.insert(sh.index, (xi, sh.value)).is_some() {
-                    err = Some(Error::DuplicateEval);
-                }
-                m
-            });
+        let xs = evals.into_iter().fold(BTreeMap::new(), |mut m, sh| {
+            let mut xi = Scalar::zero();
+            xi.set_int(sh.index + 1);
+            if m.insert(sh.index, (xi, &sh.value)).is_some() {
+                err = Some(Error::DuplicateEval);
+            }
+            m
+        });
         if let Some(e) = err {
             return Err(e);
         }
@@ -238,12 +234,12 @@ impl<C: Element> Poly<C> {
         // Iterate over all indices and for each multiply the lagrange basis
         // with the value of the share
         let mut acc = C::zero();
-        for (i, xi) in &xs {
+        for (i, xi) in xs.iter().take(t) {
             let mut yi = xi.1.clone();
             let mut num = Scalar::one();
             let mut den = Scalar::one();
 
-            for (j, xj) in &xs {
+            for (j, xj) in xs.iter().take(t) {
                 if i == j {
                     continue;
                 }
@@ -335,7 +331,8 @@ pub mod tests {
         let shares = (0..threshold - 1)
             .map(|i| poly.evaluate(i))
             .collect::<Vec<_>>();
-        Poly::recover(threshold, shares).unwrap_err();
+        let share_refs = shares.iter().collect::<Vec<_>>();
+        Poly::recover(threshold, &share_refs).unwrap_err();
     }
 
     #[test]
@@ -406,7 +403,8 @@ pub mod tests {
                 let expected = poly.0[0];
 
                 let shares = (0..num_evals).map(|i| poly.evaluate(i)).collect::<Vec<_>>();
-                let recovered_constant = Poly::recover(num_evals, shares).unwrap();
+                let share_refs = shares.iter().collect::<Vec<_>>();
+                let recovered_constant = Poly::recover(num_evals, &share_refs).unwrap();
 
                 if num_evals > degree {
                     assert_eq!(

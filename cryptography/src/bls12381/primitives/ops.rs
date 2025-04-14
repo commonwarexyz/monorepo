@@ -245,7 +245,7 @@ pub fn partial_verify_multiple_messages(
 /// to use in a consensus-critical context.
 pub fn threshold_signature_recover(
     threshold: u32,
-    partials: Vec<PartialSignature>,
+    partials: &[&PartialSignature],
 ) -> Result<group::Signature, Error> {
     let sigs = partials.len() as u32;
     if threshold > sigs {
@@ -447,7 +447,8 @@ mod tests {
         for p in &partials {
             partial_verify_proof_of_possession(&public, p).expect("signature should be valid");
         }
-        let threshold_sig = threshold_signature_recover(t, partials).unwrap();
+        let partial_refs = partials.iter().collect::<Vec<_>>();
+        let threshold_sig = threshold_signature_recover(t, &partial_refs).unwrap();
         let threshold_pub = poly::public(&public);
 
         // Verify PoP
@@ -542,7 +543,8 @@ mod tests {
             partial_verify_message(&public, Some(namespace), msg, p)
                 .expect("signature should be valid");
         }
-        let threshold_sig = threshold_signature_recover(t, partials).unwrap();
+        let partial_refs = partials.iter().collect::<Vec<_>>();
+        let threshold_sig = threshold_signature_recover(t, &partial_refs).unwrap();
         let threshold_pub = poly::public(&public);
 
         // Verify the signature

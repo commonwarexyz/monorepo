@@ -130,7 +130,8 @@ pub fn recover_public(
                         value: commitment.get(coeff),
                     })
                     .collect();
-                match poly::Public::recover(required, evals) {
+                let eval_refs = evals.iter().collect::<Vec<_>>();
+                match poly::Public::recover(required, &eval_refs) {
                     Ok(point) => Ok(point),
                     Err(_) => Err(Error::PublicKeyInterpolationFailed),
                 }
