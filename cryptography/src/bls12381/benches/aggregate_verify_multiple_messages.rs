@@ -27,8 +27,7 @@ fn benchmark_aggregate_verify_multiple_messages(c: &mut Criterion) {
                                 let signature = ops::sign_message(&private, *namespace, msg);
                                 signatures.push(signature);
                             }
-                            let signature_refs = signatures.iter().collect::<Vec<_>>();
-                            (public, ops::aggregate_signatures(&signature_refs))
+                            (public, ops::aggregate_signatures(&signatures))
                         },
                         |(public, signature)| {
                             ops::aggregate_verify_multiple_messages(

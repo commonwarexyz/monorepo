@@ -213,8 +213,7 @@ impl<P: Array> Player<P> {
                         value: share.private,
                     })
                     .collect::<Vec<_>>();
-                let dealing_refs = dealings.iter().collect::<Vec<_>>();
-                secret = match poly::Private::recover(self.dealer_threshold, &dealing_refs) {
+                secret = match poly::Private::recover(self.dealer_threshold, &dealings) {
                     Ok(share) => share,
                     Err(_) => return Err(Error::ShareInterpolationFailed),
                 };

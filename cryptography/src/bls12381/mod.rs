@@ -49,8 +49,7 @@ mod tests {
         });
 
         // Generate and verify the threshold sig
-        let partial_refs = partials.iter().collect::<Vec<_>>();
-        let threshold_sig = threshold_signature_recover(t, &partial_refs).unwrap();
+        let threshold_sig = threshold_signature_recover(t, &partials).unwrap();
         let threshold_pub = public(&group);
         verify_message(threshold_pub, namespace, msg, &threshold_sig).unwrap();
     }
@@ -85,8 +84,7 @@ mod tests {
         });
 
         // Generate and verify the threshold sig
-        let partial_refs = partials.iter().collect::<Vec<_>>();
-        let threshold_sig = threshold_signature_recover(t, &partial_refs).unwrap();
+        let threshold_sig = threshold_signature_recover(t, &partials).unwrap();
         let threshold_pub = public(&group);
         assert!(matches!(
             verify_message(threshold_pub, namespace, msg, &threshold_sig).unwrap_err(),
@@ -120,9 +118,8 @@ mod tests {
         });
 
         // Generate the threshold sig
-        let partial_refs = partials.iter().collect::<Vec<_>>();
         assert!(matches!(
-            threshold_signature_recover(t, &partial_refs).unwrap_err(),
+            threshold_signature_recover(t, &partials).unwrap_err(),
             Error::NotEnoughPartialSignatures(4, 3)
         ));
     }
@@ -154,9 +151,8 @@ mod tests {
         });
 
         // Generate the threshold sig
-        let partial_refs = partials.iter().collect::<Vec<_>>();
         assert!(matches!(
-            threshold_signature_recover(t, &partial_refs).unwrap_err(),
+            threshold_signature_recover(t, &partials).unwrap_err(),
             Error::DuplicateEval,
         ));
     }
@@ -189,8 +185,7 @@ mod tests {
         });
 
         // Generate and verify the threshold sig
-        let partial_refs = partials.iter().collect::<Vec<_>>();
-        let threshold_sig = threshold_signature_recover(t, &partial_refs).unwrap();
+        let threshold_sig = threshold_signature_recover(t, &partials).unwrap();
         let threshold_pub = public(&group);
         verify_message(threshold_pub, namespace, msg, &threshold_sig).unwrap();
     }
