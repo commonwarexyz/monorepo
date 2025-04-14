@@ -15,7 +15,7 @@ use commonware_codec::{
     Decode, DecodeExt, Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write,
 };
 use rand::{rngs::OsRng, RngCore};
-use std::{collections::BTreeMap, hash::Hash};
+use std::hash::Hash;
 
 /// Private polynomials are used to generate secret shares.
 pub type Private = Poly<group::Private>;
@@ -208,6 +208,10 @@ impl<C: Element> Poly<C> {
     }
 
     /// Recover the polynomial's constant term given at least `t` polynomial evaluations.
+    ///
+    /// # Warning
+    ///
+    /// This function assumes that each evaluation is unique.
     pub fn recover<'a, I>(t: u32, evals: I) -> Result<C, Error>
     where
         C: 'a,
@@ -215,51 +219,52 @@ impl<C: Element> Poly<C> {
     {
         // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/a714310be76620e10e8797d6637df64011926430/crates/threshold-bls/src/poly.rs#L131-L165
 
-        // Convert the first `t` sorted shares into scalars
-        let xs = evals.into_iter().try_fold(BTreeMap::new(), |mut m, sh| {
-            let mut xi = Scalar::zero();
-            xi.set_int(sh.index + 1);
-            if m.insert(sh.index, (xi, &sh.value)).is_some() {
-                return Err(Error::DuplicateEval);
-            }
-            Ok(m)
-        })?;
-
         // Ensure we have enough shares
         let t = t as usize;
-        if xs.len() < t {
-            return Err(Error::NotEnoughPartialSignatures(t, xs.len()));
+        let mut evals = evals.into_iter().collect::<Vec<_>>();
+        if evals.len() < t {
+            return Err(Error::NotEnoughPartialSignatures(t, evals.len()));
         }
+
+        // Convert the first `t` sorted shares into scalars
+        evals.sort_by_key(|e| e.index);
+        let xs = evals
+            .into_iter()
+            .take(t)
+            .fold(Vec::with_capacity(t), |mut m, sh| {
+                let mut xi = Scalar::zero();
+                xi.set_int(sh.index + 1);
+                m.push((sh.index, (xi, &sh.value)));
+                m
+            });
 
         // Iterate over all indices and for each multiply the lagrange basis
         // with the value of the share
-        xs.iter()
-            .take(t)
-            .try_fold(C::zero(), |mut acc, (i, (xi, yi))| {
-                let (mut num, den) = xs.iter().take(t).fold(
-                    (Scalar::one(), Scalar::one()),
-                    |(mut num, mut den), (j, (xj, _))| {
-                        if i != j {
-                            // (xj - 0)
-                            num.mul(xj);
+        xs.iter().try_fold(C::zero(), |mut acc, (i, (xi, yi))| {
+            let (mut num, den) = xs.iter().fold(
+                (Scalar::one(), Scalar::one()),
+                |(mut num, mut den), (j, (xj, _))| {
+                    if i != j {
+                        // (xj - 0)
+                        num.mul(xj);
 
-                            // 1 / (xj - xi)
-                            let mut tmp = *xj;
-                            tmp.sub(xi);
-                            den.mul(&tmp);
-                        }
-                        (num, den)
-                    },
-                );
+                        // 1 / (xj - xi)
+                        let mut tmp = *xj;
+                        tmp.sub(xi);
+                        den.mul(&tmp);
+                    }
+                    (num, den)
+                },
+            );
 
-                let inv = den.inverse().ok_or(Error::NoInverse)?;
-                num.mul(&inv);
+            let inv = den.inverse().ok_or(Error::NoInverse)?;
+            num.mul(&inv);
 
-                let mut yi_scaled = (*yi).clone();
-                yi_scaled.mul(&num);
-                acc.add(&yi_scaled);
-                Ok(acc)
-            })
+            let mut yi_scaled = (*yi).clone();
+            yi_scaled.mul(&num);
+            acc.add(&yi_scaled);
+            Ok(acc)
+        })
     }
 }
 
