@@ -211,7 +211,7 @@ impl<C: Element> Poly<C> {
     ///
     /// # Warning
     ///
-    /// This function assumes that there are no duplicate evaluations in the iterator.
+    /// This function assumes that each evaluation is unique.
     pub fn recover<'a, I>(t: u32, evals: I) -> Result<C, Error>
     where
         C: 'a,

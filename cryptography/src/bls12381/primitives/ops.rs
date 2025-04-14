@@ -249,7 +249,7 @@ where
 ///
 /// # Warning
 ///
-/// This function assumes that there are no duplicate partials in the iterator.
+/// This function assumes that each partial signature is unique.
 pub fn threshold_signature_recover<'a, I>(
     threshold: u32,
     partials: I,
