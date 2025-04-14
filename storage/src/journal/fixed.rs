@@ -73,7 +73,7 @@ pub struct Config {
 }
 
 /// Implementation of `Journal` storage.
-pub struct Journal<B: Blob, E: Storage<B> + Metrics, A: Array> {
+pub struct Journal<B: Blob, E: Storage<B>, A: Array> {
     context: E,
     cfg: Config,
 
