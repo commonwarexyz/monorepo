@@ -209,9 +209,9 @@ impl<C: Element> Poly<C> {
 
     /// Recovers the constant term of a polynomial of degree less than `t` using at least `t` evaluations of the polynomial.
     ///
-    /// This function uses Lagrange interpolation to compute the constant term (i.e., the value of the polynomial at x=0)
+    /// This function uses Lagrange interpolation to compute the constant term (i.e., the value of the polynomial at `x=0`)
     /// given at least `t` distinct evaluations of the polynomial. Each evaluation is assumed to have a unique index,
-    /// which is mapped to a unique x-value as x = index + 1.
+    /// which is mapped to a unique x-value as `x = index + 1`.
     ///
     /// # Warning
     ///
