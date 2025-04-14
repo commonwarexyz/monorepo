@@ -197,8 +197,8 @@ mod tests {
     use commonware_cryptography::{Ed25519, Signer};
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        deterministic, tokio, Clock, DefaultStorage, Listener, Metrics, Network as RNetwork,
-        Runner, Sink, Spawner, Stream,
+        deterministic, tokio, Clock, Listener, Metrics, Network as RNetwork, Runner, Sink, Spawner,
+        Stream,
     };
     use governor::{clock::ReasonablyRealtime, Quota};
     use rand::{CryptoRng, Rng};

@@ -83,7 +83,7 @@ use commonware_cryptography::{Ed25519, Signer};
 use commonware_p2p::authenticated::{self, Network};
 use commonware_runtime::{
     tokio::{self, Executor},
-    DefaultStorage, Metrics, Runner,
+    Metrics, Runner,
 };
 use commonware_utils::quorum;
 use governor::Quota;

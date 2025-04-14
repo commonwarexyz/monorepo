@@ -1,4 +1,4 @@
-use crate::{utils::Signaler, Clock, Error, Handle, Signal, Storage, METRICS_PREFIX};
+use crate::{utils::Signaler, Clock, Error, Handle, Signal, METRICS_PREFIX};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
     encoding::{text::encode, EncodeLabelSet},
