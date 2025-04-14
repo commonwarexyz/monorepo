@@ -24,9 +24,9 @@ struct Location {
 }
 
 /// Implementation of `Archive` storage.
-pub struct Archive<T: Translator, K: Array, E: Storage + Metrics> {
+pub struct Archive<T: Translator, K: Array, S: Storage> {
     cfg: Config<T>,
-    journal: Journal<E>,
+    journal: Journal<S>,
 
     // Oldest allowed section to read from. This is updated when `prune` is called.
     oldest_allowed: Option<u64>,
@@ -51,17 +51,21 @@ pub struct Archive<T: Translator, K: Array, E: Storage + Metrics> {
     _phantom: std::marker::PhantomData<K>,
 }
 
-impl<T: Translator, K: Array, E: Storage + Metrics> Archive<T, K, E> {
+impl<T: Translator, K: Array, S: Storage> Archive<T, K, S> {
     const PREFIX_LEN: u32 = (u64::LEN_ENCODED + K::LEN_ENCODED + u32::LEN_ENCODED) as u32;
 
     /// Initialize a new `Archive` instance.
     ///
     /// The in-memory index for `Archive` is populated during this call
     /// by replaying the journal.
-    pub async fn init(context: E, mut journal: Journal<E>, cfg: Config<T>) -> Result<Self, Error> {
+    pub async fn init(
+        metrics: impl Metrics,
+        mut journal: Journal<S>,
+        cfg: Config<T>,
+    ) -> Result<Self, Error> {
         // Initialize keys and run corruption check
         let mut indices = BTreeMap::new();
-        let mut keys = Index::init(context.with_label("index"), cfg.translator.clone());
+        let mut keys = Index::init(metrics.with_label("index"), cfg.translator.clone());
         let mut intervals = RangeInclusiveSet::new();
         {
             debug!("initializing archive");
@@ -93,24 +97,24 @@ impl<T: Translator, K: Array, E: Storage + Metrics> Archive<T, K, E> {
         let gets = Counter::default();
         let has = Counter::default();
         let syncs = Counter::default();
-        context.register(
+        metrics.register(
             "items_tracked",
             "Number of items tracked",
             items_tracked.clone(),
         );
-        context.register(
+        metrics.register(
             "indices_pruned",
             "Number of indices pruned",
             indices_pruned.clone(),
         );
-        context.register(
+        metrics.register(
             "unnecessary_reads",
             "Number of unnecessary reads performed during key lookups",
             unnecessary_reads.clone(),
         );
-        context.register("gets", "Number of gets performed", gets.clone());
-        context.register("has", "Number of has performed", has.clone());
-        context.register("syncs", "Number of syncs called", syncs.clone());
+        metrics.register("gets", "Number of gets performed", gets.clone());
+        metrics.register("has", "Number of has performed", has.clone());
+        metrics.register("syncs", "Number of syncs called", syncs.clone());
         items_tracked.set(indices.len() as i64);
 
         // Return populated archive

@@ -675,7 +675,8 @@ impl<
 }
 
 pub struct Actor<
-    E: Clock + Rng + Spawner + Storage + Metrics,
+    St: Storage,
+    E: Clock + Rng + Spawner + Metrics,
     C: Scheme,
     D: Digest,
     A: Automaton<Digest = D, Context = Context<D>>,
@@ -697,7 +698,7 @@ pub struct Actor<
     supervisor: S,
 
     replay_concurrency: usize,
-    journal: Option<Journal<E>>,
+    journal: Option<Journal<St>>,
 
     genesis: Option<D>,
 
@@ -728,7 +729,8 @@ pub struct Actor<
 }
 
 impl<
-        E: Clock + Rng + Spawner + Storage + Metrics,
+        St: Storage,
+        E: Clock + Rng + Spawner + Metrics,
         C: Scheme,
         D: Digest,
         A: Automaton<Digest = D, Context = Context<D>>,
@@ -741,11 +743,11 @@ impl<
             Share = group::Share,
             PublicKey = C::PublicKey,
         >,
-    > Actor<E, C, D, A, R, F, S>
+    > Actor<St, E, C, D, A, R, F, S>
 {
     pub fn new(
         context: E,
-        journal: Journal<E>,
+        journal: Journal<St>,
         cfg: Config<C, D, A, R, F, S>,
     ) -> (Self, Mailbox<D>) {
         // Assert correctness of timeouts

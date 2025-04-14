@@ -232,6 +232,7 @@ mod tests {
             // Initialize an empty journal
             let journal = Journal::init(
                 context.clone(),
+                context.clone(),
                 JConfig {
                     partition: "test_partition".into(),
                 },
@@ -338,6 +339,7 @@ mod tests {
             // Initialize an empty journal
             let journal = Journal::init(
                 context.clone(),
+                context.clone(),
                 JConfig {
                     partition: "test_partition".into(),
                 },
@@ -371,6 +373,7 @@ mod tests {
 
             // Initialize the archive again without compression
             let journal = Journal::init(
+                context.clone(),
                 context.clone(),
                 JConfig {
                     partition: "test_partition".into(),
@@ -412,6 +415,7 @@ mod tests {
         executor.start(async move {
             // Initialize an empty journal
             let journal = Journal::init(
+                context.clone(),
                 context.clone(),
                 JConfig {
                     partition: "test_partition".into(),
@@ -458,6 +462,7 @@ mod tests {
             // Initialize the archive again
             let journal = Journal::init(
                 context.clone(),
+                context.clone(),
                 JConfig {
                     partition: "test_partition".into(),
                 },
@@ -494,6 +499,7 @@ mod tests {
         executor.start(async move {
             // Initialize an empty journal
             let journal = Journal::init(
+                context.clone(),
                 context.clone(),
                 JConfig {
                     partition: "test_partition".into(),
@@ -561,6 +567,7 @@ mod tests {
             // Initialize an empty journal
             let journal = Journal::init(
                 context.clone(),
+                context.clone(),
                 JConfig {
                     partition: "test_partition".into(),
                 },
@@ -611,6 +618,7 @@ mod tests {
         executor.start(async move {
             // Initialize an empty journal
             let journal = Journal::init(
+                context.clone(),
                 context.clone(),
                 JConfig {
                     partition: "test_partition".into(),
@@ -682,6 +690,7 @@ mod tests {
             // Initialize an empty journal
             let journal = Journal::init(
                 context.clone(),
+                context.clone(),
                 JConfig {
                     partition: "test_partition".into(),
                 },
@@ -745,6 +754,7 @@ mod tests {
         executor.start(async move {
             // Initialize an empty journal
             let journal = Journal::init(
+                context.clone(),
                 context.clone(),
                 JConfig {
                     partition: "test_partition".into(),
@@ -840,6 +850,7 @@ mod tests {
             // Initialize an empty journal
             let journal = Journal::init(
                 context.clone(),
+                context.clone(),
                 JConfig {
                     partition: "test_partition".into(),
                 },
@@ -905,6 +916,7 @@ mod tests {
 
             // Reinitialize the archive
             let journal = Journal::init(
+                context.clone(),
                 context.clone(),
                 JConfig {
                     partition: "test_partition".into(),
@@ -1005,6 +1017,7 @@ mod tests {
             // Initialize an empty journal
             let journal = Journal::init(
                 context.clone(),
+                context.clone(),
                 JConfig {
                     partition: "test_partition".into(),
                 },
@@ -1067,6 +1080,7 @@ mod tests {
             archive.close().await.expect("Failed to close archive");
 
             let journal = Journal::init(
+                context.clone(),
                 context.clone(),
                 JConfig {
                     partition: "test_partition".into(),

@@ -233,6 +233,7 @@ mod tests {
             committers.insert(validator.clone(), committer_mailbox);
 
             let engine = Engine::new(
+                context.clone(),
                 context.with_label("engine"),
                 Config {
                     crypto: scheme.clone(),

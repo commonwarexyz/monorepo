@@ -53,7 +53,8 @@ struct Verify<C: Scheme, D: Digest, E: Clock> {
 
 /// Instance of the engine.
 pub struct Engine<
-    E: Clock + Spawner + Storage + Metrics,
+    St: Storage,
+    E: Clock + Spawner + Metrics,
     C: Scheme,
     D: Digest,
     A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
@@ -73,6 +74,7 @@ pub struct Engine<
     ////////////////////////////////////////
     // Interfaces
     ////////////////////////////////////////
+    storage: St,
     context: E,
     crypto: C,
     automaton: A,
@@ -148,7 +150,7 @@ pub struct Engine<
     journal_name_prefix: String,
 
     // A map of sequencer public keys to their journals.
-    journals: BTreeMap<C::PublicKey, Journal<E>>,
+    journals: BTreeMap<C::PublicKey, Journal<St>>,
 
     ////////////////////////////////////////
     // State
@@ -192,7 +194,8 @@ pub struct Engine<
 }
 
 impl<
-        E: Clock + Spawner + Storage + Metrics,
+        St: Storage,
+        E: Clock + Spawner + Metrics,
         C: Scheme,
         D: Digest,
         A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
@@ -208,13 +211,14 @@ impl<
         >,
         NetS: Sender<PublicKey = C::PublicKey>,
         NetR: Receiver<PublicKey = C::PublicKey>,
-    > Engine<E, C, D, A, R, Z, M, Su, TSu, NetS, NetR>
+    > Engine<St, E, C, D, A, R, Z, M, Su, TSu, NetS, NetR>
 {
     /// Creates a new engine with the given context and configuration.
-    pub fn new(context: E, cfg: Config<C, D, A, R, Z, M, Su, TSu>) -> Self {
+    pub fn new(storage: St, context: E, cfg: Config<C, D, A, R, Z, M, Su, TSu>) -> Self {
         let metrics = metrics::Metrics::init(context.clone());
 
         Self {
+            storage,
             context,
             crypto: cfg.crypto,
             automaton: cfg.automaton,
@@ -1020,7 +1024,7 @@ impl<
         let cfg = journal::variable::Config {
             partition: format!("{}{}", &self.journal_name_prefix, sequencer),
         };
-        let mut journal = Journal::init(self.context.clone(), cfg)
+        let mut journal = Journal::init(self.storage.clone(), self.context.clone(), cfg)
             .await
             .expect("unable to init journal");
 
