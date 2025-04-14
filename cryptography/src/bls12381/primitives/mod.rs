@@ -52,7 +52,7 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("not enough partial signatures: {0}/{1}")]
-    NotEnoughPartialSignatures(u32, u32),
+    NotEnoughPartialSignatures(usize, usize),
     #[error("invalid signature")]
     InvalidSignature,
     #[error("invalid recovery")]

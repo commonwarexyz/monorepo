@@ -234,7 +234,7 @@ impl<C: Element> Poly<C> {
         // Ensure we have enough shares
         let t = t as usize;
         if xs.len() < t {
-            return Err(Error::InvalidRecovery);
+            return Err(Error::NotEnoughPartialSignatures(xs.len(), t));
         }
 
         // Iterate over all indices and for each multiply the lagrange basis
