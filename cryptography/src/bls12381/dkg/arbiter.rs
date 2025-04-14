@@ -44,6 +44,7 @@ use crate::{
     Array,
 };
 use commonware_utils::{max_faults, quorum};
+use rayon::ThreadPool;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Output of the DKG/Resharing procedure.
@@ -64,7 +65,7 @@ pub struct Arbiter<P: Array> {
     previous: Option<poly::Public>,
     dealer_threshold: u32,
     player_threshold: u32,
-    concurrency: usize,
+    pool: Option<ThreadPool>,
 
     dealers: HashMap<P, u32>,
     players: Vec<P>,
@@ -79,7 +80,7 @@ impl<P: Array> Arbiter<P> {
         previous: Option<poly::Public>,
         mut dealers: Vec<P>,
         mut players: Vec<P>,
-        concurrency: usize,
+        pool: Option<ThreadPool>,
     ) -> Self {
         dealers.sort();
         let dealers = dealers
@@ -92,7 +93,7 @@ impl<P: Array> Arbiter<P> {
             dealer_threshold: quorum(dealers.len() as u32).expect("insufficient dealers"),
             player_threshold: quorum(players.len() as u32).expect("insufficient players"),
             previous,
-            concurrency,
+            pool,
 
             dealers,
             players,
@@ -256,7 +257,7 @@ impl<P: Array> Arbiter<P> {
                     &previous,
                     commitments,
                     self.player_threshold,
-                    self.concurrency,
+                    self.pool.as_ref(),
                 ) {
                     Ok(public) => public,
                     Err(e) => return (Err(e), self.disqualified),

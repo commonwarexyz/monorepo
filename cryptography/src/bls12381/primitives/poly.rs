@@ -13,6 +13,7 @@ use crate::bls12381::primitives::{
 use bytes::BufMut;
 use commonware_codec::FixedSize;
 use rand::{rngs::OsRng, RngCore};
+use rayon::{prelude::*, ThreadPool};
 use std::collections::BTreeMap;
 
 /// Private polynomials are used to generate secret shares.
@@ -208,8 +209,37 @@ impl<C: Element> Poly<C> {
         }
     }
 
+    fn recover_index(
+        i: &u32,
+        xi: &(Scalar, C),
+        xs: &BTreeMap<u32, (Scalar, C)>,
+    ) -> Result<C, Error> {
+        // Multiple the lagrange basis with the value of the share
+        let mut yi = xi.1.clone();
+        let mut num = Scalar::one();
+        let mut den = Scalar::one();
+        for (j, xj) in xs {
+            if i == j {
+                continue;
+            }
+
+            // xj - 0
+            num.mul(&xj.0);
+
+            // 1 / (xj - xi)
+            let mut tmp = xj.0;
+            tmp.sub(&xi.0);
+            den.mul(&tmp);
+        }
+
+        let inv = den.inverse().ok_or(Error::NoInverse)?;
+        num.mul(&inv);
+        yi.mul(&num);
+        Ok(yi)
+    }
+
     /// Recover the polynomial's constant term given at least `t` polynomial evaluations.
-    pub fn recover(t: u32, mut evals: Vec<Eval<C>>) -> Result<C, Error> {
+    pub fn recover(t: u32, mut evals: Vec<Eval<C>>, pool: Option<&ThreadPool>) -> Result<C, Error> {
         // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/a714310be76620e10e8797d6637df64011926430/crates/threshold-bls/src/poly.rs#L131-L165
 
         // Ensure there are enough shares
@@ -236,31 +266,29 @@ impl<C: Element> Poly<C> {
             return Err(e);
         }
 
-        // Iterate over all indices and for each multiply the lagrange basis
-        // with the value of the share
+        // If we have a thread pool, perform the computation in parallel
+        if let Some(pool) = pool {
+            // Iterate over all indices and for each multiply the lagrange basis
+            // with the value of the share
+            return pool.install(|| {
+                // Iterate over all indices and for each multiply the lagrange basis
+                // with the value of the share
+                xs.par_iter()
+                    .map(|(i, xi)| Self::recover_index(i, xi, &xs))
+                    .try_reduce(
+                        || C::zero(),
+                        |mut acc, yi| {
+                            acc.add(&yi);
+                            Ok(acc)
+                        },
+                    )
+            });
+        }
+
+        // If there isn't a thread pool, perform the computation serially
         let mut acc = C::zero();
         for (i, xi) in &xs {
-            let mut yi = xi.1.clone();
-            let mut num = Scalar::one();
-            let mut den = Scalar::one();
-
-            for (j, xj) in &xs {
-                if i == j {
-                    continue;
-                }
-
-                // xj - 0
-                num.mul(&xj.0);
-
-                // 1 / (xj - xi)
-                let mut tmp = xj.0;
-                tmp.sub(&xi.0);
-                den.mul(&tmp);
-            }
-
-            let inv = den.inverse().ok_or(Error::NoInverse)?;
-            num.mul(&inv);
-            yi.mul(&num);
+            let yi = Self::recover_index(i, xi, &xs)?;
             acc.add(&yi);
         }
         Ok(acc)
@@ -308,7 +336,7 @@ pub mod tests {
         let shares = (0..threshold - 1)
             .map(|i| poly.evaluate(i))
             .collect::<Vec<_>>();
-        Poly::recover(threshold, shares).unwrap_err();
+        Poly::recover(threshold, shares, None).unwrap_err();
     }
 
     #[test]
@@ -379,7 +407,7 @@ pub mod tests {
                 let expected = poly.0[0];
 
                 let shares = (0..num_evals).map(|i| poly.evaluate(i)).collect::<Vec<_>>();
-                let recovered_constant = Poly::recover(num_evals, shares).unwrap();
+                let recovered_constant = Poly::recover(num_evals, shares, None).unwrap();
 
                 if num_evals > degree {
                     assert_eq!(

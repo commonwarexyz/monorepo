@@ -14,7 +14,7 @@ use super::{
 };
 use commonware_utils::union_unique;
 use rand::RngCore;
-use rayon::{prelude::*, ThreadPoolBuilder};
+use rayon::{prelude::*, ThreadPool, ThreadPoolBuilder};
 use std::borrow::Cow;
 
 /// Returns a new keypair derived from the provided randomness.
@@ -246,12 +246,13 @@ pub fn partial_verify_multiple_messages(
 pub fn threshold_signature_recover(
     threshold: u32,
     partials: Vec<PartialSignature>,
+    pool: Option<&ThreadPool>,
 ) -> Result<group::Signature, Error> {
     let sigs = partials.len() as u32;
     if threshold > sigs {
         return Err(Error::NotEnoughPartialSignatures(threshold, sigs));
     }
-    poly::Signature::recover(threshold, partials)
+    poly::Signature::recover(threshold, partials, pool)
 }
 
 /// Aggregates multiple public keys.
@@ -447,7 +448,7 @@ mod tests {
         for p in &partials {
             partial_verify_proof_of_possession(&public, p).expect("signature should be valid");
         }
-        let threshold_sig = threshold_signature_recover(t, partials).unwrap();
+        let threshold_sig = threshold_signature_recover(t, partials, None).unwrap();
         let threshold_pub = poly::public(&public);
 
         // Verify PoP
@@ -542,7 +543,7 @@ mod tests {
             partial_verify_message(&public, Some(namespace), msg, p)
                 .expect("signature should be valid");
         }
-        let threshold_sig = threshold_signature_recover(t, partials).unwrap();
+        let threshold_sig = threshold_signature_recover(t, partials, None).unwrap();
         let threshold_pub = poly::public(&public);
 
         // Verify the signature

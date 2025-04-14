@@ -5,7 +5,7 @@ use crate::bls12381::{
     primitives::{group::Share, poly},
 };
 use rand::RngCore;
-use rayon::{prelude::*, ThreadPoolBuilder};
+use rayon::ThreadPool;
 use std::collections::BTreeMap;
 
 /// Generate shares and a commitment.
@@ -104,7 +104,7 @@ pub fn recover_public(
     previous: &poly::Public,
     commitments: BTreeMap<u32, poly::Public>,
     threshold: u32,
-    concurrency: usize,
+    pool: Option<&ThreadPool>,
 ) -> Result<poly::Public, Error> {
     // Ensure we have enough commitments to interpolate
     let required = previous.required();
@@ -112,34 +112,22 @@ pub fn recover_public(
         return Err(Error::InsufficientDealings);
     }
 
-    // Construct pool to perform interpolation
-    let pool = ThreadPoolBuilder::new()
-        .num_threads(concurrency)
-        .build()
-        .expect("unable to build thread pool");
-
     // Perform interpolation over each coefficient
-    let new = match pool.install(|| {
-        (0..threshold)
-            .into_par_iter()
-            .map(|coeff| {
-                let evals: Vec<_> = commitments
-                    .iter()
-                    .map(|(dealer, commitment)| poly::Eval {
-                        index: *dealer,
-                        value: commitment.get(coeff),
-                    })
-                    .collect();
-                match poly::Public::recover(required, evals) {
-                    Ok(point) => Ok(point),
-                    Err(_) => Err(Error::PublicKeyInterpolationFailed),
-                }
+    let mut points = Vec::with_capacity(threshold as usize);
+    for coeff in 0..threshold {
+        let evals: Vec<_> = commitments
+            .iter()
+            .map(|(dealer, commitment)| poly::Eval {
+                index: *dealer,
+                value: commitment.get(coeff),
             })
-            .collect::<Result<Vec<_>, _>>()
-    }) {
-        Ok(points) => poly::Public::from(points),
-        Err(e) => return Err(e),
-    };
+            .collect();
+        match poly::Public::recover(required, evals, pool) {
+            Ok(point) => points.push(point),
+            Err(_) => return Err(Error::PublicKeyInterpolationFailed),
+        };
+    }
+    let new = poly::Public::from(points);
 
     // Ensure public key matches
     if previous.constant() != new.constant() {

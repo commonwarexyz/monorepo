@@ -12,6 +12,7 @@ use crate::{
     Array,
 };
 use commonware_utils::quorum;
+use rayon::ThreadPool;
 use std::collections::{BTreeMap, HashMap};
 
 /// Output of a DKG/Resharing procedure.
@@ -32,7 +33,7 @@ pub struct Player<P: Array> {
     dealer_threshold: u32,
     player_threshold: u32,
     previous: Option<poly::Public>,
-    concurrency: usize,
+    pool: Option<ThreadPool>,
 
     dealers: HashMap<P, u32>,
 
@@ -46,7 +47,7 @@ impl<P: Array> Player<P> {
         previous: Option<poly::Public>,
         mut dealers: Vec<P>,
         mut recipients: Vec<P>,
-        concurrency: usize,
+        pool: Option<ThreadPool>,
     ) -> Self {
         dealers.sort();
         let dealers = dealers
@@ -67,7 +68,7 @@ impl<P: Array> Player<P> {
             dealer_threshold: quorum(dealers.len() as u32).expect("insufficient dealers"),
             player_threshold: quorum(recipients.len() as u32).expect("insufficient participants"),
             previous,
-            concurrency,
+            pool,
 
             dealers,
 
@@ -201,7 +202,7 @@ impl<P: Array> Player<P> {
                     &previous,
                     commitments,
                     self.player_threshold,
-                    self.concurrency,
+                    self.pool.as_ref(),
                 )?;
 
                 // Recover share via interpolation
@@ -213,7 +214,11 @@ impl<P: Array> Player<P> {
                         value: share.private,
                     })
                     .collect::<Vec<_>>();
-                secret = match poly::Private::recover(self.dealer_threshold, dealings) {
+                secret = match poly::Private::recover(
+                    self.dealer_threshold,
+                    dealings,
+                    self.pool.as_ref(),
+                ) {
                     Ok(share) => share,
                     Err(_) => return Err(Error::ShareInterpolationFailed),
                 };
