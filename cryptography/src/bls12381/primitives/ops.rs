@@ -246,6 +246,10 @@ where
 ///
 /// Signatures recovered by this function are deterministic and are safe
 /// to use in a consensus-critical context.
+///
+/// # Warning
+///
+/// This function assumes that there are no duplicate partials in the iterator.
 pub fn threshold_signature_recover<'a, I>(
     threshold: u32,
     partials: I,
