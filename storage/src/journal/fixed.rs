@@ -769,7 +769,7 @@ mod tests {
                 .await
                 .expect("Failed to remove blob");
             // Re-initialize the journal to simulate a restart
-            let result = Journal::<_, Digest>::init(context.clone(), cfg.clone()).await;
+            let result = Journal::<_, Digest>::init(context, cfg.clone()).await;
             assert!(matches!(result.err().unwrap(), Error::MissingBlob(n) if n == 40));
         });
     }
@@ -870,7 +870,7 @@ mod tests {
             blob.close().await.expect("Failed to close blob");
 
             // Re-initialize the journal to simulate a restart
-            let mut journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+            let mut journal = Journal::<_, Digest>::init(context, cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
 
