@@ -235,7 +235,6 @@ impl<C: Element> Poly<C> {
         // with the value of the share
         let mut acc = C::zero();
         for (i, xi) in xs.iter().take(t) {
-            let mut yi = xi.1.clone();
             let mut num = Scalar::one();
             let mut den = Scalar::one();
 
@@ -255,6 +254,8 @@ impl<C: Element> Poly<C> {
 
             let inv = den.inverse().ok_or(Error::NoInverse)?;
             num.mul(&inv);
+
+            let mut yi = xi.1.clone();
             yi.mul(&num);
             acc.add(&yi);
         }
