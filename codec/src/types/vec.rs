@@ -3,7 +3,7 @@
 //! For portability and consistency between architectures,
 //! the length of the vector must fit within a [`u32`].
 
-use crate::{varint, Config, EncodeSize, Error, RangeConfig, Read, Write};
+use crate::{varint, Config, EncodeSize, Error, Pair, RangeConfig, Read, Write};
 use bytes::{Buf, BufMut};
 
 impl<T: Write> Write for Vec<T> {
@@ -25,9 +25,9 @@ impl<T: EncodeSize> EncodeSize for Vec<T> {
     }
 }
 
-impl<R: RangeConfig, Cfg: Config, T: Read<Cfg>> Read<(R, Cfg)> for Vec<T> {
+impl<R: RangeConfig, C: Config, T: Read<C>> Read<Pair<&'static R, C>> for Vec<T> {
     #[inline]
-    fn read_cfg(buf: &mut impl Buf, (range, cfg): &(R, Cfg)) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, Pair(range, cfg): Pair<&'static R, C>) -> Result<Self, Error> {
         let len32 = varint::read::<u32>(buf)?;
         let len = usize::try_from(len32).map_err(|_| Error::InvalidVarint)?;
         if !range.contains(&len) {
@@ -55,18 +55,18 @@ mod tests {
 
             // Valid decoding
             let len = value.len();
-            let decoded = Vec::<u8>::decode_range(encoded, len..=len).unwrap();
+            let decoded = Vec::<u8>::decode_range(encoded, &(len..=len)).unwrap();
             assert_eq!(value, decoded);
 
             // Failure for too long
             matches!(
-                Vec::<u8>::decode_range(value.encode(), 0..len),
+                Vec::<u8>::decode_range(value.encode(), &(0..len)),
                 Err(Error::InvalidLength(_))
             );
 
             // Failure for too short
             matches!(
-                Vec::<u8>::decode_range(value.encode(), len + 1..),
+                Vec::<u8>::decode_range(value.encode(), &(len + 1..)),
                 Err(Error::InvalidLength(_))
             );
         }

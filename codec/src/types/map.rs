@@ -6,7 +6,7 @@
 use crate::{
     codec::{EncodeSize, Read, Write},
     error::Error,
-    varint, Config, RangeConfig,
+    varint, Config, Pair, RangeConfig,
 };
 use bytes::{Buf, BufMut};
 use std::{collections::HashMap, hash::Hash};
@@ -51,11 +51,11 @@ impl<
         VCfg: Config,
         K: Read<KCfg> + Clone + Ord + Hash + Eq,
         V: Read<VCfg> + Clone,
-    > Read<(R, (KCfg, VCfg))> for HashMap<K, V>
+    > Read<Pair<R, Pair<KCfg, VCfg>>> for HashMap<K, V>
 {
     fn read_cfg(
         buf: &mut impl Buf,
-        (range, (k_cfg, v_cfg)): &(R, (KCfg, VCfg)),
+        Pair(range, Pair(k_cfg, v_cfg)): Pair<R, Pair<KCfg, VCfg>>,
     ) -> Result<Self, Error> {
         // Read and validate the length prefix
         let len32 = varint::read::<u32>(buf)?;
@@ -93,16 +93,14 @@ impl<
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::{
         codec::{Decode, Encode, EncodeSize, FixedSize, Read, Write},
         error::Error,
-        varint, Config, RangeConfig,
+        varint, Config, DecodeRangeExt, RangeConfig, ReadRangeExt,
     };
     use bytes::{BufMut, Bytes, BytesMut};
-    use std::collections::HashMap;
-    use std::fmt::Debug;
-    use std::hash::Hash;
-    use std::ops::RangeInclusive;
+    use std::{collections::HashMap, fmt::Debug, hash::Hash};
 
     // Manual round trip test function for non-default configs
     fn round_trip<K, V, R, KCfg, VCfg>(map: &HashMap<K, V>, range_cfg: R, k_cfg: KCfg, v_cfg: VCfg)
@@ -112,28 +110,24 @@ mod tests {
         R: RangeConfig + Clone,
         KCfg: Config + Clone,
         VCfg: Config + Clone,
-        HashMap<K, V>: Read<(R, (KCfg, VCfg))>
-            + Decode<(R, (KCfg, VCfg))>
+        HashMap<K, V>: Read<Pair<R, Pair<KCfg, VCfg>>>
+            + Decode<Pair<R, Pair<KCfg, VCfg>>>
             + Debug
             + PartialEq
             + Write
             + EncodeSize,
     {
         let encoded = map.encode();
-        let config_tuple = (range_cfg, (k_cfg, v_cfg));
+        let config_tuple = Pair(range_cfg, Pair(k_cfg, v_cfg));
         let decoded =
-            HashMap::<K, V>::decode_cfg(encoded, &config_tuple).expect("decode_cfg failed");
+            HashMap::<K, V>::decode_cfg(encoded, config_tuple).expect("decode_cfg failed");
         assert_eq!(map, &decoded);
-    }
-
-    fn allow_any_len() -> RangeInclusive<usize> {
-        0..=usize::MAX
     }
 
     #[test]
     fn test_empty_map() {
         let map = HashMap::<u32, u64>::new();
-        round_trip(&map, allow_any_len(), (), ());
+        round_trip(&map, .., (), ());
         assert_eq!(map.encode_size(), 1);
         let encoded = map.encode();
         assert_eq!(encoded, Bytes::from_static(&[0])); // varint 0
@@ -145,7 +139,7 @@ mod tests {
         map.insert(1u32, 100u64);
         map.insert(5u32, 500u64);
         map.insert(2u32, 200u64);
-        round_trip(&map, allow_any_len(), (), ());
+        round_trip(&map, .., (), ());
         assert_eq!(map.encode_size(), 1 + 3 * (u32::SIZE + u64::SIZE));
     }
 
@@ -169,7 +163,7 @@ mod tests {
         let key_range = ..=10;
         let val_range = 0..=100;
 
-        round_trip(&map, map_range, key_range, (val_range, ()));
+        round_trip(&map, map_range, key_range, Pair(val_range, ()));
     }
 
     #[test]
@@ -179,10 +173,7 @@ mod tests {
         map.insert(5u32, 500u64);
 
         let encoded = map.encode();
-        let restrictive_range = 0..=1;
-        let config_tuple = (restrictive_range, ((), ()));
-
-        let result = HashMap::<u32, u64>::decode_cfg(encoded, &config_tuple);
+        let result = HashMap::<u32, u64>::decode_range(encoded, 0..=1);
         assert!(matches!(result, Err(Error::InvalidLength(2))));
     }
 
@@ -191,13 +182,9 @@ mod tests {
         let mut map = HashMap::new();
         map.insert(Bytes::from_static(b"key1"), vec![1, 2, 3, 4, 5]);
 
-        let key_range = ..=10;
-        let map_range = 0..=10;
-        let restrictive_val_range = 0..=3;
-
         let encoded = map.encode();
-        let config_tuple = (map_range, (key_range, (restrictive_val_range, ())));
-        let result = HashMap::<Bytes, Vec<u8>>::decode_cfg(encoded, &config_tuple);
+        let config_tuple = Pair(&.., Pair(&.., Pair(0..=3, ())));
+        let result = HashMap::<Bytes, Vec<u8>>::decode_cfg(encoded, config_tuple);
 
         assert!(matches!(result, Err(Error::InvalidLength(5))));
     }
@@ -211,10 +198,7 @@ mod tests {
         2u32.write(&mut encoded); // Key 2 (out of order)
         200u64.write(&mut encoded); // Value 200
 
-        let range = allow_any_len();
-        let config_tuple = (range, ((), ()));
-
-        let result = HashMap::<u32, u64>::decode_cfg(encoded, &config_tuple);
+        let result = HashMap::<u32, u64>::decode_range(encoded, ..);
         assert!(matches!(
             result,
             Err(Error::Invalid("HashMap", "Keys must ascend"))
@@ -230,10 +214,7 @@ mod tests {
         1u32.write(&mut encoded); // Duplicate Key 1
         200u64.write(&mut encoded); // Value 200
 
-        let range = allow_any_len();
-        let config_tuple = (range, ((), ()));
-
-        let result = HashMap::<u32, u64>::decode_cfg(encoded, &config_tuple);
+        let result = HashMap::<u32, u64>::decode_range(encoded, ..);
         assert!(matches!(
             result,
             Err(Error::Invalid("HashMap", "Duplicate key"))
@@ -249,9 +230,7 @@ mod tests {
         let mut encoded = map.encode();
         encoded.truncate(map.encode_size() - 10); // Truncate during last key/value pair
 
-        let range = allow_any_len();
-        let config_tuple = (range, ((), ()));
-        let result = HashMap::<u32, u64>::decode_cfg(encoded, &config_tuple);
+        let result = HashMap::<u32, u64>::decode_range(encoded, ..);
         assert!(matches!(result, Err(Error::EndOfBuffer)));
     }
 
@@ -264,9 +243,7 @@ mod tests {
         let mut encoded = map.encode();
         encoded.truncate(map.encode_size() - 4); // Truncate during last value
 
-        let range = allow_any_len();
-        let config_tuple = (range, ((), ()));
-        let result = HashMap::<u32, u64>::decode_cfg(encoded, &config_tuple);
+        let result = HashMap::<u32, u64>::decode_range(encoded, ..);
         assert!(matches!(result, Err(Error::EndOfBuffer)));
     }
 
@@ -278,15 +255,12 @@ mod tests {
         let mut encoded = map.encode();
         encoded.put_u8(0xFF); // Add extra byte
 
-        let range = allow_any_len();
-        let config_tuple = (range.clone(), ((), ())); // Clone range for read_cfg later
-
         // Use decode_cfg which enforces buffer is fully consumed
-        let result = HashMap::<u32, u64>::decode_cfg(encoded.clone(), &config_tuple);
+        let result = HashMap::<u32, u64>::decode_range(encoded.clone(), ..);
         assert!(matches!(result, Err(Error::ExtraData(1))));
 
         // Verify that read_cfg would succeed (doesn't check for extra data)
-        let read_result = HashMap::<u32, u64>::read_cfg(&mut encoded, &config_tuple);
+        let read_result = HashMap::<u32, u64>::read_range(&mut encoded, ..);
         assert!(read_result.is_ok());
         let decoded_map = read_result.unwrap();
         assert_eq!(decoded_map.len(), 1);

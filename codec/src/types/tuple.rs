@@ -25,7 +25,7 @@ macro_rules! impl_codec_for_tuple {
 
             impl <Cfg: Config, $( [<T $index>]: Read<Cfg> ),*> Read<Cfg> for ( $( [<T $index>], )* ) {
                 #[inline]
-                fn read_cfg(buf: &mut impl Buf, cfg: &Cfg) -> Result<Self, Error> {
+                fn read_cfg(buf: &mut impl Buf, cfg: Cfg) -> Result<Self, Error> {
                     Ok(( $( [<T $index>]::read_cfg(buf, cfg)?, )* ))
                 }
             }

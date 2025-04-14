@@ -1,29 +1,7 @@
 //! Core traits for encoding and decoding.
 
-use crate::error::Error;
+use crate::{error::Error, Config};
 use bytes::{Buf, BufMut, BytesMut};
-use std::ops::RangeBounds;
-
-/// Marker trait for types that can be used as configuration during decoding.
-///
-/// Configuration is primarily used with the [`Read`] trait to pass parameters (like size limits)
-/// needed to safely decode untrusted data. Types implementing `Config` must also be
-/// `Clone + Send + 'static`.
-///
-/// Use the unit type `()` if no configuration is required for a specific [`Read`] implementation.
-pub trait Config: Send + 'static {}
-
-// Automatically implement `Config` for matching types.
-impl<T: Send + 'static> Config for T {}
-
-/// A marker trait for a [`Config`] type that is also a [`RangeBounds<usize>`].
-///
-/// This is often used to configure length limits for variable-length collections like `Vec<T>` or
-/// `Bytes`.
-pub trait RangeConfig: Config + RangeBounds<usize> {}
-
-// Automatically implement `RangeConfig` for matching types.
-impl<T: Config + RangeBounds<usize>> RangeConfig for T {}
 
 /// Trait for types with a known, fixed encoded size.
 ///
@@ -76,7 +54,7 @@ pub trait Read<Cfg: Config = ()>: Sized {
     ///
     /// Returns [`Error`] if decoding fails due to invalid data, insufficient bytes in the buffer,
     /// or violation of constraints imposed by the `cfg`.
-    fn read_cfg(buf: &mut impl Buf, cfg: &Cfg) -> Result<Self, Error>;
+    fn read_cfg(buf: &mut impl Buf, cfg: Cfg) -> Result<Self, Error>;
 }
 
 /// Trait combining [`Write`] and [`EncodeSize`] for types that can be fully encoded.
@@ -112,7 +90,7 @@ pub trait Decode<Cfg: Config = ()>: Read<Cfg> {
     ///
     /// Returns [`Error`] if decoding fails via [`Read::read_cfg`] or if there are leftover bytes in
     /// `buf` after reading.
-    fn decode_cfg(mut buf: impl Buf, cfg: &Cfg) -> Result<Self, Error> {
+    fn decode_cfg(mut buf: impl Buf, cfg: Cfg) -> Result<Self, Error> {
         let result = Self::read_cfg(&mut buf, cfg)?;
 
         // Check that the buffer is fully consumed.

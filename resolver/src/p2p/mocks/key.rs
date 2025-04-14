@@ -58,7 +58,7 @@ impl Write for Key {
 }
 
 impl Read for Key {
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, _: ()) -> Result<Self, CodecError> {
         u8::read(buf).map(Self)
     }
 }

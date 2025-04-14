@@ -134,7 +134,7 @@ impl Write for PrivateKey {
 }
 
 impl Read for PrivateKey {
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, _: ()) -> Result<Self, CodecError> {
         Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
     }
 }
@@ -244,7 +244,7 @@ impl Write for PublicKey {
 }
 
 impl Read for PublicKey {
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, _: ()) -> Result<Self, CodecError> {
         Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
     }
 }
@@ -328,7 +328,7 @@ impl Write for Signature {
 }
 
 impl Read for Signature {
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, _: ()) -> Result<Self, CodecError> {
         Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
     }
 }

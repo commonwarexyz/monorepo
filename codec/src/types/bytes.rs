@@ -23,7 +23,7 @@ impl EncodeSize for Bytes {
     }
 }
 
-impl<R: RangeConfig> Read<R> for Bytes {
+impl<R: RangeConfig> Read<&'static R> for Bytes {
     #[inline]
     fn read_cfg(buf: &mut impl Buf, cfg: &R) -> Result<Self, Error> {
         let len32 = varint::read::<u32>(buf)?;
@@ -58,18 +58,18 @@ mod tests {
             let len = value.len();
 
             // Valid decoding
-            let decoded = Bytes::decode_cfg(encoded, &(len..=len)).unwrap();
+            let decoded = Bytes::decode_cfg(encoded, len..=len).unwrap();
             assert_eq!(value, decoded);
 
             // Failure for too long
             matches!(
-                Bytes::decode_cfg(value.encode(), &(0..len)),
+                Bytes::decode_cfg(value.encode(), 0..len),
                 Err(Error::InvalidLength(_))
             );
 
             // Failure for too short
             matches!(
-                Bytes::decode_cfg(value.encode(), &(len + 1..)),
+                Bytes::decode_cfg(value.encode(), len + 1..),
                 Err(Error::InvalidLength(_))
             );
         }

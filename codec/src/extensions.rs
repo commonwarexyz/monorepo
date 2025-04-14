@@ -14,7 +14,7 @@ use bytes::Buf;
 pub trait ReadExt: Read<()> {
     /// Reads a value using the default `()` config.
     fn read(buf: &mut impl Buf) -> Result<Self, Error> {
-        <Self as Read<()>>::read_cfg(buf, &())
+        <Self as Read<()>>::read_cfg(buf, ())
     }
 }
 
@@ -28,7 +28,7 @@ impl<T: Read<()>> ReadExt for T {}
 pub trait DecodeExt: Decode<()> {
     /// Decodes a value using the default `()` config.
     fn decode(buf: impl Buf) -> Result<Self, Error> {
-        <Self as Decode<()>>::decode_cfg(buf, &())
+        <Self as Decode<()>>::decode_cfg(buf, ())
     }
 }
 
@@ -40,35 +40,62 @@ impl<T: Decode<()>> DecodeExt for T {}
 ///
 /// Useful for reading collections like `Vec<T>` where `T` implements `Read<()>`.
 /// Import this trait to use the `.read_range()` method.
-pub trait ReadRangeExt<T: Config + Default, R: RangeConfig>: Read<(R, T)> {
+pub trait ReadRangeExt<R: RangeConfig, RR: Config + From<R>>: Read<RR> {
     /// Reads a value using only a range configuration.
     /// Assumes the inner configuration is a unit type.
     fn read_range(buf: &mut impl Buf, range: R) -> Result<Self, Error> {
-        Self::read_cfg(buf, &(range, T::default()))
+        Self::read_cfg(buf, RR::from(range))
     }
 }
 
-// Blanket implementation ONLY for T = ()
-// Applies to types like Vec<U> where U: Read<()>
-impl<R: RangeConfig, U: Read<(R, ())>> ReadRangeExt<(), R> for U {}
+// Blanket implementation
+impl<R: RangeConfig, RR: Config + From<R>, U: Read<RR>> ReadRangeExt<R, RR> for U {}
 
-// Blanket implementation ONLY for T = ((), ())
-// Applies to types like HashMap<K, V> where K: Read<()>, V: Read<()>
-impl<R: RangeConfig, U: Read<(R, ((), ()))>> ReadRangeExt<((), ()), R> for U {}
-
-/// Extension trait for decoding types whose config is `(RangeConfig, T)`,
-/// i.e., requiring a range but no specific inner configuration, ensuring the buffer is consumed.
-///
-/// Useful for decoding collections like `Vec<T>` where `T` implements `Read<()>`.
-/// Import this trait to use the `.decode_range()` method.
-pub trait DecodeRangeExt<T: Config + Default, R: RangeConfig>: Decode<(R, T)> {
+pub trait DecodeRangeExt<R: RangeConfig, RR: Config + From<R>>: Decode<RR> {
+    /// Decodes a value using only a range configuration.
+    /// Assumes the inner configuration is a unit type.
     fn decode_range(buf: impl Buf, range: R) -> Result<Self, Error> {
-        Self::decode_cfg(buf, &(range, T::default()))
+        Self::decode_cfg(buf, RR::from(range))
     }
 }
 
-// Blanket implementation ONLY for T = ()
-impl<R: RangeConfig, U: Decode<(R, ())>> DecodeRangeExt<(), R> for U {}
+// Blanket implementation
+impl<R: RangeConfig, RR: Config + From<R>, U: Decode<RR>> DecodeRangeExt<R, RR> for U {}
 
-// Blanket implementation ONLY for T = ((), ())
-impl<R: RangeConfig, U: Decode<(R, ((), ()))>> DecodeRangeExt<((), ()), R> for U {}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Encode, ReadRangeExt};
+    use bytes::Bytes;
+    use std::ops::RangeTo;
+
+    #[test]
+    fn test_read_ext() {
+        let original: u64 = 1234;
+        let mut encoded = original.encode();
+        let result = u64::read(&mut encoded).unwrap();
+        assert_eq!(result, original);
+    }
+
+    #[test]
+    fn test_decode_ext() {
+        let original: u64 = 1234;
+        let encoded = original.encode();
+        let result = u64::decode(encoded).unwrap();
+        assert_eq!(result, original);
+    }
+
+    #[test]
+    fn test_decode_range_ext() {
+        let original = vec![1, 2, 3, 4, 5];
+        let mut encoded = original.encode();
+        let result = Vec::<i32>::read_range(&mut encoded, ..12usize).unwrap();
+        assert_eq!(result, original);
+
+        let original = Bytes::from_static(b"hello");
+        let mut encoded = original.encode();
+        let range: RangeTo<usize> = ..12;
+        let result = Bytes::read_range(&mut encoded, range).unwrap();
+        assert_eq!(result, original);
+    }
+}
