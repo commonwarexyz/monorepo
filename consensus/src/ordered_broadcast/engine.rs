@@ -26,7 +26,7 @@ use commonware_runtime::{
         histogram,
         status::{CounterExt, Status},
     },
-    Blob, Clock, Handle, Metrics, Spawner, Storage,
+    Clock, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::{self, variable::Journal};
 use commonware_utils::futures::Pool as FuturesPool;
@@ -53,8 +53,7 @@ struct Verify<C: Scheme, D: Digest, E: Clock> {
 
 /// Instance of the engine.
 pub struct Engine<
-    B: Blob,
-    E: Clock + Spawner + Storage<B> + Metrics,
+    E: Clock + Spawner + Storage + Metrics,
     C: Scheme,
     D: Digest,
     A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
@@ -149,7 +148,7 @@ pub struct Engine<
     journal_name_prefix: String,
 
     // A map of sequencer public keys to their journals.
-    journals: BTreeMap<C::PublicKey, Journal<B, E>>,
+    journals: BTreeMap<C::PublicKey, Journal<E>>,
 
     ////////////////////////////////////////
     // State
@@ -193,8 +192,7 @@ pub struct Engine<
 }
 
 impl<
-        B: Blob,
-        E: Clock + Spawner + Storage<B> + Metrics,
+        E: Clock + Spawner + Storage + Metrics,
         C: Scheme,
         D: Digest,
         A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
@@ -210,7 +208,7 @@ impl<
         >,
         NetS: Sender<PublicKey = C::PublicKey>,
         NetR: Receiver<PublicKey = C::PublicKey>,
-    > Engine<B, E, C, D, A, R, Z, M, Su, TSu, NetS, NetR>
+    > Engine<E, C, D, A, R, Z, M, Su, TSu, NetS, NetR>
 {
     /// Creates a new engine with the given context and configuration.
     pub fn new(context: E, cfg: Config<C, D, A, R, Z, M, Su, TSu>) -> Self {

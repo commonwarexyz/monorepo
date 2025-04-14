@@ -17,7 +17,7 @@ use crate::mmr::{
 };
 use bytes::Bytes;
 use commonware_cryptography::Hasher;
-use commonware_runtime::{Blob, Clock, Metrics, Storage as RStorage};
+use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::array::prefixed_u64::U64;
 use std::collections::HashMap;
 use tracing::{debug, error, warn};
@@ -39,12 +39,12 @@ pub struct Config {
 }
 
 /// A MMR backed by a fixed-item-length journal.
-pub struct Mmr<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> {
+pub struct Mmr<E: RStorage + Clock + Metrics, H: Hasher> {
     /// A memory resident MMR used to build the MMR structure and cache updates.
     mem_mmr: MemMmr<H>,
 
     /// Stores all unpruned MMR nodes.
-    journal: Journal<B, E, H::Digest>,
+    journal: Journal<E, H::Digest>,
 
     /// The size of the journal irrespective of any pruned nodes or any un-synced nodes currently
     /// cached in the memory resident MMR.
@@ -53,13 +53,13 @@ pub struct Mmr<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> {
     /// Stores all "pinned nodes" (pruned nodes required for proving & root generation) for the MMR,
     /// and the corresponding pruning boundary used to generate them. The metadata remains empty
     /// until pruning is invoked, and its contents change only when the pruning boundary moves.
-    metadata: Metadata<B, E, U64>,
+    metadata: Metadata<E, U64>,
 
     /// The last pruning boundary used to prune this MMR, or 0 if the MMR has never been pruned.
     pruned_to_pos: u64,
 }
 
-impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Storage<H::Digest> for Mmr<B, E, H> {
+impl<E: RStorage + Clock + Metrics, H: Hasher> Storage<H::Digest> for Mmr<E, H> {
     async fn size(&self) -> Result<u64, Error> {
         Ok(self.size())
     }
@@ -77,7 +77,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Storage<H::Digest> fo
     }
 }
 
-impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
+impl<E: RStorage + Clock + Metrics, H: Hasher> Mmr<E, H> {
     /// Initialize a new `Mmr` instance.
     pub async fn init(context: E, cfg: Config) -> Result<Self, Error> {
         let journal_cfg = JConfig {
@@ -85,8 +85,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
             items_per_blob: cfg.items_per_blob,
         };
         let mut journal =
-            Journal::<B, E, H::Digest>::init(context.with_label("mmr_journal"), journal_cfg)
-                .await?;
+            Journal::<E, H::Digest>::init(context.with_label("mmr_journal"), journal_cfg).await?;
         let mut journal_size = journal.size().await?;
 
         let metadata_cfg = MConfig {
@@ -154,7 +153,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
         let mut pinned_nodes = Vec::new();
         for pos in Proof::<H>::nodes_to_pin(journal_size, journal_size) {
             let digest =
-                Mmr::<B, E, H>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
+                Mmr::<E, H>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
             pinned_nodes.push(digest);
         }
         let mut mem_mmr = MemMmr::init(vec![], journal_size, pinned_nodes);
@@ -164,7 +163,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
         let mut pinned_nodes = HashMap::new();
         for pos in Proof::<H>::nodes_to_pin(journal_size, metadata_prune_pos) {
             let digest =
-                Mmr::<B, E, H>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
+                Mmr::<E, H>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
             pinned_nodes.insert(pos, digest);
         }
         mem_mmr.add_pinned_nodes(pinned_nodes);
@@ -207,8 +206,8 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
     /// Assumes the node should exist in at least one of these sources and returns a `MissingNode`
     /// error otherwise.
     async fn get_from_metadata_or_journal(
-        metadata: &Metadata<B, E, U64>,
-        journal: &Journal<B, E, H::Digest>,
+        metadata: &Metadata<E, U64>,
+        journal: &Journal<E, H::Digest>,
         pos: u64,
     ) -> Result<H::Digest, Error> {
         if let Some(bytes) = metadata.get(&U64::new(0, pos)) {
@@ -286,7 +285,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
         let mut pinned_nodes = Vec::new();
         for pos in Proof::<H>::nodes_to_pin(new_size, new_size) {
             let digest =
-                Mmr::<B, E, H>::get_from_metadata_or_journal(&self.metadata, &self.journal, pos)
+                Mmr::<E, H>::get_from_metadata_or_journal(&self.metadata, &self.journal, pos)
                     .await?;
             pinned_nodes.push(digest);
         }
@@ -386,7 +385,7 @@ impl<B: Blob, E: RStorage<B> + Clock + Metrics, H: Hasher> Mmr<B, E, H> {
         start_element_pos: u64,
         end_element_pos: u64,
     ) -> Result<Proof<H>, Error> {
-        Proof::<H>::range_proof::<Mmr<B, E, H>>(self, start_element_pos, end_element_pos).await
+        Proof::<H>::range_proof::<Mmr<E, H>>(self, start_element_pos, end_element_pos).await
     }
 
     /// Prune as many nodes as possible, leaving behind at most items_per_blob nodes in the current
