@@ -175,15 +175,6 @@ pub struct Config<S: Storage> {
     pub tcp_nodelay: Option<bool>,
 
     pub storage_config: S::Config,
-    // TODO danlaine: remove
-    // Base directory for all storage operations.
-    // pub storage_directory: PathBuf,
-
-    // TODO danlaine: remove
-    // Maximum buffer size for operations on blobs.
-    //
-    // Tokio sets the default value to 2MB.
-    // pub maximum_buffer_size: usize,
 }
 
 impl<S: Storage> Default for Config<S> {

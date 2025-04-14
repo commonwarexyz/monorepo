@@ -393,7 +393,7 @@ mod tests {
                 let cfg = JConfig {
                     partition: validator.to_string(),
                 };
-                let journal = Journal::init(context.clone(), context.with_label("journal"), cfg)
+                let journal = Journal::init(context.clone(), &context.with_label("journal"), cfg)
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
@@ -629,7 +629,7 @@ mod tests {
                     let cfg = JConfig {
                         partition: validator.to_string(),
                     };
-                    let journal = Journal::init(context.clone(),context.with_label("journal"), cfg)
+                    let journal = Journal::init(context.clone(),&context.with_label("journal"), cfg)
                         .await
                         .expect("unable to create journal");
                     let cfg = config::Config {
@@ -849,7 +849,7 @@ skip_timeout,
                 let cfg = JConfig {
                     partition: validator.to_string(),
                 };
-                let journal = Journal::init(context.clone(), context.with_label("journal"), cfg)
+                let journal = Journal::init(context.clone(), &context.with_label("journal"), cfg)
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
@@ -986,7 +986,7 @@ skip_timeout,
                 let cfg = JConfig {
                     partition: validator.to_string(),
                 };
-                let journal = Journal::init(context.clone(), context.with_label("journal"), cfg)
+                let journal = Journal::init(context.clone(), &context.with_label("journal"), cfg)
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
@@ -1144,7 +1144,7 @@ skip_timeout,
                 let cfg = JConfig {
                     partition: validator.to_string(),
                 };
-                let journal = Journal::init(context.clone(), context.with_label("journal"), cfg)
+                let journal = Journal::init(context.clone(), &context.with_label("journal"), cfg)
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
@@ -1335,7 +1335,7 @@ skip_timeout,
                 let cfg = JConfig {
                     partition: validator.to_string(),
                 };
-                let journal = Journal::init(context.clone(), context.with_label("journal"), cfg)
+                let journal = Journal::init(context.clone(), &context.with_label("journal"), cfg)
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
@@ -1515,7 +1515,7 @@ skip_timeout,
                 let cfg = JConfig {
                     partition: validator.to_string(),
                 };
-                let journal = Journal::init(context.clone(), context.with_label("journal"), cfg)
+                let journal = Journal::init(context.clone(), &context.with_label("journal"), cfg)
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
@@ -1688,7 +1688,7 @@ skip_timeout,
                 let cfg = JConfig {
                     partition: validator.to_string(),
                 };
-                let journal = Journal::init(context.clone(), context.with_label("journal"), cfg)
+                let journal = Journal::init(context.clone(), &context.with_label("journal"), cfg)
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
@@ -1917,7 +1917,7 @@ skip_timeout,
                 let cfg = JConfig {
                     partition: validator.to_string(),
                 };
-                let journal = Journal::init(context.clone(), context.with_label("journal"), cfg)
+                let journal = Journal::init(context.clone(), &context.with_label("journal"), cfg)
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
@@ -2111,7 +2111,7 @@ skip_timeout,
                         partition: validator.to_string(),
                     };
                     let journal =
-                        Journal::init(context.clone(), context.with_label("journal"), cfg)
+                        Journal::init(context.clone(), &context.with_label("journal"), cfg)
                             .await
                             .expect("unable to create journal");
                     let cfg = config::Config {
@@ -2295,7 +2295,7 @@ skip_timeout,
                         partition: validator.to_string(),
                     };
                     let journal =
-                        Journal::init(context.clone(), context.with_label("journal"), cfg)
+                        Journal::init(context.clone(), &context.with_label("journal"), cfg)
                             .await
                             .expect("unable to create journal");
                     let cfg = config::Config {

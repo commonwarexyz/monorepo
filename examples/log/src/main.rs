@@ -188,7 +188,7 @@ fn main() {
         // Initialize storage
         let journal = Journal::init(
             context.clone(),
-            context.with_label("journal"),
+            &context.with_label("journal"),
             Config {
                 partition: String::from("log"),
             },

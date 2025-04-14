@@ -148,7 +148,7 @@ impl<S: Storage> Journal<S> {
     /// All backing blobs are opened but not read during
     /// initialization. The `replay` method can be used
     /// to iterate over all items in the `Journal`.
-    pub async fn init(storage: S, metrics: impl Metrics, cfg: Config) -> Result<Self, Error> {
+    pub async fn init(storage: S, metrics: &impl Metrics, cfg: Config) -> Result<Self, Error> {
         // Iterate over blobs in partition
         let mut blobs = BTreeMap::new();
         let stored_blobs = match storage.scan(&cfg.partition).await {
@@ -596,7 +596,7 @@ mod tests {
             };
             let index = 1u64;
             let data = Bytes::from("Test data");
-            let mut journal = Journal::init(context.clone(), context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.clone(), &context, cfg.clone())
                 .await
                 .expect("Failed to initialize journal");
 
@@ -617,7 +617,7 @@ mod tests {
             let cfg = Config {
                 partition: "test_partition".into(),
             };
-            let mut journal = Journal::init(context.clone(), context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.clone(), &context, cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
 
@@ -662,7 +662,7 @@ mod tests {
             };
 
             // Initialize the journal
-            let mut journal = Journal::init(context.clone(), context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.clone(), &context, cfg.clone())
                 .await
                 .expect("Failed to initialize journal");
 
@@ -690,7 +690,7 @@ mod tests {
             journal.close().await.expect("Failed to close journal");
 
             // Re-initialize the journal to simulate a restart
-            let mut journal = Journal::init(context.clone(), context, cfg)
+            let mut journal = Journal::init(context.clone(), &context, cfg)
                 .await
                 .expect("Failed to re-initialize journal");
 
@@ -755,7 +755,7 @@ mod tests {
             };
 
             // Initialize the journal
-            let mut journal = Journal::init(context.clone(), context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.clone(), &context, cfg.clone())
                 .await
                 .expect("Failed to initialize journal");
 
@@ -796,7 +796,7 @@ mod tests {
             journal.close().await.expect("Failed to close journal");
 
             // Re-initialize the journal to simulate a restart
-            let mut journal = Journal::init(context.clone(), context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.clone(), &context, cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
 
@@ -862,7 +862,7 @@ mod tests {
             blob.close().await.expect("Failed to close blob");
 
             // Attempt to initialize the journal
-            let result = Journal::init(context.clone(), context, cfg).await;
+            let result = Journal::init(context.clone(), &context, cfg).await;
 
             // Expect an error
             assert!(matches!(result, Err(Error::InvalidBlobName(_))));
@@ -896,7 +896,7 @@ mod tests {
             blob.close().await.expect("Failed to close blob");
 
             // Initialize the journal
-            let mut journal = Journal::init(context.clone(), context, cfg)
+            let mut journal = Journal::init(context.clone(), &context, cfg)
                 .await
                 .expect("Failed to initialize journal");
 
@@ -958,7 +958,7 @@ mod tests {
             blob.close().await.expect("Failed to close blob");
 
             // Initialize the journal
-            let mut journal = Journal::init(context.clone(), context, cfg)
+            let mut journal = Journal::init(context.clone(), &context, cfg)
                 .await
                 .expect("Failed to initialize journal");
 
@@ -1030,7 +1030,7 @@ mod tests {
             blob.close().await.expect("Failed to close blob");
 
             // Initialize the journal
-            let mut journal = Journal::init(context.clone(), context, cfg)
+            let mut journal = Journal::init(context.clone(), &context, cfg)
                 .await
                 .expect("Failed to initialize journal");
 
@@ -1099,7 +1099,7 @@ mod tests {
             blob.close().await.expect("Failed to close blob");
 
             // Initialize the journal
-            let mut journal = Journal::init(context.clone(), context, cfg)
+            let mut journal = Journal::init(context.clone(), &context, cfg)
                 .await
                 .expect("Failed to initialize journal");
 
@@ -1139,7 +1139,7 @@ mod tests {
             };
 
             // Initialize the journal
-            let mut journal = Journal::init(context.clone(), context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.clone(), &context, cfg.clone())
                 .await
                 .expect("Failed to initialize journal");
 
@@ -1178,7 +1178,7 @@ mod tests {
             blob.close().await.expect("Failed to close blob");
 
             // Re-initialize the journal to simulate a restart
-            let mut journal = Journal::init(context.clone(), context, cfg)
+            let mut journal = Journal::init(context.clone(), &context, cfg)
                 .await
                 .expect("Failed to re-initialize journal");
 
@@ -1299,7 +1299,7 @@ mod tests {
             let context = MockStorage {
                 len: u32::MAX as u64 * INDEX_ALIGNMENT, // can store up to u32::Max at the last offset
             };
-            let mut journal = Journal::init(context.clone(), context, cfg).await.unwrap();
+            let mut journal = Journal::init(context.clone(), &context, cfg).await.unwrap();
 
             // Append data
             let data = Bytes::from("Test data");
@@ -1323,7 +1323,7 @@ mod tests {
             let context = MockStorage {
                 len: u32::MAX as u64 * INDEX_ALIGNMENT + 1,
             };
-            let mut journal = Journal::init(context.clone(), context, cfg).await.unwrap();
+            let mut journal = Journal::init(context.clone(), &context, cfg).await.unwrap();
 
             // Append data
             let data = Bytes::from("Test data");
