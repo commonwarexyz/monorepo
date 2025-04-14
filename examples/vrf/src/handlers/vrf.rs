@@ -5,7 +5,6 @@ use commonware_cryptography::bls12381::{
     primitives::{
         group::{self, Element},
         ops,
-        poly::PartialSignature,
     },
 };
 use commonware_macros::select;
@@ -72,12 +71,7 @@ impl<E: Clock + Spawner, P: Array> Vrf<E, P> {
         sender
             .send(
                 Recipients::Some(self.contributors.clone()),
-                wire::VRF {
-                    round,
-                    signature: signature.serialize(),
-                }
-                .encode()
-                .into(),
+                wire::VRF { round, signature }.encode().into(),
                 true,
             )
             .await
@@ -121,16 +115,9 @@ impl<E: Clock + Spawner, P: Array> Vrf<E, P> {
                                 );
                                 continue;
                             }
-                            let signature = match PartialSignature::deserialize(&msg.signature) {
-                                Some(signature) => signature,
-                                None => {
-                                    warn!(round, dealer, "received invalid signature");
-                                    continue;
-                                }
-                            };
-                            match ops::partial_verify_message(&output.public, Some(VRF_NAMESPACE), &payload, &signature) {
+                            match ops::partial_verify_message(&output.public, Some(VRF_NAMESPACE), &payload, &msg.signature) {
                                 Ok(_) => {
-                                    partials.push(signature);
+                                    partials.push(msg.signature);
                                     debug!(round, dealer, "received partial signature");
                                 }
                                 Err(_) => {

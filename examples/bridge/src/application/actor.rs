@@ -1,10 +1,9 @@
-use crate::wire;
-
 use super::{
     ingress::{Mailbox, Message},
     supervisor::Supervisor,
     Config,
 };
+use crate::wire::{self, Inbound, Outbound};
 use bytes::BufMut;
 use commonware_codec::{DecodeExt, Encode, FixedSize};
 use commonware_consensus::threshold_simplex::types::{Activity, Finalization, Viewable};
@@ -93,15 +92,13 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                                 .receive()
                                 .await
                                 .expect("failed to receive from indexer");
-                            let msg =
-                                wire::Outbound::decode(result).expect("failed to decode result");
-                            let payload = msg.payload.expect("missing payload");
-                            let proof = match payload {
-                                wire::Outbound::Success(_) => {
+                            let msg = Outbound::decode(result).expect("failed to decode result");
+                            let proof = match msg {
+                                Outbound::Success(_) => {
                                     debug!("no finalization found");
                                     continue;
                                 }
-                                wire::Outbound::Finalization(f) => f,
+                                Outbound::Finalization(f) => f,
                                 _ => panic!("unexpected response"),
                             };
 
@@ -130,8 +127,8 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                     let msg = wire::PutBlock {
                         network: self.public.serialize(),
                         data: msg.into(),
-                    };
-                    let msg = wire::Inbound::PutBlock(msg).encode().into();
+                    })
+                    .encode();
                     indexer_sender
                         .send(&msg)
                         .await
@@ -140,10 +137,9 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                         .receive()
                         .await
                         .expect("failed to receive from indexer");
-                    let msg = wire::Outbound::decode(result).expect("failed to decode result");
-                    let payload = msg.payload.expect("missing payload");
-                    let success = match payload {
-                        wire::Outbound::Success(s) => s,
+                    let msg = Outbound::decode(result).expect("failed to decode result");
+                    let success = match msg {
+                        Outbound::Success(s) => s,
                         _ => panic!("unexpected response"),
                     };
                     debug!(view = index, success, "block published");
@@ -169,10 +165,9 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                         .receive()
                         .await
                         .expect("failed to receive from indexer");
-                    let msg = wire::Outbound::decode(result).expect("failed to decode result");
-                    let payload = msg.payload.expect("missing payload");
-                    let block = match payload {
-                        wire::Outbound::Success(b) => {
+                    let msg = Outbound::decode(result).expect("failed to decode result");
+                    let block = match msg {
+                        Outbound::Success(b) => {
                             if b {
                                 panic!("unexpected success");
                             }
@@ -180,7 +175,7 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                             debug!("block not found");
                             continue;
                         }
-                        wire::Outbound::Block(b) => b,
+                        Outbound::Block(b) => b,
                         _ => panic!("unexpected response"),
                     };
 

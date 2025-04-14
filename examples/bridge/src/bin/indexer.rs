@@ -13,7 +13,7 @@ use commonware_stream::{
     public_key::{Config, Connection, IncomingConnection},
     Receiver, Sender,
 };
-use commonware_utils::{from_hex, hex, union};
+use commonware_utils::{from_hex, union, Array};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
@@ -25,13 +25,13 @@ use std::{
 };
 use tracing::{debug, info};
 
-enum Message {
+enum Message<D: Array> {
     PutBlock {
         incoming: wire::PutBlock,
         response: oneshot::Sender<bool>, // wait to broadcast consensus message
     },
     GetBlock {
-        incoming: wire::GetBlock,
+        incoming: wire::GetBlock<D>,
         response: oneshot::Sender<Option<Bytes>>,
     },
     PutFinalization {
@@ -149,7 +149,7 @@ fn main() {
                         network.insert(digest, incoming.data);
                         let _ = response.send(true);
                         info!(
-                            network = hex(&incoming.network),
+                            network = ?incoming.network,
                             block = ?digest,
                             "stored block"
                         );
@@ -194,7 +194,7 @@ fn main() {
                         network.insert(view, incoming.data);
                         let _ = response.send(true);
                         info!(
-                            network = hex(&incoming.network),
+                            network = ?incoming.network,
                             view = view,
                             "stored finalization"
                         );
@@ -331,8 +331,8 @@ fn main() {
                                     .await
                                     .expect("failed to send message");
                                 let success = receiver.await.expect("failed to receive response");
-                                let msg = wire::Outbound::Success(success).encode().into();
-                                if sender.send(&msg).await.is_err() {
+                                let msg = wire::Outbound::Success(success).encode().as_ref();
+                                if sender.send(msg).await.is_err() {
                                     debug!(?peer, "failed to send message");
                                     return;
                                 }

@@ -1,16 +1,17 @@
-use bytes::BufMut;
-use commonware_codec::FixedSize;
+use commonware_codec::{EncodeSize, FixedSize, Write};
 use commonware_cryptography::bls12381::primitives::{group::Element, poly};
 use commonware_utils::{hex, Array};
 
 pub const ACK_NAMESPACE: &[u8] = b"_COMMONWARE_DKG_ACK_";
 
 /// Create a payload for acking a secret.
-pub fn payload<P: Array>(round: u64, dealer: &P, commitment: &[u8]) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(u64::SIZE + P::SIZE + commitment.len());
-    payload.put_u64(round);
-    payload.extend_from_slice(dealer);
-    payload.extend_from_slice(commitment);
+///
+/// TODO: remove in favor of (round, dealer, commitment).encode()
+pub fn payload<P: Array>(round: u64, dealer: &P, commitment: &poly::Public) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(u64::SIZE + P::SIZE + commitment.encode_size());
+    round.write(&mut payload);
+    dealer.write(&mut payload);
+    commitment.write(&mut payload);
     payload
 }
 
