@@ -182,9 +182,10 @@ pub fn partial_verify_message(
 /// This function assumes a group check was already performed on each `signature` and
 /// that each `signature` is unique. If any of these assumptions are violated, an attacker can
 /// exploit this function to verify an incorrect aggregate signature.
-pub fn partial_aggregate_signatures(
-    partials: &[&PartialSignature],
-) -> Option<(u32, group::Signature)> {
+pub fn partial_aggregate_signatures<'a, I>(partials: I) -> Option<(u32, group::Signature)>
+where
+    I: IntoIterator<Item = &'a PartialSignature>,
+{
     if partials.is_empty() {
         return None;
     }
@@ -205,12 +206,16 @@ pub fn partial_aggregate_signatures(
 /// # Warning
 ///
 /// This function assumes a group check was already performed on each `signature`.
-pub fn partial_verify_multiple_messages(
+pub fn partial_verify_multiple_messages<'a, I, J>(
     public: &poly::Public,
     partial_signer: u32,
-    messages: &[(Option<&[u8]>, &[u8])],
-    signatures: &[&PartialSignature],
-) -> Result<(), Error> {
+    messages: I,
+    signatures: J,
+) -> Result<(), Error>
+where
+    I: IntoIterator<Item = (Option<&'a [u8]>, &'a [u8])>,
+    J: IntoIterator<Item = &'a PartialSignature>,
+{
     // Aggregate the partial signatures
     let (index, signature) =
         partial_aggregate_signatures(signatures).ok_or(Error::InvalidSignature)?;
@@ -261,7 +266,10 @@ where
 /// that each `public_key` is unique, and that the caller has a Proof-of-Possession (PoP)
 /// for each `public_key`. If any of these assumptions are violated, an attacker can
 /// exploit this function to verify an incorrect aggregate signature.
-pub fn aggregate_public_keys(public_keys: &[&group::Public]) -> group::Public {
+pub fn aggregate_public_keys<'a, I>(public_keys: I) -> group::Public
+where
+    I: IntoIterator<Item = &'a group::Public>,
+{
     let mut p = group::Public::zero();
     for pk in public_keys {
         p.add(pk);
@@ -276,7 +284,10 @@ pub fn aggregate_public_keys(public_keys: &[&group::Public]) -> group::Public {
 /// This function assumes a group check was already performed on each `signature` and
 /// that each `signature` is unique. If any of these assumptions are violated, an attacker can
 /// exploit this function to verify an incorrect aggregate signature.
-pub fn aggregate_signatures(signatures: &[&group::Signature]) -> group::Signature {
+pub fn aggregate_signatures<'a, I>(signatures: I) -> group::Signature
+where
+    I: IntoIterator<Item = &'a group::Signature>,
+{
     let mut s = group::Signature::zero();
     for sig in signatures {
         s.add(sig);
@@ -291,12 +302,15 @@ pub fn aggregate_signatures(signatures: &[&group::Signature]) -> group::Signatur
 /// This function assumes the caller has performed a group check and collected a proof-of-possession
 /// for all provided `public`. This function assumes a group check was already performed on the
 /// `signature`. It is not safe to provide duplicate public keys.
-pub fn aggregate_verify_multiple_public_keys(
-    public: &[&group::Public],
+pub fn aggregate_verify_multiple_public_keys<'a, I>(
+    public: I,
     namespace: Option<&[u8]>,
     message: &[u8],
     signature: &group::Signature,
-) -> Result<(), Error> {
+) -> Result<(), Error>
+where
+    I: IntoIterator<Item = &'a group::Public>,
+{
     // Aggregate public keys
     //
     // We can take advantage of the bilinearity property of pairings to aggregate public keys
@@ -320,12 +334,15 @@ pub fn aggregate_verify_multiple_public_keys(
 /// and sum hashed messages together before performing a single pairing operation (instead of summing `len(messages)` pairings of
 /// hashed message and public key). If the public key itself is an aggregate of multiple public keys, an attacker can exploit
 /// this optimization to cause this function to return that an aggregate signature is valid when it really isn't.
-pub fn aggregate_verify_multiple_messages(
+pub fn aggregate_verify_multiple_messages<'a, I>(
     public: &group::Public,
-    messages: &[(Option<&[u8]>, &[u8])],
+    messages: I,
     signature: &group::Signature,
     concurrency: usize,
-) -> Result<(), Error> {
+) -> Result<(), Error>
+where
+    I: IntoIterator<Item = (Option<&'a [u8]>, &'a [u8])>,
+{
     let hm_sum = if concurrency == 1 {
         // Avoid pool overhead when concurrency is 1
         let mut hm_sum = group::Signature::zero();
@@ -580,11 +597,14 @@ mod tests {
         result.expect("signature should be valid");
     }
 
-    fn blst_aggregate_verify_multiple_public_keys(
-        public: &[&group::Public],
+    fn blst_aggregate_verify_multiple_public_keys<'a, I>(
+        public: I,
         message: &[u8],
         signature: &group::Signature,
-    ) -> Result<(), BLST_ERROR> {
+    ) -> Result<(), BLST_ERROR>
+    where
+        I: IntoIterator<Item = &'a group::Public>,
+    {
         let public = public
             .iter()
             .map(|pk| blst::min_pk::PublicKey::from_bytes(pk.serialize().as_slice()).unwrap())
@@ -680,11 +700,14 @@ mod tests {
         assert!(matches!(result, Err(Error::InvalidSignature)));
     }
 
-    fn blst_aggregate_verify_multiple_messages(
+    fn blst_aggregate_verify_multiple_messages<'a, I>(
         public: &group::Public,
-        msgs: &[&[u8]],
+        msgs: I,
         signature: &group::Signature,
-    ) -> Result<(), BLST_ERROR> {
+    ) -> Result<(), BLST_ERROR>
+    where
+        I: IntoIterator<Item = &'a [u8]>,
+    {
         let public = blst::min_pk::PublicKey::from_bytes(public.serialize().as_slice()).unwrap();
         let pks = vec![&public; msgs.len()];
         let signature =
