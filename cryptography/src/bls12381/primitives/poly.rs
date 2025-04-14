@@ -208,6 +208,8 @@ impl<C: Element> Poly<C> {
     }
 
     /// Recover the polynomial's constant term given at least `t` polynomial evaluations.
+    ///
+    /// TODO: move I to where clause
     pub fn recover<'a, I: IntoIterator<Item = &'a Eval<C>>>(t: u32, evals: I) -> Result<C, Error>
     where
         C: 'a,
