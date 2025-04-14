@@ -8,10 +8,11 @@
 //! domain separation tag is `BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_`. You can read more about DSTs [here](https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-05#section-4.2).
 
 use super::{
-    group::{self, equal, Element, Point, Share, DST, MESSAGE, PROOF_OF_POSSESSION},
+    group::{self, equal, Element, Point, Scalar, Share, DST, G2, MESSAGE, PROOF_OF_POSSESSION},
     poly::{self, Eval, PartialSignature},
     Error,
 };
+use blst::min_pk::Signature;
 use commonware_utils::union_unique;
 use rand::RngCore;
 use rayon::{prelude::*, ThreadPoolBuilder};
@@ -257,7 +258,53 @@ pub fn threshold_signature_recover<'a, I>(
 where
     I: IntoIterator<Item = &'a PartialSignature>,
 {
-    poly::Signature::recover(threshold, partials)
+    let t = threshold as usize;
+    let mut partials: Vec<_> = partials.into_iter().collect();
+    if partials.len() < t {
+        return Err(Error::NotEnoughPartialSignatures(t, partials.len()));
+    }
+
+    // Sort by index and take first t evaluations
+    partials.sort_by_key(|p| p.index);
+    let evals: Vec<_> = partials.iter().take(t).collect();
+
+    // Compute x_i values (x_i = index + 1)
+    let xs: Vec<Scalar> = evals
+        .iter()
+        .map(|p| {
+            let mut xi = Scalar::zero();
+            xi.set_int(p.index + 1);
+            xi
+        })
+        .collect();
+
+    // Compute Lagrange coefficients l_i(0)
+    let coefficients: Vec<Scalar> = (0..t)
+        .map(|i| {
+            let xi = &xs[i];
+            let mut num = Scalar::one();
+            let mut den = Scalar::one();
+            for (j, xj) in xs.iter().enumerate() {
+                if i != j {
+                    num.mul(xj);
+                    let mut tmp = *xj;
+                    tmp.sub(xi);
+                    den.mul(&tmp);
+                }
+            }
+            let inv = den.inverse().ok_or(Error::NoInverse)?;
+            num.mul(&inv);
+            Ok(num)
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+
+    // Extract points (partial signatures)
+    let points: Vec<G2> = evals.iter().map(|p| p.value).collect();
+
+    // Compute the sum using multi-scalar multiplication
+    let result = G2::multi_scalar_mul(&coefficients, &points);
+
+    Ok(result)
 }
 
 /// Aggregates multiple public keys.
