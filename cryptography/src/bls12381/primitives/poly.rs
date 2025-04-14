@@ -15,7 +15,7 @@ use commonware_codec::{
     Decode, DecodeExt, Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write,
 };
 use rand::{rngs::OsRng, RngCore};
-use std::{collections::BTreeMap, hash::Hash};
+use std::hash::Hash;
 
 /// Private polynomials are used to generate secret shares.
 pub type Private = Poly<group::Private>;
