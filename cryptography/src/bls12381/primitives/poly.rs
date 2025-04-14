@@ -216,18 +216,14 @@ impl<C: Element> Poly<C> {
         // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/a714310be76620e10e8797d6637df64011926430/crates/threshold-bls/src/poly.rs#L131-L165
 
         // Convert the first `t` sorted shares into scalars
-        let mut err = None;
-        let xs = evals.into_iter().fold(BTreeMap::new(), |mut m, sh| {
+        let xs = evals.into_iter().try_fold(BTreeMap::new(), |mut m, sh| {
             let mut xi = Scalar::zero();
             xi.set_int(sh.index + 1);
             if m.insert(sh.index, (xi, &sh.value)).is_some() {
-                err = Some(Error::DuplicateEval);
+                return Err(Error::DuplicateEval);
             }
-            m
-        });
-        if let Some(e) = err {
-            return Err(e);
-        }
+            Ok(m)
+        })?;
 
         // Ensure we have enough shares
         let t = t as usize;
