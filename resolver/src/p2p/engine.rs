@@ -4,10 +4,7 @@ use super::{
     ingress::{Mailbox, Message},
     metrics,
 };
-use super::{
-    wire::{Payload, PeerMsg},
-    Coordinator, Producer,
-};
+use super::{wire, Coordinator, Producer};
 use crate::Consumer;
 use bytes::Bytes;
 use commonware_codec::{DecodeExt, Encode};
@@ -254,7 +251,7 @@ impl<
                             return;
                         }
                     };
-                    let msg = match PeerMsg::decode(msg) {
+                    let msg = match wire::Message::decode(msg) {
                         Ok(msg) => msg,
                         Err(err) => {
                             trace!(?err, ?peer, "decode failed");
@@ -262,9 +259,9 @@ impl<
                         }
                     };
                     match msg.payload {
-                        Payload::Request(request) => self.handle_network_request(peer, msg.id, request).await,
-                        Payload::Response(response) => self.handle_network_response(&mut sender, peer, msg.id, response).await,
-                        Payload::ErrorResponse => self.handle_network_error_response(&mut sender, peer, msg.id).await,
+                        wire::Payload::Request(key) => self.handle_network_request(peer, msg.id, key).await,
+                        wire::Payload::Response(response) => self.handle_network_response(&mut sender, peer, msg.id, response).await,
+                        wire::Payload::ErrorResponse => self.handle_network_error_response(&mut sender, peer, msg.id).await,
                     };
                 },
 
@@ -298,11 +295,11 @@ impl<
         priority: bool,
     ) {
         // Encode message
-        let payload = match response {
-            Ok(data) => Payload::Response(data),
-            Err(_) => Payload::ErrorResponse,
+        let payload: wire::Payload<Key> = match response {
+            Ok(data) => wire::Payload::Response(data),
+            Err(_) => wire::Payload::ErrorResponse,
         };
-        let msg: Bytes = PeerMsg { id, payload }.encode().into();
+        let msg: Bytes = wire::Message { id, payload }.encode().into();
 
         // Send message to peer
         let result = sender
@@ -318,14 +315,7 @@ impl<
     }
 
     /// Handle a network request from a peer.
-    async fn handle_network_request(&mut self, peer: P, id: u64, request: Bytes) {
-        // Parse request
-        let Ok(key) = Key::try_from(request.to_vec()) else {
-            trace!(?peer, ?id, "peer invalid request");
-            self.metrics.serve.inc(Status::Invalid);
-            return;
-        };
-
+    async fn handle_network_request(&mut self, peer: P, id: u64, key: Key) {
         // Serve the request
         trace!(?peer, ?id, "peer request");
         let mut producer = self.producer.clone();

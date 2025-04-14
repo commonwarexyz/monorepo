@@ -1,4 +1,4 @@
-use crate::p2p::wire::{Payload, PeerMsg};
+use crate::p2p::wire;
 use bimap::BiHashMap;
 use commonware_codec::Encode;
 use commonware_p2p::{
@@ -103,8 +103,8 @@ impl<E: Clock + GClock + Rng + Metrics, P: Array, Key: Array, NetS: Sender<Publi
         };
 
         // Send message to peer
-        let payload = Payload::Request(key.encode().into());
-        let msg = PeerMsg { id, payload }.encode().into();
+        let payload = wire::Payload::Request(key.clone());
+        let msg = wire::Message { id, payload }.encode().into();
         let result = sender
             .send(Recipients::One(peer.clone()), msg, self.priority_requests)
             .await;
