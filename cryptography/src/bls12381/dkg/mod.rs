@@ -305,7 +305,7 @@ mod tests {
             .map(|s| partial_sign_proof_of_possession(&s.public, &s.share))
             .collect::<Vec<_>>();
         let signature =
-            threshold_signature_recover(t, partials).expect("unable to recover signature");
+            threshold_signature_recover(t, &partials).expect("unable to recover signature");
         let public_key = public(&outputs.iter().next().unwrap().1.public);
         verify_proof_of_possession(public_key, &signature).expect("invalid proof of possession");
 
@@ -416,7 +416,7 @@ mod tests {
             .map(|s| partial_sign_proof_of_possession(&s.public, &s.share))
             .collect::<Vec<_>>();
         let signature =
-            threshold_signature_recover(t, partials).expect("unable to recover signature");
+            threshold_signature_recover(t, &partials).expect("unable to recover signature");
         let public_key = public(&outputs[0].public);
         verify_proof_of_possession(public_key, &signature).expect("invalid proof of possession");
     }

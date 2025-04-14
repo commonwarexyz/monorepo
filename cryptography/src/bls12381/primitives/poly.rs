@@ -208,61 +208,58 @@ impl<C: Element> Poly<C> {
     }
 
     /// Recover the polynomial's constant term given at least `t` polynomial evaluations.
-    pub fn recover(t: u32, mut evals: Vec<Eval<C>>) -> Result<C, Error> {
+    pub fn recover<'a, I>(t: u32, evals: I) -> Result<C, Error>
+    where
+        C: 'a,
+        I: IntoIterator<Item = &'a Eval<C>>,
+    {
         // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/a714310be76620e10e8797d6637df64011926430/crates/threshold-bls/src/poly.rs#L131-L165
 
-        // Ensure there are enough shares
-        let t = t as usize;
-        if evals.len() < t {
-            return Err(Error::InvalidRecovery);
-        }
-
         // Convert the first `t` sorted shares into scalars
-        let mut err = None;
-        evals.sort_by(|a, b| a.index.cmp(&b.index));
-        let xs = evals
-            .into_iter()
-            .take(t)
-            .fold(BTreeMap::new(), |mut m, sh| {
-                let mut xi = Scalar::zero();
-                xi.set_int(sh.index + 1);
-                if m.insert(sh.index, (xi, sh.value)).is_some() {
-                    err = Some(Error::DuplicateEval);
-                }
-                m
-            });
-        if let Some(e) = err {
-            return Err(e);
+        let xs = evals.into_iter().try_fold(BTreeMap::new(), |mut m, sh| {
+            let mut xi = Scalar::zero();
+            xi.set_int(sh.index + 1);
+            if m.insert(sh.index, (xi, &sh.value)).is_some() {
+                return Err(Error::DuplicateEval);
+            }
+            Ok(m)
+        })?;
+
+        // Ensure we have enough shares
+        let t = t as usize;
+        if xs.len() < t {
+            return Err(Error::NotEnoughPartialSignatures(t, xs.len()));
         }
 
         // Iterate over all indices and for each multiply the lagrange basis
         // with the value of the share
-        let mut acc = C::zero();
-        for (i, xi) in &xs {
-            let mut yi = xi.1.clone();
-            let mut num = Scalar::one();
-            let mut den = Scalar::one();
+        xs.iter()
+            .take(t)
+            .try_fold(C::zero(), |mut acc, (i, (xi, yi))| {
+                let (mut num, den) = xs.iter().take(t).fold(
+                    (Scalar::one(), Scalar::one()),
+                    |(mut num, mut den), (j, (xj, _))| {
+                        if i != j {
+                            // (xj - 0)
+                            num.mul(xj);
 
-            for (j, xj) in &xs {
-                if i == j {
-                    continue;
-                }
+                            // 1 / (xj - xi)
+                            let mut tmp = *xj;
+                            tmp.sub(xi);
+                            den.mul(&tmp);
+                        }
+                        (num, den)
+                    },
+                );
 
-                // xj - 0
-                num.mul(&xj.0);
+                let inv = den.inverse().ok_or(Error::NoInverse)?;
+                num.mul(&inv);
 
-                // 1 / (xj - xi)
-                let mut tmp = xj.0;
-                tmp.sub(&xi.0);
-                den.mul(&tmp);
-            }
-
-            let inv = den.inverse().ok_or(Error::NoInverse)?;
-            num.mul(&inv);
-            yi.mul(&num);
-            acc.add(&yi);
-        }
-        Ok(acc)
+                let mut yi_scaled = (*yi).clone();
+                yi_scaled.mul(&num);
+                acc.add(&yi_scaled);
+                Ok(acc)
+            })
     }
 }
 
@@ -335,7 +332,7 @@ pub mod tests {
         let shares = (0..threshold - 1)
             .map(|i| poly.evaluate(i))
             .collect::<Vec<_>>();
-        Poly::recover(threshold, shares).unwrap_err();
+        Poly::recover(threshold, &shares).unwrap_err();
     }
 
     #[test]
@@ -406,7 +403,7 @@ pub mod tests {
                 let expected = poly.0[0];
 
                 let shares = (0..num_evals).map(|i| poly.evaluate(i)).collect::<Vec<_>>();
-                let recovered_constant = Poly::recover(num_evals, shares).unwrap();
+                let recovered_constant = Poly::recover(num_evals, &shares).unwrap();
 
                 if num_evals > degree {
                     assert_eq!(

@@ -20,7 +20,7 @@ fn benchmark_threshold_signature_recover(c: &mut Criterion) {
                         .collect::<Vec<_>>()
                 },
                 |partials| {
-                    black_box(primitives::ops::threshold_signature_recover(t, partials).unwrap());
+                    black_box(primitives::ops::threshold_signature_recover(t, &partials).unwrap());
                 },
                 BatchSize::SmallInput,
             );

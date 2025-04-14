@@ -16,8 +16,7 @@ fn benchmark_aggregate_public_keys(c: &mut Criterion) {
                     public_keys
                 },
                 |public_keys| {
-                    let public_key_refs = public_keys.iter().collect::<Vec<_>>();
-                    black_box(ops::aggregate_public_keys(&public_key_refs));
+                    black_box(ops::aggregate_public_keys(&public_keys));
                 },
                 BatchSize::SmallInput,
             );

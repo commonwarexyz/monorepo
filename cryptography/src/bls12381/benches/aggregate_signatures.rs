@@ -24,8 +24,7 @@ fn benchmark_aggregate_signatures(c: &mut Criterion) {
                     signatures
                 },
                 |signatures| {
-                    let signature_refs = signatures.iter().collect::<Vec<_>>();
-                    black_box(ops::aggregate_signatures(&signature_refs));
+                    black_box(ops::aggregate_signatures(&signatures));
                 },
                 BatchSize::SmallInput,
             );
