@@ -136,7 +136,7 @@ impl Metrics {
 
 /// Configuration for the `tokio` runtime.
 #[derive(Clone)]
-pub struct Config<S: Storage> {
+pub struct Config {
     /// Number of threads to use for handling async tasks.
     ///
     /// Worker threads are always active (waiting for work).
@@ -173,11 +173,9 @@ pub struct Config<S: Storage> {
     /// Note: Make sure that your compile target has and allows this configuration otherwise
     /// panics or unexpected behaviours are possible.
     pub tcp_nodelay: Option<bool>,
-
-    pub storage_config: S::Config,
 }
 
-impl<S: Storage> Default for Config<S> {
+impl Default for Config {
     fn default() -> Self {
         // Return the configuration
         Self {
@@ -187,14 +185,13 @@ impl<S: Storage> Default for Config<S> {
             read_timeout: Duration::from_secs(60),
             write_timeout: Duration::from_secs(30),
             tcp_nodelay: None,
-            storage_config: S::Config::default(),
         }
     }
 }
 
 /// Runtime based on [Tokio](https://tokio.rs).
-pub struct Executor<S: Storage> {
-    pub(crate) cfg: Config<S>,
+pub struct Executor {
+    pub(crate) cfg: Config,
     registry: Mutex<Registry>,
     pub(crate) metrics: Arc<Metrics>,
     runtime: Runtime,
@@ -202,9 +199,9 @@ pub struct Executor<S: Storage> {
     signal: Signal,
 }
 
-impl<S: Storage> Executor<S> {
+impl Executor {
     /// Initialize a new `tokio` runtime with the given number of threads.
-    pub fn init(cfg: Config<S>) -> (Runner<S>, Context<S>) {
+    pub fn init(cfg: Config) -> (Runner, Context) {
         // Create a new registry
         let mut registry = Registry::default();
         let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
@@ -219,7 +216,8 @@ impl<S: Storage> Executor<S> {
             .expect("failed to create Tokio runtime");
         let (signaler, signal) = Signaler::new();
 
-        let storage_config = cfg.storage_config.clone();
+        // TODO danlaine: remove
+        // let storage_config = cfg.storage_config.clone();
 
         let executor = Arc::new(Self {
             cfg,
@@ -237,7 +235,7 @@ impl<S: Storage> Executor<S> {
                 label: String::new(),
                 spawned: false,
                 executor,
-                storage: S::new(storage_config),
+                // storage: S::new(storage_config), TODO danlaine: remove
             },
         )
     }
@@ -245,17 +243,17 @@ impl<S: Storage> Executor<S> {
     /// Initialize a new `tokio` runtime with default configuration.
     // We'd love to implement the trait but we can't because of the return type.
     #[allow(clippy::should_implement_trait)]
-    pub fn default() -> (Runner<S>, Context<S>) {
+    pub fn default() -> (Runner, Context) {
         Self::init(Config::default())
     }
 }
 
 /// Implementation of [`crate::Runner`] for the `tokio` runtime.
-pub struct Runner<S: Storage> {
-    executor: Arc<Executor<S>>,
+pub struct Runner {
+    executor: Arc<Executor>,
 }
 
-impl<S: Storage> crate::Runner for Runner<S> {
+impl crate::Runner for Runner {
     fn start<F>(self, f: F) -> F::Output
     where
         F: Future + Send + 'static,
@@ -270,46 +268,23 @@ impl<S: Storage> crate::Runner for Runner<S> {
 /// runtime.
 /// TODO danlaine: refactor code to reduce number of places we
 /// need to paramterize on S:Storage. e.g. Stream.
-pub struct Context<S: Storage> {
+pub struct Context {
     label: String,
     spawned: bool,
-    pub(crate) executor: Arc<Executor<S>>,
-    storage: S,
+    pub(crate) executor: Arc<Executor>,
 }
 
-impl<S: Storage> Storage for Context<S> {
-    type Blob = S::Blob;
-    type Config = S::Config;
-
-    async fn open(&self, partition: &str, name: &[u8]) -> Result<Self::Blob, Error> {
-        self.storage.open(partition, name).await
-    }
-
-    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
-        self.storage.remove(partition, name).await
-    }
-
-    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
-        self.storage.scan(partition).await
-    }
-
-    fn new(_config: Self::Config) -> Self {
-        todo!()
-    }
-}
-
-impl<S: Storage> Clone for Context<S> {
+impl Clone for Context {
     fn clone(&self) -> Self {
         Self {
             label: self.label.clone(),
             spawned: false,
             executor: self.executor.clone(),
-            storage: self.storage.clone(),
         }
     }
 }
 
-impl<S: Storage> crate::Spawner for Context<S> {
+impl crate::Spawner for Context {
     fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
@@ -423,7 +398,7 @@ impl<S: Storage> crate::Spawner for Context<S> {
     }
 }
 
-impl<S: Storage> crate::Metrics for Context<S> {
+impl crate::Metrics for Context {
     fn with_label(&self, label: &str) -> Self {
         let label = {
             let prefix = self.label.clone();
@@ -441,7 +416,6 @@ impl<S: Storage> crate::Metrics for Context<S> {
             label,
             spawned: false,
             executor: self.executor.clone(),
-            storage: self.storage.clone(),
         }
     }
 
@@ -473,7 +447,7 @@ impl<S: Storage> crate::Metrics for Context<S> {
     }
 }
 
-impl<S: Storage> Clock for Context<S> {
+impl Clock for Context {
     fn current(&self) -> SystemTime {
         SystemTime::now()
     }
@@ -493,7 +467,7 @@ impl<S: Storage> Clock for Context<S> {
     }
 }
 
-impl<S: Storage> GClock for Context<S> {
+impl GClock for Context {
     type Instant = SystemTime;
 
     fn now(&self) -> Self::Instant {
@@ -501,10 +475,10 @@ impl<S: Storage> GClock for Context<S> {
     }
 }
 
-impl<S: Storage> ReasonablyRealtime for Context<S> {}
+impl ReasonablyRealtime for Context {}
 
-impl<S: Storage> crate::Network<Listener<S>, Sink<S>, Stream<S>> for Context<S> {
-    async fn bind(&self, socket: SocketAddr) -> Result<Listener<S>, Error> {
+impl crate::Network<Listener, Sink, Stream> for Context {
+    async fn bind(&self, socket: SocketAddr) -> Result<Listener, Error> {
         TcpListener::bind(socket)
             .await
             .map_err(|_| Error::BindFailed)
@@ -514,7 +488,7 @@ impl<S: Storage> crate::Network<Listener<S>, Sink<S>, Stream<S>> for Context<S> 
             })
     }
 
-    async fn dial(&self, socket: SocketAddr) -> Result<(Sink<S>, Stream<S>), Error> {
+    async fn dial(&self, socket: SocketAddr) -> Result<(Sink, Stream), Error> {
         // Create a new TCP stream
         let stream = TcpStream::connect(socket)
             .await
@@ -542,13 +516,13 @@ impl<S: Storage> crate::Network<Listener<S>, Sink<S>, Stream<S>> for Context<S> 
 }
 
 /// Implementation of [`crate::Listener`] for the `tokio` runtime.
-pub struct Listener<S: Storage> {
-    context: Context<S>,
+pub struct Listener {
+    context: Context,
     listener: TcpListener,
 }
 
-impl<S: Storage> crate::Listener<Sink<S>, Stream<S>> for Listener<S> {
-    async fn accept(&mut self) -> Result<(SocketAddr, Sink<S>, Stream<S>), Error> {
+impl crate::Listener<Sink, Stream> for Listener {
+    async fn accept(&mut self) -> Result<(SocketAddr, Sink, Stream), Error> {
         // Accept a new TCP stream
         let (stream, addr) = self.listener.accept().await.map_err(|_| Error::Closed)?;
         self.context.executor.metrics.inbound_connections.inc();
@@ -574,7 +548,7 @@ impl<S: Storage> crate::Listener<Sink<S>, Stream<S>> for Listener<S> {
     }
 }
 
-impl<S: Storage> axum::serve::Listener for Listener<S> {
+impl axum::serve::Listener for Listener {
     type Io = TcpStream;
     type Addr = SocketAddr;
 
@@ -589,12 +563,12 @@ impl<S: Storage> axum::serve::Listener for Listener<S> {
 }
 
 /// Implementation of [`crate::Sink`] for the `tokio` runtime.
-pub struct Sink<S: Storage> {
-    context: Context<S>,
+pub struct Sink {
+    context: Context,
     sink: OwnedWriteHalf,
 }
 
-impl<S: Storage> crate::Sink for Sink<S> {
+impl crate::Sink for Sink {
     async fn send(&mut self, msg: &[u8]) -> Result<(), Error> {
         let len = msg.len();
         timeout(
@@ -614,12 +588,12 @@ impl<S: Storage> crate::Sink for Sink<S> {
 }
 
 /// Implementation of [`crate::Stream`] for the `tokio` runtime.
-pub struct Stream<S: Storage> {
-    context: Context<S>,
+pub struct Stream {
+    context: Context,
     stream: OwnedReadHalf,
 }
 
-impl<S: Storage> crate::Stream for Stream<S> {
+impl crate::Stream for Stream {
     async fn recv(&mut self, buf: &mut [u8]) -> Result<(), Error> {
         // Wait for the stream to be readable
         timeout(
@@ -641,7 +615,7 @@ impl<S: Storage> crate::Stream for Stream<S> {
     }
 }
 
-impl<S: Storage> RngCore for Context<S> {
+impl RngCore for Context {
     fn next_u32(&mut self) -> u32 {
         OsRng.next_u32()
     }
@@ -659,4 +633,4 @@ impl<S: Storage> RngCore for Context<S> {
     }
 }
 
-impl<S: Storage> CryptoRng for Context<S> {}
+impl CryptoRng for Context {}

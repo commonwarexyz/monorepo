@@ -6,7 +6,7 @@ use commonware_cryptography::{
 use commonware_deployer::ec2::{Hosts, METRICS_PORT};
 use commonware_flood::Config;
 use commonware_p2p::{authenticated, Receiver, Recipients, Sender};
-use commonware_runtime::{tokio, DefaultStorage, Metrics, Runner, Spawner};
+use commonware_runtime::{tokio, Metrics, Runner, Spawner};
 use commonware_utils::{from_hex_formatted, union};
 use futures::future::try_join_all;
 use governor::Quota;
@@ -62,7 +62,7 @@ fn main() {
         worker_threads: config.worker_threads,
         ..Default::default()
     };
-    let (executor, context) = tokio::Executor::<DefaultStorage>::init(cfg);
+    let (executor, context) = tokio::Executor::init(cfg);
 
     // Start runtime
     executor.start(async move {

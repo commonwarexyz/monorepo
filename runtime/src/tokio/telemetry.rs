@@ -4,18 +4,13 @@ use super::{
     tracing::{export, Config},
     Context,
 };
-use crate::{telemetry::metrics, Metrics, Spawner, Storage};
+use crate::{telemetry::metrics, Metrics, Spawner};
 use std::net::SocketAddr;
 use tracing::Level;
 use tracing_subscriber::{layer::SubscriberExt, Registry};
 
 /// Initialize telemetry with the given configuration.
-pub fn init<S: Storage>(
-    context: Context<S>,
-    level: Level,
-    metrics: Option<SocketAddr>,
-    traces: Option<Config>,
-) {
+pub fn init(context: Context, level: Level, metrics: Option<SocketAddr>, traces: Option<Config>) {
     // Create fmt layer for logging
     let fmt_layer = tracing_subscriber::fmt::layer()
         .json()

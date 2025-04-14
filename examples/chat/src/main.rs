@@ -73,7 +73,7 @@ const APPLICATION_NAMESPACE: &[u8] = b"commonware-chat";
 #[doc(hidden)]
 fn main() {
     // Initialize context
-    let (executor, context) = Executor::<DefaultStorage>::default();
+    let (executor, context) = Executor::default();
 
     // Parse arguments
     let matches = Command::new("commonware-chat")

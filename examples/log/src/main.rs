@@ -52,7 +52,10 @@ use commonware_consensus::simplex::{self, Engine, Prover};
 use commonware_cryptography::{sha256::Digest as Sha256Digest, Ed25519, Sha256, Signer};
 use commonware_p2p::authenticated::{self, Network};
 use commonware_runtime::{
-    tokio::{self, blob_non_linux::Storage as NonLinuxStorage, Executor},
+    tokio::{
+        blob_non_linux::Config as NonLinuxStorageConfig,
+        blob_non_linux::Storage as NonLinuxStorage, Executor,
+    },
     Metrics, Runner,
 };
 use commonware_storage::journal::variable::{Config, Journal};
@@ -143,9 +146,10 @@ fn main() {
         .expect("Please provide storage directory");
 
     // Initialize context
-    let mut runtime_cfg = tokio::Config::<NonLinuxStorage>::default();
-    runtime_cfg.storage_config.storage_directory = storage_directory.into();
-    let (executor, context) = Executor::init(runtime_cfg.clone());
+    let (executor, context) = Executor::init(Default::default());
+    let mut storage_config = NonLinuxStorageConfig::default();
+    storage_config.storage_directory = storage_directory.into();
+    let storage = NonLinuxStorage::new(todo!(), storage_config);
 
     // Configure network
     let p2p_cfg = authenticated::Config::aggressive(
@@ -187,7 +191,7 @@ fn main() {
 
         // Initialize storage
         let journal = Journal::init(
-            context.clone(),
+            storage,
             &context.with_label("journal"),
             Config {
                 partition: String::from("log"),

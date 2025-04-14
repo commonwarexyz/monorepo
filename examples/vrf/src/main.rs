@@ -99,7 +99,7 @@ const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_VRF_";
 
 fn main() {
     // Initialize context
-    let runtime_cfg = tokio::Config::<DefaultStorage>::default();
+    let runtime_cfg = tokio::Config::default();
     let (executor, context) = Executor::init(runtime_cfg.clone());
 
     // Parse arguments

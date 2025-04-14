@@ -499,13 +499,13 @@ mod tests {
         });
     }
 
-    fn test_storage_operations(runner: impl Runner, context: impl Spawner + Storage) {
+    fn test_storage_operations(runner: impl Runner, storage: impl Storage) {
         runner.start(async move {
             let partition = "test_partition";
             let name = b"test_blob";
 
             // Open a new blob
-            let blob = context
+            let blob = storage
                 .open(partition, name)
                 .await
                 .expect("Failed to open blob");
@@ -534,14 +534,14 @@ mod tests {
             blob.close().await.expect("Failed to close blob");
 
             // Scan blobs in the partition
-            let blobs = context
+            let blobs = storage
                 .scan(partition)
                 .await
                 .expect("Failed to scan partition");
             assert!(blobs.contains(&name.to_vec()));
 
             // Reopen the blob
-            let blob = context
+            let blob = storage
                 .open(partition, name)
                 .await
                 .expect("Failed to reopen blob");
@@ -557,37 +557,37 @@ mod tests {
             blob.close().await.expect("Failed to close blob");
 
             // Remove the blob
-            context
+            storage
                 .remove(partition, Some(name))
                 .await
                 .expect("Failed to remove blob");
 
             // Ensure the blob is removed
-            let blobs = context
+            let blobs = storage
                 .scan(partition)
                 .await
                 .expect("Failed to scan partition");
             assert!(!blobs.contains(&name.to_vec()));
 
             // Remove the partition
-            context
+            storage
                 .remove(partition, None)
                 .await
                 .expect("Failed to remove partition");
 
             // Scan the partition
-            let result = context.scan(partition).await;
+            let result = storage.scan(partition).await;
             assert!(matches!(result, Err(Error::PartitionMissing(_))));
         });
     }
 
-    fn test_blob_read_write(runner: impl Runner, context: impl Spawner + Storage) {
+    fn test_blob_read_write(runner: impl Runner, storage: impl Storage) {
         runner.start(async move {
             let partition = "test_partition";
             let name = b"test_blob_rw";
 
             // Open a new blob
-            let blob = context
+            let blob = storage
                 .open(partition, name)
                 .await
                 .expect("Failed to open blob");
@@ -654,14 +654,14 @@ mod tests {
         });
     }
 
-    fn test_many_partition_read_write(runner: impl Runner, context: impl Spawner + Storage) {
+    fn test_many_partition_read_write(runner: impl Runner, storage: impl Storage) {
         runner.start(async move {
             let partitions = ["partition1", "partition2", "partition3"];
             let name = b"test_blob_rw";
 
             for (additional, partition) in partitions.iter().enumerate() {
                 // Open a new blob
-                let blob = context
+                let blob = storage
                     .open(partition, name)
                     .await
                     .expect("Failed to open blob");
@@ -682,7 +682,7 @@ mod tests {
 
             for (additional, partition) in partitions.iter().enumerate() {
                 // Open a new blob
-                let blob = context
+                let blob = storage
                     .open(partition, name)
                     .await
                     .expect("Failed to open blob");
@@ -701,13 +701,13 @@ mod tests {
         });
     }
 
-    fn test_blob_read_past_length(runner: impl Runner, context: impl Spawner + Storage) {
+    fn test_blob_read_past_length(runner: impl Runner, storage: impl Storage) {
         runner.start(async move {
             let partition = "test_partition";
             let name = b"test_blob_rw";
 
             // Open a new blob
-            let blob = context
+            let blob = storage
                 .open(partition, name)
                 .await
                 .expect("Failed to open blob");
@@ -732,14 +732,15 @@ mod tests {
 
     fn test_blob_clone_and_concurrent_read(
         runner: impl Runner,
-        context: impl Spawner + Storage + Metrics,
+        context: impl Spawner + Metrics,
+        storage: impl Storage,
     ) {
         runner.start(async move {
             let partition = "test_partition";
             let name = b"test_blob_rw";
 
             // Open a new blob
-            let blob = context
+            let blob = storage
                 .open(partition, name)
                 .await
                 .expect("Failed to open blob");
@@ -1127,8 +1128,9 @@ mod tests {
 
     #[test]
     fn test_deterministic_many_partition_read_write() {
-        let (executor, context, _) = deterministic::Executor::default();
-        test_many_partition_read_write(executor, context);
+        let (executor, _, _) = deterministic::Executor::default();
+        let storage = DefaultStorage::default();
+        test_many_partition_read_write(executor, storage);
     }
 
     #[test]
@@ -1141,7 +1143,8 @@ mod tests {
     fn test_deterministic_blob_clone_and_concurrent_read() {
         // Run test
         let (executor, context, _) = deterministic::Executor::default();
-        test_blob_clone_and_concurrent_read(executor, context.clone());
+        let storage = DefaultStorage::default();
+        test_blob_clone_and_concurrent_read(executor, context.clone(), storage);
 
         // Ensure no blobs still open
         let buffer = context.encode();
@@ -1219,87 +1222,92 @@ mod tests {
 
     #[test]
     fn test_tokio_error_future() {
-        let (runner, _) = tokio::Executor::<DefaultStorage>::default();
+        let (runner, _) = tokio::Executor::default();
         test_error_future(runner);
     }
 
     #[test]
     fn test_tokio_clock_sleep() {
-        let (executor, context) = tokio::Executor::<DefaultStorage>::default();
+        let (executor, context) = tokio::Executor::default();
         test_clock_sleep(executor, context);
     }
 
     #[test]
     fn test_tokio_clock_sleep_until() {
-        let (executor, context) = tokio::Executor::<DefaultStorage>::default();
+        let (executor, context) = tokio::Executor::default();
         test_clock_sleep_until(executor, context);
     }
 
     #[test]
     fn test_tokio_root_finishes() {
-        let (executor, context) = tokio::Executor::<DefaultStorage>::default();
+        let (executor, context) = tokio::Executor::default();
         test_root_finishes(executor, context);
     }
 
     #[test]
     fn test_tokio_spawn_abort() {
-        let (executor, context) = tokio::Executor::<DefaultStorage>::default();
+        let (executor, context) = tokio::Executor::default();
         test_spawn_abort(executor, context);
     }
 
     #[test]
     fn test_tokio_panic_aborts_root() {
-        let (runner, _) = tokio::Executor::<DefaultStorage>::default();
+        let (runner, _) = tokio::Executor::default();
         test_panic_aborts_root(runner);
     }
 
     #[test]
     fn test_tokio_panic_aborts_spawn() {
-        let (executor, context) = tokio::Executor::<DefaultStorage>::default();
+        let (executor, context) = tokio::Executor::default();
         test_panic_aborts_spawn(executor, context);
     }
 
     #[test]
     fn test_tokio_select() {
-        let (executor, _) = tokio::Executor::<DefaultStorage>::default();
+        let (executor, _) = tokio::Executor::default();
         test_select(executor);
     }
 
     #[test]
     fn test_tokio_select_loop() {
-        let (executor, context) = tokio::Executor::<DefaultStorage>::default();
+        let (executor, context) = tokio::Executor::default();
         test_select_loop(executor, context);
     }
 
     #[test]
     fn test_tokio_storage_operations() {
-        let (executor, context) = tokio::Executor::<DefaultStorage>::default();
-        test_storage_operations(executor, context);
+        let (executor, _) = tokio::Executor::default();
+        let storage = DefaultStorage::default();
+        test_storage_operations(executor, storage);
     }
 
     #[test]
     fn test_tokio_blob_read_write() {
-        let (executor, context) = tokio::Executor::<DefaultStorage>::default();
-        test_blob_read_write(executor, context);
+        let (executor, _) = tokio::Executor::default();
+        let storage = DefaultStorage::default();
+        test_blob_read_write(executor, storage);
     }
 
     #[test]
     fn test_tokio_many_partition_read_write() {
-        let (executor, context) = tokio::Executor::<DefaultStorage>::default();
-        test_many_partition_read_write(executor, context);
+        let (executor, _) = tokio::Executor::default();
+        let storage = DefaultStorage::default();
+        test_many_partition_read_write(executor, storage);
     }
 
     #[test]
     fn test_tokio_blob_read_past_length() {
-        let (executor, context) = tokio::Executor::<DefaultStorage>::default();
-        test_blob_read_past_length(executor, context);
+        let (executor, _) = tokio::Executor::default();
+        let storage = DefaultStorage::default();
+        test_blob_read_past_length(executor, storage);
     }
 
     #[test]
     fn test_tokio_blob_clone_and_concurrent_read() {
         // Run test
-        let (executor, context) = tokio::Executor::<DefaultStorage>::default();
-        test_blob_clone_and_concurrent_read(executor, context.clone());
+        let (executor, context) = tokio::Executor::default();
+        let storage = DefaultStorage::default();
+        test_blob_clone_and_concurrent_read(executor, context.clone(), storage);
 
         // Ensure no blobs still open
         let buffer = context.encode();
@@ -1308,39 +1316,39 @@ mod tests {
 
     #[test]
     fn test_tokio_shutdown() {
-        let (executor, context) = tokio::Executor::<DefaultStorage>::default();
+        let (executor, context) = tokio::Executor::default();
         test_shutdown(executor, context);
     }
 
     #[test]
     fn test_tokio_spawn_ref() {
-        let (executor, context) = tokio::Executor::<DefaultStorage>::default();
+        let (executor, context) = tokio::Executor::default();
         test_spawn_ref(executor, context);
     }
 
     #[test]
     #[should_panic]
     fn test_tokio_spawn_ref_duplicate() {
-        let (executor, context) = tokio::Executor::<DefaultStorage>::default();
+        let (executor, context) = tokio::Executor::default();
         test_spawn_ref_duplicate(executor, context);
     }
 
     #[test]
     #[should_panic]
     fn test_tokio_spawn_duplicate() {
-        let (executor, context) = tokio::Executor::<DefaultStorage>::default();
+        let (executor, context) = tokio::Executor::default();
         test_spawn_duplicate(executor, context);
     }
 
     #[test]
     fn test_tokio_spawn_blocking() {
-        let (executor, context) = tokio::Executor::<DefaultStorage>::default();
+        let (executor, context) = tokio::Executor::default();
         test_spawn_blocking(executor, context);
     }
 
     #[test]
     fn test_tokio_spawn_blocking_panic() {
-        let (executor, context) = tokio::Executor::<DefaultStorage>::default();
+        let (executor, context) = tokio::Executor::default();
         executor.start(async move {
             let handle = context.spawn_blocking(|| {
                 panic!("blocking task panicked");
@@ -1352,26 +1360,26 @@ mod tests {
 
     #[test]
     fn test_tokio_spawn_blocking_abort() {
-        let (executor, context) = tokio::Executor::<DefaultStorage>::default();
+        let (executor, context) = tokio::Executor::default();
         test_spawn_blocking_abort(executor, context);
     }
 
     #[test]
     fn test_tokio_metrics() {
-        let (executor, context) = tokio::Executor::<DefaultStorage>::default();
+        let (executor, context) = tokio::Executor::default();
         test_metrics(executor, context);
     }
 
     #[test]
     #[should_panic]
     fn test_tokio_metrics_label() {
-        let (executor, context) = tokio::Executor::<DefaultStorage>::default();
+        let (executor, context) = tokio::Executor::default();
         test_metrics_label(executor, context);
     }
 
     #[test]
     fn test_tokio_metrics_serve() {
-        let (executor, context) = tokio::Executor::<DefaultStorage>::default();
+        let (executor, context) = tokio::Executor::default();
         test_metrics_serve(executor, context);
     }
 }

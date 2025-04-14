@@ -210,6 +210,7 @@ mod tests {
     };
     use bytes::Bytes;
     use commonware_macros::test_traced;
+    use commonware_runtime::DefaultStorage;
     use commonware_runtime::{deterministic::Executor, Blob, Metrics, Runner, Storage};
     use commonware_utils::array::FixedBytes;
     use rand::Rng;
@@ -228,11 +229,12 @@ mod tests {
     fn test_archive_put_get(compression: Option<u8>) {
         // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
+        let storage = DefaultStorage::default();
         executor.start(async move {
             // Initialize an empty journal
             let journal = Journal::init(
-                context.clone(),
-                context.clone(),
+                storage,
+                &context,
                 JConfig {
                     partition: "test_partition".into(),
                 },
@@ -335,11 +337,12 @@ mod tests {
     fn test_archive_compression_then_none() {
         // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
+        let storage = DefaultStorage::default();
         executor.start(async move {
             // Initialize an empty journal
             let journal = Journal::init(
-                context.clone(),
-                context.clone(),
+                storage.clone(),
+                &context,
                 JConfig {
                     partition: "test_partition".into(),
                 },
@@ -373,8 +376,8 @@ mod tests {
 
             // Initialize the archive again without compression
             let journal = Journal::init(
-                context.clone(),
-                context.clone(),
+                storage,
+                &context,
                 JConfig {
                     partition: "test_partition".into(),
                 },
@@ -412,11 +415,12 @@ mod tests {
     fn test_archive_record_corruption() {
         // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
+        let storage = DefaultStorage::default();
         executor.start(async move {
             // Initialize an empty journal
             let journal = Journal::init(
-                context.clone(),
-                context.clone(),
+                storage.clone(),
+                &context,
                 JConfig {
                     partition: "test_partition".into(),
                 },
@@ -461,8 +465,8 @@ mod tests {
 
             // Initialize the archive again
             let journal = Journal::init(
-                context.clone(),
-                context.clone(),
+                storage,
+                &context,
                 JConfig {
                     partition: "test_partition".into(),
                 },
@@ -496,11 +500,12 @@ mod tests {
     fn test_archive_duplicate_key() {
         // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
+        let storage = DefaultStorage::default();
         executor.start(async move {
             // Initialize an empty journal
             let journal = Journal::init(
-                context.clone(),
-                context.clone(),
+                storage,
+                &context,
                 JConfig {
                     partition: "test_partition".into(),
                 },
@@ -563,11 +568,12 @@ mod tests {
     fn test_archive_get_nonexistent() {
         // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
+        let storage = DefaultStorage::default();
         executor.start(async move {
             // Initialize an empty journal
             let journal = Journal::init(
-                context.clone(),
-                context.clone(),
+                storage,
+                &context,
                 JConfig {
                     partition: "test_partition".into(),
                 },
@@ -615,11 +621,12 @@ mod tests {
     fn test_archive_overlapping_key_basic() {
         // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
+        let storage = DefaultStorage::default();
         executor.start(async move {
             // Initialize an empty journal
             let journal = Journal::init(
-                context.clone(),
-                context.clone(),
+                storage,
+                &context,
                 JConfig {
                     partition: "test_partition".into(),
                 },
@@ -686,11 +693,12 @@ mod tests {
     fn test_archive_overlapping_key_multiple_sections() {
         // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
+        let storage = DefaultStorage::default();
         executor.start(async move {
             // Initialize an empty journal
             let journal = Journal::init(
-                context.clone(),
-                context.clone(),
+                storage,
+                &context,
                 JConfig {
                     partition: "test_partition".into(),
                 },
@@ -751,11 +759,12 @@ mod tests {
     fn test_archive_prune_keys() {
         // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
+        let storage = DefaultStorage::default();
         executor.start(async move {
             // Initialize an empty journal
             let journal = Journal::init(
-                context.clone(),
-                context.clone(),
+                storage,
+                &context,
                 JConfig {
                     partition: "test_partition".into(),
                 },
@@ -846,11 +855,12 @@ mod tests {
     fn test_archive_keys_and_restart(num_keys: usize) -> String {
         // Initialize the deterministic context
         let (executor, mut context, auditor) = Executor::default();
+        let storage = DefaultStorage::default();
         executor.start(async move {
             // Initialize an empty journal
             let journal = Journal::init(
-                context.clone(),
-                context.clone(),
+                storage.clone(),
+                &context,
                 JConfig {
                     partition: "test_partition".into(),
                 },
@@ -916,8 +926,8 @@ mod tests {
 
             // Reinitialize the archive
             let journal = Journal::init(
-                context.clone(),
-                context.clone(),
+                storage,
+                &context,
                 JConfig {
                     partition: "test_partition".into(),
                 },
@@ -1013,11 +1023,12 @@ mod tests {
     fn test_ranges() {
         // Initialize the deterministic context
         let (executor, context, _) = Executor::default();
+        let storage = DefaultStorage::default();
         executor.start(async move {
             // Initialize an empty journal
             let journal = Journal::init(
-                context.clone(),
-                context.clone(),
+                storage.clone(),
+                &context,
                 JConfig {
                     partition: "test_partition".into(),
                 },
@@ -1080,8 +1091,8 @@ mod tests {
             archive.close().await.expect("Failed to close archive");
 
             let journal = Journal::init(
-                context.clone(),
-                context.clone(),
+                storage,
+                &context,
                 JConfig {
                     partition: "test_partition".into(),
                 },

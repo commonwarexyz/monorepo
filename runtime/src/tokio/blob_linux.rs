@@ -12,10 +12,11 @@ use rand::{rngs::OsRng, RngCore};
 use tokio::sync::Mutex;
 
 use crate::Error;
+use crate::Storage as _;
 
 #[derive(Clone)]
 pub struct Config {
-    _storage_directory: PathBuf,
+    storage_directory: PathBuf,
 }
 
 impl Default for Config {
@@ -23,7 +24,7 @@ impl Default for Config {
         // Generate a random directory name to avoid conflicts (used in tests, so we shouldn't need to reload)
         let rng = OsRng.next_u64();
         Self {
-            _storage_directory: env::temp_dir().join(format!("commonware_tokio_runtime_{}", rng)),
+            storage_directory: env::temp_dir().join(format!("commonware_tokio_runtime_{}", rng)),
         }
     }
 }
@@ -34,12 +35,10 @@ pub struct Storage {
     pub storage_directory: PathBuf,
 }
 
-impl Storage {
-    fn _new(cfg: Config) -> Storage {
-        Storage {
-            lock: Mutex::new(()).into(),
-            storage_directory: cfg._storage_directory,
-        }
+impl Default for Storage {
+    fn default() -> Self {
+        let config = Config::default();
+        Self::new(config)
     }
 }
 
@@ -114,8 +113,11 @@ impl crate::Storage for Storage {
         Ok(blobs)
     }
 
-    fn new(_config: Self::Config) -> Self {
-        todo!()
+    fn new(config: Self::Config) -> Self {
+        Storage {
+            lock: Mutex::new(()).into(),
+            storage_directory: config.storage_directory,
+        }
     }
 }
 
