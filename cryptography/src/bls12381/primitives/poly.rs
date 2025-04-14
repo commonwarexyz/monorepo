@@ -233,33 +233,33 @@ impl<C: Element> Poly<C> {
 
         // Iterate over all indices and for each multiply the lagrange basis
         // with the value of the share
-        let mut acc = C::zero();
-        for (i, xi) in xs.iter().take(t) {
-            let mut num = Scalar::one();
-            let mut den = Scalar::one();
+        xs.iter()
+            .take(t)
+            .try_fold(C::zero(), |mut acc, (i, (xi, yi))| {
+                let (mut num, den) = xs.iter().take(t).fold(
+                    (Scalar::one(), Scalar::one()),
+                    |(mut num, mut den), (j, (xj, _))| {
+                        if i != j {
+                            // (xj - 0)
+                            num.mul(xj);
 
-            for (j, xj) in xs.iter().take(t) {
-                if i == j {
-                    continue;
-                }
+                            // 1 / (xj - xi)
+                            let mut tmp = *xj;
+                            tmp.sub(xi);
+                            den.mul(&tmp);
+                        }
+                        (num, den)
+                    },
+                );
 
-                // xj - 0
-                num.mul(&xj.0);
+                let inv = den.inverse().ok_or(Error::NoInverse)?;
+                num.mul(&inv);
 
-                // 1 / (xj - xi)
-                let mut tmp = xj.0;
-                tmp.sub(&xi.0);
-                den.mul(&tmp);
-            }
-
-            let inv = den.inverse().ok_or(Error::NoInverse)?;
-            num.mul(&inv);
-
-            let mut yi = xi.1.clone();
-            yi.mul(&num);
-            acc.add(&yi);
-        }
-        Ok(acc)
+                let mut yi_scaled = (*yi).clone();
+                yi_scaled.mul(&num);
+                acc.add(&yi_scaled);
+                Ok(acc)
+            })
     }
 }
 
