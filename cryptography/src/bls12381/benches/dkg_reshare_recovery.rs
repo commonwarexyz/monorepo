@@ -10,7 +10,7 @@ use std::hint::black_box;
 
 fn benchmark_dkg_reshare_recovery(c: &mut Criterion) {
     let mut rng = StdRng::seed_from_u64(0);
-    for &n in &[5, 10, 20, 50, 100, 250, 500, 1000, 1500, 2000] {
+    for &n in &[5, 10, 20, 50, 100, 250, 500, 1000] {
         // Perform DKG
         //
         // We do this once outside of the benchmark to reduce the overhead
