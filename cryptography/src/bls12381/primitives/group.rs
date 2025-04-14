@@ -27,7 +27,10 @@ use commonware_codec::{
     FixedSize, Read, ReadExt, Write,
 };
 use rand::RngCore;
-use std::{hash::Hash, ptr};
+use std::{
+    hash::{Hash, Hasher},
+    ptr,
+};
 use zeroize::Zeroize;
 
 /// Domain separation tag used when hashing a message to a curve (G1 or G2).
@@ -223,6 +226,16 @@ impl Scalar {
     pub fn sub(&mut self, rhs: &Self) {
         unsafe { blst_fr_sub(&mut self.0, &self.0, &rhs.0) }
     }
+
+    fn as_slice(&self) -> [u8; Self::SIZE] {
+        let mut slice = [0u8; Self::SIZE];
+        unsafe {
+            let mut scalar = blst_scalar::default();
+            blst_scalar_from_fr(&mut scalar, &self.0);
+            blst_bendian_from_scalar(slice.as_mut_ptr(), &scalar);
+        }
+        slice
+    }
 }
 
 impl Zeroize for Scalar {
@@ -267,13 +280,8 @@ impl Element for Scalar {
 
 impl Write for Scalar {
     fn write(&self, buf: &mut impl BufMut) {
-        let mut bytes = [0u8; Self::SIZE];
-        unsafe {
-            let mut scalar = blst_scalar::default();
-            blst_scalar_from_fr(&mut scalar, &self.0);
-            blst_bendian_from_scalar(bytes.as_mut_ptr(), &scalar);
-        }
-        buf.put_slice(&bytes);
+        let slice = self.as_slice();
+        buf.put_slice(&slice);
     }
 }
 
@@ -307,8 +315,9 @@ impl FixedSize for Scalar {
 }
 
 impl Hash for Scalar {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        state.write(&self.encode());
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let slice = self.as_slice();
+        state.write(&slice);
     }
 }
 
@@ -361,6 +370,16 @@ impl FixedSize for Share {
     const SIZE: usize = u32::SIZE + Private::SIZE;
 }
 
+impl G1 {
+    fn as_slice(&self) -> [u8; Self::SIZE] {
+        let mut slice = [0u8; Self::SIZE];
+        unsafe {
+            blst_p1_compress(slice.as_mut_ptr(), &self.0);
+        }
+        slice
+    }
+}
+
 impl Element for G1 {
     fn zero() -> Self {
         Self(blst_p1::default())
@@ -403,11 +422,8 @@ impl Element for G1 {
 
 impl Write for G1 {
     fn write(&self, buf: &mut impl BufMut) {
-        let mut bytes = [0u8; Self::SIZE];
-        unsafe {
-            blst_p1_compress(bytes.as_mut_ptr(), &self.0);
-        }
-        buf.put_slice(&bytes);
+        let slice = self.as_slice();
+        buf.put_slice(&slice);
     }
 }
 
@@ -448,8 +464,9 @@ impl FixedSize for G1 {
 }
 
 impl Hash for G1 {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        state.write(&self.encode());
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let slice = self.as_slice();
+        state.write(&slice);
     }
 }
 
@@ -466,6 +483,16 @@ impl Point for G1 {
                 0,
             );
         }
+    }
+}
+
+impl G2 {
+    fn as_slice(&self) -> [u8; Self::SIZE] {
+        let mut slice = [0u8; Self::SIZE];
+        unsafe {
+            blst_p2_compress(slice.as_mut_ptr(), &self.0);
+        }
+        slice
     }
 }
 
@@ -511,11 +538,8 @@ impl Element for G2 {
 
 impl Write for G2 {
     fn write(&self, buf: &mut impl BufMut) {
-        let mut bytes = [0u8; Self::SIZE];
-        unsafe {
-            blst_p2_compress(bytes.as_mut_ptr(), &self.0);
-        }
-        buf.put_slice(&bytes);
+        let slice = self.as_slice();
+        buf.put_slice(&slice);
     }
 }
 
@@ -556,8 +580,9 @@ impl FixedSize for G2 {
 }
 
 impl Hash for G2 {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        state.write(&self.encode());
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let slice = self.as_slice();
+        state.write(&slice);
     }
 }
 
