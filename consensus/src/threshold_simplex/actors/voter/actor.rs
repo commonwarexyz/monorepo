@@ -1114,7 +1114,7 @@ impl<
             identity,
             public_key_index,
             &[nullify_message, seed_message],
-            &[nullify_signature, seed_signature],
+            &[&nullify_signature, &seed_signature],
         )
         .is_err()
         {
@@ -1498,7 +1498,7 @@ impl<
             identity,
             public_key_index,
             &[notarize_message, seed_message],
-            &[notarize_signature, seed_signature],
+            &[&notarize_signature, &seed_signature],
         )
         .is_err()
         {

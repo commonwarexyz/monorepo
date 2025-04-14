@@ -62,7 +62,7 @@ pub fn verify_notarization<
     };
 
     // Verify aggregate signature
-    let signature = aggregate_signatures(&[notarization_signature, seed_signature]);
+    let signature = aggregate_signatures(&[&notarization_signature, &seed_signature]);
     let notarization_message = proposal_message(proposal.view, proposal.parent, &payload);
     let notarization_message = (Some(notarization_namespace), notarization_message.as_ref());
     let seed_message = seed_message(proposal.view);
@@ -118,7 +118,7 @@ pub fn verify_nullification<S: ThresholdSupervisor<Index = View, Identity = poly
     };
 
     // Verify aggregate signature
-    let signature = aggregate_signatures(&[nullification_signature, seed_signature]);
+    let signature = aggregate_signatures(&[&nullification_signature, &seed_signature]);
     let nullification_message = nullify_message(nullification.view);
     let nullification_message = (
         Some(nullification_namespace),
@@ -195,7 +195,7 @@ pub fn verify_finalization<
     };
 
     // Verify aggregate signature
-    let signature = aggregate_signatures(&[finalization_signature, seed_signature]);
+    let signature = aggregate_signatures(&[&finalization_signature, &seed_signature]);
     let finalization_message = proposal_message(proposal.view, proposal.parent, &payload);
     let finalization_message = (Some(finalization_namespace), finalization_message.as_ref());
     let seed_message = seed_message(proposal.view);
