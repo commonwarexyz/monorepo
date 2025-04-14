@@ -243,14 +243,13 @@ pub fn partial_verify_multiple_messages(
 ///
 /// Signatures recovered by this function are deterministic and are safe
 /// to use in a consensus-critical context.
-pub fn threshold_signature_recover(
+pub fn threshold_signature_recover<'a, I>(
     threshold: u32,
-    partials: &[&PartialSignature],
-) -> Result<group::Signature, Error> {
-    let sigs = partials.len() as u32;
-    if threshold > sigs {
-        return Err(Error::NotEnoughPartialSignatures(threshold, sigs));
-    }
+    partials: I,
+) -> Result<group::Signature, Error>
+where
+    I: IntoIterator<Item = &'a PartialSignature>,
+{
     poly::Signature::recover(threshold, partials)
 }
 
@@ -447,8 +446,7 @@ mod tests {
         for p in &partials {
             partial_verify_proof_of_possession(&public, p).expect("signature should be valid");
         }
-        let partial_refs = partials.iter().collect::<Vec<_>>();
-        let threshold_sig = threshold_signature_recover(t, &partial_refs).unwrap();
+        let threshold_sig = threshold_signature_recover(t, &partials).unwrap();
         let threshold_pub = poly::public(&public);
 
         // Verify PoP
@@ -543,8 +541,7 @@ mod tests {
             partial_verify_message(&public, Some(namespace), msg, p)
                 .expect("signature should be valid");
         }
-        let partial_refs = partials.iter().collect::<Vec<_>>();
-        let threshold_sig = threshold_signature_recover(t, &partial_refs).unwrap();
+        let threshold_sig = threshold_signature_recover(t, &partials).unwrap();
         let threshold_pub = poly::public(&public);
 
         // Verify the signature

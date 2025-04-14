@@ -210,9 +210,10 @@ impl<C: Element> Poly<C> {
     /// Recover the polynomial's constant term given at least `t` polynomial evaluations.
     ///
     /// TODO: move I to where clause
-    pub fn recover<'a, I: IntoIterator<Item = &'a Eval<C>>>(t: u32, evals: I) -> Result<C, Error>
+    pub fn recover<'a, I>(t: u32, evals: I) -> Result<C, Error>
     where
         C: 'a,
+        I: IntoIterator<Item = &'a Eval<C>>,
     {
         // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/a714310be76620e10e8797d6637df64011926430/crates/threshold-bls/src/poly.rs#L131-L165
 
@@ -337,7 +338,7 @@ pub mod tests {
         let shares = (0..threshold - 1)
             .map(|i| poly.evaluate(i))
             .collect::<Vec<_>>();
-        Poly::recover(threshold, shares.iter()).unwrap_err();
+        Poly::recover(threshold, &shares).unwrap_err();
     }
 
     #[test]
@@ -408,7 +409,7 @@ pub mod tests {
                 let expected = poly.0[0];
 
                 let shares = (0..num_evals).map(|i| poly.evaluate(i)).collect::<Vec<_>>();
-                let recovered_constant = Poly::recover(num_evals, shares.iter()).unwrap();
+                let recovered_constant = Poly::recover(num_evals, &shares).unwrap();
 
                 if num_evals > degree {
                     assert_eq!(
