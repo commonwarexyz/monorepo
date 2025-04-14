@@ -45,7 +45,8 @@ pub struct AckManager<D: Digest, P: Array> {
     // The BTreeMaps are sorted by key, so we can prune old entries. In particular, we can prune
     // entries where the height is less than the height of the highest chunk for the sequencer.
     // We can often prune entries for old epochs as well.
-    acks: HashMap<P, BTreeMap<u64, BTreeMap<Epoch, Evidence<D>>>>,
+    #[allow(clippy::type_complexity)]
+    acks: HashMap<P, BTreeMap<u64, Vec<(Epoch, Evidence<D>)>>>,
 }
 
 impl<D: Digest, P: Array> AckManager<D, P> {
@@ -60,14 +61,8 @@ impl<D: Digest, P: Array> AckManager<D, P> {
     ///
     /// If-and-only-if the quorum is newly-reached, the threshold signature is returned.
     pub fn add_ack(&mut self, ack: &parsed::Ack<D, P>, quorum: u32) -> Option<group::Signature> {
-        let evidence = self
-            .acks
-            .entry(ack.chunk.sequencer.clone())
-            .or_default()
-            .entry(ack.chunk.height)
-            .or_default()
-            .entry(ack.epoch)
-            .or_default();
+        let evidence =
+            self.evidence_or_default_mut(ack.chunk.sequencer.clone(), ack.chunk.height, ack.epoch);
 
         match evidence {
             Evidence::Threshold(_) => None,
@@ -123,14 +118,10 @@ impl<D: Digest, P: Array> AckManager<D, P> {
     ) -> bool {
         // Set the threshold.
         // If the threshold already existed, return false
-        if let Some(Evidence::Threshold(_)) = self
-            .acks
-            .entry(sequencer.clone())
-            .or_default()
-            .entry(height)
-            .or_default()
-            .insert(epoch, Evidence::Threshold(threshold))
-        {
+        let have_threshold = self.have_threshold(sequencer, height, epoch, &threshold);
+        self.set_evidence(sequencer, height, epoch, Evidence::Threshold(threshold));
+
+        if have_threshold {
             return false;
         }
 
@@ -145,6 +136,55 @@ impl<D: Digest, P: Array> AckManager<D, P> {
         }
 
         true
+    }
+
+    fn evidence(&self, sequencer: &P, height: u64, epoch: Epoch) -> Option<&Evidence<D>> {
+        self.acks.get(sequencer).and_then(|heights| {
+            heights.get(&height).map(|epochs| {
+                epochs
+                    .iter()
+                    .find(|(ep, _)| *ep == epoch)
+                    .map(|(_, evid)| evid)
+            })
+        })?
+    }
+
+    fn evidence_or_default_mut(
+        &mut self,
+        sequencer: P,
+        height: u64,
+        epoch: Epoch,
+    ) -> &mut Evidence<D> {
+        let epochs = self
+            .acks
+            .entry(sequencer)
+            .or_default()
+            .entry(height)
+            .or_default();
+
+        if !epochs.iter_mut().any(|(ep, _)| *ep == epoch) {
+            epochs.push((epoch, Evidence::default()));
+        }
+
+        &mut epochs.iter_mut().find(|(ep, _)| *ep == epoch).unwrap().1
+    }
+
+    fn have_threshold(
+        &self,
+        sequencer: &P,
+        height: u64,
+        epoch: Epoch,
+        threshold: &group::Signature,
+    ) -> bool {
+        if let Some(Evidence::Threshold(t)) = self.evidence(sequencer, height, epoch) {
+            t == threshold
+        } else {
+            false
+        }
+    }
+
+    fn set_evidence(&mut self, sequencer: &P, height: u64, epoch: Epoch, evidence: Evidence<D>) {
+        *self.evidence_or_default_mut(sequencer.clone(), height, epoch) = evidence;
     }
 }
 
