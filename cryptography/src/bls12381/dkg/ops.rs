@@ -114,6 +114,7 @@ pub fn recover_public(
 
     // Perform interpolation over each coefficient
     let new = if concurrency == 1 {
+        // Interpolate each coefficient sequentially
         let mut points = Vec::with_capacity(threshold as usize);
         for coeff in 0..threshold {
             let evals: Vec<_> = commitments
