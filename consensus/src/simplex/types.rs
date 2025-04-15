@@ -1,5 +1,5 @@
 use bytes::{Buf, BufMut};
-use commonware_codec::{Error, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, Error, FixedSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{Digest, Verifier};
 use commonware_utils::union;
 
@@ -187,6 +187,94 @@ impl<V: Verifier, D: Digest> Viewable for Notarize<V, D> {
 }
 
 impl<V: Verifier, D: Digest> Attributable<V> for Notarize<V, D> {
+    fn signer(&self) -> V::PublicKey {
+        self.signature.signer()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Notarization<V: Verifier, D: Digest> {
+    pub proposal: Proposal<D>,
+    pub signatures: Vec<Signature<V>>,
+}
+
+impl<V: Verifier, D: Digest> Notarization<V, D> {
+    pub fn new(proposal: Proposal<D>, signatures: Vec<Signature<V>>) -> Self {
+        Self {
+            proposal,
+            signatures,
+        }
+    }
+}
+
+impl<V: Verifier, D: Digest> Write for Notarization<V, D> {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.proposal.write(writer);
+        self.signatures.write(writer);
+    }
+}
+
+impl<V: Verifier, D: Digest> Read<usize> for Notarization<V, D> {
+    fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
+        let proposal = Proposal::<D>::read(reader)?;
+        let signatures = Vec::<Signature<V>>::read_range(reader, ..=*max_len)?;
+        Ok(Self {
+            proposal,
+            signatures,
+        })
+    }
+}
+
+impl<V: Verifier, D: Digest> EncodeSize for Notarization<V, D> {
+    fn encode_size(&self) -> usize {
+        self.proposal.encode_size() + self.signatures.encode_size()
+    }
+}
+
+impl<V: Verifier, D: Digest> Viewable for Notarization<V, D> {
+    fn view(&self) -> View {
+        self.proposal.view()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Nullify<V: Verifier> {
+    pub view: View,
+    pub signature: Signature<V>,
+}
+
+impl<V: Verifier> Nullify<V> {
+    pub fn new(view: View, signature: Signature<V>) -> Self {
+        Self { view, signature }
+    }
+}
+
+impl<V: Verifier> Write for Nullify<V> {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.view.write(writer);
+        self.signature.write(writer);
+    }
+}
+
+impl<V: Verifier> Read for Nullify<V> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        let view = View::read(reader)?;
+        let signature = Signature::<V>::read(reader)?;
+        Ok(Self { view, signature })
+    }
+}
+
+impl<V: Verifier> FixedSize for Nullify<V> {
+    const SIZE: usize = View::SIZE + Signature::<V>::SIZE;
+}
+
+impl<V: Verifier> Viewable for Nullify<V> {
+    fn view(&self) -> View {
+        self.view
+    }
+}
+
+impl<V: Verifier> Attributable<V> for Nullify<V> {
     fn signer(&self) -> V::PublicKey {
         self.signature.signer()
     }
