@@ -11,7 +11,7 @@ use super::{
     metrics,
     types::{
         ack_message, ack_namespace, chunk_namespace, Ack, Activity, Chunk, Context, Epoch, Lock,
-        Node,
+        Node, Parent, Proposal,
     },
     AckManager, Config, TipManager,
 };
@@ -497,8 +497,10 @@ impl<
         }
 
         // Emit the activity
-        self.reporter
-            .report(Activity::Node(())
+        self.reporter.report(Activity::Proposal(Proposal::new(
+            tip.chunk.clone(),
+            tip.signature.clone(),
+        )));
 
         // Construct partial signature
         let Some(share) = self.validators.share(self.epoch) else {
@@ -581,7 +583,7 @@ impl<
     ///
     /// Returns an error if the ack is invalid, or can be ignored
     /// (e.g. already exists, threshold already exists, is outside the epoch bounds, etc.).
-    async fn handle_ack(&mut self, ack: &parsed::Ack<D, C::PublicKey>) -> Result<(), Error> {
+    async fn handle_ack(&mut self, ack: &Ack<C::PublicKey, D>) -> Result<(), Error> {
         // Get the quorum
         let Some(identity) = self.validators.identity(ack.epoch) else {
             return Err(Error::UnknownIdentity(ack.epoch));
@@ -602,7 +604,7 @@ impl<
     /// Handles a valid `Node` message, storing it as the tip.
     /// Alerts the automaton of the new node.
     /// Also appends the `Node` to the journal if it's new.
-    async fn handle_node(&mut self, node: &parsed::Node<C, D>) {
+    async fn handle_node(&mut self, node: &Node<C, D>) {
         // Store the tip
         let is_new = self.tip_manager.put(node);
 
@@ -706,11 +708,7 @@ impl<
 
             // Update height and parent
             height = tip.chunk.height + 1;
-            parent = Some(parsed::Parent {
-                payload: tip.chunk.payload,
-                threshold,
-                epoch,
-            });
+            parent = Some(Parent::new(tip.chunk.payload, epoch, threshold));
         }
 
         // Error-check context height
@@ -719,19 +717,11 @@ impl<
         }
 
         // Construct new node
-        let chunk = parsed::Chunk {
-            sequencer: me.clone(),
-            height,
-            payload,
-        };
+        let chunk = Chunk::new(me.clone(), height, payload);
         let signature = self
             .crypto
-            .sign(Some(&self.chunk_namespace), &serializer::chunk(&chunk));
-        let node = parsed::Node::<C, D> {
-            chunk,
-            signature,
-            parent,
-        };
+            .sign(Some(&self.chunk_namespace), &chunk.encode());
+        let node = Node::new(chunk, signature, parent);
 
         // Deal with the chunk as if it were received over the network
         self.handle_node(&node).await;
@@ -796,7 +786,7 @@ impl<
     /// Send a  `Node` message to all validators in the given epoch.
     async fn broadcast(
         &mut self,
-        node: &parsed::Node<C, D>,
+        node: &Node<C, D>,
         node_sender: &mut NetS,
         epoch: Epoch,
     ) -> Result<(), Error> {
@@ -835,9 +825,9 @@ impl<
     /// Else returns an error if the `Node` is invalid.
     fn validate_node(
         &mut self,
-        node: &parsed::Node<C, D>,
+        node: &Node<C, D>,
         sender: &C::PublicKey,
-    ) -> Result<Option<parsed::Chunk<D, C::PublicKey>>, Error> {
+    ) -> Result<Option<Chunk<C::PublicKey, D>>, Error> {
         // Verify the sender
         if node.chunk.sequencer != *sender {
             return Err(Error::PeerMismatch);
@@ -854,47 +844,19 @@ impl<
         // Validate chunk
         self.validate_chunk(&node.chunk, self.epoch)?;
 
+        // Get parent identity
+        let public = if let Some(parent) = &node.parent {
+            let Some(identity) = self.validators.identity(parent.epoch) else {
+                return Err(Error::UnknownIdentity(parent.epoch));
+            };
+            Some(poly::public(identity))
+        } else {
+            None
+        };
+
         // Verify the signature
-        if !C::verify(
-            Some(&self.chunk_namespace),
-            &serializer::chunk(&node.chunk),
-            sender,
-            &node.signature,
-        ) {
-            return Err(Error::InvalidNodeSignature);
-        }
-
-        // Verify no parent
-        if node.chunk.height == 0 {
-            if node.parent.is_some() {
-                return Err(Error::GenesisChunkMustNotHaveParent);
-            }
-            return Ok(None);
-        }
-
-        // Verify parent
-        let Some(parent) = &node.parent else {
-            return Err(Error::NodeMissingParent);
-        };
-        let parent_chunk = parsed::Chunk {
-            sequencer: sender.clone(),
-            height: node.chunk.height.checked_sub(1).unwrap(),
-            payload: parent.payload,
-        };
-
-        // Verify parent threshold signature
-        let Some(identity) = self.validators.identity(parent.epoch) else {
-            return Err(Error::UnknownIdentity(parent.epoch));
-        };
-        let public_key = poly::public(identity);
-        ops::verify_message(
-            public_key,
-            Some(&self.ack_namespace),
-            &serializer::ack(&parent_chunk, parent.epoch),
-            &parent.threshold,
-        )
-        .map_err(|_| Error::InvalidThresholdSignature)?;
-        Ok(Some(parent_chunk))
+        node.verify(public, &self.chunk_namespace, &self.ack_namespace)
+            .map_err(|_| Error::InvalidNodeSignature)
     }
 
     /// Takes a raw ack (from sender) from the p2p network and validates it.

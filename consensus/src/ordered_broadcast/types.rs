@@ -172,7 +172,12 @@ impl<C: Verifier, D: Digest> Node<C, D> {
         }
     }
 
-    pub fn verify(&self, public: &Public, chunk_namespace: &[u8], ack_namespace: &[u8]) -> bool {
+    pub fn verify(
+        &self,
+        public: Option<&Public>,
+        chunk_namespace: &[u8],
+        ack_namespace: &[u8],
+    ) -> Result<Option<Chunk<C::PublicKey, D>>, Error> {
         // Verify chunk
         let message = self.chunk.encode();
         if !C::verify(
@@ -181,25 +186,31 @@ impl<C: Verifier, D: Digest> Node<C, D> {
             &self.chunk.sequencer,
             &self.signature,
         ) {
-            return false;
+            return Err(Error::InvalidSignature);
         }
         let Some(parent) = &self.parent else {
-            return true;
+            return Ok(None);
         };
 
         // Verify parent (if present)
+        let Some(public) = public else {
+            unreachable!("public should always be present when parent is present");
+        };
         let parent_chunk = Chunk::new(
             self.chunk.sequencer.clone(),
             self.chunk.height - 1, // Will not parse if height is 0 and parent exists
             parent.digest.clone(),
         );
-        verify_lock(
+        if !verify_lock(
             public,
             &parent_chunk,
             &parent.epoch,
             &parent.signature,
             ack_namespace,
-        )
+        ) {
+            return Err(Error::InvalidSignature);
+        }
+        Ok(Some(parent_chunk))
     }
 }
 
@@ -338,7 +349,7 @@ impl<C: Verifier, D: Digest> Write for Activity<C, D> {
 impl<C: Verifier, D: Digest> Read for Activity<C, D> {
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         match u8::read(reader)? {
-            0 => Ok(Activity::Chunk(Chunk::read(reader)?)),
+            0 => Ok(Activity::Proposal(Proposal::read(reader)?)),
             1 => Ok(Activity::Lock(Lock::read(reader)?)),
             _ => Err(CodecError::Invalid(
                 "consensus::ordered_broadcast::Activity",
@@ -351,7 +362,7 @@ impl<C: Verifier, D: Digest> Read for Activity<C, D> {
 impl<C: Verifier, D: Digest> EncodeSize for Activity<C, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Activity::chunk(chunk) => chunk.encode_size(),
+            Activity::Proposal(proposal) => proposal.encode_size(),
             Activity::Lock(lock) => lock.encode_size(),
         }
     }
@@ -394,7 +405,7 @@ impl<C: Verifier, D: Digest> Proposal<C, D> {
         Self { chunk, signature }
     }
 
-    pub fn verify(&self, public_key: &Public, chunk_namespace: &[u8]) -> bool {
+    pub fn verify(&self, chunk_namespace: &[u8]) -> bool {
         // Verify chunk
         let message = self.chunk.encode();
         C::verify(
