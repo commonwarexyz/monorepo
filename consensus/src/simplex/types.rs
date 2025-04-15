@@ -1,7 +1,7 @@
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error, FixedSize, Read, ReadExt, ReadRangeExt, Write};
+use commonware_codec::{Encode, EncodeSize, Error, FixedSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{Digest, Verifier};
-use commonware_utils::union;
+use commonware_utils::{quorum, union, Array};
 
 /// View is a monotonically increasing counter that represents the current focus of consensus.
 pub type View = u64;
@@ -47,6 +47,12 @@ pub fn nullify_namespace(namespace: &[u8]) -> Vec<u8> {
 
 pub fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, FINALIZE_SUFFIX)
+}
+
+pub fn threshold<P: Array>(validators: &[P]) -> Option<(u32, u32)> {
+    let len = validators.len() as u32;
+    let threshold = quorum(len).expect("not enough validators for a quorum");
+    Some((threshold, len))
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -241,6 +247,16 @@ impl<V: Verifier, D: Digest> Notarize<V, D> {
             signature,
         }
     }
+
+    pub fn verify(&self, notarize_namespace: &[u8]) -> bool {
+        let message = self.proposal.encode();
+        V::verify(
+            Some(&notarize_namespace),
+            &message,
+            self.signature.public_key,
+            self.signature.signature,
+        )
+    }
 }
 
 impl<V: Verifier, D: Digest> Write for Notarize<V, D> {
@@ -332,6 +348,16 @@ impl<V: Verifier> Nullify<V> {
     pub fn new(view: View, signature: Signature<V>) -> Self {
         Self { view, signature }
     }
+
+    pub fn verify(&self, nullify_namespace: &[u8]) -> bool {
+        let message = view_message(self.view);
+        V::verify(
+            Some(&nullify_namespace),
+            &message,
+            self.signature.public_key,
+            self.signature.signature,
+        )
+    }
 }
 
 impl<V: Verifier> Write for Nullify<V> {
@@ -405,43 +431,59 @@ impl<V: Verifier> Viewable for Nullification<V> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Finalize<V: Verifier> {
-    pub view: View,
+pub struct Finalize<V: Verifier, D: Digest> {
+    pub proposal: Proposal<D>,
     pub signature: Signature<V>,
 }
 
-impl<V: Verifier> Finalize<V> {
-    pub fn new(view: View, signature: Signature<V>) -> Self {
-        Self { view, signature }
+impl<V: Verifier, D: Digest> Finalize<V, D> {
+    pub fn new(proposal: Proposal<D>, signature: Signature<V>) -> Self {
+        Self {
+            proposal,
+            signature,
+        }
+    }
+
+    pub fn verify(&self, finalize_namespace: &[u8]) -> bool {
+        let message = self.proposal.encode();
+        V::verify(
+            Some(&finalize_namespace),
+            &message,
+            self.signature.public_key,
+            self.signature.signature,
+        )
     }
 }
 
-impl<V: Verifier> Write for Finalize<V> {
+impl<V: Verifier, D: Digest> Write for Finalize<V, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.view.write(writer);
         self.signature.write(writer);
     }
 }
 
-impl<V: Verifier> Read for Finalize<V> {
+impl<V: Verifier, D> Read for Finalize<V, D> {
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let view = View::read(reader)?;
+        let proposal = Proposal::<D>::read(reader)?;
         let signature = Signature::<V>::read(reader)?;
-        Ok(Self { view, signature })
+        Ok(Self {
+            proposal,
+            signature,
+        })
     }
 }
 
-impl<V: Verifier> FixedSize for Finalize<V> {
-    const SIZE: usize = View::SIZE + Signature::<V>::SIZE;
+impl<V: Verifier, D> FixedSize for Finalize<V, D> {
+    const SIZE: usize = Proposal::<D>::SIZE + Signature::<V>::SIZE;
 }
 
-impl<V: Verifier> Viewable for Finalize<V> {
+impl<V: Verifier, D: Digest> Viewable for Finalize<V, D> {
     fn view(&self) -> View {
-        self.view
+        self.proposal.view()
     }
 }
 
-impl<V: Verifier> Attributable<V> for Finalize<V> {
+impl<V: Verifier, D: Digest> Attributable<V> for Finalize<V, D> {
     fn signer(&self) -> V::PublicKey {
         self.signature.signer()
     }
