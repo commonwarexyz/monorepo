@@ -44,6 +44,10 @@ pub const NOTARIZE_SUFFIX: &[u8] = b"_NOTARIZE";
 pub const NULLIFY_SUFFIX: &[u8] = b"_NULLIFY";
 pub const FINALIZE_SUFFIX: &[u8] = b"_FINALIZE";
 
+pub fn view_message(view: View) -> Vec<u8> {
+    View::encode(&view).into()
+}
+
 pub fn seed_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, SEED_SUFFIX)
 }
@@ -193,7 +197,7 @@ impl<D: Digest> Read for Proposal<D> {
         let view = View::read(reader)?;
         let parent = View::read(reader)?;
         let payload = D::read(reader)?;
-        Ok(Proposal {
+        Ok(Self {
             view,
             parent,
             payload,
@@ -829,10 +833,6 @@ impl<D: Digest> Read<usize> for Response<D> {
             nullifications,
         })
     }
-}
-
-pub fn view_message(view: View) -> Vec<u8> {
-    View::encode(&view).into()
 }
 
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]

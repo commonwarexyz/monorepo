@@ -115,15 +115,7 @@
 //! * Introduce message rebroadcast to continue making progress if messages from a given view are dropped (only way
 //!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
 
-use crate::Activity;
-use commonware_utils::Array;
-
-mod encoder;
-mod prover;
-pub use prover::Prover;
-mod wire {
-    include!(concat!(env!("OUT_DIR"), "/simplex.wire.rs"));
-}
+pub mod types;
 
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
@@ -140,41 +132,6 @@ cfg_if::cfg_if! {
 #[cfg(test)]
 pub mod mocks;
 
-/// View is a monotonically increasing counter that represents the current focus of consensus.
-pub type View = u64;
-
-/// Context is a collection of metadata from consensus about a given payload.
-#[derive(Clone)]
-pub struct Context<D: Array> {
-    /// Current view of consensus.
-    pub view: View,
-
-    /// Parent the payload is built on.
-    ///
-    /// If there is a gap between the current view and the parent view, the participant
-    /// must possess a nullification for each discarded view to safely vote on the proposed
-    /// payload (any view without a nullification may eventually be finalized and skipping
-    /// it would result in a fork).
-    pub parent: (View, D),
-}
-
-/// Notarize a payload at a given view.
-///
-/// ## Clarifications
-/// * Vote for leader is considered a proposal and a vote.
-/// * It is ok to have both a vote for a proposal and the null
-///   container in the same view.
-/// * It is ok to notarize/finalize different proposals in the same view.
-pub const NOTARIZE: Activity = 0;
-/// Finalize a payload at a given view.
-pub const FINALIZE: Activity = 1;
-/// Notarize a payload that conflicts with a previous notarize.
-pub const CONFLICTING_NOTARIZE: Activity = 2;
-/// Finalize a payload that conflicts with a previous finalize.
-pub const CONFLICTING_FINALIZE: Activity = 3;
-/// Nullify and finalize in the same view.
-pub const NULLIFY_AND_FINALIZE: Activity = 4;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,11 +143,10 @@ mod tests {
         Clock, Metrics, Runner, Spawner,
     };
     use commonware_storage::journal::variable::{Config as JConfig, Journal};
-    use commonware_utils::quorum;
+    use commonware_utils::{quorum, Array};
     use engine::Engine;
     use futures::{channel::mpsc, StreamExt};
     use governor::Quota;
-    use prover::Prover;
     use rand::Rng;
     use std::{
         collections::{BTreeMap, HashMap, HashSet},
