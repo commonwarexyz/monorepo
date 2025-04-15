@@ -12,7 +12,7 @@ use crate::{
     },
     ThresholdSupervisor,
 };
-use commonware_codec::Codec;
+use commonware_codec::{Decode, Encode, EncodeSize};
 use commonware_cryptography::{bls12381::primitives::poly, Digest, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{utils::requester, Receiver, Recipients, Sender};
@@ -436,7 +436,7 @@ impl<
                 },
                 network = receiver.recv() => {
                     let (s, msg) = network.unwrap();
-                    let msg = match Backfiller::decode(msg) {
+                    let msg = match Backfiller::decode_cfg(msg, &self.max_fetch_count) {
                         Ok(msg) => msg,
                         Err(err) => {
                             warn!(?err, sender = ?s, "failed to decode message");
@@ -459,11 +459,12 @@ impl<
                                 self.requester.block(s);
                                 continue;
                             }
+                            // TODO: need to factor in size of Backfiller message overhead to do size?
 
                             // Populate notarizations first
                             for view in request.notarizations {
                                 if let Some(notarization) = self.notarizations.get(&view) {
-                                    let size = notarization.len_encoded();
+                                    let size = notarization.encode_size();
                                     if populated_bytes + size > self.max_fetch_size {
                                         break;
                                     }
@@ -479,7 +480,7 @@ impl<
                             // Populate nullifications next
                             for view in request.nullifications {
                                 if let Some(nullification) = self.nullifications.get(&view) {
-                                    let size = nullification.len_encoded();
+                                    let size = nullification.encode_size();
                                     if populated_bytes + size > self.max_fetch_size {
                                         break;
                                     }
