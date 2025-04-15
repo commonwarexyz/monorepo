@@ -46,7 +46,7 @@ mod tests {
             Notarization, Proposal, Voter,
         },
     };
-    use commonware_codec::Codec;
+    use commonware_codec::Encode;
     use commonware_cryptography::{
         bls12381::{
             dkg::ops,
@@ -198,14 +198,14 @@ mod tests {
                 .iter()
                 .map(|share| partial_sign_message(share, Some(&finalize_namespace), &message))
                 .collect();
-            let proposal_signature = threshold_signature_recover(threshold, partials).unwrap();
+            let proposal_signature = threshold_signature_recover(threshold, &partials).unwrap();
             let seed_namespace = seed_namespace(&namespace);
             let message = view_message(proposal.view);
             let partials: Vec<_> = shares
                 .iter()
                 .map(|share| partial_sign_message(share, Some(&seed_namespace), &message))
                 .collect();
-            let seed_signature = threshold_signature_recover(threshold, partials).unwrap();
+            let seed_signature = threshold_signature_recover(threshold, &partials).unwrap();
             let finalization = Finalization::new(proposal, proposal_signature, seed_signature);
             let msg = Voter::Finalization(finalization).encode().into();
             peer_sender
@@ -234,13 +234,13 @@ mod tests {
                 .iter()
                 .map(|share| partial_sign_message(share, Some(&notarize_namespace), &message))
                 .collect();
-            let proposal_signature = threshold_signature_recover(threshold, partials).unwrap();
+            let proposal_signature = threshold_signature_recover(threshold, &partials).unwrap();
             let message = view_message(proposal.view);
             let partials: Vec<_> = shares
                 .iter()
                 .map(|share| partial_sign_message(share, Some(&seed_namespace), &message))
                 .collect();
-            let seed_signature = threshold_signature_recover(threshold, partials).unwrap();
+            let seed_signature = threshold_signature_recover(threshold, &partials).unwrap();
             let notarization = Notarization::new(proposal, proposal_signature, seed_signature);
             mailbox.notarization(notarization).await;
 
@@ -252,13 +252,13 @@ mod tests {
                 .iter()
                 .map(|share| partial_sign_message(share, Some(&finalize_namespace), &message))
                 .collect();
-            let proposal_signature = threshold_signature_recover(threshold, partials).unwrap();
+            let proposal_signature = threshold_signature_recover(threshold, &partials).unwrap();
             let message = view_message(proposal.view);
             let partials: Vec<_> = shares
                 .iter()
                 .map(|share| partial_sign_message(share, Some(&seed_namespace), &message))
                 .collect();
-            let seed_signature = threshold_signature_recover(threshold, partials).unwrap();
+            let seed_signature = threshold_signature_recover(threshold, &partials).unwrap();
             let finalization = Finalization::new(proposal, proposal_signature, seed_signature);
             let msg = Voter::Finalization(finalization).encode().into();
             peer_sender
