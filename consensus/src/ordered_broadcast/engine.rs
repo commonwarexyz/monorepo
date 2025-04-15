@@ -838,12 +838,7 @@ impl<
         // Optimization: If the node is exactly equal to the tip,
         // don't perform further validation.
         if let Some(tip) = self.tip_manager.get(sender) {
-            // We can't use `PartialEq` here because equality is only defined
-            // for `Node<C: Verifier, D: Digest>`.
-            if tip.chunk == node.chunk
-                && tip.signature == node.signature
-                && tip.parent == node.parent
-            {
+            if tip == *node {
                 return Ok(None);
             }
         }
