@@ -18,7 +18,8 @@ use tracing::debug;
 
 /// Instance of `threshold-simplex` consensus engine.
 pub struct Engine<
-    E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
+    St: Storage,
+    E: Clock + GClock + Rng + CryptoRng + Spawner + Metrics,
     C: Scheme,
     D: Digest,
     A: Automaton<Context = Context<D>, Digest = D>,
@@ -34,14 +35,15 @@ pub struct Engine<
 > {
     context: E,
 
-    voter: voter::Actor<E, C, D, A, R, F, S>,
+    voter: voter::Actor<St, E, C, D, A, R, F, S>,
     voter_mailbox: voter::Mailbox<D>,
     resolver: resolver::Actor<E, C, D, S>,
     resolver_mailbox: resolver::Mailbox,
 }
 
 impl<
-        E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
+        St: Storage,
+        E: Clock + GClock + Rng + CryptoRng + Spawner + Metrics,
         C: Scheme,
         D: Digest,
         A: Automaton<Context = Context<D>, Digest = D>,
@@ -54,10 +56,10 @@ impl<
             Identity = poly::Public,
             PublicKey = C::PublicKey,
         >,
-    > Engine<E, C, D, A, R, F, S>
+    > Engine<St, E, C, D, A, R, F, S>
 {
     /// Create a new `threshold-simplex` consensus engine.
-    pub fn new(context: E, journal: Journal<E>, cfg: Config<C, D, A, R, F, S>) -> Self {
+    pub fn new(context: E, journal: Journal<St>, cfg: Config<C, D, A, R, F, S>) -> Self {
         // Ensure configuration is valid
         cfg.assert();
 
