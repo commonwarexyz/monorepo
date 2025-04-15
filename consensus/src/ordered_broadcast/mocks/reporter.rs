@@ -1,22 +1,22 @@
 use crate::{
-    ordered_broadcast::{prover::Prover, Epoch},
-    Committer as Z, Proof,
+    ordered_broadcast::types::{ack_namespace, Activity, Epoch, Lock},
+    Reporter as Z,
 };
-use commonware_cryptography::{bls12381::primitives::group, Digest, Scheme};
+use commonware_cryptography::{bls12381::primitives::group, Digest, Verifier};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
 };
 use std::collections::{btree_map::Entry, BTreeMap, HashMap};
 
-enum Message<C: Scheme, D: Digest> {
-    Acknowledged(Proof, D),
+enum Message<C: Verifier, D: Digest> {
+    Locked(Lock<C::PublicKey, D>),
     GetTip(C::PublicKey, oneshot::Sender<Option<(u64, Epoch)>>),
     GetContiguousTip(C::PublicKey, oneshot::Sender<Option<u64>>),
     Get(C::PublicKey, u64, oneshot::Sender<Option<(D, Epoch)>>),
 }
 
-pub struct Committer<C: Scheme, D: Digest> {
+pub struct Reporter<C: Verifier, D: Digest> {
     mailbox: mpsc::Receiver<Message<C, D>>,
 
     // Application namespace
@@ -35,11 +35,11 @@ pub struct Committer<C: Scheme, D: Digest> {
     highest: HashMap<C::PublicKey, (u64, Epoch)>,
 }
 
-impl<C: Scheme, D: Digest> Committer<C, D> {
+impl<C: Verifier, D: Digest> Reporter<C, D> {
     pub fn new(namespace: &[u8], public: group::Public) -> (Self, Mailbox<C, D>) {
         let (sender, receiver) = mpsc::channel(1024);
         (
-            Committer {
+            Reporter {
                 mailbox: receiver,
                 namespace: namespace.to_vec(),
                 public,
@@ -52,58 +52,59 @@ impl<C: Scheme, D: Digest> Committer<C, D> {
     }
 
     pub async fn run(mut self) {
-        let prover = Prover::<C, D>::new(&self.namespace, self.public);
         while let Some(msg) = self.mailbox.next().await {
             match msg {
-                Message::Acknowledged(proof, payload) => {
+                Message::Locked(lock) => {
                     // Check proof.
                     //
                     // The prover checks the validity of the threshold signature when deserializing
-                    let (context, _, epoch, _) =
-                        prover.deserialize_threshold(proof).expect("Invalid proof");
+                    if !lock.verify(&self.public, &ack_namespace(&self.namespace)) {
+                        panic!("Invalid proof");
+                    }
 
-                    // Update the committer
-                    let digests = self.digests.entry(context.sequencer.clone()).or_default();
-                    let entry = digests.entry(context.height);
+                    // Update the reporter
+                    let chunk = lock.chunk;
+                    let digests = self.digests.entry(chunk.sequencer.clone()).or_default();
+                    let entry = digests.entry(chunk.height);
                     match entry {
                         Entry::Occupied(mut entry) => {
                             // It should never be possible to get a conflicting payload
                             let (existing_payload, existing_epoch) = entry.get();
-                            assert_eq!(*existing_payload, payload);
+                            assert_eq!(*existing_payload, chunk.payload);
 
                             // We may hear about a commitment again, however, this should
                             // only occur if the epoch has changed.
-                            assert_ne!(*existing_epoch, epoch);
-                            if epoch > *existing_epoch {
-                                entry.insert((payload, epoch));
+                            assert_ne!(*existing_epoch, lock.epoch);
+                            if lock.epoch > *existing_epoch {
+                                entry.insert((chunk.payload, lock.epoch));
                             }
                         }
                         Entry::Vacant(entry) => {
-                            entry.insert((payload, epoch));
+                            entry.insert((chunk.payload, lock.epoch));
                         }
                     }
 
                     // Update the highest height
                     let highest = self
                         .highest
-                        .get(&context.sequencer)
+                        .get(&chunk.sequencer)
                         .copied()
                         .unwrap_or((0, 0));
-                    if context.height > highest.0 {
+                    if chunk.height > highest.0 {
                         self.highest
-                            .insert(context.sequencer.clone(), (context.height, epoch));
+                            .insert(chunk.sequencer.clone(), (chunk.height, lock.epoch));
                     }
 
                     // Update the highest contiguous height
-                    let highest = self.contiguous.get(&context.sequencer);
-                    if (highest.is_none() && context.height == 0)
-                        || (highest.is_some() && context.height == highest.unwrap() + 1)
+                    let highest = self.contiguous.get(&chunk.sequencer);
+                    if (highest.is_none() && chunk.height == 0)
+                        || (highest.is_some() && chunk.height == highest.unwrap() + 1)
                     {
-                        let mut contiguous = context.height;
+                        let mut contiguous = chunk.height;
                         while digests.contains_key(&(contiguous + 1)) {
                             contiguous += 1;
                         }
-                        self.contiguous.insert(context.sequencer, contiguous);
+                        self.contiguous.insert(chunk.sequencer, contiguous);
                     }
                 }
                 Message::GetTip(sequencer, sender) => {
@@ -128,25 +129,29 @@ impl<C: Scheme, D: Digest> Committer<C, D> {
 }
 
 #[derive(Clone)]
-pub struct Mailbox<C: Scheme, D: Digest> {
+pub struct Mailbox<C: Verifier, D: Digest> {
     sender: mpsc::Sender<Message<C, D>>,
 }
 
-impl<C: Scheme, D: Digest> Z for Mailbox<C, D> {
-    type Digest = D;
-    async fn finalized(&mut self, proof: Proof, payload: Self::Digest) {
-        self.sender
-            .send(Message::Acknowledged(proof, payload))
-            .await
-            .expect("Failed to send acknowledged");
-    }
+impl<C: Verifier, D: Digest> Z for Mailbox<C, D> {
+    type Activity = Activity<C, D>;
 
-    async fn prepared(&mut self, _proof: Proof, _payload: Self::Digest) {
-        unimplemented!()
+    async fn report(&mut self, activity: Self::Activity) {
+        match activity {
+            Activity::Proposal(_) => {
+                // TODO: implement
+            }
+            Activity::Lock(lock) => {
+                self.sender
+                    .send(Message::Locked(lock))
+                    .await
+                    .expect("Failed to send locked");
+            }
+        }
     }
 }
 
-impl<C: Scheme, D: Digest> Mailbox<C, D> {
+impl<C: Verifier, D: Digest> Mailbox<C, D> {
     pub async fn get_tip(&mut self, sequencer: C::PublicKey) -> Option<(u64, Epoch)> {
         let (sender, receiver) = oneshot::channel();
         self.sender

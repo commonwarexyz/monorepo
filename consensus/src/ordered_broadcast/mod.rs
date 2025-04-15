@@ -33,7 +33,7 @@
 //! [Autobahn](https://arxiv.org/abs/2401.10369) provided the insight that a succinct
 //! proof-of-availability could be produced by linking sequencer broadcasts.
 
-mod types;
+pub mod types;
 
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
@@ -206,7 +206,7 @@ mod tests {
         validators: &[(PublicKey, Ed25519, Share)],
         registrations: &mut Registrations<PublicKey>,
         automatons: &mut BTreeMap<PublicKey, mocks::Automaton<PublicKey>>,
-        committers: &mut BTreeMap<PublicKey, mocks::CommitterMailbox<Ed25519, Sha256Digest>>,
+        reporters: &mut BTreeMap<PublicKey, mocks::ReporterMailbox<Ed25519, Sha256Digest>>,
         rebroadcast_timeout: Duration,
         invalid_when: fn(u64) -> bool,
     ) -> HashMap<PublicKey, mocks::Monitor> {
@@ -223,10 +223,10 @@ mod tests {
             let automaton = mocks::Automaton::<PublicKey>::new(invalid_when);
             automatons.insert(validator.clone(), automaton.clone());
 
-            let (committer, committer_mailbox) =
-                mocks::Committer::<Ed25519, Sha256Digest>::new(namespace, *poly::public(&identity));
-            context.with_label("committer").spawn(|_| committer.run());
-            committers.insert(validator.clone(), committer_mailbox);
+            let (reporter, reporter_mailbox) =
+                mocks::Reporter::<Ed25519, Sha256Digest>::new(namespace, *poly::public(&identity));
+            context.with_label("reporter").spawn(|_| reporter.run());
+            reporters.insert(validator.clone(), reporter_mailbox);
 
             let engine = Engine::new(
                 context.with_label("engine"),
@@ -234,7 +234,7 @@ mod tests {
                     crypto: scheme.clone(),
                     relay: automaton.clone(),
                     automaton: automaton.clone(),
-                    reporter: committers.get(validator).unwrap().clone(),
+                    reporter: reporters.get(validator).unwrap().clone(),
                     monitor,
                     sequencers,
                     validators,
@@ -256,26 +256,26 @@ mod tests {
         monitors
     }
 
-    async fn await_committers(
+    async fn await_reporters(
         context: Context,
-        committers: &BTreeMap<PublicKey, mocks::CommitterMailbox<Ed25519, Sha256Digest>>,
+        reporters: &BTreeMap<PublicKey, mocks::ReporterMailbox<Ed25519, Sha256Digest>>,
         threshold: (u64, Epoch),
     ) {
         let mut receivers = Vec::new();
-        for (sequencer, mailbox) in committers.iter() {
-            // Create a oneshot channel to signal when the committer has reached the threshold.
+        for (sequencer, mailbox) in reporters.iter() {
+            // Create a oneshot channel to signal when the reporter has reached the threshold.
             let (tx, rx) = oneshot::channel();
             receivers.push(rx);
 
-            // Spawn a watcher for the committer.
-            context.with_label("committer_watcher").spawn({
+            // Spawn a watcher for the reporter.
+            context.with_label("reporter_watcher").spawn({
                 let sequencer = sequencer.clone();
                 let mut mailbox = mailbox.clone();
                 move |context| async move {
                     loop {
                         let (height, epoch) =
                             mailbox.get_tip(sequencer.clone()).await.unwrap_or((0, 0));
-                        debug!(height, epoch, ?sequencer, "committer");
+                        debug!(height, epoch, ?sequencer, "reporter");
                         if height >= threshold.0 && epoch >= threshold.1 {
                             let _ = tx.send(sequencer.clone());
                             break;
@@ -288,14 +288,14 @@ mod tests {
 
         // Wait for all oneshot receivers to complete.
         let results = join_all(receivers).await;
-        assert_eq!(results.len(), committers.len());
+        assert_eq!(results.len(), reporters.len());
     }
 
     async fn get_max_height(
-        committers: &mut BTreeMap<PublicKey, mocks::CommitterMailbox<Ed25519, Sha256Digest>>,
+        reporters: &mut BTreeMap<PublicKey, mocks::ReporterMailbox<Ed25519, Sha256Digest>>,
     ) -> u64 {
         let mut max_height = 0;
-        for (sequencer, mailbox) in committers.iter_mut() {
+        for (sequencer, mailbox) in reporters.iter_mut() {
             let (height, _) = mailbox.get_tip(sequencer.clone()).await.unwrap_or((0, 0));
             if height > max_height {
                 max_height = height;
@@ -323,8 +323,8 @@ mod tests {
             let automatons = Arc::new(Mutex::new(
                 BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
             ));
-            let mut committers =
-                BTreeMap::<PublicKey, mocks::CommitterMailbox<Ed25519, Sha256Digest>>::new();
+            let mut reporters =
+                BTreeMap::<PublicKey, mocks::ReporterMailbox<Ed25519, Sha256Digest>>::new();
             spawn_validator_engines(
                 context.with_label("validator"),
                 identity.clone(),
@@ -332,11 +332,11 @@ mod tests {
                 &validators,
                 &mut registrations,
                 &mut automatons.lock().unwrap(),
-                &mut committers,
+                &mut reporters,
                 Duration::from_secs(5),
                 |_| false,
             );
-            await_committers(context.with_label("committer"), &committers, (100, 111)).await;
+            await_reporters(context.with_label("reporter"), &reporters, (100, 111)).await;
         });
     }
 
@@ -393,9 +393,8 @@ mod tests {
                         PublicKey,
                         mocks::Automaton<PublicKey>,
                     >::new()));
-                    let mut committers =
-                        BTreeMap::<PublicKey, mocks::CommitterMailbox<Ed25519, Sha256Digest>>::new(
-                        );
+                    let mut reporters =
+                        BTreeMap::<PublicKey, mocks::ReporterMailbox<Ed25519, Sha256Digest>>::new();
                     spawn_validator_engines(
                         context.with_label("validator"),
                         identity.clone(),
@@ -403,22 +402,22 @@ mod tests {
                         &validators,
                         &mut registrations,
                         &mut automatons.lock().unwrap(),
-                        &mut committers,
+                        &mut reporters,
                         Duration::from_secs(5),
                         |_| false,
                     );
 
-                    let committer_pairs: Vec<(
+                    let reporter_pairs: Vec<(
                         PublicKey,
-                        mocks::CommitterMailbox<Ed25519, Sha256Digest>,
-                    )> = committers
+                        mocks::ReporterMailbox<Ed25519, Sha256Digest>,
+                    )> = reporters
                         .iter()
                         .map(|(v, m)| (v.clone(), m.clone()))
                         .collect();
-                    for (validator, mut mailbox) in committer_pairs {
+                    for (validator, mut mailbox) in reporter_pairs {
                         let completed_clone = completed.clone();
                         context
-                            .with_label("committer_unclean")
+                            .with_label("reporter_unclean")
                             .spawn(|context| async move {
                                 loop {
                                     let (height, _) =
@@ -461,8 +460,8 @@ mod tests {
             let automatons = Arc::new(Mutex::new(
                 BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
             ));
-            let mut committers =
-                BTreeMap::<PublicKey, mocks::CommitterMailbox<Ed25519, Sha256Digest>>::new();
+            let mut reporters =
+                BTreeMap::<PublicKey, mocks::ReporterMailbox<Ed25519, Sha256Digest>>::new();
             spawn_validator_engines(
                 context.with_label("validator"),
                 identity.clone(),
@@ -470,7 +469,7 @@ mod tests {
                 &validators,
                 &mut registrations,
                 &mut automatons.lock().unwrap(),
-                &mut committers,
+                &mut reporters,
                 Duration::from_secs(1),
                 |_| false,
             );
@@ -479,8 +478,8 @@ mod tests {
             link_validators(&mut oracle, &pks, Action::Unlink, None).await;
             context.sleep(Duration::from_secs(30)).await;
 
-            // Get the maximum height from all committers.
-            let max_height = get_max_height(&mut committers).await;
+            // Get the maximum height from all reporters.
+            let max_height = get_max_height(&mut reporters).await;
 
             // Heal the partition by re-adding links.
             let link = Link {
@@ -489,9 +488,9 @@ mod tests {
                 success_rate: 1.0,
             };
             link_validators(&mut oracle, &pks, Action::Link(link), None).await;
-            await_committers(
-                context.with_label("committer"),
-                &committers,
+            await_reporters(
+                context.with_label("reporter"),
+                &reporters,
                 (max_height + 100, 111),
             )
             .await;
@@ -529,8 +528,8 @@ mod tests {
             let automatons = Arc::new(Mutex::new(
                 BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
             ));
-            let mut committers =
-                BTreeMap::<PublicKey, mocks::CommitterMailbox<Ed25519, Sha256Digest>>::new();
+            let mut reporters =
+                BTreeMap::<PublicKey, mocks::ReporterMailbox<Ed25519, Sha256Digest>>::new();
             spawn_validator_engines(
                 context.with_label("validator"),
                 identity.clone(),
@@ -538,12 +537,12 @@ mod tests {
                 &validators,
                 &mut registrations,
                 &mut automatons.lock().unwrap(),
-                &mut committers,
+                &mut reporters,
                 Duration::from_millis(150),
                 |_| false,
             );
 
-            await_committers(context.with_label("committer"), &committers, (40, 111)).await;
+            await_reporters(context.with_label("reporter"), &reporters, (40, 111)).await;
         });
         auditor.state()
     }
@@ -583,8 +582,8 @@ mod tests {
             let automatons = Arc::new(Mutex::new(
                 BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
             ));
-            let mut committers =
-                BTreeMap::<PublicKey, mocks::CommitterMailbox<Ed25519, Sha256Digest>>::new();
+            let mut reporters =
+                BTreeMap::<PublicKey, mocks::ReporterMailbox<Ed25519, Sha256Digest>>::new();
             spawn_validator_engines(
                 context.with_label("validator"),
                 identity.clone(),
@@ -592,12 +591,12 @@ mod tests {
                 &validators,
                 &mut registrations,
                 &mut automatons.lock().unwrap(),
-                &mut committers,
+                &mut reporters,
                 Duration::from_secs(5),
                 |i| i % 10 == 0,
             );
 
-            await_committers(context.with_label("committer"), &committers, (100, 111)).await;
+            await_reporters(context.with_label("reporter"), &reporters, (100, 111)).await;
         });
     }
 
@@ -621,8 +620,8 @@ mod tests {
             let automatons = Arc::new(Mutex::new(
                 BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
             ));
-            let mut committers =
-                BTreeMap::<PublicKey, mocks::CommitterMailbox<Ed25519, Sha256Digest>>::new();
+            let mut reporters =
+                BTreeMap::<PublicKey, mocks::ReporterMailbox<Ed25519, Sha256Digest>>::new();
             let monitors = spawn_validator_engines(
                 context.with_label("validator"),
                 identity.clone(),
@@ -630,20 +629,20 @@ mod tests {
                 &validators,
                 &mut registrations,
                 &mut automatons.lock().unwrap(),
-                &mut committers,
+                &mut reporters,
                 Duration::from_secs(1),
                 |_| false,
             );
 
             // Perform some work
-            await_committers(context.with_label("committer"), &committers, (100, 111)).await;
+            await_reporters(context.with_label("reporter"), &reporters, (100, 111)).await;
 
             // Simulate partition by removing all links.
             link_validators(&mut oracle, &pks, Action::Unlink, None).await;
             context.sleep(Duration::from_secs(30)).await;
 
-            // Get the maximum height from all committers.
-            let max_height = get_max_height(&mut committers).await;
+            // Get the maximum height from all reporters.
+            let max_height = get_max_height(&mut reporters).await;
 
             // Update the epoch
             for monitor in monitors.values() {
@@ -657,9 +656,9 @@ mod tests {
                 success_rate: 1.0,
             };
             link_validators(&mut oracle, &pks, Action::Link(link), None).await;
-            await_committers(
-                context.with_label("committer"),
-                &committers,
+            await_reporters(
+                context.with_label("reporter"),
+                &reporters,
                 (max_height + 100, 112),
             )
             .await;

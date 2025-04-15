@@ -151,6 +151,8 @@ impl<P: Array, D: Digest> AckManager<P, D> {
 
 #[cfg(test)]
 mod tests {
+    use crate::ordered_broadcast::types::Chunk;
+
     use super::*;
     use commonware_cryptography::{bls12381::dkg::ops::generate_shares, ed25519, sha256};
     use commonware_runtime::deterministic::Executor;
@@ -175,15 +177,6 @@ mod tests {
             ed25519::PublicKey::try_from(&[val; ed25519::PublicKey::SIZE][..]).unwrap()
         }
 
-        /// Create a chunk with the given sequencer, height, and payload.
-        pub fn create_chunk(
-            sequencer: &ed25519::PublicKey,
-            height: u64,
-            payload: sha256::Digest,
-        ) -> Chunk<ed25519::PublicKey, sha256::Digest> {
-            Chunk::new(sequencer, height, payload)
-        }
-
         /// Sign a partial for the given chunk and epoch using the provided share.
         pub fn sign_partial(
             share: &Share,
@@ -200,10 +193,10 @@ mod tests {
         /// Create an Ack by signing a partial with the provided share.
         pub fn create_ack(
             share: &Share,
-            chunk: &Chunk<ed25519::PublicKey, sha256::Digest>,
-            epoch: &Epoch,
+            chunk: Chunk<ed25519::PublicKey, sha256::Digest>,
+            epoch: Epoch,
         ) -> Ack<ed25519::PublicKey, sha256::Digest> {
-            let signature = sign_partial(share, chunk, epoch);
+            let signature = sign_partial(share, &chunk, &epoch);
             Ack::new(chunk, epoch, signature)
         }
 
@@ -212,7 +205,7 @@ mod tests {
             quorum: u32,
             partials: Vec<commonware_cryptography::bls12381::primitives::poly::PartialSignature>,
         ) -> commonware_cryptography::bls12381::primitives::group::Signature {
-            ops::threshold_signature_recover(quorum, partials).unwrap()
+            ops::threshold_signature_recover(quorum, &partials).unwrap()
         }
 
         /// Generate a threshold signature directly from the shares specified by `indices`.
@@ -233,13 +226,13 @@ mod tests {
         /// Create a vector of acks for the given share indices.
         pub fn create_acks_for_indices(
             shares: &[Share],
-            chunk: &Chunk<ed25519::PublicKey, sha256::Digest>,
-            epoch: &Epoch,
+            chunk: Chunk<ed25519::PublicKey, sha256::Digest>,
+            epoch: Epoch,
             indices: &[usize],
         ) -> Vec<Ack<ed25519::PublicKey, sha256::Digest>> {
             indices
                 .iter()
-                .map(|&i| create_ack(&shares[i], chunk, epoch))
+                .map(|&i| create_ack(&shares[i], chunk.clone(), epoch))
                 .collect()
         }
 
@@ -248,8 +241,8 @@ mod tests {
         pub fn add_acks_for_indices(
             manager: &mut AckManager<ed25519::PublicKey, sha256::Digest>,
             shares: &[Share],
-            chunk: &Chunk<ed25519::PublicKey, sha256::Digest>,
-            epoch: &Epoch,
+            chunk: Chunk<ed25519::PublicKey, sha256::Digest>,
+            epoch: Epoch,
             quorum: u32,
             indices: &[usize],
         ) -> Option<commonware_cryptography::bls12381::primitives::group::Signature> {
@@ -270,18 +263,18 @@ mod tests {
         let num_validators = 6;
         let quorum = 3;
         let shares = helpers::setup_shares(num_validators, quorum);
-        let mut acks = AckManager::<sha256::Digest, ed25519::PublicKey>::new();
+        let mut acks = AckManager::<ed25519::PublicKey, sha256::Digest>::new();
         let sequencer = helpers::gen_public_key(1);
         let height = 10;
         let epoch = 5;
 
-        let chunk1 = helpers::create_chunk(&sequencer, height, sha256::hash(b"payload1"));
-        let chunk2 = helpers::create_chunk(&sequencer, height, sha256::hash(b"payload2"));
+        let chunk1 = Chunk::new(sequencer.clone(), height, sha256::hash(b"payload1"));
+        let chunk2 = Chunk::new(sequencer, height, sha256::hash(b"payload2"));
 
         let threshold1 =
-            helpers::add_acks_for_indices(&mut acks, &shares, &chunk1, epoch, quorum, &[0, 1, 2]);
+            helpers::add_acks_for_indices(&mut acks, &shares, chunk1, epoch, quorum, &[0, 1, 2]);
         let threshold2 =
-            helpers::add_acks_for_indices(&mut acks, &shares, &chunk2, epoch, quorum, &[3, 4, 5]);
+            helpers::add_acks_for_indices(&mut acks, &shares, chunk2, epoch, quorum, &[3, 4, 5]);
 
         let t1 = threshold1.expect("Expected threshold signature for payload1");
         let t2 = threshold2.expect("Expected threshold signature for payload2");
@@ -294,24 +287,24 @@ mod tests {
         let num_validators = 4;
         let quorum = 3;
         let shares = helpers::setup_shares(num_validators, quorum);
-        let mut acks = AckManager::<sha256::Digest, ed25519::PublicKey>::new();
+        let mut acks = AckManager::<ed25519::PublicKey, sha256::Digest>::new();
         let sequencer = helpers::gen_public_key(1);
         let epoch = 10;
         let height1 = 10;
         let height2 = 20;
 
-        let chunk1 = helpers::create_chunk(&sequencer, height1, sha256::hash(b"chunk1"));
+        let chunk1 = Chunk::new(sequencer.clone(), height1, sha256::hash(b"chunk1"));
         let threshold1 =
-            helpers::generate_threshold_from_indices(&shares, &chunk1, epoch, quorum, &[0, 1, 2]);
+            helpers::generate_threshold_from_indices(&shares, &chunk1, &epoch, quorum, &[0, 1, 2]);
         assert!(acks.add_threshold(&sequencer, height1, epoch, threshold1));
         assert_eq!(
             acks.get_threshold(&sequencer, height1),
             Some((epoch, threshold1))
         );
 
-        let chunk2 = helpers::create_chunk(&sequencer, height2, sha256::hash(b"chunk2"));
+        let chunk2 = Chunk::new(sequencer.clone(), height2, sha256::hash(b"chunk2"));
         let threshold2 =
-            helpers::generate_threshold_from_indices(&shares, &chunk2, epoch, quorum, &[0, 1, 2]);
+            helpers::generate_threshold_from_indices(&shares, &chunk2, &epoch, quorum, &[0, 1, 2]);
         assert!(acks.add_threshold(&sequencer, height2, epoch, threshold2));
 
         assert_eq!(acks.get_threshold(&sequencer, height1), None);
@@ -327,22 +320,22 @@ mod tests {
         let num_validators = 4;
         let quorum = 3;
         let shares = helpers::setup_shares(num_validators, quorum);
-        let mut acks = AckManager::<sha256::Digest, ed25519::PublicKey>::new();
+        let mut acks = AckManager::<ed25519::PublicKey, sha256::Digest>::new();
         let sequencer = helpers::gen_public_key(1);
         let epoch = 10;
 
-        let chunk1 = helpers::create_chunk(&sequencer, 10, sha256::hash(b"chunk1"));
+        let chunk1 = Chunk::new(sequencer.clone(), 10, sha256::hash(b"chunk1"));
         let threshold1 =
-            helpers::generate_threshold_from_indices(&shares, &chunk1, epoch, quorum, &[0, 1, 2]);
+            helpers::generate_threshold_from_indices(&shares, &chunk1, &epoch, quorum, &[0, 1, 2]);
         assert!(acks.add_threshold(&sequencer, 10, epoch, threshold1));
         assert_eq!(
             acks.get_threshold(&sequencer, 10),
             Some((epoch, threshold1))
         );
 
-        let chunk2 = helpers::create_chunk(&sequencer, 11, sha256::hash(b"chunk2"));
+        let chunk2 = Chunk::new(sequencer.clone(), 11, sha256::hash(b"chunk2"));
         let threshold2 =
-            helpers::generate_threshold_from_indices(&shares, &chunk2, epoch, quorum, &[0, 1, 2]);
+            helpers::generate_threshold_from_indices(&shares, &chunk2, &epoch, quorum, &[0, 1, 2]);
         assert!(acks.add_threshold(&sequencer, 11, epoch, threshold2));
 
         assert_eq!(
@@ -354,9 +347,9 @@ mod tests {
             Some((epoch, threshold2))
         );
 
-        let chunk3 = helpers::create_chunk(&sequencer, 12, sha256::hash(b"chunk3"));
+        let chunk3 = Chunk::new(sequencer.clone(), 12, sha256::hash(b"chunk3"));
         let threshold3 =
-            helpers::generate_threshold_from_indices(&shares, &chunk3, epoch, quorum, &[0, 1, 2]);
+            helpers::generate_threshold_from_indices(&shares, &chunk3, &epoch, quorum, &[0, 1, 2]);
         assert!(acks.add_threshold(&sequencer, 12, epoch, threshold3));
 
         assert_eq!(acks.get_threshold(&sequencer, 10), None);
@@ -376,20 +369,20 @@ mod tests {
         let num_validators = 4;
         let quorum = 3;
         let shares = helpers::setup_shares(num_validators, quorum);
-        let mut acks = AckManager::<sha256::Digest, ed25519::PublicKey>::new();
+        let mut acks = AckManager::<ed25519::PublicKey, sha256::Digest>::new();
         let sequencer = helpers::gen_public_key(1);
         let height = 30;
         let epoch1 = 1;
         let epoch2 = 2;
 
-        let chunk = helpers::create_chunk(&sequencer, height, sha256::hash(b"chunk"));
+        let chunk = Chunk::new(sequencer.clone(), height, sha256::hash(b"chunk"));
 
         let threshold1 =
-            helpers::generate_threshold_from_indices(&shares, &chunk, epoch1, quorum, &[0, 1, 2]);
+            helpers::generate_threshold_from_indices(&shares, &chunk, &epoch1, quorum, &[0, 1, 2]);
         assert!(acks.add_threshold(&sequencer, height, epoch1, threshold1));
 
         let threshold2 =
-            helpers::generate_threshold_from_indices(&shares, &chunk, epoch2, quorum, &[0, 1, 2]);
+            helpers::generate_threshold_from_indices(&shares, &chunk, &epoch2, quorum, &[0, 1, 2]);
         assert!(acks.add_threshold(&sequencer, height, epoch2, threshold2));
 
         assert_eq!(
@@ -404,14 +397,14 @@ mod tests {
         let num_validators = 4;
         let quorum = 3;
         let shares = helpers::setup_shares(num_validators, quorum);
-        let mut acks = AckManager::<sha256::Digest, ed25519::PublicKey>::new();
+        let mut acks = AckManager::<ed25519::PublicKey, sha256::Digest>::new();
         let epoch = 99;
         let sequencer = helpers::gen_public_key(1);
         let height = 42;
-        let chunk = helpers::create_chunk(&sequencer, height, sha256::hash(&sequencer));
+        let chunk = Chunk::new(sequencer.clone(), height, sha256::hash(&sequencer));
 
         let threshold =
-            helpers::generate_threshold_from_indices(&shares, &chunk, epoch, quorum, &[0, 1, 2]);
+            helpers::generate_threshold_from_indices(&shares, &chunk, &epoch, quorum, &[0, 1, 2]);
 
         assert_eq!(acks.get_threshold(&sequencer, height), None);
         assert!(acks.add_threshold(&sequencer, height, epoch, threshold));
@@ -432,13 +425,13 @@ mod tests {
         let num_validators = 4;
         let quorum = 3;
         let shares = helpers::setup_shares(num_validators, quorum);
-        let mut acks = AckManager::<sha256::Digest, ed25519::PublicKey>::new();
+        let mut acks = AckManager::<ed25519::PublicKey, sha256::Digest>::new();
         let sequencer = helpers::gen_public_key(1);
         let epoch = 1;
         let height = 10;
-        let chunk = helpers::create_chunk(&sequencer, height, sha256::hash(b"payload"));
+        let chunk = Chunk::new(sequencer, height, sha256::hash(b"payload"));
 
-        let ack = helpers::create_ack(&shares[0], &chunk, epoch);
+        let ack = helpers::create_ack(&shares[0], chunk, epoch);
         assert!(acks.add_ack(&ack, quorum).is_none());
         assert!(acks.add_ack(&ack, quorum).is_none());
     }
@@ -449,13 +442,13 @@ mod tests {
         let num_validators = 4;
         let quorum = 3;
         let shares = helpers::setup_shares(num_validators, quorum);
-        let mut acks = AckManager::<sha256::Digest, ed25519::PublicKey>::new();
+        let mut acks = AckManager::<ed25519::PublicKey, sha256::Digest>::new();
         let sequencer = helpers::gen_public_key(1);
         let epoch = 1;
         let height = 10;
-        let chunk = helpers::create_chunk(&sequencer, height, sha256::hash(b"payload"));
+        let chunk = Chunk::new(sequencer, height, sha256::hash(b"payload"));
 
-        let acks_vec = helpers::create_acks_for_indices(&shares, &chunk, epoch, &[0, 1, 2]);
+        let acks_vec = helpers::create_acks_for_indices(&shares, chunk.clone(), epoch, &[0, 1, 2]);
         let mut produced = None;
         for ack in acks_vec {
             if let Some(thresh) = acks.add_ack(&ack, quorum) {
@@ -464,7 +457,7 @@ mod tests {
         }
         assert!(produced.is_some());
 
-        let ack = helpers::create_ack(&shares[3], &chunk, epoch);
+        let ack = helpers::create_ack(&shares[3], chunk, epoch);
         assert!(acks.add_ack(&ack, quorum).is_none());
     }
 
@@ -474,21 +467,21 @@ mod tests {
         let num_validators = 4;
         let quorum = 3;
         let shares = helpers::setup_shares(num_validators, quorum);
-        let mut acks = AckManager::<sha256::Digest, ed25519::PublicKey>::new();
+        let mut acks = AckManager::<ed25519::PublicKey, sha256::Digest>::new();
 
         let sequencer1 = helpers::gen_public_key(1);
         let sequencer2 = helpers::gen_public_key(3);
         let epoch = 1;
         let height = 10;
 
-        let chunk1 = helpers::create_chunk(&sequencer1, height, sha256::hash(b"payload1"));
-        let chunk2 = helpers::create_chunk(&sequencer2, height, sha256::hash(b"payload2"));
+        let chunk1 = Chunk::new(sequencer1.clone(), height, sha256::hash(b"payload1"));
+        let chunk2 = Chunk::new(sequencer2.clone(), height, sha256::hash(b"payload2"));
 
         let threshold1 =
-            helpers::add_acks_for_indices(&mut acks, &shares, &chunk1, epoch, quorum, &[0, 1, 2])
+            helpers::add_acks_for_indices(&mut acks, &shares, chunk1, epoch, quorum, &[0, 1, 2])
                 .unwrap();
         let threshold2 =
-            helpers::add_acks_for_indices(&mut acks, &shares, &chunk2, epoch, quorum, &[0, 1, 2])
+            helpers::add_acks_for_indices(&mut acks, &shares, chunk2, epoch, quorum, &[0, 1, 2])
                 .unwrap();
 
         assert_ne!(threshold1, threshold2);
@@ -502,13 +495,13 @@ mod tests {
         let num_validators = 4;
         let quorum = 3;
         let shares = helpers::setup_shares(num_validators, quorum);
-        let mut acks = AckManager::<sha256::Digest, ed25519::PublicKey>::new();
+        let mut acks = AckManager::<ed25519::PublicKey, sha256::Digest>::new();
         let sequencer = helpers::gen_public_key(1);
         let epoch = 1;
         let height = 10;
-        let chunk = helpers::create_chunk(&sequencer, height, sha256::hash(b"payload"));
+        let chunk = Chunk::new(sequencer.clone(), height, sha256::hash(b"payload"));
 
-        let acks_vec = helpers::create_acks_for_indices(&shares, &chunk, epoch, &[0, 1]);
+        let acks_vec = helpers::create_acks_for_indices(&shares, chunk, epoch, &[0, 1]);
         for ack in acks_vec {
             assert!(acks.add_ack(&ack, quorum).is_none());
         }
@@ -521,7 +514,7 @@ mod tests {
         let num_validators = 6;
         let quorum = 3;
         let shares = helpers::setup_shares(num_validators, quorum);
-        let mut acks = AckManager::<sha256::Digest, ed25519::PublicKey>::new();
+        let mut acks = AckManager::<ed25519::PublicKey, sha256::Digest>::new();
         let sequencer = helpers::gen_public_key(1);
         let epoch = 1;
         let height = 10;
@@ -529,8 +522,8 @@ mod tests {
         let payload1 = sha256::hash(b"payload1");
         let payload2 = sha256::hash(b"payload2");
 
-        let chunk1 = helpers::create_chunk(&sequencer, height, payload1);
-        let chunk2 = helpers::create_chunk(&sequencer, height, payload2);
+        let chunk1 = Chunk::new(sequencer.clone(), height, payload1);
+        let chunk2 = Chunk::new(sequencer, height, payload2);
 
         let submissions = [
             (0, &chunk1),
@@ -541,8 +534,8 @@ mod tests {
             (5, &chunk2),
         ];
         let mut thresholds = Vec::new();
-        for (i, chunk) in submissions.iter() {
-            let ack = helpers::create_ack(&shares[*i], chunk, epoch);
+        for (i, chunk) in submissions.into_iter() {
+            let ack = helpers::create_ack(&shares[i], chunk.clone(), epoch);
             if let Some(threshold) = acks.add_ack(&ack, quorum) {
                 thresholds.push((chunk.payload, threshold));
             }

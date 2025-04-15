@@ -84,7 +84,7 @@ cfg_if::cfg_if! {
             type Activity;
 
             /// Report some activity observed by the consensus implementation.
-            fn report(&self, activity: Self::Activity) -> impl Future<Output = ()> + Send;
+            fn report(&mut self, activity: Self::Activity) -> impl Future<Output = ()> + Send;
         }
 
         /// Supervisor is the interface responsible for managing which participants are active at a given time.
