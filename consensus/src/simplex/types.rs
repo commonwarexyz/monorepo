@@ -845,6 +845,22 @@ impl<V: Verifier, D: Digest> ConflictingNotarize<V, D> {
             signature_2,
         }
     }
+
+    pub fn verify(&self, notarize_namespace: &[u8]) -> bool {
+        let message_1 = self.proposal_1.encode();
+        let message_2 = self.proposal_2.encode();
+        V::verify(
+            Some(&notarize_namespace),
+            &message_1,
+            self.signature_1.public_key,
+            self.signature_1.signature,
+        ) && V::verify(
+            Some(&notarize_namespace),
+            &message_2,
+            self.signature_2.public_key,
+            self.signature_2.signature,
+        )
+    }
 }
 
 impl<V: Verifier, D: Digest> Write for ConflictingNotarize<V, D> {
@@ -910,6 +926,22 @@ impl<V: Verifier, D: Digest> ConflictingFinalize<V, D> {
             signature_2,
         }
     }
+
+    pub fn verify(&self, finalize_namespace: &[u8]) -> bool {
+        let message_1 = self.proposal_1.encode();
+        let message_2 = self.proposal_2.encode();
+        V::verify(
+            Some(&finalize_namespace),
+            &message_1,
+            self.signature_1.public_key,
+            self.signature_1.signature,
+        ) && V::verify(
+            Some(&finalize_namespace),
+            &message_2,
+            self.signature_2.public_key,
+            self.signature_2.signature,
+        )
+    }
 }
 
 impl<V: Verifier, D: Digest> Write for ConflictingFinalize<V, D> {
@@ -962,6 +994,21 @@ pub struct NullifyFinalize<V: Verifier, D: Digest> {
 impl<V: Verifier, D: Digest> NullifyFinalize<V, D> {
     pub fn new(nullify: Nullify<V>, finalize: Finalize<V>) -> Self {
         Self { nullify, finalize }
+    }
+
+    pub fn verify(&self, nullify_namespace: &[u8], finalize_namespace: &[u8]) -> bool {
+        let message = view_message(self.nullify.view);
+        V::verify(
+            Some(&nullify_namespace),
+            &message,
+            self.nullify.signature.public_key,
+            self.nullify.signature.signature,
+        ) && V::verify(
+            Some(&finalize_namespace),
+            &message,
+            self.finalize.signature.public_key,
+            self.finalize.signature.signature,
+        )
     }
 }
 
