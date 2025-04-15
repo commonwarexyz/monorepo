@@ -36,6 +36,10 @@ pub trait FixedSize {
     const SIZE: usize;
 }
 
+impl<T: FixedSize> FixedSize for &T {
+    const SIZE: usize = T::SIZE;
+}
+
 /// Trait for types that can provide their encoded size in bytes.
 ///
 /// This must be implemented by all encodable types. For types implementing [`FixedSize`], this
@@ -59,6 +63,14 @@ pub trait Write {
     ///
     /// Implementations should panic if the buffer doesn't have enough capacity.
     fn write(&self, buf: &mut impl BufMut);
+}
+
+impl<T: Write> Write for &T {
+    #[inline]
+    fn write(&self, buf: &mut impl BufMut) {
+        // Dereference and call the original implementation
+        (*self).write(buf)
+    }
 }
 
 /// Trait for types that can be read (decoded) from a byte buffer.

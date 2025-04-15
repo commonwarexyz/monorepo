@@ -132,8 +132,11 @@ impl<Sig: Array> Read<usize> for Payload<Sig> {
             },
             3 => Payload::Commitment {
                 commitment: poly::Public::read_cfg(buf, &t)?,
-                acks: HashMap::<u32, Sig>::read_range(buf, ..=*p)?, // TODO: is this expected to be at-most or exactly t?
-                reveals: Vec::<group::Share>::read_range(buf, ..=*p)?, // TODO: is this expected to be at-most or exactly t?
+                // The lengths of the acks and reveals should equal p. Here, we allow either of them
+                // to be length up-to-p, but technically reveals should be constrained to equal
+                // exactly `p - acks.len()`.
+                acks: HashMap::<u32, Sig>::read_range(buf, ..=*p)?,
+                reveals: Vec::<group::Share>::read_range(buf, ..=*p)?,
             },
             4 => Payload::Success {
                 commitments: HashMap::<u32, poly::Public>::read_cfg(buf, &(..=*p, ((), t)))?, // TODO: is this expected to be at-most or exactly t?
