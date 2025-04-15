@@ -93,9 +93,9 @@ impl<E: RStorage + Clock + Metrics, H: Hasher> Mmr<E, H> {
             partition: cfg.metadata_partition,
         };
         let metadata = Metadata::init(
-            &context,
-            &context,
-            context.with_label("mmr_metadata"),
+            &context.clone(),
+            &context.with_label("mmr_metadata"),
+            context,
             metadata_cfg,
         )
         .await?;

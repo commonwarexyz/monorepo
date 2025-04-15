@@ -101,8 +101,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher> Any<E, K, V,
         .await?;
 
         let mut log = Journal::init(
-            context.with_label("log"),
-            &context,
+            context.clone(),
+            &context.with_label("log"),
             JConfig {
                 partition: cfg.log_journal_partition,
                 items_per_blob: cfg.log_items_per_blob,
