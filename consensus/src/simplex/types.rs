@@ -21,6 +21,14 @@ pub struct Context<D: Digest> {
     pub parent: (View, D),
 }
 
+pub trait Viewable {
+    fn view(&self) -> View;
+}
+
+pub trait Attributable<V: Verifier> {
+    fn signer(&self) -> V::PublicKey;
+}
+
 pub const NOTARIZE_SUFFIX: &[u8] = b"_NOTARIZE";
 pub const NULLIFY_SUFFIX: &[u8] = b"_NULLIFY";
 pub const FINALIZE_SUFFIX: &[u8] = b"_FINALIZE";
@@ -121,6 +129,55 @@ impl<V: Verifier> Read for Signature<V> {
 
 impl<V: Verifier> FixedSize for Signature<V> {
     const SIZE: usize = V::PublicKey::SIZE + V::Signature::SIZE;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Notarize<V: Verifier, D: Digest> {
+    pub proposal: Proposal<D>,
+    pub signature: Signature<V>,
+}
+
+impl<V: Verifier, D: Digest> Notarize<V, D> {
+    pub fn new(proposal: Proposal<D>, signature: Signature<V>) -> Self {
+        Self {
+            proposal,
+            signature,
+        }
+    }
+}
+
+impl<V: Verifier, D: Digest> Write for Notarize<V, D> {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.proposal.write(writer);
+        self.signature.write(writer);
+    }
+}
+
+impl<V: Verifier, D: Digest> Read for Notarize<V, D> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        let proposal = Proposal::<D>::read_cfg(reader, &())?;
+        let signature = Signature::<V>::read_cfg(reader, &())?;
+        Ok(Self {
+            proposal,
+            signature,
+        })
+    }
+}
+
+impl<V: Verifier, D: Digest> FixedSize for Notarize<V, D> {
+    const SIZE: usize = Proposal::<D>::SIZE + Signature::<V>::SIZE;
+}
+
+impl<V: Verifier, D: Digest> Viewable for Notarize<V, D> {
+    fn view(&self) -> View {
+        self.proposal.view
+    }
+}
+
+impl<V: Verifier, D: Digest> Attributable<V> for Notarize<V, D> {
+    fn signer(&self) -> V::PublicKey {
+        self.signature.public_key
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
