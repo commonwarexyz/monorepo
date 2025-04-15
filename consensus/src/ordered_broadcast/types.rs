@@ -81,11 +81,13 @@ pub struct Ack<P: Array, D: Digest> {
     pub signature: PartialSignature,
 }
 
+/// Activity is the type associated with the [`Reporter`](crate::Reporter) trait.
 pub enum Activity<P: Array, D: Digest> {
     Chunk(Chunk<P, D>),
     Lock(Lock<P, D>),
 }
 
+/// Lock is a message that can be generated once `2f + 1` acks are received for a Chunk.
 pub struct Lock<P: Array, D: Digest> {
     /// Chunk that is being locked.
     pub chunk: Chunk<P, D>,
