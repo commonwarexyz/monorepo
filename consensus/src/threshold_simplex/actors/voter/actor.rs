@@ -173,7 +173,7 @@ impl<
         notarize: Notarize<D>,
     ) -> bool {
         // Check if already notarized
-        if let Some(previous) = &self.notarizes[public_key_index as usize] {
+        if let Some(previous) = &self.notarizes.get(public_key_index as usize).unwrap() {
             if previous == &notarize {
                 trace!(?notarize, ?previous, "already notarized");
                 return false;
@@ -213,7 +213,7 @@ impl<
 
     async fn add_verified_nullify(&mut self, public_key_index: u32, nullify: Nullify) -> bool {
         // Check if already issued finalize
-        let Some(finalize) = &self.finalizes[public_key_index as usize] else {
+        let Some(finalize) = &self.finalizes.get(public_key_index as usize).unwrap() else {
             // Store the nullify
             let entry = Arc::get_mut(&mut self.nullifies)
                 .unwrap()
@@ -270,7 +270,7 @@ impl<
         }
 
         // Check if already finalized
-        if let Some(previous) = &self.finalizes[public_key_index as usize] {
+        if let Some(previous) = &self.finalizes.get(public_key_index as usize).unwrap() {
             if previous == &finalize {
                 trace!(?finalize, ?previous, "already finalize");
                 return false;
@@ -1047,7 +1047,7 @@ impl<
             }
 
             // Check if leader has signed a digest
-            let notarize = round.notarizes[leader_index as usize].as_ref()?;
+            let notarize = round.notarizes.get(leader_index as usize)?.as_ref()?;
             let proposal = &notarize.proposal;
 
             // Check parent validity
@@ -1218,7 +1218,11 @@ impl<
                     return;
                 }
             };
-            if round.notarizes[leader_index as usize].is_some()
+            if round
+                .notarizes
+                .get(leader_index as usize)
+                .unwrap()
+                .is_some()
                 || round.nullifies.contains_key(&leader_index)
             {
                 return;
