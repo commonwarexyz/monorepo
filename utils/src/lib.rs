@@ -193,6 +193,8 @@ mod tests {
             assert_eq!(quorum(n), eq);
             if let (Some(f), Some(q)) = (ef, eq) {
                 assert_eq!(n, f + q);
+            } else {
+                assert!(ef.is_none() && eq.is_none());
             }
         }
     }
