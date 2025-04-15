@@ -247,7 +247,7 @@ impl<D: Digest> Notarize<D> {
             identity,
             public_key_index,
             &[notarize_message, seed_message],
-            &[self.proposal_signature, self.seed_signature],
+            [&self.proposal_signature, &self.seed_signature],
         )
         .is_ok()
     }
@@ -400,7 +400,7 @@ impl Nullify {
             identity,
             public_key_index,
             &[nullify_message, seed_message],
-            &[&self.view_signature, &self.seed_signature],
+            [&self.view_signature, &self.seed_signature],
         )
         .is_ok()
     }
@@ -980,7 +980,7 @@ impl<D: Digest> ConflictingNotarize<D> {
             identity,
             public_key_index,
             &[notarize_message_1, notarize_message_2],
-            &[&self.signature_1, &self.signature_2],
+            [&self.signature_1, &self.signature_2],
         )
         .is_ok()
     }
@@ -1074,7 +1074,7 @@ impl<D: Digest> ConflictingFinalize<D> {
             identity,
             public_key_index,
             &[finalize_message_1, finalize_message_2],
-            &[&self.signature_1, &self.signature_2],
+            [&self.signature_1, &self.signature_2],
         )
         .is_ok()
     }
@@ -1166,7 +1166,7 @@ impl<D: Digest> NullifyFinalize<D> {
             identity,
             public_key_index,
             &[nullify_message, finalize_message],
-            &[&self.view_signature, &self.finalize_signature],
+            [&self.view_signature, &self.finalize_signature],
         )
         .is_ok()
     }
