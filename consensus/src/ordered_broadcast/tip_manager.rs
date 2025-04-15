@@ -1,16 +1,16 @@
-use super::parsed;
-use commonware_cryptography::{Digest, Scheme};
+use super::types::Node;
+use commonware_cryptography::{Digest, Scheme, Verifier};
 use std::collections::{hash_map::Entry, HashMap};
 
 /// Manages the highest-height chunk for each sequencer.
 #[derive(Default, Debug)]
-pub struct TipManager<C: Scheme, D: Digest> {
+pub struct TipManager<C: Verifier, D: Digest> {
     // The highest-height chunk for each sequencer.
     // The chunk must have the threshold signature of its parent.
     // Existence of the chunk implies:
     // - The existence of the sequencer's entire chunk chain (from height zero)
     // - That the chunk has been acked by this validator.
-    tips: HashMap<C::PublicKey, parsed::Node<C, D>>,
+    tips: HashMap<C::PublicKey, Node<C, D>>,
 }
 
 impl<C: Scheme, D: Digest> TipManager<C, D> {
@@ -23,7 +23,7 @@ impl<C: Scheme, D: Digest> TipManager<C, D> {
 
     /// Inserts a new tip. Returns true if the tip is new.
     /// Panics if the new tip is lower-height than the existing tip.
-    pub fn put(&mut self, node: &parsed::Node<C, D>) -> bool {
+    pub fn put(&mut self, node: &Node<C, D>) -> bool {
         match self.tips.entry(node.chunk.sequencer.clone()) {
             Entry::Vacant(e) => {
                 e.insert(node.clone());
@@ -48,16 +48,15 @@ impl<C: Scheme, D: Digest> TipManager<C, D> {
     }
 
     /// Returns the tip for the given sequencer.
-    pub fn get(&self, sequencer: &C::PublicKey) -> Option<parsed::Node<C, D>> {
+    pub fn get(&self, sequencer: &C::PublicKey) -> Option<Node<C, D>> {
         self.tips.get(sequencer).cloned()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{super::parsed, *};
+    use super::*;
     use bytes::Bytes;
-    use commonware_codec::SizedCodec;
     use commonware_cryptography::{
         ed25519::{self, Ed25519, PublicKey, Signature},
         sha256::{self, Digest},
@@ -68,6 +67,8 @@ mod tests {
     /// Helper functions for TipManager tests.
     mod helpers {
         use super::*;
+        use crate::ordered_broadcast::types::Chunk;
+        use commonware_codec::FixedSize;
         use commonware_cryptography::Signer;
 
         /// Creates a dummy link for testing.
@@ -75,20 +76,16 @@ mod tests {
             sequencer: PublicKey,
             height: u64,
             payload: &str,
-        ) -> parsed::Node<Ed25519, Digest> {
+        ) -> Node<Ed25519, Digest> {
             let signature = {
-                let mut data = Bytes::from(vec![3u8; Signature::LEN_ENCODED]);
+                let mut data = Bytes::from(vec![3u8; Signature::SIZE]);
                 Signature::read_from(&mut data).unwrap()
             };
-            parsed::Node::<Ed25519, Digest> {
-                chunk: parsed::Chunk {
-                    sequencer,
-                    height,
-                    payload: sha256::hash(payload.as_bytes()),
-                },
+            Node::new(
+                Chunk::new(sequencer, height, sha256::hash(payload.as_bytes())),
                 signature,
-                parent: None,
-            }
+                None,
+            )
         }
 
         /// Generates a deterministic public key for testing using the provided seed.
@@ -103,7 +100,7 @@ mod tests {
             key: ed25519::PublicKey,
             height: u64,
             payload: &str,
-        ) -> parsed::Node<Ed25519, Digest> {
+        ) -> Node<Ed25519, Digest> {
             let node = create_dummy_node(key.clone(), height, payload);
             manager.put(&node);
             node

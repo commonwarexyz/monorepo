@@ -2,8 +2,8 @@
 
 mod automaton;
 pub use automaton::Automaton;
-mod committer;
-pub use committer::{Committer, Mailbox as CommitterMailbox};
+mod reporter;
+pub use reporter::{Mailbox as ReporterMailbox, Reporter};
 mod monitor;
 pub use monitor::Monitor;
 mod sequencers;

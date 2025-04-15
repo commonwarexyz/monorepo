@@ -1,5 +1,5 @@
-use super::{Context, Epoch};
-use crate::{Automaton, Committer, Monitor, Relay, Supervisor, ThresholdSupervisor};
+use super::types::{Activity, Context, Epoch};
+use crate::{Automaton, Monitor, Relay, Reporter, Supervisor, ThresholdSupervisor};
 use commonware_cryptography::{Digest, Scheme};
 use std::time::Duration;
 
@@ -9,7 +9,7 @@ pub struct Config<
     D: Digest,
     A: Automaton<Context = Context<C::PublicKey>, Digest = D>,
     R: Relay<Digest = D>,
-    Z: Committer<Digest = D>,
+    Z: Reporter<Activity = Activity<C, D>>,
     M: Monitor<Index = Epoch>,
     Su: Supervisor<Index = Epoch, PublicKey = C::PublicKey>,
     TSu: ThresholdSupervisor<Index = Epoch, PublicKey = C::PublicKey>,
@@ -35,7 +35,7 @@ pub struct Config<
     pub relay: R,
 
     /// Notified when a chunk receives a threshold of acks.
-    pub committer: Z,
+    pub reporter: Z,
 
     /// The application namespace used to sign over different types of messages.
     /// Used to prevent replay attacks on other applications.

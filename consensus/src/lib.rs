@@ -5,7 +5,7 @@
 //! `commonware-consensus` is **ALPHA** software and is not yet recommended for production use. Developers should
 //! expect breaking changes and occasional instability.
 
-// pub mod ordered_broadcast;
+pub mod ordered_broadcast;
 // pub mod simplex;
 pub mod threshold_simplex;
 
@@ -84,7 +84,7 @@ cfg_if::cfg_if! {
             type Activity;
 
             /// Report some activity observed by the consensus implementation.
-            fn report(&self, activity: Self::Activity) -> impl Future<Output = ()> + Send;
+            fn report(&mut self, activity: Self::Activity) -> impl Future<Output = ()> + Send;
         }
 
         /// Supervisor is the interface responsible for managing which participants are active at a given time.
