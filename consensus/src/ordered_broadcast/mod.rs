@@ -33,7 +33,6 @@
 //! [Autobahn](https://arxiv.org/abs/2401.10369) provided the insight that a succinct
 //! proof-of-availability could be produced by linking sequencer broadcasts.
 
-mod namespace;
 mod parsed;
 mod prover;
 pub use prover::Prover;
@@ -55,6 +54,28 @@ cfg_if::cfg_if! {
 
 #[cfg(test)]
 pub mod mocks;
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("Decode error: {0}")]
+    Decode(#[from] prost::DecodeError),
+    #[error("Missing chunk")]
+    MissingChunk,
+    #[error("Missing parent")]
+    ParentMissing,
+    #[error("Parent on genesis chunk")]
+    ParentOnGenesis,
+    #[error("Invalid partial")]
+    InvalidPartial,
+    #[error("Invalid threshold")]
+    InvalidThreshold,
+    #[error("Invalid sequencer")]
+    InvalidSequencer,
+    #[error("Invalid payload")]
+    InvalidPayload,
+    #[error("Invalid signature")]
+    InvalidSignature,
+}
 
 #[cfg(test)]
 mod tests {

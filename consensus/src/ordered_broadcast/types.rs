@@ -1,7 +1,12 @@
+use super::Error;
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error, FixedSize, Read, Write};
+use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, Read, Write};
 use commonware_cryptography::{
-    bls12381::primitives::{group::Signature, poly::PartialSignature},
+    bls12381::primitives::{
+        group::{Public, Signature},
+        ops,
+        poly::PartialSignature,
+    },
     Digest, Verifier,
 };
 use commonware_utils::{union, Array};
@@ -68,11 +73,11 @@ impl<C: Verifier, D: Digest> EncodeSize for Wire<C, D> {
 }
 
 impl<C: Verifier, D: Digest> Read for Wire<C, D> {
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         match u8::read(reader)? {
             0 => Ok(Wire::Node(Node::read(reader)?)),
             1 => Ok(Wire::Ack(Ack::read(reader)?)),
-            _ => Err(Error::Invalid(
+            _ => Err(CodecError::Invalid(
                 "consensus::ordered_broadcast::Wire",
                 "Invalid type",
             )),
@@ -113,7 +118,7 @@ impl<P: Array, D: Digest> Write for Chunk<P, D> {
 }
 
 impl<P: Array, D: Digest> Read for Chunk<P, D> {
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let sequencer = P::read(reader)?;
         let height = u64::read(reader)?;
         let payload = D::read(reader)?;
@@ -164,7 +169,7 @@ impl<D: Digest> Write for Parent<D> {
 }
 
 impl<D: Digest> Read for Parent<D> {
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let digest = D::read(reader)?;
         let epoch = Epoch::read(reader)?;
         let signature = Signature::read(reader)?;
@@ -226,7 +231,7 @@ impl<C: Verifier, D: Digest> Write for Node<C, D> {
 }
 
 impl<C: Verifier, D: Digest> Read for Node<C, D> {
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let chunk = Chunk::read(reader)?;
         let signature = D::read(reader)?;
         let parent = if bool::read(reader)? {
@@ -234,6 +239,17 @@ impl<C: Verifier, D: Digest> Read for Node<C, D> {
         } else {
             None
         };
+        if chunk.height == 0 && parent.is_some() {
+            return Err(CodecError::Wrapped(
+                "consensus::ordered_broadcast::Node",
+                Error::ParentOnGenesis,
+            ));
+        } else if chunk.height > 0 && parent.is_none() {
+            return Err(CodecError::Invalid(
+                "consensus::ordered_broadcast::Node",
+                Error::ParentMissing,
+            ));
+        }
         Ok(Self {
             chunk,
             signature,
@@ -286,7 +302,7 @@ impl<P: Array, D: Digest> Write for Ack<P, D> {
 }
 
 impl<P: Array, D: Digest> Read for Ack<P, D> {
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let chunk = Chunk::read(reader)?;
         let epoch = Epoch::read(reader)?;
         let signature = PartialSignature::read(reader)?;
@@ -325,11 +341,11 @@ impl<C: Verifier, D: Digest> Write for Activity<C, D> {
 }
 
 impl<C: Verifier, D: Digest> Read for Activity<C, D> {
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         match u8::read(reader)? {
             0 => Ok(Activity::Node(Node::read(reader)?)),
             1 => Ok(Activity::Lock(Lock::read(reader)?)),
-            _ => Err(Error::Invalid(
+            _ => Err(CodecError::Invalid(
                 "consensus::ordered_broadcast::Activity",
                 "Invalid type",
             )),
@@ -355,7 +371,7 @@ pub struct Lock<P: Array, D: Digest> {
     /// Epoch of the validator set.
     pub epoch: Epoch,
 
-    /// Partial signature over the chunk.
+    /// Threshold signature over the chunk.
     pub signature: Signature,
 }
 
@@ -368,6 +384,16 @@ impl<P: Array, D: Digest> Lock<P, D> {
             signature,
         }
     }
+
+    pub fn verify(&self, public_key: &Public, ack_namespace: &[u8]) -> bool {
+        // Construct signing payload
+        let mut message = Vec::with_capacity(Chunk::<P, D>::SIZE + Epoch::SIZE);
+        self.chunk.write(&mut message);
+        self.epoch.write(&mut message);
+
+        // Verify signature
+        ops::verify_message(public_key, Some(ack_namespace), &message, &self.signature).is_ok()
+    }
 }
 
 impl<P: Array, D: Digest> Write for Lock<P, D> {
@@ -379,7 +405,7 @@ impl<P: Array, D: Digest> Write for Lock<P, D> {
 }
 
 impl<P: Array, D: Digest> Read for Lock<P, D> {
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let chunk = Chunk::read(reader)?;
         let epoch = Epoch::read(reader)?;
         let signature = Signature::read(reader)?;
