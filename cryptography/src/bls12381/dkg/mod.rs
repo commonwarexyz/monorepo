@@ -433,12 +433,12 @@ mod tests {
 
     #[test]
     fn test_dkg_and_reshare_min_active_different_sizes() {
-        run_dkg_and_reshare(5, 3, 10, 3, 4);
+        run_dkg_and_reshare(5, 4, 10, 4, 4);
     }
 
     #[test]
     fn test_dkg_and_reshare_min_active_large() {
-        run_dkg_and_reshare(20, 13, 100, 13, 4);
+        run_dkg_and_reshare(20, 14, 100, 14, 4);
     }
 
     #[test]
@@ -747,7 +747,8 @@ mod tests {
     #[test]
     fn test_arbiter_reveals() {
         // Initialize test
-        let n = 5;
+        let n = 11;
+        let q = quorum(n as u32).unwrap() as usize;
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create contributors (must be in sorted order)
@@ -768,10 +769,12 @@ mod tests {
             // Create dealer
             let (_, commitment, shares) = Dealer::new(&mut rng, None, contributors.clone());
             commitments.push(commitment.clone());
-            reveals.push(shares[4]);
+            reveals.push(shares[q]);
 
             // Add commitment to arbiter
-            arb.commitment(con.clone(), commitment, vec![0, 1, 2, 3], vec![shares[4]])
+            let acks: Vec<u32> = (0..q as u32).collect();
+            let reveals = shares[q..n].to_vec();
+            arb.commitment(con.clone(), commitment, acks, reveals)
                 .unwrap();
         }
 
@@ -780,8 +783,8 @@ mod tests {
         let output = result.unwrap();
 
         // Ensure commitments and reveals are correct
-        assert_eq!(output.commitments.len(), 3);
-        for (dealer_idx, commitment) in commitments.iter().enumerate().take(3) {
+        assert_eq!(output.commitments.len(), q);
+        for (dealer_idx, commitment) in commitments.iter().enumerate().take(q) {
             let dealer_idx = dealer_idx as u32;
             assert_eq!(output.commitments.get(&dealer_idx).unwrap(), commitment);
             assert_eq!(
@@ -1261,7 +1264,8 @@ mod tests {
     #[test]
     fn test_player_reveals() {
         // Initialize test
-        let n = 5;
+        let n = 11;
+        let q = quorum(n as u32).unwrap() as usize;
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create contributors (must be in sorted order)
@@ -1283,7 +1287,7 @@ mod tests {
 
         // Send shares to player
         let mut commitments = HashMap::new();
-        for (i, con) in contributors.iter().enumerate().take(2) {
+        for (i, con) in contributors.iter().enumerate().take(q - 1) {
             let (_, commitment, shares) = Dealer::new(&mut rng, None, contributors.clone());
             player
                 .share(con.clone(), commitment.clone(), shares[0])
@@ -1292,17 +1296,19 @@ mod tests {
         }
 
         // Finalize player with reveal
+        let last = (q - 1) as u32;
         let (_, commitment, shares) = Dealer::new(&mut rng, None, contributors.clone());
-        commitments.insert(2, commitment);
+        commitments.insert(last, commitment);
         let mut reveals = HashMap::new();
-        reveals.insert(2, shares[0]);
+        reveals.insert(last, shares[0]);
         player.finalize(commitments, reveals).unwrap();
     }
 
     #[test]
     fn test_player_missing_reveal() {
         // Initialize test
-        let n = 5;
+        let n = 11;
+        let q = quorum(n as u32).unwrap() as usize;
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create contributors (must be in sorted order)
@@ -1324,7 +1330,7 @@ mod tests {
 
         // Send shares to player
         let mut commitments = HashMap::new();
-        for (i, con) in contributors.iter().enumerate().take(2) {
+        for (i, con) in contributors.iter().enumerate().take(q - 1) {
             let (_, commitment, shares) = Dealer::new(&mut rng, None, contributors.clone());
             player
                 .share(con.clone(), commitment.clone(), shares[0])
@@ -1333,8 +1339,9 @@ mod tests {
         }
 
         // Finalize player with reveal
+        let last = (q - 1) as u32;
         let (_, commitment, _) = Dealer::new(&mut rng, None, contributors.clone());
-        commitments.insert(2, commitment);
+        commitments.insert(last, commitment);
         let result = player.finalize(commitments, HashMap::new());
         assert!(matches!(result, Err(Error::MissingShare)));
     }
@@ -1380,7 +1387,8 @@ mod tests {
     #[test]
     fn test_player_misdirected_reveal() {
         // Initialize test
-        let n = 5;
+        let n = 11;
+        let q = quorum(n as u32).unwrap() as usize;
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create contributors (must be in sorted order)
@@ -1402,7 +1410,7 @@ mod tests {
 
         // Send shares to player
         let mut commitments = HashMap::new();
-        for (i, con) in contributors.iter().enumerate().take(2) {
+        for (i, con) in contributors.iter().enumerate().take(q - 1) {
             let (_, commitment, shares) = Dealer::new(&mut rng, None, contributors.clone());
             player
                 .share(con.clone(), commitment.clone(), shares[0])
@@ -1411,10 +1419,11 @@ mod tests {
         }
 
         // Finalize player with reveal
+        let last = (q - 1) as u32;
         let (_, commitment, shares) = Dealer::new(&mut rng, None, contributors.clone());
-        commitments.insert(2, commitment);
+        commitments.insert(last, commitment);
         let mut reveals = HashMap::new();
-        reveals.insert(2, shares[1]);
+        reveals.insert(last, shares[1]);
         let result = player.finalize(commitments, reveals);
         assert!(matches!(result, Err(Error::MisdirectedShare)));
     }
@@ -1422,7 +1431,8 @@ mod tests {
     #[test]
     fn test_player_invalid_commitment() {
         // Initialize test
-        let n = 5;
+        let n = 11;
+        let q = quorum(n as u32).unwrap() as usize;
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create contributors (must be in sorted order)
@@ -1444,7 +1454,7 @@ mod tests {
 
         // Send shares to player
         let mut commitments = HashMap::new();
-        for (i, con) in contributors.iter().enumerate().take(2) {
+        for (i, con) in contributors.iter().enumerate().take(q - 1) {
             let (_, commitment, shares) = Dealer::new(&mut rng, None, contributors.clone());
             player
                 .share(con.clone(), commitment.clone(), shares[0])
@@ -1453,10 +1463,11 @@ mod tests {
         }
 
         // Finalize player with reveal
-        let (commitment, shares) = ops::generate_shares(&mut rng, None, n, 1);
-        commitments.insert(2, commitment);
+        let last = (q - 1) as u32;
+        let (commitment, shares) = ops::generate_shares(&mut rng, None, n as u32, 1);
+        commitments.insert(last, commitment);
         let mut reveals = HashMap::new();
-        reveals.insert(2, shares[0]);
+        reveals.insert(last, shares[0]);
         let result = player.finalize(commitments, reveals);
         assert!(matches!(result, Err(Error::CommitmentWrongDegree)));
     }
@@ -1464,7 +1475,8 @@ mod tests {
     #[test]
     fn test_player_invalid_reveal() {
         // Initialize test
-        let n = 5;
+        let n = 11;
+        let q = quorum(n as u32).unwrap() as usize;
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create contributors (must be in sorted order)
@@ -1486,7 +1498,7 @@ mod tests {
 
         // Send shares to player
         let mut commitments = HashMap::new();
-        for (i, con) in contributors.iter().enumerate().take(2) {
+        for (i, con) in contributors.iter().enumerate().take(q - 1) {
             let (_, commitment, shares) = Dealer::new(&mut rng, None, contributors.clone());
             player
                 .share(con.clone(), commitment.clone(), shares[0])
@@ -1495,12 +1507,13 @@ mod tests {
         }
 
         // Finalize player with reveal
+        let last = (q - 1) as u32;
         let (_, commitment, shares) = Dealer::new(&mut rng, None, contributors.clone());
-        commitments.insert(2, commitment);
+        commitments.insert(last, commitment);
         let mut reveals = HashMap::new();
         let mut share = shares[1];
         share.index = 0;
-        reveals.insert(2, share);
+        reveals.insert(last, share);
         let result = player.finalize(commitments, reveals);
         assert!(matches!(result, Err(Error::ShareWrongCommitment)));
     }
