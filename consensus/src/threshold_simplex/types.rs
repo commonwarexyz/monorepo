@@ -1,5 +1,5 @@
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error, Read, Write};
+use commonware_codec::{EncodeSize, Error, FixedSize, Read, Write};
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{Public, Signature},
@@ -180,18 +180,16 @@ impl<D: Digest> Proposal<D> {
     }
 }
 
-impl<D: Digest> Codec for Proposal<D> {
-    fn write(&self, writer: &mut impl Writer) {
+impl<D: Digest> Write for Proposal<D> {
+    fn write(&self, writer: &mut impl BufMut) {
         self.view.write(writer);
         self.parent.write(writer);
         self.payload.write(writer)
     }
+}
 
-    fn len_encoded(&self) -> usize {
-        Self::LEN_ENCODED
-    }
-
-    fn read(reader: &mut impl Reader) -> Result<Self, Error> {
+impl<D: Digest> Read for Proposal<D> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let view = View::read(reader)?;
         let parent = View::read(reader)?;
         let payload = D::read(reader)?;
@@ -203,8 +201,8 @@ impl<D: Digest> Codec for Proposal<D> {
     }
 }
 
-impl<D: Digest> SizedCodec for Proposal<D> {
-    const LEN_ENCODED: usize = View::LEN_ENCODED + View::LEN_ENCODED + D::LEN_ENCODED;
+impl<D: Digest> FixedSize for Proposal<D> {
+    const SIZE: usize = View::SIZE + View::SIZE + D::SIZE;
 }
 
 impl<D: Digest> Viewable for Proposal<D> {
@@ -267,18 +265,16 @@ impl<D: Digest> Viewable for Notarize<D> {
     }
 }
 
-impl<D: Digest> Codec for Notarize<D> {
-    fn write(&self, writer: &mut impl Writer) {
+impl<D: Digest> Write for Notarize<D> {
+    fn write(&self, writer: &mut impl BufMut) {
         self.proposal.write(writer);
         self.proposal_signature.write(writer);
         self.seed_signature.write(writer);
     }
+}
 
-    fn len_encoded(&self) -> usize {
-        Self::LEN_ENCODED
-    }
-
-    fn read(reader: &mut impl Reader) -> Result<Self, Error> {
+impl<D: Digest> Read for Notarize<D> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let proposal = Proposal::read(reader)?;
         let proposal_signature = PartialSignature::read(reader)?;
         let seed_signature = PartialSignature::read(reader)?;
@@ -293,9 +289,8 @@ impl<D: Digest> Codec for Notarize<D> {
     }
 }
 
-impl<D: Digest> SizedCodec for Notarize<D> {
-    const LEN_ENCODED: usize =
-        Proposal::<D>::LEN_ENCODED + PartialSignature::LEN_ENCODED + PartialSignature::LEN_ENCODED;
+impl<D: Digest> FixedSize for Notarize<D> {
+    const SIZE: usize = Proposal::<D>::SIZE + PartialSignature::SIZE + PartialSignature::SIZE;
 }
 
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
@@ -318,7 +313,6 @@ impl<D: Digest> Notarization<D> {
         }
     }
 
-    // TODO: modify threshold funcs to allow references
     pub fn verify(
         &self,
         public_key: &Public,
@@ -346,18 +340,16 @@ impl<D: Digest> Viewable for Notarization<D> {
     }
 }
 
-impl<D: Digest> Codec for Notarization<D> {
-    fn write(&self, writer: &mut impl Writer) {
+impl<D: Digest> Write for Notarization<D> {
+    fn write(&self, writer: &mut impl BufMut) {
         self.proposal.write(writer);
         self.proposal_signature.write(writer);
         self.seed_signature.write(writer)
     }
+}
 
-    fn len_encoded(&self) -> usize {
-        Self::LEN_ENCODED
-    }
-
-    fn read(reader: &mut impl Reader) -> Result<Self, Error> {
+impl<D: Digest> Read for Notarization<D> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let proposal = Proposal::read(reader)?;
         let proposal_signature = Signature::read(reader)?;
         let seed_signature = Signature::read(reader)?;
@@ -369,9 +361,8 @@ impl<D: Digest> Codec for Notarization<D> {
     }
 }
 
-impl<D: Digest> SizedCodec for Notarization<D> {
-    const LEN_ENCODED: usize =
-        Proposal::<D>::LEN_ENCODED + Signature::LEN_ENCODED + Signature::LEN_ENCODED;
+impl<D: Digest> FixedSize for Notarization<D> {
+    const SIZE: usize = Proposal::<D>::SIZE + Signature::SIZE + Signature::SIZE;
 }
 
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
@@ -427,18 +418,16 @@ impl Viewable for Nullify {
     }
 }
 
-impl Codec for Nullify {
-    fn write(&self, writer: &mut impl Writer) {
+impl Write for Nullify {
+    fn write(&self, writer: &mut impl BufMut) {
         self.view.write(writer);
         self.view_signature.write(writer);
         self.seed_signature.write(writer);
     }
+}
 
-    fn len_encoded(&self) -> usize {
-        Self::LEN_ENCODED
-    }
-
-    fn read(reader: &mut impl Reader) -> Result<Self, Error> {
+impl Read for Nullify {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let view = View::read(reader)?;
         let view_signature = PartialSignature::read(reader)?;
         let seed_signature = PartialSignature::read(reader)?;
@@ -453,9 +442,8 @@ impl Codec for Nullify {
     }
 }
 
-impl SizedCodec for Nullify {
-    const LEN_ENCODED: usize =
-        View::LEN_ENCODED + PartialSignature::LEN_ENCODED + PartialSignature::LEN_ENCODED;
+impl FixedSize for Nullify {
+    const SIZE: usize = View::SIZE + PartialSignature::SIZE + PartialSignature::SIZE;
 }
 
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
@@ -500,18 +488,16 @@ impl Viewable for Nullification {
     }
 }
 
-impl Codec for Nullification {
-    fn write(&self, writer: &mut impl Writer) {
+impl Write for Nullification {
+    fn write(&self, writer: &mut impl BufMut) {
         self.view.write(writer);
         self.view_signature.write(writer);
         self.seed_signature.write(writer);
     }
+}
 
-    fn len_encoded(&self) -> usize {
-        Self::LEN_ENCODED
-    }
-
-    fn read(reader: &mut impl Reader) -> Result<Self, Error> {
+impl Read for Nullification {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let view = View::read(reader)?;
         let view_signature = Signature::read(reader)?;
         let seed_signature = Signature::read(reader)?;
@@ -523,8 +509,8 @@ impl Codec for Nullification {
     }
 }
 
-impl SizedCodec for Nullification {
-    const LEN_ENCODED: usize = View::LEN_ENCODED + Signature::LEN_ENCODED + Signature::LEN_ENCODED;
+impl FixedSize for Nullification {
+    const SIZE: usize = View::SIZE + Signature::SIZE + Signature::SIZE;
 }
 
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
@@ -575,17 +561,15 @@ impl<D: Digest> Viewable for Finalize<D> {
     }
 }
 
-impl<D: Digest> Codec for Finalize<D> {
-    fn write(&self, writer: &mut impl Writer) {
+impl<D: Digest> Write for Finalize<D> {
+    fn write(&self, writer: &mut impl BufMut) {
         self.proposal.write(writer);
         self.proposal_signature.write(writer);
     }
+}
 
-    fn len_encoded(&self) -> usize {
-        Self::LEN_ENCODED
-    }
-
-    fn read(reader: &mut impl Reader) -> Result<Self, Error> {
+impl<D: Digest> Read for Finalize<D> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let proposal = Proposal::read(reader)?;
         let proposal_signature = PartialSignature::read(reader)?;
         Ok(Finalize {
@@ -595,8 +579,8 @@ impl<D: Digest> Codec for Finalize<D> {
     }
 }
 
-impl<D: Digest> SizedCodec for Finalize<D> {
-    const LEN_ENCODED: usize = Proposal::<D>::LEN_ENCODED + PartialSignature::LEN_ENCODED;
+impl<D: Digest> FixedSize for Finalize<D> {
+    const SIZE: usize = Proposal::<D>::SIZE + PartialSignature::SIZE;
 }
 
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
@@ -646,18 +630,16 @@ impl<D: Digest> Viewable for Finalization<D> {
     }
 }
 
-impl<D: Digest> Codec for Finalization<D> {
-    fn write(&self, writer: &mut impl Writer) {
+impl<D: Digest> Write for Finalization<D> {
+    fn write(&self, writer: &mut impl BufMut) {
         self.proposal.write(writer);
         self.proposal_signature.write(writer);
         self.seed_signature.write(writer);
     }
+}
 
-    fn len_encoded(&self) -> usize {
-        Self::LEN_ENCODED
-    }
-
-    fn read(reader: &mut impl Reader) -> Result<Self, Error> {
+impl<D: Digest> Read for Finalization<D> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let proposal = Proposal::read(reader)?;
         let proposal_signature = Signature::read(reader)?;
         let seed_signature = Signature::read(reader)?;
@@ -669,9 +651,8 @@ impl<D: Digest> Codec for Finalization<D> {
     }
 }
 
-impl<D: Digest> SizedCodec for Finalization<D> {
-    const LEN_ENCODED: usize =
-        Proposal::<D>::LEN_ENCODED + Signature::LEN_ENCODED + Signature::LEN_ENCODED;
+impl<D: Digest> FixedSize for Finalization<D> {
+    const SIZE: usize = Proposal::<D>::SIZE + Signature::SIZE + Signature::SIZE;
 }
 
 #[derive(Clone, Debug, PartialEq)]
