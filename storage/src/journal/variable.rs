@@ -129,26 +129,26 @@ fn compute_next_offset(mut offset: u64) -> Result<u32, Error> {
 }
 
 /// Implementation of `Journal` storage.
-pub struct Journal<B: Blob, E: Storage<B>> {
-    storage: E,
+pub struct Journal<S: Storage> {
+    storage: S,
     cfg: Config,
 
     oldest_allowed: Option<u64>,
 
-    blobs: BTreeMap<u64, B>,
+    blobs: BTreeMap<u64, S::Blob>,
 
     tracked: Gauge,
     synced: Counter,
     pruned: Counter,
 }
 
-impl<B: Blob, E: Storage<B>> Journal<B, E> {
+impl<S: Storage> Journal<S> {
     /// Initialize a new `Journal` instance.
     ///
     /// All backing blobs are opened but not read during
     /// initialization. The `replay` method can be used
     /// to iterate over all items in the `Journal`.
-    pub async fn init(storage: E, metrics: &impl Metrics, cfg: Config) -> Result<Self, Error> {
+    pub async fn init(storage: S, metrics: &impl Metrics, cfg: Config) -> Result<Self, Error> {
         // Iterate over blobs in partition
         let mut blobs = BTreeMap::new();
         let stored_blobs = match storage.scan(&cfg.partition).await {
@@ -201,7 +201,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     }
 
     /// Reads an item from the blob at the given offset.
-    async fn read(blob: &B, offset: u32) -> Result<(u32, u32, Bytes), Error> {
+    async fn read(blob: &S::Blob, offset: u32) -> Result<(u32, u32, Bytes), Error> {
         // Read item size
         let offset = offset as u64 * ITEM_ALIGNMENT;
         let mut size = [0u8; 4];
@@ -240,7 +240,11 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     /// This method bypasses the checksum verification and the caller is responsible for ensuring
     /// the integrity of any data read. If `prefix` exceeds the size of an item (and runs over the blob
     /// length), it will lead to unintentional truncation of data.
-    async fn read_prefix(blob: &B, offset: u32, prefix: u32) -> Result<(u32, u32, Bytes), Error> {
+    async fn read_prefix(
+        blob: &S::Blob,
+        offset: u32,
+        prefix: u32,
+    ) -> Result<(u32, u32, Bytes), Error> {
         // Read item size and first `prefix` bytes
         let offset = offset as u64 * ITEM_ALIGNMENT;
         let mut buf = vec![0u8; 4 + prefix as usize];
@@ -277,7 +281,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     /// This method assumes the caller knows the exact size of the item (either because
     /// they store fixed-size items or they previously indexed the size). If an incorrect
     /// `exact` is provided, the method will likely return an error (as integrity is verified).
-    async fn read_exact(blob: &B, offset: u32, exact: u32) -> Result<(u32, Bytes), Error> {
+    async fn read_exact(blob: &S::Blob, offset: u32, exact: u32) -> Result<(u32, Bytes), Error> {
         // Read all of the item into one buffer
         let offset = offset as u64 * ITEM_ALIGNMENT;
         let mut buf = vec![0u8; 4 + exact as usize + 4];
@@ -1242,7 +1246,9 @@ mod tests {
         len: u64,
     }
 
-    impl Storage<MockBlob> for MockStorage {
+    impl Storage for MockStorage {
+        type Blob = MockBlob;
+
         async fn open(&self, _partition: &str, _name: &[u8]) -> Result<MockBlob, RError> {
             Ok(MockBlob { len: self.len })
         }

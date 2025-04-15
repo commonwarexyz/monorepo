@@ -2,7 +2,7 @@ use super::{Config, Error, Translator};
 use crate::{index::Index, journal::variable::Journal};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::FixedSize;
-use commonware_runtime::{Blob, Metrics, Storage};
+use commonware_runtime::{Metrics, Storage};
 use commonware_utils::Array;
 use futures::{pin_mut, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
@@ -24,9 +24,9 @@ struct Location {
 }
 
 /// Implementation of `Archive` storage.
-pub struct Archive<T: Translator, K: Array, B: Blob, E: Storage<B> + Metrics> {
+pub struct Archive<T: Translator, K: Array, E: Storage + Metrics> {
     cfg: Config<T>,
-    journal: Journal<B, E>,
+    journal: Journal<E>,
 
     // Oldest allowed section to read from. This is updated when `prune` is called.
     oldest_allowed: Option<u64>,
@@ -51,18 +51,14 @@ pub struct Archive<T: Translator, K: Array, B: Blob, E: Storage<B> + Metrics> {
     _phantom: std::marker::PhantomData<K>,
 }
 
-impl<T: Translator, K: Array, B: Blob, E: Storage<B> + Metrics> Archive<T, K, B, E> {
+impl<T: Translator, K: Array, E: Storage + Metrics> Archive<T, K, E> {
     const PREFIX_LEN: u32 = (u64::SIZE + K::SIZE + u32::SIZE) as u32;
 
     /// Initialize a new `Archive` instance.
     ///
     /// The in-memory index for `Archive` is populated during this call
     /// by replaying the journal.
-    pub async fn init(
-        context: E,
-        mut journal: Journal<B, E>,
-        cfg: Config<T>,
-    ) -> Result<Self, Error> {
+    pub async fn init(context: E, mut journal: Journal<E>, cfg: Config<T>) -> Result<Self, Error> {
         // Initialize keys and run corruption check
         let mut indices = BTreeMap::new();
         let mut keys = Index::init(context.with_label("index"), cfg.translator.clone());
