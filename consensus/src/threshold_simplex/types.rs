@@ -655,11 +655,6 @@ impl<D: Digest> FixedSize for Finalization<D> {
     const SIZE: usize = Proposal::<D>::SIZE + Signature::SIZE + Signature::SIZE;
 }
 
-#[derive(Clone)]
-pub struct BackfillerConfig {
-    pub max_requests: usize,
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub enum Backfiller<D: Digest> {
     Request(Request),
@@ -690,8 +685,8 @@ impl<D: Digest> EncodeSize for Backfiller<D> {
     }
 }
 
-impl<D: Digest> Read<BackfillerConfig> for Backfiller<D> {
-    fn read_cfg(reader: &mut impl Buf, cfg: &BackfillerConfig) -> Result<Self, Error> {
+impl<D: Digest> Read<usize> for Backfiller<D> {
+    fn read_cfg(reader: &mut impl Buf, cfg: &usize) -> Result<Self, Error> {
         let tag = <u8>::read(reader)?;
         match tag {
             0 => {
@@ -741,11 +736,11 @@ impl EncodeSize for Request {
     }
 }
 
-impl Read<BackfillerConfig> for Request {
-    fn read_cfg(reader: &mut impl Buf, cfg: &BackfillerConfig) -> Result<Self, Error> {
+impl Read<usize> for Request {
+    fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
         let id = View::read(reader)?;
-        let notarizations = Vec::<View>::read_range(reader, ..=cfg.max_requests)?;
-        let nullifications = Vec::<View>::read_range(reader, ..=cfg.max_requests)?;
+        let notarizations = Vec::<View>::read_range(reader, ..=*max_len)?;
+        let nullifications = Vec::<View>::read_range(reader, ..=*max_len)?;
         Ok(Request {
             id,
             notarizations,
@@ -789,11 +784,11 @@ impl<D: Digest> EncodeSize for Response<D> {
     }
 }
 
-impl<D: Digest> Read<BackfillerConfig> for Response<D> {
-    fn read_cfg(reader: &mut impl Buf, cfg: &BackfillerConfig) -> Result<Self, Error> {
+impl<D: Digest> Read<usize> for Response<D> {
+    fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
         let id = View::read(reader)?;
-        let notarizations = Vec::<Notarization<D>>::read_range(reader, ..=cfg.max_requests)?;
-        let nullifications = Vec::<Nullification>::read_range(reader, ..=cfg.max_requests)?;
+        let notarizations = Vec::<Notarization<D>>::read_range(reader, ..=*max_len)?;
+        let nullifications = Vec::<Nullification>::read_range(reader, ..=*max_len)?;
         Ok(Response {
             id,
             notarizations,
