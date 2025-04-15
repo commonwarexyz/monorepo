@@ -496,12 +496,6 @@ impl<
             return Err(Error::AppVerifiedPayloadMismatch);
         }
 
-        // Emit the activity
-        self.reporter.report(Activity::Proposal(Proposal::new(
-            tip.chunk.clone(),
-            tip.signature.clone(),
-        )));
-
         // Construct partial signature
         let Some(share) = self.validators.share(self.epoch) else {
             return Err(Error::UnknownShare(self.epoch));
@@ -534,7 +528,7 @@ impl<
         };
 
         // Send the ack to the network
-        let ack = Ack::new(tip.chunk, self.epoch, partial);
+        let ack = Ack::new(tip.chunk.clone(), self.epoch, partial);
         ack_sender
             .send(
                 Recipients::Some(recipients),
@@ -546,6 +540,14 @@ impl<
 
         // Handle the ack internally
         self.handle_ack(&ack).await?;
+
+        // Emit the activity
+        self.reporter
+            .report(Activity::Proposal(Proposal::new(
+                tip.chunk,
+                tip.signature.clone(),
+            )))
+            .await;
 
         Ok(())
     }
@@ -576,7 +578,8 @@ impl<
 
         // Emit the activity
         self.reporter
-            .report(Activity::Lock(Lock::new(chunk.clone(), epoch, threshold)));
+            .report(Activity::Lock(Lock::new(chunk.clone(), epoch, threshold)))
+            .await;
     }
 
     /// Handles an ack
@@ -836,7 +839,12 @@ impl<
         // Optimization: If the node is exactly equal to the tip,
         // don't perform further validation.
         if let Some(tip) = self.tip_manager.get(sender) {
-            if tip == *node {
+            // We can't use `PartialEq` here because equality is only defined
+            // for `Node<C: Verifier, D: Digest>`.
+            if tip.chunk == node.chunk
+                && tip.signature == node.signature
+                && tip.parent == node.parent
+            {
                 return Ok(None);
             }
         }
@@ -908,7 +916,7 @@ impl<
             return Err(Error::UnknownIdentity(ack.epoch));
         };
         if !ack.verify(identity, &self.ack_namespace) {
-            return Err(Error::InvalidPartialSignature);
+            return Err(Error::InvalidAckSignature);
         }
 
         Ok(())
@@ -1088,12 +1096,6 @@ enum Error {
     #[error("Invalid context height")]
     ContextHeight,
 
-    // Proto Malformed Errors
-    #[error("Genesis chunk must not have a parent")]
-    GenesisChunkMustNotHaveParent,
-    #[error("Node missing parent")]
-    NodeMissingParent,
-
     // Epoch Errors
     #[error("Unknown identity at epoch {0}")]
     UnknownIdentity(u64),
@@ -1111,12 +1113,10 @@ enum Error {
     PeerMismatch,
 
     // Signature Errors
-    #[error("Invalid threshold signature")]
-    InvalidThresholdSignature,
-    #[error("Invalid partial signature")]
-    InvalidPartialSignature,
     #[error("Invalid node signature")]
     InvalidNodeSignature,
+    #[error("Invalid partial signature")]
+    InvalidAckSignature,
 
     // Ignorable Message Errors
     #[error("Invalid ack epoch {0} outside bounds {1} - {2}")]

@@ -199,7 +199,7 @@ impl<C: Verifier, D: Digest> Node<C, D> {
         let parent_chunk = Chunk::new(
             self.chunk.sequencer.clone(),
             self.chunk.height - 1, // Will not parse if height is 0 and parent exists
-            parent.digest.clone(),
+            parent.digest,
         );
         if !verify_lock(
             public,
@@ -325,6 +325,7 @@ impl<P: Array, D: Digest> FixedSize for Ack<P, D> {
 }
 
 /// Activity is the type associated with the [`Reporter`](crate::Reporter) trait.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum Activity<C: Verifier, D: Digest> {
     Proposal(Proposal<C, D>),
