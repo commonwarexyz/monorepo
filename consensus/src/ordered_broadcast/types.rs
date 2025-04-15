@@ -215,6 +215,36 @@ impl<C: Verifier, D: Digest> Node<C, D> {
             parent,
         }
     }
+
+    pub fn verify(&self, public: &Public, chunk_namespace: &[u8], ack_namespace: &[u8]) -> bool {
+        // Verify chunk
+        let message = self.chunk.encode();
+        if !C::verify(
+            Some(chunk_namespace),
+            &message,
+            self.chunk.sequencer,
+            &self.signature,
+        ) {
+            return false;
+        }
+        let Some(parent) = &self.parent else {
+            return true;
+        };
+
+        // Verify parent (if present)
+        let parent_chunk = Chunk::new(
+            self.chunk.sequencer,
+            self.chunk.height - 1, // Will not parse if height is 0 and parent exists
+            parent.digest.clone(),
+        );
+        verify_lock(
+            public,
+            &parent_chunk,
+            &parent.epoch,
+            &parent.signature,
+            ack_namespace,
+        )
+    }
 }
 
 impl<C: Verifier, D: Digest> Write for Node<C, D> {
@@ -362,6 +392,22 @@ impl<C: Verifier, D: Digest> EncodeSize for Activity<C, D> {
     }
 }
 
+fn verify_lock<P: Array, D: Digest>(
+    public_key: &Public,
+    chunk: &Chunk<P, D>,
+    epoch: &Epoch,
+    signature: &Signature,
+    ack_namespace: &[u8],
+) -> bool {
+    // Construct signing payload
+    let mut message = Vec::with_capacity(Chunk::<P, D>::SIZE + Epoch::SIZE);
+    chunk.write(&mut message);
+    epoch.write(&mut message);
+
+    // Verify signature
+    ops::verify_message(public_key, Some(ack_namespace), &message, signature).is_ok()
+}
+
 /// Lock is a message that can be generated once `2f + 1` acks are received for a Chunk.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Lock<P: Array, D: Digest> {
@@ -386,13 +432,13 @@ impl<P: Array, D: Digest> Lock<P, D> {
     }
 
     pub fn verify(&self, public_key: &Public, ack_namespace: &[u8]) -> bool {
-        // Construct signing payload
-        let mut message = Vec::with_capacity(Chunk::<P, D>::SIZE + Epoch::SIZE);
-        self.chunk.write(&mut message);
-        self.epoch.write(&mut message);
-
-        // Verify signature
-        ops::verify_message(public_key, Some(ack_namespace), &message, &self.signature).is_ok()
+        verify_lock(
+            public_key,
+            &self.chunk,
+            &self.epoch,
+            &self.signature,
+            ack_namespace,
+        )
     }
 }
 
