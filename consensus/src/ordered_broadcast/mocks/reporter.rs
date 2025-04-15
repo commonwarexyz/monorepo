@@ -31,7 +31,7 @@ pub struct Reporter<C: Verifier, D: Digest> {
 
     // Notified proposals
     proposals: HashSet<Chunk<C::PublicKey, D>>,
-    misses_allowed: Option<usize>,
+    limit_misses: Option<usize>,
 
     // All known digests
     digests: HashMap<C::PublicKey, BTreeMap<u64, (D, Epoch)>>,
@@ -47,7 +47,7 @@ impl<C: Verifier, D: Digest> Reporter<C, D> {
     pub fn new(
         namespace: &[u8],
         public: group::Public,
-        misses_allowed: Option<usize>,
+        limit_misses: Option<usize>,
     ) -> (Self, Mailbox<C, D>) {
         let (sender, receiver) = mpsc::channel(1024);
         (
@@ -56,7 +56,7 @@ impl<C: Verifier, D: Digest> Reporter<C, D> {
                 namespace: namespace.to_vec(),
                 public,
                 proposals: HashSet::new(),
-                misses_allowed,
+                limit_misses,
                 digests: HashMap::new(),
                 contiguous: HashMap::new(),
                 highest: HashMap::new(),
@@ -85,7 +85,7 @@ impl<C: Verifier, D: Digest> Reporter<C, D> {
                     }
 
                     // Check if the proposal is known
-                    if let Some(misses_allowed) = self.misses_allowed {
+                    if let Some(misses_allowed) = self.limit_misses {
                         if !self.proposals.contains(&lock.chunk) {
                             misses += 1;
                         }
