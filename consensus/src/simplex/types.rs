@@ -410,5 +410,99 @@ impl<V: Verifier, D: Digest> Viewable for Finalization<V, D> {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Backfiller<D: Digest> {}
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct Request {
+    pub id: u64,
+    pub notarizations: Vec<View>,
+    pub nullifications: Vec<View>,
+}
+
+impl Request {
+    pub fn new(id: u64, notarizations: Vec<View>, nullifications: Vec<View>) -> Self {
+        Self {
+            id,
+            notarizations,
+            nullifications,
+        }
+    }
+}
+
+impl Write for Request {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.id.write(writer);
+        self.notarizations.write(writer);
+        self.nullifications.write(writer);
+    }
+}
+
+impl Read<usize> for Request {
+    fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
+        let id = u64::read(reader)?;
+        let notarizations = Vec::<View>::read_range(reader, ..=*max_len)?;
+        let remaining = max_len - notarizations.len();
+        let nullifications = Vec::<View>::read_range(reader, ..=remaining)?;
+        Ok(Self {
+            id,
+            notarizations,
+            nullifications,
+        })
+    }
+}
+
+impl EncodeSize for Request {
+    fn encode_size(&self) -> usize {
+        self.id.encode_size() + self.notarizations.encode_size() + self.nullifications.encode_size()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Response<V: Verifier, D: Digest> {
+    pub id: u64,
+    pub notarizations: Vec<Notarization<V, D>>,
+    pub nullifications: Vec<Nullification<V>>,
+}
+
+impl<V: Verifier, D: Digest> Response<V, D> {
+    pub fn new(
+        id: u64,
+        notarizations: Vec<Notarization<V, D>>,
+        nullifications: Vec<Nullification<V>>,
+    ) -> Self {
+        Self {
+            id,
+            notarizations,
+            nullifications,
+        }
+    }
+}
+
+impl<V: Verifier, D: Digest> Write for Response<V, D> {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.id.write(writer);
+        self.notarizations.write(writer);
+        self.nullifications.write(writer);
+    }
+}
+
+impl<V: Verifier, D: Digest> Read<usize> for Response<V, D> {
+    fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
+        let id = u64::read(reader)?;
+        let notarizations = Vec::<Notarization<V, D>>::read_range(reader, ..=*max_len)?;
+        let remaining = max_len - notarizations.len();
+        let nullifications = Vec::<Nullification<V>>::read_range(reader, ..=remaining)?;
+        Ok(Self {
+            id,
+            notarizations,
+            nullifications,
+        })
+    }
+}
+
+impl<V: Verifier, D: Digest> EncodeSize for Response<V, D> {
+    fn encode_size(&self) -> usize {
+        self.id.encode_size() + self.notarizations.encode_size() + self.nullifications.encode_size()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub enum Activity {}

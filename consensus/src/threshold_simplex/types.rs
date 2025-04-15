@@ -743,13 +743,13 @@ impl<D: Digest> Read<usize> for Backfiller<D> {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Request {
-    pub id: View,
+    pub id: u64,
     pub notarizations: Vec<View>,
     pub nullifications: Vec<View>,
 }
 
 impl Request {
-    pub fn new(id: View, notarizations: Vec<View>, nullifications: Vec<View>) -> Self {
+    pub fn new(id: u64, notarizations: Vec<View>, nullifications: Vec<View>) -> Self {
         Request {
             id,
             notarizations,
@@ -774,7 +774,7 @@ impl EncodeSize for Request {
 
 impl Read<usize> for Request {
     fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
-        let id = View::read(reader)?;
+        let id = u64::read(reader)?;
         let notarizations = Vec::<View>::read_range(reader, ..=*max_len)?;
         let remaining = max_len - notarizations.len();
         let nullifications = Vec::<View>::read_range(reader, ..=remaining)?;
@@ -788,14 +788,14 @@ impl Read<usize> for Request {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Response<D: Digest> {
-    pub id: View,
+    pub id: u64,
     pub notarizations: Vec<Notarization<D>>,
     pub nullifications: Vec<Nullification>,
 }
 
 impl<D: Digest> Response<D> {
     pub fn new(
-        id: View,
+        id: u64,
         notarizations: Vec<Notarization<D>>,
         nullifications: Vec<Nullification>,
     ) -> Self {
@@ -823,7 +823,7 @@ impl<D: Digest> EncodeSize for Response<D> {
 
 impl<D: Digest> Read<usize> for Response<D> {
     fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
-        let id = View::read(reader)?;
+        let id = u64::read(reader)?;
         let notarizations = Vec::<Notarization<D>>::read_range(reader, ..=*max_len)?;
         let remaining = max_len - notarizations.len();
         let nullifications = Vec::<Nullification>::read_range(reader, ..=remaining)?;
