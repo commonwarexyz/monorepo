@@ -633,4 +633,281 @@ impl<V: Verifier, D: Digest> EncodeSize for Response<V, D> {
 }
 
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
-pub enum Activity {}
+pub enum Activity<V: Verifier, D: Digest> {
+    Notarize(Notarize<V, D>),
+    Notarization(Notarization<V, D>),
+    Nullify(Nullify<V>),
+    Nullification(Nullification<V>),
+    Finalize(Finalize<V>),
+    Finalization(Finalization<V, D>),
+    ConflictingNotarize(ConflictingNotarize<V, D>),
+    ConflictingFinalize(ConflictingFinalize<V, D>),
+    NullifyFinalize(NullifyFinalize<V, D>),
+}
+
+impl<V: Verifier, D: Digest> Write for Activity<V, D> {
+    fn write(&self, writer: &mut impl BufMut) {
+        match self {
+            Activity::Notarize(notarize) => {
+                0u8.write(writer);
+                notarize.write(writer);
+            }
+            Activity::Notarization(notarization) => {
+                1u8.write(writer);
+                notarization.write(writer);
+            }
+            Activity::Nullify(nullify) => {
+                2u8.write(writer);
+                nullify.write(writer);
+            }
+            Activity::Nullification(nullification) => {
+                3u8.write(writer);
+                nullification.write(writer);
+            }
+            Activity::Finalize(finalize) => {
+                4u8.write(writer);
+                finalize.write(writer);
+            }
+            Activity::Finalization(finalization) => {
+                5u8.write(writer);
+                finalization.write(writer);
+            }
+            Activity::ConflictingNotarize(conflicting_notarize) => {
+                6u8.write(writer);
+                conflicting_notarize.write(writer);
+            }
+            Activity::ConflictingFinalize(conflicting_finalize) => {
+                7u8.write(writer);
+                conflicting_finalize.write(writer);
+            }
+            Activity::NullifyFinalize(nullify_finalize) => {
+                8u8.write(writer);
+                nullify_finalize.write(writer);
+            }
+        }
+    }
+}
+
+impl<V: Verifier, D: Digest> Read<usize> for Activity<V, D> {
+    fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
+        let tag = u8::read(reader)?;
+        match tag {
+            0 => Ok(Activity::Notarize(Notarize::<V, D>::read_cfg(
+                reader, max_len,
+            )?)),
+            1 => Ok(Activity::Notarization(Notarization::<V, D>::read_cfg(
+                reader, max_len,
+            )?)),
+            2 => Ok(Activity::Nullify(Nullify::<V>::read_cfg(reader, max_len)?)),
+            3 => Ok(Activity::Nullification(Nullification::<V>::read_cfg(
+                reader, max_len,
+            )?)),
+            4 => Ok(Activity::Finalize(Finalize::<V>::read_cfg(
+                reader, max_len,
+            )?)),
+            5 => Ok(Activity::Finalization(Finalization::<V, D>::read_cfg(
+                reader, max_len,
+            )?)),
+            6 => Ok(Activity::ConflictingNotarize(
+                ConflictingNotarize::<V, D>::read_cfg(reader, max_len)?,
+            )),
+            7 => Ok(Activity::ConflictingFinalize(
+                ConflictingFinalize::<V, D>::read_cfg(reader, max_len)?,
+            )),
+            8 => Ok(Activity::NullifyFinalize(
+                NullifyFinalize::<V, D>::read_cfg(reader, max_len)?,
+            )),
+            _ => Err(Error::Invalid(
+                "consensus::simplex::Activity",
+                "Invalid type",
+            )),
+        }
+    }
+}
+
+impl<V: Verifier, D: Digest> EncodeSize for Activity<V, D> {
+    fn encode_size(&self) -> usize {
+        1 + match self {
+            Activity::Notarize(notarize) => notarize.encode_size(),
+            Activity::Notarization(notarization) => notarization.encode_size(),
+            Activity::Nullify(nullify) => nullify.encode_size(),
+            Activity::Nullification(nullification) => nullification.encode_size(),
+            Activity::Finalize(finalize) => finalize.encode_size(),
+            Activity::Finalization(finalization) => finalization.encode_size(),
+            Activity::ConflictingNotarize(conflicting_notarize) => {
+                conflicting_notarize.encode_size()
+            }
+            Activity::ConflictingFinalize(conflicting_finalize) => {
+                conflicting_finalize.encode_size()
+            }
+            Activity::NullifyFinalize(nullify_finalize) => nullify_finalize.encode_size(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Hash, Eq)]
+pub struct ConflictingNotarize<V: Verifier, D: Digest> {
+    pub proposal_1: Proposal<D>,
+    pub signature_1: Signature<V>,
+    pub proposal_2: Proposal<D>,
+    pub signature_2: Signature<V>,
+}
+
+impl<V: Verifier, D: Digest> ConflictingNotarize<V, D> {
+    pub fn new(
+        proposal_1: Proposal<D>,
+        signature_1: Signature<V>,
+        proposal_2: Proposal<D>,
+        signature_2: Signature<V>,
+    ) -> Self {
+        Self {
+            proposal_1,
+            signature_1,
+            proposal_2,
+            signature_2,
+        }
+    }
+}
+
+impl<V: Verifier, D: Digest> Write for ConflictingNotarize<V, D> {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.proposal_1.write(writer);
+        self.signature_1.write(writer);
+        self.proposal_2.write(writer);
+        self.signature_2.write(writer);
+    }
+}
+
+impl<V: Verifier, D: Digest> Read for ConflictingNotarize<V, D> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        let proposal_1 = Proposal::<D>::read(reader)?;
+        let signature_1 = Signature::<V>::read(reader)?;
+        let proposal_2 = Proposal::<D>::read(reader)?;
+        let signature_2 = Signature::<V>::read(reader)?;
+        if proposal_1.view != proposal_2.view {
+            return Err(Error::Invalid(
+                "consensus::simplex::ConflictingNotarize",
+                "proposals must have the same view",
+            ));
+        }
+        if signature_1.public_key != signature_2.public_key {
+            return Err(Error::Invalid(
+                "consensus::simplex::ConflictingNotarize",
+                "signatures must have the same public key",
+            ));
+        }
+        Ok(Self {
+            proposal_1,
+            signature_1,
+            proposal_2,
+            signature_2,
+        })
+    }
+}
+
+impl<V: Verifier, D: Digest> FixedSize for ConflictingNotarize<V, D> {
+    const SIZE: usize =
+        Proposal::<D>::SIZE + Signature::<V>::SIZE + Proposal::<D>::SIZE + Signature::<V>::SIZE;
+}
+
+#[derive(Clone, Debug, PartialEq, Hash, Eq)]
+pub struct ConflictingFinalize<V: Verifier, D: Digest> {
+    pub proposal_1: Proposal<D>,
+    pub signature_1: Signature<V>,
+    pub proposal_2: Proposal<D>,
+    pub signature_2: Signature<V>,
+}
+
+impl<V: Verifier, D: Digest> ConflictingFinalize<V, D> {
+    pub fn new(
+        proposal_1: Proposal<D>,
+        signature_1: Signature<V>,
+        proposal_2: Proposal<D>,
+        signature_2: Signature<V>,
+    ) -> Self {
+        Self {
+            proposal_1,
+            signature_1,
+            proposal_2,
+            signature_2,
+        }
+    }
+}
+
+impl<V: Verifier, D: Digest> Write for ConflictingFinalize<V, D> {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.proposal_1.write(writer);
+        self.signature_1.write(writer);
+        self.proposal_2.write(writer);
+        self.signature_2.write(writer);
+    }
+}
+
+impl<V: Verifier, D: Digest> Read for ConflictingFinalize<V, D> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        let proposal_1 = Proposal::<D>::read(reader)?;
+        let signature_1 = Signature::<V>::read(reader)?;
+        let proposal_2 = Proposal::<D>::read(reader)?;
+        let signature_2 = Signature::<V>::read(reader)?;
+        if proposal_1.view != proposal_2.view {
+            return Err(Error::Invalid(
+                "consensus::simplex::ConflictingFinalize",
+                "proposals must have the same view",
+            ));
+        }
+        if signature_1.public_key != signature_2.public_key {
+            return Err(Error::Invalid(
+                "consensus::simplex::ConflictingFinalize",
+                "signatures must have the same public key",
+            ));
+        }
+        Ok(Self {
+            proposal_1,
+            signature_1,
+            proposal_2,
+            signature_2,
+        })
+    }
+}
+
+impl<V: Verifier, D: Digest> FixedSize for ConflictingFinalize<V, D> {
+    const SIZE: usize =
+        Proposal::<D>::SIZE + Signature::<V>::SIZE + Proposal::<D>::SIZE + Signature::<V>::SIZE;
+}
+
+#[derive(Clone, Debug, PartialEq, Hash, Eq)]
+pub struct NullifyFinalize<V: Verifier, D: Digest> {
+    pub nullify: Nullify<V>,
+    pub finalize: Finalize<V>,
+}
+
+impl<V: Verifier, D: Digest> NullifyFinalize<V, D> {
+    pub fn new(nullify: Nullify<V>, finalize: Finalize<V>) -> Self {
+        Self { nullify, finalize }
+    }
+}
+
+impl<V: Verifier, D: Digest> Write for NullifyFinalize<V, D> {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.nullify.write(writer);
+        self.finalize.write(writer);
+    }
+}
+
+impl<V: Verifier, D: Digest> Read for NullifyFinalize<V, D> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        let nullify = Nullify::<V>::read(reader)?;
+        let finalize = Finalize::<V>::read(reader)?;
+        if nullify.view != finalize.view {
+            return Err(Error::Invalid(
+                "consensus::simplex::NullifyFinalize",
+                "nullification and finalization must have the same view",
+            ));
+        }
+        Ok(Self { nullify, finalize })
+    }
+}
+
+impl<V: Verifier, D: Digest> FixedSize for NullifyFinalize<V, D> {
+    const SIZE: usize = Nullify::<V>::SIZE + Finalize::<V>::SIZE;
+}
