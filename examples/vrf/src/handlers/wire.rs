@@ -4,7 +4,7 @@ use commonware_cryptography::bls12381::primitives::{
     group,
     poly::{self, Eval},
 };
-use commonware_utils::Array;
+use commonware_utils::{quorum, Array};
 use std::collections::HashMap;
 
 // All messages that can be sent over DKG_CHANNEL.
@@ -21,9 +21,9 @@ impl<Sig: Array> Write for Dkg<Sig> {
 }
 
 impl<Sig: Array> Read<usize> for Dkg<Sig> {
-    fn read_cfg(buf: &mut impl Buf, poly_size: &usize) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, num_players: &usize) -> Result<Self, Error> {
         let round = u64::read(buf)?;
-        let payload = Payload::<Sig>::read_cfg(buf, poly_size)?;
+        let payload = Payload::<Sig>::read_cfg(buf, num_players)?;
         Ok(Self { round, payload })
     }
 }
@@ -35,34 +35,37 @@ impl<Sig: Array> EncodeSize for Dkg<Sig> {
 }
 
 pub enum Payload<Sig: Array> {
-    // Sent by arbiter to start DKG
-    Start {
-        group: Option<poly::Public>,
-    },
+    /// Sent by arbiter to start DKG
+    Start { group: Option<poly::Public> },
 
-    // Sent by dealer to player
+    /// Sent by dealer to player
     Share {
         commitment: poly::Public,
         share: group::Share,
     },
 
-    // Sent by player to dealer
-    Ack(Ack<Sig>),
+    /// Sent by player to dealer
+    Ack {
+        public_key: u32,
 
-    // Sent by dealer to arbiter after collecting acks from players
+        /// Signature over round + dealer + commitment
+        signature: Sig,
+    },
+
+    /// Sent by dealer to arbiter after collecting acks from players
     Commitment {
         commitment: poly::Public,
-        acks: Vec<Ack<Sig>>,
+        acks: HashMap<u32, Sig>,
         reveals: Vec<group::Share>,
     },
 
-    // Sent by arbiter to a player if round is successful
+    /// Sent by arbiter to a player if round is successful
     Success {
         commitments: HashMap<u32, poly::Public>,
         reveals: HashMap<u32, group::Share>,
     },
 
-    // Sent by arbiter to all players if round is unsuccessful
+    /// Sent by arbiter to all players if round is unsuccessful
     Abort,
 }
 
@@ -78,10 +81,13 @@ impl<Sig: Array> Write for Payload<Sig> {
                 commitment.write(buf);
                 share.write(buf);
             }
-            Payload::Ack(ack) => {
+            Payload::Ack {
+                public_key,
+                signature,
+            } => {
                 buf.put_u8(2);
-                ack.public_key.write(buf);
-                ack.signature.write(buf);
+                public_key.write(buf);
+                signature.write(buf);
             }
             Payload::Commitment {
                 commitment,
@@ -109,25 +115,29 @@ impl<Sig: Array> Write for Payload<Sig> {
 }
 
 impl<Sig: Array> Read<usize> for Payload<Sig> {
-    fn read_cfg(buf: &mut impl Buf, poly_size: &usize) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, p: &usize) -> Result<Self, Error> {
         let tag = u8::read(buf)?;
+        let t = quorum(u32::try_from(*p).unwrap()).unwrap() as usize; // threshold
         let result = match tag {
             0 => Payload::Start {
-                group: Option::<poly::Public>::read_cfg(buf, poly_size)?,
+                group: Option::<poly::Public>::read_cfg(buf, &t)?,
             },
             1 => Payload::Share {
-                commitment: poly::Public::read_cfg(buf, poly_size)?,
+                commitment: poly::Public::read_cfg(buf, &t)?,
                 share: group::Share::read(buf)?,
             },
-            2 => Payload::Ack(Ack::<Sig>::read(buf)?),
+            2 => Payload::Ack {
+                public_key: u32::read(buf)?,
+                signature: Sig::read(buf)?,
+            },
             3 => Payload::Commitment {
-                commitment: poly::Public::read_cfg(buf, poly_size)?,
-                acks: Vec::<Ack<Sig>>::read_range(buf, ..)?, // TODO: is this expected to be at-most or exactly poly_size?
-                reveals: Vec::<group::Share>::read_range(buf, ..)?, // TODO: is this expected to be at-most or exactly poly_size?
+                commitment: poly::Public::read_cfg(buf, &t)?,
+                acks: HashMap::<u32, Sig>::read_range(buf, ..=*p)?, // TODO: is this expected to be at-most or exactly t?
+                reveals: Vec::<group::Share>::read_range(buf, ..=*p)?, // TODO: is this expected to be at-most or exactly t?
             },
             4 => Payload::Success {
-                commitments: HashMap::<u32, poly::Public>::read_cfg(buf, &(.., ((), *poly_size)))?, // TODO: is this expected to be at-most or exactly poly_size?
-                reveals: HashMap::<u32, group::Share>::read_range(buf, ..)?, // TODO: is this expected to be at-most or exactly poly_size?
+                commitments: HashMap::<u32, poly::Public>::read_cfg(buf, &(..=*p, ((), t)))?, // TODO: is this expected to be at-most or exactly t?
+                reveals: HashMap::<u32, group::Share>::read_range(buf, ..=*p)?, // TODO: is this expected to be at-most or exactly t?
             },
             5 => Payload::Abort,
             _ => return Err(Error::InvalidEnum(tag)),
@@ -153,34 +163,6 @@ impl<Sig: Array> EncodeSize for Payload<Sig> {
             Payload::Abort => 0,
         }
     }
-}
-
-pub struct Ack<S: Array> {
-    pub public_key: u32,
-    // Signature over round + dealer + commitment
-    pub signature: S,
-}
-
-impl<S: Array> Write for Ack<S> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.public_key.write(buf);
-        self.signature.write(buf);
-    }
-}
-
-impl<S: Array> Read for Ack<S> {
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let public_key = u32::read(buf)?;
-        let signature = S::read(buf)?;
-        Ok(Self {
-            public_key,
-            signature,
-        })
-    }
-}
-
-impl<S: Array> FixedSize for Ack<S> {
-    const SIZE: usize = u32::SIZE + S::SIZE;
 }
 
 // All messages that can be sent over VRF_CHANNEL.

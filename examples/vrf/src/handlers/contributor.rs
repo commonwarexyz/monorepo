@@ -263,7 +263,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
                                     return (round, None);
                                 }
                                 match msg.payload {
-                                    wire::Payload::Ack(msg) => {
+                                    wire::Payload::Ack{ public_key, signature } => {
                                         // Skip if not dealing
                                         let Some((dealer, commitment, _, acks)) = &mut dealer_obj else {
                                             continue;
@@ -275,7 +275,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
                                         }
 
                                         // Verify index matches
-                                        let Some(player) = self.contributors.get(msg.public_key as usize) else {
+                                        let Some(player) = self.contributors.get(public_key as usize) else {
                                             continue;
                                         };
                                         if player != &s {
@@ -285,7 +285,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
 
                                         // Verify signature on incoming ack
                                         let payload = payload(round, &me, commitment);
-                                        if !C::verify(Some(ACK_NAMESPACE), &payload, &s, &msg.signature) {
+                                        if !C::verify(Some(ACK_NAMESPACE), &payload, &s, &signature) {
                                             warn!(round, sender = ?s, "received invalid ack signature");
                                             continue;
                                         }
@@ -295,8 +295,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
                                             warn!(round, error = ?e, sender = ?s, "failed to record ack");
                                             continue;
                                         }
-                                        acks.insert(msg.public_key, msg.signature);
-
+                                        acks.insert(public_key, signature);
                                     },
                                     wire::Payload::Share{ commitment, share } => {
                                         // Store share
@@ -313,10 +312,10 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
                                                 Recipients::One(s),
                                                 wire::Dkg {
                                                     round,
-                                                    payload: wire::Payload::Ack(wire::Ack {
+                                                    payload: wire::Payload::Ack{
                                                         public_key: me_idx,
                                                         signature,
-                                                    }),
+                                                    },
                                                 }
                                                 .encode()
                                                 .into(),
@@ -342,24 +341,15 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
 
         // Send commitment to arbiter
         if let Some((_, commitment, shares, acks)) = dealer_obj {
-            let mut ack_vec: Vec<wire::Ack<C::Signature>> = Vec::with_capacity(acks.len());
             let mut reveals = Vec::new();
             for idx in 0..self.contributors.len() as u32 {
-                match acks.get(&idx) {
-                    Some(signature) => {
-                        ack_vec.push(wire::Ack {
-                            public_key: idx,
-                            signature: signature.clone(),
-                        });
-                    }
-                    None => {
-                        reveals.push(shares[idx as usize]);
-                    }
+                if !acks.contains_key(&idx) {
+                    reveals.push(shares[idx as usize]);
                 }
             }
             debug!(
                 round,
-                acks = ack_vec.len(),
+                acks = acks.len(),
                 reveals = reveals.len(),
                 "sending commitment to arbiter"
             );
@@ -370,7 +360,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
                         round,
                         payload: wire::Payload::Commitment {
                             commitment,
-                            acks: ack_vec,
+                            acks,
                             reveals,
                         },
                     }
