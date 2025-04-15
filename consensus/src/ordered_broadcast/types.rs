@@ -1,4 +1,3 @@
-use super::Error;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_cryptography::{
@@ -10,6 +9,93 @@ use commonware_cryptography::{
     Digest, Verifier,
 };
 use commonware_utils::{union, Array};
+use futures::channel::oneshot;
+
+/// Error that may be encountered when interacting with `ordered-broadcast`.
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    // Parser Errors
+    #[error("Missing chunk")]
+    MissingChunk,
+    #[error("Missing parent")]
+    ParentMissing,
+    #[error("Parent on genesis chunk")]
+    ParentOnGenesis,
+    #[error("Invalid partial")]
+    InvalidPartial,
+    #[error("Invalid threshold")]
+    InvalidThreshold,
+    #[error("Invalid sequencer")]
+    InvalidSequencer,
+    #[error("Invalid payload")]
+    InvalidPayload,
+    #[error("Invalid signature")]
+    InvalidSignature,
+
+    // Application Verification Errors
+    #[error("Application verify error: {0}")]
+    AppVerifyCanceled(oneshot::Canceled),
+    #[error("Application verified no tip")]
+    AppVerifiedNoTip,
+    #[error("Application verified height mismatch")]
+    AppVerifiedHeightMismatch,
+    #[error("Application verified payload mismatch")]
+    AppVerifiedPayloadMismatch,
+
+    // P2P Errors
+    #[error("Unable to send message")]
+    UnableToSendMessage,
+
+    // Broadcast errors
+    #[error("Already thresholded")]
+    AlreadyThresholded,
+    #[error("I am not a sequencer in epoch {0}")]
+    IAmNotASequencer(u64),
+    #[error("Nothing to rebroadcast")]
+    NothingToRebroadcast,
+    #[error("Broadcast failed")]
+    BroadcastFailed,
+    #[error("Missing threshold")]
+    MissingThreshold,
+    #[error("Invalid context sequencer")]
+    ContextSequencer,
+    #[error("Invalid context height")]
+    ContextHeight,
+
+    // Epoch Errors
+    #[error("Unknown identity at epoch {0}")]
+    UnknownIdentity(u64),
+    #[error("Unknown validators at epoch {0}")]
+    UnknownValidators(u64),
+    #[error("Epoch {0} has no sequencer {1}")]
+    UnknownSequencer(u64, String),
+    #[error("Epoch {0} has no validator {1}")]
+    UnknownValidator(u64, String),
+    #[error("Unknown share at epoch {0}")]
+    UnknownShare(u64),
+
+    // Peer Errors
+    #[error("Peer mismatch")]
+    PeerMismatch,
+
+    // Signature Errors
+    #[error("Invalid node signature")]
+    InvalidNodeSignature,
+    #[error("Invalid partial signature")]
+    InvalidAckSignature,
+
+    // Ignorable Message Errors
+    #[error("Invalid ack epoch {0} outside bounds {1} - {2}")]
+    AckEpochOutsideBounds(u64, u64, u64),
+    #[error("Invalid ack height {0} outside bounds {1} - {2}")]
+    AckHeightOutsideBounds(u64, u64, u64),
+    #[error("Chunk height {0} lower than tip height {1}")]
+    ChunkHeightTooLow(u64, u64),
+
+    // Slashable Errors
+    #[error("Chunk mismatch from sender {0} with height {1}")]
+    ChunkMismatch(String, u64),
+}
 
 /// Used as the [`Index`](crate::Supervisor::Index) type.
 /// Defines the current set of sequencers and validators.
@@ -315,7 +401,9 @@ impl<P: Array, D: Digest> FixedSize for Ack<P, D> {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Activity<C: Verifier, D: Digest> {
     Proposal(Proposal<C, D>),
+    Ack(),
     Lock(Lock<C::PublicKey, D>),
+    ChunkMismatch(),
 }
 
 impl<C: Verifier, D: Digest> Write for Activity<C, D> {
@@ -325,9 +413,15 @@ impl<C: Verifier, D: Digest> Write for Activity<C, D> {
                 0u8.write(writer);
                 proposal.write(writer);
             }
-            Activity::Lock(lock) => {
+            Activity::Ack() => {
                 1u8.write(writer);
+            }
+            Activity::Lock(lock) => {
+                2u8.write(writer);
                 lock.write(writer);
+            }
+            Activity::ChunkMismatch() => {
+                3u8.write(writer);
             }
         }
     }
@@ -337,7 +431,9 @@ impl<C: Verifier, D: Digest> Read for Activity<C, D> {
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         match u8::read(reader)? {
             0 => Ok(Activity::Proposal(Proposal::read(reader)?)),
-            1 => Ok(Activity::Lock(Lock::read(reader)?)),
+            1 => Ok(Activity::Ack()),
+            2 => Ok(Activity::Lock(Lock::read(reader)?)),
+            3 => Ok(Activity::ChunkMismatch()),
             _ => Err(CodecError::Invalid(
                 "consensus::ordered_broadcast::Activity",
                 "Invalid type",
@@ -350,7 +446,9 @@ impl<C: Verifier, D: Digest> EncodeSize for Activity<C, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Activity::Proposal(proposal) => proposal.encode_size(),
+            Activity::Ack() => 0,
             Activity::Lock(lock) => lock.encode_size(),
+            Activity::ChunkMismatch() => 0,
         }
     }
 }

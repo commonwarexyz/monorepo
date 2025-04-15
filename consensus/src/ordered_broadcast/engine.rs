@@ -10,8 +10,8 @@
 use super::{
     metrics,
     types::{
-        ack_message, ack_namespace, chunk_namespace, Ack, Activity, Chunk, Context, Epoch, Lock,
-        Node, Parent, Proposal,
+        ack_message, ack_namespace, chunk_namespace, Ack, Activity, Chunk, Context, Epoch, Error,
+        Lock, Node, Parent, Proposal,
     },
     AckManager, Config, TipManager,
 };
@@ -46,7 +46,6 @@ use std::{
     marker::PhantomData,
     time::{Duration, SystemTime},
 };
-use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
 /// Represents a pending verification request to the automaton.
@@ -1061,72 +1060,4 @@ impl<
         // Prune journal, ignoring errors
         let _ = journal.prune(section).await;
     }
-}
-
-/// Errors that can occur when running the engine.
-#[derive(Error, Debug)]
-enum Error {
-    // Application Verification Errors
-    #[error("Application verify error: {0}")]
-    AppVerifyCanceled(oneshot::Canceled),
-    #[error("Application verified no tip")]
-    AppVerifiedNoTip,
-    #[error("Application verified height mismatch")]
-    AppVerifiedHeightMismatch,
-    #[error("Application verified payload mismatch")]
-    AppVerifiedPayloadMismatch,
-
-    // P2P Errors
-    #[error("Unable to send message")]
-    UnableToSendMessage,
-
-    // Broadcast errors
-    #[error("Already thresholded")]
-    AlreadyThresholded,
-    #[error("I am not a sequencer in epoch {0}")]
-    IAmNotASequencer(u64),
-    #[error("Nothing to rebroadcast")]
-    NothingToRebroadcast,
-    #[error("Broadcast failed")]
-    BroadcastFailed,
-    #[error("Missing threshold")]
-    MissingThreshold,
-    #[error("Invalid context sequencer")]
-    ContextSequencer,
-    #[error("Invalid context height")]
-    ContextHeight,
-
-    // Epoch Errors
-    #[error("Unknown identity at epoch {0}")]
-    UnknownIdentity(u64),
-    #[error("Unknown validators at epoch {0}")]
-    UnknownValidators(u64),
-    #[error("Epoch {0} has no sequencer {1}")]
-    UnknownSequencer(u64, String),
-    #[error("Epoch {0} has no validator {1}")]
-    UnknownValidator(u64, String),
-    #[error("Unknown share at epoch {0}")]
-    UnknownShare(u64),
-
-    // Peer Errors
-    #[error("Peer mismatch")]
-    PeerMismatch,
-
-    // Signature Errors
-    #[error("Invalid node signature")]
-    InvalidNodeSignature,
-    #[error("Invalid partial signature")]
-    InvalidAckSignature,
-
-    // Ignorable Message Errors
-    #[error("Invalid ack epoch {0} outside bounds {1} - {2}")]
-    AckEpochOutsideBounds(u64, u64, u64),
-    #[error("Invalid ack height {0} outside bounds {1} - {2}")]
-    AckHeightOutsideBounds(u64, u64, u64),
-    #[error("Chunk height {0} lower than tip height {1}")]
-    ChunkHeightTooLow(u64, u64),
-
-    // Slashable Errors
-    #[error("Chunk mismatch from sender {0} with height {1}")]
-    ChunkMismatch(String, u64),
 }

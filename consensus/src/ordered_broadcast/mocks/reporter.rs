@@ -142,11 +142,17 @@ impl<C: Verifier, D: Digest> Z for Mailbox<C, D> {
             Activity::Proposal(_) => {
                 // TODO: implement
             }
+            Activity::Ack() => {
+                // TODO: implement
+            }
             Activity::Lock(lock) => {
                 self.sender
                     .send(Message::Locked(lock))
                     .await
                     .expect("Failed to send locked");
+            }
+            Activity::ChunkMismatch() => {
+                // TODO: implement
             }
         }
     }
