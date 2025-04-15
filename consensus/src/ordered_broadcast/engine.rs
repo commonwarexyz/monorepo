@@ -8,9 +8,12 @@
 //! - Notifying other actors of new chunks and threshold signatures
 
 use super::{
-    metrics, namespace, parsed, serializer, AckManager, Config, Context, Epoch, Prover, TipManager,
+    metrics,
+    types::{ack_namespace, chunk_namespace, Ack, Activity, Chunk, Context, Epoch, Node},
+    AckManager, Config, TipManager,
 };
-use crate::{Automaton, Committer, Monitor, Relay, Supervisor, ThresholdSupervisor};
+use crate::{Automaton, Monitor, Relay, Reporter, Supervisor, ThresholdSupervisor};
+use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{self},
@@ -59,7 +62,7 @@ pub struct Engine<
     D: Digest,
     A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
     R: Relay<Digest = D>,
-    Z: Committer<Digest = D>,
+    Z: Reporter<Activity = Activity<C, D>>,
     M: Monitor<Index = Epoch>,
     Su: Supervisor<Index = Epoch, PublicKey = C::PublicKey>,
     TSu: ThresholdSupervisor<
@@ -163,7 +166,7 @@ pub struct Engine<
 
     // Tracks the acknowledgements for chunks.
     // This is comprised of partial signatures or threshold signatures.
-    ack_manager: AckManager<D, C::PublicKey>,
+    ack_manager: AckManager<C::PublicKey, D>,
 
     // The current epoch.
     epoch: Epoch,
@@ -199,7 +202,7 @@ impl<
         D: Digest,
         A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
         R: Relay<Digest = D>,
-        Z: Committer<Digest = D>,
+        Z: Reporter<Activity = Activity<C, D>>,
         M: Monitor<Index = Epoch>,
         Su: Supervisor<Index = Epoch, PublicKey = C::PublicKey>,
         TSu: ThresholdSupervisor<
@@ -225,8 +228,8 @@ impl<
             monitor: cfg.monitor,
             sequencers: cfg.sequencers,
             validators: cfg.validators,
-            chunk_namespace: namespace::chunk(&cfg.namespace),
-            ack_namespace: namespace::ack(&cfg.namespace),
+            chunk_namespace: chunk_namespace(&cfg.namespace),
+            ack_namespace: ack_namespace(&cfg.namespace),
             rebroadcast_timeout: cfg.rebroadcast_timeout,
             rebroadcast_deadline: None,
             epoch_bounds: cfg.epoch_bounds,
@@ -237,7 +240,7 @@ impl<
             journal_name_prefix: cfg.journal_name_prefix,
             journals: BTreeMap::new(),
             tip_manager: TipManager::<C, D>::new(),
-            ack_manager: AckManager::<D, C::PublicKey>::new(),
+            ack_manager: AckManager::<C::PublicKey, D>::new(),
             epoch: 0,
             priority_proposals: cfg.priority_proposals,
             priority_acks: cfg.priority_acks,
@@ -365,7 +368,7 @@ impl<
                         }
                     };
                     let mut guard = self.metrics.nodes.guard(Status::Invalid);
-                    let node = match parsed::Node::<C, D>::decode(&msg) {
+                    let node = match Node::decode(msg) {
                         Ok(node) => node,
                         Err(err) => {
                             warn!(?err, ?sender, "node decode failed");
@@ -900,11 +903,7 @@ impl<
     ///
     /// Returns the chunk, epoch, and partial signature if the ack is valid.
     /// Returns an error if the ack is invalid.
-    fn validate_ack(
-        &self,
-        ack: &parsed::Ack<D, C::PublicKey>,
-        sender: &C::PublicKey,
-    ) -> Result<(), Error> {
+    fn validate_ack(&self, ack: &Ack<C::PublicKey, D>, sender: &C::PublicKey) -> Result<(), Error> {
         // Validate chunk
         self.validate_chunk(&ack.chunk, ack.epoch)?;
 
@@ -912,7 +911,7 @@ impl<
         let Some(index) = self.validators.is_participant(ack.epoch, sender) else {
             return Err(Error::UnknownValidator(ack.epoch, sender.to_string()));
         };
-        if index != ack.partial.index {
+        if index != ack.signature.index {
             return Err(Error::PeerMismatch);
         }
 
@@ -948,13 +947,9 @@ impl<
         let Some(identity) = self.validators.identity(ack.epoch) else {
             return Err(Error::UnknownIdentity(ack.epoch));
         };
-        ops::partial_verify_message(
-            identity,
-            Some(&self.ack_namespace),
-            &serializer::ack(&ack.chunk, ack.epoch),
-            &ack.partial,
-        )
-        .map_err(|_| Error::InvalidPartialSignature)?;
+        if !ack.verify(identity, &self.ack_namespace) {
+            return Err(Error::InvalidPartialSignature);
+        }
 
         Ok(())
     }
@@ -963,11 +958,7 @@ impl<
     ///
     /// Returns the chunk if the chunk is valid.
     /// Returns an error if the chunk is invalid.
-    fn validate_chunk(
-        &self,
-        chunk: &parsed::Chunk<D, C::PublicKey>,
-        epoch: Epoch,
-    ) -> Result<(), Error> {
+    fn validate_chunk(&self, chunk: &Chunk<C::PublicKey, D>, epoch: Epoch) -> Result<(), Error> {
         // Verify sequencer
         if self
             .sequencers
@@ -1039,13 +1030,12 @@ impl<
 
             // Read from the stream, which may be in arbitrary order.
             // Remember the highest node height
-            let mut tip: Option<parsed::Node<C, D>> = None;
+            let mut tip: Option<Node<C, D>> = None;
             let mut num_items = 0;
             while let Some(msg) = stream.next().await {
                 num_items += 1;
                 let (_, _, _, msg) = msg.expect("unable to decode journal message");
-                let node = parsed::Node::<C, D>::decode(&msg)
-                    .expect("journal message is unexpected format");
+                let node = Node::decode(msg).expect("journal message is unexpected format");
                 let height = node.chunk.height;
                 match tip {
                     None => {
@@ -1077,7 +1067,7 @@ impl<
     ///
     /// To prevent ever writing two conflicting `Chunk`s at the same height,
     /// the journal must already be open and replayed.
-    async fn journal_append(&mut self, node: &parsed::Node<C, D>) {
+    async fn journal_append(&mut self, node: &Node<C, D>) {
         let section = self.get_journal_section(node.chunk.height);
         self.journals
             .get_mut(&node.chunk.sequencer)
