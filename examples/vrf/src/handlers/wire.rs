@@ -7,7 +7,12 @@ use commonware_cryptography::bls12381::primitives::{
 use commonware_utils::{quorum, Array};
 use std::collections::HashMap;
 
-// All messages that can be sent over DKG_CHANNEL.
+/// Represents a top-level message for the Distributed Key Generation (DKG) protocol,
+/// typically sent over a dedicated DKG communication channel.
+///
+/// It encapsulates a specific round number and a payload containing the actual
+/// DKG protocol message content.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Dkg<Sig: Array> {
     pub round: u64,
     pub payload: Payload<Sig>,
@@ -34,38 +39,69 @@ impl<Sig: Array> EncodeSize for Dkg<Sig> {
     }
 }
 
+/// Defines the different types of messages exchanged during the DKG protocol.
+///
+/// This enum is used as the `payload` field within the [`Dkg`] message struct.
+/// The generic parameter `Sig` represents the type used for signatures in acknowledgments.
+#[derive(Clone, Debug, PartialEq)]
 pub enum Payload<Sig: Array> {
-    /// Sent by arbiter to start DKG
-    Start { group: Option<poly::Public> },
+    /// Message sent by the arbiter to initiate a DKG round.
+    ///
+    /// Optionally includes a pre-existing group public key if reforming a group.
+    Start {
+        /// Optional existing group public polynomial commitment.
+        group: Option<poly::Public>,
+    },
 
-    /// Sent by dealer to player
+    /// Message sent by a dealer node to a player node.
+    ///
+    /// Contains the dealer's public commitment to their polynomial and the specific
+    /// share calculated for the receiving player.
     Share {
+        /// The dealer's public commitment (coefficients of the polynomial).
         commitment: poly::Public,
+        /// The secret share evaluated for the recipient player.
         share: group::Share,
     },
 
-    /// Sent by player to dealer
+    /// Message sent by a player node back to the dealer node.
+    ///
+    /// Acknowledges the receipt and verification of a [`Payload::Share`] message.
+    /// Includes a signature to authenticate the acknowledgment.
     Ack {
+        /// The public key identifier of the player sending the acknowledgment.
         public_key: u32,
-
-        /// Signature over round + dealer + commitment
+        /// A signature covering the DKG round, dealer ID, and the dealer's commitment.
+        /// This confirms the player received and validated the correct share.
         signature: Sig,
     },
 
-    /// Sent by dealer to arbiter after collecting acks from players
+    /// Message sent by a dealer node to the arbiter.
+    ///
+    /// Sent after the dealer has collected a sufficient number of [`Payload::Ack`] messages
+    /// from players. Contains the dealer's commitment, the collected acknowledgments,
+    /// and potentially revealed shares (e.g., for handling unresponsive players).
     Commitment {
+        /// The dealer's public commitment.
         commitment: poly::Public,
+        /// A map of player public key identifiers to their corresponding acknowledgment signatures.
         acks: HashMap<u32, Sig>,
+        /// A vector of shares revealed by the dealer, potentially for players who did not acknowledge.
         reveals: Vec<group::Share>,
     },
 
-    /// Sent by arbiter to a player if round is successful
+    /// Message sent by the arbiter to player nodes upon successful completion of a DKG round.
+    ///
+    /// Contains the final aggregated commitments and revealed shares from all participating dealers.
     Success {
+        /// A map of dealer public key identifiers to their final public commitments.
         commitments: HashMap<u32, poly::Public>,
+        /// A map of player public key identifiers to their corresponding revealed shares,
+        /// aggregated from all dealers' [`Payload::Commitment`] messages.
         reveals: HashMap<u32, group::Share>,
     },
 
-    /// Sent by arbiter to all players if round is unsuccessful
+    /// Message broadcast by the arbiter to all player nodes if the DKG round fails or is aborted.
     Abort,
 }
 
@@ -130,18 +166,25 @@ impl<Sig: Array> Read<usize> for Payload<Sig> {
                 public_key: u32::read(buf)?,
                 signature: Sig::read(buf)?,
             },
-            3 => Payload::Commitment {
-                commitment: poly::Public::read_cfg(buf, &t)?,
-                // The lengths of the acks and reveals should equal p. Here, we allow either of them
-                // to be length up-to-p, but technically reveals should be constrained to equal
-                // exactly `p - acks.len()`.
-                acks: HashMap::<u32, Sig>::read_range(buf, ..=*p)?,
-                reveals: Vec::<group::Share>::read_range(buf, ..=*p)?,
-            },
-            4 => Payload::Success {
-                commitments: HashMap::<u32, poly::Public>::read_cfg(buf, &(..=*p, ((), t)))?, // TODO: is this expected to be at-most or exactly t?
-                reveals: HashMap::<u32, group::Share>::read_range(buf, ..=*p)?, // TODO: is this expected to be at-most or exactly t?
-            },
+            3 => {
+                let commitment = poly::Public::read_cfg(buf, &t)?;
+                let acks = HashMap::<u32, Sig>::read_range(buf, ..=*p)?;
+                let r = p.checked_sub(acks.len()).unwrap(); // The lengths of the two sets must sum to exactly p.
+                let reveals = Vec::<group::Share>::read_range(buf, r..=r)?;
+                Payload::Commitment {
+                    commitment,
+                    acks,
+                    reveals,
+                }
+            }
+            4 => {
+                let commitments = HashMap::<u32, poly::Public>::read_cfg(buf, &(..=*p, ((), t)))?;
+                let reveals = HashMap::<u32, group::Share>::read_range(buf, ..=*p)?;
+                Payload::Success {
+                    commitments,
+                    reveals,
+                }
+            }
             5 => Payload::Abort,
             _ => return Err(Error::InvalidEnum(tag)),
         };
@@ -168,9 +211,16 @@ impl<Sig: Array> EncodeSize for Payload<Sig> {
     }
 }
 
-// All messages that can be sent over VRF_CHANNEL.
+/// Represents a message containing a Verifiable Random Function (VRF) output,
+/// typically sent over a dedicated VRF communication channel.
+///
+/// It includes the round number for which the VRF was computed and the resulting
+/// evaluated signature (VRF proof).
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Vrf {
+    /// The round number associated with this VRF output.
     pub round: u64,
+    /// The VRF signature/proof, represented as an evaluation of a threshold signature.
     pub signature: Eval<group::Signature>,
 }
 
@@ -191,4 +241,142 @@ impl Read for Vrf {
 
 impl FixedSize for Vrf {
     const SIZE: usize = u64::SIZE + Eval::<group::Signature>::SIZE;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_codec::{Decode, Encode};
+    use commonware_cryptography::bls12381::primitives::group::Element;
+    use commonware_cryptography::bls12381::primitives::{group, poly};
+    use commonware_cryptography::ed25519::Signature;
+    use std::collections::HashMap;
+
+    const N: usize = 11;
+    const T: usize = 8;
+
+    fn signature_from(b: u8) -> Signature {
+        Signature::try_from(&[b; Signature::SIZE][..]).unwrap()
+    }
+
+    fn new_share(v: u32) -> group::Share {
+        group::Share {
+            index: v,
+            private: group::Private::one(),
+        }
+    }
+
+    fn new_eval(v: u32) -> Eval<group::Signature> {
+        Eval {
+            index: v,
+            value: group::Signature::one(),
+        }
+    }
+
+    fn new_poly() -> poly::Public {
+        poly::Public::from(vec![group::Public::one(); T])
+    }
+
+    #[test]
+    fn test_dkg_start_codec() {
+        let original: Dkg<Signature> = Dkg {
+            round: 1,
+            payload: Payload::Start {
+                group: Some(new_poly()),
+            },
+        };
+        let encoded = original.encode();
+        let decoded = Dkg::<Signature>::decode_cfg(encoded, &N).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_dkg_share_codec() {
+        let original: Dkg<Signature> = Dkg {
+            round: 1,
+            payload: Payload::Share {
+                commitment: new_poly(),
+                share: new_share(42),
+            },
+        };
+        let encoded = original.encode();
+        let decoded = Dkg::<Signature>::decode_cfg(encoded, &N).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_dkg_ack_codec() {
+        let original: Dkg<Signature> = Dkg {
+            round: 1,
+            payload: Payload::Ack {
+                public_key: 1,
+                signature: signature_from(123),
+            },
+        };
+        let encoded = original.encode();
+        let decoded = Dkg::<Signature>::decode_cfg(encoded, &N).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_dkg_commitment_codec() {
+        let commitment = new_poly();
+        let mut acks = HashMap::<u32, Signature>::new();
+        acks.insert(1, signature_from(123));
+        let num_reveals = N - acks.len();
+        let reveals_vec = vec![new_share(4321); num_reveals];
+
+        let original: Dkg<Signature> = Dkg {
+            round: 1,
+            payload: Payload::Commitment {
+                commitment: commitment.clone(),
+                acks: acks.clone(),
+                reveals: reveals_vec.clone(),
+            },
+        };
+        let encoded = original.encode();
+        let decoded = Dkg::<Signature>::decode_cfg(encoded, &N).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_dkg_success_codec() {
+        let mut commitments = HashMap::<u32, poly::Public>::new();
+        commitments.insert(1, new_poly());
+        let mut reveals = HashMap::<u32, group::Share>::new();
+        reveals.insert(1, new_share(123));
+
+        let original: Dkg<Signature> = Dkg {
+            round: 1,
+            payload: Payload::Success {
+                commitments,
+                reveals,
+            },
+        };
+        let encoded = original.encode();
+        let decoded = Dkg::<Signature>::decode_cfg(encoded, &N).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_dkg_abort_codec() {
+        let original: Dkg<Signature> = Dkg {
+            round: 1,
+            payload: Payload::Abort,
+        };
+        let encoded = original.encode();
+        let decoded = Dkg::<Signature>::decode_cfg(encoded, &N).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_vrf_codec() {
+        let original = Vrf {
+            round: 1,
+            signature: new_eval(123),
+        };
+        let encoded = original.encode();
+        let decoded = Vrf::decode_cfg(encoded, &()).unwrap();
+        assert_eq!(original, decoded);
+    }
 }
