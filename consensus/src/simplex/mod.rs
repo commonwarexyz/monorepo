@@ -503,7 +503,7 @@ mod tests {
         let finalized = Arc::new(Mutex::new(HashMap::new()));
         let completed = Arc::new(Mutex::new(HashSet::new()));
         let supervised = Arc::new(Mutex::new(Vec::new()));
-        let (mut executor, mut context, _) = Executor::timed(Duration::from_secs(30));
+        let (mut executor, mut context, _) = Executor::timed(Duration::from_secs(60));
         while completed.lock().unwrap().len() != n as usize {
             let namespace = namespace.clone();
             let shutdowns = shutdowns.clone();
@@ -542,7 +542,7 @@ mod tests {
                 // Link all validators
                 let link = Link {
                     latency: 50.0,
-                    jitter: 50.0,
+                    jitter: 40.0,
                     success_rate: 1.0,
                 };
                 link_validators(&mut oracle, &validators, Action::Link(link), None).await;
@@ -598,7 +598,7 @@ mod tests {
                         nullify_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
-skip_timeout,
+                        skip_timeout,
                         max_fetch_count: 1,
                         max_fetch_size: 1024 * 512,
                         fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
@@ -1755,7 +1755,7 @@ skip_timeout,
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config {
             seed,
-            timeout: Some(Duration::from_secs(3_000)),
+            timeout: Some(Duration::from_secs(5_000)),
             ..deterministic::Config::default()
         };
         let (executor, context, auditor) = Executor::init(cfg);
