@@ -40,7 +40,10 @@ pub fn from_hex_formatted(hex: &str) -> Option<Vec<u8>> {
     from_hex(res)
 }
 
-/// Compute the maximum value of `f` (faults) that can be tolerated given `n = 3f + 1`.
+/// Compute the maximum number of `f` (faults) that can be tolerated for a given set of `n`
+/// participants. This is the maximum integer `f` such that `n >= 3*f + 1`.
+///
+/// If the value of `n` is too small to tolerate any faults, this function returns `None`.
 pub fn max_faults(n: u32) -> Option<u32> {
     let f = n.checked_sub(1)? / 3;
     if f == 0 {
@@ -49,12 +52,13 @@ pub fn max_faults(n: u32) -> Option<u32> {
     Some(f)
 }
 
-/// Assuming that `n = 3f + 1`, compute the minimum size of `q` such that `q >= 2f + 1`.
+/// Compute the quorum size for a given set of `n` participants. This is the minimum integer `q`
+/// such that `3*q >= 2*n + 1`. It is also equal to `n - f`, where `f` is the maximum number of faults.
 ///
 /// If the value of `n` is too small to tolerate any faults, this function returns `None`.
 pub fn quorum(n: u32) -> Option<u32> {
     let f = max_faults(n)?;
-    Some((2 * f) + 1)
+    Some(n.checked_sub(f).unwrap())
 }
 
 /// Computes the union of two byte slices.
@@ -168,18 +172,31 @@ mod tests {
     }
 
     #[test]
-    fn test_quorum() {
-        // Test case 0: n = 3 (3*0 + 1)
-        assert_eq!(quorum(3), None);
+    fn test_quorum_and_max_faults() {
+        // n, expected_f, expected_q
+        let test_cases = [
+            (0, None, None),
+            (1, None, None),
+            (2, None, None),
+            (3, None, None),
+            (4, Some(1), Some(3)),
+            (5, Some(1), Some(4)),
+            (6, Some(1), Some(5)),
+            (7, Some(2), Some(5)),
+            (8, Some(2), Some(6)),
+            (9, Some(2), Some(7)),
+            (10, Some(3), Some(7)),
+        ];
 
-        // Test case 1: n = 4 (3*1 + 1)
-        assert_eq!(quorum(4), Some(3));
-
-        // Test case 2: n = 7 (3*2 + 1)
-        assert_eq!(quorum(7), Some(5));
-
-        // Test case 3: n = 10 (3*3 + 1)
-        assert_eq!(quorum(10), Some(7));
+        for (n, ef, eq) in test_cases {
+            assert_eq!(max_faults(n), ef);
+            assert_eq!(quorum(n), eq);
+            if let (Some(f), Some(q)) = (ef, eq) {
+                assert_eq!(n, f + q);
+            } else {
+                assert!(ef.is_none() && eq.is_none());
+            }
+        }
     }
 
     #[test]
