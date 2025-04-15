@@ -5,6 +5,7 @@ use prometheus_client::{
 
 pub mod audited;
 pub mod memory;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod tokio;
 
 pub struct Metrics {
