@@ -67,9 +67,6 @@ pub struct Config<
     /// Maximum number of notarizations/nullifications to request/respond with at once.
     pub max_fetch_count: usize,
 
-    /// Maximum number of bytes to respond with at once.
-    pub max_fetch_size: usize,
-
     /// Maximum rate of requests to send to a given peer.
     ///
     /// Inbound rate limiting is handled by `commonware-p2p`.
@@ -125,10 +122,6 @@ impl<
         assert!(
             self.max_fetch_count > 0,
             "it must be possible to fetch at least one container per request"
-        );
-        assert!(
-            self.max_fetch_size > 0,
-            "it must be possible to fetch at least one byte"
         );
         assert!(
             self.fetch_concurrent > 0,

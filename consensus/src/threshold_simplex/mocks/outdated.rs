@@ -7,7 +7,7 @@ use crate::{
     },
     ThresholdSupervisor,
 };
-use commonware_codec::Codec;
+use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{
     bls12381::primitives::{group, ops},
     Hasher,
