@@ -73,7 +73,7 @@ pub struct Config {
 }
 
 /// Implementation of `Journal` storage.
-pub struct Journal<B: Blob, E: Storage<B> + Metrics, A: Array> {
+pub struct Journal<E: Storage + Metrics, A: Array> {
     context: E,
     cfg: Config,
 
@@ -82,7 +82,7 @@ pub struct Journal<B: Blob, E: Storage<B> + Metrics, A: Array> {
     // - Indices are consecutive and without gaps.
     // - There will always be at least one blob in the map.
     // - The most recent blob will never be completely full, but it may be empty.
-    blobs: BTreeMap<u64, B>,
+    blobs: BTreeMap<u64, E::Blob>,
 
     tracked: Gauge,
     synced: Counter,
@@ -91,7 +91,7 @@ pub struct Journal<B: Blob, E: Storage<B> + Metrics, A: Array> {
     _array: PhantomData<A>,
 }
 
-impl<B: Blob, E: Storage<B> + Metrics, A: Array> Journal<B, E, A> {
+impl<E: Storage + Metrics, A: Array> Journal<E, A> {
     const CHUNK_SIZE: usize = u32::SIZE + A::SIZE;
     const CHUNK_SIZE_U64: u64 = Self::CHUNK_SIZE as u64;
 
@@ -393,7 +393,7 @@ impl<B: Blob, E: Storage<B> + Metrics, A: Array> Journal<B, E, A> {
     }
 
     /// Return the blob containing the most recent items and its index.
-    fn newest_blob(&self) -> (u64, &B) {
+    fn newest_blob(&self) -> (u64, &E::Blob) {
         if let Some((index, blob)) = self.blobs.last_key_value() {
             return (*index, blob);
         }
@@ -401,7 +401,7 @@ impl<B: Blob, E: Storage<B> + Metrics, A: Array> Journal<B, E, A> {
     }
 
     /// Return the blob containing the oldest retained items and its index.
-    fn oldest_blob(&self) -> (u64, &B) {
+    fn oldest_blob(&self) -> (u64, &E::Blob) {
         if let Some((index, blob)) = self.blobs.first_key_value() {
             return (*index, blob);
         }
@@ -769,7 +769,7 @@ mod tests {
                 .await
                 .expect("Failed to remove blob");
             // Re-initialize the journal to simulate a restart
-            let result = Journal::<_, _, Digest>::init(context.clone(), cfg.clone()).await;
+            let result = Journal::<_, Digest>::init(context.clone(), cfg.clone()).await;
             assert!(matches!(result.err().unwrap(), Error::MissingBlob(n) if n == 40));
         });
     }
@@ -813,7 +813,7 @@ mod tests {
             blob.close().await.expect("Failed to close blob");
 
             // Re-initialize the journal to simulate a restart
-            let journal = Journal::<_, _, Digest>::init(context.clone(), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
             // the last corrupted item should get discarded
@@ -828,7 +828,7 @@ mod tests {
                 .remove(&cfg.partition, Some(&1u64.to_be_bytes()))
                 .await
                 .expect("Failed to remove blob");
-            let journal = Journal::<_, _, Digest>::init(context.clone(), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
             assert_eq!(journal.size().await.unwrap(), 3);
@@ -870,7 +870,7 @@ mod tests {
             blob.close().await.expect("Failed to close blob");
 
             // Re-initialize the journal to simulate a restart
-            let mut journal = Journal::<_, _, Digest>::init(context.clone(), cfg.clone())
+            let mut journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
 
@@ -982,7 +982,7 @@ mod tests {
             journal.close().await.expect("Failed to close journal");
 
             // Make sure re-opened journal is as expected
-            let mut journal: Journal<_, _, Digest> = Journal::init(context.clone(), cfg.clone())
+            let mut journal: Journal<_, Digest> = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to re-initialize journal");
             assert_eq!(journal.size().await.unwrap(), 10 * (100 - 49));

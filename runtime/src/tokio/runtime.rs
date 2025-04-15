@@ -695,7 +695,9 @@ impl Clone for Blob {
     }
 }
 
-impl crate::Storage<Blob> for Context {
+impl crate::Storage for Context {
+    type Blob = Blob;
+
     async fn open(&self, partition: &str, name: &[u8]) -> Result<Blob, Error> {
         // Acquire the filesystem lock
         let _guard = self.executor.fs.lock().await;
