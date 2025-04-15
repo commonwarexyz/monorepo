@@ -4,10 +4,10 @@ use crate::{
         actors::resolver,
         metrics,
         types::{
-            finalize_namespace, notarize_namespace, nullify_namespace, seed_namespace,
-            view_message, Activity, Attributable, ConflictingFinalize, ConflictingNotarize,
-            Context, Finalization, Finalize, Notarization, Notarize, Nullification, Nullify,
-            NullifyFinalize, Proposal, View, Viewable, Voter,
+            finalize_namespace, notarize_namespace, nullify_namespace, seed_namespace, Activity,
+            Attributable, ConflictingFinalize, ConflictingNotarize, Context, Finalization,
+            Finalize, Notarization, Notarize, Nullification, Nullify, NullifyFinalize, Proposal,
+            View, Viewable, Voter,
         },
     },
     Automaton, Relay, Reporter, ThresholdSupervisor, LATENCY,
@@ -16,7 +16,7 @@ use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{self, Element},
-        ops::{partial_sign_message, threshold_signature_recover},
+        ops::threshold_signature_recover,
         poly,
     },
     Digest, Scheme,
@@ -919,13 +919,15 @@ impl<
 
         // Construct nullify
         let share = self.supervisor.share(self.view).unwrap();
-        let message = view_message(self.view);
-        let view_signature = partial_sign_message(share, Some(&self.nullify_namespace), &message);
-        let seed_signature = partial_sign_message(share, Some(&self.seed_namespace), &message);
-        let null = Nullify::new(self.view, view_signature, seed_signature);
+        let nullify = Nullify::sign(
+            share,
+            self.view,
+            &self.nullify_namespace,
+            &self.seed_namespace,
+        );
 
         // Handle the nullify
-        self.handle_nullify(share.index, null.clone()).await;
+        self.handle_nullify(share.index, nullify.clone()).await;
 
         // Sync the journal
         self.journal
@@ -936,7 +938,7 @@ impl<
             .expect("unable to sync journal");
 
         // Broadcast nullify
-        let msg = Voter::<D>::Nullify(null).encode().into();
+        let msg = Voter::<D>::Nullify(nullify).encode().into();
         sender.send(Recipients::All, msg, true).await.unwrap();
         self.broadcast_messages
             .get_or_create(&metrics::NULLIFY)
@@ -1585,18 +1587,16 @@ impl<
         if !round.verified_proposal {
             return None;
         }
+        round.broadcast_notarize = true;
+
+        // Construct notarize
         let share = self.supervisor.share(view).unwrap();
         let proposal = round.proposal.as_ref().unwrap();
-        let message = proposal.encode();
-        let proposal_signature =
-            partial_sign_message(share, Some(&self.notarize_namespace), &message);
-        let message = view_message(view);
-        let seed_signature = partial_sign_message(share, Some(&self.seed_namespace), &message);
-        round.broadcast_notarize = true;
-        Some(Notarize::new(
+        Some(Notarize::sign(
+            share,
             proposal.clone(),
-            proposal_signature,
-            seed_signature,
+            &self.notarize_namespace,
+            &self.seed_namespace,
         ))
     }
 
@@ -1636,15 +1636,16 @@ impl<
         if round.broadcast_finalize {
             return None;
         }
+        round.broadcast_finalize = true;
         let share = self.supervisor.share(view).unwrap();
         let Some(proposal) = &round.proposal else {
             return None;
         };
-        let message = proposal.encode();
-        let proposal_signature =
-            partial_sign_message(share, Some(&self.finalize_namespace), &message);
-        round.broadcast_finalize = true;
-        Some(Finalize::new(proposal.clone(), proposal_signature))
+        Some(Finalize::sign(
+            share,
+            proposal.clone(),
+            &self.finalize_namespace,
+        ))
     }
 
     async fn construct_finalization(&mut self, view: u64, force: bool) -> Option<Finalization<D>> {

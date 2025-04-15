@@ -2,10 +2,10 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error, FixedSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{
     bls12381::primitives::{
-        group::{Public, Signature},
+        group::{Public, Share, Signature},
         ops::{
-            aggregate_signatures, aggregate_verify_multiple_messages, partial_verify_message,
-            partial_verify_multiple_messages,
+            aggregate_signatures, aggregate_verify_multiple_messages, partial_sign_message,
+            partial_verify_message, partial_verify_multiple_messages,
         },
         poly::{PartialSignature, Poly},
     },
@@ -251,6 +251,20 @@ impl<D: Digest> Notarize<D> {
         )
         .is_ok()
     }
+
+    pub fn sign(
+        share: &Share,
+        proposal: Proposal<D>,
+        notarize_namespace: &[u8],
+        seed_namespace: &[u8],
+    ) -> Self {
+        let proposal_message = proposal.encode();
+        let proposal_signature =
+            partial_sign_message(share, Some(notarize_namespace), &proposal_message);
+        let seed_message = view_message(proposal.view);
+        let seed_signature = partial_sign_message(share, Some(seed_namespace), &seed_message);
+        Notarize::new(proposal, proposal_signature, seed_signature)
+    }
 }
 
 impl<D: Digest> Attributable for Notarize<D> {
@@ -404,6 +418,18 @@ impl Nullify {
         )
         .is_ok()
     }
+
+    pub fn sign(
+        share: &Share,
+        view: View,
+        nullify_namespace: &[u8],
+        seed_namespace: &[u8],
+    ) -> Self {
+        let view_message = view_message(view);
+        let view_signature = partial_sign_message(share, Some(nullify_namespace), &view_message);
+        let seed_signature = partial_sign_message(share, Some(seed_namespace), &view_message);
+        Nullify::new(view, view_signature, seed_signature)
+    }
 }
 
 impl Attributable for Nullify {
@@ -546,6 +572,12 @@ impl<D: Digest> Finalize<D> {
             &self.proposal_signature,
         )
         .is_ok()
+    }
+
+    pub fn sign(share: &Share, proposal: Proposal<D>, finalize_namespace: &[u8]) -> Self {
+        let message = proposal.encode();
+        let proposal_signature = partial_sign_message(share, Some(finalize_namespace), &message);
+        Finalize::new(proposal, proposal_signature)
     }
 }
 
