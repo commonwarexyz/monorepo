@@ -542,7 +542,7 @@ mod tests {
                 // Link all validators
                 let link = Link {
                     latency: 50.0,
-                    jitter: 40.0,
+                    jitter: 25.0,
                     success_rate: 1.0,
                 };
                 link_validators(&mut oracle, &validators, Action::Link(link), None).await;

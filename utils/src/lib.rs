@@ -41,7 +41,7 @@ pub fn from_hex_formatted(hex: &str) -> Option<Vec<u8>> {
 }
 
 /// Compute the maximum number of `f` (faults) that can be tolerated for a given set of `n`
-/// participants. This is the maximum integer `f` such that `n > 3*f`.
+/// participants. This is the maximum integer `f` such that `n >= 3*f + 1`.
 ///
 /// If the value of `n` is too small to tolerate any faults, this function returns `None`.
 pub fn max_faults(n: u32) -> Option<u32> {
@@ -53,7 +53,7 @@ pub fn max_faults(n: u32) -> Option<u32> {
 }
 
 /// Compute the quorum size for a given set of `n` participants. This is the minimum integer `q`
-/// such that `3*q > 2*n`. It is also equal to `n - f`, where `f` is the maximum number of faults.
+/// such that `3*q >= 2*n + 1`. It is also equal to `n - f`, where `f` is the maximum number of faults.
 ///
 /// If the value of `n` is too small to tolerate any faults, this function returns `None`.
 pub fn quorum(n: u32) -> Option<u32> {

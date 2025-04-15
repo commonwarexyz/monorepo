@@ -546,7 +546,7 @@ mod tests {
         let finalized = Arc::new(Mutex::new(HashMap::new()));
         let completed = Arc::new(Mutex::new(HashSet::new()));
         let supervised = Arc::new(Mutex::new(Vec::new()));
-        let (mut executor, mut context, _) = Executor::timed(Duration::from_secs(10 * 60));
+        let (mut executor, mut context, _) = Executor::timed(Duration::from_secs(600));
         while completed.lock().unwrap().len() != n as usize {
             let namespace = namespace.clone();
             let shutdowns = shutdowns.clone();
