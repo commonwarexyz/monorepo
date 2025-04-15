@@ -94,6 +94,12 @@ impl<D: Digest> FixedSize for Proposal<D> {
     const SIZE: usize = View::SIZE + View::SIZE + D::SIZE;
 }
 
+impl<D: Digest> Viewable for Proposal<D> {
+    fn view(&self) -> View {
+        self.view
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Signature<V: Verifier> {
     pub public_key: V::PublicKey,
@@ -129,6 +135,12 @@ impl<V: Verifier> Read for Signature<V> {
 
 impl<V: Verifier> FixedSize for Signature<V> {
     const SIZE: usize = V::PublicKey::SIZE + V::Signature::SIZE;
+}
+
+impl<V: Verifier> Attributable<V> for Signature<V> {
+    fn signer(&self) -> V::PublicKey {
+        self.public_key
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -170,13 +182,13 @@ impl<V: Verifier, D: Digest> FixedSize for Notarize<V, D> {
 
 impl<V: Verifier, D: Digest> Viewable for Notarize<V, D> {
     fn view(&self) -> View {
-        self.proposal.view
+        self.proposal.view()
     }
 }
 
 impl<V: Verifier, D: Digest> Attributable<V> for Notarize<V, D> {
     fn signer(&self) -> V::PublicKey {
-        self.signature.public_key
+        self.signature.signer()
     }
 }
 
