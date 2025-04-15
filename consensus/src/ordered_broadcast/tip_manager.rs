@@ -66,9 +66,8 @@ mod tests {
 
     /// Helper functions for TipManager tests.
     mod helpers {
-        use crate::ordered_broadcast::types::Chunk;
-
         use super::*;
+        use crate::ordered_broadcast::types::Chunk;
         use commonware_codec::FixedSize;
         use commonware_cryptography::Signer;
 
