@@ -218,12 +218,7 @@ impl<C: Verifier, D: Digest> Write for Node<C, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.chunk.write(writer);
         self.signature.write(writer);
-        if let Some(parent) = &self.parent {
-            true.write(writer);
-            parent.write(writer);
-        } else {
-            false.write(writer);
-        }
+        self.parent.write(writer);
     }
 }
 
@@ -231,11 +226,7 @@ impl<C: Verifier, D: Digest> Read for Node<C, D> {
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let chunk = Chunk::read(reader)?;
         let signature = C::Signature::read(reader)?;
-        let parent = if bool::read(reader)? {
-            Some(Parent::read(reader)?)
-        } else {
-            None
-        };
+        let parent = <Option<Parent<D>>>::read(reader)?;
         if chunk.height == 0 && parent.is_some() {
             return Err(CodecError::Wrapped(
                 "consensus::ordered_broadcast::Node",
@@ -257,12 +248,7 @@ impl<C: Verifier, D: Digest> Read for Node<C, D> {
 
 impl<C: Verifier, D: Digest> EncodeSize for Node<C, D> {
     fn encode_size(&self) -> usize {
-        let parent_size = if self.parent.is_some() {
-            Parent::<D>::SIZE
-        } else {
-            0
-        };
-        Chunk::<C::PublicKey, D>::SIZE + C::Signature::SIZE + bool::SIZE + parent_size
+        Chunk::<C::PublicKey, D>::SIZE + C::Signature::SIZE + self.parent.encode_size()
     }
 }
 
