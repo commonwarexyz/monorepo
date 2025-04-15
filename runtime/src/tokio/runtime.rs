@@ -1,3 +1,5 @@
+use crate::storage::tokio::Config as StorageConfig;
+use crate::storage::Storage;
 use crate::{utils::Signaler, Clock, Error, Handle, Signal, METRICS_PREFIX};
 use commonware_utils::{from_hex, hex};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
@@ -234,6 +236,12 @@ impl Executor {
             .build()
             .expect("failed to create Tokio runtime");
         let (signaler, signal) = Signaler::new();
+
+        let storage = Storage::new(
+            runtime_registry,
+            StorageConfig::new(cfg.storage_directory.clone()),
+        );
+
         let executor = Arc::new(Self {
             cfg,
             registry: Mutex::new(registry),
@@ -248,6 +256,7 @@ impl Executor {
                 executor: executor.clone(),
             },
             Context {
+                storage,
                 label: String::new(),
                 spawned: false,
                 executor,
@@ -285,6 +294,7 @@ pub struct Context {
     label: String,
     spawned: bool,
     executor: Arc<Executor>,
+    storage: Storage,
 }
 
 impl Clone for Context {
@@ -293,6 +303,7 @@ impl Clone for Context {
             label: self.label.clone(),
             spawned: false,
             executor: self.executor.clone(),
+            storage: self.storage.clone(),
         }
     }
 }
@@ -429,6 +440,7 @@ impl crate::Metrics for Context {
             label,
             spawned: false,
             executor: self.executor.clone(),
+            storage: self.storage.clone(),
         }
     }
 
