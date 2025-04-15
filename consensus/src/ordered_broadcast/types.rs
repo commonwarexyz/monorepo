@@ -1,4 +1,7 @@
-use commonware_cryptography::{bls12381::primitives::poly::PartialSignature, Digest};
+use commonware_cryptography::{
+    bls12381::primitives::poly::{PartialSignature, Signature},
+    Digest,
+};
 use commonware_utils::Array;
 
 /// Used as the [`Index`](crate::Supervisor::Index) type.
@@ -76,4 +79,20 @@ pub struct Ack<P: Array, D: Digest> {
 
     /// Partial signature over the chunk.
     pub signature: PartialSignature,
+}
+
+pub enum Activity<P: Array, D: Digest> {
+    Chunk(Chunk<P, D>),
+    Lock(Lock<P, D>),
+}
+
+pub struct Lock<P: Array, D: Digest> {
+    /// Chunk that is being locked.
+    pub chunk: Chunk<P, D>,
+
+    /// Epoch of the validator set.
+    pub epoch: Epoch,
+
+    /// Partial signature over the chunk.
+    pub signature: Signature,
 }

@@ -33,13 +33,10 @@
 //! [Autobahn](https://arxiv.org/abs/2401.10369) provided the insight that a succinct
 //! proof-of-availability could be produced by linking sequencer broadcasts.
 
-use commonware_utils::Array;
-
 mod namespace;
 mod parsed;
 mod prover;
 pub use prover::Prover;
-mod serializer;
 mod types;
 
 cfg_if::cfg_if! {
@@ -61,7 +58,7 @@ pub mod mocks;
 
 #[cfg(test)]
 mod tests {
-    use super::{mocks, Config, Engine, Epoch};
+    use super::{mocks, types::Epoch, Config, Engine};
     use commonware_cryptography::{
         bls12381::{
             dkg::ops,
