@@ -82,15 +82,11 @@ mod tests {
                 let mut data = Bytes::from(vec![3u8; Signature::SIZE]);
                 Signature::read_from(&mut data).unwrap()
             };
-            Node::<Ed25519, Digest> {
-                chunk: Chunk {
-                    sequencer,
-                    height,
-                    payload: sha256::hash(payload.as_bytes()),
-                },
+            Node::new(
+                Chunk::new(sequencer, height, sha256::hash(payload.as_bytes())),
                 signature,
-                parent: None,
-            }
+                None,
+            )
         }
 
         /// Generates a deterministic public key for testing using the provided seed.

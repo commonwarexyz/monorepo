@@ -401,14 +401,14 @@ impl<C: Verifier, D: Digest> EncodeSize for Activity<C, D> {
     }
 }
 
-fn ack_message<P: Array, D: Digest>(chunk: &Chunk<P, D>, epoch: &Epoch) -> Vec<u8> {
+pub fn ack_message<P: Array, D: Digest>(chunk: &Chunk<P, D>, epoch: &Epoch) -> Vec<u8> {
     let mut message = Vec::with_capacity(Chunk::<P, D>::SIZE + Epoch::SIZE);
     chunk.write(&mut message);
     epoch.write(&mut message);
     message
 }
 
-fn verify_lock<P: Array, D: Digest>(
+pub fn verify_lock<P: Array, D: Digest>(
     public_key: &Public,
     chunk: &Chunk<P, D>,
     epoch: &Epoch,

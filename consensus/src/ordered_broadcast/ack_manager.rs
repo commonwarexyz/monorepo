@@ -1,10 +1,11 @@
-use super::{parsed, Epoch};
 use commonware_cryptography::{
     bls12381::primitives::{group, ops, poly::PartialSignature},
     Digest,
 };
 use commonware_utils::Array;
 use std::collections::{BTreeMap, HashMap, HashSet};
+
+use super::types::{Ack, Epoch};
 
 /// A struct representing a set of partial signatures for a payload digest.
 #[derive(Default)]
@@ -35,7 +36,7 @@ impl<D: Digest> Default for Evidence<D> {
 
 /// Manages acknowledgements for chunks.
 #[derive(Default)]
-pub struct AckManager<D: Digest, P: Array> {
+pub struct AckManager<P: Array, D: Digest> {
     // Acknowledgements for digests.
     //
     // Map from Sequencer => Height => Epoch => Evidence
@@ -48,7 +49,7 @@ pub struct AckManager<D: Digest, P: Array> {
     acks: HashMap<P, BTreeMap<u64, BTreeMap<Epoch, Evidence<D>>>>,
 }
 
-impl<D: Digest, P: Array> AckManager<D, P> {
+impl<P: Array, D: Digest> AckManager<P, D> {
     /// Creates a new `AckManager`.
     pub fn new() -> Self {
         Self {
@@ -59,7 +60,7 @@ impl<D: Digest, P: Array> AckManager<D, P> {
     /// Adds a partial signature to the evidence.
     ///
     /// If-and-only-if the quorum is newly-reached, the threshold signature is returned.
-    pub fn add_ack(&mut self, ack: &parsed::Ack<D, P>, quorum: u32) -> Option<group::Signature> {
+    pub fn add_ack(&mut self, ack: &Ack<P, D>, quorum: u32) -> Option<group::Signature> {
         let evidence = self
             .acks
             .entry(ack.chunk.sequencer.clone())
@@ -150,17 +151,16 @@ impl<D: Digest, P: Array> AckManager<D, P> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        super::{namespace, parsed, serializer},
-        *,
-    };
-    use commonware_codec::SizedCodec;
+    use super::*;
     use commonware_cryptography::{bls12381::dkg::ops::generate_shares, ed25519, sha256};
     use commonware_runtime::deterministic::Executor;
 
     /// Aggregated helper functions to reduce duplication in tests.
     mod helpers {
+        use crate::ordered_broadcast::types::{ack_message, ack_namespace, Chunk};
+
         use super::*;
+        use commonware_codec::FixedSize;
         use commonware_cryptography::bls12381::primitives::group::Share;
 
         /// Generate shares using the default executor.
@@ -172,7 +172,7 @@ mod tests {
 
         /// Generate a fixed public key for testing.
         pub fn gen_public_key(val: u8) -> ed25519::PublicKey {
-            ed25519::PublicKey::try_from(&[val; ed25519::PublicKey::LEN_ENCODED][..]).unwrap()
+            ed25519::PublicKey::try_from(&[val; ed25519::PublicKey::SIZE][..]).unwrap()
         }
 
         /// Create a chunk with the given sequencer, height, and payload.
@@ -180,39 +180,31 @@ mod tests {
             sequencer: &ed25519::PublicKey,
             height: u64,
             payload: sha256::Digest,
-        ) -> parsed::Chunk<sha256::Digest, ed25519::PublicKey> {
-            parsed::Chunk {
-                sequencer: sequencer.clone(),
-                height,
-                payload,
-            }
+        ) -> Chunk<ed25519::PublicKey, sha256::Digest> {
+            Chunk::new(sequencer, height, payload)
         }
 
         /// Sign a partial for the given chunk and epoch using the provided share.
         pub fn sign_partial(
             share: &Share,
-            chunk: &parsed::Chunk<sha256::Digest, ed25519::PublicKey>,
-            epoch: Epoch,
+            chunk: &Chunk<ed25519::PublicKey, sha256::Digest>,
+            epoch: &Epoch,
         ) -> commonware_cryptography::bls12381::primitives::poly::PartialSignature {
             ops::partial_sign_message(
                 share,
-                Some(namespace::ack(b"1234").as_slice()),
-                &serializer::ack(chunk, epoch),
+                Some(ack_namespace(b"1234").as_slice()),
+                &ack_message(chunk, epoch),
             )
         }
 
         /// Create an Ack by signing a partial with the provided share.
         pub fn create_ack(
             share: &Share,
-            chunk: &parsed::Chunk<sha256::Digest, ed25519::PublicKey>,
-            epoch: Epoch,
-        ) -> parsed::Ack<sha256::Digest, ed25519::PublicKey> {
-            let partial = sign_partial(share, chunk, epoch);
-            parsed::Ack {
-                chunk: chunk.clone(),
-                epoch,
-                partial,
-            }
+            chunk: &Chunk<ed25519::PublicKey, sha256::Digest>,
+            epoch: &Epoch,
+        ) -> Ack<ed25519::PublicKey, sha256::Digest> {
+            let signature = sign_partial(share, chunk, epoch);
+            Ack::new(chunk, epoch, signature)
         }
 
         /// Recover a threshold signature from a set of partials.
@@ -226,8 +218,8 @@ mod tests {
         /// Generate a threshold signature directly from the shares specified by `indices`.
         pub fn generate_threshold_from_indices(
             shares: &[Share],
-            chunk: &parsed::Chunk<sha256::Digest, ed25519::PublicKey>,
-            epoch: Epoch,
+            chunk: &Chunk<ed25519::PublicKey, sha256::Digest>,
+            epoch: &Epoch,
             quorum: u32,
             indices: &[usize],
         ) -> commonware_cryptography::bls12381::primitives::group::Signature {
@@ -241,10 +233,10 @@ mod tests {
         /// Create a vector of acks for the given share indices.
         pub fn create_acks_for_indices(
             shares: &[Share],
-            chunk: &parsed::Chunk<sha256::Digest, ed25519::PublicKey>,
-            epoch: Epoch,
+            chunk: &Chunk<ed25519::PublicKey, sha256::Digest>,
+            epoch: &Epoch,
             indices: &[usize],
-        ) -> Vec<parsed::Ack<sha256::Digest, ed25519::PublicKey>> {
+        ) -> Vec<Ack<ed25519::PublicKey, sha256::Digest>> {
             indices
                 .iter()
                 .map(|&i| create_ack(&shares[i], chunk, epoch))
@@ -254,10 +246,10 @@ mod tests {
         /// Add acks (generated from the provided share indices) to the manager.
         /// Returns the threshold signature if produced.
         pub fn add_acks_for_indices(
-            manager: &mut AckManager<sha256::Digest, ed25519::PublicKey>,
+            manager: &mut AckManager<ed25519::PublicKey, sha256::Digest>,
             shares: &[Share],
-            chunk: &parsed::Chunk<sha256::Digest, ed25519::PublicKey>,
-            epoch: Epoch,
+            chunk: &Chunk<ed25519::PublicKey, sha256::Digest>,
+            epoch: &Epoch,
             quorum: u32,
             indices: &[usize],
         ) -> Option<commonware_cryptography::bls12381::primitives::group::Signature> {
