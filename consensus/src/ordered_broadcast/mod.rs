@@ -234,7 +234,7 @@ mod tests {
                     crypto: scheme.clone(),
                     relay: automaton.clone(),
                     automaton: automaton.clone(),
-                    committer: committers.get(validator).unwrap().clone(),
+                    reporter: committers.get(validator).unwrap().clone(),
                     monitor,
                     sequencers,
                     validators,

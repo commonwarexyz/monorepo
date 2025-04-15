@@ -73,14 +73,14 @@ impl<P: Array, D: Digest> AckManager<P, D> {
         match evidence {
             Evidence::Threshold(_) => None,
             Evidence::Partials(p) => {
-                if !p.shares.insert(ack.partial.index) {
+                if !p.shares.insert(ack.signature.index) {
                     // Validator already signed
                     return None;
                 }
 
                 // Add the partial
                 let partials = p.sigs.entry(ack.chunk.payload).or_default();
-                partials.push(ack.partial.clone());
+                partials.push(ack.signature.clone());
 
                 // Return early if no quorum
                 if partials.len() < quorum as usize {
@@ -91,7 +91,7 @@ impl<P: Array, D: Digest> AckManager<P, D> {
                 let partials = p.sigs.remove(&ack.chunk.payload).unwrap();
 
                 // Construct the threshold signature
-                let threshold = ops::threshold_signature_recover(quorum, partials).unwrap();
+                let threshold = ops::threshold_signature_recover(quorum, &partials).unwrap();
                 Some(threshold)
             }
         }

@@ -35,7 +35,7 @@ pub struct Config<
     pub relay: R,
 
     /// Notified when a chunk receives a threshold of acks.
-    pub committer: Z,
+    pub reporter: Z,
 
     /// The application namespace used to sign over different types of messages.
     /// Used to prevent replay attacks on other applications.

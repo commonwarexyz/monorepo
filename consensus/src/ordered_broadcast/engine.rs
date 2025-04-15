@@ -9,7 +9,10 @@
 
 use super::{
     metrics,
-    types::{ack_namespace, chunk_namespace, Ack, Activity, Chunk, Context, Epoch, Node},
+    types::{
+        ack_message, ack_namespace, chunk_namespace, Ack, Activity, Chunk, Context, Epoch, Lock,
+        Node,
+    },
     AckManager, Config, TipManager,
 };
 use crate::{Automaton, Monitor, Relay, Reporter, Supervisor, ThresholdSupervisor};
@@ -84,7 +87,7 @@ pub struct Engine<
     monitor: M,
     sequencers: Su,
     validators: TSu,
-    committer: Z,
+    reporter: Z,
 
     ////////////////////////////////////////
     // Namespace Constants
@@ -224,7 +227,7 @@ impl<
             crypto: cfg.crypto,
             automaton: cfg.automaton,
             relay: cfg.relay,
-            committer: cfg.committer,
+            reporter: cfg.reporter,
             monitor: cfg.monitor,
             sequencers: cfg.sequencers,
             validators: cfg.validators,
@@ -389,7 +392,7 @@ impl<
                     // Handle the parent threshold signature
                     if let Some(parent_chunk) = result {
                         let parent = node.parent.as_ref().unwrap();
-                        self.handle_threshold(&parent_chunk, parent.epoch, parent.threshold).await;
+                        self.handle_threshold(&parent_chunk, parent.epoch, parent.signature).await;
                     }
 
                     // Process the node
@@ -412,7 +415,7 @@ impl<
                         }
                     };
                     let mut guard = self.metrics.acks.guard(Status::Invalid);
-                    let ack = match parsed::Ack::decode(&msg) {
+                    let ack = match Ack::decode(msg) {
                         Ok(ack) => ack,
                         Err(err) => {
                             warn!(?err, ?sender, "ack decode failed");
@@ -493,6 +496,10 @@ impl<
             return Err(Error::AppVerifiedPayloadMismatch);
         }
 
+        // Emit the activity
+        self.reporter
+            .report(Activity::Node(())
+
         // Construct partial signature
         let Some(share) = self.validators.share(self.epoch) else {
             return Err(Error::UnknownShare(self.epoch));
@@ -500,7 +507,7 @@ impl<
         let partial = ops::partial_sign_message(
             share,
             Some(&self.ack_namespace),
-            &serializer::ack(&tip.chunk, self.epoch),
+            &ack_message(&tip.chunk, &self.epoch),
         );
 
         // Sync the journal to prevent ever acking two conflicting chunks at
@@ -525,11 +532,7 @@ impl<
         };
 
         // Send the ack to the network
-        let ack = parsed::Ack {
-            chunk: tip.chunk,
-            epoch: self.epoch,
-            partial,
-        };
+        let ack = Ack::new(tip.chunk, self.epoch, partial);
         ack_sender
             .send(
                 Recipients::Some(recipients),
@@ -552,7 +555,7 @@ impl<
     /// If the threshold is already known, it is ignored.
     async fn handle_threshold(
         &mut self,
-        chunk: &parsed::Chunk<D, C::PublicKey>,
+        chunk: &Chunk<C::PublicKey, D>,
         epoch: Epoch,
         threshold: group::Signature,
     ) {
@@ -569,14 +572,9 @@ impl<
             self.propose_timer.take();
         }
 
-        // Emit the proof
-        let context = Context {
-            sequencer: chunk.sequencer.clone(),
-            height: chunk.height,
-        };
-        let proof =
-            Prover::<C, D>::serialize_threshold(&context, &chunk.payload, epoch, &threshold);
-        self.committer.finalized(proof, chunk.payload).await;
+        // Emit the activity
+        self.reporter
+            .report(Activity::Lock(Lock::new(chunk.clone(), epoch, threshold)));
     }
 
     /// Handles an ack
