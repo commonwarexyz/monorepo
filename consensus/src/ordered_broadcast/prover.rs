@@ -3,7 +3,6 @@
 //! The proofs contain threshold signatures of validators that have seen and validated a chunk.
 
 use super::{namespace, parsed, serializer, Context, Epoch};
-use crate::Proof;
 use bytes::{Buf, BufMut};
 use commonware_codec::SizedCodec;
 use commonware_cryptography::{

@@ -40,9 +40,7 @@ mod parsed;
 mod prover;
 pub use prover::Prover;
 mod serializer;
-mod wire {
-    include!(concat!(env!("OUT_DIR"), "/wire.rs"));
-}
+mod types;
 
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
@@ -60,23 +58,6 @@ cfg_if::cfg_if! {
 
 #[cfg(test)]
 pub mod mocks;
-
-/// Used as the [`Index`](crate::Supervisor::Index) type.
-/// Defines the current set of sequencers and validators.
-///
-/// This is not a single "View" in the sense of a consensus protocol, but rather a continuous
-/// sequence of views in-which the set of sequencers and validators is constant.
-pub type Epoch = u64;
-
-/// Used as the [`Automaton::Context`](crate::Automaton::Context) type.
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub struct Context<P: Array> {
-    /// Sequencer's public key.
-    pub sequencer: P,
-
-    /// Sequencer-specific sequential height. Zero-indexed.
-    pub height: u64,
-}
 
 #[cfg(test)]
 mod tests {
