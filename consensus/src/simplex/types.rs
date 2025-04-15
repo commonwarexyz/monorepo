@@ -408,7 +408,50 @@ impl<V: Verifier, D: Digest> Viewable for Finalization<V, D> {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum Backfiller<D: Digest> {}
+pub enum Backfiller<V: Verifier, D: Digest> {
+    Request(Request),
+    Response(Response<V, D>),
+}
+
+impl<V: Verifier, D: Digest> Write for Backfiller<V, D> {
+    fn write(&self, writer: &mut impl BufMut) {
+        match self {
+            Backfiller::Request(request) => {
+                0u8.write(writer);
+                request.write(writer);
+            }
+            Backfiller::Response(response) => {
+                1u8.write(writer);
+                response.write(writer);
+            }
+        }
+    }
+}
+
+impl<V: Verifier, D: Digest> Read<usize> for Backfiller<V, D> {
+    fn read_cfg(reader: &mut impl Buf, cfg: &usize) -> Result<Self, Error> {
+        let tag = u8::read(reader)?;
+        match tag {
+            0 => Ok(Backfiller::Request(Request::read_cfg(reader, cfg)?)),
+            1 => Ok(Backfiller::Response(Response::<V, D>::read_cfg(
+                reader, cfg,
+            )?)),
+            _ => Err(Error::Invalid(
+                "consensus::simplex::Backfiller",
+                "Invalid type",
+            )),
+        }
+    }
+}
+
+impl<V: Verifier, D: Digest> EncodeSize for Backfiller<V, D> {
+    fn encode_size(&self) -> usize {
+        1 + match self {
+            Backfiller::Request(request) => request.encode_size(),
+            Backfiller::Response(response) => response.encode_size(),
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Request {
