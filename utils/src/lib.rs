@@ -53,7 +53,7 @@ pub fn max_faults(n: u32) -> Option<u32> {
 }
 
 /// Compute the quorum size for a given set of `n` participants. This is the minimum integer `q`
-/// such that `3*q > 2*n`. It is also equal to `n - f`, where `f` is the maximum number of faults
+/// such that `3*q > 2*n`. It is also equal to `n - f`, where `f` is the maximum number of faults.
 ///
 /// If the value of `n` is too small to tolerate any faults, this function returns `None`.
 pub fn quorum(n: u32) -> Option<u32> {
@@ -172,33 +172,29 @@ mod tests {
     }
 
     #[test]
-    fn test_max_faults() {
-        assert_eq!(max_faults(0), None);
-        assert_eq!(max_faults(1), None);
-        assert_eq!(max_faults(2), None);
-        assert_eq!(max_faults(3), None);
-        assert_eq!(max_faults(4), Some(1));
-        assert_eq!(max_faults(5), Some(1));
-        assert_eq!(max_faults(6), Some(1));
-        assert_eq!(max_faults(7), Some(2));
-        assert_eq!(max_faults(8), Some(2));
-        assert_eq!(max_faults(9), Some(2));
-        assert_eq!(max_faults(10), Some(3));
-    }
+    fn test_quorum_and_max_faults() {
+        // n, expected_f, expected_q
+        let test_cases = [
+            (0, None, None),
+            (1, None, None),
+            (2, None, None),
+            (3, None, None),
+            (4, Some(1), Some(3)),
+            (5, Some(1), Some(4)),
+            (6, Some(1), Some(5)),
+            (7, Some(2), Some(5)),
+            (8, Some(2), Some(6)),
+            (9, Some(2), Some(7)),
+            (10, Some(3), Some(7)),
+        ];
 
-    #[test]
-    fn test_quorum() {
-        assert_eq!(quorum(0), None);
-        assert_eq!(quorum(1), None);
-        assert_eq!(quorum(2), None);
-        assert_eq!(quorum(3), None);
-        assert_eq!(quorum(4), Some(3));
-        assert_eq!(quorum(5), Some(4));
-        assert_eq!(quorum(6), Some(5));
-        assert_eq!(quorum(7), Some(5));
-        assert_eq!(quorum(8), Some(6));
-        assert_eq!(quorum(9), Some(7));
-        assert_eq!(quorum(10), Some(7));
+        for (n, ef, eq) in test_cases {
+            assert_eq!(max_faults(n), ef);
+            assert_eq!(quorum(n), eq);
+            if let (Some(f), Some(q)) = (ef, eq) {
+                assert_eq!(n, f + q);
+            }
+        }
     }
 
     #[test]
