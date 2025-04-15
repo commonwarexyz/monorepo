@@ -18,8 +18,8 @@ use tracing::debug;
 
 /// Instance of `threshold-simplex` consensus engine.
 pub struct Engine<
-    St: Storage,
     E: Clock + GClock + Rng + CryptoRng + Spawner + Metrics,
+    St: Storage,
     C: Scheme,
     D: Digest,
     A: Automaton<Context = Context<D>, Digest = D>,
@@ -35,15 +35,15 @@ pub struct Engine<
 > {
     context: E,
 
-    voter: voter::Actor<St, E, C, D, A, R, F, S>,
+    voter: voter::Actor<E, St, C, D, A, R, F, S>,
     voter_mailbox: voter::Mailbox<D>,
     resolver: resolver::Actor<E, C, D, S>,
     resolver_mailbox: resolver::Mailbox,
 }
 
 impl<
-        St: Storage,
         E: Clock + GClock + Rng + CryptoRng + Spawner + Metrics,
+        St: Storage,
         C: Scheme,
         D: Digest,
         A: Automaton<Context = Context<D>, Digest = D>,
@@ -56,7 +56,7 @@ impl<
             Identity = poly::Public,
             PublicKey = C::PublicKey,
         >,
-    > Engine<St, E, C, D, A, R, F, S>
+    > Engine<E, St, C, D, A, R, F, S>
 {
     /// Create a new `threshold-simplex` consensus engine.
     pub fn new(context: E, journal: Journal<St>, cfg: Config<C, D, A, R, F, S>) -> Self {

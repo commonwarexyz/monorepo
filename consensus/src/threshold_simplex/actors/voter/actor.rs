@@ -675,8 +675,8 @@ impl<
 }
 
 pub struct Actor<
-    St: Storage,
     E: Clock + Rng + Spawner + Metrics,
+    St: Storage,
     C: Scheme,
     D: Digest,
     A: Automaton<Digest = D, Context = Context<D>>,
@@ -729,8 +729,8 @@ pub struct Actor<
 }
 
 impl<
-        St: Storage,
         E: Clock + Rng + Spawner + Metrics,
+        St: Storage,
         C: Scheme,
         D: Digest,
         A: Automaton<Digest = D, Context = Context<D>>,
@@ -743,7 +743,7 @@ impl<
             Share = group::Share,
             PublicKey = C::PublicKey,
         >,
-    > Actor<St, E, C, D, A, R, F, S>
+    > Actor<E, St, C, D, A, R, F, S>
 {
     pub fn new(
         context: E,
