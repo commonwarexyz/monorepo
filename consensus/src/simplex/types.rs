@@ -1,6 +1,6 @@
 use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error, FixedSize, Read, ReadExt, ReadRangeExt, Write};
-use commonware_cryptography::{Digest, Verifier};
+use commonware_cryptography::{Digest, Scheme, Verifier};
 use commonware_utils::{quorum, union, Array};
 
 /// View is a monotonically increasing counter that represents the current focus of consensus.
@@ -61,7 +61,7 @@ pub enum Voter<V: Verifier, D: Digest> {
     Notarization(Notarization<V, D>),
     Nullify(Nullify<V>),
     Nullification(Nullification<V>),
-    Finalize(Finalize<V>),
+    Finalize(Finalize<V, D>),
     Finalization(Finalization<V, D>),
 }
 
@@ -257,6 +257,19 @@ impl<V: Verifier, D: Digest> Notarize<V, D> {
             self.signature.signature,
         )
     }
+
+    pub fn sign<S: Scheme<PublicKey = V::PublicKey, Signature = V::Signature>>(
+        scheme: &mut S,
+        proposal: Proposal<D>,
+        notarize_namespace: &[u8],
+    ) -> Self {
+        let message = proposal.encode();
+        let signature = scheme.sign(Some(&notarize_namespace), &message);
+        Self {
+            proposal,
+            signature,
+        }
+    }
 }
 
 impl<V: Verifier, D: Digest> Write for Notarize<V, D> {
@@ -358,6 +371,16 @@ impl<V: Verifier> Nullify<V> {
             self.signature.signature,
         )
     }
+
+    pub fn sign<S: Scheme<PublicKey = V::PublicKey, Signature = V::Signature>>(
+        scheme: &mut S,
+        view: View,
+        nullify_namespace: &[u8],
+    ) -> Self {
+        let message = view_message(view);
+        let signature = scheme.sign(Some(&nullify_namespace), &message);
+        Self { view, signature }
+    }
 }
 
 impl<V: Verifier> Write for Nullify<V> {
@@ -452,6 +475,19 @@ impl<V: Verifier, D: Digest> Finalize<V, D> {
             self.signature.public_key,
             self.signature.signature,
         )
+    }
+
+    pub fn sign<S: Scheme<PublicKey = V::PublicKey, Signature = V::Signature>>(
+        scheme: &mut S,
+        proposal: Proposal<D>,
+        finalize_namespace: &[u8],
+    ) -> Self {
+        let message = proposal.encode();
+        let signature = scheme.sign(Some(&finalize_namespace), &message);
+        Self {
+            proposal,
+            signature,
+        }
     }
 }
 
@@ -680,7 +716,7 @@ pub enum Activity<V: Verifier, D: Digest> {
     Notarization(Notarization<V, D>),
     Nullify(Nullify<V>),
     Nullification(Nullification<V>),
-    Finalize(Finalize<V>),
+    Finalize(Finalize<V, D>),
     Finalization(Finalization<V, D>),
     ConflictingNotarize(ConflictingNotarize<V, D>),
     ConflictingFinalize(ConflictingFinalize<V, D>),
@@ -920,7 +956,7 @@ impl<V: Verifier, D: Digest> FixedSize for ConflictingFinalize<V, D> {
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub struct NullifyFinalize<V: Verifier, D: Digest> {
     pub nullify: Nullify<V>,
-    pub finalize: Finalize<V>,
+    pub finalize: Finalize<V, D>,
 }
 
 impl<V: Verifier, D: Digest> NullifyFinalize<V, D> {
