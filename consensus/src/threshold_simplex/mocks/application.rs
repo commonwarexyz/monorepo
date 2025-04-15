@@ -1,7 +1,7 @@
 use super::relay::Relay;
-use crate::{threshold_simplex::Context, Automaton as Au, Committer as Co, Proof, Relay as Re};
+use crate::{threshold_simplex::types::Context, Automaton as Au, Relay as Re};
 use bytes::{Buf, BufMut, Bytes};
-use commonware_codec::FixedSize;
+use commonware_codec::SizedCodec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Spawner};
@@ -32,14 +32,6 @@ pub enum Message<D: Digest> {
         response: oneshot::Sender<bool>,
     },
     Broadcast {
-        payload: D,
-    },
-    Notarized {
-        proof: Proof,
-        payload: D,
-    },
-    Finalized {
-        proof: Proof,
         payload: D,
     },
 }
@@ -106,32 +98,9 @@ impl<D: Digest> Re for Mailbox<D> {
     }
 }
 
-impl<D: Digest> Co for Mailbox<D> {
-    type Digest = D;
-
-    async fn prepared(&mut self, proof: Proof, payload: Self::Digest) {
-        self.sender
-            .send(Message::Notarized { proof, payload })
-            .await
-            .expect("Failed to send notarized");
-    }
-
-    async fn finalized(&mut self, proof: Proof, payload: Self::Digest) {
-        self.sender
-            .send(Message::Finalized { proof, payload })
-            .await
-            .expect("Failed to send finalized");
-    }
-}
-
 const GENESIS_BYTES: &[u8] = b"genesis";
 
 type Latency = (f64, f64);
-
-pub enum Progress<D: Array> {
-    Notarized(Proof, D),
-    Finalized(Proof, D),
-}
 
 pub struct Config<H: Hasher, P: Array> {
     pub hasher: H,
@@ -146,8 +115,6 @@ pub struct Config<H: Hasher, P: Array> {
 
     pub propose_latency: Latency,
     pub verify_latency: Latency,
-
-    pub tracker: mpsc::UnboundedSender<(P, Progress<H::Digest>)>,
 }
 
 pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: Array> {
@@ -157,7 +124,6 @@ pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: Array> {
 
     relay: Arc<Relay<H::Digest, P>>,
     broadcast: mpsc::UnboundedReceiver<(H::Digest, Bytes)>,
-    tracker: mpsc::UnboundedSender<(P, Progress<H::Digest>)>,
 
     mailbox: mpsc::Receiver<Message<H::Digest>>,
 
@@ -167,8 +133,6 @@ pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: Array> {
     pending: HashMap<H::Digest, Bytes>,
 
     verified: HashSet<H::Digest>,
-    notarized_views: HashSet<H::Digest>,
-    finalized_views: HashSet<H::Digest>,
 }
 
 impl<E: Clock + RngCore + Spawner, H: Hasher, P: Array> Application<E, H, P> {
@@ -190,7 +154,6 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: Array> Application<E, H, P> {
 
                 relay: cfg.relay,
                 broadcast,
-                tracker: cfg.tracker,
 
                 mailbox: receiver,
 
@@ -200,8 +163,6 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: Array> Application<E, H, P> {
                 pending: HashMap::new(),
 
                 verified: HashSet::new(),
-                notarized_views: HashSet::new(),
-                finalized_views: HashSet::new(),
             },
             Mailbox::new(sender),
         )
@@ -216,7 +177,6 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: Array> Application<E, H, P> {
         self.hasher.update(&payload);
         let digest = self.hasher.finalize();
         self.verified.insert(digest);
-        self.finalized_views.insert(digest);
         digest
     }
 
@@ -230,7 +190,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: Array> Application<E, H, P> {
             .await;
 
         // Generate the payload
-        let payload_len = u64::SIZE + H::Digest::SIZE + u64::SIZE;
+        let payload_len = u64::LEN_ENCODED + H::Digest::LEN_ENCODED + u64::LEN_ENCODED;
         let mut payload = Vec::with_capacity(payload_len);
         payload.put_u64(context.view);
         payload.extend_from_slice(&context.parent.1);
@@ -290,32 +250,6 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: Array> Application<E, H, P> {
             .await;
     }
 
-    async fn notarized(&mut self, proof: Proof, payload: H::Digest) {
-        if !self.notarized_views.insert(payload) {
-            self.panic("view already notarized");
-        }
-        let _ = self
-            .tracker
-            .send((
-                self.participant.clone(),
-                Progress::Notarized(proof, payload),
-            ))
-            .await;
-    }
-
-    async fn finalized(&mut self, proof: Proof, payload: H::Digest) {
-        if !self.finalized_views.insert(payload) {
-            self.panic("view already finalized");
-        }
-        let _ = self
-            .tracker
-            .send((
-                self.participant.clone(),
-                Progress::Finalized(proof, payload),
-            ))
-            .await;
-    }
-
     pub fn start(mut self) -> Handle<()> {
         self.context.spawn_ref()(self.run())
     }
@@ -360,12 +294,6 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: Array> Application<E, H, P> {
                         }
                         Message::Broadcast { payload } => {
                             self.broadcast(payload).await;
-                        }
-                        Message::Notarized { proof, payload } => {
-                            self.notarized(proof, payload).await;
-                        }
-                        Message::Finalized { proof, payload } => {
-                            self.finalized(proof, payload).await;
                         }
                     }
                 },

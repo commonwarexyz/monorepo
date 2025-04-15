@@ -90,7 +90,7 @@ impl<D: Digest, P: Array> AckManager<D, P> {
                 let partials = p.sigs.remove(&ack.chunk.payload).unwrap();
 
                 // Construct the threshold signature
-                let threshold = ops::threshold_signature_recover(quorum, &partials).unwrap();
+                let threshold = ops::threshold_signature_recover(quorum, partials).unwrap();
                 Some(threshold)
             }
         }
@@ -154,7 +154,7 @@ mod tests {
         super::{namespace, parsed, serializer},
         *,
     };
-    use commonware_codec::FixedSize;
+    use commonware_codec::SizedCodec;
     use commonware_cryptography::{bls12381::dkg::ops::generate_shares, ed25519, sha256};
     use commonware_runtime::deterministic::Executor;
 
@@ -172,7 +172,7 @@ mod tests {
 
         /// Generate a fixed public key for testing.
         pub fn gen_public_key(val: u8) -> ed25519::PublicKey {
-            ed25519::PublicKey::try_from(&[val; ed25519::PublicKey::SIZE][..]).unwrap()
+            ed25519::PublicKey::try_from(&[val; ed25519::PublicKey::LEN_ENCODED][..]).unwrap()
         }
 
         /// Create a chunk with the given sequencer, height, and payload.
@@ -220,7 +220,7 @@ mod tests {
             quorum: u32,
             partials: Vec<commonware_cryptography::bls12381::primitives::poly::PartialSignature>,
         ) -> commonware_cryptography::bls12381::primitives::group::Signature {
-            ops::threshold_signature_recover(quorum, &partials).unwrap()
+            ops::threshold_signature_recover(quorum, partials).unwrap()
         }
 
         /// Generate a threshold signature directly from the shares specified by `indices`.

@@ -1,7 +1,7 @@
 use super::relay::Relay;
 use crate::{simplex::Context, Automaton as Au, Committer as Co, Proof, Relay as Re};
 use bytes::{Buf, BufMut, Bytes};
-use commonware_codec::FixedSize;
+use commonware_codec::SizedCodec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Spawner};
@@ -230,7 +230,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: Array> Application<E, H, P> {
             .await;
 
         // Generate the payload
-        let payload_len = u64::SIZE + H::Digest::SIZE + u64::SIZE;
+        let payload_len = u64::LEN_ENCODED + H::Digest::LEN_ENCODED + u64::LEN_ENCODED;
         let mut payload = Vec::with_capacity(payload_len);
         payload.put_u64(context.view);
         payload.extend_from_slice(&context.parent.1);

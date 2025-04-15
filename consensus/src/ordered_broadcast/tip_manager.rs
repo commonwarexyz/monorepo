@@ -57,7 +57,7 @@ impl<C: Scheme, D: Digest> TipManager<C, D> {
 mod tests {
     use super::{super::parsed, *};
     use bytes::Bytes;
-    use commonware_codec::FixedSize;
+    use commonware_codec::SizedCodec;
     use commonware_cryptography::{
         ed25519::{self, Ed25519, PublicKey, Signature},
         sha256::{self, Digest},
@@ -77,7 +77,7 @@ mod tests {
             payload: &str,
         ) -> parsed::Node<Ed25519, Digest> {
             let signature = {
-                let mut data = Bytes::from(vec![3u8; Signature::SIZE]);
+                let mut data = Bytes::from(vec![3u8; Signature::LEN_ENCODED]);
                 Signature::read_from(&mut data).unwrap()
             };
             parsed::Node::<Ed25519, Digest> {

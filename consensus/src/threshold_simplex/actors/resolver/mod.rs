@@ -6,6 +6,8 @@ pub use actor::Actor;
 use commonware_cryptography::Scheme;
 use governor::Quota;
 pub use ingress::Mailbox;
+#[cfg(test)]
+pub use ingress::Message;
 use std::time::Duration;
 
 pub struct Config<C: Scheme, S: Supervisor> {

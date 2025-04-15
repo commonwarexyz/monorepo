@@ -1,9 +1,9 @@
 use super::{
     actors::{resolver, voter},
     config::Config,
-    Context, View,
+    types::{Activity, Context, View},
 };
-use crate::{Automaton, Committer, Relay, ThresholdSupervisor};
+use crate::{Automaton, Relay, Reporter, ThresholdSupervisor};
 use commonware_cryptography::{
     bls12381::primitives::{group, poly},
     Digest, Scheme,
@@ -24,7 +24,7 @@ pub struct Engine<
     D: Digest,
     A: Automaton<Context = Context<D>, Digest = D>,
     R: Relay<Digest = D>,
-    F: Committer<Digest = D>,
+    F: Reporter<Activity = Activity<D>>,
     S: ThresholdSupervisor<
         Seed = group::Signature,
         Index = View,
@@ -38,7 +38,7 @@ pub struct Engine<
     voter: voter::Actor<B, E, C, D, A, R, F, S>,
     voter_mailbox: voter::Mailbox<D>,
     resolver: resolver::Actor<E, C, D, S>,
-    resolver_mailbox: resolver::Mailbox,
+    resolver_mailbox: resolver::Mailbox<D>,
 }
 
 impl<
@@ -48,7 +48,7 @@ impl<
         D: Digest,
         A: Automaton<Context = Context<D>, Digest = D>,
         R: Relay<Digest = D>,
-        F: Committer<Digest = D>,
+        F: Reporter<Activity = Activity<D>>,
         S: ThresholdSupervisor<
             Seed = group::Signature,
             Index = View,
@@ -71,7 +71,7 @@ impl<
                 crypto: cfg.crypto.clone(),
                 automaton: cfg.automaton,
                 relay: cfg.relay,
-                committer: cfg.committer,
+                reporter: cfg.reporter,
                 supervisor: cfg.supervisor.clone(),
                 mailbox_size: cfg.mailbox_size,
                 namespace: cfg.namespace.clone(),

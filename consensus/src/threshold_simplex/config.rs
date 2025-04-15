@@ -1,17 +1,16 @@
-use super::{Context, View};
-use crate::{Automaton, Committer, Relay, ThresholdSupervisor};
-use commonware_cryptography::{bls12381::primitives::group, Scheme};
-use commonware_utils::Array;
+use super::types::{Activity, Context, View};
+use crate::{Automaton, Relay, Reporter, ThresholdSupervisor};
+use commonware_cryptography::{bls12381::primitives::group, Digest, Scheme};
 use governor::Quota;
 use std::time::Duration;
 
 /// Configuration for the consensus engine.
 pub struct Config<
     C: Scheme,
-    D: Array,
+    D: Digest,
     A: Automaton<Context = Context<D>>,
     R: Relay,
-    F: Committer,
+    F: Reporter<Activity = Activity<D>>,
     S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
 > {
     /// Cryptographic primitives.
@@ -23,8 +22,8 @@ pub struct Config<
     /// Relay for the consensus engine.
     pub relay: R,
 
-    /// Committer for the consensus engine.
-    pub committer: F,
+    /// Reporter for the consensus engine.
+    pub reporter: F,
 
     /// Supervisor for the consensus engine.
     pub supervisor: S,
@@ -82,10 +81,10 @@ pub struct Config<
 
 impl<
         C: Scheme,
-        D: Array,
+        D: Digest,
         A: Automaton<Context = Context<D>>,
         R: Relay,
-        F: Committer,
+        F: Reporter<Activity = Activity<D>>,
         S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
     > Config<C, D, A, R, F, S>
 {
