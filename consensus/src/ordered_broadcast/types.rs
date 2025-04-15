@@ -262,7 +262,7 @@ impl<C: Verifier, D: Digest> EncodeSize for Node<C, D> {
         } else {
             0
         };
-        Chunk::<C::PublicKey, D>::SIZE + D::SIZE + bool::SIZE + parent_size
+        Chunk::<C::PublicKey, D>::SIZE + C::Signature::SIZE + bool::SIZE + parent_size
     }
 }
 
