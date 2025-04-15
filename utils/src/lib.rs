@@ -40,7 +40,10 @@ pub fn from_hex_formatted(hex: &str) -> Option<Vec<u8>> {
     from_hex(res)
 }
 
-/// Compute the maximum value of `f` (faults) that can be tolerated given `n = 3f + 1`.
+/// Compute the maximum number of `f` (faults) that can be tolerated for a given set of `n`
+/// participants. This is the maximum integer `f` such that `n > 3*f`.
+///
+/// If the value of `n` is too small to tolerate any faults, this function returns `None`.
 pub fn max_faults(n: u32) -> Option<u32> {
     let f = n.checked_sub(1)? / 3;
     if f == 0 {
@@ -49,12 +52,13 @@ pub fn max_faults(n: u32) -> Option<u32> {
     Some(f)
 }
 
-/// Assuming that `n = 3f + 1`, compute the minimum size of `q` such that `q >= 2f + 1`.
+/// Compute the quorum size for a given set of `n` participants. This is the minimum integer `q`
+/// such that `3*q > 2*n`. It is also equal to `n - f`, where `f` is the maximum number of faults
 ///
 /// If the value of `n` is too small to tolerate any faults, this function returns `None`.
 pub fn quorum(n: u32) -> Option<u32> {
     let f = max_faults(n)?;
-    Some((2 * f) + 1)
+    Some(n.checked_sub(f).unwrap())
 }
 
 /// Computes the union of two byte slices.
@@ -168,17 +172,32 @@ mod tests {
     }
 
     #[test]
+    fn test_max_faults() {
+        assert_eq!(max_faults(0), None);
+        assert_eq!(max_faults(1), None);
+        assert_eq!(max_faults(2), None);
+        assert_eq!(max_faults(3), None);
+        assert_eq!(max_faults(4), Some(1));
+        assert_eq!(max_faults(5), Some(1));
+        assert_eq!(max_faults(6), Some(1));
+        assert_eq!(max_faults(7), Some(2));
+        assert_eq!(max_faults(8), Some(2));
+        assert_eq!(max_faults(9), Some(2));
+        assert_eq!(max_faults(10), Some(3));
+    }
+
+    #[test]
     fn test_quorum() {
-        // Test case 0: n = 3 (3*0 + 1)
+        assert_eq!(quorum(0), None);
+        assert_eq!(quorum(1), None);
+        assert_eq!(quorum(2), None);
         assert_eq!(quorum(3), None);
-
-        // Test case 1: n = 4 (3*1 + 1)
         assert_eq!(quorum(4), Some(3));
-
-        // Test case 2: n = 7 (3*2 + 1)
+        assert_eq!(quorum(5), Some(4));
+        assert_eq!(quorum(6), Some(5));
         assert_eq!(quorum(7), Some(5));
-
-        // Test case 3: n = 10 (3*3 + 1)
+        assert_eq!(quorum(8), Some(6));
+        assert_eq!(quorum(9), Some(7));
         assert_eq!(quorum(10), Some(7));
     }
 
