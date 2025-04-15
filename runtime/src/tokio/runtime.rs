@@ -1,7 +1,6 @@
-use crate::storage::tokio::Blob;
 use crate::storage::tokio::Config as StorageConfig;
-
-use crate::storage::Storage;
+use crate::storage::tokio::Storage;
+use crate::Storage as StorageTrait;
 use crate::{utils::Signaler, Clock, Error, Handle, Signal, METRICS_PREFIX};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
@@ -670,7 +669,7 @@ impl CryptoRng for Context {}
 // }
 
 impl crate::Storage for Context {
-    type Blob = Blob;
+    type Blob = <crate::storage::tokio::Storage as StorageTrait>::Blob;
 
     async fn open(&self, partition: &str, name: &[u8]) -> Result<Self::Blob, Error> {
         self.storage.open(partition, name).await
