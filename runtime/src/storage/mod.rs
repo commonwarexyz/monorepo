@@ -3,6 +3,7 @@ use prometheus_client::{
     registry::Registry,
 };
 
+pub mod audited;
 pub mod memory;
 pub mod tokio;
 

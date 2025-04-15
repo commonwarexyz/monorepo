@@ -251,7 +251,7 @@ impl Auditor {
         *hash = hasher.finalize().to_vec();
     }
 
-    fn open(&self, partition: &str, name: &[u8]) {
+    pub(crate) fn open(&self, partition: &str, name: &[u8]) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
         hasher.update(&*hash);
@@ -261,7 +261,7 @@ impl Auditor {
         *hash = hasher.finalize().to_vec();
     }
 
-    fn remove(&self, partition: &str, name: Option<&[u8]>) {
+    pub(crate) fn remove(&self, partition: &str, name: Option<&[u8]>) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
         hasher.update(&*hash);
@@ -273,7 +273,7 @@ impl Auditor {
         *hash = hasher.finalize().to_vec();
     }
 
-    fn scan(&self, partition: &str) {
+    pub(crate) fn scan(&self, partition: &str) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
         hasher.update(&*hash);
@@ -282,7 +282,7 @@ impl Auditor {
         *hash = hasher.finalize().to_vec();
     }
 
-    fn len(&self, partition: &str, name: &[u8]) {
+    pub(crate) fn len(&self, partition: &str, name: &[u8]) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
         hasher.update(&*hash);
@@ -292,7 +292,7 @@ impl Auditor {
         *hash = hasher.finalize().to_vec();
     }
 
-    fn read_at(&self, partition: &str, name: &[u8], buf: usize, offset: u64) {
+    pub(crate) fn read_at(&self, partition: &str, name: &[u8], buf: usize, offset: u64) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
         hasher.update(&*hash);
@@ -304,7 +304,7 @@ impl Auditor {
         *hash = hasher.finalize().to_vec();
     }
 
-    fn write_at(&self, partition: &str, name: &[u8], buf: &[u8], offset: u64) {
+    pub(crate) fn write_at(&self, partition: &str, name: &[u8], buf: &[u8], offset: u64) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
         hasher.update(&*hash);
@@ -316,7 +316,7 @@ impl Auditor {
         *hash = hasher.finalize().to_vec();
     }
 
-    fn truncate(&self, partition: &str, name: &[u8], size: u64) {
+    pub(crate) fn truncate(&self, partition: &str, name: &[u8], size: u64) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
         hasher.update(&*hash);
@@ -327,7 +327,7 @@ impl Auditor {
         *hash = hasher.finalize().to_vec();
     }
 
-    fn sync(&self, partition: &str, name: &[u8]) {
+    pub(crate) fn sync(&self, partition: &str, name: &[u8]) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
         hasher.update(&*hash);
@@ -337,7 +337,7 @@ impl Auditor {
         *hash = hasher.finalize().to_vec();
     }
 
-    fn close(&self, partition: &str, name: &[u8]) {
+    pub(crate) fn close(&self, partition: &str, name: &[u8]) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
         hasher.update(&*hash);
