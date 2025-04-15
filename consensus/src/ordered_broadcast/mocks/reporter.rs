@@ -1,5 +1,5 @@
 use crate::{
-    ordered_broadcast::types::{ack_namespace, Activity, Epoch, Lock},
+    ordered_broadcast::types::{ack_namespace, chunk_namespace, Activity, Epoch, Lock, Proposal},
     Reporter as Z,
 };
 use commonware_cryptography::{bls12381::primitives::group, Digest, Verifier};
@@ -7,10 +7,11 @@ use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
 };
-use std::collections::{btree_map::Entry, BTreeMap, HashMap};
+use std::collections::{btree_map::Entry, BTreeMap, HashMap, HashSet};
 
 #[allow(clippy::large_enum_variant)]
 enum Message<C: Verifier, D: Digest> {
+    Proposal(Proposal<C, D>),
     Locked(Lock<C::PublicKey, D>),
     GetTip(C::PublicKey, oneshot::Sender<Option<(u64, Epoch)>>),
     GetContiguousTip(C::PublicKey, oneshot::Sender<Option<u64>>),
@@ -25,6 +26,9 @@ pub struct Reporter<C: Verifier, D: Digest> {
 
     // Public key of the group
     public: group::Public,
+
+    // Notified proposals
+    proposals: HashSet<Proposal<C, D>>,
 
     // All known digests
     digests: HashMap<C::PublicKey, BTreeMap<u64, (D, Epoch)>>,
@@ -44,6 +48,7 @@ impl<C: Verifier, D: Digest> Reporter<C, D> {
                 mailbox: receiver,
                 namespace: namespace.to_vec(),
                 public,
+                proposals: HashSet::new(),
                 digests: HashMap::new(),
                 contiguous: HashMap::new(),
                 highest: HashMap::new(),
@@ -55,10 +60,17 @@ impl<C: Verifier, D: Digest> Reporter<C, D> {
     pub async fn run(mut self) {
         while let Some(msg) = self.mailbox.next().await {
             match msg {
+                Message::Proposal(proposal) => {
+                    // Verify properly constructed (not needed in production)
+                    if !proposal.verify(&chunk_namespace(&self.namespace)) {
+                        panic!("Invalid proof");
+                    }
+
+                    // Store the proposal
+                    self.proposals.insert(proposal.clone());
+                }
                 Message::Locked(lock) => {
-                    // Check proof.
-                    //
-                    // The prover checks the validity of the threshold signature when deserializing
+                    // Verify properly constructed (not needed in production)
                     if !lock.verify(&self.public, &ack_namespace(&self.namespace)) {
                         panic!("Invalid proof");
                     }
@@ -139,20 +151,17 @@ impl<C: Verifier, D: Digest> Z for Mailbox<C, D> {
 
     async fn report(&mut self, activity: Self::Activity) {
         match activity {
-            Activity::Proposal(_) => {
-                // TODO: implement
-            }
-            Activity::Ack() => {
-                // TODO: implement
+            Activity::Proposal(proposal) => {
+                self.sender
+                    .send(Message::Proposal(proposal))
+                    .await
+                    .expect("Failed to send proposal");
             }
             Activity::Lock(lock) => {
                 self.sender
                     .send(Message::Locked(lock))
                     .await
                     .expect("Failed to send locked");
-            }
-            Activity::ChunkMismatch() => {
-                // TODO: implement
             }
         }
     }
