@@ -33,9 +33,6 @@
 //! [Autobahn](https://arxiv.org/abs/2401.10369) provided the insight that a succinct
 //! proof-of-availability could be produced by linking sequencer broadcasts.
 
-mod parsed;
-mod prover;
-pub use prover::Prover;
 mod types;
 
 cfg_if::cfg_if! {
