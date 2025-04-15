@@ -1,7 +1,5 @@
-use std::ops::RangeBounds;
-
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error, FixedSize, RangeConfig, Read, ReadRangeExt, Write};
+use commonware_codec::{Encode, EncodeSize, Error, FixedSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{Public, Signature},
@@ -76,27 +74,27 @@ impl<D: Digest> Write for Voter<D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
             Voter::Notarize(v) => {
-                writer.write_u8(0);
+                0u8.write(writer);
                 v.write(writer);
             }
             Voter::Notarization(v) => {
-                writer.write_u8(1);
+                1u8.write(writer);
                 v.write(writer);
             }
             Voter::Nullify(v) => {
-                writer.write_u8(2);
+                2u8.write(writer);
                 v.write(writer);
             }
             Voter::Nullification(v) => {
-                writer.write_u8(3);
+                3u8.write(writer);
                 v.write(writer);
             }
             Voter::Finalize(v) => {
-                writer.write_u8(4);
+                4u8.write(writer);
                 v.write(writer);
             }
             Voter::Finalization(v) => {
-                writer.write_u8(5);
+                5u8.write(writer);
                 v.write(writer);
             }
         }
@@ -118,7 +116,7 @@ impl<D: Digest> EncodeSize for Voter<D> {
 
 impl<D: Digest> Read for Voter<D> {
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let tag = reader.read_u8()?;
+        let tag = <u8>::read(reader)?;
         match tag {
             0 => {
                 let v = Notarize::read(reader)?;
@@ -249,7 +247,7 @@ impl<D: Digest> Notarize<D> {
             identity,
             public_key_index,
             &[notarize_message, seed_message],
-            &[&self.proposal_signature, &self.seed_signature],
+            &[self.proposal_signature, self.seed_signature],
         )
         .is_ok()
     }
@@ -672,11 +670,11 @@ impl<D: Digest> Write for Backfiller<D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
             Backfiller::Request(v) => {
-                writer.write_u8(0);
+                0u8.write(writer);
                 v.write(writer);
             }
             Backfiller::Response(v) => {
-                writer.write_u8(1);
+                1u8.write(writer);
                 v.write(writer);
             }
         }
@@ -694,14 +692,14 @@ impl<D: Digest> EncodeSize for Backfiller<D> {
 
 impl<D: Digest> Read<BackfillerConfig> for Backfiller<D> {
     fn read_cfg(reader: &mut impl Buf, cfg: &BackfillerConfig) -> Result<Self, Error> {
-        let tag = reader.read_u8()?;
+        let tag = <u8>::read(reader)?;
         match tag {
             0 => {
                 let v = Request::read_cfg(reader, cfg)?;
                 Ok(Backfiller::Request(v))
             }
             1 => {
-                let v = Response::<D>::read(reader, cfg)?;
+                let v = Response::<D>::read_cfg(reader, cfg)?;
                 Ok(Backfiller::Response(v))
             }
             _ => Err(Error::Invalid(
@@ -805,7 +803,7 @@ impl<D: Digest> Read<BackfillerConfig> for Response<D> {
 }
 
 pub fn view_message(view: View) -> Vec<u8> {
-    View::encode(&view)
+    View::encode(&view).into()
 }
 
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
@@ -825,39 +823,39 @@ impl<D: Digest> Write for Activity<D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
             Activity::Notarize(v) => {
-                writer.write_u8(0);
+                0u8.write(writer);
                 v.write(writer);
             }
             Activity::Notarization(v) => {
-                writer.write_u8(1);
+                1u8.write(writer);
                 v.write(writer);
             }
             Activity::Nullify(v) => {
-                writer.write_u8(2);
+                2u8.write(writer);
                 v.write(writer);
             }
             Activity::Nullification(v) => {
-                writer.write_u8(3);
+                3u8.write(writer);
                 v.write(writer);
             }
             Activity::Finalize(v) => {
-                writer.write_u8(4);
+                4u8.write(writer);
                 v.write(writer);
             }
             Activity::Finalization(v) => {
-                writer.write_u8(5);
+                5u8.write(writer);
                 v.write(writer);
             }
             Activity::ConflictingNotarize(v) => {
-                writer.write_u8(6);
+                6u8.write(writer);
                 v.write(writer);
             }
             Activity::ConflictingFinalize(v) => {
-                writer.write_u8(7);
+                7u8.write(writer);
                 v.write(writer);
             }
             Activity::NullifyFinalize(v) => {
-                writer.write_u8(8);
+                8u8.write(writer);
                 v.write(writer);
             }
         }
@@ -882,7 +880,7 @@ impl<D: Digest> EncodeSize for Activity<D> {
 
 impl<D: Digest> Read for Activity<D> {
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let tag = reader.read_u8()?;
+        let tag = <u8>::read(reader)?;
         match tag {
             0 => {
                 let v = Notarize::read(reader)?;
@@ -1001,18 +999,16 @@ impl<D: Digest> Viewable for ConflictingNotarize<D> {
 }
 
 impl<D: Digest> Write for ConflictingNotarize<D> {
-    fn write(&self, writer: &mut impl Writer) {
+    fn write(&self, writer: &mut impl BufMut) {
         self.proposal_1.write(writer);
         self.signature_1.write(writer);
         self.proposal_2.write(writer);
         self.signature_2.write(writer);
     }
+}
 
-    fn len_encoded(&self) -> usize {
-        Self::LEN_ENCODED
-    }
-
-    fn read(reader: &mut impl Reader) -> Result<Self, Error> {
+impl<D: Digest> Read for ConflictingNotarize<D> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let proposal_1 = Proposal::read(reader)?;
         let signature_1 = PartialSignature::read(reader)?;
         let proposal_2 = Proposal::read(reader)?;
@@ -1035,11 +1031,9 @@ impl<D: Digest> Write for ConflictingNotarize<D> {
     }
 }
 
-impl<D: Digest> SizedCodec for ConflictingNotarize<D> {
-    const LEN_ENCODED: usize = Proposal::<D>::LEN_ENCODED
-        + PartialSignature::LEN_ENCODED
-        + Proposal::<D>::LEN_ENCODED
-        + PartialSignature::LEN_ENCODED;
+impl<D: Digest> FixedSize for ConflictingNotarize<D> {
+    const SIZE: usize =
+        Proposal::<D>::SIZE + PartialSignature::SIZE + Proposal::<D>::SIZE + PartialSignature::SIZE;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -1098,19 +1092,17 @@ impl<D: Digest> Viewable for ConflictingFinalize<D> {
     }
 }
 
-impl<D: Digest> Codec for ConflictingFinalize<D> {
-    fn write(&self, writer: &mut impl Writer) {
+impl<D: Digest> Write for ConflictingFinalize<D> {
+    fn write(&self, writer: &mut impl BufMut) {
         self.proposal_1.write(writer);
         self.signature_1.write(writer);
         self.proposal_2.write(writer);
         self.signature_2.write(writer);
     }
+}
 
-    fn len_encoded(&self) -> usize {
-        Self::LEN_ENCODED
-    }
-
-    fn read(reader: &mut impl Reader) -> Result<Self, Error> {
+impl<D: Digest> Read for ConflictingFinalize<D> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let proposal_1 = Proposal::read(reader)?;
         let signature_1 = PartialSignature::read(reader)?;
         let proposal_2 = Proposal::read(reader)?;
@@ -1133,11 +1125,9 @@ impl<D: Digest> Codec for ConflictingFinalize<D> {
     }
 }
 
-impl<D: Digest> SizedCodec for ConflictingFinalize<D> {
-    const LEN_ENCODED: usize = Proposal::<D>::LEN_ENCODED
-        + PartialSignature::LEN_ENCODED
-        + Proposal::<D>::LEN_ENCODED
-        + PartialSignature::LEN_ENCODED;
+impl<D: Digest> FixedSize for ConflictingFinalize<D> {
+    const SIZE: usize =
+        Proposal::<D>::SIZE + PartialSignature::SIZE + Proposal::<D>::SIZE + PartialSignature::SIZE;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -1194,18 +1184,16 @@ impl<D: Digest> Viewable for NullifyFinalize<D> {
     }
 }
 
-impl<D: Digest> Codec for NullifyFinalize<D> {
-    fn write(&self, writer: &mut impl Writer) {
+impl<D: Digest> Write for NullifyFinalize<D> {
+    fn write(&self, writer: &mut impl BufMut) {
         self.proposal.write(writer);
         self.view_signature.write(writer);
         self.finalize_signature.write(writer);
     }
+}
 
-    fn len_encoded(&self) -> usize {
-        Self::LEN_ENCODED
-    }
-
-    fn read(reader: &mut impl Reader) -> Result<Self, Error> {
+impl<D: Digest> Read for NullifyFinalize<D> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let proposal = Proposal::read(reader)?;
         let view_signature = PartialSignature::read(reader)?;
         let finalize_signature = PartialSignature::read(reader)?;
@@ -1220,7 +1208,6 @@ impl<D: Digest> Codec for NullifyFinalize<D> {
     }
 }
 
-impl<D: Digest> SizedCodec for NullifyFinalize<D> {
-    const LEN_ENCODED: usize =
-        Proposal::<D>::LEN_ENCODED + PartialSignature::LEN_ENCODED + PartialSignature::LEN_ENCODED;
+impl<D: Digest> FixedSize for NullifyFinalize<D> {
+    const SIZE: usize = Proposal::<D>::SIZE + PartialSignature::SIZE + PartialSignature::SIZE;
 }
