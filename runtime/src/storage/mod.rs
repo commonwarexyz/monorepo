@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use prometheus_client::{
     metrics::{counter::Counter, gauge::Gauge},
     registry::Registry,
