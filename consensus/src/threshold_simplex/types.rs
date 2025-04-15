@@ -740,7 +740,8 @@ impl Read<usize> for Request {
     fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
         let id = View::read(reader)?;
         let notarizations = Vec::<View>::read_range(reader, ..=*max_len)?;
-        let nullifications = Vec::<View>::read_range(reader, ..=*max_len)?;
+        let remaining = max_len - notarizations.len();
+        let nullifications = Vec::<View>::read_range(reader, ..=remaining)?;
         Ok(Request {
             id,
             notarizations,
@@ -788,7 +789,8 @@ impl<D: Digest> Read<usize> for Response<D> {
     fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
         let id = View::read(reader)?;
         let notarizations = Vec::<Notarization<D>>::read_range(reader, ..=*max_len)?;
-        let nullifications = Vec::<Nullification>::read_range(reader, ..=*max_len)?;
+        let remaining = max_len - notarizations.len();
+        let nullifications = Vec::<Nullification>::read_range(reader, ..=remaining)?;
         Ok(Response {
             id,
             notarizations,

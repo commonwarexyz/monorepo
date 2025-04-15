@@ -438,6 +438,7 @@ impl<
                         Ok(msg) => msg,
                         Err(err) => {
                             warn!(?err, sender = ?s, "failed to decode message");
+                            self.requester.block(s);
                             continue;
                         },
                     };
@@ -449,13 +450,6 @@ impl<
                             let mut nullifications = Vec::new();
                             let mut missing_nullifications = Vec::new();
                             let mut nullifications_found = Vec::new();
-
-                            // Ensure too many notarizations/nullifications aren't requested
-                            if request.notarizations.len() + request.nullifications.len() > self.max_fetch_count {
-                                warn!(sender = ?s, "request too large");
-                                self.requester.block(s);
-                                continue;
-                            }
 
                             // Populate notarizations first
                             for view in request.notarizations {
@@ -495,17 +489,6 @@ impl<
                                 continue;
                             };
                             self.inflight.clear(request.id);
-
-                            // Ensure response isn't too big
-                            if response.notarizations.len() + response.nullifications.len() > self.max_fetch_count {
-                                // Block responder
-                                warn!(sender = ?s, "response too large");
-                                self.requester.block(s);
-
-                                // Pick new recipient
-                                self.send(true, &mut sender).await;
-                                continue;
-                            }
 
                             // Parse notarizations
                             let mut notarizations_found = BTreeSet::new();
