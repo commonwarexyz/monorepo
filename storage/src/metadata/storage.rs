@@ -14,22 +14,22 @@ const BLOB_NAMES: [&[u8]; 2] = [b"left", b"right"];
 const SECONDS_IN_NANOSECONDS: u128 = 1_000_000_000;
 
 /// Implementation of `Metadata` storage.
-pub struct Metadata<B: Blob, C: Clock, K: Array> {
+pub struct Metadata<S: Storage, C: Clock, K: Array> {
     clock: C,
 
     // Data is stored in a BTreeMap to enable deterministic serialization.
     data: BTreeMap<K, Bytes>,
     cursor: usize,
-    blobs: [(B, u128); 2],
+    blobs: [(S::Blob, u128); 2],
 
     syncs: Counter,
     keys: Gauge,
 }
 
-impl<B: Blob, C: Clock, K: Array> Metadata<B, C, K> {
+impl<S: Storage, C: Clock, K: Array> Metadata<S, C, K> {
     /// Initialize a new `Metadata` instance.
     pub async fn init(
-        storage: &impl Storage<B>,
+        storage: &S,
         metrics: &impl Metrics,
         clock: C,
         cfg: Config,
@@ -84,7 +84,10 @@ impl<B: Blob, C: Clock, K: Array> Metadata<B, C, K> {
         })
     }
 
-    async fn load(index: usize, blob: &B) -> Result<Option<(u128, BTreeMap<K, Bytes>)>, Error<K>> {
+    async fn load(
+        index: usize,
+        blob: &S::Blob,
+    ) -> Result<Option<(u128, BTreeMap<K, Bytes>)>, Error<K>> {
         // Get blob length
         let len = blob.len().await?;
         if len == 0 {
