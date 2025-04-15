@@ -1,5 +1,7 @@
+use std::ops::RangeBounds;
+
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error, FixedSize, Read, Write};
+use commonware_codec::{EncodeSize, Error, FixedSize, RangeConfig, Read, ReadRangeExt, Write};
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{Public, Signature},
@@ -655,14 +657,19 @@ impl<D: Digest> FixedSize for Finalization<D> {
     const SIZE: usize = Proposal::<D>::SIZE + Signature::SIZE + Signature::SIZE;
 }
 
+#[derive(Clone)]
+pub struct BackfillerConfig {
+    pub max_requests: usize,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Backfiller<D: Digest> {
     Request(Request),
     Response(Response<D>),
 }
 
-impl<D: Digest> Codec for Backfiller<D> {
-    fn write(&self, writer: &mut impl Writer) {
+impl<D: Digest> Write for Backfiller<D> {
+    fn write(&self, writer: &mut impl BufMut) {
         match self {
             Backfiller::Request(v) => {
                 writer.write_u8(0);
@@ -674,23 +681,27 @@ impl<D: Digest> Codec for Backfiller<D> {
             }
         }
     }
+}
 
-    fn len_encoded(&self) -> usize {
-        (match self {
+impl<D: Digest> EncodeSize for Backfiller<D> {
+    fn encode_size(&self) -> usize {
+        1 + match self {
             Backfiller::Request(v) => v.encode_size(),
             Backfiller::Response(v) => v.encode_size(),
-        }) + 1
+        }
     }
+}
 
-    fn read(reader: &mut impl Reader) -> Result<Self, Error> {
+impl<D: Digest> Read<BackfillerConfig> for Backfiller<D> {
+    fn read_cfg(reader: &mut impl Buf, cfg: &BackfillerConfig) -> Result<Self, Error> {
         let tag = reader.read_u8()?;
         match tag {
             0 => {
-                let v = Request::read(reader)?;
+                let v = Request::read_cfg(reader, cfg)?;
                 Ok(Backfiller::Request(v))
             }
             1 => {
-                let v = Response::<D>::read(reader)?;
+                let v = Response::<D>::read(reader, cfg)?;
                 Ok(Backfiller::Response(v))
             }
             _ => Err(Error::Invalid(
@@ -718,23 +729,25 @@ impl Request {
     }
 }
 
-impl Codec for Request {
-    fn write(&self, writer: &mut impl Writer) {
+impl Write for Request {
+    fn write(&self, writer: &mut impl BufMut) {
         self.id.write(writer);
         self.notarizations.write(writer);
         self.nullifications.write(writer);
     }
+}
 
-    fn len_encoded(&self) -> usize {
-        Codec::len_encoded(&self.id)
-            + self.notarizations.len_encoded()
-            + self.nullifications.len_encoded()
+impl EncodeSize for Request {
+    fn encode_size(&self) -> usize {
+        self.id.encode_size() + self.notarizations.encode_size() + self.nullifications.encode_size()
     }
+}
 
-    fn read(reader: &mut impl Reader) -> Result<Self, Error> {
+impl Read<BackfillerConfig> for Request {
+    fn read_cfg(reader: &mut impl Buf, cfg: &BackfillerConfig) -> Result<Self, Error> {
         let id = View::read(reader)?;
-        let notarizations = Vec::<View>::read(reader)?;
-        let nullifications = Vec::<View>::read(reader)?;
+        let notarizations = Vec::<View>::read_range(reader, ..=cfg.max_requests)?;
+        let nullifications = Vec::<View>::read_range(reader, ..=cfg.max_requests)?;
         Ok(Request {
             id,
             notarizations,
@@ -764,25 +777,25 @@ impl<D: Digest> Response<D> {
     }
 }
 
-impl<D: Digest> Codec for Response<D> {
-    fn write(&self, writer: &mut impl Writer) {
+impl<D: Digest> Write for Response<D> {
+    fn write(&self, writer: &mut impl BufMut) {
         self.id.write(writer);
         self.notarizations.write(writer);
         self.nullifications.write(writer);
     }
+}
 
-    fn len_encoded(&self) -> usize {
-        Codec::len_encoded(&self.id)
-            + self.notarizations.len_encoded()
-            + self.nullifications.len_encoded()
+impl<D: Digest> EncodeSize for Response<D> {
+    fn encode_size(&self) -> usize {
+        self.id.encode_size() + self.notarizations.encode_size() + self.nullifications.encode_size()
     }
+}
 
-    fn read(reader: &mut impl Reader) -> Result<Self, Error> {
+impl<D: Digest> Read<BackfillerConfig> for Response<D> {
+    fn read_cfg(reader: &mut impl Buf, cfg: &BackfillerConfig) -> Result<Self, Error> {
         let id = View::read(reader)?;
-        // TODO: limit size of notarizations and nullifications read (to avoid runaway memory allocation for improerly
-        // provide "len" encoding)
-        let notarizations = Vec::<Notarization<D>>::read(reader)?;
-        let nullifications = Vec::<Nullification>::read(reader)?;
+        let notarizations = Vec::<Notarization<D>>::read_range(reader, ..=cfg.max_requests)?;
+        let nullifications = Vec::<Nullification>::read_range(reader, ..=cfg.max_requests)?;
         Ok(Response {
             id,
             notarizations,
@@ -808,8 +821,8 @@ pub enum Activity<D: Digest> {
     NullifyFinalize(NullifyFinalize<D>),
 }
 
-impl<D: Digest> Codec for Activity<D> {
-    fn write(&self, writer: &mut impl Writer) {
+impl<D: Digest> Write for Activity<D> {
+    fn write(&self, writer: &mut impl BufMut) {
         match self {
             Activity::Notarize(v) => {
                 writer.write_u8(0);
@@ -849,9 +862,11 @@ impl<D: Digest> Codec for Activity<D> {
             }
         }
     }
+}
 
-    fn len_encoded(&self) -> usize {
-        (match self {
+impl<D: Digest> EncodeSize for Activity<D> {
+    fn encode_size(&self) -> usize {
+        1 + match self {
             Activity::Notarize(v) => v.encode_size(),
             Activity::Notarization(v) => v.encode_size(),
             Activity::Nullify(v) => v.encode_size(),
@@ -861,10 +876,12 @@ impl<D: Digest> Codec for Activity<D> {
             Activity::ConflictingNotarize(v) => v.encode_size(),
             Activity::ConflictingFinalize(v) => v.encode_size(),
             Activity::NullifyFinalize(v) => v.encode_size(),
-        }) + 1
+        }
     }
+}
 
-    fn read(reader: &mut impl Reader) -> Result<Self, Error> {
+impl<D: Digest> Read for Activity<D> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let tag = reader.read_u8()?;
         match tag {
             0 => {
@@ -983,7 +1000,7 @@ impl<D: Digest> Viewable for ConflictingNotarize<D> {
     }
 }
 
-impl<D: Digest> Codec for ConflictingNotarize<D> {
+impl<D: Digest> Write for ConflictingNotarize<D> {
     fn write(&self, writer: &mut impl Writer) {
         self.proposal_1.write(writer);
         self.signature_1.write(writer);
