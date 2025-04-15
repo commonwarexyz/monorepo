@@ -17,22 +17,10 @@ use futures::channel::oneshot;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     // Parser Errors
-    #[error("Missing chunk")]
-    MissingChunk,
     #[error("Missing parent")]
     ParentMissing,
     #[error("Parent on genesis chunk")]
     ParentOnGenesis,
-    #[error("Invalid partial")]
-    InvalidPartial,
-    #[error("Invalid threshold")]
-    InvalidThreshold,
-    #[error("Invalid sequencer")]
-    InvalidSequencer,
-    #[error("Invalid payload")]
-    InvalidPayload,
-    #[error("Invalid signature")]
-    InvalidSignature,
 
     // Application Verification Errors
     #[error("Application verify error: {0}")]
@@ -81,9 +69,13 @@ pub enum Error {
     PeerMismatch,
 
     // Signature Errors
+    #[error("Invalid sequencer signature")]
+    InvalidSequencerSignature,
+    #[error("Invalid threshold signature")]
+    InvalidThresholdSignature,
     #[error("Invalid node signature")]
     InvalidNodeSignature,
-    #[error("Invalid partial signature")]
+    #[error("Invalid ack signature")]
     InvalidAckSignature,
 
     // Ignorable Message Errors
@@ -94,7 +86,7 @@ pub enum Error {
     #[error("Chunk height {0} lower than tip height {1}")]
     ChunkHeightTooLow(u64, u64),
 
-    // Slashable Errors
+    // Attributable Faults
     #[error("Chunk mismatch from sender {0} with height {1}")]
     ChunkMismatch(String, u64),
 }
@@ -274,7 +266,7 @@ impl<C: Verifier, D: Digest> Node<C, D> {
             &self.chunk.sequencer,
             &self.signature,
         ) {
-            return Err(Error::InvalidSignature);
+            return Err(Error::InvalidSequencerSignature);
         }
         let Some(parent) = &self.parent else {
             return Ok(None);
@@ -296,7 +288,7 @@ impl<C: Verifier, D: Digest> Node<C, D> {
             &parent.signature,
             ack_namespace,
         ) {
-            return Err(Error::InvalidSignature);
+            return Err(Error::InvalidThresholdSignature);
         }
         Ok(Some(parent_chunk))
     }
