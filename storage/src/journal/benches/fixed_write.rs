@@ -1,19 +1,19 @@
-use commonware_runtime::tokio::{Blob, Config as TConfig, Context, Executor};
+use commonware_runtime::tokio::{Config as TConfig, Context, Executor};
 use commonware_storage::journal::fixed::{Config as JConfig, Journal};
 use commonware_utils::array::FixedBytes;
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 
 /// Value of items_per_blob to use in the journal config.
-const ITEMS_PER_BLOB: u64 = 10000;
+const ITEMS_PER_BLOB: u64 = 10_000;
 
 /// Size of each journal item in bytes.
 const ITEM_SIZE: usize = 32;
 
 /// Number of items to write to the journal in each benchmark iteration.
-const ITEMS_TO_WRITE: usize = 500000;
+const ITEMS_TO_WRITE: usize = 500_000;
 
-async fn bench_setup(context: Context) -> Journal<Blob, Context, FixedBytes<ITEM_SIZE>> {
+async fn bench_setup(context: Context) -> Journal<Context, FixedBytes<ITEM_SIZE>> {
     let partition = "test_partition";
 
     let journal_config = JConfig {
@@ -28,7 +28,7 @@ async fn bench_setup(context: Context) -> Journal<Blob, Context, FixedBytes<ITEM
     j
 }
 
-async fn bench_run(journal: &mut Journal<Blob, Context, FixedBytes<ITEM_SIZE>>) {
+async fn bench_run(journal: &mut Journal<Context, FixedBytes<ITEM_SIZE>>) {
     let mut rng = StdRng::seed_from_u64(0);
     // Append a ton of random items to the journal
     let mut arr = [0; ITEM_SIZE];
