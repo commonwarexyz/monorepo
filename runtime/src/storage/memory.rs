@@ -10,7 +10,7 @@ pub struct Storage {
 }
 
 impl Storage {
-    pub fn _new() -> Self {
+    pub fn new() -> Self {
         Self {
             partitions: Arc::new(Mutex::new(HashMap::new())),
         }

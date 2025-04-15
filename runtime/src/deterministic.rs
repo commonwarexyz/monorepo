@@ -22,6 +22,8 @@
 //! println!("Auditor state: {}", auditor.state());
 //! ```
 
+use crate::storage::audited::{Blob as AuditedBlob, Storage as AuditedStorage};
+use crate::storage::memory::{Blob as MemBlob, Storage as MemStorage};
 use crate::{mocks, utils::Signaler, Clock, Error, Handle, Signal, METRICS_PREFIX};
 use commonware_utils::{hex, SystemTimeExt};
 use futures::{
@@ -44,7 +46,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     ops::Range,
     pin::Pin,
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, Mutex},
     task::{self, Poll, Waker},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -70,12 +72,6 @@ struct Metrics {
     task_polls: Family<Work, Counter>,
 
     network_bandwidth: Counter,
-
-    open_blobs: Gauge,
-    storage_reads: Counter,
-    storage_read_bandwidth: Counter,
-    storage_writes: Counter,
-    storage_write_bandwidth: Counter,
 }
 
 impl Metrics {
@@ -87,11 +83,6 @@ impl Metrics {
             blocking_tasks_spawned: Family::default(),
             blocking_tasks_running: Family::default(),
             network_bandwidth: Counter::default(),
-            open_blobs: Gauge::default(),
-            storage_reads: Counter::default(),
-            storage_read_bandwidth: Counter::default(),
-            storage_writes: Counter::default(),
-            storage_write_bandwidth: Counter::default(),
         };
         registry.register(
             "tasks_spawned",
@@ -122,31 +113,6 @@ impl Metrics {
             "bandwidth",
             "Total amount of data sent over network",
             metrics.network_bandwidth.clone(),
-        );
-        registry.register(
-            "open_blobs",
-            "Number of open blobs",
-            metrics.open_blobs.clone(),
-        );
-        registry.register(
-            "storage_reads",
-            "Total number of disk reads",
-            metrics.storage_reads.clone(),
-        );
-        registry.register(
-            "storage_read_bandwidth",
-            "Total amount of data read from disk",
-            metrics.storage_read_bandwidth.clone(),
-        );
-        registry.register(
-            "storage_writes",
-            "Total number of disk writes",
-            metrics.storage_writes.clone(),
-        );
-        registry.register(
-            "storage_write_bandwidth",
-            "Total amount of data written to disk",
-            metrics.storage_write_bandwidth.clone(),
         );
         metrics
     }
@@ -528,6 +494,7 @@ impl Executor {
                 spawned: false,
                 executor,
                 networking: Arc::new(Networking::new(metrics, auditor.clone())),
+                storage: AuditedStorage::new(MemStorage::new(), auditor.clone()),
             },
             auditor,
         )
@@ -733,6 +700,7 @@ pub struct Context {
     spawned: bool,
     executor: Arc<Executor>,
     networking: Arc<Networking>,
+    storage: AuditedStorage<MemStorage>,
 }
 
 impl Context {
@@ -801,6 +769,7 @@ impl Context {
                 spawned: false,
                 executor,
                 networking: Arc::new(Networking::new(metrics, auditor.clone())),
+                storage: self.storage,
             },
             auditor,
         )
@@ -814,6 +783,7 @@ impl Clone for Context {
             spawned: false,
             executor: self.executor.clone(),
             networking: self.networking.clone(),
+            storage: self.storage.clone(),
         }
     }
 }
@@ -955,6 +925,7 @@ impl crate::Metrics for Context {
             spawned: false,
             executor: self.executor.clone(),
             networking: self.networking.clone(),
+            storage: self.storage.clone(),
         }
     }
 
@@ -1286,181 +1257,19 @@ impl RngCore for Context {
 
 impl CryptoRng for Context {}
 
-/// Implementation of [`crate::Blob`] for the `deterministic` runtime.
-pub struct Blob {
-    executor: Arc<Executor>,
-
-    partition: String,
-    name: Vec<u8>,
-
-    // For content to be updated for future opens,
-    // it must be synced back to the partition (occurs on
-    // `sync` and `close`).
-    content: Arc<RwLock<Vec<u8>>>,
-}
-
-impl Blob {
-    fn new(executor: Arc<Executor>, partition: String, name: &[u8], content: Vec<u8>) -> Self {
-        executor.metrics.open_blobs.inc();
-        Self {
-            executor,
-            partition,
-            name: name.into(),
-            content: Arc::new(RwLock::new(content)),
-        }
-    }
-}
-
-impl Clone for Blob {
-    fn clone(&self) -> Self {
-        // We implement `Clone` manually to ensure the `open_blobs` gauge is updated.
-        self.executor.metrics.open_blobs.inc();
-        Self {
-            executor: self.executor.clone(),
-            partition: self.partition.clone(),
-            name: self.name.clone(),
-            content: self.content.clone(),
-        }
-    }
-}
-
 impl crate::Storage for Context {
-    type Blob = Blob;
+    type Blob = AuditedBlob<MemBlob>;
 
-    async fn open(&self, partition: &str, name: &[u8]) -> Result<Blob, Error> {
-        self.executor.auditor.open(partition, name);
-        let mut partitions = self.executor.partitions.lock().unwrap();
-        let partition_entry = partitions.entry(partition.into()).or_default();
-        let content = partition_entry.entry(name.into()).or_default();
-        Ok(Blob::new(
-            self.executor.clone(),
-            partition.into(),
-            name,
-            content.clone(),
-        ))
+    async fn open(&self, partition: &str, name: &[u8]) -> Result<Self::Blob, Error> {
+        self.storage.open(partition, name).await
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
-        self.executor.auditor.remove(partition, name);
-        let mut partitions = self.executor.partitions.lock().unwrap();
-        match name {
-            Some(name) => {
-                partitions
-                    .get_mut(partition)
-                    .ok_or(Error::PartitionMissing(partition.into()))?
-                    .remove(name)
-                    .ok_or(Error::BlobMissing(partition.into(), hex(name)))?;
-            }
-            None => {
-                partitions
-                    .remove(partition)
-                    .ok_or(Error::PartitionMissing(partition.into()))?;
-            }
-        }
-        Ok(())
+        self.storage.remove(partition, name).await
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
-        self.executor.auditor.scan(partition);
-        let partitions = self.executor.partitions.lock().unwrap();
-        let partition = partitions
-            .get(partition)
-            .ok_or(Error::PartitionMissing(partition.into()))?;
-        let mut results = Vec::with_capacity(partition.len());
-        for name in partition.keys() {
-            results.push(name.clone());
-        }
-        results.sort(); // deterministic output
-        Ok(results)
-    }
-}
-
-impl crate::Blob for Blob {
-    async fn len(&self) -> Result<u64, Error> {
-        self.executor.auditor.len(&self.partition, &self.name);
-        let content = self.content.read().unwrap();
-        Ok(content.len() as u64)
-    }
-
-    async fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
-        let buf_len = buf.len();
-        self.executor
-            .auditor
-            .read_at(&self.partition, &self.name, buf_len, offset);
-        let offset = offset.try_into().map_err(|_| Error::OffsetOverflow)?;
-        let content = self.content.read().unwrap();
-        let content_len = content.len();
-        if offset + buf_len > content_len {
-            return Err(Error::BlobInsufficientLength);
-        }
-        buf.copy_from_slice(&content[offset..offset + buf_len]);
-        self.executor.metrics.storage_reads.inc();
-        self.executor
-            .metrics
-            .storage_read_bandwidth
-            .inc_by(buf_len as u64);
-        Ok(())
-    }
-
-    async fn write_at(&self, buf: &[u8], offset: u64) -> Result<(), Error> {
-        self.executor
-            .auditor
-            .write_at(&self.partition, &self.name, buf, offset);
-        let offset = offset.try_into().map_err(|_| Error::OffsetOverflow)?;
-        let mut content = self.content.write().unwrap();
-        let required = offset + buf.len();
-        if required > content.len() {
-            content.resize(required, 0);
-        }
-        content[offset..offset + buf.len()].copy_from_slice(buf);
-        self.executor.metrics.storage_writes.inc();
-        self.executor
-            .metrics
-            .storage_write_bandwidth
-            .inc_by(buf.len() as u64);
-        Ok(())
-    }
-
-    async fn truncate(&self, len: u64) -> Result<(), Error> {
-        self.executor
-            .auditor
-            .truncate(&self.partition, &self.name, len);
-        let len = len.try_into().map_err(|_| Error::OffsetOverflow)?;
-        let mut content = self.content.write().unwrap();
-        content.truncate(len);
-        Ok(())
-    }
-
-    async fn sync(&self) -> Result<(), Error> {
-        // Create new content for partition
-        //
-        // Doing this first means we don't need to hold both the content
-        // lock and the partition lock at the same time.
-        let new_content = self.content.read().unwrap().clone();
-
-        // Update partition content
-        self.executor.auditor.sync(&self.partition, &self.name);
-        let mut partitions = self.executor.partitions.lock().unwrap();
-        let partition = partitions
-            .get_mut(&self.partition)
-            .ok_or(Error::PartitionMissing(self.partition.clone()))?;
-        let content = partition
-            .get_mut(&self.name)
-            .ok_or(Error::BlobMissing(self.partition.clone(), hex(&self.name)))?;
-        *content = new_content;
-        Ok(())
-    }
-
-    async fn close(self) -> Result<(), Error> {
-        self.executor.auditor.close(&self.partition, &self.name);
-        self.sync().await?;
-        Ok(())
-    }
-}
-
-impl Drop for Blob {
-    fn drop(&mut self) {
-        self.executor.metrics.open_blobs.dec();
+        self.storage.scan(partition).await
     }
 }
 

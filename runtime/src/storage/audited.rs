@@ -8,7 +8,7 @@ pub struct Storage<S: StorageTrait> {
 }
 
 impl<S: StorageTrait> Storage<S> {
-    pub fn _new(inner: S, auditor: Arc<Auditor>) -> Self {
+    pub fn new(inner: S, auditor: Arc<Auditor>) -> Self {
         Self { inner, auditor }
     }
 }
