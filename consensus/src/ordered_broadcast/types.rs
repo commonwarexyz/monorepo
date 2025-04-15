@@ -5,7 +5,7 @@ use commonware_cryptography::{
     bls12381::primitives::{
         group::{Public, Signature},
         ops,
-        poly::PartialSignature,
+        poly::{self, PartialSignature},
     },
     Digest, Verifier,
 };
@@ -321,6 +321,15 @@ impl<P: Array, D: Digest> Ack<P, D> {
             signature,
         }
     }
+
+    pub fn verify(&self, identity: &poly::Public, ack_namespace: &[u8]) -> bool {
+        // Construct signing payload
+        let message = ack_message(&self.chunk, &self.epoch);
+
+        // Verify signature
+        ops::partial_verify_message(identity, Some(ack_namespace), &message, &self.signature)
+            .is_ok()
+    }
 }
 
 impl<P: Array, D: Digest> Write for Ack<P, D> {
@@ -392,6 +401,13 @@ impl<C: Verifier, D: Digest> EncodeSize for Activity<C, D> {
     }
 }
 
+fn ack_message<P: Array, D: Digest>(chunk: &Chunk<P, D>, epoch: &Epoch) -> Vec<u8> {
+    let mut message = Vec::with_capacity(Chunk::<P, D>::SIZE + Epoch::SIZE);
+    chunk.write(&mut message);
+    epoch.write(&mut message);
+    message
+}
+
 fn verify_lock<P: Array, D: Digest>(
     public_key: &Public,
     chunk: &Chunk<P, D>,
@@ -400,9 +416,7 @@ fn verify_lock<P: Array, D: Digest>(
     ack_namespace: &[u8],
 ) -> bool {
     // Construct signing payload
-    let mut message = Vec::with_capacity(Chunk::<P, D>::SIZE + Epoch::SIZE);
-    chunk.write(&mut message);
-    epoch.write(&mut message);
+    let message = ack_message(chunk, epoch);
 
     // Verify signature
     ops::verify_message(public_key, Some(ack_namespace), &message, signature).is_ok()
