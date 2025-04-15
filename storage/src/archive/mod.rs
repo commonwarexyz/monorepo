@@ -131,7 +131,7 @@
 //!     let cfg = JConfig {
 //!         partition: "partition".to_string()
 //!     };
-//!     let journal = Journal::init(context.clone(), cfg).await.unwrap();
+//!     let journal = Journal::init(context.clone(), &context, cfg).await.unwrap();
 //!
 //!     // Create an archive
 //!     let cfg = Config {

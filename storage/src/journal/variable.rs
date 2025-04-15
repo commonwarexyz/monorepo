@@ -85,7 +85,7 @@
 //! let (executor, context, _) = Executor::default();
 //! executor.start(async move {
 //!     // Create a journal
-//!     let mut journal = Journal::init(context, Config{
+//!     let mut journal = Journal::init(context.clone(), &context, Config{
 //!         partition: "partition".to_string()
 //!     }).await.unwrap();
 //!
