@@ -280,6 +280,133 @@ impl<V: Verifier> Attributable<V> for Nullify<V> {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Nullification<V: Verifier> {
+    pub view: View,
+    pub signatures: Vec<Signature<V>>,
+}
+
+impl<V: Verifier> Nullification<V> {
+    pub fn new(view: View, signatures: Vec<Signature<V>>) -> Self {
+        Self { view, signatures }
+    }
+}
+
+impl<V: Verifier> Write for Nullification<V> {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.view.write(writer);
+        self.signatures.write(writer);
+    }
+}
+
+impl<V: Verifier> Read<usize> for Nullification<V> {
+    fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
+        let view = View::read(reader)?;
+        let signatures = Vec::<Signature<V>>::read_range(reader, ..=*max_len)?;
+        Ok(Self { view, signatures })
+    }
+}
+
+impl<V: Verifier> EncodeSize for Nullification<V> {
+    fn encode_size(&self) -> usize {
+        self.view.encode_size() + self.signatures.encode_size()
+    }
+}
+
+impl<V: Verifier> Viewable for Nullification<V> {
+    fn view(&self) -> View {
+        self.view
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Finalize<V: Verifier> {
+    pub view: View,
+    pub signature: Signature<V>,
+}
+
+impl<V: Verifier> Finalize<V> {
+    pub fn new(view: View, signature: Signature<V>) -> Self {
+        Self { view, signature }
+    }
+}
+
+impl<V: Verifier> Write for Finalize<V> {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.view.write(writer);
+        self.signature.write(writer);
+    }
+}
+
+impl<V: Verifier> Read for Finalize<V> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        let view = View::read(reader)?;
+        let signature = Signature::<V>::read(reader)?;
+        Ok(Self { view, signature })
+    }
+}
+
+impl<V: Verifier> FixedSize for Finalize<V> {
+    const SIZE: usize = View::SIZE + Signature::<V>::SIZE;
+}
+
+impl<V: Verifier> Viewable for Finalize<V> {
+    fn view(&self) -> View {
+        self.view
+    }
+}
+
+impl<V: Verifier> Attributable<V> for Finalize<V> {
+    fn signer(&self) -> V::PublicKey {
+        self.signature.signer()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Finalization<V: Verifier, D: Digest> {
+    pub proposal: Proposal<D>,
+    pub signatures: Vec<Signature<V>>,
+}
+
+impl<V: Verifier, D: Digest> Finalization<V, D> {
+    pub fn new(proposal: Proposal<D>, signatures: Vec<Signature<V>>) -> Self {
+        Self {
+            proposal,
+            signatures,
+        }
+    }
+}
+
+impl<V: Verifier, D: Digest> Write for Finalization<V, D> {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.proposal.write(writer);
+        self.signatures.write(writer);
+    }
+}
+
+impl<V: Verifier, D: Digest> Read<usize> for Finalization<V, D> {
+    fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
+        let proposal = Proposal::<D>::read(reader)?;
+        let signatures = Vec::<Signature<V>>::read_range(reader, ..=*max_len)?;
+        Ok(Self {
+            proposal,
+            signatures,
+        })
+    }
+}
+
+impl<V: Verifier, D: Digest> EncodeSize for Finalization<V, D> {
+    fn encode_size(&self) -> usize {
+        self.proposal.encode_size() + self.signatures.encode_size()
+    }
+}
+
+impl<V: Verifier, D: Digest> Viewable for Finalization<V, D> {
+    fn view(&self) -> View {
+        self.proposal.view()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Backfiller<D: Digest> {}
 
