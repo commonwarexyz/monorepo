@@ -204,9 +204,10 @@ impl<
             self.notarized_proposals
                 .insert(notarize.proposal.clone(), vec![public_key_index]);
         }
-        Arc::get_mut(&mut self.notarizes)
+        *Arc::get_mut(&mut self.notarizes)
             .unwrap()
-            .insert(public_key_index as usize, Some(notarize.clone()));
+            .get_mut(public_key_index as usize)
+            .unwrap() = Some(notarize.clone());
         self.reporter.report(Activity::Notarize(notarize)).await;
         true
     }
@@ -301,9 +302,10 @@ impl<
             self.finalized_proposals
                 .insert(finalize.proposal.clone(), vec![public_key_index]);
         }
-        Arc::get_mut(&mut self.finalizes)
+        *Arc::get_mut(&mut self.finalizes)
             .unwrap()
-            .insert(public_key_index as usize, Some(finalize.clone()));
+            .get_mut(public_key_index as usize)
+            .unwrap() = Some(finalize.clone());
         self.reporter.report(Activity::Finalize(finalize)).await;
         true
     }
@@ -2199,7 +2201,7 @@ impl<
                         }
                     };
                     if !handled {
-                        debug!(sender=?s, view, "failed to handle message");
+                        trace!(sender=?s, view, "dropped message");
                         continue;
                     }
                 },
