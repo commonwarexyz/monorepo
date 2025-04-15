@@ -163,7 +163,7 @@ impl<P: Array, D: Digest> TSu for Supervisor<P, D> {
 impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
     type Activity = Activity<D>;
 
-    async fn report(&self, activity: Self::Activity) {
+    async fn report(&mut self, activity: Self::Activity) {
         // We check signatures for all messages to ensure that the prover is working correctly
         // but in production this isn't necessary (as signatures are already verified in
         // consensus).

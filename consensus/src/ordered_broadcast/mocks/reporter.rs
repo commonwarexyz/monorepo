@@ -9,6 +9,7 @@ use futures::{
 };
 use std::collections::{btree_map::Entry, BTreeMap, HashMap};
 
+#[allow(clippy::large_enum_variant)]
 enum Message<C: Verifier, D: Digest> {
     Locked(Lock<C::PublicKey, D>),
     GetTip(C::PublicKey, oneshot::Sender<Option<(u64, Epoch)>>),
