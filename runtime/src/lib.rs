@@ -30,9 +30,9 @@ pub mod mocks;
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
         pub mod tokio;
+        mod storage;
     }
 }
-mod storage;
 pub mod telemetry;
 mod utils;
 pub use utils::{reschedule, Handle, Signal, Signaler};
