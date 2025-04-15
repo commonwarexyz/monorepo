@@ -12,7 +12,7 @@ use crate::{
     },
     ThresholdSupervisor,
 };
-use commonware_codec::{Decode, Encode, EncodeSize};
+use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{bls12381::primitives::poly, Digest, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{utils::requester, Receiver, Recipients, Sender};
@@ -122,7 +122,6 @@ pub struct Actor<
 
     fetch_timeout: Duration,
     max_fetch_count: usize,
-    max_fetch_size: usize,
     fetch_concurrent: usize,
     requester: requester::Requester<E, C::PublicKey>,
 
@@ -188,7 +187,6 @@ impl<
 
                 fetch_timeout: cfg.fetch_timeout,
                 max_fetch_count: cfg.max_fetch_count,
-                max_fetch_size: cfg.max_fetch_size,
                 fetch_concurrent: cfg.fetch_concurrent,
                 requester,
 
@@ -445,7 +443,6 @@ impl<
                     };
                     match msg{
                         Backfiller::Request(request) => {
-                            let mut populated_bytes = 0;
                             let mut notarizations = Vec::new();
                             let mut missing_notarizations = Vec::new();
                             let mut notarizations_found = Vec::new();
@@ -459,16 +456,10 @@ impl<
                                 self.requester.block(s);
                                 continue;
                             }
-                            // TODO: need to factor in size of Backfiller message overhead to do size?
 
                             // Populate notarizations first
                             for view in request.notarizations {
                                 if let Some(notarization) = self.notarizations.get(&view) {
-                                    let size = notarization.encode_size();
-                                    if populated_bytes + size > self.max_fetch_size {
-                                        break;
-                                    }
-                                    populated_bytes += size;
                                     notarizations.push(view);
                                     notarizations_found.push(notarization.clone());
                                     self.served.inc();
@@ -480,11 +471,6 @@ impl<
                             // Populate nullifications next
                             for view in request.nullifications {
                                 if let Some(nullification) = self.nullifications.get(&view) {
-                                    let size = nullification.encode_size();
-                                    if populated_bytes + size > self.max_fetch_size {
-                                        break;
-                                    }
-                                    populated_bytes += size;
                                     nullifications.push(view);
                                     nullifications_found.push(nullification.clone());
                                     self.served.inc();
