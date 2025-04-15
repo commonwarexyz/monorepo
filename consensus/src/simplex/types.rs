@@ -50,7 +50,92 @@ pub fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum Voter<D: Digest> {}
+pub enum Voter<V: Verifier, D: Digest> {
+    Notarize(Notarize<V, D>),
+    Notarization(Notarization<V, D>),
+    Nullify(Nullify<V>),
+    Nullification(Nullification<V>),
+    Finalize(Finalize<V>),
+    Finalization(Finalization<V, D>),
+}
+
+impl<V: Verifier, D: Digest> Write for Voter<V, D> {
+    fn write(&self, writer: &mut impl BufMut) {
+        match self {
+            Voter::Notarize(notarize) => {
+                0u8.write(writer);
+                notarize.write(writer);
+            }
+            Voter::Notarization(notarization) => {
+                1u8.write(writer);
+                notarization.write(writer);
+            }
+            Voter::Nullify(nullify) => {
+                2u8.write(writer);
+                nullify.write(writer);
+            }
+            Voter::Nullification(nullification) => {
+                3u8.write(writer);
+                nullification.write(writer);
+            }
+            Voter::Finalize(finalize) => {
+                4u8.write(writer);
+                finalize.write(writer);
+            }
+            Voter::Finalization(finalization) => {
+                5u8.write(writer);
+                finalization.write(writer);
+            }
+        }
+    }
+}
+
+impl<V: Verifier, D: Digest> Read<usize> for Voter<V, D> {
+    fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
+        let tag = u8::read(reader)?;
+        match tag {
+            0 => Ok(Voter::Notarize(Notarize::<V, D>::read(reader)?)),
+            1 => Ok(Voter::Notarization(Notarization::<V, D>::read_cfg(
+                reader, max_len,
+            )?)),
+            2 => Ok(Voter::Nullify(Nullify::<V>::read(reader)?)),
+            3 => Ok(Voter::Nullification(Nullification::<V>::read_cfg(
+                reader, max_len,
+            )?)),
+            4 => Ok(Voter::Finalize(Finalize::<V>::read(reader)?)),
+            5 => Ok(Voter::Finalization(Finalization::<V, D>::read_cfg(
+                reader, max_len,
+            )?)),
+            _ => Err(Error::Invalid("consensus::simplex::Voter", "Invalid type")),
+        }
+    }
+}
+
+impl<V: Verifier, D: Digest> EncodeSize for Voter<V, D> {
+    fn encode_size(&self) -> usize {
+        1 + match self {
+            Voter::Notarize(notarize) => notarize.encode_size(),
+            Voter::Notarization(notarization) => notarization.encode_size(),
+            Voter::Nullify(nullify) => nullify.encode_size(),
+            Voter::Nullification(nullification) => nullification.encode_size(),
+            Voter::Finalize(finalize) => finalize.encode_size(),
+            Voter::Finalization(finalization) => finalization.encode_size(),
+        }
+    }
+}
+
+impl<V: Verifier, D: Digest> Viewable for Voter<V, D> {
+    fn view(&self) -> View {
+        match self {
+            Voter::Notarize(notarize) => notarize.view(),
+            Voter::Notarization(notarization) => notarization.view(),
+            Voter::Nullify(nullify) => nullify.view(),
+            Voter::Nullification(nullification) => nullification.view(),
+            Voter::Finalize(finalize) => finalize.view(),
+            Voter::Finalization(finalization) => finalization.view(),
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Proposal<D: Digest> {
