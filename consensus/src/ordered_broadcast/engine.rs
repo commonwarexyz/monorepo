@@ -10,19 +10,15 @@
 use super::{
     metrics,
     types::{
-        ack_message, ack_namespace, chunk_namespace, Ack, Activity, Chunk, Context, Epoch, Error,
-        Lock, Node, Parent, Proposal,
+        ack_namespace, chunk_namespace, Ack, Activity, Chunk, Context, Epoch, Error, Lock, Node,
+        Parent, Proposal,
     },
     AckManager, Config, TipManager,
 };
 use crate::{Automaton, Monitor, Relay, Reporter, Supervisor, ThresholdSupervisor};
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{
-    bls12381::primitives::{
-        group::{self},
-        ops,
-        poly::{self},
-    },
+    bls12381::primitives::{group, poly},
     Digest, Scheme,
 };
 use commonware_macros::select;
@@ -499,11 +495,7 @@ impl<
         let Some(share) = self.validators.share(self.epoch) else {
             return Err(Error::UnknownShare(self.epoch));
         };
-        let partial = ops::partial_sign_message(
-            share,
-            Some(&self.ack_namespace),
-            &ack_message(&tip.chunk, &self.epoch),
-        );
+        let ack = Ack::sign(share, tip.chunk.clone(), self.epoch, &self.ack_namespace);
 
         // Sync the journal to prevent ever acking two conflicting chunks at
         // the same height, even if the node crashes and restarts.
@@ -527,7 +519,6 @@ impl<
         };
 
         // Send the ack to the network
-        let ack = Ack::new(tip.chunk.clone(), self.epoch, partial);
         ack_sender
             .send(
                 Recipients::Some(recipients),
@@ -719,11 +710,13 @@ impl<
         }
 
         // Construct new node
-        let chunk = Chunk::new(me.clone(), height, payload);
-        let signature = self
-            .crypto
-            .sign(Some(&self.chunk_namespace), &chunk.encode());
-        let node = Node::new(chunk, signature, parent);
+        let node = Node::sign(
+            &mut self.crypto,
+            height,
+            payload,
+            parent,
+            &self.chunk_namespace,
+        );
 
         // Deal with the chunk as if it were received over the network
         self.handle_node(&node).await;

@@ -159,7 +159,7 @@ mod tests {
 
     /// Aggregated helper functions to reduce duplication in tests.
     mod helpers {
-        use crate::ordered_broadcast::types::{ack_message, ack_namespace, Chunk};
+        use crate::ordered_broadcast::types::{ack_namespace, Chunk};
 
         use super::*;
         use commonware_codec::FixedSize;
@@ -177,27 +177,13 @@ mod tests {
             ed25519::PublicKey::try_from(&[val; ed25519::PublicKey::SIZE][..]).unwrap()
         }
 
-        /// Sign a partial for the given chunk and epoch using the provided share.
-        pub fn sign_partial(
-            share: &Share,
-            chunk: &Chunk<ed25519::PublicKey, sha256::Digest>,
-            epoch: &Epoch,
-        ) -> commonware_cryptography::bls12381::primitives::poly::PartialSignature {
-            ops::partial_sign_message(
-                share,
-                Some(ack_namespace(b"1234").as_slice()),
-                &ack_message(chunk, epoch),
-            )
-        }
-
         /// Create an Ack by signing a partial with the provided share.
         pub fn create_ack(
             share: &Share,
             chunk: Chunk<ed25519::PublicKey, sha256::Digest>,
             epoch: Epoch,
         ) -> Ack<ed25519::PublicKey, sha256::Digest> {
-            let signature = sign_partial(share, &chunk, &epoch);
-            Ack::new(chunk, epoch, signature)
+            Ack::sign(share, chunk, epoch, ack_namespace(b"1234").as_slice())
         }
 
         /// Recover a threshold signature from a set of partials.
@@ -218,7 +204,7 @@ mod tests {
         ) -> commonware_cryptography::bls12381::primitives::group::Signature {
             let partials: Vec<_> = indices
                 .iter()
-                .map(|&i| sign_partial(&shares[i], chunk, epoch))
+                .map(|&i| create_ack(&shares[i], chunk.clone(), *epoch).signature)
                 .collect();
             recover_threshold(quorum, partials)
         }
