@@ -1,5 +1,7 @@
 use crate::{
-    ordered_broadcast::types::{ack_namespace, chunk_namespace, Activity, Epoch, Lock, Proposal},
+    ordered_broadcast::types::{
+        ack_namespace, chunk_namespace, Activity, Chunk, Epoch, Lock, Proposal,
+    },
     Reporter as Z,
 };
 use commonware_cryptography::{bls12381::primitives::group, Digest, Verifier};
@@ -28,7 +30,8 @@ pub struct Reporter<C: Verifier, D: Digest> {
     public: group::Public,
 
     // Notified proposals
-    proposals: HashSet<Proposal<C, D>>,
+    proposals: HashSet<Chunk<C::PublicKey, D>>,
+    misses_allowed: Option<usize>,
 
     // All known digests
     digests: HashMap<C::PublicKey, BTreeMap<u64, (D, Epoch)>>,
@@ -41,7 +44,11 @@ pub struct Reporter<C: Verifier, D: Digest> {
 }
 
 impl<C: Verifier, D: Digest> Reporter<C, D> {
-    pub fn new(namespace: &[u8], public: group::Public) -> (Self, Mailbox<C, D>) {
+    pub fn new(
+        namespace: &[u8],
+        public: group::Public,
+        misses_allowed: Option<usize>,
+    ) -> (Self, Mailbox<C, D>) {
         let (sender, receiver) = mpsc::channel(1024);
         (
             Reporter {
@@ -49,6 +56,7 @@ impl<C: Verifier, D: Digest> Reporter<C, D> {
                 namespace: namespace.to_vec(),
                 public,
                 proposals: HashSet::new(),
+                misses_allowed,
                 digests: HashMap::new(),
                 contiguous: HashMap::new(),
                 highest: HashMap::new(),
@@ -58,6 +66,7 @@ impl<C: Verifier, D: Digest> Reporter<C, D> {
     }
 
     pub async fn run(mut self) {
+        let mut misses = 0;
         while let Some(msg) = self.mailbox.next().await {
             match msg {
                 Message::Proposal(proposal) => {
@@ -67,12 +76,20 @@ impl<C: Verifier, D: Digest> Reporter<C, D> {
                     }
 
                     // Store the proposal
-                    self.proposals.insert(proposal.clone());
+                    self.proposals.insert(proposal.chunk);
                 }
                 Message::Locked(lock) => {
                     // Verify properly constructed (not needed in production)
                     if !lock.verify(&self.public, &ack_namespace(&self.namespace)) {
                         panic!("Invalid proof");
+                    }
+
+                    // Check if the proposal is known
+                    if let Some(misses_allowed) = self.misses_allowed {
+                        if !self.proposals.contains(&lock.chunk) {
+                            misses += 1;
+                        }
+                        assert!(misses <= misses_allowed, "Missed too many proposals");
                     }
 
                     // Update the reporter

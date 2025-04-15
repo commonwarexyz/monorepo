@@ -187,6 +187,7 @@ mod tests {
         reporters: &mut BTreeMap<PublicKey, mocks::ReporterMailbox<Ed25519, Sha256Digest>>,
         rebroadcast_timeout: Duration,
         invalid_when: fn(u64) -> bool,
+        misses_allowed: Option<usize>,
     ) -> HashMap<PublicKey, mocks::Monitor> {
         let mut monitors = HashMap::new();
         let namespace = b"my testing namespace";
@@ -201,8 +202,11 @@ mod tests {
             let automaton = mocks::Automaton::<PublicKey>::new(invalid_when);
             automatons.insert(validator.clone(), automaton.clone());
 
-            let (reporter, reporter_mailbox) =
-                mocks::Reporter::<Ed25519, Sha256Digest>::new(namespace, *poly::public(&identity));
+            let (reporter, reporter_mailbox) = mocks::Reporter::<Ed25519, Sha256Digest>::new(
+                namespace,
+                *poly::public(&identity),
+                misses_allowed,
+            );
             context.with_label("reporter").spawn(|_| reporter.run());
             reporters.insert(validator.clone(), reporter_mailbox);
 
@@ -313,6 +317,7 @@ mod tests {
                 &mut reporters,
                 Duration::from_secs(5),
                 |_| false,
+                Some(5),
             );
             await_reporters(context.with_label("reporter"), &reporters, (100, 111)).await;
         });
@@ -383,6 +388,7 @@ mod tests {
                         &mut reporters,
                         Duration::from_secs(5),
                         |_| false,
+                        None,
                     );
 
                     let reporter_pairs: Vec<(
@@ -450,6 +456,7 @@ mod tests {
                 &mut reporters,
                 Duration::from_secs(1),
                 |_| false,
+                None,
             );
 
             // Simulate partition by removing all links.
@@ -518,6 +525,7 @@ mod tests {
                 &mut reporters,
                 Duration::from_millis(150),
                 |_| false,
+                None,
             );
 
             await_reporters(context.with_label("reporter"), &reporters, (40, 111)).await;
@@ -572,6 +580,7 @@ mod tests {
                 &mut reporters,
                 Duration::from_secs(5),
                 |i| i % 10 == 0,
+                None,
             );
 
             await_reporters(context.with_label("reporter"), &reporters, (100, 111)).await;
@@ -610,6 +619,7 @@ mod tests {
                 &mut reporters,
                 Duration::from_secs(1),
                 |_| false,
+                Some(5),
             );
 
             // Perform some work
