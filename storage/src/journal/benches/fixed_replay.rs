@@ -6,6 +6,7 @@ use commonware_runtime::{
 use commonware_storage::journal::fixed::Journal;
 use commonware_utils::array::FixedBytes;
 use criterion::{black_box, criterion_group, Criterion};
+use futures::{pin_mut, StreamExt};
 use std::time::{Duration, Instant};
 
 /// Partition name to use in the journal config.
@@ -28,16 +29,27 @@ async fn bench_init(
         .await
 }
 
-/// Sequentially read `items_to_read` items in the given `journal` starting from item 0.
-async fn bench_run(journal: &Journal<Context, FixedBytes<ITEM_SIZE>>, items_to_read: u64) {
-    for pos in 0..items_to_read {
-        black_box(journal.read(pos).await.expect("failed to read data"));
+/// Replay all items in the given `journal`.
+async fn bench_run(journal: &mut Journal<Context, FixedBytes<ITEM_SIZE>>) {
+    let concurrency = (ITEMS_TO_WRITE / ITEMS_PER_BLOB) as usize;
+    let stream = journal
+        .replay(concurrency)
+        .await
+        .expect("failed to replay journal");
+    pin_mut!(stream);
+    while let Some(result) = stream.next().await {
+        match result {
+            Ok(item) => {
+                black_box(item);
+            }
+            Err(err) => panic!("Failed to read item: {}", err),
+        }
     }
 }
 
-/// Benchmark the sequential read of ITEMS_TO_WRITE (and then ITEMS_TO_WRITE*2)
+/// Benchmark the replaying of ITEMS_TO_WRITE (and then ITEMS_TO_WRITE*2)
 /// items from a journal containing exactly that number of items.
-fn bench_fixed_read_sequential(c: &mut Criterion) {
+fn bench_fixed_replay(c: &mut Criterion) {
     let executor = tokio::Executor::default();
 
     c.bench_function(
@@ -45,17 +57,15 @@ fn bench_fixed_read_sequential(c: &mut Criterion) {
         |b| {
             b.to_async(&executor).iter_custom(|iters| async move {
                 let ctx = context::get::<commonware_runtime::tokio::Context>();
-                let journal = bench_init(ctx.clone(), ITEMS_TO_WRITE).await;
-                let sz = journal.size().await.unwrap();
-                assert_eq!(sz, ITEMS_TO_WRITE);
+                let mut j = bench_init(ctx.clone(), ITEMS_TO_WRITE).await;
 
                 let mut duration = Duration::ZERO;
                 for _ in 0..iters {
                     let start = Instant::now();
-                    bench_run(&journal, ITEMS_TO_WRITE).await;
+                    bench_run(&mut j).await;
                     duration += start.elapsed();
                 }
-                journal.destroy().await.unwrap();
+                j.destroy().await.unwrap();
 
                 duration
             });
@@ -67,17 +77,15 @@ fn bench_fixed_read_sequential(c: &mut Criterion) {
         |b| {
             b.to_async(&executor).iter_custom(|iters| async move {
                 let ctx = context::get::<commonware_runtime::tokio::Context>();
-                let journal = bench_init(ctx.clone(), ITEMS_TO_WRITE * 2).await;
-                let sz = journal.size().await.unwrap();
-                assert_eq!(sz, ITEMS_TO_WRITE * 2);
+                let mut j = bench_init(ctx.clone(), ITEMS_TO_WRITE * 2).await;
 
                 let mut duration = Duration::ZERO;
                 for _ in 0..iters {
                     let start = Instant::now();
-                    bench_run(&journal, ITEMS_TO_WRITE * 2).await;
+                    bench_run(&mut j).await;
                     duration += start.elapsed();
                 }
-                journal.destroy().await.unwrap();
+                j.destroy().await.unwrap();
 
                 duration
             });
@@ -88,5 +96,5 @@ fn bench_fixed_read_sequential(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_fixed_read_sequential
+    targets = bench_fixed_replay
 }

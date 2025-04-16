@@ -6,12 +6,14 @@ use rand::{rngs::StdRng, RngCore, SeedableRng};
 
 mod fixed_read_random;
 mod fixed_read_sequential;
+mod fixed_replay;
 mod fixed_write;
 
 criterion_main!(
     fixed_write::benches,
     fixed_read_random::benches,
-    fixed_read_sequential::benches
+    fixed_read_sequential::benches,
+    fixed_replay::benches,
 );
 
 /// Write `items_to_write` random items to a journal of items with ITEM_SIZE bytes each. The journal
@@ -21,7 +23,6 @@ async fn write_random_journal<const ITEM_SIZE: usize>(
     partition_name: &str,
     items_per_blob: u64,
     items_to_write: u64,
-    prune: bool, // whether to prune to 0 items before writing
 ) -> Journal<Context, FixedBytes<ITEM_SIZE>> {
     let journal_config = JConfig {
         partition: partition_name.to_string(),
@@ -30,9 +31,6 @@ async fn write_random_journal<const ITEM_SIZE: usize>(
 
     // Initialize the journal and prune it to its empty state if requested.
     let mut journal = Journal::init(context, journal_config).await.unwrap();
-    if prune {
-        journal.prune(0).await.unwrap();
-    }
 
     // Append `items_to_write` random items to the journal.
     let mut rng = StdRng::seed_from_u64(0);
@@ -47,17 +45,4 @@ async fn write_random_journal<const ITEM_SIZE: usize>(
     journal.sync().await.unwrap();
 
     journal
-}
-
-/// Get a previously initialized random journal with the given journal config parameters.
-async fn get_random_journal<const ITEM_SIZE: usize>(
-    context: Context,
-    partition_name: &str,
-    items_per_blob: u64,
-) -> Journal<Context, FixedBytes<ITEM_SIZE>> {
-    let journal_config = JConfig {
-        partition: partition_name.to_string(),
-        items_per_blob,
-    };
-    Journal::init(context, journal_config).await.unwrap()
 }

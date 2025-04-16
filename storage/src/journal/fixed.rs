@@ -448,6 +448,18 @@ impl<E: Storage + Metrics, A: Array> Journal<E, A> {
         }
         Ok(())
     }
+
+    /// Close and remove any remnants of the journal on disk.
+    pub async fn destroy(self) -> Result<(), Error> {
+        for (i, blob) in self.blobs.into_iter() {
+            blob.close().await?;
+            debug!(blob = i, "destroyed blob");
+            self.context
+                .remove(&self.cfg.partition, Some(&i.to_be_bytes()))
+                .await?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

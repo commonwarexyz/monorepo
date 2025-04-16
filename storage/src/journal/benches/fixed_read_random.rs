@@ -1,10 +1,14 @@
-use super::{get_random_journal, write_random_journal};
-use commonware_runtime::tokio::{Config as TConfig, Context, Executor};
+use super::write_random_journal;
+use commonware_runtime::{
+    benchmarks::{context, tokio},
+    tokio::Context,
+};
 use commonware_storage::journal::fixed::Journal;
 use commonware_utils::array::FixedBytes;
-use criterion::{async_executor::AsyncExecutor, black_box, criterion_group, BatchSize, Criterion};
+use criterion::{black_box, criterion_group, Criterion};
 use futures::future::try_join_all;
 use rand::{rngs::StdRng, Rng, SeedableRng};
+use std::time::{Duration, Instant};
 
 /// Partition name to use in the journal config.
 const PARTITION: &str = "test_partition";
@@ -19,21 +23,8 @@ const ITEMS_TO_WRITE: u64 = 5_000_000;
 const ITEM_SIZE: usize = 32;
 
 async fn bench_init(context: Context) -> Journal<Context, FixedBytes<ITEM_SIZE>> {
-    write_random_journal::<ITEM_SIZE>(
-        context.clone(),
-        PARTITION,
-        ITEMS_PER_BLOB,
-        ITEMS_TO_WRITE,
-        true,
-    )
-    .await
-}
-
-async fn bench_setup(context: Context) -> Journal<Context, FixedBytes<ITEM_SIZE>> {
-    let journal = get_random_journal::<ITEM_SIZE>(context, PARTITION, ITEMS_PER_BLOB).await;
-    assert_eq!(journal.size().await.unwrap(), ITEMS_TO_WRITE);
-
-    journal
+    write_random_journal::<ITEM_SIZE>(context.clone(), PARTITION, ITEMS_PER_BLOB, ITEMS_TO_WRITE)
+        .await
 }
 
 /// Read `items_to_read` random items from the given `journal`, awaiting each
@@ -63,37 +54,48 @@ async fn bench_run_concurrent(
 }
 
 fn bench_fixed_read_random(c: &mut Criterion) {
-    let runtime_cfg = TConfig::default();
-    let (executor, context) = Executor::init(runtime_cfg.clone());
-    executor.block_on(async {
-        let journal = bench_init(context.clone()).await;
-        let sz = journal.size().await.unwrap();
-        assert_eq!(sz, ITEMS_TO_WRITE);
-    });
+    let executor = tokio::Executor::default();
 
-    for n in [100, 1_000, 5_000, 10_000, 25_000, 50_000, 100_000] {
-        c.bench_function(&format!("{}/serial/items={}", module_path!(), n), |b| {
-            b.to_async(&executor).iter_batched(
-                || bench_setup(context.clone()),
-                |journal| async {
-                    let j = journal.await;
-                    bench_run_serial(&j, n).await;
-                },
-                BatchSize::SmallInput,
-            );
-        });
+    const ITEMS_TO_READ: usize = 100_000;
+    c.bench_function(
+        &format!("{}/serial/items={}", module_path!(), ITEMS_TO_READ),
+        |b| {
+            b.to_async(&executor).iter_custom(|iters| async move {
+                let ctx = context::get::<commonware_runtime::tokio::Context>();
+                let j = bench_init(ctx.clone()).await;
+                let mut duration = Duration::ZERO;
 
-        c.bench_function(&format!("{}/concurrent/items={}", module_path!(), n), |b| {
-            b.to_async(&executor).iter_batched(
-                || bench_setup(context.clone()),
-                |journal| async {
-                    let j = journal.await;
-                    bench_run_concurrent(&j, n).await;
-                },
-                BatchSize::SmallInput,
-            );
-        });
-    }
+                for _ in 0..iters {
+                    let start = Instant::now();
+                    bench_run_serial(&j, ITEMS_TO_READ).await;
+                    duration += start.elapsed();
+                }
+                j.destroy().await.unwrap();
+
+                duration
+            });
+        },
+    );
+
+    c.bench_function(
+        &format!("{}/concurrent/items={}", module_path!(), ITEMS_TO_READ),
+        |b| {
+            b.to_async(&executor).iter_custom(|iters| async move {
+                let ctx = context::get::<commonware_runtime::tokio::Context>();
+                let j = bench_init(ctx.clone()).await;
+                let mut duration = Duration::ZERO;
+
+                for _ in 0..iters {
+                    let start = Instant::now();
+                    bench_run_concurrent(&j, ITEMS_TO_READ).await;
+                    duration += start.elapsed();
+                }
+                j.destroy().await.unwrap();
+
+                duration
+            });
+        },
+    );
 }
 
 criterion_group! {

@@ -1,8 +1,6 @@
 use crate::storage::metered::Storage;
 use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
 use crate::{utils::Signaler, Clock, Error, Handle, Signal, METRICS_PREFIX};
-use commonware_utils::{from_hex, hex};
-use criterion::async_executor::AsyncExecutor;
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
     encoding::{text::encode, EncodeLabelSet},
@@ -247,18 +245,6 @@ impl crate::Runner for Runner {
         F: Future,
     {
         self.executor.runtime.block_on(f)
-    }
-}
-
-impl AsyncExecutor for &Runner {
-    fn block_on<T>(&self, future: impl Future<Output = T>) -> T {
-        self.executor.runtime.block_on(future)
-    }
-}
-
-impl AsyncExecutor for Runner {
-    fn block_on<T>(&self, future: impl Future<Output = T>) -> T {
-        self.executor.runtime.block_on(future)
     }
 }
 

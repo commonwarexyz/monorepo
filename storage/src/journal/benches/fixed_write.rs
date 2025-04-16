@@ -1,8 +1,12 @@
-use commonware_runtime::tokio::{Config as TConfig, Context, Executor};
+use commonware_runtime::{
+    benchmarks::{context, tokio},
+    tokio::Context,
+};
 use commonware_storage::journal::fixed::{Config as JConfig, Journal};
 use commonware_utils::array::FixedBytes;
-use criterion::{criterion_group, BatchSize, Criterion};
+use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
+use std::time::{Duration, Instant};
 
 /// Value of items_per_blob to use in the journal config.
 const ITEMS_PER_BLOB: u64 = 10_000;
@@ -13,7 +17,7 @@ const ITEM_SIZE: usize = 32;
 /// Number of items to write to the journal in each benchmark iteration.
 const ITEMS_TO_WRITE: usize = 500_000;
 
-async fn bench_setup(context: Context) -> Journal<Context, FixedBytes<ITEM_SIZE>> {
+async fn bench_init(context: Context) -> Journal<Context, FixedBytes<ITEM_SIZE>> {
     let partition = "test_partition";
 
     let journal_config = JConfig {
@@ -21,11 +25,7 @@ async fn bench_setup(context: Context) -> Journal<Context, FixedBytes<ITEM_SIZE>
         items_per_blob: ITEMS_PER_BLOB,
     };
 
-    let mut j = Journal::init(context, journal_config).await.unwrap();
-    // Ensure each sample starts writing from position 0.
-    j.prune(0).await.unwrap();
-
-    j
+    Journal::init(context, journal_config).await.unwrap()
 }
 
 async fn bench_run(journal: &mut Journal<Context, FixedBytes<ITEM_SIZE>>) {
@@ -42,18 +42,21 @@ async fn bench_run(journal: &mut Journal<Context, FixedBytes<ITEM_SIZE>>) {
 }
 
 fn bench_fixed_write(c: &mut Criterion) {
-    let runtime_cfg = TConfig::default();
-    let (executor, context) = Executor::init(runtime_cfg.clone());
+    let executor = tokio::Executor::default();
 
     c.bench_function(module_path!(), |b| {
-        b.to_async(&executor).iter_batched(
-            || bench_setup(context.clone()),
-            |journal| async {
-                let mut j = journal.await;
+        b.to_async(&executor).iter_custom(|iters| async move {
+            let ctx = context::get::<commonware_runtime::tokio::Context>();
+            let mut duration = Duration::ZERO;
+            for _ in 0..iters {
+                let mut j = bench_init(ctx.clone()).await;
+                let start = Instant::now();
                 bench_run(&mut j).await;
-            },
-            BatchSize::SmallInput,
-        );
+                duration += start.elapsed();
+                j.destroy().await.unwrap();
+            }
+            duration
+        });
     });
 }
 
