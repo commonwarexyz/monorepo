@@ -94,7 +94,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
     pub const CHUNK_SIZE: usize = N;
 
     /// The size of a chunk in bits.
-    const CHUNK_SIZE_BITS: u64 = N as u64 * 8;
+    pub const CHUNK_SIZE_BITS: u64 = N as u64 * 8;
 
     /// Return a new empty bitmap.
     pub fn new() -> Self {
@@ -115,9 +115,11 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
     /// that pruning boundary.
     pub async fn restore_pruned<C: RStorage + Metrics + Clock>(
         context: C,
-        partition: String,
+        partition: &str,
     ) -> Result<Self, Error> {
-        let metadata_cfg = MConfig { partition };
+        let metadata_cfg = MConfig {
+            partition: partition.to_string(),
+        };
         let metadata = Metadata::init(context.with_label("metadata"), metadata_cfg).await?;
 
         let key: U64 = U64::new(PRUNED_CHUNKS_PREFIX, 0);
@@ -173,9 +175,11 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
     pub async fn write_pruned<C: RStorage + Metrics + Clock>(
         &self,
         context: C,
-        partition: String,
+        partition: &str,
     ) -> Result<(), Error> {
-        let metadata_cfg = MConfig { partition };
+        let metadata_cfg = MConfig {
+            partition: partition.to_string(),
+        };
         let mut metadata = Metadata::init(context.with_label("metadata"), metadata_cfg).await?;
         metadata.clear();
 
@@ -200,6 +204,11 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         (self.pruned_chunks + self.bitmap.len()) as u64 * Self::CHUNK_SIZE_BITS
             - Self::CHUNK_SIZE_BITS
             + self.next_bit
+    }
+
+    /// Return the number of bits that have been pruned from this bitmap.
+    pub fn pruned_bits(&self) -> u64 {
+        self.pruned_chunks as u64 * Self::CHUNK_SIZE_BITS
     }
 
     /// Prune the bitmap to the most recent chunk boundary that contains the referenced bit. Panics
@@ -723,10 +732,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Initializing from an empty partition should result in an empty bitmap.
-            let mut bitmap =
-                Bitmap::<Sha256, 32>::restore_pruned(context.clone(), PARTITION.to_string())
-                    .await
-                    .unwrap();
+            let mut bitmap = Bitmap::<Sha256, 32>::restore_pruned(context.clone(), PARTITION)
+                .await
+                .unwrap();
             assert_eq!(bitmap.bit_count(), 0);
 
             // Add a non-trivial amount of data.
@@ -750,13 +758,12 @@ mod tests {
             for i in (10..=FULL_CHUNK_COUNT).step_by(10) {
                 bitmap.prune_to_bit(i as u64 * Bitmap::<Sha256, 32>::CHUNK_SIZE_BITS);
                 bitmap
-                    .write_pruned(context.clone(), PARTITION.to_string())
+                    .write_pruned(context.clone(), PARTITION)
                     .await
                     .unwrap();
-                bitmap =
-                    Bitmap::<Sha256, 32>::restore_pruned(context.clone(), PARTITION.to_string())
-                        .await
-                        .unwrap();
+                bitmap = Bitmap::<Sha256, 32>::restore_pruned(context.clone(), PARTITION)
+                    .await
+                    .unwrap();
                 let _ = bitmap.root(&mut hasher);
 
                 // Replay missing chunks.

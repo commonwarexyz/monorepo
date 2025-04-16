@@ -5,7 +5,8 @@
 //! In the [Any] db, it is not possible to prove whether the value of a key is the currently active
 //! one, only that it was associated with the key at some point in the past. This type of
 //! authenticated database is most useful for applications involving keys that are given values once
-//! and cannot be updated after.
+//! and cannot be updated after. If authenticating the current value is required, see
+//! [Current](crate::adb::Current).
 
 use crate::{
     adb::{operation::Operation, Error},
@@ -58,7 +59,7 @@ pub struct Any<
 > {
     /// An MMR over digests of the operations applied to the db. The number of leaves in this MMR
     /// always equals the number of operations in the unpruned `log`.
-    ops: Mmr<E, H>,
+    pub(crate) ops: Mmr<E, H>,
 
     /// A (pruned) log of all operations applied to the db in order of occurrence. The position
     /// of each operation in the log is called its _location_, which is a stable identifier. Pruning
@@ -67,19 +68,19 @@ pub struct Any<
     ///
     /// Invariant: An operation's location is always equal to the number of the MMR leaf storing the
     /// digest of the operation.
-    log: Journal<E, Operation<K, V>>,
+    pub(crate) log: Journal<E, Operation<K, V>>,
 
     /// A location before which all operations are "inactive" (that is, operations before this point
     /// are over keys that have been updated by some operation at or after this point).
-    inactivity_floor_loc: u64,
+    pub(crate) inactivity_floor_loc: u64,
 
     /// A snapshot of all currently active operations in the form of a map from each key to the
     /// location in the log containing its most recent update. Only contains the keys that currently
     /// have a value (that is, deleted keys are not in the map).
-    snapshot: Index<T, u64>,
+    pub(crate) snapshot: Index<T, u64>,
 
     /// The number of operations that are pending commit.
-    uncommitted_ops: u64,
+    pub(crate) uncommitted_ops: u64,
 }
 
 /// The result of a database `update` operation.
@@ -521,10 +522,23 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     pub async fn commit(&mut self, hasher: &mut H) -> Result<(), Error> {
         // Raise the inactivity floor by the # of uncommitted operations, plus 1 to account for the
         // commit op that will be appended.
-        self.raise_inactivity_floor(hasher, self.uncommitted_ops + 1, None)
+        self.raise_inactivity_floor::<0 /*unused*/>(hasher, self.uncommitted_ops + 1, None)
             .await?;
         self.uncommitted_ops = 0;
         self.sync().await?;
+
+        Ok(())
+    }
+
+    /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable
+    /// upon return from this function. Also raises the inactivity floor according to the schedule,
+    /// and prunes those operations below it.
+    pub async fn commit(
+        &mut self,
+        hasher: &mut H,
+        old_locs: Option<&mut Vec<u64>>,
+    ) -> Result<(), Error> {
+        self.commit_only(hasher, old_locs).await?;
 
         // TODO: Make the frequency with which we prune known inactive items configurable in case
         // this turns out to be a significant part of commit overhead, or the user wants to ensure
@@ -533,7 +547,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     }
 
     /// Sync the db to disk ensuring the current state is persisted.
-    async fn sync(&mut self) -> Result<(), Error> {
+    pub(crate) async fn sync(&mut self) -> Result<(), Error> {
         try_join!(
             self.log.sync().map_err(Error::JournalError),
             self.ops.sync().map_err(Error::MmrError),
@@ -596,16 +610,16 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
 
     /// Raise the inactivity floor by exactly `max_steps` steps, followed by applying a commit
     /// operation. Each step either advances over an inactive operation, or re-applies an active
-    /// operation to the tip and then advances over it. If old_locs is non-None, then any locations
-    /// that were flipped from active to inactive are added to the provided vector.
+    /// operation to the tip and then advances over it. If the bitmap is non-None, then an active
+    /// bit will be added for any moved operation, with its old location flipped to false.
     ///
     /// This method does not change the state of the db's snapshot, but it always changes the root
     /// since it applies at least one operation.
-    pub(crate) async fn raise_inactivity_floor(
+    pub(crate) async fn raise_inactivity_floor<const N: usize>(
         &mut self,
         hasher: &mut H,
         max_steps: u64,
-        mut old_locs: Option<&mut Vec<u64>>,
+        mut bitmap: Option<&mut Bitmap<H, N>>,
     ) -> Result<(), Error> {
         for _ in 0..max_steps {
             if self.inactivity_floor_loc == self.op_count() {
@@ -615,14 +629,20 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             let old_loc = self
                 .move_op_if_active(hasher, op, self.inactivity_floor_loc)
                 .await?;
-            if let (Some(old_locs_vec), Some(old_loc_value)) = (old_locs.as_mut(), old_loc) {
-                old_locs_vec.push(old_loc_value);
+            if let Some(bitmap_ref) = &mut bitmap {
+                if let Some(old_loc) = old_loc {
+                    bitmap_ref.set_bit(hasher, old_loc, false);
+                    bitmap_ref.append(hasher, true);
+                }
             }
             self.inactivity_floor_loc += 1;
         }
 
         self.apply_op(hasher, Operation::Commit(self.inactivity_floor_loc))
             .await?;
+        if let Some(bitmap_ref) = &mut bitmap {
+            bitmap_ref.append(hasher, false);
+        }
 
         Ok(())
     }
@@ -721,7 +741,7 @@ mod test {
             .unwrap()
     }
 
-    #[test_traced]
+    #[test_traced("WARN")]
     pub fn test_any_db_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -809,11 +829,12 @@ mod test {
             db.sync().await.unwrap();
 
             // Advance over 3 inactive operations.
-            let mut old_locs = Vec::new();
-            db.raise_inactivity_floor(&mut hasher, 3, Some(&mut old_locs))
+            let mut bitmap = Bitmap::<_, 32>::new();
+            db.raise_inactivity_floor(&mut hasher, 3, Some(&mut bitmap))
                 .await
                 .unwrap();
-            assert!(old_locs.is_empty()); // no active ops were moved
+            assert_eq!(bitmap.bit_count(), 1); // commit operation added
+            assert!(!bitmap.get_bit(0)); // commit operation should be tagged inactive
             assert_eq!(db.inactivity_floor_loc, 3);
             assert_eq!(db.log.size().await.unwrap(), 6); // 4 updates, 1 deletion, 1 commit
 
@@ -864,7 +885,7 @@ mod test {
 
             // Since this db no longer has any active keys, we should be able to raise the
             // inactivity floor to the tip (only the inactive commit op remains).
-            db.raise_inactivity_floor(&mut hasher, 100, None)
+            db.raise_inactivity_floor::<0>(&mut hasher, 100, None)
                 .await
                 .unwrap();
             assert_eq!(db.inactivity_floor_loc, db.op_count() - 1);
@@ -961,11 +982,9 @@ mod test {
             assert_eq!(db.snapshot.keys(), 857);
 
             // Raise the inactivity floor to the point where all inactive operations can be pruned.
-            let mut old_locs = Vec::new();
-            db.raise_inactivity_floor(&mut hasher, 3000, Some(&mut old_locs))
+            db.raise_inactivity_floor::<0>(&mut hasher, 3000, None)
                 .await
                 .unwrap();
-            assert_eq!(old_locs.len(), 2999);
             db.prune_inactive().await.unwrap();
             assert_eq!(db.inactivity_floor_loc, 4478);
             // Inactivity floor should be 858 operations from tip since 858 operations are active
@@ -993,11 +1012,9 @@ mod test {
             let start_pos = db.ops.pruned_to_pos();
             let start_loc = leaf_pos_to_num(start_pos).unwrap();
             // Raise the inactivity floor and make sure historical inactive operations are still provable.
-            old_locs.clear();
-            db.raise_inactivity_floor(&mut hasher, 100, Some(&mut old_locs))
+            db.raise_inactivity_floor::<0>(&mut hasher, 100, None)
                 .await
                 .unwrap();
-            assert_eq!(old_locs.len(), 100);
             let root = db.root(&mut hasher);
             assert!(start_loc < db.inactivity_floor_loc);
             for i in start_loc..end_loc {
