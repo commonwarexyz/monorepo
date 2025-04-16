@@ -206,7 +206,7 @@ impl BitVec {
     #[inline]
     pub fn clear_all(&mut self) {
         for block in &mut self.storage {
-            *block = 0;
+            *block = EMPTY_BLOCK;
         }
     }
 
@@ -214,7 +214,7 @@ impl BitVec {
     #[inline]
     pub fn set_all(&mut self) {
         for block in &mut self.storage {
-            *block = u64::MAX;
+            *block = FULL_BLOCK;
         }
         self.clear_trailing_bits();
     }
