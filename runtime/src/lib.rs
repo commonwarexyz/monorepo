@@ -1119,11 +1119,6 @@ mod tests {
         // Run test
         let (executor, context, _) = deterministic::Executor::default();
         test_blob_clone_and_concurrent_read(executor, context.clone());
-
-        // TODO danlaine: replace/remove this test
-        // Ensure no blobs still open
-        // let buffer = context.encode();
-        // assert!(buffer.contains("open_blobs 0"));
     }
 
     #[test]
@@ -1278,11 +1273,6 @@ mod tests {
         // Run test
         let (executor, context) = tokio::Executor::default();
         test_blob_clone_and_concurrent_read(executor, context.clone());
-
-        // TODO danlaine: replace/remove this test
-        // Ensure no blobs still open
-        // let buffer = context.encode();
-        // assert!(buffer.contains("open_blobs 0"));
     }
 
     #[test]
