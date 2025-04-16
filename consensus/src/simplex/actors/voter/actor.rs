@@ -5,9 +5,9 @@ use crate::{
         metrics,
         types::{
             finalize_namespace, notarize_namespace, nullify_namespace, threshold, Activity,
-            Attributable, ConflictingFinalize, ConflictingNotarize, Context, Finalize,
-            Notarization, Notarize, Nullification, Nullify, NullifyFinalize, Proposal, View,
-            Viewable, Voter,
+            Attributable, ConflictingFinalize, ConflictingNotarize, Context, Finalization,
+            Finalize, Notarization, Notarize, Nullification, Nullify, NullifyFinalize, Proposal,
+            View, Viewable, Voter,
         },
     },
     Automaton, Relay, Reporter, Supervisor, LATENCY,
@@ -1130,7 +1130,7 @@ impl<
         self.enter_view(view + 1);
     }
 
-    async fn nullification(&mut self, nullification: wire::Nullification) {
+    async fn nullification(&mut self, nullification: Nullification<V>) {
         // Check if we are still in a view where this notarization could help
         if !self.interesting(nullification.view, true) {
             return;
@@ -1145,8 +1145,7 @@ impl<
         }
 
         // Verify nullification
-        if !verify_nullification::<S, C>(&self.supervisor, &self.nullify_namespace, &nullification)
-        {
+        if !nullification.verify(&self.supervisor, &self.nullify_namespace) {
             return;
         }
 
@@ -1154,32 +1153,30 @@ impl<
         self.handle_nullification(nullification).await;
     }
 
-    async fn handle_nullification(&mut self, nullification: wire::Nullification) {
+    async fn handle_nullification(&mut self, nullification: Nullification<V>) {
         // Add signatures to view (needed to broadcast notarization if we get proposal)
-        let round = self.views.entry(nullification.view).or_insert_with(|| {
+        let view = nullification.view();
+        let round = self.views.entry(view).or_insert_with(|| {
             Round::new(
                 self.context.current(),
+                self.reporter.clone(),
                 self.supervisor.clone(),
-                nullification.view,
+                view,
             )
         });
-        let validators = self.supervisor.participants(nullification.view).unwrap();
         for signature in &nullification.signatures {
-            let nullify = wire::Nullify {
-                view: nullification.view,
-                signature: Some(signature.clone()),
-            };
-            let nullify_bytes = wire::Voter {
-                payload: Some(wire::voter::Payload::Nullify(nullify.clone())),
-            }
-            .encode_to_vec()
-            .into();
-            let public_key = validators.get(signature.public_key as usize).unwrap();
-            if round.add_verified_nullify(public_key, nullify).await && self.journal.is_some() {
+            let public_key_index = self
+                .supervisor
+                .is_participant(view, signature.signer())
+                .unwrap();
+            let nullify = Nullify::new(view, signature.clone());
+            let msg = Voter::Nullify::<V, D>(nullify.clone()).encode().into();
+            if round.add_verified_nullify(public_key_index, nullify).await && self.journal.is_some()
+            {
                 self.journal
                     .as_mut()
                     .unwrap()
-                    .append(nullification.view, nullify_bytes)
+                    .append(nullification.view, msg)
                     .await
                     .expect("unable to append to journal");
             }
@@ -1193,166 +1190,106 @@ impl<
         self.enter_view(nullification.view + 1);
     }
 
-    async fn finalize(&mut self, finalize: wire::Finalize) {
-        // Extract proposal
-        let Some(proposal) = finalize.proposal.as_ref() else {
-            return;
-        };
-
+    async fn finalize(&mut self, finalize: Finalize<V, D>) {
         // Ensure we are in the right view to process this message
-        if !self.interesting(proposal.view, false) {
+        let view = finalize.view();
+        if !self.interesting(view, false) {
             return;
         }
 
-        // Ensure digest is well-formed
-        let Ok(payload) = D::try_from(&proposal.payload) else {
-            return;
-        };
-
-        // Parse signature
-        let Some(signature) = finalize.signature.as_ref() else {
-            return;
-        };
-
         // Verify that signer is a validator
-        let Some(participants) = self.supervisor.participants(proposal.view) else {
-            return;
-        };
-        let Ok(public_key_index) = usize::try_from(signature.public_key) else {
-            return;
-        };
-        let Some(public_key) = participants.get(public_key_index).cloned() else {
+        let Some(public_key_index) = self.supervisor.is_participant(view, finalize.signer()) else {
             return;
         };
 
         // Verify the signature
-        let Ok(signature) = C::Signature::try_from(&signature.signature) else {
-            return;
-        };
-        let finalize_message = proposal_message(proposal.view, proposal.parent, &payload);
-        if !C::verify(
-            Some(&self.finalize_namespace),
-            &finalize_message,
-            &public_key,
-            &signature,
-        ) {
+        if !finalize.verify(&self.finalize_namespace) {
             return;
         }
 
         // Handle finalize
-        self.handle_finalize(
-            &public_key,
-            Parsed {
-                message: finalize,
-                digest: payload,
-            },
-        )
-        .await;
+        self.handle_finalize(public_key_index, finalize).await;
     }
 
-    async fn handle_finalize(
-        &mut self,
-        public_key: &C::PublicKey,
-        finalize: Parsed<wire::Finalize, D>,
-    ) {
+    async fn handle_finalize(&mut self, public_key_index: u32, finalize: Finalize<V, D>) {
         // Get view for finalize
-        let view = finalize.message.proposal.as_ref().unwrap().view;
-        let round = self
-            .views
-            .entry(view)
-            .or_insert_with(|| Round::new(self.context.current(), self.supervisor.clone(), view));
+        let view = finalize.view();
+        let round = self.views.entry(view).or_insert_with(|| {
+            Round::new(
+                self.context.current(),
+                self.reporter.clone(),
+                self.supervisor.clone(),
+                view,
+            )
+        });
 
         // Handle finalize
-        let finalize_bytes = wire::Voter {
-            payload: Some(wire::voter::Payload::Finalize(finalize.message.clone())),
-        }
-        .encode_to_vec()
-        .into();
-        if round.add_verified_finalize(public_key, finalize).await && self.journal.is_some() {
+        let msg = Voter::Finalize::<V, D>(finalize.clone()).encode().into();
+        if round
+            .add_verified_finalize(public_key_index, finalize)
+            .await
+            && self.journal.is_some()
+        {
             self.journal
                 .as_mut()
                 .unwrap()
-                .append(view, finalize_bytes)
+                .append(view, msg)
                 .await
                 .expect("unable to append to journal");
         }
     }
 
-    async fn finalization(&mut self, finalization: wire::Finalization) {
-        // Extract proposal
-        let Some(proposal) = &finalization.proposal else {
-            return;
-        };
-
+    async fn finalization(&mut self, finalization: Finalization<V, D>) {
         // Check if we are still in a view where this finalization could help
-        if !self.interesting(proposal.view, true) {
+        let view = finalization.view();
+        if !self.interesting(view, true) {
             return;
         }
 
-        // Ensure digest is well-formed
-        let Ok(payload) = D::try_from(&proposal.payload) else {
-            return;
-        };
-
         // Determine if we already broadcast finalization for this view (in which
         // case we can ignore this message)
-        if let Some(ref round) = self.views.get_mut(&proposal.view) {
+        if let Some(ref round) = self.views.get_mut(&view) {
             if round.broadcast_finalization {
                 return;
             }
         }
 
         // Verify finalization
-        if !verify_finalization::<S, C, D>(
-            &self.supervisor,
-            &self.finalize_namespace,
-            &finalization,
-        ) {
+        if !finalization.verify(&self.supervisor, &self.finalize_namespace) {
             return;
         }
 
         // Process finalization
-        self.handle_finalization(Parsed {
-            message: finalization,
-            digest: payload,
-        })
-        .await;
+        self.handle_finalization(finalization).await;
     }
 
-    async fn handle_finalization(&mut self, finalization: Parsed<wire::Finalization, D>) {
+    async fn handle_finalization(&mut self, finalization: Finalization<V, D>) {
         // Add signatures to view (needed to broadcast finalization if we get proposal)
-        let view = finalization.message.proposal.as_ref().unwrap().view;
-        let round = self
-            .views
-            .entry(view)
-            .or_insert_with(|| Round::new(self.context.current(), self.supervisor.clone(), view));
-        let validators = self.supervisor.participants(view).unwrap();
-        for signature in finalization.message.signatures.iter() {
-            let finalize = wire::Finalize {
-                proposal: Some(finalization.message.proposal.as_ref().unwrap().clone()),
-                signature: Some(signature.clone()),
-            };
-            let finalize_bytes = wire::Voter {
-                payload: Some(wire::voter::Payload::Finalize(finalize.clone())),
-            }
-            .encode_to_vec()
-            .into();
-            let public_key = validators.get(signature.public_key as usize).unwrap();
+        let view = finalization.view();
+        let round = self.views.entry(view).or_insert_with(|| {
+            Round::new(
+                self.context.current(),
+                self.reporter.clone(),
+                self.supervisor.clone(),
+                view,
+            )
+        });
+        for signature in finalization.signatures {
+            let public_key_index = self
+                .supervisor
+                .is_participant(view, signature.signer())
+                .unwrap();
+            let finalize = Finalize::new(finalization.proposal.clone(), signature.clone());
+            let msg = Voter::Finalize::<V, D>(finalize.clone()).encode().into();
             if round
-                .add_verified_finalize(
-                    public_key,
-                    Parsed {
-                        message: finalize,
-                        digest: finalization.digest.clone(),
-                    },
-                )
+                .add_verified_finalize(public_key_index, finalize)
                 .await
                 && self.journal.is_some()
             {
                 self.journal
                     .as_mut()
                     .unwrap()
-                    .append(view, finalize_bytes)
+                    .append(view, msg)
                     .await
                     .expect("unable to append to journal");
             }
@@ -1360,22 +1297,12 @@ impl<
 
         // If proposal is missing, set it
         if round.proposal.is_none() {
-            let proposal = finalization.message.proposal.unwrap();
-            let message = proposal_message(proposal.view, proposal.parent, &finalization.digest);
-            let proposal_digest = hash(&message);
+            let proposal = finalization.proposal;
             debug!(
                 view = proposal.view,
-                digest = ?proposal_digest,
-                payload = ?finalization.digest,
                 "setting unverified proposal in finalization"
             );
-            round.proposal = Some((
-                proposal_digest,
-                Parsed {
-                    message: proposal,
-                    digest: finalization.digest,
-                },
-            ));
+            round.proposal = Some(proposal);
         }
 
         // Track view finalized
