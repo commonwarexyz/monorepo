@@ -661,7 +661,7 @@ impl<
                     .inc();
                 debug!(view = past_view, "rebroadcast entry notarization");
             } else if let Some(nullification) = self.construct_nullification(past_view, true) {
-                let msg = Voter::Nullification(nullification).encode().into();
+                let msg = Voter::Nullification::<V, D>(nullification).encode().into();
                 sender.send(Recipients::All, msg, true).await.unwrap();
                 self.broadcast_messages
                     .get_or_create(&metrics::NULLIFICATION)
@@ -695,7 +695,7 @@ impl<
             .expect("unable to sync journal");
 
         // Broadcast nullify
-        let msg = Voter::Nullify(nullify).encode().into();
+        let msg = Voter::Nullify::<V, D>(nullify).encode().into();
         sender.send(Recipients::All, msg, true).await.unwrap();
         self.broadcast_messages
             .get_or_create(&metrics::NULLIFY)
@@ -1447,10 +1447,18 @@ impl<
         sender: &mut impl Sender,
         view: u64,
     ) {
+        // Get public key index
+        let Some(public_key_index) = self
+            .supervisor
+            .is_participant(view, &self.crypto.public_key())
+        else {
+            return;
+        };
+
         // Attempt to notarize
         if let Some(notarize) = self.construct_notarize(view) {
             // Handle the notarize
-            self.handle_notarize(&self.crypto.public_key(), notarize.clone())
+            self.handle_notarize(public_key_index, notarize.clone())
                 .await;
 
             // Sync the journal
@@ -1462,11 +1470,7 @@ impl<
                 .expect("unable to sync journal");
 
             // Broadcast the notarize
-            let msg = wire::Voter {
-                payload: Some(wire::voter::Payload::Notarize(notarize.message)),
-            }
-            .encode_to_vec()
-            .into();
+            let msg = Voter::Notarize(notarize).encode().into();
             sender.send(Recipients::All, msg, true).await.unwrap();
             self.broadcast_messages
                 .get_or_create(&metrics::NOTARIZE)
@@ -1483,7 +1487,7 @@ impl<
             }
 
             // Update backfiller
-            backfiller.notarized(notarization.message.clone()).await;
+            backfiller.notarized(notarization.clone()).await;
 
             // Handle the notarization
             self.handle_notarization(notarization.clone()).await;
@@ -1497,23 +1501,12 @@ impl<
                 .expect("unable to sync journal");
 
             // Alert application
-            let validators = self.supervisor.participants(view).unwrap();
-            let proposal = notarization.message.proposal.as_ref().unwrap();
-            let mut signatures = Vec::with_capacity(notarization.message.signatures.len());
-            for signature in &notarization.message.signatures {
-                let public_key = validators.get(signature.public_key as usize).unwrap();
-                let signature = C::Signature::try_from(&signature.signature).unwrap();
-                signatures.push((public_key, signature));
-            }
-            let proof = Prover::<C, D>::serialize_aggregation(proposal, signatures);
-            self.committer.prepared(proof, notarization.digest).await;
+            self.reporter
+                .report(Activity::Notarization(notarization.clone()))
+                .await;
 
             // Broadcast the notarization
-            let msg = wire::Voter {
-                payload: Some(wire::voter::Payload::Notarization(notarization.message)),
-            }
-            .encode_to_vec()
-            .into();
+            let msg = Voter::Notarization(notarization).encode().into();
             sender.send(Recipients::All, msg, true).await.unwrap();
             self.broadcast_messages
                 .get_or_create(&metrics::NOTARIZATION)
@@ -1539,11 +1532,7 @@ impl<
                 .expect("unable to sync journal");
 
             // Broadcast the nullification
-            let msg = wire::Voter {
-                payload: Some(wire::voter::Payload::Nullification(nullification)),
-            }
-            .encode_to_vec()
-            .into();
+            let msg = Voter::Nullification(nullification).encode().into();
             sender.send(Recipients::All, msg, true).await.unwrap();
             self.broadcast_messages
                 .get_or_create(&metrics::NULLIFICATION)
@@ -1583,11 +1572,7 @@ impl<
                     );
                     let finalization = self.construct_finalization(self.last_finalized, true);
                     if let Some(finalization) = finalization {
-                        let msg = wire::Voter {
-                            payload: Some(wire::voter::Payload::Finalization(finalization.message)),
-                        }
-                        .encode_to_vec()
-                        .into();
+                        let msg = Voter::Finalization(finalization).encode().into();
                         sender
                             .send(Recipients::All, msg, true)
                             .await
@@ -1608,7 +1593,7 @@ impl<
         // Attempt to finalize
         if let Some(finalize) = self.construct_finalize(view) {
             // Handle the finalize
-            self.handle_finalize(&self.crypto.public_key(), finalize.clone())
+            self.handle_finalize(public_key_index, finalize.clone())
                 .await;
 
             // Sync the journal
@@ -1620,11 +1605,7 @@ impl<
                 .expect("unable to sync journal");
 
             // Broadcast the finalize
-            let msg = wire::Voter {
-                payload: Some(wire::voter::Payload::Finalize(finalize.message)),
-            }
-            .encode_to_vec()
-            .into();
+            let msg = Voter::Finalize(finalize).encode().into();
             sender.send(Recipients::All, msg, true).await.unwrap();
             self.broadcast_messages
                 .get_or_create(&metrics::FINALIZE)
@@ -1655,23 +1636,12 @@ impl<
                 .expect("unable to sync journal");
 
             // Alert application
-            let validators = self.supervisor.participants(view).unwrap();
-            let proposal = finalization.message.proposal.as_ref().unwrap();
-            let mut signatures = Vec::with_capacity(finalization.message.signatures.len());
-            for signature in &finalization.message.signatures {
-                let public_key = validators.get(signature.public_key as usize).unwrap();
-                let signature = C::Signature::try_from(&signature.signature).unwrap();
-                signatures.push((public_key, signature));
-            }
-            let proof = Prover::<C, D>::serialize_aggregation(proposal, signatures);
-            self.committer.finalized(proof, finalization.digest).await;
+            self.reporter
+                .report(Activity::Finalization(finalization.clone()))
+                .await;
 
             // Broadcast the finalization
-            let msg = wire::Voter {
-                payload: Some(wire::voter::Payload::Finalization(finalization.message)),
-            }
-            .encode_to_vec()
-            .into();
+            let msg = Voter::Finalization(finalization).encode().into();
             sender.send(Recipients::All, msg, true).await.unwrap();
             self.broadcast_messages
                 .get_or_create(&metrics::FINALIZATION)
