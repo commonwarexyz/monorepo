@@ -1,16 +1,15 @@
 //! Byzantine participant that sends nullify and finalize messages for the same view.
 
 use crate::{
-    simplex::{
-        encoder::{finalize_namespace, nullify_message, nullify_namespace, proposal_message},
-        wire, View,
+    simplex::types::{
+        finalize_namespace, nullify_namespace, Finalize, Nullify, View, Viewable, Voter,
     },
     Supervisor,
 };
+use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{Hasher, Scheme};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Handle, Spawner};
-use prost::Message;
 use std::marker::PhantomData;
 use tracing::debug;
 
@@ -58,83 +57,45 @@ impl<E: Spawner, C: Scheme, H: Hasher, S: Supervisor<Index = View, PublicKey = C
         let (mut sender, mut receiver) = voter_network;
         while let Ok((s, msg)) = receiver.recv().await {
             // Parse message
-            let msg = match wire::Voter::decode(msg) {
+            let msg = match Voter::<C::Signature, H::Digest>::decode_cfg(msg, &usize::MAX) {
                 Ok(msg) => msg,
                 Err(err) => {
                     debug!(?err, sender = ?s, "failed to decode message");
                     continue;
                 }
             };
-            let payload = match msg.payload {
-                Some(payload) => payload,
-                None => {
-                    debug!(sender = ?s, "message missing payload");
-                    continue;
-                }
-            };
+            let view = msg.view();
 
             // Process message
-            match payload {
-                wire::voter::Payload::Notarize(notarize) => {
+            match msg {
+                Voter::Notarize(notarize) => {
                     // Get our index
-                    let proposal = match notarize.proposal {
-                        Some(proposal) => proposal,
-                        None => {
-                            debug!(sender = ?s, "notarize missing proposal");
-                            continue;
-                        }
-                    };
-                    let Ok(payload) = H::Digest::try_from(&proposal.payload) else {
-                        debug!(sender = ?s, "failed to decode proposal payload");
-                        continue;
-                    };
-                    let view = proposal.view;
                     let public_key_index = self
                         .supervisor
                         .is_participant(view, &self.crypto.public_key())
                         .unwrap();
 
                     // Nullify
-                    let msg = nullify_message(view);
-                    let n = wire::Nullify {
+                    let msg = Nullify::sign(
+                        &mut self.crypto,
+                        public_key_index,
                         view,
-                        signature: Some(wire::Signature {
-                            public_key: public_key_index,
-                            signature: self
-                                .crypto
-                                .sign(Some(&self.nullify_namespace), &msg)
-                                .to_vec(),
-                        }),
-                    };
-                    let msg = wire::Voter {
-                        payload: Some(wire::voter::Payload::Nullify(n)),
-                    }
-                    .encode_to_vec();
-                    sender
-                        .send(Recipients::All, msg.into(), true)
-                        .await
-                        .unwrap();
+                        &self.nullify_namespace,
+                    );
+                    let msg = Voter::Nullify::<C::Signature, H::Digest>(msg)
+                        .encode()
+                        .into();
+                    sender.send(Recipients::All, msg, true).await.unwrap();
 
                     // Finalize digest
-                    let msg = proposal_message(view, proposal.parent, &payload);
-                    let f = wire::Finalize {
-                        proposal: Some(proposal.clone()),
-                        signature: Some(wire::Signature {
-                            public_key: public_key_index,
-                            signature: self
-                                .crypto
-                                .sign(Some(&self.finalize_namespace), &msg)
-                                .to_vec(),
-                        }),
-                    };
-                    let msg = wire::Voter {
-                        payload: Some(wire::voter::Payload::Finalize(f)),
-                    }
-                    .encode_to_vec();
-                    sender
-                        .send(Recipients::All, msg.into(), true)
-                        .await
-                        .unwrap();
+                    let msg = Finalize::sign(
+                        &mut self.crypto,
+                        public_key_index,
+                        notarize.proposal,
+                        &self.finalize_namespace,
+                    );
+                    let msg = Voter::Finalize(msg).encode().into();
+                    sender.send(Recipients::All, msg, true).await.unwrap();
                 }
                 _ => continue,
             }
