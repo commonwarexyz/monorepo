@@ -1264,7 +1264,7 @@ impl<
         self.enter_view(view + 1);
     }
 
-    fn construct_notarize(&mut self, view: u64) -> Option<Notarize<V, D>> {
+    fn construct_notarize(&mut self, view: u64) -> Option<Notarize<C::Signature, D>> {
         let round = match self.views.get_mut(&view) {
             Some(view) => view,
             None => {
@@ -1280,15 +1280,26 @@ impl<
         if !round.verified_proposal {
             return None;
         }
+        let Some(public_key_index) = self
+            .supervisor
+            .is_participant(view, &self.crypto.public_key())
+        else {
+            return None;
+        };
         round.broadcast_notarize = true;
         Some(Notarize::sign(
             &mut self.crypto,
+            public_key_index,
             round.proposal.as_ref().unwrap().clone(),
             &self.notarize_namespace,
         ))
     }
 
-    fn construct_notarization(&mut self, view: u64, force: bool) -> Option<Notarization<V, D>> {
+    fn construct_notarization(
+        &mut self,
+        view: u64,
+        force: bool,
+    ) -> Option<Notarization<C::Signature, D>> {
         // Get requested view
         let round = match self.views.get_mut(&view) {
             Some(view) => view,
@@ -1306,10 +1317,19 @@ impl<
         };
         let threshold =
             quorum(validators.len() as u32).expect("not enough validators for a quorum");
-        let (proposal, notarizes) = round.notarizable(threshold, force)?;
+        let (proposal, proposal_notarizes, notarizes) = round.notarizable(threshold, force)?;
 
         // Construct notarization
-        let signatures = notarizes.into_iter().map(|n| n.signature).collect();
+        let mut signatures = Vec::new();
+        for notarize in proposal_notarizes {
+            signatures.push(
+                notarizes[*notarize as usize]
+                    .as_ref()
+                    .unwrap()
+                    .signature
+                    .clone(),
+            );
+        }
         Some(Notarization::new(proposal, signatures))
     }
 
