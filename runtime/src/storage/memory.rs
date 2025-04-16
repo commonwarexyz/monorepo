@@ -9,8 +9,8 @@ pub struct Storage {
     partitions: Arc<Mutex<HashMap<String, Partition>>>,
 }
 
-impl Storage {
-    pub fn new() -> Self {
+impl Default for Storage {
+    fn default() -> Self {
         Self {
             partitions: Arc::new(Mutex::new(HashMap::new())),
         }

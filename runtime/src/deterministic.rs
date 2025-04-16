@@ -496,7 +496,7 @@ impl Executor {
                 spawned: false,
                 executor,
                 networking: Arc::new(Networking::new(metrics, auditor.clone())),
-                storage: AuditedStorage::new(MemStorage::new(), auditor.clone()),
+                storage: AuditedStorage::new(MemStorage::default(), auditor.clone()),
             },
             auditor,
         )
