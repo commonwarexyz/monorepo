@@ -925,157 +925,102 @@ impl<V: Verifier, D: Digest> EncodeSize for Activity<V, D> {
 
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub struct ConflictingNotarize<V: Verifier, D: Digest> {
-    pub proposal_1: Proposal<D>,
-    pub signature_1: Signature<V>,
-    pub proposal_2: Proposal<D>,
-    pub signature_2: Signature<V>,
+    pub notarize_1: Notarize<V, D>,
+    pub notarize_2: Notarize<V, D>,
 }
 
 impl<V: Verifier, D: Digest> ConflictingNotarize<V, D> {
-    pub fn new(
-        proposal_1: Proposal<D>,
-        signature_1: Signature<V>,
-        proposal_2: Proposal<D>,
-        signature_2: Signature<V>,
-    ) -> Self {
+    pub fn new(notarize_1: Notarize<V, D>, notarize_2: Notarize<V, D>) -> Self {
         Self {
-            proposal_1,
-            signature_1,
-            proposal_2,
-            signature_2,
+            notarize_1,
+            notarize_2,
         }
     }
 
     pub fn verify(&self, notarize_namespace: &[u8]) -> bool {
-        let message_1 = self.proposal_1.encode();
-        let message_2 = self.proposal_2.encode();
-        V::verify(
-            Some(&notarize_namespace),
-            &message_1,
-            self.signature_1.public_key,
-            self.signature_1.signature,
-        ) && V::verify(
-            Some(&notarize_namespace),
-            &message_2,
-            self.signature_2.public_key,
-            self.signature_2.signature,
-        )
+        self.notarize_1.verify(notarize_namespace) && self.notarize_2.verify(notarize_namespace)
     }
 }
 
 impl<V: Verifier, D: Digest> Write for ConflictingNotarize<V, D> {
     fn write(&self, writer: &mut impl BufMut) {
-        self.proposal_1.write(writer);
-        self.signature_1.write(writer);
-        self.proposal_2.write(writer);
-        self.signature_2.write(writer);
+        self.notarize_1.write(writer);
+        self.notarize_2.write(writer);
     }
 }
 
 impl<V: Verifier, D: Digest> Read for ConflictingNotarize<V, D> {
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let proposal_1 = Proposal::<D>::read(reader)?;
-        let signature_1 = Signature::<V>::read(reader)?;
-        let proposal_2 = Proposal::<D>::read(reader)?;
-        let signature_2 = Signature::<V>::read(reader)?;
-        if proposal_1.view != proposal_2.view {
+        let notarize_1 = Notarize::<V, D>::read(reader)?;
+        let notarize_2 = Notarize::<V, D>::read(reader)?;
+        if notarize_1.view() != notarize_2.view() {
             return Err(Error::Invalid(
                 "consensus::simplex::ConflictingNotarize",
-                "proposals must have the same view",
+                "notarizes must have the same view",
             ));
         }
-        if signature_1.public_key != signature_2.public_key {
+        if notarize_1.signer() != notarize_2.signer() {
             return Err(Error::Invalid(
                 "consensus::simplex::ConflictingNotarize",
-                "signatures must have the same public key",
+                "notarizes must have the same public key",
             ));
         }
         Ok(Self {
-            proposal_1,
-            signature_1,
-            proposal_2,
-            signature_2,
+            notarize_1,
+            notarize_2,
         })
     }
 }
 
 impl<V: Verifier, D: Digest> FixedSize for ConflictingNotarize<V, D> {
-    const SIZE: usize =
-        Proposal::<D>::SIZE + Signature::<V>::SIZE + Proposal::<D>::SIZE + Signature::<V>::SIZE;
+    const SIZE: usize = Notarize::<V, D>::SIZE + Notarize::<V, D>::SIZE;
 }
 
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub struct ConflictingFinalize<V: Verifier, D: Digest> {
-    pub proposal_1: Proposal<D>,
-    pub signature_1: Signature<V>,
-    pub proposal_2: Proposal<D>,
-    pub signature_2: Signature<V>,
+    pub finalize_1: Finalize<V, D>,
+    pub finalize_2: Finalize<V, D>,
 }
 
 impl<V: Verifier, D: Digest> ConflictingFinalize<V, D> {
-    pub fn new(
-        proposal_1: Proposal<D>,
-        signature_1: Signature<V>,
-        proposal_2: Proposal<D>,
-        signature_2: Signature<V>,
-    ) -> Self {
+    pub fn new(finalize_1: Finalize<V, D>, finalize_2: Finalize<V, D>) -> Self {
         Self {
-            proposal_1,
-            signature_1,
-            proposal_2,
-            signature_2,
+            finalize_1,
+            finalize_2,
         }
     }
 
     pub fn verify(&self, finalize_namespace: &[u8]) -> bool {
-        let message_1 = self.proposal_1.encode();
-        let message_2 = self.proposal_2.encode();
-        V::verify(
-            Some(&finalize_namespace),
-            &message_1,
-            self.signature_1.public_key,
-            self.signature_1.signature,
-        ) && V::verify(
-            Some(&finalize_namespace),
-            &message_2,
-            self.signature_2.public_key,
-            self.signature_2.signature,
-        )
+        self.finalize_1.verify(finalize_namespace) && self.finalize_2.verify(finalize_namespace)
     }
 }
 
 impl<V: Verifier, D: Digest> Write for ConflictingFinalize<V, D> {
     fn write(&self, writer: &mut impl BufMut) {
-        self.proposal_1.write(writer);
-        self.signature_1.write(writer);
-        self.proposal_2.write(writer);
-        self.signature_2.write(writer);
+        self.finalize_1.write(writer);
+        self.finalize_2.write(writer);
     }
 }
 
 impl<V: Verifier, D: Digest> Read for ConflictingFinalize<V, D> {
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let proposal_1 = Proposal::<D>::read(reader)?;
-        let signature_1 = Signature::<V>::read(reader)?;
-        let proposal_2 = Proposal::<D>::read(reader)?;
-        let signature_2 = Signature::<V>::read(reader)?;
-        if proposal_1.view != proposal_2.view {
+        let finalize_1 = Finalize::<V, D>::read(reader)?;
+        let finalize_2 = Finalize::<V, D>::read(reader)?;
+        if finalize_1.view() != finalize_2.view() {
             return Err(Error::Invalid(
                 "consensus::simplex::ConflictingFinalize",
-                "proposals must have the same view",
+                "finalizes must have the same view",
             ));
         }
-        if signature_1.public_key != signature_2.public_key {
+        if finalize_1.signer() != finalize_2.signer() {
             return Err(Error::Invalid(
                 "consensus::simplex::ConflictingFinalize",
-                "signatures must have the same public key",
+                "finalizes must have the same public key",
             ));
         }
         Ok(Self {
-            proposal_1,
-            signature_1,
-            proposal_2,
-            signature_2,
+            finalize_1,
+            finalize_2,
         })
     }
 }
@@ -1097,18 +1042,7 @@ impl<V: Verifier, D: Digest> NullifyFinalize<V, D> {
     }
 
     pub fn verify(&self, nullify_namespace: &[u8], finalize_namespace: &[u8]) -> bool {
-        let message = view_message(self.nullify.view);
-        V::verify(
-            Some(&nullify_namespace),
-            &message,
-            self.nullify.signature.public_key,
-            self.nullify.signature.signature,
-        ) && V::verify(
-            Some(&finalize_namespace),
-            &message,
-            self.finalize.signature.public_key,
-            self.finalize.signature.signature,
-        )
+        self.nullify.verify(nullify_namespace) && self.finalize.verify(finalize_namespace)
     }
 }
 
@@ -1123,10 +1057,16 @@ impl<V: Verifier, D: Digest> Read for NullifyFinalize<V, D> {
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let nullify = Nullify::<V>::read(reader)?;
         let finalize = Finalize::<V>::read(reader)?;
-        if nullify.view != finalize.view {
+        if nullify.view() != finalize.view() {
             return Err(Error::Invalid(
                 "consensus::simplex::NullifyFinalize",
                 "nullification and finalization must have the same view",
+            ));
+        }
+        if nullify.signer() != finalize.signer() {
+            return Err(Error::Invalid(
+                "consensus::simplex::NullifyFinalize",
+                "nullification and finalization must have the same public key",
             ));
         }
         Ok(Self { nullify, finalize })

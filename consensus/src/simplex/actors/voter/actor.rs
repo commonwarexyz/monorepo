@@ -3,7 +3,7 @@ use crate::{
     simplex::{
         actors::resolver,
         metrics,
-        types::{Finalize, Notarize, Nullify, Proposal, View},
+        types::{ConflictingNotarize, Finalize, Notarize, Nullify, Proposal, View},
     },
     Automaton, Relay, Reporter, Supervisor, LATENCY,
 };
@@ -117,32 +117,19 @@ impl<
         }
     }
 
-    async fn add_verified_notarize(
-        &mut self,
-        public_key: &C::PublicKey,
-        notarize: Parsed<wire::Notarize, D>,
-    ) -> bool {
-        // Get proposal
-        let proposal = notarize.message.proposal.as_ref().unwrap();
-
-        // Compute proposal digest
-        let message = proposal_message(proposal.view, proposal.parent, &notarize.digest);
-        let proposal_digest = hash(&message);
-
-        // Get Signature
-        let Ok(notarize_signature) =
-            C::Signature::try_from(&notarize.message.signature.as_ref().unwrap().signature)
+    async fn add_verified_notarize(&mut self, notarize: Notarize<D>) -> bool {
+        // Check if already notarized
+        let Some(public_key_index) = self
+            .supervisor
+            .is_participant(self.view, &notarize.signature.public_key)
         else {
             return false;
         };
-
-        // Check if already notarized
-        let public_key_index = notarize.message.signature.as_ref().unwrap().public_key;
-        if let Some(previous_notarize) = self.notaries.get(&public_key_index) {
-            if previous_notarize == &proposal_digest {
+        if let Some(previous_notarize) = self.notarizes.get(public_key_index as usize).unwrap() {
+            if previous_notarize == &notarize {
                 trace!(
                     view = self.view,
-                    signer = ?public_key,
+                    signer = ?notarize.signature.public_key,
                     previous_notarize = ?previous_notarize,
                     "already notarized"
                 );
@@ -150,6 +137,7 @@ impl<
             }
 
             // Create fault
+            let fault = ConflictingNotarize::new(proposal_1, signature_1, proposal_2, signature_2)
             let previous_notarize = self
                 .notarizes
                 .get(previous_notarize)
