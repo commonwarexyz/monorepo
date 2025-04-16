@@ -1,7 +1,11 @@
+use std::collections::HashSet;
+
 use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error, FixedSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{Digest, Scheme, Verifier};
 use commonware_utils::{quorum, union, Array};
+
+use crate::Supervisor;
 
 /// View is a monotonically increasing counter that represents the current focus of consensus.
 pub type View = u64;
@@ -49,10 +53,10 @@ pub fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, FINALIZE_SUFFIX)
 }
 
-pub fn threshold<P: Array>(validators: &[P]) -> Option<(u32, u32)> {
+pub fn threshold<P: Array>(validators: &[P]) -> (u32, u32) {
     let len = validators.len() as u32;
     let threshold = quorum(len).expect("not enough validators for a quorum");
-    Some((threshold, len))
+    (threshold, len)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -319,6 +323,38 @@ impl<V: Verifier, D: Digest> Notarization<V, D> {
             signatures,
         }
     }
+
+    pub fn verify<S: Supervisor<Index = View, PublicKey = V::PublicKey>>(
+        &self,
+        notarize_namespace: &[u8],
+    ) -> bool {
+        let Some(validators) = S::validators(self.proposal.view) else {
+            return false;
+        };
+        let (threshold, count) = threshold(validators);
+        if self.signatures.len() < threshold as usize {
+            return false;
+        }
+        if self.signatures.len() > count as usize {
+            return false;
+        }
+        let mut seen = HashSet::new();
+        let message = self.proposal.encode();
+        for signature in &self.signatures {
+            if !seen.insert(signature.public_key) {
+                return false;
+            }
+            if !V::verify(
+                Some(&notarize_namespace),
+                &message,
+                signature.public_key,
+                signature.signature,
+            ) {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 impl<V: Verifier, D: Digest> Write for Notarization<V, D> {
@@ -423,6 +459,38 @@ pub struct Nullification<V: Verifier> {
 impl<V: Verifier> Nullification<V> {
     pub fn new(view: View, signatures: Vec<Signature<V>>) -> Self {
         Self { view, signatures }
+    }
+
+    pub fn verify<S: Supervisor<Index = View, PublicKey = V::PublicKey>>(
+        &self,
+        nullify_namespace: &[u8],
+    ) -> bool {
+        let Some(validators) = S::validators(self.view) else {
+            return false;
+        };
+        let (threshold, count) = threshold(validators);
+        if self.signatures.len() < threshold as usize {
+            return false;
+        }
+        if self.signatures.len() > count as usize {
+            return false;
+        }
+        let mut seen = HashSet::new();
+        let message = view_message(self.view);
+        for signature in &self.signatures {
+            if !seen.insert(signature.public_key) {
+                return false;
+            }
+            if !V::verify(
+                Some(&nullify_namespace),
+                &message,
+                signature.public_key,
+                signature.signature,
+            ) {
+                return false;
+            }
+        }
+        true
     }
 }
 
@@ -537,6 +605,38 @@ impl<V: Verifier, D: Digest> Finalization<V, D> {
             proposal,
             signatures,
         }
+    }
+
+    pub fn verify<S: Supervisor<Index = View, PublicKey = V::PublicKey>>(
+        &self,
+        finalize_namespace: &[u8],
+    ) -> bool {
+        let Some(validators) = S::validators(self.proposal.view) else {
+            return false;
+        };
+        let (threshold, count) = threshold(validators);
+        if self.signatures.len() < threshold as usize {
+            return false;
+        }
+        if self.signatures.len() > count as usize {
+            return false;
+        }
+        let mut seen = HashSet::new();
+        let message = self.proposal.encode();
+        for signature in &self.signatures {
+            if !seen.insert(signature.public_key) {
+                return false;
+            }
+            if !V::verify(
+                Some(&finalize_namespace),
+                &message,
+                signature.public_key,
+                signature.signature,
+            ) {
+                return false;
+            }
+        }
+        true
     }
 }
 
