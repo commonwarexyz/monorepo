@@ -73,9 +73,9 @@ impl<S: StorageTrait> StorageTrait for MeteredStorage<S> {
 
     async fn open(&self, partition: &str, name: &[u8]) -> Result<Self::Blob, Error> {
         self.metrics.open_blobs.inc();
-        let inner_blob = self.inner.open(partition, name).await?;
+        let inner = self.inner.open(partition, name).await?;
         Ok(MeteredBlob {
-            inner: State::Open(inner_blob),
+            inner,
             metrics: self.metrics.clone(),
         })
     }
@@ -89,89 +89,147 @@ impl<S: StorageTrait> StorageTrait for MeteredStorage<S> {
     }
 }
 
-/// Tracks whether the blob is open or closed.
-/// We use this to make sure we only decrement the open blobs metric
-/// once during close() or drop(), and not both.
-// TODO danlaine: we should consider removing the close() method
-// from the Blob trait and just using drop() to close the blob.
-#[derive(Clone)]
-enum State<B> {
-    Open(B),
-    Closed,
-}
-
 /// A wrapper around a `Blob` implementation that tracks metrics
 #[derive(Clone)]
 pub struct MeteredBlob<B> {
-    inner: State<B>,
+    inner: B,
     metrics: Arc<Metrics>,
 }
 
 impl<B: BlobTrait> BlobTrait for MeteredBlob<B> {
     async fn len(&self) -> Result<u64, Error> {
-        match &self.inner {
-            State::Open(inner) => inner.len().await,
-            State::Closed => Err(Error::Closed),
-        }
+        self.inner.len().await
     }
 
     async fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
-        match &self.inner {
-            State::Open(inner) => {
-                inner.read_at(buf, offset).await?;
-                self.metrics.storage_reads.inc();
-                self.metrics.storage_read_bytes.inc_by(buf.len() as u64);
-                Ok(())
-            }
-            State::Closed => Err(Error::Closed),
-        }
+        self.inner.read_at(buf, offset).await?;
+        self.metrics.storage_reads.inc();
+        self.metrics.storage_read_bytes.inc_by(buf.len() as u64);
+        Ok(())
     }
 
     async fn write_at(&self, buf: &[u8], offset: u64) -> Result<(), Error> {
-        match &self.inner {
-            State::Open(inner) => {
-                inner.write_at(buf, offset).await?;
-                self.metrics.storage_writes.inc();
-                self.metrics.storage_write_bytes.inc_by(buf.len() as u64);
-                Ok(())
-            }
-            State::Closed => Err(Error::Closed),
-        }
+        self.inner.write_at(buf, offset).await?;
+        self.metrics.storage_writes.inc();
+        self.metrics.storage_write_bytes.inc_by(buf.len() as u64);
+        Ok(())
     }
 
     async fn truncate(&self, len: u64) -> Result<(), Error> {
-        match &self.inner {
-            State::Open(inner) => inner.truncate(len).await,
-            State::Closed => Err(Error::Closed),
-        }
+        self.inner.truncate(len).await
     }
 
     async fn sync(&self) -> Result<(), Error> {
-        match &self.inner {
-            State::Open(inner) => inner.sync().await,
-            State::Closed => Err(Error::Closed),
-        }
+        self.inner.sync().await
     }
 
-    async fn close(mut self) -> Result<(), Error> {
-        let inner = match std::mem::replace(&mut self.inner, State::Closed) {
-            State::Open(inner) => inner,
-            State::Closed => return Err(Error::Closed),
-        };
-
+    // TODO danlaine: This is error-prone because the metrics will be
+    // incorrect if the blob is dropped before it's closed. We should
+    // consider using a `Drop` implementation to decrement the metric.
+    async fn close(self) -> Result<(), Error> {
         self.metrics.open_blobs.dec();
-
-        inner.close().await
+        self.inner.close().await
     }
 }
 
-impl<B> Drop for MeteredBlob<B> {
-    fn drop(&mut self) {
-        match &self.inner {
-            State::Open(_) => {
-                self.metrics.open_blobs.dec();
-            }
-            State::Closed => {}
-        }
+#[cfg(test)]
+mod metered_blob_tests {
+    use super::*;
+    use crate::storage::memory::Storage as MemoryStorage;
+    use crate::{Blob, Storage};
+    use prometheus_client::registry::Registry;
+
+    /// Test that metrics are updated correctly for basic operations.
+    #[tokio::test]
+    async fn test_metered_blob_metrics() {
+        let mut registry = Registry::default();
+        let inner = MemoryStorage::default();
+        let storage = MeteredStorage::new(inner, &mut registry);
+
+        // Open a blob
+        let blob = storage.open("partition", b"test_blob").await.unwrap();
+
+        // Verify that the open_blobs metric is incremented
+        let open_blobs = storage.metrics.open_blobs.get();
+        assert_eq!(
+            open_blobs, 1,
+            "open_blobs metric was not incremented after opening a blob"
+        );
+
+        // Write data to the blob
+        blob.write_at(b"hello world", 0).await.unwrap();
+        let writes = storage.metrics.storage_writes.get();
+        let write_bytes = storage.metrics.storage_write_bytes.get();
+        assert_eq!(
+            writes, 1,
+            "storage_writes metric was not incremented after write"
+        );
+        assert_eq!(
+            write_bytes, 11,
+            "storage_write_bytes metric was not updated correctly after write"
+        );
+
+        // Read data from the blob
+        let mut buffer = vec![0; 11];
+        blob.read_at(&mut buffer, 0).await.unwrap();
+        let reads = storage.metrics.storage_reads.get();
+        let read_bytes = storage.metrics.storage_read_bytes.get();
+        assert_eq!(
+            reads, 1,
+            "storage_reads metric was not incremented after read"
+        );
+        assert_eq!(
+            read_bytes, 11,
+            "storage_read_bytes metric was not updated correctly after read"
+        );
+
+        // Close the blob
+        blob.close().await.unwrap();
+
+        // Verify that the open_blobs metric is decremented
+        let open_blobs_after_close = storage.metrics.open_blobs.get();
+        assert_eq!(
+            open_blobs_after_close, 0,
+            "open_blobs metric was not decremented after closing the blob"
+        );
+    }
+
+    /// Test that metrics are updated correctly when multiple blobs are opened and closed.
+    #[tokio::test]
+    async fn test_metered_blob_multiple_blobs() {
+        let mut registry = Registry::default();
+        let inner = MemoryStorage::default();
+        let storage = MeteredStorage::new(inner, &mut registry);
+
+        // Open multiple blobs
+        let blob1 = storage.open("partition", b"blob1").await.unwrap();
+        let blob2 = storage.open("partition", b"blob2").await.unwrap();
+
+        // Verify that the open_blobs metric is incremented correctly
+        let open_blobs = storage.metrics.open_blobs.get();
+        assert_eq!(
+            open_blobs, 2,
+            "open_blobs metric was not updated correctly after opening multiple blobs"
+        );
+
+        // Close one blob
+        blob1.close().await.unwrap();
+
+        // Verify that the open_blobs metric is decremented correctly
+        let open_blobs_after_close_one = storage.metrics.open_blobs.get();
+        assert_eq!(
+            open_blobs_after_close_one, 1,
+            "open_blobs metric was not decremented correctly after closing one blob"
+        );
+
+        // Close the second blob
+        blob2.close().await.unwrap();
+
+        // Verify that the open_blobs metric is decremented to zero
+        let open_blobs_after_close_all = storage.metrics.open_blobs.get();
+        assert_eq!(
+            open_blobs_after_close_all, 0,
+            "open_blobs metric was not decremented to zero after closing all blobs"
+        );
     }
 }
