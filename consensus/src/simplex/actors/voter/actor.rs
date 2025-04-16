@@ -1515,6 +1515,11 @@ impl<
                 .await
                 .expect("unable to sync journal");
 
+            // Alert application
+            self.reporter
+                .report(Activity::Nullification(nullification.clone()))
+                .await;
+
             // Broadcast the nullification
             let msg = Voter::Nullification::<C::Signature, D>(nullification)
                 .encode()
