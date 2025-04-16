@@ -107,7 +107,10 @@ impl<E: Spawner + Metrics, C: Verifier> Mailbox<E, C> {
         }
 
         // If any other error occurs, we should panic!
-        panic!("Unexpected error while trying to send message: {:?}", e);
+        panic!(
+            "unexpected error while trying to release reservation: {:?}",
+            e
+        );
     }
 
     pub async fn release(&mut self, peer: C::PublicKey) {
