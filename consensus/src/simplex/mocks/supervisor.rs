@@ -17,7 +17,7 @@ pub struct Config<C: Verifier> {
     pub participants: BTreeMap<View, Vec<C::PublicKey>>,
 }
 
-type Participation<D, P> = HashMap<View, HashMap<D, HashSet<P>>>;
+type Participation<P, D> = HashMap<View, HashMap<D, HashSet<P>>>;
 type Faults<P, S, D> = HashMap<P, HashMap<View, HashSet<Activity<S, D>>>>;
 type Participants<P> = BTreeMap<View, (HashMap<P, u32>, Vec<P>)>;
 
@@ -29,11 +29,11 @@ pub struct Supervisor<C: Verifier, D: Digest> {
     nullify_namespace: Vec<u8>,
     finalize_namespace: Vec<u8>,
 
-    pub notarizes: Arc<Mutex<Participation<D, C::PublicKey>>>,
+    pub notarizes: Arc<Mutex<Participation<C::PublicKey, D>>>,
     pub notarizations: Arc<Mutex<HashMap<View, Notarization<C::Signature, D>>>>,
     pub nullifies: Arc<Mutex<HashMap<View, HashSet<C::PublicKey>>>>,
     pub nullifications: Arc<Mutex<HashMap<View, Nullification<C::Signature>>>>,
-    pub finalizes: Arc<Mutex<Participation<D, C::PublicKey>>>,
+    pub finalizes: Arc<Mutex<Participation<C::PublicKey,D >>>,
     pub finalizations: Arc<Mutex<HashMap<View, Finalization<C::Signature, D>>>>,
     pub faults: Arc<Mutex<Faults<C::PublicKey, C::Signature, D>>>,
 

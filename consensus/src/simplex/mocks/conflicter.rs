@@ -11,7 +11,7 @@ use commonware_cryptography::{Hasher, Scheme};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};
 use rand::{CryptoRng, Rng};
-use std::{marker::PhantomData, usize};
+use std::marker::PhantomData;
 use tracing::debug;
 
 pub struct Config<C: Scheme, S: Supervisor<Index = View>> {
