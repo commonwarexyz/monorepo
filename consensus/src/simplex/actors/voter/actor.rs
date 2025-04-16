@@ -1333,7 +1333,11 @@ impl<
         Some(Notarization::new(proposal, signatures))
     }
 
-    fn construct_nullification(&mut self, view: u64, force: bool) -> Option<Nullification<V>> {
+    fn construct_nullification(
+        &mut self,
+        view: u64,
+        force: bool,
+    ) -> Option<Nullification<C::Signature>> {
         // Get requested view
         let round = match self.views.get_mut(&view) {
             Some(view) => view,
@@ -1354,11 +1358,15 @@ impl<
         let (_, nullifies) = round.nullifiable(threshold, force)?;
 
         // Construct nullification
-        let signatures = nullifies.into_iter().map(|n| n.signature).collect();
+        let signatures = nullifies
+            .into_iter()
+            .filter_map(|n| n.as_ref())
+            .map(|n| n.signature.clone())
+            .collect::<Vec<_>>();
         Some(Nullification::new(view, signatures))
     }
 
-    fn construct_finalize(&mut self, view: u64) -> Option<Finalize<V, D>> {
+    fn construct_finalize(&mut self, view: u64) -> Option<Finalize<C::Signature, D>> {
         let round = match self.views.get_mut(&view) {
             Some(view) => view,
             None => {
@@ -1379,9 +1387,16 @@ impl<
         if round.broadcast_finalize {
             return None;
         }
+        let Some(public_key_index) = self
+            .supervisor
+            .is_participant(view, &self.crypto.public_key())
+        else {
+            return None;
+        };
         round.broadcast_finalize = true;
         Some(Finalize::sign(
             &mut self.crypto,
+            public_key_index,
             round.proposal.as_ref().unwrap().clone(),
             &self.finalize_namespace,
         ))
