@@ -5,7 +5,8 @@
 //! In the [Any] db, it is not possible to prove whether the value of a key is the currently active
 //! one, only that it was associated with the key at some point in the past. This type of
 //! authenticated database is most useful for applications involving keys that are given values once
-//! and cannot be updated after.
+//! and cannot be updated after. If authenticating the current value is required, see
+//! [Current](crate::adb::Current).
 
 use crate::{
     adb::{operation::Operation, Error},
@@ -520,8 +521,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
 
     /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable
     /// upon return from this function. Also raises the inactivity floor according to the schedule,
-    /// and prunes those operations below it. If an old_locs vector is provided, then any locations
-    /// that were flipped from active to inactive during this operation are added to it.
+    /// and prunes those operations below it.
     pub async fn commit(&mut self, hasher: &mut H) -> Result<(), Error> {
         // Raise the inactivity floor by the # of uncommitted operations, plus 1 to account for the
         // commit op that will be appended.

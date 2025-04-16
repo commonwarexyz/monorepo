@@ -735,10 +735,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Initializing from an empty partition should result in an empty bitmap.
-            let mut bitmap =
-                Bitmap::<Sha256, SHA256_SIZE>::restore_pruned(context.clone(), PARTITION)
-                    .await
-                    .unwrap();
+            let mut bitmap = Bitmap::<Sha256, 32>::restore_pruned(context.clone(), PARTITION)
+                .await
+                .unwrap();
             assert_eq!(bitmap.bit_count(), 0);
 
             // Add a non-trivial amount of data.
@@ -765,7 +764,7 @@ mod tests {
                     .write_pruned(context.clone(), PARTITION)
                     .await
                     .unwrap();
-                bitmap = Bitmap::<Sha256, SHA256_SIZE>::restore_pruned(context.clone(), PARTITION)
+                bitmap = Bitmap::<Sha256, 32>::restore_pruned(context.clone(), PARTITION)
                     .await
                     .unwrap();
                 let _ = bitmap.root(&mut hasher);
