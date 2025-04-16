@@ -1,13 +1,10 @@
 use std::collections::HashSet;
 
+use crate::Supervisor;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error, FixedSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{Digest, Scheme, Verifier};
 use commonware_utils::{quorum, union, Array};
-
-use crate::Supervisor;
-
-use super::mocks::supervisor;
 
 /// View is a monotonically increasing counter that represents the current focus of consensus.
 pub type View = u64;
@@ -731,11 +728,11 @@ impl<V: Verifier, D: Digest> Write for Backfiller<V, D> {
     }
 }
 
-impl<V: Verifier, D: Digest> Read<usize> for Backfiller<V, D> {
-    fn read_cfg(reader: &mut impl Buf, cfg: &usize) -> Result<Self, Error> {
+impl<V: Verifier, D: Digest> Read<(usize, usize)> for Backfiller<V, D> {
+    fn read_cfg(reader: &mut impl Buf, cfg: &(usize, usize)) -> Result<Self, Error> {
         let tag = u8::read(reader)?;
         match tag {
-            0 => Ok(Backfiller::Request(Request::read_cfg(reader, cfg)?)),
+            0 => Ok(Backfiller::Request(Request::read_cfg(reader, &cfg.0)?)),
             1 => Ok(Backfiller::Response(Response::<V, D>::read_cfg(
                 reader, cfg,
             )?)),
@@ -830,12 +827,13 @@ impl<V: Verifier, D: Digest> Write for Response<V, D> {
     }
 }
 
-impl<V: Verifier, D: Digest> Read<usize> for Response<V, D> {
-    fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
+impl<V: Verifier, D: Digest> Read<(usize, usize)> for Response<V, D> {
+    fn read_cfg(reader: &mut impl Buf, max_len: &(usize, usize)) -> Result<Self, Error> {
         let id = u64::read(reader)?;
-        let notarizations = Vec::<Notarization<V, D>>::read_range(reader, ..=*max_len)?;
-        let remaining = max_len - notarizations.len();
-        let nullifications = Vec::<Nullification<V>>::read_range(reader, ..=remaining)?;
+        let notarizations =
+            Vec::<Notarization<V, D>>::read_cfg(reader, &(..=max_len.0, max_len.1))?;
+        let remaining = max_len.0 - notarizations.len();
+        let nullifications = Vec::<Nullification<V>>::read_cfg(reader, &(..=remaining, max_len.1))?;
         Ok(Self {
             id,
             notarizations,
@@ -910,31 +908,27 @@ impl<V: Verifier, D: Digest> Read<usize> for Activity<V, D> {
     fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
         let tag = u8::read(reader)?;
         match tag {
-            0 => Ok(Activity::Notarize(Notarize::<V, D>::read_cfg(
-                reader, max_len,
-            )?)),
+            0 => Ok(Activity::Notarize(Notarize::<V, D>::read(reader)?)),
             1 => Ok(Activity::Notarization(Notarization::<V, D>::read_cfg(
                 reader, max_len,
             )?)),
-            2 => Ok(Activity::Nullify(Nullify::<V>::read_cfg(reader, max_len)?)),
+            2 => Ok(Activity::Nullify(Nullify::<V>::read(reader)?)),
             3 => Ok(Activity::Nullification(Nullification::<V>::read_cfg(
                 reader, max_len,
             )?)),
-            4 => Ok(Activity::Finalize(Finalize::<V>::read_cfg(
-                reader, max_len,
-            )?)),
+            4 => Ok(Activity::Finalize(Finalize::<V, D>::read(reader)?)),
             5 => Ok(Activity::Finalization(Finalization::<V, D>::read_cfg(
                 reader, max_len,
             )?)),
             6 => Ok(Activity::ConflictingNotarize(
-                ConflictingNotarize::<V, D>::read_cfg(reader, max_len)?,
+                ConflictingNotarize::<V, D>::read(reader)?,
             )),
             7 => Ok(Activity::ConflictingFinalize(
-                ConflictingFinalize::<V, D>::read_cfg(reader, max_len)?,
+                ConflictingFinalize::<V, D>::read(reader)?,
             )),
-            8 => Ok(Activity::NullifyFinalize(
-                NullifyFinalize::<V, D>::read_cfg(reader, max_len)?,
-            )),
+            8 => Ok(Activity::NullifyFinalize(NullifyFinalize::<V, D>::read(
+                reader,
+            )?)),
             _ => Err(Error::Invalid(
                 "consensus::simplex::Activity",
                 "Invalid type",
@@ -1077,7 +1071,7 @@ pub struct NullifyFinalize<V: Verifier, D: Digest> {
 }
 
 impl<V: Verifier, D: Digest> NullifyFinalize<V, D> {
-    pub fn new(nullify: Nullify<V>, finalize: Finalize<V>) -> Self {
+    pub fn new(nullify: Nullify<V>, finalize: Finalize<V, D>) -> Self {
         Self { nullify, finalize }
     }
 
@@ -1096,7 +1090,7 @@ impl<V: Verifier, D: Digest> Write for NullifyFinalize<V, D> {
 impl<V: Verifier, D: Digest> Read for NullifyFinalize<V, D> {
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let nullify = Nullify::<V>::read(reader)?;
-        let finalize = Finalize::<V>::read(reader)?;
+        let finalize = Finalize::<V, D>::read(reader)?;
         if nullify.view() != finalize.view() {
             return Err(Error::Invalid(
                 "consensus::simplex::NullifyFinalize",
@@ -1114,5 +1108,5 @@ impl<V: Verifier, D: Digest> Read for NullifyFinalize<V, D> {
 }
 
 impl<V: Verifier, D: Digest> FixedSize for NullifyFinalize<V, D> {
-    const SIZE: usize = Nullify::<V>::SIZE + Finalize::<V>::SIZE;
+    const SIZE: usize = Nullify::<V>::SIZE + Finalize::<V, D>::SIZE;
 }
