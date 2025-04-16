@@ -1314,7 +1314,7 @@ impl<
         self.enter_view(view + 1);
     }
 
-    fn construct_notarize(&mut self, view: u64) -> Option<Parsed<wire::Notarize, D>> {
+    fn construct_notarize(&mut self, view: u64) -> Option<Notarize<V, D>> {
         let round = match self.views.get_mut(&view) {
             Some(view) => view,
             None => {
@@ -1330,36 +1330,15 @@ impl<
         if !round.verified_proposal {
             return None;
         }
-        let public_key = self
-            .supervisor
-            .is_participant(view, &self.crypto.public_key())?;
-        let proposal = &round.proposal.as_ref().unwrap().1;
-        let message = proposal_message(
-            proposal.message.view,
-            proposal.message.parent,
-            &proposal.digest,
-        );
         round.broadcast_notarize = true;
-        Some(Parsed {
-            message: wire::Notarize {
-                proposal: Some(proposal.message.clone()),
-                signature: Some(wire::Signature {
-                    public_key,
-                    signature: self
-                        .crypto
-                        .sign(Some(&self.notarize_namespace), &message)
-                        .to_vec(),
-                }),
-            },
-            digest: proposal.digest.clone(),
-        })
+        Some(Notarize::sign(
+            &mut self.crypto,
+            round.proposal.as_ref().unwrap().clone(),
+            &self.notarize_namespace,
+        ))
     }
 
-    fn construct_notarization(
-        &mut self,
-        view: u64,
-        force: bool,
-    ) -> Option<Parsed<wire::Notarization, D>> {
+    fn construct_notarization(&mut self, view: u64, force: bool) -> Option<Notarization<V, D>> {
         // Get requested view
         let round = match self.views.get_mut(&view) {
             Some(view) => view,
@@ -1380,25 +1359,11 @@ impl<
         let (proposal, notarizes) = round.notarizable(threshold, force)?;
 
         // Construct notarization
-        let mut payload = None;
-        let mut signatures = Vec::new();
-        for validator in 0..(validators.len() as u32) {
-            if let Some(notarize) = notarizes.get(&validator) {
-                payload = Some(notarize.digest.clone());
-                signatures.push(notarize.message.signature.clone().unwrap());
-            }
-        }
-        let notarization = wire::Notarization {
-            proposal: Some(proposal),
-            signatures,
-        };
-        Some(Parsed {
-            message: notarization,
-            digest: payload.unwrap(),
-        })
+        let signatures = notarizes.into_iter().map(|n| n.signature).collect();
+        Some(Notarization::new(proposal, signatures))
     }
 
-    fn construct_nullification(&mut self, view: u64, force: bool) -> Option<wire::Nullification> {
+    fn construct_nullification(&mut self, view: u64, force: bool) -> Option<Nullification<V>> {
         // Get requested view
         let round = match self.views.get_mut(&view) {
             Some(view) => view,
@@ -1419,13 +1384,8 @@ impl<
         let (_, nullifies) = round.nullifiable(threshold, force)?;
 
         // Construct nullification
-        let mut signatures = Vec::new();
-        for validator in 0..(validators.len() as u32) {
-            if let Some(nullify) = nullifies.get(&validator) {
-                signatures.push(nullify.signature.clone().unwrap());
-            }
-        }
-        Some(wire::Nullification { view, signatures })
+        let signatures = nullifies.into_iter().map(|n| n.signature).collect();
+        Some(Nullification::new(view, signatures))
     }
 
     fn construct_finalize(&mut self, view: u64) -> Option<Parsed<wire::Finalize, D>> {
