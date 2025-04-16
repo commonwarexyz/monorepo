@@ -186,7 +186,7 @@ impl Executor {
     pub fn init(cfg: Config) -> (Runner, Context) {
         // Create a new registry
         let mut registry = Registry::default();
-        let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
+        let mut runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
 
         // Initialize runtime
         let metrics = Arc::new(Metrics::init(runtime_registry));
@@ -200,7 +200,7 @@ impl Executor {
 
         let storage = MeteredStorage::new(
             TokioStorage::new(TokioStorageConfig::new(cfg.storage_directory.clone())),
-            &mut registry,
+            &mut runtime_registry,
         );
 
         let executor = Arc::new(Self {
