@@ -8,7 +8,7 @@ use governor::Quota;
 pub use ingress::Mailbox;
 use std::time::Duration;
 
-pub struct Config<C: Scheme, S: Supervisor> {
+pub struct Config<C: Scheme, S: Supervisor<PublicKey = C::PublicKey>> {
     pub crypto: C,
     pub supervisor: S,
 

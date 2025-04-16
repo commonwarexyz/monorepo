@@ -5,21 +5,21 @@ use super::{
 use crate::{
     simplex::{
         actors::voter,
-        encoder::{notarize_namespace, nullify_namespace},
-        verifier::{verify_notarization, verify_nullification},
-        wire, View,
+        types::{
+            notarize_namespace, nullify_namespace, Backfiller, Notarization, Nullification,
+            Request, Response, View, Viewable,
+        },
     },
-    Parsed, Supervisor,
+    Supervisor,
 };
-use commonware_cryptography::Scheme;
+use commonware_codec::{Decode, Encode};
+use commonware_cryptography::{Digest, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{utils::requester, Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Metrics, Spawner};
-use commonware_utils::Array;
 use futures::{channel::mpsc, future::Either, StreamExt};
 use governor::clock::Clock as GClock;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
-use prost::Message as _;
 use rand::{seq::IteratorRandom, Rng};
 use std::{
     cmp::Ordering,
@@ -99,7 +99,7 @@ impl Inflight {
 pub struct Actor<
     E: Clock + GClock + Rng + Metrics + Spawner,
     C: Scheme,
-    D: Array,
+    D: Digest,
     S: Supervisor<Index = View, PublicKey = C::PublicKey>,
 > {
     context: E,
@@ -109,20 +109,20 @@ pub struct Actor<
     notarize_namespace: Vec<u8>,
     nullify_namespace: Vec<u8>,
 
-    notarizations: BTreeMap<View, wire::Notarization>,
-    nullifications: BTreeMap<View, wire::Nullification>,
+    notarizations: BTreeMap<View, Notarization<C::Signature, D>>,
+    nullifications: BTreeMap<View, Nullification<C::Signature>>,
     activity_timeout: u64,
 
     required: BTreeSet<Entry>,
     inflight: Inflight,
     retry: Option<SystemTime>,
 
-    mailbox_receiver: mpsc::Receiver<Message>,
+    mailbox_receiver: mpsc::Receiver<Message<C::Signature, D>>,
 
     fetch_timeout: Duration,
     max_fetch_count: usize,
-    max_fetch_size: usize,
     fetch_concurrent: usize,
+    max_participants: usize,
     requester: requester::Requester<E, C::PublicKey>,
 
     unfulfilled: Gauge,
@@ -133,11 +133,11 @@ pub struct Actor<
 impl<
         E: Clock + GClock + Rng + Metrics + Spawner,
         C: Scheme,
-        D: Array,
+        D: Digest,
         S: Supervisor<Index = View, PublicKey = C::PublicKey>,
     > Actor<E, C, D, S>
 {
-    pub fn new(context: E, cfg: Config<C, S>) -> (Self, Mailbox) {
+    pub fn new(context: E, cfg: Config<C, S>) -> (Self, Mailbox<C::Signature, D>) {
         // Initialize requester
         let config = requester::Config {
             public_key: cfg.crypto.public_key(),
@@ -177,6 +177,7 @@ impl<
                 notarizations: BTreeMap::new(),
                 nullifications: BTreeMap::new(),
                 activity_timeout: cfg.activity_timeout,
+                max_participants: cfg.max_participants,
 
                 required: BTreeSet::new(),
                 inflight: Inflight::new(),
@@ -186,7 +187,6 @@ impl<
 
                 fetch_timeout: cfg.fetch_timeout,
                 max_fetch_count: cfg.max_fetch_count,
-                max_fetch_size: cfg.max_fetch_size,
                 fetch_concurrent: cfg.fetch_concurrent,
                 requester,
 
@@ -242,13 +242,7 @@ impl<
             }
 
             // Select next recipient
-            let mut msg = wire::Backfiller {
-                id: 0, // set once we have a request ID
-                payload: Some(wire::backfiller::Payload::Request(wire::Request {
-                    notarizations: notarizations.clone(),
-                    nullifications: nullifications.clone(),
-                })),
-            };
+            let mut msg = Request::new(0, notarizations.clone(), nullifications.clone());
             loop {
                 // Get next best
                 let Some((recipient, request)) = self.requester.request(shuffle) else {
@@ -269,7 +263,9 @@ impl<
 
                 // Create new message
                 msg.id = request;
-                let encoded = msg.encode_to_vec().into();
+                let encoded = Backfiller::Request::<C::Signature, D>(msg.clone())
+                    .encode()
+                    .into();
 
                 // Try to send
                 if sender
@@ -299,19 +295,17 @@ impl<
     }
 
     pub fn start(
-        self,
-        voter: voter::Mailbox<D>,
+        mut self,
+        voter: voter::Mailbox<C::Signature, D>,
         sender: impl Sender<PublicKey = C::PublicKey>,
         receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) -> Handle<()> {
-        self.context
-            .clone()
-            .spawn(|_| self.run(voter, sender, receiver))
+        self.context.spawn_ref()(self.run(voter, sender, receiver))
     }
 
     async fn run(
         mut self,
-        mut voter: voter::Mailbox<D>,
+        mut voter: voter::Mailbox<C::Signature, D>,
         mut sender: impl Sender<PublicKey = C::PublicKey>,
         mut receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) {
@@ -371,7 +365,7 @@ impl<
                         }
                         Message::Notarized { notarization } => {
                             // Update current view
-                            let view = notarization.proposal.as_ref().unwrap().view;
+                            let view = notarization.view();
                             if view > current_view {
                                 current_view = view;
                             } else {
@@ -438,23 +432,16 @@ impl<
                 },
                 network = receiver.recv() => {
                     let (s, msg) = network.unwrap();
-                    let msg = match wire::Backfiller::decode(msg) {
+                    let msg = match Backfiller::decode_cfg(msg, &(self.max_fetch_count, self.max_participants)) {
                         Ok(msg) => msg,
                         Err(err) => {
                             warn!(?err, sender = ?s, "failed to decode message");
+                            self.requester.block(s);
                             continue;
                         },
                     };
-                    let payload = match msg.payload {
-                        Some(payload) => payload,
-                        None => {
-                            warn!(sender = ?s, "missing payload");
-                            continue;
-                        },
-                    };
-                    match payload {
-                        wire::backfiller::Payload::Request(request) => {
-                            let mut populated_bytes = 0;
+                    match msg {
+                        Backfiller::Request(request) => {
                             let mut notarizations = Vec::new();
                             let mut missing_notarizations = Vec::new();
                             let mut notarizations_found = Vec::new();
@@ -462,21 +449,9 @@ impl<
                             let mut missing_nullifications = Vec::new();
                             let mut nullifications_found = Vec::new();
 
-                            // Ensure too many notarizations/nullifications aren't requested
-                            if request.notarizations.len() + request.nullifications.len() > self.max_fetch_count {
-                                warn!(sender = ?s, "request too large");
-                                self.requester.block(s);
-                                continue;
-                            }
-
                             // Populate notarizations first
                             for view in request.notarizations {
                                 if let Some(notarization) = self.notarizations.get(&view) {
-                                    let size = notarization.encoded_len();
-                                    if populated_bytes + size > self.max_fetch_size {
-                                        break;
-                                    }
-                                    populated_bytes += size;
                                     notarizations.push(view);
                                     notarizations_found.push(notarization.clone());
                                     self.served.inc();
@@ -488,11 +463,6 @@ impl<
                             // Populate nullifications next
                             for view in request.nullifications {
                                 if let Some(nullification) = self.nullifications.get(&view) {
-                                    let size = nullification.encoded_len();
-                                    if populated_bytes + size > self.max_fetch_size {
-                                        break;
-                                    }
-                                    populated_bytes += size;
                                     nullifications.push(view);
                                     nullifications_found.push(nullification.clone());
                                     self.served.inc();
@@ -503,85 +473,56 @@ impl<
 
                             // Send response
                             debug!(sender = ?s, ?notarizations, ?missing_notarizations, ?nullifications, ?missing_nullifications, "sending response");
-                            let response = wire::Backfiller {
-                                id: msg.id,
-                                payload: Some(wire::backfiller::Payload::Response(wire::Response {
-                                    notarizations: notarizations_found,
-                                    nullifications: nullifications_found,
-                                })),
-                            }
-                            .encode_to_vec()
+                            let msg = Backfiller::Response::<C::Signature, D>(Response::new(
+                                request.id,
+                                notarizations_found,
+                                nullifications_found,
+                            ))
+                            .encode()
                             .into();
                             sender
-                                .send(Recipients::One(s), response, false)
+                                .send(Recipients::One(s), msg, false)
                                 .await
                                 .unwrap();
                         },
-                        wire::backfiller::Payload::Response(response) => {
+                        Backfiller::Response(response) => {
                             // Ensure we were waiting for this response
-                            let Some(request) = self.requester.handle(&s, msg.id) else {
+                            let Some(request) = self.requester.handle(&s, response.id) else {
                                 debug!(sender = ?s, "unexpected message");
                                 continue;
                             };
                             self.inflight.clear(request.id);
 
-                            // Ensure response isn't too big
-                            if response.notarizations.len() + response.nullifications.len() > self.max_fetch_count {
-                                // Block responder
-                                warn!(sender = ?s, "response too large");
-                                self.requester.block(s);
-
-                                // Pick new recipient
-                                self.send(true, &mut sender).await;
-                                continue;
-                            }
-
                             // Parse notarizations
                             let mut notarizations_found = BTreeSet::new();
                             let mut nullifications_found = BTreeSet::new();
                             for notarization in response.notarizations {
-                                let proposal= match notarization.proposal.as_ref() {
-                                    Some(proposal) => proposal,
-                                    None => {
-                                        warn!(sender = ?s, "missing proposal");
-                                        self.requester.block(s.clone());
-                                        continue;
-                                    },
-                                };
-                                let view = proposal.view;
-                                let Ok(payload) = D::try_from(&proposal.payload) else {
-                                    warn!(view, sender = ?s, "invalid proposal");
-                                    self.requester.block(s.clone());
-                                    continue;
-                                };
+                                let view = notarization.view();
                                 let entry = Entry { task: Task::Notarization, view };
                                 if !self.required.contains(&entry) {
                                     debug!(view, sender = ?s, "unnecessary notarization");
                                     continue;
                                 }
-                                if !verify_notarization::<S,C,D>(&self.supervisor, &self.notarize_namespace, &notarization) {
+                                if !notarization.verify::<S, C>(&self.supervisor, &self.notarize_namespace) {
                                     warn!(view, sender = ?s, "invalid notarization");
                                     self.requester.block(s.clone());
                                     continue;
                                 }
                                 self.required.remove(&entry);
                                 self.notarizations.insert(view, notarization.clone());
-                                voter.notarization(Parsed{
-                                    message: notarization,
-                                    digest: payload,
-                                }).await;
+                                voter.notarization(notarization).await;
                                 notarizations_found.insert(view);
                             }
 
                             // Parse nullifications
                             for nullification in response.nullifications {
-                                let view = nullification.view;
+                                let view = nullification.view();
                                 let entry = Entry { task: Task::Nullification, view };
                                 if !self.required.contains(&entry) {
                                     debug!(view, sender = ?s, "unnecessary nullification");
                                     continue;
                                 }
-                                if !verify_nullification::<S,C>(&self.supervisor, &self.nullify_namespace, &nullification) {
+                                if nullification.verify::<S, C>(&self.supervisor, &self.nullify_namespace) {
                                     warn!(view, sender = ?s, "invalid nullification");
                                     self.requester.block(s.clone());
                                     continue;
