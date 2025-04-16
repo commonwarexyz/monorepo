@@ -66,7 +66,6 @@ opentelemetry = "0.28.0"
 opentelemetry-otlp = "0.28.0"
 opentelemetry_sdk =  "0.28.0"
 tracing-opentelemetry = "0.29.0"
-tempfile = "3.19.0"
 
 [profile.bench]
 # Because we enable overflow checks in "release," we should benchmark with them.
