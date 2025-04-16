@@ -37,9 +37,9 @@ use std::{
 use std::{collections::hash_map::Entry, sync::atomic::AtomicI64};
 use tracing::{debug, info, trace, warn};
 
-type Notarizable<'a, V, D> = Option<(Proposal<D>, &'a HashMap<u32, Notarize<V, D>>)>;
-type Nullifiable<'a, V> = Option<(View, &'a HashMap<u32, Nullify<V>>)>;
-type Finalizable<'a, V, D> = Option<(Proposal<D>, &'a HashMap<u32, Finalize<V, D>>)>;
+type Notarizable<'a, V, D> = Option<(Proposal<D>, Vec<Notarize<V, D>>)>;
+type Nullifiable<'a, V> = Option<(View, Vec<Nullify<V>>)>;
+type Finalizable<'a, V, D> = Option<(Proposal<D>, Vec<Finalize<V, D>>)>;
 
 const GENESIS_VIEW: View = 0;
 
@@ -207,6 +207,17 @@ impl<
                 "broadcasting notarization"
             );
             self.broadcast_notarization = true;
+            let notarizes = notarizes
+                .iter()
+                .map(|index| {
+                    self.notarizes
+                        .get(*index as usize)
+                        .unwrap()
+                        .as_ref()
+                        .unwrap()
+                        .clone()
+                })
+                .collect::<Vec<_>>();
             return Some((proposal.clone(), notarizes));
         }
         None
@@ -220,7 +231,12 @@ impl<
             return None;
         }
         self.broadcast_nullification = true;
-        Some((self.view, &self.nullifies))
+        let nullifies = self
+            .nullifies
+            .iter()
+            .map(|(_, nullify)| nullify.clone())
+            .collect::<Vec<_>>();
+        Some((self.view, nullifies))
     }
 
     async fn add_verified_finalize(
@@ -229,15 +245,12 @@ impl<
         finalize: Finalize<V, D>,
     ) -> bool {
         // Check if also issued nullify
+        let signer = finalize.signer();
         if let Some(nullify) = self.nullifies.get(&public_key_index) {
             // Create fault
             let fault = NullifyFinalize::new(nullify.clone(), finalize);
             self.reporter.report(Activity::NullifyFinalize(fault)).await;
-            warn!(
-                view = self.view,
-                signer = ?nullify.signer(),
-                "recorded fault"
-            );
+            warn!(view = self.view, ?signer, "recorded fault");
             return false;
         }
 
@@ -253,11 +266,7 @@ impl<
             self.reporter
                 .report(Activity::ConflictingFinalize(fault))
                 .await;
-            warn!(
-                view = self.view,
-                signer = ?finalize.signer(),
-                "recorded fault"
-            );
+            warn!(view = self.view, ?signer, "recorded fault");
             return false;
         }
 
@@ -281,7 +290,7 @@ impl<
             // We want to broadcast a finalization, even if we haven't yet verified a proposal.
             return None;
         }
-        for (proposal, finalizes) in self.finalizes.iter() {
+        for (proposal, finalizes) in self.finalized_proposals.iter() {
             if (finalizes.len() as u32) < threshold {
                 continue;
             }
@@ -295,18 +304,18 @@ impl<
                 "broadcasting finalization"
             );
             self.broadcast_finalization = true;
-
-            // Grab the proposal
-            let proposal = finalizes
-                .values()
-                .next()
-                .unwrap()
-                .message
-                .proposal
-                .as_ref()
-                .unwrap()
-                .clone();
-            return Some((proposal, finalizes));
+            let finalizes = finalizes
+                .iter()
+                .map(|index| {
+                    self.finalizes
+                        .get(*index as usize)
+                        .unwrap()
+                        .as_ref()
+                        .unwrap()
+                        .clone()
+                })
+                .collect::<Vec<_>>();
+            return Some((proposal.clone(), finalizes));
         }
         None
     }
@@ -315,20 +324,11 @@ impl<
         let participants = self.supervisor.participants(self.view)?;
         let threshold = quorum(participants.len() as u32)?;
         let at_least_one_honest = (threshold - 1) / 2 + 1;
-        for (_, notarizes) in self.notarizes.iter() {
+        for (proposal, notarizes) in self.notarized_proposals.iter() {
             if notarizes.len() < at_least_one_honest as usize {
                 continue;
             }
-            let parent = notarizes
-                .values()
-                .next()
-                .unwrap()
-                .message
-                .proposal
-                .as_ref()
-                .unwrap()
-                .parent;
-            return Some(parent);
+            return Some(proposal.parent);
         }
         None
     }
