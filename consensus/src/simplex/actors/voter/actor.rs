@@ -28,17 +28,17 @@ use prometheus_client::metrics::{
     counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
 };
 use rand::Rng;
+use std::sync::atomic::AtomicI64;
 use std::{
     cmp::max,
     collections::{BTreeMap, HashMap},
     time::{Duration, SystemTime},
 };
-use std::{collections::hash_map::Entry, sync::atomic::AtomicI64};
 use tracing::{debug, info, trace, warn};
 
-type Notarizable<'a, V, D> = Option<(Proposal<D>, &'a Vec<Option<Notarize<V, D>>>)>;
+type Notarizable<'a, V, D> = Option<(Proposal<D>, &'a Vec<u32>, &'a Vec<Option<Notarize<V, D>>>)>;
 type Nullifiable<'a, V> = Option<(View, &'a Vec<Option<Nullify<V>>>)>;
-type Finalizable<'a, V, D> = Option<(Proposal<D>, &'a Vec<Option<Finalize<V, D>>>)>;
+type Finalizable<'a, V, D> = Option<(Proposal<D>, &'a Vec<u32>, &'a Vec<Option<Finalize<V, D>>>)>;
 
 const GENESIS_VIEW: View = 0;
 
@@ -156,19 +156,19 @@ impl<
         true
     }
 
-    async fn add_verified_nullify(&mut self, public_key_index: u32, nullify: Nullify<V>) -> bool {
+    async fn add_verified_nullify(&mut self, nullify: Nullify<C::Signature>) -> bool {
         // Check if already issued finalize
-        let Some(finalize) = self.finalizes.get(public_key_index as usize).unwrap() else {
+        let public_key_index = nullify.signer();
+        let Some(finalize) = self.finalizes[public_key_index as usize].as_ref() else {
             // Store the nullify
-            let entry = self.nullifies.entry(public_key_index);
-            return match entry {
-                Entry::Occupied(_) => false,
-                Entry::Vacant(v) => {
-                    v.insert(nullify.clone());
-                    self.reporter.report(Activity::Nullify(nullify)).await;
-                    true
-                }
-            };
+            if self.nullifies[public_key_index as usize].is_some() {
+                return false;
+            }
+            self.nullifies[public_key_index as usize] = Some(nullify.clone());
+            self.reporter
+                .report(Activity::Nullify(nullify.clone()))
+                .await;
+            return true;
         };
 
         // Create fault
@@ -182,7 +182,7 @@ impl<
         false
     }
 
-    fn notarizable(&mut self, threshold: u32, force: bool) -> Notarizable<V, D> {
+    fn notarizable(&mut self, threshold: u32, force: bool) -> Notarizable<C::Signature, D> {
         if !force && (self.broadcast_notarization || self.broadcast_nullification) {
             // We want to broadcast a notarization, even if we haven't yet verified a proposal.
             return None;
@@ -201,23 +201,12 @@ impl<
                 "broadcasting notarization"
             );
             self.broadcast_notarization = true;
-            let notarizes = notarizes
-                .iter()
-                .map(|index| {
-                    self.notarizes
-                        .get(*index as usize)
-                        .unwrap()
-                        .as_ref()
-                        .unwrap()
-                        .clone()
-                })
-                .collect::<Vec<_>>();
-            return Some((proposal.clone(), notarizes));
+            return Some((proposal.clone(), notarizes, &self.notarizes));
         }
         None
     }
 
-    fn nullifiable(&mut self, threshold: u32, force: bool) -> Nullifiable<V> {
+    fn nullifiable(&mut self, threshold: u32, force: bool) -> Nullifiable<C::Signature> {
         if !force && (self.broadcast_nullification || self.broadcast_notarization) {
             return None;
         }
@@ -225,21 +214,13 @@ impl<
             return None;
         }
         self.broadcast_nullification = true;
-        let nullifies = self
-            .nullifies
-            .iter()
-            .map(|(_, nullify)| nullify.clone())
-            .collect::<Vec<_>>();
-        Some((self.view, nullifies))
+        Some((self.view, &self.nullifies))
     }
 
-    async fn add_verified_finalize(
-        &mut self,
-        public_key_index: u32,
-        finalize: Finalize<V, D>,
-    ) -> bool {
+    async fn add_verified_finalize(&mut self, finalize: Finalize<C::Signature, D>) -> bool {
         // Check if also issued nullify
-        if let Some(nullify) = self.nullifies.get(&public_key_index) {
+        let public_key_index = finalize.signer();
+        if let Some(nullify) = self.nullifies[public_key_index as usize].as_ref() {
             // Create fault
             let fault = NullifyFinalize::new(nullify.clone(), finalize);
             self.reporter.report(Activity::NullifyFinalize(fault)).await;
@@ -248,7 +229,7 @@ impl<
         }
 
         // Check if already finalized
-        if let Some(previous) = self.finalizes.get(public_key_index as usize).unwrap() {
+        if let Some(previous) = self.finalizes[public_key_index as usize].as_ref() {
             if previous == &finalize {
                 trace!(view = ?self.view, signer = ?previous.signer(), "already finalized");
                 return false;
@@ -270,15 +251,12 @@ impl<
             self.finalized_proposals
                 .insert(finalize.proposal.clone(), vec![public_key_index]);
         }
-        self.finalizes
-            .get_mut(public_key_index as usize)
-            .unwrap()
-            .replace(finalize.clone());
+        self.finalizes[public_key_index as usize] = Some(finalize.clone());
         self.reporter.report(Activity::Finalize(finalize)).await;
         true
     }
 
-    fn finalizable(&mut self, threshold: u32, force: bool) -> Finalizable<V, D> {
+    fn finalizable(&mut self, threshold: u32, force: bool) -> Finalizable<C::Signature, D> {
         if !force && self.broadcast_finalization {
             // We want to broadcast a finalization, even if we haven't yet verified a proposal.
             return None;
@@ -297,18 +275,7 @@ impl<
                 "broadcasting finalization"
             );
             self.broadcast_finalization = true;
-            let finalizes = finalizes
-                .iter()
-                .map(|index| {
-                    self.finalizes
-                        .get(*index as usize)
-                        .unwrap()
-                        .as_ref()
-                        .unwrap()
-                        .clone()
-                })
-                .collect::<Vec<_>>();
-            return Some((proposal.clone(), finalizes));
+            return Some((proposal.clone(), finalizes, &self.finalizes));
         }
         None
     }
