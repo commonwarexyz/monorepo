@@ -3,6 +3,7 @@ use commonware_cryptography::Verifier;
 use commonware_runtime::{Metrics, Spawner};
 use futures::{
     channel::{mpsc, oneshot},
+    executor::block_on,
     SinkExt,
 };
 use std::net::SocketAddr;
@@ -134,14 +135,12 @@ impl<E: Spawner + Metrics, C: Verifier> Oracle<E, C> {
 }
 
 pub struct Reservation<E: Spawner + Metrics, C: Verifier> {
-    context: E,
     closer: Option<(C::PublicKey, Mailbox<E, C>)>,
 }
 
 impl<E: Spawner + Metrics, C: Verifier> Reservation<E, C> {
-    pub fn new(context: E, peer: C::PublicKey, mailbox: Mailbox<E, C>) -> Self {
+    pub fn new(peer: C::PublicKey, mailbox: Mailbox<E, C>) -> Self {
         Self {
-            context,
             closer: Some((peer, mailbox)),
         }
     }
@@ -150,11 +149,6 @@ impl<E: Spawner + Metrics, C: Verifier> Reservation<E, C> {
 impl<E: Spawner + Metrics, C: Verifier> Drop for Reservation<E, C> {
     fn drop(&mut self) {
         let (peer, mut mailbox) = self.closer.take().unwrap();
-        self.context
-            .clone()
-            .with_label("reservation")
-            .spawn(move |_| async move {
-                mailbox.release(peer).await;
-            });
+        block_on(mailbox.release(peer));
     }
 }
