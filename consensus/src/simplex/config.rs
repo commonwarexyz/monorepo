@@ -1,6 +1,5 @@
 use crate::{Automaton, Relay, Reporter, Supervisor};
-use commonware_cryptography::{Digest, Scheme, Verifier};
-use commonware_utils::Array;
+use commonware_cryptography::{Digest, Scheme};
 use governor::Quota;
 use std::time::Duration;
 
@@ -9,11 +8,10 @@ use super::types::{Activity, Context, View};
 /// Configuration for the consensus engine.
 pub struct Config<
     C: Scheme,
-    V: Verifier<PublicKey = C::PublicKey, Signature = C::Signature>,
     D: Digest,
     A: Automaton<Context = Context<D>, Digest = D>,
     R: Relay<Digest = D>,
-    F: Reporter<Activity = Activity<V, D>>,
+    F: Reporter<Activity = Activity<C::Signature, D>>,
     S: Supervisor<Index = View>,
 > {
     /// Cryptographic primitives.
@@ -85,13 +83,12 @@ pub struct Config<
 
 impl<
         C: Scheme,
-        V: Verifier<PublicKey = C::PublicKey, Signature = C::Signature>,
         D: Digest,
         A: Automaton<Context = Context<D>, Digest = D>,
         R: Relay<Digest = D>,
-        F: Reporter<Activity = Activity<V, D>>,
+        F: Reporter<Activity = Activity<C::Signature, D>>,
         S: Supervisor<Index = View>,
-    > Config<C, V, D, A, R, F, S>
+    > Config<C, D, A, R, F, S>
 {
     /// Assert enforces that all configuration values are valid.
     pub fn assert(&self) {
