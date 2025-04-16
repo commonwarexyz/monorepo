@@ -124,7 +124,7 @@ pub struct Auditor {
 }
 
 impl Auditor {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             hash: Mutex::new(Vec::new()),
         }
