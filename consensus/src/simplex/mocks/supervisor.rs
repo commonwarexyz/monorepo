@@ -6,7 +6,7 @@ use crate::{
     Monitor, Reporter, Supervisor as Su,
 };
 use commonware_cryptography::{Digest, Verifier};
-use futures::channel::mpsc::Sender;
+use futures::channel::mpsc::{Receiver, Sender};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     sync::{Arc, Mutex},
@@ -116,7 +116,7 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
             Activity::Notarize(notarize) => {
                 let view = notarize.view();
                 let participants = self.participants(view).unwrap();
-                let public_key = participants[notarize.signer() as usize];
+                let public_key = participants[notarize.signer() as usize].clone();
                 if !notarize.verify::<C::PublicKey, C>(&public_key, &self.notarize_namespace) {
                     panic!("signature verification failed");
                 }
@@ -134,29 +134,27 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
                 if !notarization.verify::<_, C>(self, &self.notarize_namespace) {
                     panic!("signature verification failed");
                 }
-                self.notarizations
-                    .lock()
-                    .unwrap()
-                    .insert(view, notarization);
-                let mut notarizes = self
-                    .notarizes
-                    .lock()
-                    .unwrap()
+                let participants = self.participants(view).unwrap();
+                let mut notarizes = self.notarizes.lock().unwrap();
+                let notarizes = notarizes
                     .entry(view)
                     .or_default()
                     .entry(notarization.proposal.payload)
                     .or_default();
-                let participants = self.participants(view).unwrap();
-                for signature in notarization.signatures {
+                for signature in &notarization.signatures {
                     let public_key_index = signature.signer() as usize;
-                    let public_key = participants[public_key_index];
-                    notarizes.insert(public_key.clone());
+                    let public_key = participants[public_key_index].clone();
+                    notarizes.insert(public_key);
                 }
+                self.notarizations
+                    .lock()
+                    .unwrap()
+                    .insert(view, notarization);
             }
             Activity::Nullify(nullify) => {
                 let view = nullify.view();
                 let participants = self.participants(view).unwrap();
-                let public_key = participants[nullify.signer() as usize];
+                let public_key = participants[nullify.signer() as usize].clone();
                 if !nullify.verify::<C::PublicKey, C>(&public_key, &self.nullify_namespace) {
                     panic!("signature verification failed");
                 }
@@ -172,22 +170,23 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
                 if !nullification.verify::<_, C>(self, &self.nullify_namespace) {
                     panic!("signature verification failed");
                 }
+                let participants = self.participants(view).unwrap();
+                let mut nullifies = self.nullifies.lock().unwrap();
+                let nullifies = nullifies.entry(view).or_default();
+                for signature in &nullification.signatures {
+                    let public_key_index = signature.signer() as usize;
+                    let public_key = participants[public_key_index].clone();
+                    nullifies.insert(public_key);
+                }
                 self.nullifications
                     .lock()
                     .unwrap()
                     .insert(view, nullification);
-                let mut nullifies = self.nullifies.lock().unwrap().entry(view).or_default();
-                let participants = self.participants(view).unwrap();
-                for signature in nullification.signatures {
-                    let public_key_index = signature.signer() as usize;
-                    let public_key = participants[public_key_index];
-                    nullifies.insert(public_key.clone());
-                }
             }
             Activity::Finalize(finalize) => {
                 let view = finalize.view();
                 let participants = self.participants(view).unwrap();
-                let public_key = participants[finalize.signer() as usize];
+                let public_key = participants[finalize.signer() as usize].clone();
                 if !finalize.verify::<C::PublicKey, C>(&public_key, &self.finalize_namespace) {
                     panic!("signature verification failed");
                 }
@@ -205,25 +204,85 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
                 if !finalization.verify::<_, C>(self, &self.finalize_namespace) {
                     panic!("signature verification failed");
                 }
-                self.finalizations
-                    .lock()
-                    .unwrap()
-                    .insert(view, finalization);
-                let mut finalizes = self
-                    .finalizes
-                    .lock()
-                    .unwrap()
+                let participants = self.participants(view).unwrap();
+                let mut finalizes = self.finalizes.lock().unwrap();
+                let finalizes = finalizes
                     .entry(view)
                     .or_default()
                     .entry(finalization.proposal.payload)
                     .or_default();
-                let participants = self.participants(view).unwrap();
-                for signature in finalization.signatures {
+                for signature in &finalization.signatures {
                     let public_key_index = signature.signer() as usize;
-                    let public_key = participants[public_key_index];
-                    finalizes.insert(public_key.clone());
+                    let public_key = participants[public_key_index].clone();
+                    finalizes.insert(public_key);
                 }
+                self.finalizations
+                    .lock()
+                    .unwrap()
+                    .insert(view, finalization);
+            }
+            Activity::ConflictingNotarize(ref conflicting) => {
+                let view = conflicting.view();
+                let participants = self.participants(view).unwrap();
+                let public_key = participants[conflicting.signer() as usize].clone();
+                if !conflicting.verify::<C::PublicKey, C>(&public_key, &self.notarize_namespace) {
+                    panic!("signature verification failed");
+                }
+                self.faults
+                    .lock()
+                    .unwrap()
+                    .entry(public_key)
+                    .or_default()
+                    .entry(view)
+                    .or_default()
+                    .insert(activity);
+            }
+            Activity::ConflictingFinalize(ref conflicting) => {
+                let view = conflicting.view();
+                let participants = self.participants(view).unwrap();
+                let public_key = participants[conflicting.signer() as usize].clone();
+                if !conflicting.verify::<C::PublicKey, C>(&public_key, &self.finalize_namespace) {
+                    panic!("signature verification failed");
+                }
+                self.faults
+                    .lock()
+                    .unwrap()
+                    .entry(public_key)
+                    .or_default()
+                    .entry(view)
+                    .or_default()
+                    .insert(activity);
+            }
+            Activity::NullifyFinalize(ref conflicting) => {
+                let view = conflicting.view();
+                let participants = self.participants(view).unwrap();
+                let public_key = participants[conflicting.signer() as usize].clone();
+                if !conflicting.verify::<C::PublicKey, C>(
+                    &public_key,
+                    &self.nullify_namespace,
+                    &self.finalize_namespace,
+                ) {
+                    panic!("signature verification failed");
+                }
+                self.faults
+                    .lock()
+                    .unwrap()
+                    .entry(public_key)
+                    .or_default()
+                    .entry(view)
+                    .or_default()
+                    .insert(activity);
             }
         }
+    }
+}
+
+impl<C: Verifier, D: Digest> Monitor for Supervisor<C, D> {
+    type Index = View;
+    async fn subscribe(&mut self) -> (Self::Index, Receiver<Self::Index>) {
+        let (sender, receiver) = futures::channel::mpsc::channel(128);
+        self.subscribers.lock().unwrap().push(sender);
+        let latest = *self.latest.lock().unwrap();
+        (latest, receiver)
     }
 }
