@@ -1289,7 +1289,8 @@ mod tests {
                 {
                     let nullifies = supervisor.nullifies.lock().unwrap();
                     for (view, participants) in nullifies.iter() {
-                        if participants.contains(slow) {
+                        // Start checking once all are online (leader may never have proposed)
+                        if *view > 10 && participants.contains(slow) {
                             panic!("view: {}", view);
                         }
                     }
