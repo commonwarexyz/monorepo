@@ -33,7 +33,7 @@ pub struct Supervisor<C: Verifier, D: Digest> {
     pub notarizations: Arc<Mutex<HashMap<View, Notarization<C::Signature, D>>>>,
     pub nullifies: Arc<Mutex<HashMap<View, HashSet<C::PublicKey>>>>,
     pub nullifications: Arc<Mutex<HashMap<View, Nullification<C::Signature>>>>,
-    pub finalizes: Arc<Mutex<Participation<C::PublicKey,D >>>,
+    pub finalizes: Arc<Mutex<Participation<C::PublicKey, D>>>,
     pub finalizations: Arc<Mutex<HashMap<View, Finalization<C::Signature, D>>>>,
     pub faults: Arc<Mutex<Faults<C::PublicKey, C::Signature, D>>>,
 
@@ -220,6 +220,13 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
                     .lock()
                     .unwrap()
                     .insert(view, finalization);
+
+                // Send message to subscribers
+                *self.latest.lock().unwrap() = view;
+                let mut subscribers = self.subscribers.lock().unwrap();
+                for subscriber in subscribers.iter_mut() {
+                    let _ = subscriber.try_send(view);
+                }
             }
             Activity::ConflictingNotarize(ref conflicting) => {
                 let view = conflicting.view();
