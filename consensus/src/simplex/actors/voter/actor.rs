@@ -4,8 +4,8 @@ use crate::{
         actors::resolver,
         metrics,
         types::{
-            Activity, Attributable, ConflictingNotarize, Finalize, Notarize, Nullify, Proposal,
-            View,
+            Activity, Attributable, ConflictingNotarize, Finalize, Notarize, Nullification,
+            Nullify, NullifyFinalize, Proposal, View,
         },
     },
     Automaton, Relay, Reporter, Supervisor, LATENCY,
@@ -28,12 +28,12 @@ use prometheus_client::metrics::{
     counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
 };
 use rand::Rng;
-use std::sync::atomic::AtomicI64;
 use std::{
     cmp::max,
     collections::{BTreeMap, HashMap},
     time::{Duration, SystemTime},
 };
+use std::{collections::hash_map::Entry, sync::atomic::AtomicI64};
 use tracing::{debug, info, trace, warn};
 
 type Notarizable<'a, V, D> = Option<(Proposal<D>, &'a HashMap<u32, Notarize<V, D>>)>;
@@ -124,14 +124,12 @@ impl<
         }
     }
 
-    async fn add_verified_notarize(&mut self, notarize: Notarize<D>) -> bool {
+    async fn add_verified_notarize(
+        &mut self,
+        public_key_index: u32,
+        notarize: Notarize<D>,
+    ) -> bool {
         // Check if already notarized
-        let Some(public_key_index) = self
-            .supervisor
-            .is_participant(self.view, &notarize.signer())
-        else {
-            return false;
-        };
         if let Some(previous_notarize) = self.notarizes.get(public_key_index as usize).unwrap() {
             if previous_notarize == &notarize {
                 trace!(
@@ -171,51 +169,27 @@ impl<
         true
     }
 
-    async fn add_verified_nullify(
-        &mut self,
-        public_key: &C::PublicKey,
-        nullify: wire::Nullify,
-    ) -> bool {
+    async fn add_verified_nullify(&mut self, public_key_index: u32, nullify: Nullify) -> bool {
         // Check if already issued finalize
-        let public_key_index = nullify.signature.as_ref().unwrap().public_key;
-        let finalize = self.finalizers.get(&public_key_index);
-        if finalize.is_none() {
+        let Some(finalize) = self.finalizes.get(public_key_index as usize).unwrap() else {
             // Store the nullify
-            return self.nullifies.insert(public_key_index, nullify).is_none();
-        }
-        let finalize = finalize.unwrap();
+            let entry = self.nullifies.entry(public_key_index);
+            return match entry {
+                Entry::Occupied(_) => false,
+                Entry::Vacant(v) => {
+                    v.insert(nullify);
+                    self.reporter.report(Activity::Nullify(nullify)).await;
+                    true
+                }
+            };
+        };
 
         // Create fault
-        let finalize = self
-            .finalizes
-            .get(finalize)
-            .unwrap()
-            .get(&public_key_index)
-            .unwrap();
-        let Ok(finalize_signature) =
-            C::Signature::try_from(&finalize.message.signature.as_ref().unwrap().signature)
-        else {
-            return false;
-        };
-        let Ok(nullify_signature) =
-            C::Signature::try_from(&nullify.signature.as_ref().unwrap().signature)
-        else {
-            return false;
-        };
-        let finalize_proposal = finalize.message.proposal.as_ref().unwrap();
-        let proof = Prover::<C, D>::serialize_nullify_finalize(
-            self.view,
-            public_key,
-            finalize_proposal.parent,
-            &finalize.digest,
-            &finalize_signature,
-            &nullify_signature,
-        );
-        self.supervisor.report(NULLIFY_AND_FINALIZE, proof).await;
+        let fault = NullifyFinalize::new(nullify, finalize.clone());
+        self.reporter.report(Activity::NullifyFinalize(fault)).await;
         warn!(
             view = self.view,
-            signer = ?public_key,
-            activity = NULLIFY_AND_FINALIZE,
+            signer = ?finalize.signer(),
             "recorded fault"
         );
         false
