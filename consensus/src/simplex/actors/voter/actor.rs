@@ -170,7 +170,7 @@ impl<
             return match entry {
                 Entry::Occupied(_) => false,
                 Entry::Vacant(v) => {
-                    v.insert(nullify);
+                    v.insert(nullify.clone());
                     self.reporter.report(Activity::Nullify(nullify)).await;
                     true
                 }
@@ -193,7 +193,7 @@ impl<
             // We want to broadcast a notarization, even if we haven't yet verified a proposal.
             return None;
         }
-        for (proposal, notarizes) in self.notarizes.iter() {
+        for (proposal, notarizes) in self.notarized_proposals.iter() {
             if (notarizes.len() as u32) < threshold {
                 continue;
             }
@@ -207,16 +207,6 @@ impl<
                 "broadcasting notarization"
             );
             self.broadcast_notarization = true;
-
-            // Grab the proposal
-            let proposal = notarizes
-                .values()
-                .next()
-                .unwrap()
-                .message
-                .proposal
-                .as_ref()
-                .unwrap();
             return Some((proposal.clone(), notarizes));
         }
         None
