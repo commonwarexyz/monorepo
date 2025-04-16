@@ -1,10 +1,10 @@
 use super::{
     actors::{resolver, voter},
     config::Config,
-    Context, View,
+    types::{Activity, Context, View},
 };
-use crate::{Automaton, Committer, Relay, Supervisor};
-use commonware_cryptography::Scheme;
+use crate::{Automaton, Relay, Reporter, Supervisor};
+use commonware_cryptography::{Scheme, Verifier};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Sender};
 use commonware_runtime::{Blob, Clock, Handle, Metrics, Spawner, Storage};
@@ -19,10 +19,11 @@ pub struct Engine<
     B: Blob,
     E: Clock + GClock + Rng + CryptoRng + Spawner + Storage<B> + Metrics,
     C: Scheme,
+    V: Verifier<PublicKey = C::PublicKey, Signature = C::Signature>,
     D: Array,
     A: Automaton<Context = Context<D>, Digest = D>,
     R: Relay<Digest = D>,
-    F: Committer<Digest = D>,
+    F: Reporter<Activity = Activity<V, D>>,
     S: Supervisor<Index = View, PublicKey = C::PublicKey>,
 > {
     context: E,
@@ -37,15 +38,16 @@ impl<
         B: Blob,
         E: Clock + GClock + Rng + CryptoRng + Spawner + Storage<B> + Metrics,
         C: Scheme,
+        V: Verifier<PublicKey = C::PublicKey, Signature = C::Signature>,
         D: Array,
         A: Automaton<Context = Context<D>, Digest = D>,
         R: Relay<Digest = D>,
-        F: Committer<Digest = D>,
+        F: Reporter<Activity = Activity<V, D>>,
         S: Supervisor<Index = View, PublicKey = C::PublicKey>,
-    > Engine<B, E, C, D, A, R, F, S>
+    > Engine<B, E, C, V, D, A, R, F, S>
 {
     /// Create a new `simplex` consensus engine.
-    pub fn new(context: E, journal: Journal<B, E>, cfg: Config<C, D, A, R, F, S>) -> Self {
+    pub fn new(context: E, journal: Journal<B, E>, cfg: Config<C, V, D, A, R, F, S>) -> Self {
         // Ensure configuration is valid
         cfg.assert();
 
@@ -57,7 +59,7 @@ impl<
                 crypto: cfg.crypto.clone(),
                 automaton: cfg.automaton,
                 relay: cfg.relay,
-                committer: cfg.committer,
+                reporter: cfg.reporter,
                 supervisor: cfg.supervisor.clone(),
                 mailbox_size: cfg.mailbox_size,
                 namespace: cfg.namespace.clone(),
