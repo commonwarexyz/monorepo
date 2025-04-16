@@ -4,7 +4,8 @@ use crate::{
         actors::resolver,
         metrics,
         types::{
-            Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalize, Notarize,
+            finalize_namespace, notarize_namespace, nullify_namespace, threshold, Activity,
+            Attributable, ConflictingFinalize, ConflictingNotarize, Context, Finalize, Notarize,
             Nullification, Nullify, NullifyFinalize, Proposal, View,
         },
     },
@@ -109,7 +110,7 @@ impl<
             verified_proposal: false,
 
             notarized_proposals: HashMap::new(),
-            notarizes: vec![None, participants],
+            notarizes: vec![None; participants],
             broadcast_notarize: false,
             broadcast_notarization: false,
 
@@ -118,7 +119,7 @@ impl<
             broadcast_nullification: false,
 
             finalized_proposals: HashMap::new(),
-            finalizes: vec![None, participants],
+            finalizes: vec![None; participants],
             broadcast_finalize: false,
             broadcast_finalization: false,
         }
@@ -127,17 +128,13 @@ impl<
     async fn add_verified_notarize(
         &mut self,
         public_key_index: u32,
-        notarize: Notarize<D>,
+        notarize: Notarize<V, D>,
     ) -> bool {
         // Check if already notarized
+        let signer = notarize.signer();
         if let Some(previous_notarize) = self.notarizes.get(public_key_index as usize).unwrap() {
             if previous_notarize == &notarize {
-                trace!(
-                    view = self.view,
-                    signer = ?notarize.signature.public_key,
-                    previous_notarize = ?previous_notarize,
-                    "already notarized"
-                );
+                trace!(view = self.view, ?signer, "already notarized");
                 return false;
             }
 
@@ -146,11 +143,7 @@ impl<
             self.reporter
                 .report(Activity::ConflictingNotarize(fault))
                 .await;
-            warn!(
-                view = self.view,
-                signer = ?notarize.signer(),
-                "recorded fault"
-            );
+            warn!(view = self.view, ?signer, "recorded fault");
             return false;
         }
 
@@ -164,12 +157,12 @@ impl<
         self.notarizes
             .get_mut(public_key_index as usize)
             .unwrap()
-            .replace(notarize);
+            .replace(notarize.clone());
         self.reporter.report(Activity::Notarize(notarize)).await;
         true
     }
 
-    async fn add_verified_nullify(&mut self, public_key_index: u32, nullify: Nullify) -> bool {
+    async fn add_verified_nullify(&mut self, public_key_index: u32, nullify: Nullify<V>) -> bool {
         // Check if already issued finalize
         let Some(finalize) = self.finalizes.get(public_key_index as usize).unwrap() else {
             // Store the nullify
@@ -195,7 +188,7 @@ impl<
         false
     }
 
-    fn notarizable(&mut self, threshold: u32, force: bool) -> Notarizable<D> {
+    fn notarizable(&mut self, threshold: u32, force: bool) -> Notarizable<V, D> {
         if !force && (self.broadcast_notarization || self.broadcast_nullification) {
             // We want to broadcast a notarization, even if we haven't yet verified a proposal.
             return None;
@@ -229,7 +222,7 @@ impl<
         None
     }
 
-    fn nullifiable(&mut self, threshold: u32, force: bool) -> Nullifiable {
+    fn nullifiable(&mut self, threshold: u32, force: bool) -> Nullifiable<V> {
         if !force && (self.broadcast_nullification || self.broadcast_notarization) {
             return None;
         }
@@ -246,7 +239,7 @@ impl<
         finalize: Finalize<V, D>,
     ) -> bool {
         // Check if also issued nullify
-        if let Some(nullify) = self.nullifies.get(public_key_index as usize).unwrap() {
+        if let Some(nullify) = self.nullifies.get(&public_key_index) {
             // Create fault
             let fault = NullifyFinalize::new(nullify.clone(), finalize);
             self.reporter.report(Activity::NullifyFinalize(fault)).await;
@@ -261,7 +254,7 @@ impl<
         // Check if already finalized
         if let Some(previous) = self.finalizes.get(public_key_index as usize).unwrap() {
             if previous == &finalize {
-                trace!(?finalize, ?previous, "already finalized");
+                trace!(view = ?self.view, signer = ?previous.signer(), "already finalized");
                 return false;
             }
 
@@ -293,7 +286,7 @@ impl<
         true
     }
 
-    fn finalizable(&mut self, threshold: u32, force: bool) -> Finalizable<D> {
+    fn finalizable(&mut self, threshold: u32, force: bool) -> Finalizable<V, D> {
         if !force && self.broadcast_finalization {
             // We want to broadcast a finalization, even if we haven't yet verified a proposal.
             return None;
@@ -355,17 +348,18 @@ pub struct Actor<
     B: Blob,
     E: Clock + Rng + Spawner + Storage<B> + Metrics,
     C: Scheme,
-    D: Array,
+    V: Verifier<PublicKey = C::PublicKey, Signature = C::Signature>,
+    D: Digest,
     A: Automaton<Context = Context<D>, Digest = D>,
     R: Relay<Digest = D>,
-    F: Committer<Digest = D>,
+    F: Reporter<Activity = Activity<V, D>>,
     S: Supervisor<Index = View, PublicKey = C::PublicKey>,
 > {
     context: E,
     crypto: C,
     automaton: A,
     relay: R,
-    committer: F,
+    reporter: F,
     supervisor: S,
 
     replay_concurrency: usize,
@@ -383,11 +377,11 @@ pub struct Actor<
     activity_timeout: View,
     skip_timeout: View,
 
-    mailbox_receiver: mpsc::Receiver<Message<D>>,
+    mailbox_receiver: mpsc::Receiver<Message<V, D>>,
 
     last_finalized: View,
     view: View,
-    views: BTreeMap<View, Round<C, D, S>>,
+    views: BTreeMap<View, Round<C, V, D, F, S>>,
 
     current_view: Gauge,
     tracked_views: Gauge,
@@ -402,18 +396,19 @@ impl<
         B: Blob,
         E: Clock + Rng + Spawner + Storage<B> + Metrics,
         C: Scheme,
-        D: Array,
+        V: Verifier<PublicKey = C::PublicKey, Signature = C::Signature>,
+        D: Digest,
         A: Automaton<Context = Context<D>, Digest = D>,
         R: Relay<Digest = D>,
-        F: Committer<Digest = D>,
+        F: Reporter<Activity = Activity<V, D>>,
         S: Supervisor<Index = View, PublicKey = C::PublicKey>,
-    > Actor<B, E, C, D, A, R, F, S>
+    > Actor<B, E, C, V, D, A, R, F, S>
 {
     pub fn new(
         context: E,
         journal: Journal<B, E>,
-        cfg: Config<C, D, A, R, F, S>,
-    ) -> (Self, Mailbox<D>) {
+        cfg: Config<C, V, D, A, R, F, S>,
+    ) -> (Self, Mailbox<V, D>) {
         // Assert correctness of timeouts
         if cfg.leader_timeout > cfg.notarization_timeout {
             panic!("leader timeout must be less than or equal to notarization timeout");
@@ -460,7 +455,7 @@ impl<
                 crypto: cfg.crypto,
                 automaton: cfg.automaton,
                 relay: cfg.relay,
-                committer: cfg.committer,
+                reporter: cfg.reporter,
                 supervisor: cfg.supervisor,
 
                 replay_concurrency: cfg.replay_concurrency,
@@ -497,16 +492,16 @@ impl<
         )
     }
 
-    fn is_notarized(&self, view: View) -> Option<&D> {
+    fn is_notarized(&self, view: View) -> Option<&Proposal<D>> {
         let round = self.views.get(&view)?;
-        let (digest, proposal) = round.proposal.as_ref()?;
-        let notarizes = round.notarizes.get(digest)?;
+        let proposal = round.proposal.as_ref()?;
+        let notarizes = round.notarized_proposals.get(proposal)?;
         let validators = self.supervisor.participants(view)?;
-        let (threshold, _) = threshold(validators)?;
+        let (threshold, _) = threshold(validators);
         if notarizes.len() < threshold as usize {
             return None;
         }
-        Some(&proposal.digest)
+        Some(&proposal)
     }
 
     fn is_nullified(&self, view: View) -> bool {

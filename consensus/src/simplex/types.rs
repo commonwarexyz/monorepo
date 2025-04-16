@@ -7,6 +7,8 @@ use commonware_utils::{quorum, union, Array};
 
 use crate::Supervisor;
 
+use super::mocks::supervisor;
+
 /// View is a monotonically increasing counter that represents the current focus of consensus.
 pub type View = u64;
 
@@ -112,7 +114,7 @@ impl<V: Verifier, D: Digest> Read<usize> for Voter<V, D> {
             3 => Ok(Voter::Nullification(Nullification::<V>::read_cfg(
                 reader, max_len,
             )?)),
-            4 => Ok(Voter::Finalize(Finalize::<V>::read(reader)?)),
+            4 => Ok(Voter::Finalize(Finalize::<V, D>::read(reader)?)),
             5 => Ok(Voter::Finalization(Finalization::<V, D>::read_cfg(
                 reader, max_len,
             )?)),
@@ -195,7 +197,7 @@ impl<D: Digest> Viewable for Proposal<D> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Hash)]
 pub struct Signature<V: Verifier> {
     pub public_key: V::PublicKey,
     pub signature: V::Signature,
@@ -234,11 +236,19 @@ impl<V: Verifier> FixedSize for Signature<V> {
 
 impl<V: Verifier> Attributable<V> for Signature<V> {
     fn signer(&self) -> V::PublicKey {
-        self.public_key
+        self.public_key.clone()
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+impl<V: Verifier> PartialEq for Signature<V> {
+    fn eq(&self, other: &Self) -> bool {
+        self.public_key == other.public_key && self.signature == other.signature
+    }
+}
+
+impl<V: Verifier> Eq for Signature<V> {}
+
+#[derive(Clone, Debug, Hash)]
 pub struct Notarize<V: Verifier, D: Digest> {
     pub proposal: Proposal<D>,
     pub signature: Signature<V>,
@@ -257,8 +267,8 @@ impl<V: Verifier, D: Digest> Notarize<V, D> {
         V::verify(
             Some(&notarize_namespace),
             &message,
-            self.signature.public_key,
-            self.signature.signature,
+            &self.signature.public_key,
+            &self.signature.signature,
         )
     }
 
@@ -271,7 +281,7 @@ impl<V: Verifier, D: Digest> Notarize<V, D> {
         let signature = scheme.sign(Some(&notarize_namespace), &message);
         Self {
             proposal,
-            signature,
+            signature: Signature::new(scheme.public_key(), signature),
         }
     }
 }
@@ -310,6 +320,14 @@ impl<V: Verifier, D: Digest> Attributable<V> for Notarize<V, D> {
     }
 }
 
+impl<V: Verifier, D: Digest> PartialEq for Notarize<V, D> {
+    fn eq(&self, other: &Self) -> bool {
+        self.proposal == other.proposal && self.signature == other.signature
+    }
+}
+
+impl<V: Verifier, D: Digest> Eq for Notarize<V, D> {}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Notarization<V: Verifier, D: Digest> {
     pub proposal: Proposal<D>,
@@ -326,9 +344,10 @@ impl<V: Verifier, D: Digest> Notarization<V, D> {
 
     pub fn verify<S: Supervisor<Index = View, PublicKey = V::PublicKey>>(
         &self,
+        supervisor: &S,
         notarize_namespace: &[u8],
     ) -> bool {
-        let Some(validators) = S::validators(self.proposal.view) else {
+        let Some(validators) = supervisor.participants(self.proposal.view) else {
             return false;
         };
         let (threshold, count) = threshold(validators);
@@ -341,14 +360,14 @@ impl<V: Verifier, D: Digest> Notarization<V, D> {
         let mut seen = HashSet::new();
         let message = self.proposal.encode();
         for signature in &self.signatures {
-            if !seen.insert(signature.public_key) {
+            if !seen.insert(&signature.public_key) {
                 return false;
             }
             if !V::verify(
                 Some(&notarize_namespace),
                 &message,
-                signature.public_key,
-                signature.signature,
+                &signature.public_key,
+                &signature.signature,
             ) {
                 return false;
             }
@@ -387,7 +406,7 @@ impl<V: Verifier, D: Digest> Viewable for Notarization<V, D> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Hash)]
 pub struct Nullify<V: Verifier> {
     pub view: View,
     pub signature: Signature<V>,
@@ -403,8 +422,8 @@ impl<V: Verifier> Nullify<V> {
         V::verify(
             Some(&nullify_namespace),
             &message,
-            self.signature.public_key,
-            self.signature.signature,
+            &self.signature.public_key,
+            &self.signature.signature,
         )
     }
 
@@ -415,7 +434,10 @@ impl<V: Verifier> Nullify<V> {
     ) -> Self {
         let message = view_message(view);
         let signature = scheme.sign(Some(&nullify_namespace), &message);
-        Self { view, signature }
+        Self {
+            view,
+            signature: Signature::new(scheme.public_key(), signature),
+        }
     }
 }
 
@@ -450,6 +472,14 @@ impl<V: Verifier> Attributable<V> for Nullify<V> {
     }
 }
 
+impl<V: Verifier> PartialEq for Nullify<V> {
+    fn eq(&self, other: &Self) -> bool {
+        self.view == other.view && self.signature == other.signature
+    }
+}
+
+impl<V: Verifier> Eq for Nullify<V> {}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Nullification<V: Verifier> {
     pub view: View,
@@ -463,9 +493,10 @@ impl<V: Verifier> Nullification<V> {
 
     pub fn verify<S: Supervisor<Index = View, PublicKey = V::PublicKey>>(
         &self,
+        supervisor: &S,
         nullify_namespace: &[u8],
     ) -> bool {
-        let Some(validators) = S::validators(self.view) else {
+        let Some(validators) = supervisor.participants(self.view) else {
             return false;
         };
         let (threshold, count) = threshold(validators);
@@ -478,14 +509,14 @@ impl<V: Verifier> Nullification<V> {
         let mut seen = HashSet::new();
         let message = view_message(self.view);
         for signature in &self.signatures {
-            if !seen.insert(signature.public_key) {
+            if !seen.insert(&signature.public_key) {
                 return false;
             }
             if !V::verify(
                 Some(&nullify_namespace),
                 &message,
-                signature.public_key,
-                signature.signature,
+                &signature.public_key,
+                &signature.signature,
             ) {
                 return false;
             }
@@ -521,7 +552,7 @@ impl<V: Verifier> Viewable for Nullification<V> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Hash)]
 pub struct Finalize<V: Verifier, D: Digest> {
     pub proposal: Proposal<D>,
     pub signature: Signature<V>,
@@ -540,8 +571,8 @@ impl<V: Verifier, D: Digest> Finalize<V, D> {
         V::verify(
             Some(&finalize_namespace),
             &message,
-            self.signature.public_key,
-            self.signature.signature,
+            &self.signature.public_key,
+            &self.signature.signature,
         )
     }
 
@@ -554,19 +585,19 @@ impl<V: Verifier, D: Digest> Finalize<V, D> {
         let signature = scheme.sign(Some(&finalize_namespace), &message);
         Self {
             proposal,
-            signature,
+            signature: Signature::new(scheme.public_key(), signature),
         }
     }
 }
 
 impl<V: Verifier, D: Digest> Write for Finalize<V, D> {
     fn write(&self, writer: &mut impl BufMut) {
-        self.view.write(writer);
+        self.proposal.write(writer);
         self.signature.write(writer);
     }
 }
 
-impl<V: Verifier, D> Read for Finalize<V, D> {
+impl<V: Verifier, D: Digest> Read for Finalize<V, D> {
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let proposal = Proposal::<D>::read(reader)?;
         let signature = Signature::<V>::read(reader)?;
@@ -577,7 +608,7 @@ impl<V: Verifier, D> Read for Finalize<V, D> {
     }
 }
 
-impl<V: Verifier, D> FixedSize for Finalize<V, D> {
+impl<V: Verifier, D: Digest> FixedSize for Finalize<V, D> {
     const SIZE: usize = Proposal::<D>::SIZE + Signature::<V>::SIZE;
 }
 
@@ -592,6 +623,14 @@ impl<V: Verifier, D: Digest> Attributable<V> for Finalize<V, D> {
         self.signature.signer()
     }
 }
+
+impl<V: Verifier, D: Digest> PartialEq for Finalize<V, D> {
+    fn eq(&self, other: &Self) -> bool {
+        self.proposal == other.proposal && self.signature == other.signature
+    }
+}
+
+impl<V: Verifier, D: Digest> Eq for Finalize<V, D> {}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Finalization<V: Verifier, D: Digest> {
@@ -609,9 +648,10 @@ impl<V: Verifier, D: Digest> Finalization<V, D> {
 
     pub fn verify<S: Supervisor<Index = View, PublicKey = V::PublicKey>>(
         &self,
+        supervisor: &S,
         finalize_namespace: &[u8],
     ) -> bool {
-        let Some(validators) = S::validators(self.proposal.view) else {
+        let Some(validators) = supervisor.participants(self.proposal.view) else {
             return false;
         };
         let (threshold, count) = threshold(validators);
@@ -624,14 +664,14 @@ impl<V: Verifier, D: Digest> Finalization<V, D> {
         let mut seen = HashSet::new();
         let message = self.proposal.encode();
         for signature in &self.signatures {
-            if !seen.insert(signature.public_key) {
+            if !seen.insert(&signature.public_key) {
                 return false;
             }
             if !V::verify(
                 Some(&finalize_namespace),
                 &message,
-                signature.public_key,
-                signature.signature,
+                &signature.public_key,
+                &signature.signature,
             ) {
                 return false;
             }

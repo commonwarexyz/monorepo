@@ -207,8 +207,7 @@ impl<
         *Arc::get_mut(&mut self.notarizes)
             .unwrap()
             .get_mut(public_key_index as usize)
-            .unwrap()
-            .replace(notarize.clone());
+            .unwrap() = Some(notarize.clone());
         self.reporter.report(Activity::Notarize(notarize)).await;
         true
     }
