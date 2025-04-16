@@ -28,8 +28,8 @@ pub trait Viewable {
     fn view(&self) -> View;
 }
 
-pub trait Attributable<V: Verifier> {
-    fn signer(&self) -> &V::PublicKey;
+pub trait Attributable {
+    fn signer(&self) -> u32;
 }
 
 pub const NOTARIZE_SUFFIX: &[u8] = b"_NOTARIZE";
@@ -195,13 +195,13 @@ impl<D: Digest> Viewable for Proposal<D> {
 }
 
 #[derive(Clone, Debug, Hash)]
-pub struct Signature<V: Verifier> {
-    pub public_key: V::PublicKey,
-    pub signature: V::Signature,
+pub struct Signature<S: Array> {
+    pub public_key: u32,
+    pub signature: S,
 }
 
-impl<V: Verifier> Signature<V> {
-    pub fn new(public_key: V::PublicKey, signature: V::Signature) -> Self {
+impl<S: Array> Signature<S> {
+    pub fn new(public_key: u32, signature: S) -> Self {
         Self {
             public_key,
             signature,
@@ -209,17 +209,17 @@ impl<V: Verifier> Signature<V> {
     }
 }
 
-impl<V: Verifier> Write for Signature<V> {
+impl<S: Array> Write for Signature<S> {
     fn write(&self, writer: &mut impl BufMut) {
         self.public_key.write(writer);
         self.signature.write(writer);
     }
 }
 
-impl<V: Verifier> Read for Signature<V> {
+impl<S: Array> Read for Signature<S> {
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let public_key = V::PublicKey::read(reader)?;
-        let signature = V::Signature::read(reader)?;
+        let public_key = u32::read(reader)?;
+        let signature = S::read(reader)?;
         Ok(Self {
             public_key,
             signature,
@@ -227,50 +227,55 @@ impl<V: Verifier> Read for Signature<V> {
     }
 }
 
-impl<V: Verifier> FixedSize for Signature<V> {
-    const SIZE: usize = V::PublicKey::SIZE + V::Signature::SIZE;
+impl<S: Array> FixedSize for Signature<S> {
+    const SIZE: usize = u32::SIZE + S::SIZE;
 }
 
-impl<V: Verifier> Attributable<V> for Signature<V> {
-    fn signer(&self) -> &V::PublicKey {
-        &self.public_key
+impl<S: Array> Attributable for Signature<S> {
+    fn signer(&self) -> u32 {
+        self.public_key
     }
 }
 
-impl<V: Verifier> PartialEq for Signature<V> {
+impl<S: Array> PartialEq for Signature<S> {
     fn eq(&self, other: &Self) -> bool {
         self.public_key == other.public_key && self.signature == other.signature
     }
 }
 
-impl<V: Verifier> Eq for Signature<V> {}
+impl<S: Array> Eq for Signature<S> {}
 
 #[derive(Clone, Debug, Hash)]
-pub struct Notarize<V: Verifier, D: Digest> {
+pub struct Notarize<S: Array, D: Digest> {
     pub proposal: Proposal<D>,
-    pub signature: Signature<V>,
+    pub signature: Signature<S>,
 }
 
-impl<V: Verifier, D: Digest> Notarize<V, D> {
-    pub fn new(proposal: Proposal<D>, signature: Signature<V>) -> Self {
+impl<S: Array, D: Digest> Notarize<S, D> {
+    pub fn new(proposal: Proposal<D>, signature: Signature<S>) -> Self {
         Self {
             proposal,
             signature,
         }
     }
 
-    pub fn verify(&self, notarize_namespace: &[u8]) -> bool {
+    pub fn verify<P: Array, V: Verifier<PublicKey = P, Signature = S>>(
+        &self,
+        public_key: &P,
+        notarize_namespace: &[u8],
+    ) -> bool {
         let message = self.proposal.encode();
         V::verify(
             Some(&notarize_namespace),
             &message,
-            &self.signature.public_key,
+            public_key,
             &self.signature.signature,
         )
     }
 
-    pub fn sign<S: Scheme<PublicKey = V::PublicKey, Signature = V::Signature>>(
-        scheme: &mut S,
+    pub fn sign<C: Scheme<Signature = S>>(
+        scheme: &mut C,
+        public_key_index: u32,
         proposal: Proposal<D>,
         notarize_namespace: &[u8],
     ) -> Self {
@@ -278,22 +283,22 @@ impl<V: Verifier, D: Digest> Notarize<V, D> {
         let signature = scheme.sign(Some(&notarize_namespace), &message);
         Self {
             proposal,
-            signature: Signature::new(scheme.public_key(), signature),
+            signature: Signature::new(public_key_index, signature),
         }
     }
 }
 
-impl<V: Verifier, D: Digest> Write for Notarize<V, D> {
+impl<S: Array, D: Digest> Write for Notarize<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.proposal.write(writer);
         self.signature.write(writer);
     }
 }
 
-impl<V: Verifier, D: Digest> Read for Notarize<V, D> {
+impl<S: Array, D: Digest> Read for Notarize<S, D> {
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let proposal = Proposal::<D>::read_cfg(reader, &())?;
-        let signature = Signature::<V>::read_cfg(reader, &())?;
+        let signature = Signature::<S>::read_cfg(reader, &())?;
         Ok(Self {
             proposal,
             signature,
@@ -301,49 +306,53 @@ impl<V: Verifier, D: Digest> Read for Notarize<V, D> {
     }
 }
 
-impl<V: Verifier, D: Digest> FixedSize for Notarize<V, D> {
-    const SIZE: usize = Proposal::<D>::SIZE + Signature::<V>::SIZE;
+impl<S: Array, D: Digest> FixedSize for Notarize<S, D> {
+    const SIZE: usize = Proposal::<D>::SIZE + Signature::<S>::SIZE;
 }
 
-impl<V: Verifier, D: Digest> Viewable for Notarize<V, D> {
+impl<S: Array, D: Digest> Viewable for Notarize<S, D> {
     fn view(&self) -> View {
         self.proposal.view()
     }
 }
 
-impl<V: Verifier, D: Digest> Attributable<V> for Notarize<V, D> {
-    fn signer(&self) -> &V::PublicKey {
+impl<S: Array, D: Digest> Attributable for Notarize<S, D> {
+    fn signer(&self) -> u32 {
         self.signature.signer()
     }
 }
 
-impl<V: Verifier, D: Digest> PartialEq for Notarize<V, D> {
+impl<S: Array, D: Digest> PartialEq for Notarize<S, D> {
     fn eq(&self, other: &Self) -> bool {
         self.proposal == other.proposal && self.signature == other.signature
     }
 }
 
-impl<V: Verifier, D: Digest> Eq for Notarize<V, D> {}
+impl<S: Array, D: Digest> Eq for Notarize<S, D> {}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Notarization<V: Verifier, D: Digest> {
+pub struct Notarization<S: Array, D: Digest> {
     pub proposal: Proposal<D>,
-    pub signatures: Vec<Signature<V>>,
+    pub signatures: Vec<Signature<S>>,
 }
 
-impl<V: Verifier, D: Digest> Notarization<V, D> {
-    pub fn new(proposal: Proposal<D>, signatures: Vec<Signature<V>>) -> Self {
+impl<S: Array, D: Digest> Notarization<S, D> {
+    pub fn new(proposal: Proposal<D>, signatures: Vec<Signature<S>>) -> Self {
         Self {
             proposal,
             signatures,
         }
     }
 
-    pub fn verify<S: Supervisor<Index = View, PublicKey = V::PublicKey>>(
+    pub fn verify<
+        Su: Supervisor<Index = View>,
+        V: Verifier<PublicKey = Su::PublicKey, Signature = S>,
+    >(
         &self,
-        supervisor: &S,
+        supervisor: &Su,
         notarize_namespace: &[u8],
     ) -> bool {
+        // Get allowed signers
         let Some(validators) = supervisor.participants(self.proposal.view) else {
             return false;
         };
@@ -354,16 +363,26 @@ impl<V: Verifier, D: Digest> Notarization<V, D> {
         if self.signatures.len() > count as usize {
             return false;
         }
+
+        // Verify signatures
         let mut seen = HashSet::new();
         let message = self.proposal.encode();
         for signature in &self.signatures {
+            // Ensure this isn't a duplicate
             if !seen.insert(&signature.public_key) {
                 return false;
             }
+
+            // Get public key
+            let Some(public_key) = validators.get(signature.public_key as usize) else {
+                return false;
+            };
+
+            // Verify signature
             if !V::verify(
                 Some(&notarize_namespace),
                 &message,
-                &signature.public_key,
+                public_key,
                 &signature.signature,
             ) {
                 return false;
