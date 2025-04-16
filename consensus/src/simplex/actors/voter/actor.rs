@@ -36,9 +36,9 @@ use std::{
 use std::{collections::hash_map::Entry, sync::atomic::AtomicI64};
 use tracing::{debug, info, trace, warn};
 
-type Notarizable<'a, V, D> = Option<(Proposal<D>, Vec<Notarize<V, D>>)>;
-type Nullifiable<'a, V> = Option<(View, Vec<Nullify<V>>)>;
-type Finalizable<'a, V, D> = Option<(Proposal<D>, Vec<Finalize<V, D>>)>;
+type Notarizable<'a, V, D> = Option<(Proposal<D>, &'a Vec<Option<Notarize<V, D>>>)>;
+type Nullifiable<'a, V> = Option<(View, &'a Vec<Option<Nullify<V>>>)>;
+type Finalizable<'a, V, D> = Option<(Proposal<D>, &'a Vec<Option<Finalize<V, D>>>)>;
 
 const GENESIS_VIEW: View = 0;
 
@@ -70,7 +70,7 @@ struct Round<
     broadcast_notarization: bool,
 
     // Track nullifies (ensuring any participant only has one recorded nullify)
-    nullifies: HashMap<u32, Nullify<C::Signature>>,
+    nullifies: Vec<Option<Nullify<C::Signature>>>,
     broadcast_nullify: bool,
     broadcast_nullification: bool,
 
@@ -111,7 +111,7 @@ impl<
             broadcast_notarize: false,
             broadcast_notarization: false,
 
-            nullifies: HashMap::new(),
+            nullifies: vec![None; participants],
             broadcast_nullify: false,
             broadcast_nullification: false,
 
@@ -122,13 +122,10 @@ impl<
         }
     }
 
-    async fn add_verified_notarize(
-        &mut self,
-        public_key_index: u32,
-        notarize: Notarize<V, D>,
-    ) -> bool {
+    async fn add_verified_notarize(&mut self, notarize: Notarize<C::Signature, D>) -> bool {
         // Check if already notarized
-        if let Some(previous_notarize) = self.notarizes.get(public_key_index as usize).unwrap() {
+        let public_key_index = notarize.signer();
+        if let Some(previous_notarize) = self.notarizes[public_key_index as usize].as_ref() {
             if previous_notarize == &notarize {
                 trace!(
                     view = self.view,
@@ -154,10 +151,7 @@ impl<
             self.notarized_proposals
                 .insert(notarize.proposal.clone(), vec![public_key_index]);
         }
-        self.notarizes
-            .get_mut(public_key_index as usize)
-            .unwrap()
-            .replace(notarize.clone());
+        self.notarizes[public_key_index as usize] = Some(notarize.clone());
         self.reporter.report(Activity::Notarize(notarize)).await;
         true
     }
