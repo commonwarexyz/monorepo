@@ -1,39 +1,45 @@
 use crate::{
-    simplex::{
-        prover::Prover, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE, NOTARIZE,
-        NULLIFY_AND_FINALIZE,
+    simplex::types::{
+        finalize_namespace, notarize_namespace, nullify_namespace, Activity, Attributable, View,
+        Viewable,
     },
-    Activity, Proof, Supervisor as Su,
+    Monitor, Reporter, Supervisor as Su,
 };
-use commonware_cryptography::Scheme;
+use commonware_cryptography::{Digest, Scheme};
 use commonware_utils::Array;
+use futures::channel::mpsc::Sender;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     sync::{Arc, Mutex},
 };
 
-pub struct Config<C: Scheme, D: Array> {
-    pub prover: Prover<C, D>,
+pub struct Config<C: Scheme> {
+    pub namespace: Vec<u8>,
     pub participants: BTreeMap<View, Vec<C::PublicKey>>,
 }
 
 type Participation<D, P> = HashMap<View, HashMap<D, HashSet<P>>>;
-type Faults<P> = HashMap<P, HashMap<View, HashSet<Activity>>>;
+type Faults<P, S, D> = HashMap<P, HashMap<View, HashSet<Activity<S, D>>>>;
 type Participants<P> = BTreeMap<View, (HashMap<P, u32>, Vec<P>)>;
 
 #[derive(Clone)]
-pub struct Supervisor<C: Scheme, D: Array> {
+pub struct Supervisor<C: Scheme, D: Digest> {
     participants: Participants<C::PublicKey>,
 
-    prover: Prover<C, D>,
+    notarize_namespace: Vec<u8>,
+    nullify_namespace: Vec<u8>,
+    finalize_namespace: Vec<u8>,
 
     pub notarizes: Arc<Mutex<Participation<D, C::PublicKey>>>,
     pub finalizes: Arc<Mutex<Participation<D, C::PublicKey>>>,
-    pub faults: Arc<Mutex<Faults<C::PublicKey>>>,
+    pub faults: Arc<Mutex<Faults<C::PublicKey, C::Signature, D>>>,
+
+    latest: Arc<Mutex<View>>,
+    subscribers: Arc<Mutex<Vec<Sender<View>>>>,
 }
 
-impl<C: Scheme, D: Array> Supervisor<C, D> {
-    pub fn new(cfg: Config<C, D>) -> Self {
+impl<C: Scheme, D: Digest> Supervisor<C, D> {
+    pub fn new(cfg: Config<C>) -> Self {
         let mut parsed_participants = BTreeMap::new();
         for (view, mut validators) in cfg.participants.into_iter() {
             let mut map = HashMap::new();
@@ -45,15 +51,19 @@ impl<C: Scheme, D: Array> Supervisor<C, D> {
         }
         Self {
             participants: parsed_participants,
-            prover: cfg.prover,
+            notarize_namespace: notarize_namespace(&cfg.namespace),
+            nullify_namespace: nullify_namespace(&cfg.namespace),
+            finalize_namespace: finalize_namespace(&cfg.namespace),
             notarizes: Arc::new(Mutex::new(HashMap::new())),
             finalizes: Arc::new(Mutex::new(HashMap::new())),
             faults: Arc::new(Mutex::new(HashMap::new())),
+            latest: Arc::new(Mutex::new(0)),
+            subscribers: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
 
-impl<C: Scheme, D: Array> Su for Supervisor<C, D> {
+impl<C: Scheme, D: Digest> Su for Supervisor<C, D> {
     type Index = View;
     type PublicKey = C::PublicKey;
 
@@ -86,21 +96,29 @@ impl<C: Scheme, D: Array> Su for Supervisor<C, D> {
         };
         closest.0.get(candidate).cloned()
     }
+}
 
-    async fn report(&self, activity: Activity, proof: Proof) {
+impl<C: Scheme, D: Digest> Reporter for Supervisor<C, D> {
+    type Activity = Activity<C::Signature, D>;
+
+    async fn report(&mut self, activity: Activity<C::Signature, D>) {
         // We check signatures for all messages to ensure that the prover is working correctly
         // but in production this isn't necessary (as signatures are already verified in
         // consensus).
         match activity {
-            NOTARIZE => {
-                let (view, _, payload, public_key) =
-                    self.prover.deserialize_notarize(proof, true).unwrap();
+            Activity::Notarize(notarize) => {
+                let view = notarize.view();
+                let participants = self.participants(view).unwrap();
+                let public_key = participants[notarize.signer() as usize];
+                if !notarize.verify(&public_key, &self.notarize_namespace) {
+                    panic!("signature verification failed");
+                }
                 self.notarizes
                     .lock()
                     .unwrap()
                     .entry(view)
                     .or_default()
-                    .entry(payload)
+                    .entry(notarize.proposal.payload)
                     .or_default()
                     .insert(public_key);
             }
