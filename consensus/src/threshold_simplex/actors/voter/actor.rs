@@ -35,7 +35,10 @@ use prometheus_client::metrics::{
     counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
 };
 use rand::Rng;
-use std::sync::{atomic::AtomicI64, Arc};
+use std::{
+    collections::hash_map::Entry,
+    sync::{atomic::AtomicI64, Arc},
+};
 use std::{
     collections::{BTreeMap, HashMap},
     time::{Duration, SystemTime},
@@ -82,7 +85,7 @@ struct Round<
     broadcast_notarization: bool,
 
     // Track nullifies (ensuring any participant only has one recorded nullify)
-    nullifies: Arc<Vec<Option<Nullify>>>,
+    nullifies: Arc<HashMap<u32, Nullify>>,
     nullification: Option<Nullification>,
     broadcast_nullify: bool,
     broadcast_nullification: bool,
@@ -134,7 +137,7 @@ impl<
             broadcast_notarize: false,
             broadcast_notarization: false,
 
-            nullifies: Arc::new(vec![None; participants]),
+            nullifies: Arc::new(HashMap::new()),
             nullification: None,
             broadcast_nullify: false,
             broadcast_nullification: false,
@@ -214,14 +217,17 @@ impl<
         // Check if already issued finalize
         let Some(finalize) = self.finalizes[public_key_index as usize].as_ref() else {
             // Store the nullify
-            let Some(item) =
-                Arc::get_mut(&mut self.nullifies).unwrap()[public_key_index as usize].as_mut()
-            else {
-                return false;
+            let item = Arc::get_mut(&mut self.nullifies)
+                .unwrap()
+                .entry(public_key_index);
+            return match item {
+                Entry::Occupied(_) => false,
+                Entry::Vacant(v) => {
+                    v.insert(nullify.clone());
+                    self.reporter.report(Activity::Nullify(nullify)).await;
+                    true
+                }
             };
-            *item = nullify.clone();
-            self.reporter.report(Activity::Nullify(nullify)).await;
-            return true;
         };
 
         // Create fault
@@ -247,7 +253,7 @@ impl<
         finalize: Finalize<D>,
     ) -> bool {
         // Check if also issued nullify
-        if let Some(previous) = self.nullifies[public_key_index as usize].as_ref() {
+        if let Some(previous) = self.nullifies.get(&public_key_index) {
             // Create fault
             let activity = NullifyFinalize::new(
                 finalize.proposal.clone(),
@@ -445,20 +451,14 @@ impl<
             .spawn_blocking({
                 let nullifies = self.nullifies.clone();
                 move || {
-                    let views = nullifies
-                        .iter()
-                        .filter_map(|x| x.as_ref())
-                        .map(|x| &x.view_signature);
+                    let views = nullifies.values().map(|x| &x.view_signature);
                     threshold_signature_recover(threshold, views).unwrap()
                 }
             });
         let seed_signature = self.context.with_label("seed_recovery").spawn_blocking({
             let nullifies = self.nullifies.clone();
             move || {
-                let seeds = nullifies
-                    .iter()
-                    .filter_map(|x| x.as_ref())
-                    .map(|x| &x.seed_signature);
+                let seeds = nullifies.values().map(|x| &x.seed_signature);
                 threshold_signature_recover(threshold, seeds).unwrap()
             }
         });
@@ -1221,7 +1221,7 @@ impl<
                 }
             };
             if round.notarizes[leader_index as usize].is_some()
-                || round.nullifies[leader_index as usize].is_some()
+                || round.nullifies.contains_key(&leader_index)
             {
                 return;
             }

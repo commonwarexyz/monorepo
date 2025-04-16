@@ -28,16 +28,16 @@ use prometheus_client::metrics::{
     counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
 };
 use rand::Rng;
-use std::sync::atomic::AtomicI64;
 use std::{
     cmp::max,
     collections::{BTreeMap, HashMap},
     time::{Duration, SystemTime},
 };
+use std::{collections::hash_map::Entry, sync::atomic::AtomicI64};
 use tracing::{debug, info, trace, warn};
 
 type Notarizable<'a, V, D> = Option<(Proposal<D>, &'a Vec<u32>, &'a Vec<Option<Notarize<V, D>>>)>;
-type Nullifiable<'a, V> = Option<(View, &'a Vec<Option<Nullify<V>>>)>;
+type Nullifiable<'a, V> = Option<(View, &'a HashMap<u32, Nullify<V>>)>;
 type Finalizable<'a, V, D> = Option<(Proposal<D>, &'a Vec<u32>, &'a Vec<Option<Finalize<V, D>>>)>;
 
 const GENESIS_VIEW: View = 0;
@@ -70,7 +70,7 @@ struct Round<
     broadcast_notarization: bool,
 
     // Track nullifies (ensuring any participant only has one recorded nullify)
-    nullifies: Vec<Option<Nullify<C::Signature>>>,
+    nullifies: HashMap<u32, Nullify<C::Signature>>,
     broadcast_nullify: bool,
     broadcast_nullification: bool,
 
@@ -111,7 +111,7 @@ impl<
             broadcast_notarize: false,
             broadcast_notarization: false,
 
-            nullifies: vec![None; participants],
+            nullifies: HashMap::new(),
             broadcast_nullify: false,
             broadcast_nullification: false,
 
@@ -161,12 +161,15 @@ impl<
         let public_key_index = nullify.signer();
         let Some(finalize) = self.finalizes[public_key_index as usize].as_ref() else {
             // Store the nullify
-            let Some(item) = self.nullifies[public_key_index as usize].as_mut() else {
-                return false;
+            let item = self.nullifies.entry(public_key_index);
+            return match item {
+                Entry::Occupied(_) => false,
+                Entry::Vacant(v) => {
+                    v.insert(nullify.clone());
+                    self.reporter.report(Activity::Nullify(nullify)).await;
+                    true
+                }
             };
-            *item = nullify.clone();
-            self.reporter.report(Activity::Nullify(nullify)).await;
-            return true;
         };
 
         // Create fault
@@ -218,7 +221,7 @@ impl<
     async fn add_verified_finalize(&mut self, finalize: Finalize<C::Signature, D>) -> bool {
         // Check if also issued nullify
         let public_key_index = finalize.signer();
-        if let Some(nullify) = self.nullifies[public_key_index as usize].as_ref() {
+        if let Some(nullify) = self.nullifies.get(&public_key_index) {
             // Create fault
             let fault = NullifyFinalize::new(nullify.clone(), finalize);
             self.reporter.report(Activity::NullifyFinalize(fault)).await;
@@ -688,7 +691,7 @@ impl<
 
     async fn handle_nullify(&mut self, nullify: Nullify<C::Signature>) {
         // Check to see if nullify is for proposal in view
-        let view = nullify.view;
+        let view = nullify.view();
         let round = self.views.entry(view).or_insert_with(|| {
             Round::new(
                 self.context.current(),
@@ -911,7 +914,7 @@ impl<
                 }
             };
             if round.notarizes[leader_index as usize].is_some()
-                || round.nullifies[leader_index as usize].is_some()
+                || round.nullifies.contains_key(&leader_index)
             {
                 return;
             }
@@ -1355,8 +1358,7 @@ impl<
 
         // Construct nullification
         let signatures = nullifies
-            .iter()
-            .filter_map(|n| n.as_ref())
+            .values()
             .map(|n| n.signature.clone())
             .collect::<Vec<_>>();
         Some(Nullification::new(view, signatures))

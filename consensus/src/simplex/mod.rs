@@ -139,14 +139,11 @@ mod tests {
     use commonware_cryptography::{sha256::Digest as Sha256Digest, Ed25519, Sha256, Signer};
     use commonware_macros::test_traced;
     use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};
-    use commonware_runtime::{
-        deterministic::Executor,
-         Metrics, Runner, Spawner,
-    };
+    use commonware_runtime::{deterministic::Executor, Metrics, Runner, Spawner};
     use commonware_storage::journal::variable::{Config as JConfig, Journal};
     use commonware_utils::{quorum, Array};
     use engine::Engine;
-    use futures::{ future::join_all, StreamExt};
+    use futures::{future::join_all, StreamExt};
     use governor::Quota;
     use std::{
         collections::{BTreeMap, HashMap},
