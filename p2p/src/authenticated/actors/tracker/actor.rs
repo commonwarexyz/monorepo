@@ -418,7 +418,11 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
         // Reserve the connection
         self.connections.insert(peer.clone());
         self.reserved_connections.inc();
-        Some(Reservation::new(peer, Mailbox::new(self.sender.clone())))
+        Some(Reservation::new(
+            self.context.with_label("reservation"),
+            peer,
+            Mailbox::new(self.sender.clone()),
+        ))
     }
 
     pub fn start(mut self) -> Handle<()> {
