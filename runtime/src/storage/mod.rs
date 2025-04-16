@@ -26,6 +26,14 @@ mod tests {
         test_scan(&storage).await;
         test_concurrent_access(&storage).await;
         test_large_data(&storage).await;
+        test_overwrite_data(&storage).await;
+        test_read_beyond_bound(&storage).await;
+        test_write_at_large_offset(&storage).await;
+        test_append_data(&storage).await;
+        test_sequential_read_write(&storage).await;
+        test_sequential_chunk_read_write(&storage).await;
+        test_read_empty_blob(&storage).await;
+        test_overlapping_writes(&storage).await;
     }
 
     /// Test opening a blob, writing to it, and reading back the data.
@@ -133,55 +141,6 @@ mod tests {
 
         assert_eq!(buffer, large_data, "Large data read/write failed");
     }
-
-    /// Test metrics tracking for MeteredStorage.
-    #[tokio::test]
-    async fn test_metered_storage() {
-        let mut registry = Registry::default();
-        let inner = MemoryStorage::default();
-        let storage = MeteredStorage::new(inner, &mut registry);
-
-        run_storage_tests(storage).await;
-    }
-
-    /// Test auditing behavior for AuditedStorage.
-    #[tokio::test]
-    async fn test_audited_storage() {
-        let inner = MemoryStorage::default();
-        let auditor = Arc::new(crate::deterministic::Auditor::default());
-        let storage = AuditedStorage::new(inner, auditor);
-
-        run_storage_tests(storage).await;
-    }
-
-    /// Test TokioStorage with a temporary directory.
-    #[tokio::test]
-    async fn test_tokio_storage() {
-        let temp_dir = tempdir().unwrap();
-        let config = crate::storage::tokio_storage::Config::new(temp_dir.path().to_path_buf());
-        let storage = TokioStorage::new(config);
-
-        run_storage_tests(storage).await;
-    }
-
-    /// Test MemoryStorage.
-    #[tokio::test]
-    async fn test_memory_storage() {
-        let storage = MemoryStorage::default();
-        run_storage_tests(storage).await;
-    }
-}
-
-#[cfg(test)]
-mod extended_tests {
-    use crate::storage::{
-        audited::Storage as AuditedStorage, memory::Storage as MemoryStorage,
-        metered::MeteredStorage, tokio_storage::Storage as TokioStorage,
-    };
-    use crate::{Blob, Storage};
-    use prometheus_client::registry::Registry;
-    use std::sync::Arc;
-    use tempfile::tempdir;
 
     /// Test overwriting data in a blob.
     async fn test_overwrite_data<S>(storage: &S)
@@ -378,14 +337,7 @@ mod extended_tests {
     #[tokio::test]
     async fn test_memory_storage() {
         let storage = MemoryStorage::default();
-        test_overwrite_data(&storage).await;
-        test_read_beyond_bound(&storage).await;
-        test_write_at_large_offset(&storage).await;
-        test_append_data(&storage).await;
-        test_sequential_read_write(&storage).await;
-        test_sequential_chunk_read_write(&storage).await;
-        test_read_empty_blob(&storage).await;
-        test_overlapping_writes(&storage).await;
+        run_storage_tests(storage).await;
     }
 
     #[tokio::test]
@@ -394,14 +346,7 @@ mod extended_tests {
         let config = crate::storage::tokio_storage::Config::new(temp_dir.path().to_path_buf());
         let storage = TokioStorage::new(config);
 
-        test_overwrite_data(&storage).await;
-        test_read_beyond_bound(&storage).await;
-        test_write_at_large_offset(&storage).await;
-        test_append_data(&storage).await;
-        test_sequential_read_write(&storage).await;
-        test_sequential_chunk_read_write(&storage).await;
-        test_read_empty_blob(&storage).await;
-        test_overlapping_writes(&storage).await;
+        run_storage_tests(storage).await;
     }
 
     #[tokio::test]
@@ -410,14 +355,7 @@ mod extended_tests {
         let auditor = Arc::new(crate::deterministic::Auditor::default());
         let storage = AuditedStorage::new(inner, auditor.clone());
 
-        test_overwrite_data(&storage).await;
-        test_read_beyond_bound(&storage).await;
-        test_write_at_large_offset(&storage).await;
-        test_append_data(&storage).await;
-        test_sequential_read_write(&storage).await;
-        test_sequential_chunk_read_write(&storage).await;
-        test_read_empty_blob(&storage).await;
-        test_overlapping_writes(&storage).await;
+        run_storage_tests(storage).await;
     }
 
     #[tokio::test]
@@ -426,13 +364,6 @@ mod extended_tests {
         let inner = MemoryStorage::default();
         let storage = MeteredStorage::new(inner, &mut registry);
 
-        test_overwrite_data(&storage).await;
-        test_read_beyond_bound(&storage).await;
-        test_write_at_large_offset(&storage).await;
-        test_append_data(&storage).await;
-        test_sequential_read_write(&storage).await;
-        test_sequential_chunk_read_write(&storage).await;
-        test_read_empty_blob(&storage).await;
-        test_overlapping_writes(&storage).await;
+        run_storage_tests(storage).await;
     }
 }
