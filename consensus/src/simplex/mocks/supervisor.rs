@@ -1,19 +1,18 @@
 use crate::{
     simplex::types::{
-        finalize_namespace, notarize_namespace, nullify_namespace, Activity, Attributable, View,
-        Viewable,
+        finalize_namespace, notarize_namespace, nullify_namespace, Activity, Attributable,
+        Finalization, Notarization, Nullification, View, Viewable,
     },
     Monitor, Reporter, Supervisor as Su,
 };
-use commonware_cryptography::{Digest, Scheme};
-use commonware_utils::Array;
+use commonware_cryptography::{Digest, Verifier};
 use futures::channel::mpsc::Sender;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     sync::{Arc, Mutex},
 };
 
-pub struct Config<C: Scheme> {
+pub struct Config<C: Verifier> {
     pub namespace: Vec<u8>,
     pub participants: BTreeMap<View, Vec<C::PublicKey>>,
 }
@@ -23,7 +22,7 @@ type Faults<P, S, D> = HashMap<P, HashMap<View, HashSet<Activity<S, D>>>>;
 type Participants<P> = BTreeMap<View, (HashMap<P, u32>, Vec<P>)>;
 
 #[derive(Clone)]
-pub struct Supervisor<C: Scheme, D: Digest> {
+pub struct Supervisor<C: Verifier, D: Digest> {
     participants: Participants<C::PublicKey>,
 
     notarize_namespace: Vec<u8>,
@@ -31,14 +30,18 @@ pub struct Supervisor<C: Scheme, D: Digest> {
     finalize_namespace: Vec<u8>,
 
     pub notarizes: Arc<Mutex<Participation<D, C::PublicKey>>>,
+    pub notarizations: Arc<Mutex<HashMap<View, Notarization<C::Signature, D>>>>,
+    pub nullifies: Arc<Mutex<HashMap<View, HashSet<C::PublicKey>>>>,
+    pub nullifications: Arc<Mutex<HashMap<View, Nullification<C::Signature>>>>,
     pub finalizes: Arc<Mutex<Participation<D, C::PublicKey>>>,
+    pub finalizations: Arc<Mutex<HashMap<View, Finalization<C::Signature, D>>>>,
     pub faults: Arc<Mutex<Faults<C::PublicKey, C::Signature, D>>>,
 
     latest: Arc<Mutex<View>>,
     subscribers: Arc<Mutex<Vec<Sender<View>>>>,
 }
 
-impl<C: Scheme, D: Digest> Supervisor<C, D> {
+impl<C: Verifier, D: Digest> Supervisor<C, D> {
     pub fn new(cfg: Config<C>) -> Self {
         let mut parsed_participants = BTreeMap::new();
         for (view, mut validators) in cfg.participants.into_iter() {
@@ -55,7 +58,11 @@ impl<C: Scheme, D: Digest> Supervisor<C, D> {
             nullify_namespace: nullify_namespace(&cfg.namespace),
             finalize_namespace: finalize_namespace(&cfg.namespace),
             notarizes: Arc::new(Mutex::new(HashMap::new())),
+            notarizations: Arc::new(Mutex::new(HashMap::new())),
+            nullifies: Arc::new(Mutex::new(HashMap::new())),
+            nullifications: Arc::new(Mutex::new(HashMap::new())),
             finalizes: Arc::new(Mutex::new(HashMap::new())),
+            finalizations: Arc::new(Mutex::new(HashMap::new())),
             faults: Arc::new(Mutex::new(HashMap::new())),
             latest: Arc::new(Mutex::new(0)),
             subscribers: Arc::new(Mutex::new(Vec::new())),
@@ -63,7 +70,7 @@ impl<C: Scheme, D: Digest> Supervisor<C, D> {
     }
 }
 
-impl<C: Scheme, D: Digest> Su for Supervisor<C, D> {
+impl<C: Verifier, D: Digest> Su for Supervisor<C, D> {
     type Index = View;
     type PublicKey = C::PublicKey;
 
@@ -98,7 +105,7 @@ impl<C: Scheme, D: Digest> Su for Supervisor<C, D> {
     }
 }
 
-impl<C: Scheme, D: Digest> Reporter for Supervisor<C, D> {
+impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
     type Activity = Activity<C::Signature, D>;
 
     async fn report(&mut self, activity: Activity<C::Signature, D>) {
@@ -110,7 +117,7 @@ impl<C: Scheme, D: Digest> Reporter for Supervisor<C, D> {
                 let view = notarize.view();
                 let participants = self.participants(view).unwrap();
                 let public_key = participants[notarize.signer() as usize];
-                if !notarize.verify(&public_key, &self.notarize_namespace) {
+                if !notarize.verify::<C::PublicKey, C>(&public_key, &self.notarize_namespace) {
                     panic!("signature verification failed");
                 }
                 self.notarizes
@@ -122,62 +129,100 @@ impl<C: Scheme, D: Digest> Reporter for Supervisor<C, D> {
                     .or_default()
                     .insert(public_key);
             }
-            FINALIZE => {
-                let (view, _, payload, public_key) =
-                    self.prover.deserialize_finalize(proof, true).unwrap();
+            Activity::Notarization(notarization) => {
+                let view = notarization.view();
+                if !notarization.verify::<_, C>(self, &self.notarize_namespace) {
+                    panic!("signature verification failed");
+                }
+                self.notarizations
+                    .lock()
+                    .unwrap()
+                    .insert(view, notarization);
+                let mut notarizes = self
+                    .notarizes
+                    .lock()
+                    .unwrap()
+                    .entry(view)
+                    .or_default()
+                    .entry(notarization.proposal.payload)
+                    .or_default();
+                let participants = self.participants(view).unwrap();
+                for signature in notarization.signatures {
+                    let public_key_index = signature.signer() as usize;
+                    let public_key = participants[public_key_index];
+                    notarizes.insert(public_key.clone());
+                }
+            }
+            Activity::Nullify(nullify) => {
+                let view = nullify.view();
+                let participants = self.participants(view).unwrap();
+                let public_key = participants[nullify.signer() as usize];
+                if !nullify.verify::<C::PublicKey, C>(&public_key, &self.nullify_namespace) {
+                    panic!("signature verification failed");
+                }
+                self.nullifies
+                    .lock()
+                    .unwrap()
+                    .entry(view)
+                    .or_default()
+                    .insert(public_key);
+            }
+            Activity::Nullification(nullification) => {
+                let view = nullification.view();
+                if !nullification.verify::<_, C>(self, &self.nullify_namespace) {
+                    panic!("signature verification failed");
+                }
+                self.nullifications
+                    .lock()
+                    .unwrap()
+                    .insert(view, nullification);
+                let mut nullifies = self.nullifies.lock().unwrap().entry(view).or_default();
+                let participants = self.participants(view).unwrap();
+                for signature in nullification.signatures {
+                    let public_key_index = signature.signer() as usize;
+                    let public_key = participants[public_key_index];
+                    nullifies.insert(public_key.clone());
+                }
+            }
+            Activity::Finalize(finalize) => {
+                let view = finalize.view();
+                let participants = self.participants(view).unwrap();
+                let public_key = participants[finalize.signer() as usize];
+                if !finalize.verify::<C::PublicKey, C>(&public_key, &self.finalize_namespace) {
+                    panic!("signature verification failed");
+                }
                 self.finalizes
                     .lock()
                     .unwrap()
                     .entry(view)
                     .or_default()
-                    .entry(payload)
+                    .entry(finalize.proposal.payload)
                     .or_default()
                     .insert(public_key);
             }
-            CONFLICTING_NOTARIZE => {
-                let (public_key, view) = self
-                    .prover
-                    .deserialize_conflicting_notarize(proof, true)
-                    .unwrap();
-                self.faults
+            Activity::Finalization(finalization) => {
+                let view = finalization.view();
+                if !finalization.verify::<_, C>(self, &self.finalize_namespace) {
+                    panic!("signature verification failed");
+                }
+                self.finalizations
                     .lock()
                     .unwrap()
-                    .entry(public_key)
-                    .or_default()
-                    .entry(view)
-                    .or_default()
-                    .insert(CONFLICTING_NOTARIZE);
-            }
-            CONFLICTING_FINALIZE => {
-                let (public_key, view) = self
-                    .prover
-                    .deserialize_conflicting_finalize(proof, true)
-                    .unwrap();
-                self.faults
+                    .insert(view, finalization);
+                let mut finalizes = self
+                    .finalizes
                     .lock()
                     .unwrap()
-                    .entry(public_key)
-                    .or_default()
                     .entry(view)
                     .or_default()
-                    .insert(CONFLICTING_FINALIZE);
-            }
-            NULLIFY_AND_FINALIZE => {
-                let (public_key, view) = self
-                    .prover
-                    .deserialize_nullify_finalize(proof, true)
-                    .unwrap();
-                self.faults
-                    .lock()
-                    .unwrap()
-                    .entry(public_key)
-                    .or_default()
-                    .entry(view)
-                    .or_default()
-                    .insert(NULLIFY_AND_FINALIZE);
-            }
-            unexpected => {
-                panic!("unexpected activity: {}", unexpected);
+                    .entry(finalization.proposal.payload)
+                    .or_default();
+                let participants = self.participants(view).unwrap();
+                for signature in finalization.signatures {
+                    let public_key_index = signature.signer() as usize;
+                    let public_key = participants[public_key_index];
+                    finalizes.insert(public_key.clone());
+                }
             }
         }
     }
