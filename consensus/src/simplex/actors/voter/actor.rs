@@ -161,13 +161,11 @@ impl<
         let public_key_index = nullify.signer();
         let Some(finalize) = self.finalizes[public_key_index as usize].as_ref() else {
             // Store the nullify
-            if self.nullifies[public_key_index as usize].is_some() {
+            let Some(item) = self.nullifies[public_key_index as usize].as_mut() else {
                 return false;
-            }
-            self.nullifies[public_key_index as usize] = Some(nullify.clone());
-            self.reporter
-                .report(Activity::Nullify(nullify.clone()))
-                .await;
+            };
+            *item = nullify.clone();
+            self.reporter.report(Activity::Nullify(nullify)).await;
             return true;
         };
 
