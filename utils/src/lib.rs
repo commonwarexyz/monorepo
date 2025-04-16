@@ -5,6 +5,8 @@ use commonware_codec::varint;
 
 pub mod array;
 pub use array::Array;
+mod bitvec;
+pub use bitvec::{BitIterator, BitVec};
 mod time;
 pub use time::SystemTimeExt;
 mod priority_set;
