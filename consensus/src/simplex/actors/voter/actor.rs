@@ -521,7 +521,7 @@ impl<
 
     async fn propose(
         &mut self,
-        backfiller: &mut resolver::Mailbox,
+        backfiller: &mut resolver::Mailbox<C::Signature, D>,
     ) -> Option<(Context<D>, oneshot::Receiver<D>)> {
         // Check if we are leader
         {
@@ -1440,7 +1440,7 @@ impl<
 
     async fn notify(
         &mut self,
-        backfiller: &mut resolver::Mailbox,
+        backfiller: &mut resolver::Mailbox<C::Signature, D>,
         sender: &mut impl Sender,
         view: u64,
     ) {
@@ -1520,7 +1520,9 @@ impl<
                 .expect("unable to sync journal");
 
             // Broadcast the nullification
-            let msg = Voter::Nullification(nullification).encode().into();
+            let msg = Voter::Nullification::<C::Signature, D>(nullification)
+                .encode()
+                .into();
             sender.send(Recipients::All, msg, true).await.unwrap();
             self.broadcast_messages
                 .get_or_create(&metrics::NULLIFICATION)
@@ -1638,7 +1640,7 @@ impl<
 
     pub fn start(
         mut self,
-        backfiller: resolver::Mailbox,
+        backfiller: resolver::Mailbox<C::Signature, D>,
         sender: impl Sender,
         receiver: impl Receiver,
     ) -> Handle<()> {
@@ -1647,7 +1649,7 @@ impl<
 
     async fn run(
         mut self,
-        mut backfiller: resolver::Mailbox,
+        mut backfiller: resolver::Mailbox<C::Signature, D>,
         mut sender: impl Sender,
         mut receiver: impl Receiver,
     ) {
