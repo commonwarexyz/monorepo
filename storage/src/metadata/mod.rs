@@ -46,7 +46,7 @@
 //! let (executor, context, _) = Executor::default();
 //! executor.start(async move {
 //!     // Create a store
-//!     let mut metadata = Metadata::init(&context, &context, context.clone(), Config{
+//!     let mut metadata = Metadata::init(context, Config{
 //!         partition: "partition".to_string()
 //!     }).await.unwrap();
 //!
