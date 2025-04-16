@@ -778,14 +778,14 @@ mod tests {
             let end_pos = *element_positions.last().unwrap();
             let range_proof = mmr.range_proof(start_pos, end_pos).await.unwrap();
             assert!(
-		range_proof.verify_range_inclusion(
+                range_proof.verify_range_inclusion(
                     &mut hasher,
                     &elements,
                     start_pos,
                     end_pos,
                     &updated_root_hash,
-		),
-		"valid range proof over remaining elements after 2 pruning rounds should verify successfully",
+                ),
+                "valid range proof over remaining elements after 2 pruning rounds should verify successfully",
             );
         });
     }

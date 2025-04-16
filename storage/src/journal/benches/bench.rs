@@ -6,12 +6,14 @@ use rand::{rngs::StdRng, RngCore, SeedableRng};
 
 mod fixed_read_random;
 mod fixed_read_sequential;
+mod fixed_replay;
 mod fixed_write;
 
 criterion_main!(
     fixed_write::benches,
     fixed_read_random::benches,
-    fixed_read_sequential::benches
+    fixed_read_sequential::benches,
+    fixed_replay::benches,
 );
 
 /// Write `items_to_write` random items to a journal of items with ITEM_SIZE bytes each. The journal

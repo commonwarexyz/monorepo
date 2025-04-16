@@ -30,7 +30,7 @@ rangemap = "1.5.1"
 tracing-subscriber = { workspace = true }
 rand = { workspace = true }
 tokio = { workspace = true }
-criterion = { workspace = true, features = ["async_tokio"]}
+criterion = { workspace = true }
 
 [lib]
 bench = false

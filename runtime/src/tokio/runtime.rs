@@ -1,7 +1,6 @@
 use crate::storage::metered::Storage;
 use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
 use crate::{utils::Signaler, Clock, Error, Handle, Signal, METRICS_PREFIX};
-use commonware_utils::{from_hex, hex};
 use criterion::async_executor::AsyncExecutor;
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
