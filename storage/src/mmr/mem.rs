@@ -31,10 +31,10 @@ pub struct Mmr<H: CHasher> {
 
     // The position of the oldest element still retained by the MMR, or the size of the MMR if there
     // are no retained nodes because the MMR is empty or it has been fully pruned.
-    oldest_retained_pos: u64,
+    pub(crate) oldest_retained_pos: u64,
 
     // The auxiliary map from node position to the digest of any pinned node.
-    pinned_nodes: HashMap<u64, H::Digest>,
+    pub(crate) pinned_nodes: HashMap<u64, H::Digest>,
 }
 
 impl<H: CHasher> Default for Mmr<H> {
