@@ -123,13 +123,15 @@ pub struct Auditor {
     hash: Mutex<Vec<u8>>,
 }
 
-impl Auditor {
-    pub fn new() -> Self {
+impl Default for Auditor {
+    fn default() -> Self {
         Self {
-            hash: Mutex::new(Vec::new()),
+            hash: Vec::new().into(),
         }
     }
+}
 
+impl Auditor {
     fn process_task(&self, task: u128, label: &str) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
@@ -460,7 +462,7 @@ impl Executor {
 
         // Initialize runtime
         let metrics = Arc::new(Metrics::init(runtime_registry));
-        let auditor = Arc::new(Auditor::new());
+        let auditor = Arc::new(Auditor::default());
         let start_time = UNIX_EPOCH;
         let deadline = cfg
             .timeout

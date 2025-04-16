@@ -148,7 +148,7 @@ mod tests {
     #[tokio::test]
     async fn test_audited_storage() {
         let inner = MemoryStorage::new();
-        let auditor = Arc::new(crate::deterministic::Auditor::new());
+        let auditor = Arc::new(crate::deterministic::Auditor::default());
         let storage = AuditedStorage::new(inner, auditor);
 
         run_storage_tests(storage).await;
