@@ -5,15 +5,14 @@ use crate::simplex::types::{Activity, Context, View};
 use crate::{Automaton, Supervisor};
 use crate::{Relay, Reporter};
 pub use actor::Actor;
-use commonware_cryptography::{Scheme, Verifier};
-use commonware_utils::Array;
+use commonware_cryptography::{Digest, Scheme, Verifier};
 pub use ingress::{Mailbox, Message};
 use std::time::Duration;
 
 pub struct Config<
     C: Scheme,
     V: Verifier<PublicKey = C::PublicKey, Signature = C::Signature>,
-    D: Array,
+    D: Digest,
     A: Automaton<Context = Context<D>, Digest = D>,
     R: Relay<Digest = D>,
     F: Reporter<Activity = Activity<V, D>>,
@@ -30,6 +29,7 @@ pub struct Config<
     pub leader_timeout: Duration,
     pub notarization_timeout: Duration,
     pub nullify_retry: Duration,
+    pub max_participants: usize,
     pub activity_timeout: View,
     pub skip_timeout: View,
     pub replay_concurrency: usize,

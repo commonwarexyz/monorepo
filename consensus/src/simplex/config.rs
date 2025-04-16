@@ -1,5 +1,5 @@
 use crate::{Automaton, Relay, Reporter, Supervisor};
-use commonware_cryptography::{Scheme, Verifier};
+use commonware_cryptography::{Digest, Scheme, Verifier};
 use commonware_utils::Array;
 use governor::Quota;
 use std::time::Duration;
@@ -10,7 +10,7 @@ use super::types::{Activity, Context, View};
 pub struct Config<
     C: Scheme,
     V: Verifier<PublicKey = C::PublicKey, Signature = C::Signature>,
-    D: Array,
+    D: Digest,
     A: Automaton<Context = Context<D>, Digest = D>,
     R: Relay<Digest = D>,
     F: Reporter<Activity = Activity<V, D>>,
@@ -57,6 +57,10 @@ pub struct Config<
     /// and persist activity derived from validator messages.
     pub activity_timeout: View,
 
+    /// Maximum number of participants...
+    /// TODO
+    pub max_participants: usize,
+
     /// Move to nullify immediately if the selected leader has been inactive
     /// for this many views.
     ///
@@ -82,7 +86,7 @@ pub struct Config<
 impl<
         C: Scheme,
         V: Verifier<PublicKey = C::PublicKey, Signature = C::Signature>,
-        D: Array,
+        D: Digest,
         A: Automaton<Context = Context<D>, Digest = D>,
         R: Relay<Digest = D>,
         F: Reporter<Activity = Activity<V, D>>,

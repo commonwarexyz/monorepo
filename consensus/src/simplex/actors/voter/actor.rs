@@ -12,7 +12,7 @@ use crate::{
     },
     Automaton, Relay, Reporter, Supervisor, LATENCY,
 };
-use commonware_codec::Encode;
+use commonware_codec::{Decode, DecodeExt, Encode};
 use commonware_cryptography::{
     sha256::{hash, Digest as Sha256Digest},
     Digest, Scheme, Verifier,
@@ -1688,32 +1688,18 @@ impl<
                 let (_, _, _, msg) = msg.expect("unable to decode journal message");
                 // We must wrap the message in Voter so we decode the right type of message (otherwise,
                 // we can parse a finalize as a notarize)
-                let msg = wire::Voter::decode(msg).expect("journal message is unexpected format");
-                let msg = msg.payload.expect("missing payload");
+                let msg = Voter::decode(msg).expect("journal message is unexpected format");
                 match msg {
-                    wire::voter::Payload::Notarize(notarize) => {
+                    Voter::Notarize(notarize) => {
                         // Handle notarize
-                        let proposal = notarize.proposal.as_ref().unwrap().clone();
-                        let payload = D::try_from(&proposal.payload).unwrap();
-                        let public_key = notarize.signature.as_ref().unwrap().public_key;
-                        let public_key = self
+                        let public_key_index = self
                             .supervisor
-                            .participants(proposal.view)
-                            .unwrap()
-                            .get(public_key as usize)
-                            .unwrap()
-                            .clone();
-                        self.handle_notarize(
-                            &public_key,
-                            Parsed {
-                                message: notarize,
-                                digest: payload.clone(),
-                            },
-                        )
-                        .await;
+                            .is_participant(notarize.view(), notarize.signer())
+                            .unwrap();
+                        self.handle_notarize(public_key_index, notarize).await;
 
                         // Update round info
-                        if public_key == self.crypto.public_key() {
+                        if notarize.signer() == self.crypto.public_key() {
                             observed_view = max(observed_view, proposal.view);
                             let round = self.views.get_mut(&proposal.view).expect("missing round");
                             let proposal_message =
@@ -1945,7 +1931,7 @@ impl<
                     let Ok((s, msg)) = msg else {
                         break;
                     };
-                    let Ok(msg) = wire::Voter::decode(msg) else {
+                    let Ok(msg) = Voter::decode_cfg(msg) else {
                         continue;
                     };
                     let Some(payload) = msg.payload else {
