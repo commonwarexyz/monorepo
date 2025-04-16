@@ -22,8 +22,8 @@
 //! println!("Auditor state: {}", auditor.state());
 //! ```
 
-use crate::storage::audited::{Blob as AuditedBlob, Storage as AuditedStorage};
-use crate::storage::memory::{Blob as MemBlob, Storage as MemStorage};
+use crate::storage::audited::Storage as AuditedStorage;
+use crate::storage::memory::Storage as MemStorage;
 use crate::{mocks, utils::Signaler, Clock, Error, Handle, Signal, METRICS_PREFIX};
 use commonware_utils::{hex, SystemTimeExt};
 use futures::{
@@ -1260,7 +1260,7 @@ impl RngCore for Context {
 impl CryptoRng for Context {}
 
 impl crate::Storage for Context {
-    type Blob = AuditedBlob<MemBlob>;
+    type Blob = <AuditedStorage<MemStorage> as crate::Storage>::Blob;
 
     async fn open(&self, partition: &str, name: &[u8]) -> Result<Self::Blob, Error> {
         self.storage.open(partition, name).await
