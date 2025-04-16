@@ -2,19 +2,15 @@ use super::{Config, Mailbox, Message};
 use crate::{
     simplex::{
         actors::resolver,
-        encoder::{
-            finalize_namespace, notarize_namespace, nullify_message, nullify_namespace,
-            proposal_message,
-        },
         metrics,
-        prover::Prover,
-        verifier::{threshold, verify_finalization, verify_notarization, verify_nullification},
-        wire, Context, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE, NOTARIZE,
-        NULLIFY_AND_FINALIZE,
+        types::{Finalize, Notarize, Nullify, Proposal, View},
     },
-    Automaton, Committer, Parsed, Relay, Supervisor, LATENCY,
+    Automaton, Relay, Reporter, Supervisor, LATENCY,
 };
-use commonware_cryptography::{sha256::hash, sha256::Digest as Sha256Digest, Scheme};
+use commonware_cryptography::{
+    sha256::{hash, Digest as Sha256Digest},
+    Digest, Scheme, Verifier,
+};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Blob, Clock, Handle, Metrics, Spawner, Storage};
@@ -28,7 +24,6 @@ use futures::{
 use prometheus_client::metrics::{
     counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
 };
-use prost::Message as _;
 use rand::Rng;
 use std::sync::atomic::AtomicI64;
 use std::{
@@ -38,13 +33,18 @@ use std::{
 };
 use tracing::{debug, info, trace, warn};
 
-type Notarizable<'a, D> = Option<(wire::Proposal, &'a HashMap<u32, Parsed<wire::Notarize, D>>)>;
-type Nullifiable<'a> = Option<(View, &'a HashMap<u32, wire::Nullify>)>;
-type Finalizable<'a, D> = Option<(wire::Proposal, &'a HashMap<u32, Parsed<wire::Finalize, D>>)>;
+type Notarizable<'a, V, D> = Option<(Proposal<D>, &'a HashMap<u32, Notarize<V, D>>)>;
+type Nullifiable<'a, V> = Option<(View, &'a HashMap<u32, Nullify<V>>)>;
+type Finalizable<'a, V, D> = Option<(Proposal<D>, &'a HashMap<u32, Finalize<V, D>>)>;
 
 const GENESIS_VIEW: View = 0;
 
-struct Round<C: Scheme, D: Array, S: Supervisor<Index = View>> {
+struct Round<
+    C: Scheme,
+    V: Verifier<PublicKey = C::PublicKey, Signature = C::Signature>,
+    D: Digest,
+    S: Supervisor<Index = View, PublicKey = C::PublicKey>,
+> {
     start: SystemTime,
     supervisor: S,
 
@@ -55,31 +55,38 @@ struct Round<C: Scheme, D: Array, S: Supervisor<Index = View>> {
     nullify_retry: Option<SystemTime>,
 
     // Track one proposal per view
-    proposal: Option<(Sha256Digest /* proposal */, Parsed<wire::Proposal, D>)>,
+    proposal: Option<Proposal<D>>,
     requested_proposal: bool,
     verified_proposal: bool,
 
     // Track notarizes for all proposals (ensuring any participant only has one recorded notarize)
-    notaries: HashMap<u32, Sha256Digest>,
-    notarizes: HashMap<Sha256Digest, HashMap<u32, Parsed<wire::Notarize, D>>>,
+    notarized_proposals: HashMap<Proposal<D>, Vec<u32>>,
+    notarizes: Vec<Option<Notarize<V, D>>>,
     broadcast_notarize: bool,
     broadcast_notarization: bool,
 
     // Track nullifies (ensuring any participant only has one recorded nullify)
-    nullifies: HashMap<u32, wire::Nullify>,
+    nullifies: HashMap<u32, Nullify<V>>,
     broadcast_nullify: bool,
     broadcast_nullification: bool,
 
     // Track finalizes for all proposals (ensuring any participant only has one recorded finalize)
-    finalizers: HashMap<u32, Sha256Digest>,
-    finalizes: HashMap<Sha256Digest, HashMap<u32, Parsed<wire::Finalize, D>>>,
+    finalized_proposals: HashMap<Proposal<D>, Vec<u32>>,
+    finalizes: Vec<Option<Finalize<V, D>>>,
     broadcast_finalize: bool,
     broadcast_finalization: bool,
 }
 
-impl<C: Scheme, D: Array, S: Supervisor<Index = View, PublicKey = C::PublicKey>> Round<C, D, S> {
+impl<
+        C: Scheme,
+        V: Verifier<PublicKey = C::PublicKey, Signature = C::Signature>,
+        D: Digest,
+        S: Supervisor<Index = View, PublicKey = C::PublicKey>,
+    > Round<C, V, D, S>
+{
     pub fn new(current: SystemTime, supervisor: S, view: View) -> Self {
         let leader = supervisor.leader(view).expect("unable to compute leader");
+        let participants = supervisor.participants(view).unwrap().len();
         Self {
             start: current,
             supervisor,
@@ -94,8 +101,8 @@ impl<C: Scheme, D: Array, S: Supervisor<Index = View, PublicKey = C::PublicKey>>
             proposal: None,
             verified_proposal: false,
 
-            notaries: HashMap::new(),
-            notarizes: HashMap::new(),
+            notarized_proposals: HashMap::new(),
+            notarizes: vec![None, participants],
             broadcast_notarize: false,
             broadcast_notarization: false,
 
@@ -103,8 +110,8 @@ impl<C: Scheme, D: Array, S: Supervisor<Index = View, PublicKey = C::PublicKey>>
             broadcast_nullify: false,
             broadcast_nullification: false,
 
-            finalizers: HashMap::new(),
-            finalizes: HashMap::new(),
+            finalized_proposals: HashMap::new(),
+            finalizes: vec![None, participants],
             broadcast_finalize: false,
             broadcast_finalization: false,
         }
