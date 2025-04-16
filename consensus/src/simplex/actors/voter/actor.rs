@@ -1388,7 +1388,7 @@ impl<
         Some(Nullification::new(view, signatures))
     }
 
-    fn construct_finalize(&mut self, view: u64) -> Option<Parsed<wire::Finalize, D>> {
+    fn construct_finalize(&mut self, view: u64) -> Option<Finalize<V, D>> {
         let round = match self.views.get_mut(&view) {
             Some(view) => view,
             None => {
@@ -1409,37 +1409,15 @@ impl<
         if round.broadcast_finalize {
             return None;
         }
-        let proposal = match &round.proposal {
-            Some((_, proposal)) => proposal,
-            None => {
-                return None;
-            }
-        };
-        let public_key = self
-            .supervisor
-            .is_participant(view, &self.crypto.public_key())?;
-        let message = proposal_message(view, proposal.message.parent, &proposal.digest);
         round.broadcast_finalize = true;
-        Some(Parsed {
-            message: wire::Finalize {
-                proposal: Some(proposal.message.clone()),
-                signature: Some(wire::Signature {
-                    public_key,
-                    signature: self
-                        .crypto
-                        .sign(Some(&self.finalize_namespace), &message)
-                        .to_vec(),
-                }),
-            },
-            digest: proposal.digest.clone(),
-        })
+        Some(Finalize::sign(
+            &mut self.crypto,
+            round.proposal.as_ref().unwrap().clone(),
+            &self.finalize_namespace,
+        ))
     }
 
-    fn construct_finalization(
-        &mut self,
-        view: u64,
-        force: bool,
-    ) -> Option<Parsed<wire::Finalization, D>> {
+    fn construct_finalization(&mut self, view: u64, force: bool) -> Option<Finalization<V, D>> {
         let round = match self.views.get_mut(&view) {
             Some(view) => view,
             None => {
@@ -1459,22 +1437,8 @@ impl<
         let (proposal, finalizes) = round.finalizable(threshold, force)?;
 
         // Construct finalization
-        let mut payload = None;
-        let mut signatures = Vec::new();
-        for validator in 0..(validators.len() as u32) {
-            if let Some(finalize) = finalizes.get(&validator) {
-                payload = Some(finalize.digest.clone());
-                signatures.push(finalize.message.signature.clone().unwrap());
-            }
-        }
-        let finalization = wire::Finalization {
-            proposal: Some(proposal),
-            signatures,
-        };
-        Some(Parsed {
-            message: finalization,
-            digest: payload.unwrap(),
-        })
+        let signatures = finalizes.into_iter().map(|n| n.signature).collect();
+        Some(Finalization::new(proposal, signatures))
     }
 
     async fn notify(
