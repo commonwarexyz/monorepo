@@ -35,6 +35,9 @@ cfg_if::cfg_if! {
             0.9, 1.0, 1.25, 1.5, 1.75, 2.0, 3.0,
         ];
 
+        /// Represents the weight or stake of a consensus participant.
+        pub type Weight = u64;
+
         /// Parsed is a wrapper around a message that has a parsable digest.
         #[derive(Clone)]
         struct Parsed<Message, Digest> {
@@ -131,18 +134,29 @@ cfg_if::cfg_if! {
             /// Public key used to identify participants.
             type PublicKey: Array;
 
+            /// Represents the weight or stake of a consensus participant.
+            type Weight: std::ops::Add<Output = Self::Weight> + Ord + Copy + Default + Send + Sync + 'static;
+
             /// Return the leader at a given index for the provided seed.
             fn leader(&self, index: Self::Index) -> Option<Self::PublicKey>;
 
             /// Get the **sorted** participants for the given view. This is called when entering a new view before
             /// listening for proposals or votes. If nothing is returned, the view will not be entered.
-            fn participants(&self, index: Self::Index) -> Option<&Vec<Self::PublicKey>>;
+            fn participants(&self, index: Self::Index) -> Option<&Vec<(Self::PublicKey, Self::Weight)>>;
 
             // Indicate whether some candidate is a participant at the given view.
             fn is_participant(&self, index: Self::Index, candidate: &Self::PublicKey) -> Option<u32>;
 
             /// Report some activity observed by the consensus implementation.
             fn report(&self, activity: Activity, proof: Proof) -> impl Future<Output = ()> + Send;
+
+            /// Get the total combined weight of all active participants at the given index.
+            /// Returns None if the index is invalid or participants are not defined.
+            fn total_weight(&self, index: Self::Index) -> Option<Self::Weight>;
+
+            /// Get the weight of a specific participant at the given index.
+            /// Returns None if the index is invalid or the candidate is not an active participant.
+            fn weight_of(&self, index: Self::Index, participant: &Self::PublicKey) -> Option<Self::Weight>;
         }
 
         /// ThresholdSupervisor is the interface responsible for managing which `identity` (typically a group polynomial with
