@@ -5,18 +5,11 @@ pub mod metered;
 pub mod tokio_storage;
 
 #[cfg(test)]
-mod tests {
-    use crate::storage::{
-        audited::Storage as AuditedStorage, memory::Storage as MemoryStorage,
-        metered::MeteredStorage, tokio_storage::Storage as TokioStorage,
-    };
+pub(crate) mod tests {
     use crate::{Blob, Storage};
-    use prometheus_client::registry::Registry;
-    use std::sync::Arc;
-    use tempfile::tempdir;
 
     /// Runs the full suite of tests on the provided storage implementation.
-    async fn run_storage_tests<S>(storage: S)
+    pub(crate) async fn run_storage_tests<S>(storage: S)
     where
         S: Storage + Send + Sync + 'static,
         S::Blob: Send + Sync,
@@ -331,39 +324,5 @@ mod tests {
         blob.read_at(&mut buffer, 0).await.unwrap();
 
         assert_eq!(buffer, b"overmap", "Overlapping writes are incorrect");
-    }
-
-    /// Add the new tests to the test suite.
-    #[tokio::test]
-    async fn test_memory_storage() {
-        let storage = MemoryStorage::default();
-        run_storage_tests(storage).await;
-    }
-
-    #[tokio::test]
-    async fn test_tokio_storage() {
-        let temp_dir = tempdir().unwrap();
-        let config = crate::storage::tokio_storage::Config::new(temp_dir.path().to_path_buf());
-        let storage = TokioStorage::new(config);
-
-        run_storage_tests(storage).await;
-    }
-
-    #[tokio::test]
-    async fn test_audited_storage() {
-        let inner = MemoryStorage::default();
-        let auditor = Arc::new(crate::deterministic::Auditor::default());
-        let storage = AuditedStorage::new(inner, auditor.clone());
-
-        run_storage_tests(storage).await;
-    }
-
-    #[tokio::test]
-    async fn test_metered_storage() {
-        let mut registry = Registry::default();
-        let inner = MemoryStorage::default();
-        let storage = MeteredStorage::new(inner, &mut registry);
-
-        run_storage_tests(storage).await;
     }
 }

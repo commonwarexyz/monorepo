@@ -208,3 +208,17 @@ impl crate::Blob for Blob {
             .map_err(|_| Error::BlobCloseFailed(self.partition.clone(), hex(&self.name)))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::storage::{
+        tests::run_storage_tests,
+        tokio_storage::{Config, Storage},
+    };
+
+    #[tokio::test]
+    async fn test_storage() {
+        let storage = Storage::new(Config::new("test_storage".into()));
+        run_storage_tests(storage).await;
+    }
+}

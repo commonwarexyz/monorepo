@@ -13,7 +13,7 @@ pub struct Metrics {
 
 impl Metrics {
     /// Initialize the `Metrics` struct and register the metrics in the provided registry.
-    pub fn new(registry: &mut Registry) -> Self {
+    fn new(registry: &mut Registry) -> Self {
         let metrics = Self {
             open_blobs: Gauge::default(),
             storage_reads: Counter::default(),
@@ -133,11 +133,21 @@ impl<B: BlobTrait> BlobTrait for MeteredBlob<B> {
 }
 
 #[cfg(test)]
-mod metered_blob_tests {
+mod tests {
     use super::*;
     use crate::storage::memory::Storage as MemoryStorage;
+    use crate::storage::tests::run_storage_tests;
     use crate::{Blob, Storage};
     use prometheus_client::registry::Registry;
+
+    #[tokio::test]
+    async fn test_metered_storage() {
+        let mut registry = Registry::default();
+        let inner = MemoryStorage::default();
+        let storage = MeteredStorage::new(inner, &mut registry);
+
+        run_storage_tests(storage).await;
+    }
 
     /// Test that metrics are updated correctly for basic operations.
     #[tokio::test]

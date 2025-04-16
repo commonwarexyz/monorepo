@@ -79,109 +79,127 @@ impl<B: BlobTrait> crate::Blob for Blob<B> {
     }
 }
 
-#[tokio::test]
-async fn test_audited_storage_combined() {
-    use crate::deterministic::Auditor;
-    use crate::storage::audited::Storage as AuditedStorage;
-    use crate::storage::memory::Storage as MemoryStorage;
+#[cfg(test)]
+mod tests {
+    use crate::{
+        storage::{
+            audited::Storage as AuditedStorage, memory::Storage as MemStorage,
+            tests::run_storage_tests,
+        },
+        Blob as _, Storage as _,
+    };
     use std::sync::Arc;
 
-    // Initialize the first storage and auditor
-    let inner1 = MemoryStorage::default();
-    let auditor1 = Arc::new(Auditor::default());
-    let storage1 = AuditedStorage::new(inner1, auditor1.clone());
+    #[tokio::test]
+    async fn test_audited_storage() {
+        let inner = MemStorage::default();
+        let auditor = Arc::new(crate::deterministic::Auditor::default());
+        let storage = AuditedStorage::new(inner, auditor.clone());
 
-    // Initialize the second storage and auditor
-    let inner2 = MemoryStorage::default();
-    let auditor2 = Arc::new(Auditor::default());
-    let storage2 = AuditedStorage::new(inner2, auditor2.clone());
+        run_storage_tests(storage).await;
+    }
 
-    // Perform a sequence of operations on both storages simultaneously
-    let blob1 = storage1.open("partition", b"test_blob").await.unwrap();
-    let blob2 = storage2.open("partition", b"test_blob").await.unwrap();
+    #[tokio::test]
+    async fn test_audited_storage_combined() {
+        use crate::deterministic::Auditor;
 
-    // Write data to the blobs
-    blob1.write_at(b"hello world", 0).await.unwrap();
-    blob2.write_at(b"hello world", 0).await.unwrap();
-    assert_eq!(
-        auditor1.state(),
-        auditor2.state(),
-        "Hashes do not match after write"
-    );
+        // Initialize the first storage and auditor
+        let inner1 = MemStorage::default();
+        let auditor1 = Arc::new(Auditor::default());
+        let storage1 = AuditedStorage::new(inner1, auditor1.clone());
 
-    // Read data from the blobs
-    let mut buffer1 = vec![0; 11];
-    let mut buffer2 = vec![0; 11];
-    blob1.read_at(&mut buffer1, 0).await.unwrap();
-    blob2.read_at(&mut buffer2, 0).await.unwrap();
-    assert_eq!(buffer1, b"hello world", "Blob1 content does not match");
-    assert_eq!(buffer2, b"hello world", "Blob2 content does not match");
-    assert_eq!(
-        auditor1.state(),
-        auditor2.state(),
-        "Hashes do not match after read"
-    );
+        // Initialize the second storage and auditor
+        let inner2 = MemStorage::default();
+        let auditor2 = Arc::new(Auditor::default());
+        let storage2 = AuditedStorage::new(inner2, auditor2.clone());
 
-    // Truncate the blobs
-    blob1.truncate(5).await.unwrap();
-    blob2.truncate(5).await.unwrap();
-    let len1 = blob1.len().await.unwrap();
-    let len2 = blob2.len().await.unwrap();
-    assert_eq!(len1, 5, "Blob1 length after truncation is incorrect");
-    assert_eq!(len2, 5, "Blob2 length after truncation is incorrect");
-    assert_eq!(
-        auditor1.state(),
-        auditor2.state(),
-        "Hashes do not match after truncate"
-    );
+        // Perform a sequence of operations on both storages simultaneously
+        let blob1 = storage1.open("partition", b"test_blob").await.unwrap();
+        let blob2 = storage2.open("partition", b"test_blob").await.unwrap();
 
-    // Sync the blobs
-    blob1.sync().await.unwrap();
-    blob2.sync().await.unwrap();
-    assert_eq!(
-        auditor1.state(),
-        auditor2.state(),
-        "Hashes do not match after sync"
-    );
+        // Write data to the blobs
+        blob1.write_at(b"hello world", 0).await.unwrap();
+        blob2.write_at(b"hello world", 0).await.unwrap();
+        assert_eq!(
+            auditor1.state(),
+            auditor2.state(),
+            "Hashes do not match after write"
+        );
 
-    // Close the blobs
-    blob1.close().await.unwrap();
-    blob2.close().await.unwrap();
-    assert_eq!(
-        auditor1.state(),
-        auditor2.state(),
-        "Hashes do not match after close"
-    );
+        // Read data from the blobs
+        let mut buffer1 = vec![0; 11];
+        let mut buffer2 = vec![0; 11];
+        blob1.read_at(&mut buffer1, 0).await.unwrap();
+        blob2.read_at(&mut buffer2, 0).await.unwrap();
+        assert_eq!(buffer1, b"hello world", "Blob1 content does not match");
+        assert_eq!(buffer2, b"hello world", "Blob2 content does not match");
+        assert_eq!(
+            auditor1.state(),
+            auditor2.state(),
+            "Hashes do not match after read"
+        );
 
-    // Remove the blobs
-    storage1
-        .remove("partition", Some(b"test_blob"))
-        .await
-        .unwrap();
-    storage2
-        .remove("partition", Some(b"test_blob"))
-        .await
-        .unwrap();
-    assert_eq!(
-        auditor1.state(),
-        auditor2.state(),
-        "Hashes do not match after remove"
-    );
+        // Truncate the blobs
+        blob1.truncate(5).await.unwrap();
+        blob2.truncate(5).await.unwrap();
+        let len1 = blob1.len().await.unwrap();
+        let len2 = blob2.len().await.unwrap();
+        assert_eq!(len1, 5, "Blob1 length after truncation is incorrect");
+        assert_eq!(len2, 5, "Blob2 length after truncation is incorrect");
+        assert_eq!(
+            auditor1.state(),
+            auditor2.state(),
+            "Hashes do not match after truncate"
+        );
 
-    // Scan the partitions
-    let blobs1 = storage1.scan("partition").await.unwrap();
-    let blobs2 = storage2.scan("partition").await.unwrap();
-    assert!(
-        blobs1.is_empty(),
-        "Partition1 should be empty after blob removal"
-    );
-    assert!(
-        blobs2.is_empty(),
-        "Partition2 should be empty after blob removal"
-    );
-    assert_eq!(
-        auditor1.state(),
-        auditor2.state(),
-        "Hashes do not match after scan"
-    );
+        // Sync the blobs
+        blob1.sync().await.unwrap();
+        blob2.sync().await.unwrap();
+        assert_eq!(
+            auditor1.state(),
+            auditor2.state(),
+            "Hashes do not match after sync"
+        );
+
+        // Close the blobs
+        blob1.close().await.unwrap();
+        blob2.close().await.unwrap();
+        assert_eq!(
+            auditor1.state(),
+            auditor2.state(),
+            "Hashes do not match after close"
+        );
+
+        // Remove the blobs
+        storage1
+            .remove("partition", Some(b"test_blob"))
+            .await
+            .unwrap();
+        storage2
+            .remove("partition", Some(b"test_blob"))
+            .await
+            .unwrap();
+        assert_eq!(
+            auditor1.state(),
+            auditor2.state(),
+            "Hashes do not match after remove"
+        );
+
+        // Scan the partitions
+        let blobs1 = storage1.scan("partition").await.unwrap();
+        let blobs2 = storage2.scan("partition").await.unwrap();
+        assert!(
+            blobs1.is_empty(),
+            "Partition1 should be empty after blob removal"
+        );
+        assert!(
+            blobs2.is_empty(),
+            "Partition2 should be empty after blob removal"
+        );
+        assert_eq!(
+            auditor1.state(),
+            auditor2.state(),
+            "Hashes do not match after scan"
+        );
+    }
 }

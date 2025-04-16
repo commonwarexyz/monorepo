@@ -154,3 +154,15 @@ impl crate::Blob for Blob {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::tests::run_storage_tests;
+
+    #[tokio::test]
+    async fn test_memory_storage() {
+        let storage = Storage::default();
+        run_storage_tests(storage).await;
+    }
+}
