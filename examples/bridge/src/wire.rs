@@ -1,12 +1,25 @@
+//! Wire protocol messages for the Commonware Bridge example.
+//!
+//! This module defines the messages used for communication between validators and the indexer
+//! in the Commonware Bridge example. The messages are used to store and retrieve blocks and
+//! finality certificates, facilitating the exchange of consensus certificates between two networks.
+
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use commonware_cryptography::bls12381::primitives::group;
 use commonware_utils::Array;
 
+/// Enum representing incoming messages from validators to the indexer.
+///
+/// Used to interact with the indexer's storage of blocks and finality certificates.
 pub enum Inbound<D: Array> {
+    /// Request to store a new block in the indexer's storage.
     PutBlock(PutBlock),
+    /// Request to retrieve a block from the indexer's storage.
     GetBlock(GetBlock<D>),
+    /// Request to store a finality certificate in the indexer's storage.
     PutFinalization(PutFinalization),
+    /// Request to retrieve the latest finality certificate from the indexer's storage.
     GetFinalization(GetFinalization),
 }
 
@@ -69,8 +82,11 @@ impl<D: Array> EncodeSize for Inbound<D> {
     }
 }
 
+/// Message to store a new block in the indexer's storage.
 pub struct PutBlock {
+    /// The network identifier for which the block belongs.
     pub network: group::Public,
+    /// The block data to be stored.
     pub data: Bytes,
 }
 
@@ -95,8 +111,11 @@ impl EncodeSize for PutBlock {
     }
 }
 
+/// Message to retrieve a block from the indexer's storage.
 pub struct GetBlock<D: Array> {
+    /// The network identifier for which the block belongs.
     pub network: group::Public,
+    /// The digest of the block to retrieve.
     pub digest: D,
 }
 
@@ -121,8 +140,11 @@ impl<D: Array> EncodeSize for GetBlock<D> {
     }
 }
 
+/// Message to store a finality certificate in the indexer's storage.
 pub struct PutFinalization {
+    /// The network identifier for which the finality certificate belongs.
     pub network: group::Public,
+    /// The finality certificate data to be stored.
     pub data: Bytes,
 }
 
@@ -147,7 +169,9 @@ impl EncodeSize for PutFinalization {
     }
 }
 
+/// Message to retrieve the latest finality certificate from the indexer's storage.
 pub struct GetFinalization {
+    /// The network identifier for which to retrieve the finality certificate.
     pub network: group::Public,
 }
 
@@ -170,9 +194,17 @@ impl EncodeSize for GetFinalization {
     }
 }
 
+/// Enum representing responses from the indexer to validators.
+///
+/// These responses correspond to the results of the operations requested by `Inbound` messages.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outbound {
-    Success(bool), // if PUT (success), if GET (success is false if not found)
+    /// Indicates the success or failure of a `Put` operation,
+    /// or if a `Get` operation found the requested item.
+    Success(bool),
+    /// Contains the requested block data in response to a `GetBlock` message.
     Block(Bytes),
+    /// Contains the requested finality certificate in response to a `GetFinalization` message.
     Finalization(Bytes),
 }
 
