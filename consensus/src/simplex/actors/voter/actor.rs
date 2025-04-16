@@ -167,17 +167,7 @@ impl<
             .get_mut(public_key_index as usize)
             .unwrap()
             .replace(notarize);
-        if self
-            .notaries
-            .insert(public_key_index, proposal_digest)
-            .is_some()
-        {
-            return false;
-        }
-        let entry = self.notarizes.entry(proposal_digest).or_default();
-        let proof = Prover::<C, D>::serialize_proposal(proposal, public_key, &notarize_signature);
-        entry.insert(public_key_index, notarize);
-        self.supervisor.report(NOTARIZE, proof).await;
+        self.reporter.report(Activity::Notarize(notarize)).await;
         true
     }
 
