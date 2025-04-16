@@ -194,7 +194,7 @@ impl<D: Digest> Viewable for Proposal<D> {
     }
 }
 
-#[derive(Clone, Debug, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Signature<S: Array> {
     pub public_key: u32,
     pub signature: S,
@@ -237,15 +237,7 @@ impl<S: Array> Attributable for Signature<S> {
     }
 }
 
-impl<S: Array> PartialEq for Signature<S> {
-    fn eq(&self, other: &Self) -> bool {
-        self.public_key == other.public_key && self.signature == other.signature
-    }
-}
-
-impl<S: Array> Eq for Signature<S> {}
-
-#[derive(Clone, Debug, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Notarize<S: Array, D: Digest> {
     pub proposal: Proposal<D>,
     pub signature: Signature<S>,
@@ -266,7 +258,7 @@ impl<S: Array, D: Digest> Notarize<S, D> {
     ) -> bool {
         let message = self.proposal.encode();
         V::verify(
-            Some(&notarize_namespace),
+            Some(notarize_namespace),
             &message,
             public_key,
             &self.signature.signature,
@@ -280,7 +272,7 @@ impl<S: Array, D: Digest> Notarize<S, D> {
         notarize_namespace: &[u8],
     ) -> Self {
         let message = proposal.encode();
-        let signature = scheme.sign(Some(&notarize_namespace), &message);
+        let signature = scheme.sign(Some(notarize_namespace), &message);
         Self {
             proposal,
             signature: Signature::new(public_key_index, signature),
@@ -321,14 +313,6 @@ impl<S: Array, D: Digest> Attributable for Notarize<S, D> {
         self.signature.signer()
     }
 }
-
-impl<S: Array, D: Digest> PartialEq for Notarize<S, D> {
-    fn eq(&self, other: &Self) -> bool {
-        self.proposal == other.proposal && self.signature == other.signature
-    }
-}
-
-impl<S: Array, D: Digest> Eq for Notarize<S, D> {}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Notarization<S: Array, D: Digest> {
@@ -380,7 +364,7 @@ impl<S: Array, D: Digest> Notarization<S, D> {
 
             // Verify signature
             if !V::verify(
-                Some(&notarize_namespace),
+                Some(notarize_namespace),
                 &message,
                 public_key,
                 &signature.signature,
@@ -422,7 +406,7 @@ impl<S: Array, D: Digest> Viewable for Notarization<S, D> {
     }
 }
 
-#[derive(Clone, Debug, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Nullify<S: Array> {
     pub view: View,
     pub signature: Signature<S>,
@@ -440,7 +424,7 @@ impl<S: Array> Nullify<S> {
     ) -> bool {
         let message = view_message(self.view);
         V::verify(
-            Some(&nullify_namespace),
+            Some(nullify_namespace),
             &message,
             public_key,
             &self.signature.signature,
@@ -454,7 +438,7 @@ impl<S: Array> Nullify<S> {
         nullify_namespace: &[u8],
     ) -> Self {
         let message = view_message(view);
-        let signature = scheme.sign(Some(&nullify_namespace), &message);
+        let signature = scheme.sign(Some(nullify_namespace), &message);
         Self {
             view,
             signature: Signature::new(public_key_index, signature),
@@ -492,14 +476,6 @@ impl<S: Array> Attributable for Nullify<S> {
         self.signature.signer()
     }
 }
-
-impl<S: Array> PartialEq for Nullify<S> {
-    fn eq(&self, other: &Self) -> bool {
-        self.view == other.view && self.signature == other.signature
-    }
-}
-
-impl<S: Array> Eq for Nullify<S> {}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Nullification<S: Array> {
@@ -548,7 +524,7 @@ impl<S: Array> Nullification<S> {
 
             // Verify signature
             if !V::verify(
-                Some(&nullify_namespace),
+                Some(nullify_namespace),
                 &message,
                 public_key,
                 &signature.signature,
@@ -587,7 +563,7 @@ impl<S: Array> Viewable for Nullification<S> {
     }
 }
 
-#[derive(Clone, Debug, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Finalize<S: Array, D: Digest> {
     pub proposal: Proposal<D>,
     pub signature: Signature<S>,
@@ -608,7 +584,7 @@ impl<S: Array, D: Digest> Finalize<S, D> {
     ) -> bool {
         let message = self.proposal.encode();
         V::verify(
-            Some(&finalize_namespace),
+            Some(finalize_namespace),
             &message,
             public_key,
             &self.signature.signature,
@@ -622,7 +598,7 @@ impl<S: Array, D: Digest> Finalize<S, D> {
         finalize_namespace: &[u8],
     ) -> Self {
         let message = proposal.encode();
-        let signature = scheme.sign(Some(&finalize_namespace), &message);
+        let signature = scheme.sign(Some(finalize_namespace), &message);
         Self {
             proposal,
             signature: Signature::new(public_key_index, signature),
@@ -663,14 +639,6 @@ impl<S: Array, D: Digest> Attributable for Finalize<S, D> {
         self.signature.signer()
     }
 }
-
-impl<S: Array, D: Digest> PartialEq for Finalize<S, D> {
-    fn eq(&self, other: &Self) -> bool {
-        self.proposal == other.proposal && self.signature == other.signature
-    }
-}
-
-impl<S: Array, D: Digest> Eq for Finalize<S, D> {}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Finalization<S: Array, D: Digest> {
@@ -722,7 +690,7 @@ impl<S: Array, D: Digest> Finalization<S, D> {
 
             // Verify signature
             if !V::verify(
-                Some(&finalize_namespace),
+                Some(finalize_namespace),
                 &message,
                 public_key,
                 &signature.signature,
