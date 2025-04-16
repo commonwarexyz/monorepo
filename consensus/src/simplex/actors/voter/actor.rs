@@ -12,8 +12,8 @@ use crate::{
     },
     Automaton, Relay, Reporter, Supervisor, LATENCY,
 };
-use commonware_codec::{Decode, DecodeExt, Encode};
-use commonware_cryptography::{bls12381::PublicKey, Digest, Scheme, Verifier};
+use commonware_codec::{Decode, Encode};
+use commonware_cryptography::{Digest, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Blob, Clock, Handle, Metrics, Spawner, Storage};
@@ -325,6 +325,7 @@ pub struct Actor<
     nullify_retry: Duration,
     activity_timeout: View,
     skip_timeout: View,
+    max_participants: usize,
 
     mailbox_receiver: mpsc::Receiver<Message<C::Signature, D>>,
 
@@ -421,6 +422,7 @@ impl<
 
                 activity_timeout: cfg.activity_timeout,
                 skip_timeout: cfg.skip_timeout,
+                max_participants: cfg.max_participants,
 
                 mailbox_receiver,
 
@@ -632,7 +634,6 @@ impl<
         }
 
         // Construct nullify
-        let public_key = &self.crypto.public_key();
         let public_key_index = self
             .supervisor
             .is_participant(self.view, &self.crypto.public_key())
@@ -1638,14 +1639,12 @@ impl<
     }
 
     pub fn start(
-        self,
+        mut self,
         backfiller: resolver::Mailbox,
         sender: impl Sender,
         receiver: impl Receiver,
     ) -> Handle<()> {
-        self.context
-            .clone()
-            .spawn(|_| self.run(backfiller, sender, receiver))
+        self.context.spawn_ref()(self.run(backfiller, sender, receiver))
     }
 
     async fn run(
@@ -1676,80 +1675,54 @@ impl<
                 let (_, _, _, msg) = msg.expect("unable to decode journal message");
                 // We must wrap the message in Voter so we decode the right type of message (otherwise,
                 // we can parse a finalize as a notarize)
-                let msg = Voter::decode(msg).expect("journal message is unexpected format");
+                let msg = Voter::decode_cfg(msg, &self.max_participants)
+                    .expect("journal message is unexpected format");
+                let view = msg.view();
+                let public_key_index = self
+                    .supervisor
+                    .is_participant(view, &self.crypto.public_key());
                 match msg {
                     Voter::Notarize(notarize) => {
                         // Handle notarize
-                        let public_key_index = self
-                            .supervisor
-                            .is_participant(notarize.view(), notarize.signer())
-                            .unwrap();
-                        self.handle_notarize(public_key_index, notarize).await;
+                        self.handle_notarize(notarize.clone()).await;
 
                         // Update round info
-                        if notarize.signer() == self.crypto.public_key() {
-                            observed_view = max(observed_view, proposal.view);
-                            let round = self.views.get_mut(&proposal.view).expect("missing round");
-                            let proposal_message =
-                                proposal_message(proposal.view, proposal.parent, &payload);
-                            let proposal_digest = hash(&proposal_message);
-                            round.proposal = Some((
-                                proposal_digest,
-                                Parsed {
-                                    message: proposal,
-                                    digest: payload,
-                                },
-                            ));
+                        let Some(public_key_index) = public_key_index else {
+                            continue;
+                        };
+                        if notarize.signer() == public_key_index {
+                            observed_view = max(observed_view, view);
+                            let round = self.views.get_mut(&view).expect("missing round");
+                            round.proposal = Some(notarize.proposal);
                             round.verified_proposal = true;
                             round.broadcast_notarize = true;
                         }
                     }
-                    wire::voter::Payload::Nullify(nullify) => {
+                    Voter::Nullify(nullify) => {
                         // Handle nullify
-                        let view = nullify.view;
-                        let public_key = nullify.signature.as_ref().unwrap().public_key;
-                        let public_key = self
-                            .supervisor
-                            .participants(view)
-                            .unwrap()
-                            .get(public_key as usize)
-                            .unwrap()
-                            .clone();
-                        self.handle_nullify(&public_key, nullify).await;
+                        self.handle_nullify(nullify.clone()).await;
 
                         // Update round info
-                        if public_key == self.crypto.public_key() {
+                        let Some(public_key_index) = public_key_index else {
+                            continue;
+                        };
+                        if nullify.signer() == public_key_index {
                             observed_view = max(observed_view, view);
                             let round = self.views.get_mut(&view).expect("missing round");
                             round.broadcast_nullify = true;
                         }
                     }
-                    wire::voter::Payload::Finalize(finalize) => {
+                    Voter::Finalize(finalize) => {
                         // Handle finalize
-                        let proposal = finalize.proposal.as_ref().unwrap();
-                        let view = proposal.view;
-                        let payload = D::try_from(&proposal.payload).unwrap();
-                        let public_key = finalize.signature.as_ref().unwrap().public_key;
-                        let public_key = self
-                            .supervisor
-                            .participants(view)
-                            .unwrap()
-                            .get(public_key as usize)
-                            .unwrap()
-                            .clone();
-                        self.handle_finalize(
-                            &public_key,
-                            Parsed {
-                                message: finalize,
-                                digest: payload,
-                            },
-                        )
-                        .await;
+                        self.handle_finalize(finalize.clone()).await;
 
                         // Update round info
                         //
                         // If we are sending a finalize message, we must be in the next view
-                        if public_key == self.crypto.public_key() {
+                        let Some(public_key_index) = public_key_index else {
+                            continue;
+                        };
+                        if finalize.signer() == public_key_index {
                             observed_view = max(observed_view, view + 1);
                             let round = self.views.get_mut(&view).expect("missing round");
                             round.broadcast_notarization = true;
@@ -1857,17 +1830,8 @@ impl<
                     }
 
                     // Construct proposal
-                    let message = proposal_message(context.view, context.parent.0, &proposed);
-                    let proposal_digest = hash(&message);
-                    let proposal = wire::Proposal {
-                        view: context.view,
-                        parent: context.parent.0,
-                        payload: proposed.to_vec(),
-                    };
-                    if !self.our_proposal(proposal_digest, Parsed{
-                        message: proposal.clone(),
-                        digest: proposed.clone(),
-                    }).await {
+                    let proposal = Proposal::new(context.view, context.parent.0, proposed);
+                    if !self.our_proposal(proposal).await {
                         warn!(view = context.view, "failed to record our container");
                         continue;
                     }
@@ -1904,13 +1868,13 @@ impl<
                 mailbox = self.mailbox_receiver.next() => {
                     let msg = mailbox.unwrap();
                     match msg {
-                        Message::Notarization{ notarization }  => {
-                            view = notarization.message.proposal.as_ref().unwrap().view;
-                            self.handle_notarization(notarization).await;
+                        Message::Notarization(notarization)  => {
+                            view = notarization.view();
+                            self.handle_notarization(&notarization).await;
                         },
-                        Message::Nullification { nullification } => {
-                            view = nullification.view;
-                            self.handle_nullification(nullification).await;
+                        Message::Nullification(nullification) => {
+                            view = nullification.view();
+                            self.handle_nullification(&nullification).await;
                         },
                     }
                 },
@@ -1919,63 +1883,35 @@ impl<
                     let Ok((s, msg)) = msg else {
                         break;
                     };
-                    let Ok(msg) = Voter::decode_cfg(msg) else {
+                    let Ok(msg) = Voter::decode_cfg(msg, &self.max_participants) else {
                         continue;
                     };
-                    let Some(payload) = msg.payload else {
-                        continue;
-                    };
+                    view = msg.view();
 
                     // Process message
-                    match payload {
-                        wire::voter::Payload::Notarize(notarize) => {
+                    match msg {
+                        Voter::Notarize(notarize) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::notarize(&s)).inc();
-                            view = match &notarize.proposal {
-                                Some(proposal) => proposal.view,
-                                None => {
-                                    continue;
-                                }
-                            };
                             self.notarize(notarize).await;
                         }
-                        wire::voter::Payload::Notarization(notarization) => {
+                        Voter::Notarization(notarization) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::notarization(&s)).inc();
-                            view = match &notarization.proposal {
-                                Some(proposal) => proposal.view,
-                                None => {
-                                    continue;
-                                }
-                            };
                             self.notarization(notarization).await;
                         }
-                        wire::voter::Payload::Nullify(nullify) => {
+                        Voter::Nullify(nullify) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::nullify(&s)).inc();
-                            view = nullify.view;
                             self.nullify(nullify).await;
                         }
-                        wire::voter::Payload::Nullification(nullification) => {
+                        Voter::Nullification(nullification) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::nullification(&s)).inc();
-                            view = nullification.view;
                             self.nullification(nullification).await;
                         }
-                        wire::voter::Payload::Finalize(finalize) => {
+                        Voter::Finalize(finalize) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::finalize(&s)).inc();
-                            view = match &finalize.proposal {
-                                Some(proposal) => proposal.view,
-                                None => {
-                                    continue;
-                                }
-                            };
                             self.finalize(finalize).await;
                         }
-                        wire::voter::Payload::Finalization(finalization) => {
+                        Voter::Finalization(finalization) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::finalization(&s)).inc();
-                            view = match &finalization.proposal {
-                                Some(proposal) => proposal.view,
-                                None => {
-                                    continue;
-                                }
-                            };
                             self.finalization(finalization).await;
                         }
                     };
