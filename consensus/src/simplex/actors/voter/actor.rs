@@ -723,25 +723,25 @@ impl<
         self.handle_nullify(public_key_index, nullify).await;
     }
 
-    async fn handle_nullify(&mut self, public_key: &C::PublicKey, nullify: wire::Nullify) {
+    async fn handle_nullify(&mut self, public_key_index: u32, nullify: Nullify<V>) {
         // Check to see if nullify is for proposal in view
         let view = nullify.view;
-        let round = self
-            .views
-            .entry(view)
-            .or_insert_with(|| Round::new(self.context.current(), self.supervisor.clone(), view));
+        let round = self.views.entry(view).or_insert_with(|| {
+            Round::new(
+                self.context.current(),
+                self.reporter.clone(),
+                self.supervisor.clone(),
+                view,
+            )
+        });
 
         // Handle nullify
-        let nullify_bytes = wire::Voter {
-            payload: Some(wire::voter::Payload::Nullify(nullify.clone())),
-        }
-        .encode_to_vec()
-        .into();
-        if round.add_verified_nullify(public_key, nullify).await && self.journal.is_some() {
+        let msg = Voter::Nullify(nullify.clone()).encode().into();
+        if round.add_verified_nullify(public_key_index, nullify).await && self.journal.is_some() {
             self.journal
                 .as_mut()
                 .unwrap()
-                .append(view, nullify_bytes)
+                .append(view, msg)
                 .await
                 .expect("unable to append nullify");
         }
