@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct Storage<S: StorageTrait> {
-    inner: S,              // The wrapped storage implementation
-    auditor: Arc<Auditor>, // The auditor
+    inner: S,
+    auditor: Arc<Auditor>,
 }
 
 impl<S: StorageTrait> Storage<S> {

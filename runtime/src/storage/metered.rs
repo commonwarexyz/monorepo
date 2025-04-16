@@ -89,6 +89,11 @@ impl<S: StorageTrait> StorageTrait for MeteredStorage<S> {
     }
 }
 
+/// Tracks whether the blob is open or closed.
+/// We use this to make sure we only decrement the open blobs metric
+/// once during close() or drop(), and not both.
+// TODO danlaine: we should consider removing the close() method
+// from the Blob trait and just using drop() to close the blob.
 #[derive(Clone)]
 enum State<B> {
     Open(B),

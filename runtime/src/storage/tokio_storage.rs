@@ -21,14 +21,14 @@ impl Config {
 
 #[derive(Clone)]
 pub struct Storage {
-    fs: Arc<AsyncMutex<()>>,
+    lock: Arc<AsyncMutex<()>>,
     cfg: Config,
 }
 
 impl Storage {
     pub fn new(cfg: Config) -> Self {
         Self {
-            fs: AsyncMutex::new(()).into(),
+            lock: AsyncMutex::new(()).into(),
             cfg,
         }
     }
@@ -56,7 +56,7 @@ impl crate::Storage for Storage {
 
     async fn open(&self, partition: &str, name: &[u8]) -> Result<Blob, Error> {
         // Acquire the filesystem lock
-        let _guard = self.fs.lock().await;
+        let _guard = self.lock.lock().await;
 
         // Construct the full path
         let path = self.cfg.storage_directory.join(partition).join(hex(name));
@@ -89,7 +89,7 @@ impl crate::Storage for Storage {
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
         // Acquire the filesystem lock
-        let _guard = self.fs.lock().await;
+        let _guard = self.lock.lock().await;
 
         // Remove all related files
         let path = self.cfg.storage_directory.join(partition);
@@ -108,7 +108,7 @@ impl crate::Storage for Storage {
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
         // Acquire the filesystem lock
-        let _guard = self.fs.lock().await;
+        let _guard = self.lock.lock().await;
 
         // Scan the partition directory
         let path = self.cfg.storage_directory.join(partition);

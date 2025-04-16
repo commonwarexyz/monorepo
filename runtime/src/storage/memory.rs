@@ -65,6 +65,8 @@ impl crate::Storage for Storage {
     }
 }
 
+type Partition = HashMap<Vec<u8>, Vec<u8>>;
+
 #[derive(Clone)]
 pub struct Blob {
     partitions: Arc<Mutex<HashMap<String, Partition>>>,
@@ -152,5 +154,3 @@ impl crate::Blob for Blob {
         Ok(())
     }
 }
-
-type Partition = HashMap<Vec<u8>, Vec<u8>>;
