@@ -918,7 +918,7 @@ pub enum Activity<S: Array, D: Digest> {
     NullifyFinalize(NullifyFinalize<S, D>),
 }
 
-impl<V: Verifier, D: Digest> Write for Activity<V, D> {
+impl<S: Array, D: Digest> Write for Activity<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
             Activity::Notarize(notarize) => {
@@ -961,29 +961,29 @@ impl<V: Verifier, D: Digest> Write for Activity<V, D> {
     }
 }
 
-impl<V: Verifier, D: Digest> Read<usize> for Activity<V, D> {
+impl<S: Array, D: Digest> Read<usize> for Activity<S, D> {
     fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
         let tag = u8::read(reader)?;
         match tag {
-            0 => Ok(Activity::Notarize(Notarize::<V, D>::read(reader)?)),
-            1 => Ok(Activity::Notarization(Notarization::<V, D>::read_cfg(
+            0 => Ok(Activity::Notarize(Notarize::<S, D>::read(reader)?)),
+            1 => Ok(Activity::Notarization(Notarization::<S, D>::read_cfg(
                 reader, max_len,
             )?)),
-            2 => Ok(Activity::Nullify(Nullify::<V>::read(reader)?)),
-            3 => Ok(Activity::Nullification(Nullification::<V>::read_cfg(
+            2 => Ok(Activity::Nullify(Nullify::<S>::read(reader)?)),
+            3 => Ok(Activity::Nullification(Nullification::<S>::read_cfg(
                 reader, max_len,
             )?)),
-            4 => Ok(Activity::Finalize(Finalize::<V, D>::read(reader)?)),
-            5 => Ok(Activity::Finalization(Finalization::<V, D>::read_cfg(
+            4 => Ok(Activity::Finalize(Finalize::<S, D>::read(reader)?)),
+            5 => Ok(Activity::Finalization(Finalization::<S, D>::read_cfg(
                 reader, max_len,
             )?)),
             6 => Ok(Activity::ConflictingNotarize(
-                ConflictingNotarize::<V, D>::read(reader)?,
+                ConflictingNotarize::<S, D>::read(reader)?,
             )),
             7 => Ok(Activity::ConflictingFinalize(
-                ConflictingFinalize::<V, D>::read(reader)?,
+                ConflictingFinalize::<S, D>::read(reader)?,
             )),
-            8 => Ok(Activity::NullifyFinalize(NullifyFinalize::<V, D>::read(
+            8 => Ok(Activity::NullifyFinalize(NullifyFinalize::<S, D>::read(
                 reader,
             )?)),
             _ => Err(Error::Invalid(
@@ -994,7 +994,7 @@ impl<V: Verifier, D: Digest> Read<usize> for Activity<V, D> {
     }
 }
 
-impl<V: Verifier, D: Digest> EncodeSize for Activity<V, D> {
+impl<S: Array, D: Digest> EncodeSize for Activity<S, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Activity::Notarize(notarize) => notarize.encode_size(),
@@ -1010,6 +1010,22 @@ impl<V: Verifier, D: Digest> EncodeSize for Activity<V, D> {
                 conflicting_finalize.encode_size()
             }
             Activity::NullifyFinalize(nullify_finalize) => nullify_finalize.encode_size(),
+        }
+    }
+}
+
+impl<S: Array, D: Digest> Viewable for Activity<S, D> {
+    fn view(&self) -> View {
+        match self {
+            Activity::Notarize(notarize) => notarize.view(),
+            Activity::Notarization(notarization) => notarization.view(),
+            Activity::Nullify(nullify) => nullify.view(),
+            Activity::Nullification(nullification) => nullification.view(),
+            Activity::Finalize(finalize) => finalize.view(),
+            Activity::Finalization(finalization) => finalization.view(),
+            Activity::ConflictingNotarize(conflicting_notarize) => conflicting_notarize.view(),
+            Activity::ConflictingFinalize(conflicting_finalize) => conflicting_finalize.view(),
+            Activity::NullifyFinalize(nullify_finalize) => nullify_finalize.view(),
         }
     }
 }
@@ -1075,36 +1091,56 @@ impl<S: Array, D: Digest> FixedSize for ConflictingNotarize<S, D> {
     const SIZE: usize = Notarize::<S, D>::SIZE + Notarize::<S, D>::SIZE;
 }
 
-#[derive(Clone, Debug, PartialEq, Hash, Eq)]
-pub struct ConflictingFinalize<V: Verifier, D: Digest> {
-    pub finalize_1: Finalize<V, D>,
-    pub finalize_2: Finalize<V, D>,
+impl<S: Array, D: Digest> Viewable for ConflictingNotarize<S, D> {
+    fn view(&self) -> View {
+        self.notarize_1.view()
+    }
 }
 
-impl<V: Verifier, D: Digest> ConflictingFinalize<V, D> {
-    pub fn new(finalize_1: Finalize<V, D>, finalize_2: Finalize<V, D>) -> Self {
+impl<S: Array, D: Digest> Attributable for ConflictingNotarize<S, D> {
+    fn signer(&self) -> u32 {
+        self.notarize_1.signer()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Hash, Eq)]
+pub struct ConflictingFinalize<S: Array, D: Digest> {
+    pub finalize_1: Finalize<S, D>,
+    pub finalize_2: Finalize<S, D>,
+}
+
+impl<S: Array, D: Digest> ConflictingFinalize<S, D> {
+    pub fn new(finalize_1: Finalize<S, D>, finalize_2: Finalize<S, D>) -> Self {
         Self {
             finalize_1,
             finalize_2,
         }
     }
 
-    pub fn verify(&self, finalize_namespace: &[u8]) -> bool {
-        self.finalize_1.verify(finalize_namespace) && self.finalize_2.verify(finalize_namespace)
+    pub fn verify<P: Array, V: Verifier<PublicKey = P, Signature = S>>(
+        &self,
+        public_key: &P,
+        finalize_namespace: &[u8],
+    ) -> bool {
+        self.finalize_1
+            .verify::<P, V>(public_key, finalize_namespace)
+            && self
+                .finalize_2
+                .verify::<P, V>(public_key, finalize_namespace)
     }
 }
 
-impl<V: Verifier, D: Digest> Write for ConflictingFinalize<V, D> {
+impl<S: Array, D: Digest> Write for ConflictingFinalize<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.finalize_1.write(writer);
         self.finalize_2.write(writer);
     }
 }
 
-impl<V: Verifier, D: Digest> Read for ConflictingFinalize<V, D> {
+impl<S: Array, D: Digest> Read for ConflictingFinalize<S, D> {
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let finalize_1 = Finalize::<V, D>::read(reader)?;
-        let finalize_2 = Finalize::<V, D>::read(reader)?;
+        let finalize_1 = Finalize::<S, D>::read(reader)?;
+        let finalize_2 = Finalize::<S, D>::read(reader)?;
         if finalize_1.view() != finalize_2.view() {
             return Err(Error::Invalid(
                 "consensus::simplex::ConflictingFinalize",
@@ -1124,38 +1160,56 @@ impl<V: Verifier, D: Digest> Read for ConflictingFinalize<V, D> {
     }
 }
 
-impl<V: Verifier, D: Digest> FixedSize for ConflictingFinalize<V, D> {
+impl<S: Array, D: Digest> FixedSize for ConflictingFinalize<S, D> {
     const SIZE: usize =
-        Proposal::<D>::SIZE + Signature::<V>::SIZE + Proposal::<D>::SIZE + Signature::<V>::SIZE;
+        Proposal::<D>::SIZE + Signature::<S>::SIZE + Proposal::<D>::SIZE + Signature::<S>::SIZE;
+}
+
+impl<S: Array, D: Digest> Viewable for ConflictingFinalize<S, D> {
+    fn view(&self) -> View {
+        self.finalize_1.view()
+    }
+}
+
+impl<S: Array, D: Digest> Attributable for ConflictingFinalize<S, D> {
+    fn signer(&self) -> u32 {
+        self.finalize_1.signer()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
-pub struct NullifyFinalize<V: Verifier, D: Digest> {
-    pub nullify: Nullify<V>,
-    pub finalize: Finalize<V, D>,
+pub struct NullifyFinalize<S: Array, D: Digest> {
+    pub nullify: Nullify<S>,
+    pub finalize: Finalize<S, D>,
 }
 
-impl<V: Verifier, D: Digest> NullifyFinalize<V, D> {
-    pub fn new(nullify: Nullify<V>, finalize: Finalize<V, D>) -> Self {
+impl<S: Array, D: Digest> NullifyFinalize<S, D> {
+    pub fn new(nullify: Nullify<S>, finalize: Finalize<S, D>) -> Self {
         Self { nullify, finalize }
     }
 
-    pub fn verify(&self, nullify_namespace: &[u8], finalize_namespace: &[u8]) -> bool {
-        self.nullify.verify(nullify_namespace) && self.finalize.verify(finalize_namespace)
+    pub fn verify<P: Array, V: Verifier<PublicKey = P, Signature = S>>(
+        &self,
+        public_key: &P,
+        nullify_namespace: &[u8],
+        finalize_namespace: &[u8],
+    ) -> bool {
+        self.nullify.verify::<P, V>(public_key, nullify_namespace)
+            && self.finalize.verify::<P, V>(public_key, finalize_namespace)
     }
 }
 
-impl<V: Verifier, D: Digest> Write for NullifyFinalize<V, D> {
+impl<S: Array, D: Digest> Write for NullifyFinalize<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.nullify.write(writer);
         self.finalize.write(writer);
     }
 }
 
-impl<V: Verifier, D: Digest> Read for NullifyFinalize<V, D> {
+impl<S: Array, D: Digest> Read for NullifyFinalize<S, D> {
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let nullify = Nullify::<V>::read(reader)?;
-        let finalize = Finalize::<V, D>::read(reader)?;
+        let nullify = Nullify::<S>::read(reader)?;
+        let finalize = Finalize::<S, D>::read(reader)?;
         if nullify.view() != finalize.view() {
             return Err(Error::Invalid(
                 "consensus::simplex::NullifyFinalize",
@@ -1172,6 +1226,18 @@ impl<V: Verifier, D: Digest> Read for NullifyFinalize<V, D> {
     }
 }
 
-impl<V: Verifier, D: Digest> FixedSize for NullifyFinalize<V, D> {
-    const SIZE: usize = Nullify::<V>::SIZE + Finalize::<V, D>::SIZE;
+impl<S: Array, D: Digest> FixedSize for NullifyFinalize<S, D> {
+    const SIZE: usize = Nullify::<S>::SIZE + Finalize::<S, D>::SIZE;
+}
+
+impl<S: Array, D: Digest> Viewable for NullifyFinalize<S, D> {
+    fn view(&self) -> View {
+        self.nullify.view()
+    }
+}
+
+impl<S: Array, D: Digest> Attributable for NullifyFinalize<S, D> {
+    fn signer(&self) -> u32 {
+        self.nullify.signer()
+    }
 }
