@@ -20,7 +20,7 @@ impl<S: StorageTrait> StorageTrait for Storage<S> {
         self.auditor.open(partition, name);
         self.inner.open(partition, name).await.map(|blob| Blob {
             auditor: self.auditor.clone(),
-            blob,
+            inner: blob,
             partition: partition.into(),
             name: name.to_vec(),
         })
@@ -42,40 +42,40 @@ pub struct Blob<B: BlobTrait> {
     auditor: Arc<Auditor>,
     partition: String,
     name: Vec<u8>,
-    blob: B,
+    inner: B,
 }
 
 impl<B: BlobTrait> crate::Blob for Blob<B> {
     async fn len(&self) -> Result<u64, Error> {
         self.auditor.len(&self.partition, &self.name);
-        self.blob.len().await
+        self.inner.len().await
     }
 
     async fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
         self.auditor
             .read_at(&self.partition, &self.name, buf.len(), offset);
-        self.blob.read_at(buf, offset).await
+        self.inner.read_at(buf, offset).await
     }
 
     async fn write_at(&self, buf: &[u8], offset: u64) -> Result<(), Error> {
         self.auditor
             .write_at(&self.partition, &self.name, buf, offset);
-        self.blob.write_at(buf, offset).await
+        self.inner.write_at(buf, offset).await
     }
 
     async fn truncate(&self, len: u64) -> Result<(), Error> {
         self.auditor.truncate(&self.partition, &self.name, len);
-        self.blob.truncate(len).await
+        self.inner.truncate(len).await
     }
 
     async fn sync(&self) -> Result<(), Error> {
         self.auditor.sync(&self.partition, &self.name);
-        self.blob.sync().await
+        self.inner.sync().await
     }
 
     async fn close(self) -> Result<(), Error> {
         self.auditor.close(&self.partition, &self.name);
-        self.blob.close().await
+        self.inner.close().await
     }
 }
 
