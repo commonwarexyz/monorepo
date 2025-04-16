@@ -1041,10 +1041,10 @@ impl<
         }
 
         // Handle notarization
-        self.handle_notarization(notarization).await;
+        self.handle_notarization(&notarization).await;
     }
 
-    async fn handle_notarization(&mut self, notarization: Notarization<C::Signature, D>) {
+    async fn handle_notarization(&mut self, notarization: &Notarization<C::Signature, D>) {
         // Add signatures to view (needed to broadcast notarization if we get proposal)
         let view = notarization.view();
         let round = self.views.entry(view).or_insert_with(|| {
@@ -1076,7 +1076,7 @@ impl<
 
         // If proposal is missing, set it
         if round.proposal.is_none() {
-            let proposal = notarization.proposal;
+            let proposal = notarization.proposal.clone();
             debug!(
                 view = proposal.view,
                 "setting unverified proposal in notarization"
@@ -1108,10 +1108,10 @@ impl<
         }
 
         // Handle notarization
-        self.handle_nullification(nullification).await;
+        self.handle_nullification(&nullification).await;
     }
 
-    async fn handle_nullification(&mut self, nullification: Nullification<C::Signature>) {
+    async fn handle_nullification(&mut self, nullification: &Nullification<C::Signature>) {
         // Add signatures to view (needed to broadcast notarization if we get proposal)
         let view = nullification.view();
         let round = self.views.entry(view).or_insert_with(|| {
@@ -1216,10 +1216,10 @@ impl<
         }
 
         // Process finalization
-        self.handle_finalization(finalization).await;
+        self.handle_finalization(&finalization).await;
     }
 
-    async fn handle_finalization(&mut self, finalization: Finalization<C::Signature, D>) {
+    async fn handle_finalization(&mut self, finalization: &Finalization<C::Signature, D>) {
         // Add signatures to view (needed to broadcast finalization if we get proposal)
         let view = finalization.view();
         let round = self.views.entry(view).or_insert_with(|| {
@@ -1230,7 +1230,7 @@ impl<
                 view,
             )
         });
-        for signature in finalization.signatures {
+        for signature in &finalization.signatures {
             let finalize = Finalize::new(finalization.proposal.clone(), signature.clone());
             let msg = Voter::Finalize::<C::Signature, D>(finalize.clone())
                 .encode()
@@ -1247,7 +1247,7 @@ impl<
 
         // If proposal is missing, set it
         if round.proposal.is_none() {
-            let proposal = finalization.proposal;
+            let proposal = finalization.proposal.clone();
             debug!(
                 view = proposal.view,
                 "setting unverified proposal in finalization"
@@ -1479,7 +1479,7 @@ impl<
             backfiller.notarized(notarization.clone()).await;
 
             // Handle the notarization
-            self.handle_notarization(notarization.clone()).await;
+            self.handle_notarization(&notarization).await;
 
             // Sync the journal
             self.journal
@@ -1510,7 +1510,7 @@ impl<
             backfiller.nullified(nullification.clone()).await;
 
             // Handle the nullification
-            self.handle_nullification(nullification.clone()).await;
+            self.handle_nullification(&nullification).await;
 
             // Sync the journal
             self.journal
@@ -1613,7 +1613,7 @@ impl<
             backfiller.finalized(view).await;
 
             // Handle the finalization
-            self.handle_finalization(finalization.clone()).await;
+            self.handle_finalization(&finalization).await;
 
             // Sync the journal
             self.journal
