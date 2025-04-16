@@ -449,7 +449,7 @@ impl<
         if notarizes.len() < threshold as usize {
             return None;
         }
-        Some(&proposal)
+        Some(proposal)
     }
 
     fn is_nullified(&self, view: View) -> bool {
@@ -474,14 +474,14 @@ impl<
         if finalizes.len() < threshold as usize {
             return None;
         }
-        Some(&proposal)
+        Some(proposal)
     }
 
     fn find_parent(&self) -> Result<(View, D), View> {
         let mut cursor = self.view - 1; // self.view always at least 1
         loop {
             if cursor == 0 {
-                return Ok((GENESIS_VIEW, self.genesis.as_ref().unwrap().clone()));
+                return Ok((GENESIS_VIEW, *self.genesis.as_ref().unwrap()));
             }
 
             // If have notarization, return
@@ -782,7 +782,7 @@ impl<
             if cursor == proposal.parent {
                 // Check if first block
                 if proposal.parent == GENESIS_VIEW {
-                    break self.genesis.as_ref().unwrap().clone();
+                    break *self.genesis.as_ref().unwrap();
                 }
 
                 // Check notarization exists
@@ -1279,12 +1279,9 @@ impl<
         if !round.verified_proposal {
             return None;
         }
-        let Some(public_key_index) = self
+        let public_key_index = self
             .supervisor
-            .is_participant(view, &self.crypto.public_key())
-        else {
-            return None;
-        };
+            .is_participant(view, &self.crypto.public_key())?;
         round.broadcast_notarize = true;
         Some(Notarize::sign(
             &mut self.crypto,
@@ -1358,7 +1355,7 @@ impl<
 
         // Construct nullification
         let signatures = nullifies
-            .into_iter()
+            .iter()
             .filter_map(|n| n.as_ref())
             .map(|n| n.signature.clone())
             .collect::<Vec<_>>();
@@ -1386,12 +1383,9 @@ impl<
         if round.broadcast_finalize {
             return None;
         }
-        let Some(public_key_index) = self
+        let public_key_index = self
             .supervisor
-            .is_participant(view, &self.crypto.public_key())
-        else {
-            return None;
-        };
+            .is_participant(view, &self.crypto.public_key())?;
         round.broadcast_finalize = true;
         Some(Finalize::sign(
             &mut self.crypto,
