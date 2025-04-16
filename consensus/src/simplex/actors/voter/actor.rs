@@ -5,8 +5,9 @@ use crate::{
         metrics,
         types::{
             finalize_namespace, notarize_namespace, nullify_namespace, threshold, Activity,
-            Attributable, ConflictingFinalize, ConflictingNotarize, Context, Finalize, Notarize,
-            Nullification, Nullify, NullifyFinalize, Proposal, View, Viewable, Voter,
+            Attributable, ConflictingFinalize, ConflictingNotarize, Context, Finalize,
+            Notarization, Notarize, Nullification, Nullify, NullifyFinalize, Proposal, View,
+            Viewable, Voter,
         },
     },
     Automaton, Relay, Reporter, Supervisor, LATENCY,
@@ -132,10 +133,13 @@ impl<
         notarize: Notarize<V, D>,
     ) -> bool {
         // Check if already notarized
-        let signer = notarize.signer();
         if let Some(previous_notarize) = self.notarizes.get(public_key_index as usize).unwrap() {
             if previous_notarize == &notarize {
-                trace!(view = self.view, ?signer, "already notarized");
+                trace!(
+                    view = self.view,
+                    signer = ?notarize.signer(),
+                    "already notarized"
+                );
                 return false;
             }
 
@@ -144,7 +148,7 @@ impl<
             self.reporter
                 .report(Activity::ConflictingNotarize(fault))
                 .await;
-            warn!(view = self.view, ?signer, "recorded fault");
+            warn!(view = self.view, signer = ?previous_notarize.signer(), "recorded fault");
             return false;
         }
 
@@ -246,12 +250,11 @@ impl<
         finalize: Finalize<V, D>,
     ) -> bool {
         // Check if also issued nullify
-        let signer = finalize.signer();
         if let Some(nullify) = self.nullifies.get(&public_key_index) {
             // Create fault
             let fault = NullifyFinalize::new(nullify.clone(), finalize);
             self.reporter.report(Activity::NullifyFinalize(fault)).await;
-            warn!(view = self.view, ?signer, "recorded fault");
+            warn!(view = self.view, signer=?nullify.signer(), "recorded fault");
             return false;
         }
 
@@ -267,7 +270,7 @@ impl<
             self.reporter
                 .report(Activity::ConflictingFinalize(fault))
                 .await;
-            warn!(view = self.view, ?signer, "recorded fault");
+            warn!(view = self.view, signer=?previous.signer(), "recorded fault");
             return false;
         }
 
@@ -709,7 +712,7 @@ impl<
         // Verify that signer is a validator
         let Some(public_key_index) = self
             .supervisor
-            .is_participant(nullify.view, &nullify.signer())
+            .is_participant(nullify.view, nullify.signer())
         else {
             return;
         };
@@ -1005,165 +1008,105 @@ impl<
     }
 
     async fn notarize(&mut self, notarize: Notarize<V, D>) {
-        // Extract proposal
-        let Some(proposal) = notarize.proposal.as_ref() else {
-            return;
-        };
-
         // Ensure we are in the right view to process this message
-        if !self.interesting(proposal.view, false) {
+        let view = notarize.view();
+        if !self.interesting(view, false) {
             return;
         }
 
-        // Ensure digest is well-formed
-        let Ok(payload) = D::try_from(&proposal.payload) else {
-            return;
-        };
-
-        // Parse signature
-        let Some(signature) = notarize.signature.as_ref() else {
-            return;
-        };
-
         // Verify that signer is a validator
-        let Some(participants) = self.supervisor.participants(proposal.view) else {
-            return;
-        };
-        let Ok(public_key_index) = usize::try_from(signature.public_key) else {
-            return;
-        };
-        let Some(public_key) = participants.get(public_key_index).cloned() else {
+        let Some(public_key_index) = self.supervisor.is_participant(view, notarize.signer()) else {
             return;
         };
 
         // Verify the signature
-        let Ok(signature) = C::Signature::try_from(&signature.signature) else {
-            return;
-        };
-        let notarize_message = proposal_message(proposal.view, proposal.parent, &payload);
-        if !C::verify(
-            Some(&self.notarize_namespace),
-            &notarize_message,
-            &public_key,
-            &signature,
-        ) {
+        if !notarize.verify(&self.notarize_namespace) {
             return;
         }
 
         // Handle notarize
-        self.handle_notarize(
-            &public_key,
-            Parsed {
-                message: notarize,
-                digest: payload,
-            },
-        )
-        .await;
+        self.handle_notarize(public_key_index, notarize).await;
     }
 
-    async fn handle_notarize(
-        &mut self,
-        public_key: &C::PublicKey,
-        notarize: Parsed<wire::Notarize, D>,
-    ) {
+    async fn handle_notarize(&mut self, public_key_index: u32, notarize: Notarize<V, D>) {
         // Check to see if notarize is for proposal in view
-        let view = notarize.message.proposal.as_ref().unwrap().view;
-        let round = self
-            .views
-            .entry(view)
-            .or_insert_with(|| Round::new(self.context.current(), self.supervisor.clone(), view));
+        let view = notarize.view();
+        let round = self.views.entry(view).or_insert_with(|| {
+            Round::new(
+                self.context.current(),
+                self.reporter.clone(),
+                self.supervisor.clone(),
+                view,
+            )
+        });
 
         // Handle notarize
-        let notarize_bytes = wire::Voter {
-            payload: Some(wire::voter::Payload::Notarize(notarize.message.clone())),
-        }
-        .encode_to_vec()
-        .into();
-        if round.add_verified_notarize(public_key, notarize).await && self.journal.is_some() {
+        let msg = Voter::Notarize::<V, D>(notarize.clone()).encode().into();
+        if round
+            .add_verified_notarize(public_key_index, notarize)
+            .await
+            && self.journal.is_some()
+        {
             self.journal
                 .as_mut()
                 .unwrap()
-                .append(view, notarize_bytes)
+                .append(view, msg)
                 .await
                 .expect("unable to append to journal");
         }
     }
 
-    async fn notarization(&mut self, notarization: wire::Notarization) {
-        // Extract proposal
-        let Some(proposal) = &notarization.proposal else {
-            return;
-        };
-
+    async fn notarization(&mut self, notarization: Notarization<V, D>) {
         // Check if we are still in a view where this notarization could help
-        if !self.interesting(proposal.view, true) {
+        let view = notarization.view();
+        if !self.interesting(view, true) {
             return;
         }
 
-        // Ensure digest is well-formed
-        let Ok(payload) = D::try_from(&proposal.payload) else {
-            return;
-        };
-
         // Determine if we already broadcast notarization for this view (in which
         // case we can ignore this message)
-        if let Some(ref round) = self.views.get_mut(&proposal.view) {
+        if let Some(ref round) = self.views.get_mut(&view) {
             if round.broadcast_notarization {
                 return;
             }
         }
 
         // Verify notarization
-        if !verify_notarization::<S, C, D>(
-            &self.supervisor,
-            &self.notarize_namespace,
-            &notarization,
-        ) {
+        if !notarization.verify(&self.supervisor, &self.notarize_namespace) {
             return;
         }
 
         // Handle notarization
-        self.handle_notarization(Parsed {
-            message: notarization,
-            digest: payload,
-        })
-        .await;
+        self.handle_notarization(notarization).await;
     }
 
-    async fn handle_notarization(&mut self, notarization: Parsed<wire::Notarization, D>) {
+    async fn handle_notarization(&mut self, notarization: Notarization<V, D>) {
         // Add signatures to view (needed to broadcast notarization if we get proposal)
-        let view = notarization.message.proposal.as_ref().unwrap().view;
-        let round = self
-            .views
-            .entry(view)
-            .or_insert_with(|| Round::new(self.context.current(), self.supervisor.clone(), view));
-        let validators = self.supervisor.participants(view).unwrap();
-        for signature in &notarization.message.signatures {
-            let notarize = wire::Notarize {
-                proposal: Some(notarization.message.proposal.as_ref().unwrap().clone()),
-                signature: Some(signature.clone()),
-            };
-            let notarize_bytes = wire::Voter {
-                payload: Some(wire::voter::Payload::Notarize(notarize.clone())),
-            }
-            .encode_to_vec()
-            .into();
-            let public_key = validators.get(signature.public_key as usize).unwrap();
+        let view = notarization.view();
+        let round = self.views.entry(view).or_insert_with(|| {
+            Round::new(
+                self.context.current(),
+                self.reporter.clone(),
+                self.supervisor.clone(),
+                view,
+            )
+        });
+        for signature in &notarization.signatures {
+            let public_key_index = self
+                .supervisor
+                .is_participant(view, signature.signer())
+                .unwrap();
+            let notarize = Notarize::new(notarization.proposal.clone(), signature.clone());
+            let msg = Voter::Notarize::<V, D>(notarize.clone()).encode().into();
             if round
-                .add_verified_notarize(
-                    public_key,
-                    Parsed {
-                        message: notarize,
-                        digest: notarization.digest.clone(),
-                    },
-                )
+                .add_verified_notarize(public_key_index, notarize)
                 .await
                 && self.journal.is_some()
             {
                 self.journal
                     .as_mut()
                     .unwrap()
-                    .append(view, notarize_bytes)
+                    .append(view, msg)
                     .await
                     .expect("unable to append to journal");
             }
@@ -1175,22 +1118,12 @@ impl<
 
         // If proposal is missing, set it
         if round.proposal.is_none() {
-            let proposal = notarization.message.proposal.unwrap();
-            let message = proposal_message(proposal.view, proposal.parent, &notarization.digest);
-            let proposal_digest = hash(&message);
+            let proposal = notarization.proposal;
             debug!(
                 view = proposal.view,
-                digest = ?proposal_digest,
-                payload = ?notarization.digest,
                 "setting unverified proposal in notarization"
             );
-            round.proposal = Some((
-                proposal_digest,
-                Parsed {
-                    message: proposal,
-                    digest: notarization.digest,
-                },
-            ));
+            round.proposal = Some(proposal);
         }
 
         // Enter next view

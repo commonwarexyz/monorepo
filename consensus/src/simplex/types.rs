@@ -29,7 +29,7 @@ pub trait Viewable {
 }
 
 pub trait Attributable<V: Verifier> {
-    fn signer(&self) -> V::PublicKey;
+    fn signer(&self) -> &V::PublicKey;
 }
 
 pub const NOTARIZE_SUFFIX: &[u8] = b"_NOTARIZE";
@@ -232,8 +232,8 @@ impl<V: Verifier> FixedSize for Signature<V> {
 }
 
 impl<V: Verifier> Attributable<V> for Signature<V> {
-    fn signer(&self) -> V::PublicKey {
-        self.public_key.clone()
+    fn signer(&self) -> &V::PublicKey {
+        &self.public_key
     }
 }
 
@@ -312,7 +312,7 @@ impl<V: Verifier, D: Digest> Viewable for Notarize<V, D> {
 }
 
 impl<V: Verifier, D: Digest> Attributable<V> for Notarize<V, D> {
-    fn signer(&self) -> V::PublicKey {
+    fn signer(&self) -> &V::PublicKey {
         self.signature.signer()
     }
 }
@@ -464,7 +464,7 @@ impl<V: Verifier> Viewable for Nullify<V> {
 }
 
 impl<V: Verifier> Attributable<V> for Nullify<V> {
-    fn signer(&self) -> V::PublicKey {
+    fn signer(&self) -> &V::PublicKey {
         self.signature.signer()
     }
 }
@@ -616,7 +616,7 @@ impl<V: Verifier, D: Digest> Viewable for Finalize<V, D> {
 }
 
 impl<V: Verifier, D: Digest> Attributable<V> for Finalize<V, D> {
-    fn signer(&self) -> V::PublicKey {
+    fn signer(&self) -> &V::PublicKey {
         self.signature.signer()
     }
 }
