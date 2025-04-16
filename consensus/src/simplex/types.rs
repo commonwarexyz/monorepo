@@ -588,31 +588,36 @@ impl<S: Array> Viewable for Nullification<S> {
 }
 
 #[derive(Clone, Debug, Hash)]
-pub struct Finalize<V: Verifier, D: Digest> {
+pub struct Finalize<S: Array, D: Digest> {
     pub proposal: Proposal<D>,
-    pub signature: Signature<V>,
+    pub signature: Signature<S>,
 }
 
-impl<V: Verifier, D: Digest> Finalize<V, D> {
-    pub fn new(proposal: Proposal<D>, signature: Signature<V>) -> Self {
+impl<S: Array, D: Digest> Finalize<S, D> {
+    pub fn new(proposal: Proposal<D>, signature: Signature<S>) -> Self {
         Self {
             proposal,
             signature,
         }
     }
 
-    pub fn verify(&self, finalize_namespace: &[u8]) -> bool {
+    pub fn verify<P: Array, V: Verifier<PublicKey = P, Signature = S>>(
+        &self,
+        public_key: &P,
+        finalize_namespace: &[u8],
+    ) -> bool {
         let message = self.proposal.encode();
         V::verify(
             Some(&finalize_namespace),
             &message,
-            &self.signature.public_key,
+            public_key,
             &self.signature.signature,
         )
     }
 
-    pub fn sign<S: Scheme<PublicKey = V::PublicKey, Signature = V::Signature>>(
-        scheme: &mut S,
+    pub fn sign<C: Scheme<Signature = S>>(
+        scheme: &mut C,
+        public_key_index: u32,
         proposal: Proposal<D>,
         finalize_namespace: &[u8],
     ) -> Self {
@@ -620,22 +625,22 @@ impl<V: Verifier, D: Digest> Finalize<V, D> {
         let signature = scheme.sign(Some(&finalize_namespace), &message);
         Self {
             proposal,
-            signature: Signature::new(scheme.public_key(), signature),
+            signature: Signature::new(public_key_index, signature),
         }
     }
 }
 
-impl<V: Verifier, D: Digest> Write for Finalize<V, D> {
+impl<S: Array, D: Digest> Write for Finalize<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.proposal.write(writer);
         self.signature.write(writer);
     }
 }
 
-impl<V: Verifier, D: Digest> Read for Finalize<V, D> {
+impl<S: Array, D: Digest> Read for Finalize<S, D> {
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let proposal = Proposal::<D>::read(reader)?;
-        let signature = Signature::<V>::read(reader)?;
+        let signature = Signature::<S>::read(reader)?;
         Ok(Self {
             proposal,
             signature,
@@ -643,49 +648,53 @@ impl<V: Verifier, D: Digest> Read for Finalize<V, D> {
     }
 }
 
-impl<V: Verifier, D: Digest> FixedSize for Finalize<V, D> {
-    const SIZE: usize = Proposal::<D>::SIZE + Signature::<V>::SIZE;
+impl<S: Array, D: Digest> FixedSize for Finalize<S, D> {
+    const SIZE: usize = Proposal::<D>::SIZE + Signature::<S>::SIZE;
 }
 
-impl<V: Verifier, D: Digest> Viewable for Finalize<V, D> {
+impl<S: Array, D: Digest> Viewable for Finalize<S, D> {
     fn view(&self) -> View {
         self.proposal.view()
     }
 }
 
-impl<V: Verifier, D: Digest> Attributable<V> for Finalize<V, D> {
-    fn signer(&self) -> &V::PublicKey {
+impl<S: Array, D: Digest> Attributable for Finalize<S, D> {
+    fn signer(&self) -> u32 {
         self.signature.signer()
     }
 }
 
-impl<V: Verifier, D: Digest> PartialEq for Finalize<V, D> {
+impl<S: Array, D: Digest> PartialEq for Finalize<S, D> {
     fn eq(&self, other: &Self) -> bool {
         self.proposal == other.proposal && self.signature == other.signature
     }
 }
 
-impl<V: Verifier, D: Digest> Eq for Finalize<V, D> {}
+impl<S: Array, D: Digest> Eq for Finalize<S, D> {}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Finalization<V: Verifier, D: Digest> {
+pub struct Finalization<S: Array, D: Digest> {
     pub proposal: Proposal<D>,
-    pub signatures: Vec<Signature<V>>,
+    pub signatures: Vec<Signature<S>>,
 }
 
-impl<V: Verifier, D: Digest> Finalization<V, D> {
-    pub fn new(proposal: Proposal<D>, signatures: Vec<Signature<V>>) -> Self {
+impl<S: Array, D: Digest> Finalization<S, D> {
+    pub fn new(proposal: Proposal<D>, signatures: Vec<Signature<S>>) -> Self {
         Self {
             proposal,
             signatures,
         }
     }
 
-    pub fn verify<S: Supervisor<Index = View, PublicKey = V::PublicKey>>(
+    pub fn verify<
+        Su: Supervisor<Index = View>,
+        V: Verifier<PublicKey = Su::PublicKey, Signature = S>,
+    >(
         &self,
-        supervisor: &S,
+        supervisor: &Su,
         finalize_namespace: &[u8],
     ) -> bool {
+        // Get allowed signers
         let Some(validators) = supervisor.participants(self.proposal.view) else {
             return false;
         };
@@ -696,16 +705,26 @@ impl<V: Verifier, D: Digest> Finalization<V, D> {
         if self.signatures.len() > count as usize {
             return false;
         }
+
+        // Verify signatures
         let mut seen = HashSet::new();
         let message = self.proposal.encode();
         for signature in &self.signatures {
+            // Ensure this isn't a duplicate
             if !seen.insert(&signature.public_key) {
                 return false;
             }
+
+            // Get public key
+            let Some(public_key) = validators.get(signature.public_key as usize) else {
+                return false;
+            };
+
+            // Verify signature
             if !V::verify(
                 Some(&finalize_namespace),
                 &message,
-                &signature.public_key,
+                public_key,
                 &signature.signature,
             ) {
                 return false;
@@ -715,17 +734,17 @@ impl<V: Verifier, D: Digest> Finalization<V, D> {
     }
 }
 
-impl<V: Verifier, D: Digest> Write for Finalization<V, D> {
+impl<S: Array, D: Digest> Write for Finalization<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.proposal.write(writer);
         self.signatures.write(writer);
     }
 }
 
-impl<V: Verifier, D: Digest> Read<usize> for Finalization<V, D> {
+impl<S: Array, D: Digest> Read<usize> for Finalization<S, D> {
     fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
         let proposal = Proposal::<D>::read(reader)?;
-        let signatures = Vec::<Signature<V>>::read_range(reader, ..=*max_len)?;
+        let signatures = Vec::<Signature<S>>::read_range(reader, ..=*max_len)?;
         Ok(Self {
             proposal,
             signatures,
@@ -733,13 +752,13 @@ impl<V: Verifier, D: Digest> Read<usize> for Finalization<V, D> {
     }
 }
 
-impl<V: Verifier, D: Digest> EncodeSize for Finalization<V, D> {
+impl<S: Array, D: Digest> EncodeSize for Finalization<S, D> {
     fn encode_size(&self) -> usize {
         self.proposal.encode_size() + self.signatures.encode_size()
     }
 }
 
-impl<V: Verifier, D: Digest> Viewable for Finalization<V, D> {
+impl<S: Array, D: Digest> Viewable for Finalization<S, D> {
     fn view(&self) -> View {
         self.proposal.view()
     }
