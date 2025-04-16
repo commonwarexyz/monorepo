@@ -13,15 +13,12 @@ use crate::{
     Automaton, Relay, Reporter, Supervisor, LATENCY,
 };
 use commonware_codec::{Decode, DecodeExt, Encode};
-use commonware_cryptography::{
-    sha256::{hash, Digest as Sha256Digest},
-    Digest, Scheme, Verifier,
-};
+use commonware_cryptography::{Digest, Scheme, Verifier};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Blob, Clock, Handle, Metrics, Spawner, Storage};
 use commonware_storage::journal::variable::Journal;
-use commonware_utils::{quorum, Array};
+use commonware_utils::quorum;
 use futures::{
     channel::{mpsc, oneshot},
     future::Either,
@@ -47,9 +44,8 @@ const GENESIS_VIEW: View = 0;
 
 struct Round<
     C: Scheme,
-    V: Verifier<PublicKey = C::PublicKey, Signature = C::Signature>,
     D: Digest,
-    R: Reporter<Activity = Activity<V, D>>,
+    R: Reporter<Activity = Activity<C::Signature, D>>,
     S: Supervisor<Index = View, PublicKey = C::PublicKey>,
 > {
     start: SystemTime,
@@ -69,29 +65,28 @@ struct Round<
 
     // Track notarizes for all proposals (ensuring any participant only has one recorded notarize)
     notarized_proposals: HashMap<Proposal<D>, Vec<u32>>,
-    notarizes: Vec<Option<Notarize<V, D>>>,
+    notarizes: Vec<Option<Notarize<C::Signature, D>>>,
     broadcast_notarize: bool,
     broadcast_notarization: bool,
 
     // Track nullifies (ensuring any participant only has one recorded nullify)
-    nullifies: HashMap<u32, Nullify<V>>,
+    nullifies: HashMap<u32, Nullify<C::Signature>>,
     broadcast_nullify: bool,
     broadcast_nullification: bool,
 
     // Track finalizes for all proposals (ensuring any participant only has one recorded finalize)
     finalized_proposals: HashMap<Proposal<D>, Vec<u32>>,
-    finalizes: Vec<Option<Finalize<V, D>>>,
+    finalizes: Vec<Option<Finalize<C::Signature, D>>>,
     broadcast_finalize: bool,
     broadcast_finalization: bool,
 }
 
 impl<
         C: Scheme,
-        V: Verifier<PublicKey = C::PublicKey, Signature = C::Signature>,
         D: Digest,
-        R: Reporter<Activity = Activity<V, D>>,
+        R: Reporter<Activity = Activity<C::Signature, D>>,
         S: Supervisor<Index = View, PublicKey = C::PublicKey>,
-    > Round<C, V, D, R, S>
+    > Round<C, D, R, S>
 {
     pub fn new(current: SystemTime, reporter: R, supervisor: S, view: View) -> Self {
         let leader = supervisor.leader(view).expect("unable to compute leader");
@@ -342,11 +337,10 @@ pub struct Actor<
     B: Blob,
     E: Clock + Rng + Spawner + Storage<B> + Metrics,
     C: Scheme,
-    V: Verifier<PublicKey = C::PublicKey, Signature = C::Signature>,
     D: Digest,
     A: Automaton<Context = Context<D>, Digest = D>,
     R: Relay<Digest = D>,
-    F: Reporter<Activity = Activity<V, D>>,
+    F: Reporter<Activity = Activity<C::Signature, D>>,
     S: Supervisor<Index = View, PublicKey = C::PublicKey>,
 > {
     context: E,
@@ -371,11 +365,11 @@ pub struct Actor<
     activity_timeout: View,
     skip_timeout: View,
 
-    mailbox_receiver: mpsc::Receiver<Message<V, D>>,
+    mailbox_receiver: mpsc::Receiver<Message<C::Signature, D>>,
 
     last_finalized: View,
     view: View,
-    views: BTreeMap<View, Round<C, V, D, F, S>>,
+    views: BTreeMap<View, Round<C, D, F, S>>,
 
     current_view: Gauge,
     tracked_views: Gauge,
@@ -390,19 +384,18 @@ impl<
         B: Blob,
         E: Clock + Rng + Spawner + Storage<B> + Metrics,
         C: Scheme,
-        V: Verifier<PublicKey = C::PublicKey, Signature = C::Signature>,
         D: Digest,
         A: Automaton<Context = Context<D>, Digest = D>,
         R: Relay<Digest = D>,
-        F: Reporter<Activity = Activity<V, D>>,
+        F: Reporter<Activity = Activity<C::Signature, D>>,
         S: Supervisor<Index = View, PublicKey = C::PublicKey>,
-    > Actor<B, E, C, V, D, A, R, F, S>
+    > Actor<B, E, C, D, A, R, F, S>
 {
     pub fn new(
         context: E,
         journal: Journal<B, E>,
-        cfg: Config<C, V, D, A, R, F, S>,
-    ) -> (Self, Mailbox<V, D>) {
+        cfg: Config<C, D, A, R, F, S>,
+    ) -> (Self, Mailbox<C::Signature, D>) {
         // Assert correctness of timeouts
         if cfg.leader_timeout > cfg.notarization_timeout {
             panic!("leader timeout must be less than or equal to notarization timeout");

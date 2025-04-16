@@ -5,17 +5,16 @@ use crate::simplex::types::{Activity, Context, View};
 use crate::{Automaton, Supervisor};
 use crate::{Relay, Reporter};
 pub use actor::Actor;
-use commonware_cryptography::{Digest, Scheme, Verifier};
+use commonware_cryptography::{Digest, Scheme};
 pub use ingress::{Mailbox, Message};
 use std::time::Duration;
 
 pub struct Config<
     C: Scheme,
-    V: Verifier<PublicKey = C::PublicKey, Signature = C::Signature>,
     D: Digest,
     A: Automaton<Context = Context<D>, Digest = D>,
     R: Relay<Digest = D>,
-    F: Reporter<Activity = Activity<V, D>>,
+    F: Reporter<Activity = Activity<C::Signature, D>>,
     S: Supervisor<Index = View>,
 > {
     pub crypto: C,
