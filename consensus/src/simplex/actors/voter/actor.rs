@@ -3,7 +3,10 @@ use crate::{
     simplex::{
         actors::resolver,
         metrics,
-        types::{ConflictingNotarize, Finalize, Notarize, Nullify, Proposal, View},
+        types::{
+            Activity, Attributable, ConflictingNotarize, Finalize, Notarize, Nullify, Proposal,
+            View,
+        },
     },
     Automaton, Relay, Reporter, Supervisor, LATENCY,
 };
@@ -43,10 +46,12 @@ struct Round<
     C: Scheme,
     V: Verifier<PublicKey = C::PublicKey, Signature = C::Signature>,
     D: Digest,
+    R: Reporter<Activity = Activity<V, D>>,
     S: Supervisor<Index = View, PublicKey = C::PublicKey>,
 > {
     start: SystemTime,
     supervisor: S,
+    reporter: R,
 
     view: View,
     leader: C::PublicKey,
@@ -81,15 +86,17 @@ impl<
         C: Scheme,
         V: Verifier<PublicKey = C::PublicKey, Signature = C::Signature>,
         D: Digest,
+        R: Reporter<Activity = Activity<V, D>>,
         S: Supervisor<Index = View, PublicKey = C::PublicKey>,
-    > Round<C, V, D, S>
+    > Round<C, V, D, R, S>
 {
-    pub fn new(current: SystemTime, supervisor: S, view: View) -> Self {
+    pub fn new(current: SystemTime, reporter: R, supervisor: S, view: View) -> Self {
         let leader = supervisor.leader(view).expect("unable to compute leader");
         let participants = supervisor.participants(view).unwrap().len();
         Self {
             start: current,
             supervisor,
+            reporter,
 
             view,
             leader,
@@ -121,7 +128,7 @@ impl<
         // Check if already notarized
         let Some(public_key_index) = self
             .supervisor
-            .is_participant(self.view, &notarize.signature.public_key)
+            .is_participant(self.view, &notarize.signer())
         else {
             return false;
         };
@@ -137,46 +144,29 @@ impl<
             }
 
             // Create fault
-            let fault = ConflictingNotarize::new(proposal_1, signature_1, proposal_2, signature_2)
-            let previous_notarize = self
-                .notarizes
-                .get(previous_notarize)
-                .unwrap()
-                .get(&public_key_index)
-                .unwrap();
-            let previous_proposal = previous_notarize.message.proposal.as_ref().unwrap();
-            let Ok(previous_notarize_signature) = C::Signature::try_from(
-                &previous_notarize
-                    .message
-                    .signature
-                    .as_ref()
-                    .unwrap()
-                    .signature,
-            ) else {
-                return false;
-            };
-
-            let proof = Prover::<C, D>::serialize_conflicting_notarize(
-                self.view,
-                public_key,
-                previous_proposal.parent,
-                &previous_notarize.digest,
-                &previous_notarize_signature,
-                proposal.parent,
-                &notarize.digest,
-                &notarize_signature,
-            );
-            self.supervisor.report(CONFLICTING_NOTARIZE, proof).await;
+            let fault = ConflictingNotarize::new(previous_notarize.clone(), notarize);
+            self.reporter
+                .report(Activity::ConflictingNotarize(fault))
+                .await;
             warn!(
                 view = self.view,
-                signer = ?public_key,
-                activity = CONFLICTING_NOTARIZE,
+                signer = ?notarize.signer(),
                 "recorded fault"
             );
             return false;
         }
 
         // Store the notarize
+        if let Some(vec) = self.notarized_proposals.get_mut(&notarize.proposal) {
+            vec.push(public_key_index);
+        } else {
+            self.notarized_proposals
+                .insert(notarize.proposal.clone(), vec![public_key_index]);
+        }
+        self.notarizes
+            .get_mut(public_key_index as usize)
+            .unwrap()
+            .replace(notarize);
         if self
             .notaries
             .insert(public_key_index, proposal_digest)

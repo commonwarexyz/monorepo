@@ -207,7 +207,8 @@ impl<
         *Arc::get_mut(&mut self.notarizes)
             .unwrap()
             .get_mut(public_key_index as usize)
-            .unwrap() = Some(notarize.clone());
+            .unwrap()
+            .replace(notarize.clone());
         self.reporter.report(Activity::Notarize(notarize)).await;
         true
     }
@@ -536,7 +537,6 @@ impl<
                 proposal_signature.unwrap(),
                 seed_signature,
             );
-            // self.finalization = Some(finalization.clone());
             self.broadcast_finalization = true;
             return Some(finalization);
         }
