@@ -392,17 +392,17 @@ impl<S: Array, D: Digest> Notarization<S, D> {
     }
 }
 
-impl<V: Verifier, D: Digest> Write for Notarization<V, D> {
+impl<S: Array, D: Digest> Write for Notarization<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.proposal.write(writer);
         self.signatures.write(writer);
     }
 }
 
-impl<V: Verifier, D: Digest> Read<usize> for Notarization<V, D> {
+impl<S: Array, D: Digest> Read<usize> for Notarization<S, D> {
     fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
         let proposal = Proposal::<D>::read(reader)?;
-        let signatures = Vec::<Signature<V>>::read_range(reader, ..=*max_len)?;
+        let signatures = Vec::<Signature<S>>::read_range(reader, ..=*max_len)?;
         Ok(Self {
             proposal,
             signatures,
@@ -410,41 +410,46 @@ impl<V: Verifier, D: Digest> Read<usize> for Notarization<V, D> {
     }
 }
 
-impl<V: Verifier, D: Digest> EncodeSize for Notarization<V, D> {
+impl<S: Array, D: Digest> EncodeSize for Notarization<S, D> {
     fn encode_size(&self) -> usize {
         self.proposal.encode_size() + self.signatures.encode_size()
     }
 }
 
-impl<V: Verifier, D: Digest> Viewable for Notarization<V, D> {
+impl<S: Array, D: Digest> Viewable for Notarization<S, D> {
     fn view(&self) -> View {
         self.proposal.view()
     }
 }
 
 #[derive(Clone, Debug, Hash)]
-pub struct Nullify<V: Verifier> {
+pub struct Nullify<S: Array> {
     pub view: View,
-    pub signature: Signature<V>,
+    pub signature: Signature<S>,
 }
 
-impl<V: Verifier> Nullify<V> {
-    pub fn new(view: View, signature: Signature<V>) -> Self {
+impl<S: Array> Nullify<S> {
+    pub fn new(view: View, signature: Signature<S>) -> Self {
         Self { view, signature }
     }
 
-    pub fn verify(&self, nullify_namespace: &[u8]) -> bool {
+    pub fn verify<P: Array, V: Verifier<PublicKey = P, Signature = S>>(
+        &self,
+        public_key: &P,
+        nullify_namespace: &[u8],
+    ) -> bool {
         let message = view_message(self.view);
         V::verify(
             Some(&nullify_namespace),
             &message,
-            &self.signature.public_key,
+            public_key,
             &self.signature.signature,
         )
     }
 
-    pub fn sign<S: Scheme<PublicKey = V::PublicKey, Signature = V::Signature>>(
-        scheme: &mut S,
+    pub fn sign<C: Scheme<Signature = S>>(
+        scheme: &mut C,
+        public_key_index: u32,
         view: View,
         nullify_namespace: &[u8],
     ) -> Self {
@@ -452,66 +457,70 @@ impl<V: Verifier> Nullify<V> {
         let signature = scheme.sign(Some(&nullify_namespace), &message);
         Self {
             view,
-            signature: Signature::new(scheme.public_key(), signature),
+            signature: Signature::new(public_key_index, signature),
         }
     }
 }
 
-impl<V: Verifier> Write for Nullify<V> {
+impl<S: Array> Write for Nullify<S> {
     fn write(&self, writer: &mut impl BufMut) {
         self.view.write(writer);
         self.signature.write(writer);
     }
 }
 
-impl<V: Verifier> Read for Nullify<V> {
+impl<S: Array> Read for Nullify<S> {
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let view = View::read(reader)?;
-        let signature = Signature::<V>::read(reader)?;
+        let signature = Signature::<S>::read(reader)?;
         Ok(Self { view, signature })
     }
 }
 
-impl<V: Verifier> FixedSize for Nullify<V> {
-    const SIZE: usize = View::SIZE + Signature::<V>::SIZE;
+impl<S: Array> FixedSize for Nullify<S> {
+    const SIZE: usize = View::SIZE + Signature::<S>::SIZE;
 }
 
-impl<V: Verifier> Viewable for Nullify<V> {
+impl<S: Array> Viewable for Nullify<S> {
     fn view(&self) -> View {
         self.view
     }
 }
 
-impl<V: Verifier> Attributable<V> for Nullify<V> {
-    fn signer(&self) -> &V::PublicKey {
+impl<S: Array> Attributable for Nullify<S> {
+    fn signer(&self) -> u32 {
         self.signature.signer()
     }
 }
 
-impl<V: Verifier> PartialEq for Nullify<V> {
+impl<S: Array> PartialEq for Nullify<S> {
     fn eq(&self, other: &Self) -> bool {
         self.view == other.view && self.signature == other.signature
     }
 }
 
-impl<V: Verifier> Eq for Nullify<V> {}
+impl<S: Array> Eq for Nullify<S> {}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Nullification<V: Verifier> {
+pub struct Nullification<S: Array> {
     pub view: View,
-    pub signatures: Vec<Signature<V>>,
+    pub signatures: Vec<Signature<S>>,
 }
 
-impl<V: Verifier> Nullification<V> {
-    pub fn new(view: View, signatures: Vec<Signature<V>>) -> Self {
+impl<S: Array> Nullification<S> {
+    pub fn new(view: View, signatures: Vec<Signature<S>>) -> Self {
         Self { view, signatures }
     }
 
-    pub fn verify<S: Supervisor<Index = View, PublicKey = V::PublicKey>>(
+    pub fn verify<
+        Su: Supervisor<Index = View>,
+        V: Verifier<PublicKey = Su::PublicKey, Signature = S>,
+    >(
         &self,
-        supervisor: &S,
+        supervisor: &Su,
         nullify_namespace: &[u8],
     ) -> bool {
+        // Get allowed signers
         let Some(validators) = supervisor.participants(self.view) else {
             return false;
         };
@@ -522,16 +531,26 @@ impl<V: Verifier> Nullification<V> {
         if self.signatures.len() > count as usize {
             return false;
         }
+
+        // Verify signatures
         let mut seen = HashSet::new();
         let message = view_message(self.view);
         for signature in &self.signatures {
+            // Ensure this isn't a duplicate
             if !seen.insert(&signature.public_key) {
                 return false;
             }
+
+            // Get public key
+            let Some(public_key) = validators.get(signature.public_key as usize) else {
+                return false;
+            };
+
+            // Verify signature
             if !V::verify(
                 Some(&nullify_namespace),
                 &message,
-                &signature.public_key,
+                public_key,
                 &signature.signature,
             ) {
                 return false;
@@ -541,14 +560,14 @@ impl<V: Verifier> Nullification<V> {
     }
 }
 
-impl<V: Verifier> Write for Nullification<V> {
+impl<S: Array> Write for Nullification<S> {
     fn write(&self, writer: &mut impl BufMut) {
         self.view.write(writer);
         self.signatures.write(writer);
     }
 }
 
-impl<V: Verifier> Read<usize> for Nullification<V> {
+impl<S: Array> Read<usize> for Nullification<S> {
     fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
         let view = View::read(reader)?;
         let signatures = Vec::<Signature<V>>::read_range(reader, ..=*max_len)?;
@@ -556,13 +575,13 @@ impl<V: Verifier> Read<usize> for Nullification<V> {
     }
 }
 
-impl<V: Verifier> EncodeSize for Nullification<V> {
+impl<S: Array> EncodeSize for Nullification<S> {
     fn encode_size(&self) -> usize {
         self.view.encode_size() + self.signatures.encode_size()
     }
 }
 
-impl<V: Verifier> Viewable for Nullification<V> {
+impl<S: Array> Viewable for Nullification<S> {
     fn view(&self) -> View {
         self.view
     }
