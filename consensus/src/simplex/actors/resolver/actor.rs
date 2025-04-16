@@ -522,7 +522,7 @@ impl<
                                     debug!(view, sender = ?s, "unnecessary nullification");
                                     continue;
                                 }
-                                if nullification.verify::<S, C>(&self.supervisor, &self.nullify_namespace) {
+                                if !nullification.verify::<S, C>(&self.supervisor, &self.nullify_namespace) {
                                     warn!(view, sender = ?s, "invalid nullification");
                                     self.requester.block(s.clone());
                                     continue;
