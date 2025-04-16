@@ -6,7 +6,7 @@ use crate::{
         types::{
             finalize_namespace, notarize_namespace, nullify_namespace, threshold, Activity,
             Attributable, ConflictingFinalize, ConflictingNotarize, Context, Finalize, Notarize,
-            Nullification, Nullify, NullifyFinalize, Proposal, View, Voter,
+            Nullification, Nullify, NullifyFinalize, Proposal, View, Viewable, Voter,
         },
     },
     Automaton, Relay, Reporter, Supervisor, LATENCY,
@@ -681,7 +681,7 @@ impl<
         let nullify = Nullify::sign(&mut self.crypto, self.view, &self.nullify_namespace);
 
         // Handle the nullify
-        self.handle_nullify(public_key, nullify.clone()).await;
+        self.handle_nullify(public_key_index, nullify.clone()).await;
 
         // Sync the journal
         self.journal
@@ -736,7 +736,7 @@ impl<
         });
 
         // Handle nullify
-        let msg = Voter::Nullify(nullify.clone()).encode().into();
+        let msg = Voter::Nullify::<V, D>(nullify.clone()).encode().into();
         if round.add_verified_nullify(public_key_index, nullify).await && self.journal.is_some() {
             self.journal
                 .as_mut()
@@ -747,21 +747,14 @@ impl<
         }
     }
 
-    async fn our_proposal(
-        &mut self,
-        proposal_digest: Sha256Digest,
-        proposal: Parsed<wire::Proposal, D>,
-    ) -> bool {
+    async fn our_proposal(&mut self, proposal: Proposal<D>) -> bool {
         // Store the proposal
-        let round = self
-            .views
-            .get_mut(&proposal.message.view)
-            .expect("view missing");
+        let round = self.views.get_mut(&proposal.view()).expect("view missing");
 
         // Check if view timed out
         if round.broadcast_nullify {
             debug!(
-                view = proposal.message.view,
+                view = proposal.view(),
                 reason = "view timed out",
                 "dropping our proposal"
             );
@@ -769,13 +762,8 @@ impl<
         }
 
         // Store the proposal
-        debug!(
-            view = proposal.message.view,
-            parent = proposal.message.parent,
-            digest = ?proposal_digest,
-            "generated proposal"
-        );
-        round.proposal = Some((proposal_digest, proposal));
+        debug!(view = proposal.view(), "generated proposal");
+        round.proposal = Some(proposal);
         round.verified_proposal = true;
         round.leader_deadline = None;
         true
@@ -784,7 +772,7 @@ impl<
     // Attempt to set proposal from each message received over the wire
     async fn peer_proposal(&mut self) -> Option<(Context<D>, oneshot::Receiver<bool>)> {
         // Get round
-        let (proposal_digest, proposal) = {
+        let proposal = {
             // Get view or exit
             let round = self.views.get(&self.view)?;
 
@@ -803,9 +791,10 @@ impl<
             }
 
             // Check if leader has signed a digest
-            let proposal_digest = round.notaries.get(&leader_index)?;
-            let notarize = round.notarizes.get(proposal_digest)?.get(&leader_index)?;
-            let proposal = notarize.message.proposal.as_ref()?;
+            let proposal = round.notarizes[leader_index as usize]
+                .as_ref()?
+                .proposal
+                .clone();
 
             // Check parent validity
             if proposal.view <= proposal.parent {
@@ -814,13 +803,7 @@ impl<
             if proposal.parent < self.last_finalized {
                 return None;
             }
-            (
-                proposal_digest,
-                Parsed {
-                    message: proposal.clone(),
-                    digest: notarize.digest.clone(),
-                },
-            )
+            proposal
         };
 
         // Ensure we have required notarizations
@@ -831,9 +814,9 @@ impl<
             _ => self.view - 1,
         };
         let parent_payload = loop {
-            if cursor == proposal.message.parent {
+            if cursor == proposal.parent {
                 // Check if first block
-                if proposal.message.parent == GENESIS_VIEW {
+                if proposal.parent == GENESIS_VIEW {
                     break self.genesis.as_ref().unwrap().clone();
                 }
 
@@ -847,7 +830,7 @@ impl<
                 };
 
                 // Peer proposal references a valid parent
-                break parent_proposal.clone();
+                break parent_proposal.payload;
             }
 
             // Check nullification exists in gap
@@ -862,18 +845,13 @@ impl<
         };
 
         // Request verification
-        debug!(
-            view = proposal.message.view,
-            digest = ?proposal_digest,
-            payload = ?proposal.digest,
-            "requested proposal verification",
-        );
+        debug!(view = proposal.view, "requested proposal verification",);
         let context = Context {
-            view: proposal.message.view,
-            parent: (proposal.message.parent, parent_payload),
+            view: proposal.view,
+            parent: (proposal.parent, parent_payload),
         };
-        let payload = proposal.digest.clone();
-        let round_proposal = Some((*proposal_digest, proposal));
+        let payload = proposal.payload;
+        let round_proposal = Some(proposal);
         let round = self.views.get_mut(&context.view).unwrap();
         round.proposal = round_proposal;
         Some((
@@ -932,10 +910,14 @@ impl<
         }
 
         // Setup new view
-        let round = self
-            .views
-            .entry(view)
-            .or_insert_with(|| Round::new(self.context.current(), self.supervisor.clone(), view));
+        let round = self.views.entry(view).or_insert_with(|| {
+            Round::new(
+                self.context.current(),
+                self.reporter.clone(),
+                self.supervisor.clone(),
+                view,
+            )
+        });
         round.leader_deadline = Some(self.context.current() + self.leader_timeout);
         round.advance_deadline = Some(self.context.current() + self.notarization_timeout);
         self.view = view;
@@ -963,7 +945,7 @@ impl<
                     return;
                 }
             };
-            if round.notaries.contains_key(&leader_index)
+            if round.notarizes[leader_index as usize].is_some()
                 || round.nullifies.contains_key(&leader_index)
             {
                 return;
@@ -1022,7 +1004,7 @@ impl<
         }
     }
 
-    async fn notarize(&mut self, notarize: wire::Notarize) {
+    async fn notarize(&mut self, notarize: Notarize<V, D>) {
         // Extract proposal
         let Some(proposal) = notarize.proposal.as_ref() else {
             return;
