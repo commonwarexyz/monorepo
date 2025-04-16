@@ -4,8 +4,8 @@ use crate::{
         actors::resolver,
         metrics,
         types::{
-            Activity, Attributable, ConflictingNotarize, Finalize, Notarize, Nullification,
-            Nullify, NullifyFinalize, Proposal, View,
+            Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalize, Notarize,
+            Nullification, Nullify, NullifyFinalize, Proposal, View,
         },
     },
     Automaton, Relay, Reporter, Supervisor, LATENCY,
@@ -242,109 +242,54 @@ impl<
 
     async fn add_verified_finalize(
         &mut self,
-        public_key: &C::PublicKey,
-        finalize: Parsed<wire::Finalize, D>,
+        public_key_index: u32,
+        finalize: Finalize<V, D>,
     ) -> bool {
         // Check if also issued nullify
-        let proposal = finalize.message.proposal.as_ref().unwrap();
-        let public_key_index = finalize.message.signature.as_ref().unwrap().public_key;
-        let Ok(finalize_signature) =
-            C::Signature::try_from(&finalize.message.signature.as_ref().unwrap().signature)
-        else {
-            return false;
-        };
-        let null = self.nullifies.get(&public_key_index);
-        if let Some(null) = null {
+        if let Some(nullify) = self.nullifies.get(public_key_index as usize).unwrap() {
             // Create fault
-            let Ok(null_signature) =
-                C::Signature::try_from(&null.signature.as_ref().unwrap().signature)
-            else {
-                return false;
-            };
-            let proof = Prover::<C, D>::serialize_nullify_finalize(
-                self.view,
-                public_key,
-                proposal.parent,
-                &finalize.digest,
-                &finalize_signature,
-                &null_signature,
-            );
-            self.supervisor.report(NULLIFY_AND_FINALIZE, proof).await;
+            let fault = NullifyFinalize::new(nullify.clone(), finalize);
+            self.reporter.report(Activity::NullifyFinalize(fault)).await;
             warn!(
                 view = self.view,
-                signer = ?public_key,
-                activity = NULLIFY_AND_FINALIZE,
+                signer = ?nullify.signer(),
                 "recorded fault"
             );
             return false;
         }
 
-        // Compute proposal digest
-        let message = proposal_message(proposal.view, proposal.parent, &finalize.digest);
-        let proposal_digest = hash(&message);
-
         // Check if already finalized
-        if let Some(previous_finalize) = self.finalizers.get(&public_key_index) {
-            if previous_finalize == &proposal_digest {
-                trace!(
-                    view = self.view,
-                    signer = ?public_key,
-                    ?previous_finalize,
-                    "already finalize"
-                );
+        if let Some(previous) = self.finalizes.get(public_key_index as usize).unwrap() {
+            if previous == &finalize {
+                trace!(?finalize, ?previous, "already finalized");
                 return false;
             }
 
             // Create fault
-            let previous_finalize = self
-                .finalizes
-                .get(previous_finalize)
-                .unwrap()
-                .get(&public_key_index)
-                .unwrap();
-            let previous_proposal = previous_finalize.message.proposal.as_ref().unwrap();
-            let Ok(previous_finalize_signature) = C::Signature::try_from(
-                &previous_finalize
-                    .message
-                    .signature
-                    .as_ref()
-                    .unwrap()
-                    .signature,
-            ) else {
-                return false;
-            };
-            let proof = Prover::<C, D>::serialize_conflicting_finalize(
-                self.view,
-                public_key,
-                previous_proposal.parent,
-                &previous_finalize.digest,
-                &previous_finalize_signature,
-                proposal.parent,
-                &finalize.digest,
-                &finalize_signature,
-            );
-            self.supervisor.report(CONFLICTING_FINALIZE, proof).await;
+            let fault = ConflictingFinalize::new(previous.clone(), finalize);
+            self.reporter
+                .report(Activity::ConflictingFinalize(fault))
+                .await;
             warn!(
                 view = self.view,
-                signer = ?public_key,
-                activity = CONFLICTING_FINALIZE,
+                signer = ?finalize.signer(),
                 "recorded fault"
             );
             return false;
         }
 
         // Store the finalize
-        if self
-            .finalizers
-            .insert(public_key_index, proposal_digest)
-            .is_some()
-        {
-            return false;
+        if let Some(vec) = self.finalized_proposals.get_mut(&finalize.proposal) {
+            vec.push(public_key_index);
+        } else {
+            self.finalized_proposals
+                .insert(finalize.proposal.clone(), vec![public_key_index]);
         }
-        let entry = self.finalizes.entry(proposal_digest).or_default();
-        let proof = Prover::<C, D>::serialize_proposal(proposal, public_key, &finalize_signature);
-        entry.insert(public_key_index, finalize);
-        self.supervisor.report(FINALIZE, proof).await;
+        self.finalizes
+            .get_mut(public_key_index as usize)
+            .unwrap()
+            .replace(finalize.clone());
+        self.reporter.report(Activity::Finalize(finalize)).await;
         true
     }
 
