@@ -13,7 +13,7 @@ use crate::{
     Automaton, Relay, Reporter, Supervisor, LATENCY,
 };
 use commonware_codec::{Decode, DecodeExt, Encode};
-use commonware_cryptography::{Digest, Scheme, Verifier};
+use commonware_cryptography::{bls12381::PublicKey, Digest, Scheme, Verifier};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Blob, Clock, Handle, Metrics, Spawner, Storage};
@@ -615,7 +615,9 @@ impl<
                     .inc();
                 debug!(view = past_view, "rebroadcast entry notarization");
             } else if let Some(nullification) = self.construct_nullification(past_view, true) {
-                let msg = Voter::Nullification::<V, D>(nullification).encode().into();
+                let msg = Voter::Nullification::<C::Signature, D>(nullification)
+                    .encode()
+                    .into();
                 sender.send(Recipients::All, msg, true).await.unwrap();
                 self.broadcast_messages
                     .get_or_create(&metrics::NULLIFICATION)
@@ -635,10 +637,15 @@ impl<
             .supervisor
             .is_participant(self.view, &self.crypto.public_key())
             .unwrap();
-        let nullify = Nullify::sign(&mut self.crypto, self.view, &self.nullify_namespace);
+        let nullify = Nullify::sign(
+            &mut self.crypto,
+            public_key_index,
+            self.view,
+            &self.nullify_namespace,
+        );
 
         // Handle the nullify
-        self.handle_nullify(public_key_index, nullify.clone()).await;
+        self.handle_nullify(nullify.clone()).await;
 
         // Sync the journal
         self.journal
@@ -649,7 +656,7 @@ impl<
             .expect("unable to sync journal");
 
         // Broadcast nullify
-        let msg = Voter::Nullify::<V, D>(nullify).encode().into();
+        let msg = Voter::Nullify::<C::Signature, D>(nullify).encode().into();
         sender.send(Recipients::All, msg, true).await.unwrap();
         self.broadcast_messages
             .get_or_create(&metrics::NULLIFY)
@@ -657,30 +664,30 @@ impl<
         debug!(view = self.view, "broadcasted nullify");
     }
 
-    async fn nullify(&mut self, nullify: Nullify<V>) {
+    async fn nullify(&mut self, nullify: Nullify<C::Signature>) {
         // Ensure we are in the right view to process this message
         if !self.interesting(nullify.view, false) {
             return;
         }
 
         // Verify that signer is a validator
-        let Some(public_key_index) = self
-            .supervisor
-            .is_participant(nullify.view, nullify.signer())
-        else {
+        let Some(participants) = self.supervisor.participants(nullify.view) else {
+            return;
+        };
+        let Some(public_key) = participants.get(nullify.signer() as usize) else {
             return;
         };
 
         // Verify the signature
-        if !nullify.verify(&self.nullify_namespace) {
+        if !nullify.verify::<C::PublicKey, C>(public_key, &self.nullify_namespace) {
             return;
         }
 
         // Handle nullify
-        self.handle_nullify(public_key_index, nullify).await;
+        self.handle_nullify(nullify).await;
     }
 
-    async fn handle_nullify(&mut self, public_key_index: u32, nullify: Nullify<V>) {
+    async fn handle_nullify(&mut self, nullify: Nullify<C::Signature>) {
         // Check to see if nullify is for proposal in view
         let view = nullify.view;
         let round = self.views.entry(view).or_insert_with(|| {
@@ -693,8 +700,10 @@ impl<
         });
 
         // Handle nullify
-        let msg = Voter::Nullify::<V, D>(nullify.clone()).encode().into();
-        if round.add_verified_nullify(public_key_index, nullify).await && self.journal.is_some() {
+        let msg = Voter::Nullify::<C::Signature, D>(nullify.clone())
+            .encode()
+            .into();
+        if round.add_verified_nullify(nullify).await && self.journal.is_some() {
             self.journal
                 .as_mut()
                 .unwrap()
@@ -903,7 +912,7 @@ impl<
                 }
             };
             if round.notarizes[leader_index as usize].is_some()
-                || round.nullifies.contains_key(&leader_index)
+                || round.nullifies[leader_index as usize].is_some()
             {
                 return;
             }
@@ -961,7 +970,7 @@ impl<
         }
     }
 
-    async fn notarize(&mut self, notarize: Notarize<V, D>) {
+    async fn notarize(&mut self, notarize: Notarize<C::Signature, D>) {
         // Ensure we are in the right view to process this message
         let view = notarize.view();
         if !self.interesting(view, false) {
@@ -969,20 +978,23 @@ impl<
         }
 
         // Verify that signer is a validator
-        let Some(public_key_index) = self.supervisor.is_participant(view, notarize.signer()) else {
+        let Some(participants) = self.supervisor.participants(view) else {
+            return;
+        };
+        let Some(public_key) = participants.get(notarize.signer() as usize) else {
             return;
         };
 
         // Verify the signature
-        if !notarize.verify(&self.notarize_namespace) {
+        if !notarize.verify::<C::PublicKey, C>(public_key, &self.notarize_namespace) {
             return;
         }
 
         // Handle notarize
-        self.handle_notarize(public_key_index, notarize).await;
+        self.handle_notarize(notarize).await;
     }
 
-    async fn handle_notarize(&mut self, public_key_index: u32, notarize: Notarize<V, D>) {
+    async fn handle_notarize(&mut self, notarize: Notarize<C::Signature, D>) {
         // Check to see if notarize is for proposal in view
         let view = notarize.view();
         let round = self.views.entry(view).or_insert_with(|| {
@@ -995,12 +1007,10 @@ impl<
         });
 
         // Handle notarize
-        let msg = Voter::Notarize::<V, D>(notarize.clone()).encode().into();
-        if round
-            .add_verified_notarize(public_key_index, notarize)
-            .await
-            && self.journal.is_some()
-        {
+        let msg = Voter::Notarize::<C::Signature, D>(notarize.clone())
+            .encode()
+            .into();
+        if round.add_verified_notarize(notarize).await && self.journal.is_some() {
             self.journal
                 .as_mut()
                 .unwrap()
@@ -1010,7 +1020,7 @@ impl<
         }
     }
 
-    async fn notarization(&mut self, notarization: Notarization<V, D>) {
+    async fn notarization(&mut self, notarization: Notarization<C::Signature, D>) {
         // Check if we are still in a view where this notarization could help
         let view = notarization.view();
         if !self.interesting(view, true) {
@@ -1026,7 +1036,7 @@ impl<
         }
 
         // Verify notarization
-        if !notarization.verify(&self.supervisor, &self.notarize_namespace) {
+        if !notarization.verify::<S, C>(&self.supervisor, &self.notarize_namespace) {
             return;
         }
 
@@ -1034,7 +1044,7 @@ impl<
         self.handle_notarization(notarization).await;
     }
 
-    async fn handle_notarization(&mut self, notarization: Notarization<V, D>) {
+    async fn handle_notarization(&mut self, notarization: Notarization<C::Signature, D>) {
         // Add signatures to view (needed to broadcast notarization if we get proposal)
         let view = notarization.view();
         let round = self.views.entry(view).or_insert_with(|| {
@@ -1046,17 +1056,11 @@ impl<
             )
         });
         for signature in &notarization.signatures {
-            let public_key_index = self
-                .supervisor
-                .is_participant(view, signature.signer())
-                .unwrap();
             let notarize = Notarize::new(notarization.proposal.clone(), signature.clone());
-            let msg = Voter::Notarize::<V, D>(notarize.clone()).encode().into();
-            if round
-                .add_verified_notarize(public_key_index, notarize)
-                .await
-                && self.journal.is_some()
-            {
+            let msg = Voter::Notarize::<C::Signature, D>(notarize.clone())
+                .encode()
+                .into();
+            if round.add_verified_notarize(notarize).await && self.journal.is_some() {
                 self.journal
                     .as_mut()
                     .unwrap()
@@ -1084,7 +1088,7 @@ impl<
         self.enter_view(view + 1);
     }
 
-    async fn nullification(&mut self, nullification: Nullification<V>) {
+    async fn nullification(&mut self, nullification: Nullification<C::Signature>) {
         // Check if we are still in a view where this notarization could help
         if !self.interesting(nullification.view, true) {
             return;
@@ -1099,7 +1103,7 @@ impl<
         }
 
         // Verify nullification
-        if !nullification.verify(&self.supervisor, &self.nullify_namespace) {
+        if !nullification.verify::<S, C>(&self.supervisor, &self.nullify_namespace) {
             return;
         }
 
@@ -1107,7 +1111,7 @@ impl<
         self.handle_nullification(nullification).await;
     }
 
-    async fn handle_nullification(&mut self, nullification: Nullification<V>) {
+    async fn handle_nullification(&mut self, nullification: Nullification<C::Signature>) {
         // Add signatures to view (needed to broadcast notarization if we get proposal)
         let view = nullification.view();
         let round = self.views.entry(view).or_insert_with(|| {
@@ -1119,14 +1123,11 @@ impl<
             )
         });
         for signature in &nullification.signatures {
-            let public_key_index = self
-                .supervisor
-                .is_participant(view, signature.signer())
-                .unwrap();
             let nullify = Nullify::new(view, signature.clone());
-            let msg = Voter::Nullify::<V, D>(nullify.clone()).encode().into();
-            if round.add_verified_nullify(public_key_index, nullify).await && self.journal.is_some()
-            {
+            let msg = Voter::Nullify::<C::Signature, D>(nullify.clone())
+                .encode()
+                .into();
+            if round.add_verified_nullify(nullify).await && self.journal.is_some() {
                 self.journal
                     .as_mut()
                     .unwrap()
@@ -1144,7 +1145,7 @@ impl<
         self.enter_view(nullification.view + 1);
     }
 
-    async fn finalize(&mut self, finalize: Finalize<V, D>) {
+    async fn finalize(&mut self, finalize: Finalize<C::Signature, D>) {
         // Ensure we are in the right view to process this message
         let view = finalize.view();
         if !self.interesting(view, false) {
@@ -1152,20 +1153,23 @@ impl<
         }
 
         // Verify that signer is a validator
-        let Some(public_key_index) = self.supervisor.is_participant(view, finalize.signer()) else {
+        let Some(participants) = self.supervisor.participants(view) else {
+            return;
+        };
+        let Some(public_key) = participants.get(finalize.signer() as usize) else {
             return;
         };
 
         // Verify the signature
-        if !finalize.verify(&self.finalize_namespace) {
+        if !finalize.verify::<C::PublicKey, C>(public_key, &self.finalize_namespace) {
             return;
         }
 
         // Handle finalize
-        self.handle_finalize(public_key_index, finalize).await;
+        self.handle_finalize(finalize).await;
     }
 
-    async fn handle_finalize(&mut self, public_key_index: u32, finalize: Finalize<V, D>) {
+    async fn handle_finalize(&mut self, finalize: Finalize<C::Signature, D>) {
         // Get view for finalize
         let view = finalize.view();
         let round = self.views.entry(view).or_insert_with(|| {
@@ -1178,12 +1182,10 @@ impl<
         });
 
         // Handle finalize
-        let msg = Voter::Finalize::<V, D>(finalize.clone()).encode().into();
-        if round
-            .add_verified_finalize(public_key_index, finalize)
-            .await
-            && self.journal.is_some()
-        {
+        let msg = Voter::Finalize::<C::Signature, D>(finalize.clone())
+            .encode()
+            .into();
+        if round.add_verified_finalize(finalize).await && self.journal.is_some() {
             self.journal
                 .as_mut()
                 .unwrap()
@@ -1193,7 +1195,7 @@ impl<
         }
     }
 
-    async fn finalization(&mut self, finalization: Finalization<V, D>) {
+    async fn finalization(&mut self, finalization: Finalization<C::Signature, D>) {
         // Check if we are still in a view where this finalization could help
         let view = finalization.view();
         if !self.interesting(view, true) {
@@ -1209,7 +1211,7 @@ impl<
         }
 
         // Verify finalization
-        if !finalization.verify(&self.supervisor, &self.finalize_namespace) {
+        if !finalization.verify::<S, C>(&self.supervisor, &self.finalize_namespace) {
             return;
         }
 
@@ -1217,7 +1219,7 @@ impl<
         self.handle_finalization(finalization).await;
     }
 
-    async fn handle_finalization(&mut self, finalization: Finalization<V, D>) {
+    async fn handle_finalization(&mut self, finalization: Finalization<C::Signature, D>) {
         // Add signatures to view (needed to broadcast finalization if we get proposal)
         let view = finalization.view();
         let round = self.views.entry(view).or_insert_with(|| {
@@ -1229,17 +1231,11 @@ impl<
             )
         });
         for signature in finalization.signatures {
-            let public_key_index = self
-                .supervisor
-                .is_participant(view, signature.signer())
-                .unwrap();
             let finalize = Finalize::new(finalization.proposal.clone(), signature.clone());
-            let msg = Voter::Finalize::<V, D>(finalize.clone()).encode().into();
-            if round
-                .add_verified_finalize(public_key_index, finalize)
-                .await
-                && self.journal.is_some()
-            {
+            let msg = Voter::Finalize::<C::Signature, D>(finalize.clone())
+                .encode()
+                .into();
+            if round.add_verified_finalize(finalize).await && self.journal.is_some() {
                 self.journal
                     .as_mut()
                     .unwrap()
