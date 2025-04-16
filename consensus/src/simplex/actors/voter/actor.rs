@@ -6,11 +6,12 @@ use crate::{
         types::{
             finalize_namespace, notarize_namespace, nullify_namespace, threshold, Activity,
             Attributable, ConflictingFinalize, ConflictingNotarize, Context, Finalize, Notarize,
-            Nullification, Nullify, NullifyFinalize, Proposal, View,
+            Nullification, Nullify, NullifyFinalize, Proposal, View, Voter,
         },
     },
     Automaton, Relay, Reporter, Supervisor, LATENCY,
 };
+use commonware_codec::Encode;
 use commonware_cryptography::{
     sha256::{hash, Digest as Sha256Digest},
     Digest, Scheme, Verifier,
@@ -503,23 +504,20 @@ impl<
             Some(validators) => validators,
             None => return false,
         };
-        let (threshold, _) = match threshold(validators) {
-            Some(threshold) => threshold,
-            None => return false,
-        };
+        let (threshold, _) = threshold(validators);
         round.nullifies.len() >= threshold as usize
     }
 
-    fn is_finalized(&self, view: View) -> Option<&D> {
+    fn is_finalized(&self, view: View) -> Option<&Proposal<D>> {
         let round = self.views.get(&view)?;
-        let (digest, proposal) = round.proposal.as_ref()?;
-        let finalizes = round.finalizes.get(digest)?;
+        let proposal = round.proposal.as_ref()?;
+        let finalizes = round.finalized_proposals.get(proposal)?;
         let validators = self.supervisor.participants(view)?;
-        let (threshold, _) = threshold(validators)?;
+        let (threshold, _) = threshold(validators);
         if finalizes.len() < threshold as usize {
             return None;
         }
-        Some(&proposal.digest)
+        Some(&proposal)
     }
 
     fn find_parent(&self) -> Result<(View, D), View> {
@@ -532,7 +530,7 @@ impl<
             // If have notarization, return
             let parent = self.is_notarized(cursor);
             if let Some(parent) = parent {
-                return Ok((cursor, parent.clone()));
+                return Ok((cursor, parent.payload));
             }
 
             // If have finalization, return
@@ -540,7 +538,7 @@ impl<
             // We never want to build on some view less than finalized and this prevents that
             let parent = self.is_finalized(cursor);
             if let Some(parent) = parent {
-                return Ok((cursor, parent.clone()));
+                return Ok((cursor, parent.payload));
             }
 
             // If have nullification, continue
@@ -653,22 +651,14 @@ impl<
         let past_view = self.view - 1;
         if retry && past_view > 0 {
             if let Some(notarization) = self.construct_notarization(past_view, true) {
-                let msg = wire::Voter {
-                    payload: Some(wire::voter::Payload::Notarization(notarization.message)),
-                }
-                .encode_to_vec()
-                .into();
+                let msg = Voter::Notarization(notarization).encode().into();
                 sender.send(Recipients::All, msg, true).await.unwrap();
                 self.broadcast_messages
                     .get_or_create(&metrics::NOTARIZATION)
                     .inc();
                 debug!(view = past_view, "rebroadcast entry notarization");
             } else if let Some(nullification) = self.construct_nullification(past_view, true) {
-                let msg = wire::Voter {
-                    payload: Some(wire::voter::Payload::Nullification(nullification)),
-                }
-                .encode_to_vec()
-                .into();
+                let msg = Voter::Nullification(nullification).encode().into();
                 sender.send(Recipients::All, msg, true).await.unwrap();
                 self.broadcast_messages
                     .get_or_create(&metrics::NULLIFICATION)
@@ -688,20 +678,10 @@ impl<
             .supervisor
             .is_participant(self.view, &self.crypto.public_key())
             .unwrap();
-        let message = nullify_message(self.view);
-        let null = wire::Nullify {
-            view: self.view,
-            signature: Some(wire::Signature {
-                public_key: public_key_index,
-                signature: self
-                    .crypto
-                    .sign(Some(&self.nullify_namespace), &message)
-                    .to_vec(),
-            }),
-        };
+        let nullify = Nullify::sign(&mut self.crypto, self.view, &self.nullify_namespace);
 
         // Handle the nullify
-        self.handle_nullify(public_key, null.clone()).await;
+        self.handle_nullify(public_key, nullify.clone()).await;
 
         // Sync the journal
         self.journal
@@ -712,11 +692,7 @@ impl<
             .expect("unable to sync journal");
 
         // Broadcast nullify
-        let msg = wire::Voter {
-            payload: Some(wire::voter::Payload::Nullify(null)),
-        }
-        .encode_to_vec()
-        .into();
+        let msg = Voter::Nullify(nullify).encode().into();
         sender.send(Recipients::All, msg, true).await.unwrap();
         self.broadcast_messages
             .get_or_create(&metrics::NULLIFY)
@@ -724,44 +700,27 @@ impl<
         debug!(view = self.view, "broadcasted nullify");
     }
 
-    async fn nullify(&mut self, nullify: wire::Nullify) {
+    async fn nullify(&mut self, nullify: Nullify<V>) {
         // Ensure we are in the right view to process this message
         if !self.interesting(nullify.view, false) {
             return;
         }
 
-        // Parse signature
-        let Some(signature) = nullify.signature.as_ref() else {
-            return;
-        };
-
         // Verify that signer is a validator
-        let Some(participants) = self.supervisor.participants(nullify.view) else {
-            return;
-        };
-        let Ok(public_key_index) = usize::try_from(signature.public_key) else {
-            return;
-        };
-        let Some(public_key) = participants.get(public_key_index).cloned() else {
+        let Some(public_key_index) = self
+            .supervisor
+            .is_participant(nullify.view, &nullify.signer())
+        else {
             return;
         };
 
         // Verify the signature
-        let nullify_message = nullify_message(nullify.view);
-        let Ok(signature) = C::Signature::try_from(&signature.signature) else {
-            return;
-        };
-        if !C::verify(
-            Some(&self.nullify_namespace),
-            &nullify_message,
-            &public_key,
-            &signature,
-        ) {
+        if !nullify.verify(&self.nullify_namespace) {
             return;
         }
 
         // Handle nullify
-        self.handle_nullify(&public_key, nullify).await;
+        self.handle_nullify(public_key_index, nullify).await;
     }
 
     async fn handle_nullify(&mut self, public_key: &C::PublicKey, nullify: wire::Nullify) {
