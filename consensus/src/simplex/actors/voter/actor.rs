@@ -1402,7 +1402,11 @@ impl<
         ))
     }
 
-    fn construct_finalization(&mut self, view: u64, force: bool) -> Option<Finalization<V, D>> {
+    fn construct_finalization(
+        &mut self,
+        view: u64,
+        force: bool,
+    ) -> Option<Finalization<C::Signature, D>> {
         let round = match self.views.get_mut(&view) {
             Some(view) => view,
             None => {
@@ -1419,10 +1423,19 @@ impl<
         };
         let threshold =
             quorum(validators.len() as u32).expect("not enough validators for a quorum");
-        let (proposal, finalizes) = round.finalizable(threshold, force)?;
+        let (proposal, proposal_finalizes, finalizes) = round.finalizable(threshold, force)?;
 
         // Construct finalization
-        let signatures = finalizes.into_iter().map(|n| n.signature).collect();
+        let mut signatures = Vec::new();
+        for finalize in proposal_finalizes {
+            signatures.push(
+                finalizes[*finalize as usize]
+                    .as_ref()
+                    .unwrap()
+                    .signature
+                    .clone(),
+            );
+        }
         Some(Finalization::new(proposal, signatures))
     }
 
@@ -1432,19 +1445,10 @@ impl<
         sender: &mut impl Sender,
         view: u64,
     ) {
-        // Get public key index
-        let Some(public_key_index) = self
-            .supervisor
-            .is_participant(view, &self.crypto.public_key())
-        else {
-            return;
-        };
-
         // Attempt to notarize
         if let Some(notarize) = self.construct_notarize(view) {
             // Handle the notarize
-            self.handle_notarize(public_key_index, notarize.clone())
-                .await;
+            self.handle_notarize(notarize.clone()).await;
 
             // Sync the journal
             self.journal
@@ -1578,8 +1582,7 @@ impl<
         // Attempt to finalize
         if let Some(finalize) = self.construct_finalize(view) {
             // Handle the finalize
-            self.handle_finalize(public_key_index, finalize.clone())
-                .await;
+            self.handle_finalize(finalize.clone()).await;
 
             // Sync the journal
             self.journal
