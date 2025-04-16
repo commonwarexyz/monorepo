@@ -29,6 +29,7 @@ pub struct Supervisor<C: Verifier, D: Digest> {
     nullify_namespace: Vec<u8>,
     finalize_namespace: Vec<u8>,
 
+    pub leaders: Arc<Mutex<HashMap<View, C::PublicKey>>>,
     pub notarizes: Arc<Mutex<Participation<C::PublicKey, D>>>,
     pub notarizations: Arc<Mutex<HashMap<View, Notarization<C::Signature, D>>>>,
     pub nullifies: Arc<Mutex<HashMap<View, HashSet<C::PublicKey>>>>,
@@ -53,6 +54,7 @@ impl<C: Verifier, D: Digest> Supervisor<C, D> {
             parsed_participants.insert(view, (map, validators));
         }
         Self {
+            leaders: Arc::new(Mutex::new(HashMap::new())),
             participants: parsed_participants,
             notarize_namespace: notarize_namespace(&cfg.namespace),
             nullify_namespace: nullify_namespace(&cfg.namespace),
@@ -81,7 +83,13 @@ impl<C: Verifier, D: Digest> Su for Supervisor<C, D> {
                 panic!("no participants in required range");
             }
         };
-        Some(closest.1[index as usize % closest.1.len()].clone())
+        let leader = closest.1[index as usize % closest.1.len()].clone();
+        self.leaders
+            .lock()
+            .unwrap()
+            .entry(index)
+            .or_insert(leader.clone());
+        Some(leader)
     }
 
     fn participants(&self, index: Self::Index) -> Option<&Vec<Self::PublicKey>> {
