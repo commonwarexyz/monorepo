@@ -59,16 +59,16 @@ pub fn threshold<P: Array>(validators: &[P]) -> (u32, u32) {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum Voter<V: Verifier, D: Digest> {
-    Notarize(Notarize<V, D>),
-    Notarization(Notarization<V, D>),
-    Nullify(Nullify<V>),
-    Nullification(Nullification<V>),
-    Finalize(Finalize<V, D>),
-    Finalization(Finalization<V, D>),
+pub enum Voter<S: Array, D: Digest> {
+    Notarize(Notarize<S, D>),
+    Notarization(Notarization<S, D>),
+    Nullify(Nullify<S>),
+    Nullification(Nullification<S>),
+    Finalize(Finalize<S, D>),
+    Finalization(Finalization<S, D>),
 }
 
-impl<V: Verifier, D: Digest> Write for Voter<V, D> {
+impl<S: Array, D: Digest> Write for Voter<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
             Voter::Notarize(notarize) => {
@@ -99,20 +99,20 @@ impl<V: Verifier, D: Digest> Write for Voter<V, D> {
     }
 }
 
-impl<V: Verifier, D: Digest> Read<usize> for Voter<V, D> {
+impl<S: Array, D: Digest> Read<usize> for Voter<S, D> {
     fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
         let tag = u8::read(reader)?;
         match tag {
-            0 => Ok(Voter::Notarize(Notarize::<V, D>::read(reader)?)),
-            1 => Ok(Voter::Notarization(Notarization::<V, D>::read_cfg(
+            0 => Ok(Voter::Notarize(Notarize::<S, D>::read(reader)?)),
+            1 => Ok(Voter::Notarization(Notarization::<S, D>::read_cfg(
                 reader, max_len,
             )?)),
-            2 => Ok(Voter::Nullify(Nullify::<V>::read(reader)?)),
-            3 => Ok(Voter::Nullification(Nullification::<V>::read_cfg(
+            2 => Ok(Voter::Nullify(Nullify::<S>::read(reader)?)),
+            3 => Ok(Voter::Nullification(Nullification::<S>::read_cfg(
                 reader, max_len,
             )?)),
-            4 => Ok(Voter::Finalize(Finalize::<V, D>::read(reader)?)),
-            5 => Ok(Voter::Finalization(Finalization::<V, D>::read_cfg(
+            4 => Ok(Voter::Finalize(Finalize::<S, D>::read(reader)?)),
+            5 => Ok(Voter::Finalization(Finalization::<S, D>::read_cfg(
                 reader, max_len,
             )?)),
             _ => Err(Error::Invalid("consensus::simplex::Voter", "Invalid type")),
@@ -120,7 +120,7 @@ impl<V: Verifier, D: Digest> Read<usize> for Voter<V, D> {
     }
 }
 
-impl<V: Verifier, D: Digest> EncodeSize for Voter<V, D> {
+impl<S: Array, D: Digest> EncodeSize for Voter<S, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Voter::Notarize(notarize) => notarize.encode_size(),
@@ -133,7 +133,7 @@ impl<V: Verifier, D: Digest> EncodeSize for Voter<V, D> {
     }
 }
 
-impl<V: Verifier, D: Digest> Viewable for Voter<V, D> {
+impl<S: Array, D: Digest> Viewable for Voter<S, D> {
     fn view(&self) -> View {
         match self {
             Voter::Notarize(notarize) => notarize.view(),
@@ -570,7 +570,7 @@ impl<S: Array> Write for Nullification<S> {
 impl<S: Array> Read<usize> for Nullification<S> {
     fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
         let view = View::read(reader)?;
-        let signatures = Vec::<Signature<V>>::read_range(reader, ..=*max_len)?;
+        let signatures = Vec::<Signature<S>>::read_range(reader, ..=*max_len)?;
         Ok(Self { view, signatures })
     }
 }
@@ -765,12 +765,12 @@ impl<S: Array, D: Digest> Viewable for Finalization<S, D> {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum Backfiller<V: Verifier, D: Digest> {
+pub enum Backfiller<S: Array, D: Digest> {
     Request(Request),
-    Response(Response<V, D>),
+    Response(Response<S, D>),
 }
 
-impl<V: Verifier, D: Digest> Write for Backfiller<V, D> {
+impl<S: Array, D: Digest> Write for Backfiller<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
             Backfiller::Request(request) => {
@@ -785,12 +785,12 @@ impl<V: Verifier, D: Digest> Write for Backfiller<V, D> {
     }
 }
 
-impl<V: Verifier, D: Digest> Read<(usize, usize)> for Backfiller<V, D> {
+impl<S: Array, D: Digest> Read<(usize, usize)> for Backfiller<S, D> {
     fn read_cfg(reader: &mut impl Buf, cfg: &(usize, usize)) -> Result<Self, Error> {
         let tag = u8::read(reader)?;
         match tag {
             0 => Ok(Backfiller::Request(Request::read_cfg(reader, &cfg.0)?)),
-            1 => Ok(Backfiller::Response(Response::<V, D>::read_cfg(
+            1 => Ok(Backfiller::Response(Response::<S, D>::read_cfg(
                 reader, cfg,
             )?)),
             _ => Err(Error::Invalid(
@@ -801,7 +801,7 @@ impl<V: Verifier, D: Digest> Read<(usize, usize)> for Backfiller<V, D> {
     }
 }
 
-impl<V: Verifier, D: Digest> EncodeSize for Backfiller<V, D> {
+impl<S: Array, D: Digest> EncodeSize for Backfiller<S, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Backfiller::Request(request) => request.encode_size(),
@@ -856,17 +856,17 @@ impl EncodeSize for Request {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct Response<V: Verifier, D: Digest> {
+pub struct Response<S: Array, D: Digest> {
     pub id: u64,
-    pub notarizations: Vec<Notarization<V, D>>,
-    pub nullifications: Vec<Nullification<V>>,
+    pub notarizations: Vec<Notarization<S, D>>,
+    pub nullifications: Vec<Nullification<S>>,
 }
 
-impl<V: Verifier, D: Digest> Response<V, D> {
+impl<S: Array, D: Digest> Response<S, D> {
     pub fn new(
         id: u64,
-        notarizations: Vec<Notarization<V, D>>,
-        nullifications: Vec<Nullification<V>>,
+        notarizations: Vec<Notarization<S, D>>,
+        nullifications: Vec<Nullification<S>>,
     ) -> Self {
         Self {
             id,
@@ -876,7 +876,7 @@ impl<V: Verifier, D: Digest> Response<V, D> {
     }
 }
 
-impl<V: Verifier, D: Digest> Write for Response<V, D> {
+impl<S: Array, D: Digest> Write for Response<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.id.write(writer);
         self.notarizations.write(writer);
@@ -884,13 +884,13 @@ impl<V: Verifier, D: Digest> Write for Response<V, D> {
     }
 }
 
-impl<V: Verifier, D: Digest> Read<(usize, usize)> for Response<V, D> {
+impl<S: Array, D: Digest> Read<(usize, usize)> for Response<S, D> {
     fn read_cfg(reader: &mut impl Buf, max_len: &(usize, usize)) -> Result<Self, Error> {
         let id = u64::read(reader)?;
         let notarizations =
-            Vec::<Notarization<V, D>>::read_cfg(reader, &(..=max_len.0, max_len.1))?;
+            Vec::<Notarization<S, D>>::read_cfg(reader, &(..=max_len.0, max_len.1))?;
         let remaining = max_len.0 - notarizations.len();
-        let nullifications = Vec::<Nullification<V>>::read_cfg(reader, &(..=remaining, max_len.1))?;
+        let nullifications = Vec::<Nullification<S>>::read_cfg(reader, &(..=remaining, max_len.1))?;
         Ok(Self {
             id,
             notarizations,
@@ -899,23 +899,23 @@ impl<V: Verifier, D: Digest> Read<(usize, usize)> for Response<V, D> {
     }
 }
 
-impl<V: Verifier, D: Digest> EncodeSize for Response<V, D> {
+impl<S: Array, D: Digest> EncodeSize for Response<S, D> {
     fn encode_size(&self) -> usize {
         self.id.encode_size() + self.notarizations.encode_size() + self.nullifications.encode_size()
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
-pub enum Activity<V: Verifier, D: Digest> {
-    Notarize(Notarize<V, D>),
-    Notarization(Notarization<V, D>),
-    Nullify(Nullify<V>),
-    Nullification(Nullification<V>),
-    Finalize(Finalize<V, D>),
-    Finalization(Finalization<V, D>),
-    ConflictingNotarize(ConflictingNotarize<V, D>),
-    ConflictingFinalize(ConflictingFinalize<V, D>),
-    NullifyFinalize(NullifyFinalize<V, D>),
+pub enum Activity<S: Array, D: Digest> {
+    Notarize(Notarize<S, D>),
+    Notarization(Notarization<S, D>),
+    Nullify(Nullify<S>),
+    Nullification(Nullification<S>),
+    Finalize(Finalize<S, D>),
+    Finalization(Finalization<S, D>),
+    ConflictingNotarize(ConflictingNotarize<S, D>),
+    ConflictingFinalize(ConflictingFinalize<S, D>),
+    NullifyFinalize(NullifyFinalize<S, D>),
 }
 
 impl<V: Verifier, D: Digest> Write for Activity<V, D> {
@@ -1015,35 +1015,43 @@ impl<V: Verifier, D: Digest> EncodeSize for Activity<V, D> {
 }
 
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
-pub struct ConflictingNotarize<V: Verifier, D: Digest> {
-    pub notarize_1: Notarize<V, D>,
-    pub notarize_2: Notarize<V, D>,
+pub struct ConflictingNotarize<S: Array, D: Digest> {
+    pub notarize_1: Notarize<S, D>,
+    pub notarize_2: Notarize<S, D>,
 }
 
-impl<V: Verifier, D: Digest> ConflictingNotarize<V, D> {
-    pub fn new(notarize_1: Notarize<V, D>, notarize_2: Notarize<V, D>) -> Self {
+impl<S: Array, D: Digest> ConflictingNotarize<S, D> {
+    pub fn new(notarize_1: Notarize<S, D>, notarize_2: Notarize<S, D>) -> Self {
         Self {
             notarize_1,
             notarize_2,
         }
     }
 
-    pub fn verify(&self, notarize_namespace: &[u8]) -> bool {
-        self.notarize_1.verify(notarize_namespace) && self.notarize_2.verify(notarize_namespace)
+    pub fn verify<P: Array, V: Verifier<PublicKey = P, Signature = S>>(
+        &self,
+        public_key: &P,
+        notarize_namespace: &[u8],
+    ) -> bool {
+        self.notarize_1
+            .verify::<P, V>(public_key, notarize_namespace)
+            && self
+                .notarize_2
+                .verify::<P, V>(public_key, notarize_namespace)
     }
 }
 
-impl<V: Verifier, D: Digest> Write for ConflictingNotarize<V, D> {
+impl<S: Array, D: Digest> Write for ConflictingNotarize<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.notarize_1.write(writer);
         self.notarize_2.write(writer);
     }
 }
 
-impl<V: Verifier, D: Digest> Read for ConflictingNotarize<V, D> {
+impl<S: Array, D: Digest> Read for ConflictingNotarize<S, D> {
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let notarize_1 = Notarize::<V, D>::read(reader)?;
-        let notarize_2 = Notarize::<V, D>::read(reader)?;
+        let notarize_1 = Notarize::<S, D>::read(reader)?;
+        let notarize_2 = Notarize::<S, D>::read(reader)?;
         if notarize_1.view() != notarize_2.view() {
             return Err(Error::Invalid(
                 "consensus::simplex::ConflictingNotarize",
@@ -1063,8 +1071,8 @@ impl<V: Verifier, D: Digest> Read for ConflictingNotarize<V, D> {
     }
 }
 
-impl<V: Verifier, D: Digest> FixedSize for ConflictingNotarize<V, D> {
-    const SIZE: usize = Notarize::<V, D>::SIZE + Notarize::<V, D>::SIZE;
+impl<S: Array, D: Digest> FixedSize for ConflictingNotarize<S, D> {
+    const SIZE: usize = Notarize::<S, D>::SIZE + Notarize::<S, D>::SIZE;
 }
 
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
