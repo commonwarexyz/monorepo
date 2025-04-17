@@ -1,4 +1,7 @@
+#[cfg(all(feature = "iouring", target_os = "linux"))]
+use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage};
 use crate::storage::metered::MeteredStorage;
+#[cfg(not(all(feature = "iouring", target_os = "linux")))]
 use crate::storage::tokio_storage::{Config as TokioStorageConfig, Storage as TokioStorage};
 use crate::Storage as StorageTrait;
 use crate::{utils::Signaler, Clock, Error, Handle, Signal, METRICS_PREFIX};
@@ -198,6 +201,15 @@ impl Executor {
             .expect("failed to create Tokio runtime");
         let (signaler, signal) = Signaler::new();
 
+        #[cfg(all(feature = "iouring", target_os = "linux"))]
+        let storage = MeteredStorage::new(
+            IoUringStorage::new(IoUringConfig {
+                storage_directory: cfg.storage_directory.clone(),
+            }),
+            runtime_registry,
+        );
+
+        #[cfg(not(all(feature = "iouring", target_os = "linux")))]
         let storage = MeteredStorage::new(
             TokioStorage::new(TokioStorageConfig::new(cfg.storage_directory.clone())),
             runtime_registry,
@@ -247,6 +259,12 @@ impl crate::Runner for Runner {
     }
 }
 
+#[cfg(all(feature = "iouring", target_os = "linux"))]
+type Storage = MeteredStorage<IoUringStorage>;
+
+#[cfg(not(all(feature = "iouring", target_os = "linux")))]
+type Storage = MeteredStorage<TokioStorage>;
+
 /// Implementation of [`crate::Spawner`], [`crate::Clock`],
 /// [`crate::Network`], and [`crate::Storage`] for the `tokio`
 /// runtime.
@@ -254,7 +272,7 @@ pub struct Context {
     label: String,
     spawned: bool,
     executor: Arc<Executor>,
-    storage: MeteredStorage<TokioStorage>,
+    storage: Storage,
 }
 
 impl Clone for Context {
@@ -621,7 +639,7 @@ impl RngCore for Context {
 impl CryptoRng for Context {}
 
 impl crate::Storage for Context {
-    type Blob = <MeteredStorage<TokioStorage> as StorageTrait>::Blob;
+    type Blob = <Storage as StorageTrait>::Blob;
 
     async fn open(&self, partition: &str, name: &[u8]) -> Result<Self::Blob, Error> {
         self.storage.open(partition, name).await

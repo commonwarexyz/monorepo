@@ -14,7 +14,7 @@ use crate::Error;
 
 #[derive(Clone)]
 pub struct Config {
-    storage_directory: PathBuf,
+    pub storage_directory: PathBuf,
 }
 
 impl Default for Config {
