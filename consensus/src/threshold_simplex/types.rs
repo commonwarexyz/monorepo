@@ -351,7 +351,10 @@ impl<D: Digest> Read for Notarize<D> {
         let proposal_signature = PartialSignature::read(reader)?;
         let seed_signature = PartialSignature::read(reader)?;
         if proposal_signature.index != seed_signature.index {
-            return Err(Error::Invalid("notarize", "mismatched signatures"));
+            return Err(Error::Invalid(
+                "consensus::threshold_simplex::Notarize",
+                "mismatched signatures",
+            ));
         }
         Ok(Notarize {
             proposal,
@@ -539,7 +542,10 @@ impl Read for Nullify {
         let view_signature = PartialSignature::read(reader)?;
         let seed_signature = PartialSignature::read(reader)?;
         if view_signature.index != seed_signature.index {
-            return Err(Error::Invalid("nullify", "mismatched signatures"));
+            return Err(Error::Invalid(
+                "consensus::threshold_simplex::Nullify",
+                "mismatched signatures",
+            ));
         }
         Ok(Nullify {
             view,
@@ -1215,7 +1221,7 @@ impl<D: Digest> Read for ConflictingNotarize<D> {
         let signature_2 = PartialSignature::read(reader)?;
         if signature_1.index != signature_2.index {
             return Err(Error::Invalid(
-                "conflicting_notarize",
+                "consensus::threshold_simplex::ConflictingNotarize",
                 "mismatched signatures",
             ));
         }
@@ -1350,7 +1356,7 @@ impl<D: Digest> Read for ConflictingFinalize<D> {
         let signature_2 = PartialSignature::read(reader)?;
         if signature_1.index != signature_2.index {
             return Err(Error::Invalid(
-                "conflicting_finalize",
+                "consensus::threshold_simplex::ConflictingFinalize",
                 "mismatched signatures",
             ));
         }
@@ -1451,7 +1457,10 @@ impl<D: Digest> Read for NullifyFinalize<D> {
         let view_signature = PartialSignature::read(reader)?;
         let finalize_signature = PartialSignature::read(reader)?;
         if view_signature.index != finalize_signature.index {
-            return Err(Error::Invalid("nullify_finalize", "mismatched signatures"));
+            return Err(Error::Invalid(
+                "consensus::threshold_simplex::NullifyFinalize",
+                "mismatched signatures",
+            ));
         }
         Ok(NullifyFinalize {
             proposal,
