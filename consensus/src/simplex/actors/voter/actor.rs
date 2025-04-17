@@ -34,7 +34,7 @@ use std::{
     collections::{btree_map::Entry, BTreeMap, HashMap},
     time::{Duration, SystemTime},
 };
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, trace, warn};
 
 type Notarizable<'a, V, D> = Option<(Proposal<D>, &'a Vec<u32>, &'a Vec<Option<Notarize<V, D>>>)>;
 type Nullifiable<'a, V> = Option<(View, &'a BTreeMap<u32, Nullify<V>>)>;
@@ -666,27 +666,28 @@ impl<
         debug!(view = self.view, "broadcasted nullify");
     }
 
-    async fn nullify(&mut self, nullify: Nullify<C::Signature>) {
+    async fn nullify(&mut self, nullify: Nullify<C::Signature>) -> bool {
         // Ensure we are in the right view to process this message
         if !self.interesting(nullify.view, false) {
-            return;
+            return false;
         }
 
         // Verify that signer is a validator
         let Some(participants) = self.supervisor.participants(nullify.view) else {
-            return;
+            return false;
         };
         let Some(public_key) = participants.get(nullify.signer() as usize) else {
-            return;
+            return false;
         };
 
         // Verify the signature
         if !nullify.verify::<C::PublicKey, C>(public_key, &self.nullify_namespace) {
-            return;
+            return false;
         }
 
         // Handle nullify
         self.handle_nullify(nullify).await;
+        true
     }
 
     async fn handle_nullify(&mut self, nullify: Nullify<C::Signature>) {
@@ -977,28 +978,29 @@ impl<
         self.tracked_views.set(self.views.len() as i64);
     }
 
-    async fn notarize(&mut self, notarize: Notarize<C::Signature, D>) {
+    async fn notarize(&mut self, notarize: Notarize<C::Signature, D>) -> bool {
         // Ensure we are in the right view to process this message
         let view = notarize.view();
         if !self.interesting(view, false) {
-            return;
+            return false;
         }
 
         // Verify that signer is a validator
         let Some(participants) = self.supervisor.participants(view) else {
-            return;
+            return false;
         };
         let Some(public_key) = participants.get(notarize.signer() as usize) else {
-            return;
+            return false;
         };
 
         // Verify the signature
         if !notarize.verify::<C::PublicKey, C>(public_key, &self.notarize_namespace) {
-            return;
+            return false;
         }
 
         // Handle notarize
         self.handle_notarize(notarize).await;
+        true
     }
 
     async fn handle_notarize(&mut self, notarize: Notarize<C::Signature, D>) {
@@ -1027,28 +1029,29 @@ impl<
         }
     }
 
-    async fn notarization(&mut self, notarization: Notarization<C::Signature, D>) {
+    async fn notarization(&mut self, notarization: Notarization<C::Signature, D>) -> bool {
         // Check if we are still in a view where this notarization could help
         let view = notarization.view();
         if !self.interesting(view, true) {
-            return;
+            return false;
         }
 
         // Determine if we already broadcast notarization for this view (in which
         // case we can ignore this message)
         if let Some(ref round) = self.views.get_mut(&view) {
             if round.broadcast_notarization {
-                return;
+                return false;
             }
         }
 
         // Verify notarization
         if !notarization.verify::<S, C>(&self.supervisor, &self.notarize_namespace) {
-            return;
+            return false;
         }
 
         // Handle notarization
         self.handle_notarization(&notarization).await;
+        true
     }
 
     async fn handle_notarization(&mut self, notarization: &Notarization<C::Signature, D>) {
@@ -1095,27 +1098,28 @@ impl<
         self.enter_view(view + 1);
     }
 
-    async fn nullification(&mut self, nullification: Nullification<C::Signature>) {
+    async fn nullification(&mut self, nullification: Nullification<C::Signature>) -> bool {
         // Check if we are still in a view where this notarization could help
         if !self.interesting(nullification.view, true) {
-            return;
+            return false;
         }
 
         // Determine if we already broadcast nullification for this view (in which
         // case we can ignore this message)
         if let Some(ref round) = self.views.get_mut(&nullification.view) {
             if round.broadcast_nullification {
-                return;
+                return false;
             }
         }
 
         // Verify nullification
         if !nullification.verify::<S, C>(&self.supervisor, &self.nullify_namespace) {
-            return;
+            return false;
         }
 
         // Handle notarization
         self.handle_nullification(&nullification).await;
+        true
     }
 
     async fn handle_nullification(&mut self, nullification: &Nullification<C::Signature>) {
@@ -1152,28 +1156,29 @@ impl<
         self.enter_view(nullification.view + 1);
     }
 
-    async fn finalize(&mut self, finalize: Finalize<C::Signature, D>) {
+    async fn finalize(&mut self, finalize: Finalize<C::Signature, D>) -> bool {
         // Ensure we are in the right view to process this message
         let view = finalize.view();
         if !self.interesting(view, false) {
-            return;
+            return false;
         }
 
         // Verify that signer is a validator
         let Some(participants) = self.supervisor.participants(view) else {
-            return;
+            return false;
         };
         let Some(public_key) = participants.get(finalize.signer() as usize) else {
-            return;
+            return false;
         };
 
         // Verify the signature
         if !finalize.verify::<C::PublicKey, C>(public_key, &self.finalize_namespace) {
-            return;
+            return false;
         }
 
         // Handle finalize
         self.handle_finalize(finalize).await;
+        true
     }
 
     async fn handle_finalize(&mut self, finalize: Finalize<C::Signature, D>) {
@@ -1202,28 +1207,29 @@ impl<
         }
     }
 
-    async fn finalization(&mut self, finalization: Finalization<C::Signature, D>) {
+    async fn finalization(&mut self, finalization: Finalization<C::Signature, D>) -> bool {
         // Check if we are still in a view where this finalization could help
         let view = finalization.view();
         if !self.interesting(view, true) {
-            return;
+            return false;
         }
 
         // Determine if we already broadcast finalization for this view (in which
         // case we can ignore this message)
         if let Some(ref round) = self.views.get_mut(&view) {
             if round.broadcast_finalization {
-                return;
+                return false;
             }
         }
 
         // Verify finalization
         if !finalization.verify::<S, C>(&self.supervisor, &self.finalize_namespace) {
-            return;
+            return false;
         }
 
         // Process finalization
         self.handle_finalization(&finalization).await;
+        true
     }
 
     async fn handle_finalization(&mut self, finalization: &Finalization<C::Signature, D>) {
@@ -1902,35 +1908,39 @@ impl<
                     let Ok(msg) = Voter::decode_cfg(msg, &self.max_participants) else {
                         continue;
                     };
-                    view = msg.view();
 
                     // Process message
-                    match msg {
+                    view = msg.view();
+                    let interesting = match msg {
                         Voter::Notarize(notarize) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::notarize(&s)).inc();
-                            self.notarize(notarize).await;
+                            self.notarize(notarize).await
                         }
                         Voter::Notarization(notarization) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::notarization(&s)).inc();
-                            self.notarization(notarization).await;
+                            self.notarization(notarization).await
                         }
                         Voter::Nullify(nullify) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::nullify(&s)).inc();
-                            self.nullify(nullify).await;
+                            self.nullify(nullify).await
                         }
                         Voter::Nullification(nullification) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::nullification(&s)).inc();
-                            self.nullification(nullification).await;
+                            self.nullification(nullification).await
                         }
                         Voter::Finalize(finalize) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::finalize(&s)).inc();
-                            self.finalize(finalize).await;
+                            self.finalize(finalize).await
                         }
                         Voter::Finalization(finalization) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::finalization(&s)).inc();
-                            self.finalization(finalization).await;
+                            self.finalization(finalization).await
                         }
                     };
+                    if !interesting {
+                        trace!(sender=?s, view, "dropped message");
+                        continue;
+                    }
                 },
             };
 

@@ -2152,7 +2152,7 @@ impl<
                     // We opt to not filter by `interesting()` here because each message type has a different
                     // configuration for handling `future` messages.
                     view = msg.view();
-                    let handled = match msg {
+                    let interesting = match msg {
                         Voter::Notarize(notarize) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::notarize(&s)).inc();
                             self.notarize(&s, notarize).await
@@ -2178,7 +2178,7 @@ impl<
                             self.finalization(finalization).await
                         }
                     };
-                    if !handled {
+                    if !interesting {
                         trace!(sender=?s, view, "dropped message");
                         continue;
                     }
