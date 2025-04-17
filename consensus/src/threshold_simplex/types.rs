@@ -971,9 +971,12 @@ impl<D: Digest> Viewable for Activity<D> {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ConflictingNotarize<D: Digest> {
-    pub proposal_1: Proposal<D>,
+    pub view: View,
+    pub parent_1: View,
+    pub payload_1: D,
     pub signature_1: PartialSignature,
-    pub proposal_2: Proposal<D>,
+    pub parent_2: View,
+    pub payload_2: D,
     pub signature_2: PartialSignature,
 }
 
@@ -982,11 +985,21 @@ impl<D: Digest> ConflictingNotarize<D> {
         assert_eq!(notarize_1.view(), notarize_2.view());
         assert_eq!(notarize_1.signer(), notarize_2.signer());
         ConflictingNotarize {
-            proposal_1: notarize_1.proposal,
+            view: notarize_1.view(),
+            parent_1: notarize_1.proposal.parent,
+            payload_1: notarize_1.proposal.payload,
             signature_1: notarize_1.proposal_signature,
-            proposal_2: notarize_2.proposal,
+            parent_2: notarize_2.proposal.parent,
+            payload_2: notarize_2.proposal.payload,
             signature_2: notarize_2.proposal_signature,
         }
+    }
+
+    pub fn proposals(&self) -> (Proposal<D>, Proposal<D>) {
+        (
+            Proposal::new(self.view, self.parent_1, self.payload_1),
+            Proposal::new(self.view, self.parent_2, self.payload_2),
+        )
     }
 
     pub fn verify(
@@ -996,13 +1009,14 @@ impl<D: Digest> ConflictingNotarize<D> {
         public_key_index: Option<u32>,
     ) -> bool {
         let public_key_index = public_key_index.unwrap_or(self.signature_1.index);
+        let (proposal_1, proposal_2) = self.proposals();
         let notarize_namespace = notarize_namespace(namespace);
-        let notarize_message_1 = self.proposal_1.encode();
+        let notarize_message_1 = proposal_1.encode();
         let notarize_message_1 = (
             Some(notarize_namespace.as_ref()),
             notarize_message_1.as_ref(),
         );
-        let notarize_message_2 = self.proposal_2.encode();
+        let notarize_message_2 = proposal_2.encode();
         let notarize_message_2 = (
             Some(notarize_namespace.as_ref()),
             notarize_message_2.as_ref(),
@@ -1025,28 +1039,31 @@ impl<D: Digest> Attributable for ConflictingNotarize<D> {
 
 impl<D: Digest> Viewable for ConflictingNotarize<D> {
     fn view(&self) -> View {
-        self.proposal_1.view()
+        self.view
     }
 }
 
 impl<D: Digest> Write for ConflictingNotarize<D> {
     fn write(&self, writer: &mut impl BufMut) {
-        self.proposal_1.write(writer);
+        self.view.write(writer);
+        self.parent_1.write(writer);
+        self.payload_1.write(writer);
         self.signature_1.write(writer);
-        self.proposal_2.write(writer);
+        self.parent_2.write(writer);
+        self.payload_2.write(writer);
         self.signature_2.write(writer);
     }
 }
 
 impl<D: Digest> Read for ConflictingNotarize<D> {
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let proposal_1 = Proposal::read(reader)?;
+        let view = View::read(reader)?;
+        let parent_1 = View::read(reader)?;
+        let payload_1 = D::read(reader)?;
         let signature_1 = PartialSignature::read(reader)?;
-        let proposal_2 = Proposal::read(reader)?;
+        let parent_2 = View::read(reader)?;
+        let payload_2 = D::read(reader)?;
         let signature_2 = PartialSignature::read(reader)?;
-        if proposal_1.view != proposal_2.view {
-            return Err(Error::Invalid("conflicting_notarize", "mismatched views"));
-        }
         if signature_1.index != signature_2.index {
             return Err(Error::Invalid(
                 "conflicting_notarize",
@@ -1054,9 +1071,12 @@ impl<D: Digest> Read for ConflictingNotarize<D> {
             ));
         }
         Ok(ConflictingNotarize {
-            proposal_1,
+            view,
+            parent_1,
+            payload_1,
             signature_1,
-            proposal_2,
+            parent_2,
+            payload_2,
             signature_2,
         })
     }
@@ -1069,9 +1089,12 @@ impl<D: Digest> FixedSize for ConflictingNotarize<D> {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ConflictingFinalize<D: Digest> {
-    pub proposal_1: Proposal<D>,
+    pub view: View,
+    pub parent_1: View,
+    pub payload_1: D,
     pub signature_1: PartialSignature,
-    pub proposal_2: Proposal<D>,
+    pub parent_2: View,
+    pub payload_2: D,
     pub signature_2: PartialSignature,
 }
 
@@ -1080,11 +1103,21 @@ impl<D: Digest> ConflictingFinalize<D> {
         assert_eq!(finalize_1.view(), finalize_2.view());
         assert_eq!(finalize_1.signer(), finalize_2.signer());
         ConflictingFinalize {
-            proposal_1: finalize_1.proposal,
+            view: finalize_1.view(),
+            parent_1: finalize_1.proposal.parent,
+            payload_1: finalize_1.proposal.payload,
             signature_1: finalize_1.proposal_signature,
-            proposal_2: finalize_2.proposal,
+            parent_2: finalize_2.proposal.parent,
+            payload_2: finalize_2.proposal.payload,
             signature_2: finalize_2.proposal_signature,
         }
+    }
+
+    pub fn proposals(&self) -> (Proposal<D>, Proposal<D>) {
+        (
+            Proposal::new(self.view, self.parent_1, self.payload_1),
+            Proposal::new(self.view, self.parent_2, self.payload_2),
+        )
     }
 
     pub fn verify(
@@ -1094,13 +1127,14 @@ impl<D: Digest> ConflictingFinalize<D> {
         public_key_index: Option<u32>,
     ) -> bool {
         let public_key_index = public_key_index.unwrap_or(self.signature_1.index);
+        let (proposal_1, proposal_2) = self.proposals();
         let finalize_namespace = finalize_namespace(namespace);
-        let finalize_message_1 = self.proposal_1.encode();
+        let finalize_message_1 = proposal_1.encode();
         let finalize_message_1 = (
             Some(finalize_namespace.as_ref()),
             finalize_message_1.as_ref(),
         );
-        let finalize_message_2 = self.proposal_2.encode();
+        let finalize_message_2 = proposal_2.encode();
         let finalize_message_2 = (
             Some(finalize_namespace.as_ref()),
             finalize_message_2.as_ref(),
@@ -1123,28 +1157,31 @@ impl<D: Digest> Attributable for ConflictingFinalize<D> {
 
 impl<D: Digest> Viewable for ConflictingFinalize<D> {
     fn view(&self) -> View {
-        self.proposal_1.view()
+        self.view
     }
 }
 
 impl<D: Digest> Write for ConflictingFinalize<D> {
     fn write(&self, writer: &mut impl BufMut) {
-        self.proposal_1.write(writer);
+        self.view.write(writer);
+        self.parent_1.write(writer);
+        self.payload_1.write(writer);
         self.signature_1.write(writer);
-        self.proposal_2.write(writer);
+        self.parent_2.write(writer);
+        self.payload_2.write(writer);
         self.signature_2.write(writer);
     }
 }
 
 impl<D: Digest> Read for ConflictingFinalize<D> {
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let proposal_1 = Proposal::read(reader)?;
+        let view = View::read(reader)?;
+        let parent_1 = View::read(reader)?;
+        let payload_1 = D::read(reader)?;
         let signature_1 = PartialSignature::read(reader)?;
-        let proposal_2 = Proposal::read(reader)?;
+        let parent_2 = View::read(reader)?;
+        let payload_2 = D::read(reader)?;
         let signature_2 = PartialSignature::read(reader)?;
-        if proposal_1.view != proposal_2.view {
-            return Err(Error::Invalid("conflicting_finalize", "mismatched views"));
-        }
         if signature_1.index != signature_2.index {
             return Err(Error::Invalid(
                 "conflicting_finalize",
@@ -1152,9 +1189,12 @@ impl<D: Digest> Read for ConflictingFinalize<D> {
             ));
         }
         Ok(ConflictingFinalize {
-            proposal_1,
+            view,
+            parent_1,
+            payload_1,
             signature_1,
-            proposal_2,
+            parent_2,
+            payload_2,
             signature_2,
         })
     }
