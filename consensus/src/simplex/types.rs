@@ -1,10 +1,8 @@
-use std::collections::HashSet;
-
-use crate::Supervisor;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error, FixedSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{Digest, Scheme, Verifier};
 use commonware_utils::{quorum, union, Array};
+use std::collections::HashSet;
 
 /// View is a monotonically increasing counter that represents the current focus of consensus.
 pub type View = u64;
@@ -328,19 +326,14 @@ impl<S: Array, D: Digest> Notarization<S, D> {
         }
     }
 
-    pub fn verify<
-        Su: Supervisor<Index = View>,
-        V: Verifier<PublicKey = Su::PublicKey, Signature = S>,
-    >(
+    // TODO(#755): Use `commonware-cryptography::Specification`
+    pub fn verify<P: Array, V: Verifier<PublicKey = P, Signature = S>>(
         &self,
-        supervisor: &Su,
+        participants: &[P],
         notarize_namespace: &[u8],
     ) -> bool {
         // Get allowed signers
-        let Some(validators) = supervisor.participants(self.proposal.view) else {
-            return false;
-        };
-        let (threshold, count) = threshold(validators);
+        let (threshold, count) = threshold(participants);
         if self.signatures.len() < threshold as usize {
             return false;
         }
@@ -358,7 +351,7 @@ impl<S: Array, D: Digest> Notarization<S, D> {
             }
 
             // Get public key
-            let Some(public_key) = validators.get(signature.public_key as usize) else {
+            let Some(public_key) = participants.get(signature.public_key as usize) else {
                 return false;
             };
 
@@ -488,19 +481,13 @@ impl<S: Array> Nullification<S> {
         Self { view, signatures }
     }
 
-    pub fn verify<
-        Su: Supervisor<Index = View>,
-        V: Verifier<PublicKey = Su::PublicKey, Signature = S>,
-    >(
+    pub fn verify<P: Array, V: Verifier<PublicKey = P, Signature = S>>(
         &self,
-        supervisor: &Su,
+        participants: &[P],
         nullify_namespace: &[u8],
     ) -> bool {
         // Get allowed signers
-        let Some(validators) = supervisor.participants(self.view) else {
-            return false;
-        };
-        let (threshold, count) = threshold(validators);
+        let (threshold, count) = threshold(participants);
         if self.signatures.len() < threshold as usize {
             return false;
         }
@@ -518,7 +505,7 @@ impl<S: Array> Nullification<S> {
             }
 
             // Get public key
-            let Some(public_key) = validators.get(signature.public_key as usize) else {
+            let Some(public_key) = participants.get(signature.public_key as usize) else {
                 return false;
             };
 
@@ -654,19 +641,13 @@ impl<S: Array, D: Digest> Finalization<S, D> {
         }
     }
 
-    pub fn verify<
-        Su: Supervisor<Index = View>,
-        V: Verifier<PublicKey = Su::PublicKey, Signature = S>,
-    >(
+    pub fn verify<P: Array, V: Verifier<PublicKey = P, Signature = S>>(
         &self,
-        supervisor: &Su,
+        participants: &[P],
         finalize_namespace: &[u8],
     ) -> bool {
         // Get allowed signers
-        let Some(validators) = supervisor.participants(self.proposal.view) else {
-            return false;
-        };
-        let (threshold, count) = threshold(validators);
+        let (threshold, count) = threshold(participants);
         if self.signatures.len() < threshold as usize {
             return false;
         }
@@ -684,7 +665,7 @@ impl<S: Array, D: Digest> Finalization<S, D> {
             }
 
             // Get public key
-            let Some(public_key) = validators.get(signature.public_key as usize) else {
+            let Some(public_key) = participants.get(signature.public_key as usize) else {
                 return false;
             };
 

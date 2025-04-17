@@ -1,7 +1,10 @@
 use bytes::Bytes;
 use clap::{value_parser, Arg, Command};
 use commonware_bridge::{wire, APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE};
-use commonware_consensus::threshold_simplex::Prover;
+use commonware_codec::DecodeExt;
+use commonware_consensus::threshold_simplex::types::{
+    finalize_namespace, seed_namespace, Finalization, Viewable,
+};
 use commonware_cryptography::{
     bls12381::primitives::group::{self, Element},
     sha256::Digest as Sha256Digest,
@@ -105,7 +108,7 @@ fn main() {
     }
 
     // Configure networks
-    let mut provers = HashMap::new();
+    let mut namespaces = HashMap::new();
     let mut blocks = HashMap::new();
     let mut finalizations = HashMap::new();
     let networks = matches
@@ -118,8 +121,7 @@ fn main() {
         let network = from_hex(network).expect("Network not well-formed");
         let public = group::Public::deserialize(&network).expect("Network not well-formed");
         let namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
-        let prover = Prover::<Sha256Digest>::new(public, &namespace);
-        provers.insert(network.clone(), prover);
+        namespaces.insert(network.clone(), (public, namespace));
         blocks.insert(network.clone(), HashMap::new());
         finalizations.insert(network, BTreeMap::new());
     }
@@ -175,13 +177,25 @@ fn main() {
                         };
 
                         // Verify signature
-                        let prover = provers.get(&incoming.network).expect("missing prover");
-                        let Some((view, _, _, _, _)) =
-                            prover.deserialize_finalization(incoming.data.clone())
+                        let Some((public, namespace)) = namespaces.get(&incoming.network) else {
+                            let _ = response.send(false);
+                            continue;
+                        };
+                        let Ok(finalization) =
+                            Finalization::<Sha256Digest>::decode(incoming.data.as_ref())
                         else {
                             let _ = response.send(false);
                             continue;
                         };
+                        let view = finalization.view();
+                        if !finalization.verify(
+                            public,
+                            &finalize_namespace(namespace),
+                            &seed_namespace(namespace),
+                        ) {
+                            let _ = response.send(false);
+                            continue;
+                        }
 
                         // Store finalization
                         network.insert(view, incoming.data);

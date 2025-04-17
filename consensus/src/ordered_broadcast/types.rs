@@ -1,5 +1,3 @@
-use std::hash::{Hash, Hasher};
-
 use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_cryptography::{
@@ -12,6 +10,7 @@ use commonware_cryptography::{
 };
 use commonware_utils::{union, Array};
 use futures::channel::oneshot;
+use std::hash::{Hash, Hasher};
 
 /// Error that may be encountered when interacting with `ordered-broadcast`.
 #[derive(Debug, thiserror::Error)]

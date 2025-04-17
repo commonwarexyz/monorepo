@@ -48,8 +48,8 @@ mod application;
 mod gui;
 
 use clap::{value_parser, Arg, Command};
-use commonware_consensus::simplex::{self, Engine, Prover};
-use commonware_cryptography::{sha256::Digest as Sha256Digest, Ed25519, Sha256, Signer};
+use commonware_consensus::simplex;
+use commonware_cryptography::{Ed25519, Sha256, Signer};
 use commonware_p2p::authenticated::{self, Network};
 use commonware_runtime::{
     tokio::{self, Executor},
@@ -111,12 +111,13 @@ fn main() {
     let participants = matches
         .get_many::<u64>("participants")
         .expect("Please provide allowed keys")
-        .copied();
-    if participants.len() == 0 {
+        .cloned()
+        .collect::<Vec<_>>();
+    if participants.is_empty() {
         panic!("Please provide at least one participant");
     }
-    for peer in participants {
-        let verifier = Ed25519::from_seed(peer).public_key();
+    for peer in &participants {
+        let verifier = Ed25519::from_seed(*peer).public_key();
         tracing::info!(key = ?verifier, "registered authorized key",);
         validators.push(verifier);
     }
@@ -199,11 +200,9 @@ fn main() {
 
         // Initialize application
         let namespace = union(APPLICATION_NAMESPACE, b"_CONSENSUS");
-        let prover: Prover<Ed25519, Sha256Digest> = Prover::new(&namespace);
         let (application, supervisor, mailbox) = application::Application::new(
             context.with_label("application"),
             application::Config {
-                prover,
                 hasher: Sha256::default(),
                 mailbox_size: 1024,
                 participants: validators.clone(),
@@ -211,30 +210,27 @@ fn main() {
         );
 
         // Initialize consensus
-        let engine = Engine::new(
-            context.with_label("engine"),
-            journal,
-            simplex::Config {
-                crypto: signer.clone(),
-                automaton: mailbox.clone(),
-                relay: mailbox.clone(),
-                committer: mailbox,
-                supervisor,
-                namespace,
-                mailbox_size: 1024,
-                replay_concurrency: 1,
-                leader_timeout: Duration::from_secs(1),
-                notarization_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(10),
-                fetch_timeout: Duration::from_secs(1),
-                activity_timeout: 10,
-                skip_timeout: 5,
-                max_fetch_count: 32,
-                max_fetch_size: 1024 * 512,
-                fetch_concurrent: 2,
-                fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
-            },
-        );
+        let cfg = simplex::Config::<_, _, _, _, _, _> {
+            crypto: signer.clone(),
+            automaton: mailbox.clone(),
+            relay: mailbox.clone(),
+            reporter: supervisor.clone(),
+            supervisor,
+            namespace,
+            mailbox_size: 1024,
+            replay_concurrency: 1,
+            leader_timeout: Duration::from_secs(1),
+            notarization_timeout: Duration::from_secs(2),
+            nullify_retry: Duration::from_secs(10),
+            fetch_timeout: Duration::from_secs(1),
+            activity_timeout: 10,
+            skip_timeout: 5,
+            max_fetch_count: 32,
+            max_participants: participants.len(),
+            fetch_concurrent: 2,
+            fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+        };
+        let engine = simplex::Engine::new(context.with_label("engine"), journal, cfg);
 
         // Start consensus
         application.start();

@@ -1045,7 +1045,10 @@ impl<
         }
 
         // Verify notarization
-        if !notarization.verify::<S, C>(&self.supervisor, &self.notarize_namespace) {
+        let Some(participants) = self.supervisor.participants(view) else {
+            return false;
+        };
+        if !notarization.verify::<S::PublicKey, C>(participants, &self.notarize_namespace) {
             return false;
         }
 
@@ -1113,7 +1116,10 @@ impl<
         }
 
         // Verify nullification
-        if !nullification.verify::<S, C>(&self.supervisor, &self.nullify_namespace) {
+        let Some(participants) = self.supervisor.participants(nullification.view) else {
+            return false;
+        };
+        if !nullification.verify::<S::PublicKey, C>(participants, &self.nullify_namespace) {
             return false;
         }
 
@@ -1223,7 +1229,10 @@ impl<
         }
 
         // Verify finalization
-        if !finalization.verify::<S, C>(&self.supervisor, &self.finalize_namespace) {
+        let Some(participants) = self.supervisor.participants(view) else {
+            return false;
+        };
+        if !finalization.verify::<S::PublicKey, C>(participants, &self.finalize_namespace) {
             return false;
         }
 
