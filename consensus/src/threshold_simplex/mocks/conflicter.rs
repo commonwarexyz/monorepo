@@ -2,16 +2,13 @@
 
 use crate::{
     threshold_simplex::types::{
-        finalize_namespace, notarize_namespace, seed_namespace, view_message, Finalize, Notarize,
-        Proposal, View, Viewable, Voter,
+        finalize_namespace, notarize_namespace, seed_namespace, Finalize, Notarize, Proposal, View,
+        Viewable, Voter,
     },
     ThresholdSupervisor,
 };
 use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::{
-    bls12381::primitives::{group, ops},
-    Hasher,
-};
+use commonware_cryptography::{bls12381::primitives::group, Hasher};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};
 use rand::{CryptoRng, Rng};
@@ -81,23 +78,24 @@ impl<
                     let share = self.supervisor.share(view).unwrap();
                     let proposal = notarize.proposal;
                     let parent = proposal.parent;
-                    let message = proposal.encode();
-                    let proposal_signature =
-                        ops::partial_sign_message(share, Some(&self.notarize_namespace), &message);
-                    let message = view_message(view);
-                    let seed_signature =
-                        ops::partial_sign_message(share, Some(&self.seed_namespace), &message);
-                    let n = Notarize::new(proposal, proposal_signature, seed_signature.clone());
+                    let n = Notarize::sign(
+                        share,
+                        proposal,
+                        &self.notarize_namespace,
+                        &self.seed_namespace,
+                    );
                     let msg = Voter::Notarize(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
 
                     // Notarize random digest
                     let payload = H::random(&mut self.context);
                     let proposal = Proposal::new(view, parent, payload);
-                    let message = proposal.encode();
-                    let proposal_signature =
-                        ops::partial_sign_message(share, Some(&self.notarize_namespace), &message);
-                    let n = Notarize::new(proposal, proposal_signature, seed_signature);
+                    let n = Notarize::sign(
+                        share,
+                        proposal,
+                        &self.notarize_namespace,
+                        &self.seed_namespace,
+                    );
                     let msg = Voter::Notarize(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
@@ -107,20 +105,14 @@ impl<
                     let share = self.supervisor.share(view).unwrap();
                     let proposal = finalize.proposal;
                     let parent = proposal.parent;
-                    let message = proposal.encode();
-                    let proposal_signature =
-                        ops::partial_sign_message(share, Some(&self.finalize_namespace), &message);
-                    let f = Finalize::new(proposal, proposal_signature);
+                    let f = Finalize::sign(share, proposal, &self.finalize_namespace);
                     let msg = Voter::Finalize(f).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
 
                     // Finalize random digest
                     let payload = H::random(&mut self.context);
                     let proposal = Proposal::new(view, parent, payload);
-                    let message = proposal.encode();
-                    let proposal_signature =
-                        ops::partial_sign_message(share, Some(&self.finalize_namespace), &message);
-                    let f = Finalize::new(proposal, proposal_signature);
+                    let f = Finalize::sign(share, proposal, &self.finalize_namespace);
                     let msg = Voter::Finalize(f).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }

@@ -1,17 +1,14 @@
-//! Byzantine participant that sends conflicting notarize/finalize messages.
+//! Byzantine participant that sends outdated notarize and finalize messages.
 
 use crate::{
     threshold_simplex::types::{
-        finalize_namespace, notarize_namespace, seed_namespace, view_message, Finalize, Notarize,
-        Proposal, View, Viewable, Voter,
+        finalize_namespace, notarize_namespace, seed_namespace, Finalize, Notarize, Proposal, View,
+        Viewable, Voter,
     },
     ThresholdSupervisor,
 };
 use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::{
-    bls12381::primitives::{group, ops},
-    Hasher,
-};
+use commonware_cryptography::{bls12381::primitives::group, Hasher};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};
 use rand::{CryptoRng, Rng};
@@ -79,12 +76,12 @@ impl<
                     continue;
                 }
             };
+            let view = msg.view();
 
             // Process message
             match msg {
                 Voter::Notarize(notarize) => {
                     // Store proposal
-                    let view = notarize.view();
                     self.history.insert(view, notarize.proposal.clone());
 
                     // Notarize old digest
@@ -94,20 +91,17 @@ impl<
                         continue;
                     };
                     debug!(?view, "notarizing old proposal");
-                    let message = proposal.encode();
-                    let proposal_signature =
-                        ops::partial_sign_message(share, Some(&self.notarize_namespace), &message);
-                    let message = view_message(view);
-                    let seed_signature =
-                        ops::partial_sign_message(share, Some(&self.seed_namespace), &message);
-                    let n =
-                        Notarize::new(proposal.clone(), proposal_signature, seed_signature.clone());
+                    let n = Notarize::sign(
+                        share,
+                        proposal.clone(),
+                        &self.notarize_namespace,
+                        &self.seed_namespace,
+                    );
                     let msg = Voter::Notarize(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
                 Voter::Finalize(finalize) => {
                     // Store proposal
-                    let view = finalize.view();
                     self.history.insert(view, finalize.proposal.clone());
 
                     // Finalize old digest
@@ -117,10 +111,7 @@ impl<
                         continue;
                     };
                     debug!(?view, "finalizing old proposal");
-                    let message = proposal.encode();
-                    let proposal_signature =
-                        ops::partial_sign_message(share, Some(&self.finalize_namespace), &message);
-                    let f = Finalize::new(proposal.clone(), proposal_signature);
+                    let f = Finalize::sign(share, proposal.clone(), &self.finalize_namespace);
                     let msg = Voter::Finalize(f).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }

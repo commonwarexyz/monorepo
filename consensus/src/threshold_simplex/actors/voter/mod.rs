@@ -131,7 +131,7 @@ mod tests {
                 crypto: scheme,
                 automaton: application.clone(),
                 relay: application.clone(),
-                reporter: supervisor.clone(), // Updated to use supervisor as reporter
+                reporter: supervisor.clone(),
                 supervisor,
                 namespace: namespace.clone(),
                 mailbox_size: 10,

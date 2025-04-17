@@ -1,26 +1,28 @@
-//! Byzantine participant that sends nullify and finalize messages for the same view.
+//! Byzantine participant that sends outdated notarize and finalize messages.
 
 use crate::{
     simplex::types::{
-        finalize_namespace, nullify_namespace, Finalize, Nullify, View, Viewable, Voter,
+        finalize_namespace, notarize_namespace, Finalize, Notarize, Proposal, View, Viewable, Voter,
     },
     Supervisor,
 };
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{Hasher, Scheme};
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Handle, Spawner};
-use std::marker::PhantomData;
+use commonware_runtime::{Clock, Handle, Spawner};
+use rand::{CryptoRng, Rng};
+use std::{collections::HashMap, marker::PhantomData};
 use tracing::debug;
 
-pub struct Config<C: Scheme, S: Supervisor<Index = View, PublicKey = C::PublicKey>> {
+pub struct Config<C: Scheme, S: Supervisor<Index = View>> {
     pub crypto: C,
     pub supervisor: S,
     pub namespace: Vec<u8>,
+    pub view_delta: u64,
 }
 
-pub struct Nuller<
-    E: Spawner,
+pub struct Outdated<
+    E: Clock + Rng + CryptoRng + Spawner,
     C: Scheme,
     H: Hasher,
     S: Supervisor<Index = View, PublicKey = C::PublicKey>,
@@ -30,12 +32,19 @@ pub struct Nuller<
     supervisor: S,
     _hasher: PhantomData<H>,
 
-    nullify_namespace: Vec<u8>,
+    notarize_namespace: Vec<u8>,
     finalize_namespace: Vec<u8>,
+
+    history: HashMap<u64, Proposal<H::Digest>>,
+    view_delta: u64,
 }
 
-impl<E: Spawner, C: Scheme, H: Hasher, S: Supervisor<Index = View, PublicKey = C::PublicKey>>
-    Nuller<E, C, H, S>
+impl<
+        E: Clock + Rng + CryptoRng + Spawner,
+        C: Scheme,
+        H: Hasher,
+        S: Supervisor<Index = View, PublicKey = C::PublicKey>,
+    > Outdated<E, C, H, S>
 {
     pub fn new(context: E, cfg: Config<C, S>) -> Self {
         Self {
@@ -44,8 +53,11 @@ impl<E: Spawner, C: Scheme, H: Hasher, S: Supervisor<Index = View, PublicKey = C
             supervisor: cfg.supervisor,
             _hasher: PhantomData,
 
-            nullify_namespace: nullify_namespace(&cfg.namespace),
+            notarize_namespace: notarize_namespace(&cfg.namespace),
             finalize_namespace: finalize_namespace(&cfg.namespace),
+
+            history: HashMap::new(),
+            view_delta: cfg.view_delta,
         }
     }
 
@@ -69,29 +81,46 @@ impl<E: Spawner, C: Scheme, H: Hasher, S: Supervisor<Index = View, PublicKey = C
             // Process message
             match msg {
                 Voter::Notarize(notarize) => {
-                    // Get our index
+                    // Store proposal
+                    self.history.insert(view, notarize.proposal.clone());
+
+                    // Notarize old digest
+                    let view = view.saturating_sub(self.view_delta);
                     let public_key_index = self
                         .supervisor
                         .is_participant(view, &self.crypto.public_key())
                         .unwrap();
-
-                    // Nullify
-                    let msg = Nullify::sign(
+                    let Some(proposal) = self.history.get(&view) else {
+                        continue;
+                    };
+                    debug!(?view, "notarizing old proposal");
+                    let msg = Notarize::sign(
                         &mut self.crypto,
                         public_key_index,
-                        view,
-                        &self.nullify_namespace,
+                        proposal.clone(),
+                        &self.notarize_namespace,
                     );
-                    let msg = Voter::Nullify::<C::Signature, H::Digest>(msg)
-                        .encode()
-                        .into();
+                    let msg = Voter::Notarize(msg).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
+                }
+                Voter::Finalize(finalize) => {
+                    // Store proposal
+                    self.history.insert(view, finalize.proposal.clone());
 
-                    // Finalize digest
+                    // Finalize provided digest
+                    let view = view.saturating_sub(self.view_delta);
+                    let public_key_index = self
+                        .supervisor
+                        .is_participant(view, &self.crypto.public_key())
+                        .unwrap();
+                    let Some(proposal) = self.history.get(&view) else {
+                        continue;
+                    };
+                    debug!(?view, "finalizing old proposal");
                     let msg = Finalize::sign(
                         &mut self.crypto,
                         public_key_index,
-                        notarize.proposal,
+                        proposal.clone(),
                         &self.finalize_namespace,
                     );
                     let msg = Voter::Finalize(msg).encode().into();

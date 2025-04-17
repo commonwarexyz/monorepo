@@ -35,7 +35,10 @@ use prometheus_client::metrics::{
     counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
 };
 use rand::Rng;
-use std::sync::{atomic::AtomicI64, Arc};
+use std::{
+    collections::hash_map::Entry,
+    sync::{atomic::AtomicI64, Arc},
+};
 use std::{
     collections::{BTreeMap, HashMap},
     time::{Duration, SystemTime},
@@ -173,7 +176,7 @@ impl<
         notarize: Notarize<D>,
     ) -> bool {
         // Check if already notarized
-        if let Some(previous) = &self.notarizes.get(public_key_index as usize).unwrap() {
+        if let Some(previous) = self.notarizes[public_key_index as usize].as_ref() {
             if previous == &notarize {
                 trace!(?notarize, ?previous, "already notarized");
                 return false;
@@ -204,25 +207,23 @@ impl<
             self.notarized_proposals
                 .insert(notarize.proposal.clone(), vec![public_key_index]);
         }
-        *Arc::get_mut(&mut self.notarizes)
-            .unwrap()
-            .get_mut(public_key_index as usize)
-            .unwrap() = Some(notarize.clone());
+        Arc::get_mut(&mut self.notarizes).unwrap()[public_key_index as usize] =
+            Some(notarize.clone());
         self.reporter.report(Activity::Notarize(notarize)).await;
         true
     }
 
     async fn add_verified_nullify(&mut self, public_key_index: u32, nullify: Nullify) -> bool {
         // Check if already issued finalize
-        let Some(finalize) = &self.finalizes.get(public_key_index as usize).unwrap() else {
+        let Some(finalize) = self.finalizes[public_key_index as usize].as_ref() else {
             // Store the nullify
-            let entry = Arc::get_mut(&mut self.nullifies)
+            let item = Arc::get_mut(&mut self.nullifies)
                 .unwrap()
                 .entry(public_key_index);
-            return match entry {
-                std::collections::hash_map::Entry::Occupied(_) => false,
-                std::collections::hash_map::Entry::Vacant(_) => {
-                    entry.or_insert(nullify.clone());
+            return match item {
+                Entry::Occupied(_) => false,
+                Entry::Vacant(v) => {
+                    v.insert(nullify.clone());
                     self.reporter.report(Activity::Nullify(nullify)).await;
                     true
                 }
@@ -252,7 +253,7 @@ impl<
         finalize: Finalize<D>,
     ) -> bool {
         // Check if also issued nullify
-        if let Some(previous) = &self.nullifies.get(&public_key_index) {
+        if let Some(previous) = self.nullifies.get(&public_key_index) {
             // Create fault
             let activity = NullifyFinalize::new(
                 finalize.proposal.clone(),
@@ -271,7 +272,7 @@ impl<
         }
 
         // Check if already finalized
-        if let Some(previous) = &self.finalizes.get(public_key_index as usize).unwrap() {
+        if let Some(previous) = self.finalizes[public_key_index as usize].as_ref() {
             if previous == &finalize {
                 trace!(?finalize, ?previous, "already finalize");
                 return false;
@@ -302,10 +303,8 @@ impl<
             self.finalized_proposals
                 .insert(finalize.proposal.clone(), vec![public_key_index]);
         }
-        *Arc::get_mut(&mut self.finalizes)
-            .unwrap()
-            .get_mut(public_key_index as usize)
-            .unwrap() = Some(finalize.clone());
+        Arc::get_mut(&mut self.finalizes).unwrap()[public_key_index as usize] =
+            Some(finalize.clone());
         self.reporter.report(Activity::Finalize(finalize)).await;
         true
     }
@@ -536,7 +535,6 @@ impl<
                 proposal_signature.unwrap(),
                 seed_signature,
             );
-            // self.finalization = Some(finalization.clone());
             self.broadcast_finalization = true;
             return Some(finalization);
         }
@@ -1051,7 +1049,7 @@ impl<
             }
 
             // Check if leader has signed a digest
-            let notarize = round.notarizes.get(leader_index as usize)?.as_ref()?;
+            let notarize = round.notarizes[leader_index as usize].as_ref()?;
             let proposal = &notarize.proposal;
 
             // Check parent validity
@@ -1222,11 +1220,7 @@ impl<
                     return;
                 }
             };
-            if round
-                .notarizes
-                .get(leader_index as usize)
-                .unwrap()
-                .is_some()
+            if round.notarizes[leader_index as usize].is_some()
                 || round.nullifies.contains_key(&leader_index)
             {
                 return;
@@ -1907,23 +1901,19 @@ impl<
                 // We must wrap the message in Voter so we decode the right type of message (otherwise,
                 // we can parse a finalize as a notarize)
                 let msg = Voter::decode(msg).expect("journal message is unexpected format");
+                let view = msg.view();
                 match msg {
                     Voter::Notarize(notarize) => {
                         // Handle notarize
-                        let view = notarize.view();
                         let public_key_index = notarize.signer();
-                        let public_key = self
-                            .supervisor
-                            .participants(view)
-                            .unwrap()
-                            .get(public_key_index as usize)
-                            .unwrap()
-                            .clone();
+                        let me = self.supervisor.participants(view).unwrap()
+                            [public_key_index as usize]
+                            == self.crypto.public_key();
                         let proposal = notarize.proposal.clone();
                         self.handle_notarize(public_key_index, notarize).await;
 
                         // Update round info
-                        if public_key == self.crypto.public_key() {
+                        if me {
                             let round = self.views.get_mut(&view).expect("missing round");
                             round.proposal = Some(proposal);
                             round.verified_proposal = true;
@@ -1932,7 +1922,6 @@ impl<
                     }
                     Voter::Notarization(notarization) => {
                         // Handle notarization
-                        let view = notarization.view();
                         self.handle_notarization(notarization).await;
 
                         // Update round info
@@ -1941,26 +1930,20 @@ impl<
                     }
                     Voter::Nullify(nullify) => {
                         // Handle nullify
-                        let view = nullify.view();
                         let public_key_index = nullify.signer();
-                        let public_key = self
-                            .supervisor
-                            .participants(view)
-                            .unwrap()
-                            .get(public_key_index as usize)
-                            .unwrap()
-                            .clone();
+                        let me = self.supervisor.participants(view).unwrap()
+                            [public_key_index as usize]
+                            == self.crypto.public_key();
                         self.handle_nullify(public_key_index, nullify).await;
 
                         // Update round info
-                        if public_key == self.crypto.public_key() {
+                        if me {
                             let round = self.views.get_mut(&view).expect("missing round");
                             round.broadcast_nullify = true;
                         }
                     }
                     Voter::Nullification(nullification) => {
                         // Handle nullification
-                        let view = nullification.view;
                         self.handle_nullification(nullification).await;
 
                         // Update round info
@@ -1969,28 +1952,22 @@ impl<
                     }
                     Voter::Finalize(finalize) => {
                         // Handle finalize
-                        let view = finalize.view();
                         let public_key_index = finalize.signer();
-                        let public_key = self
-                            .supervisor
-                            .participants(view)
-                            .unwrap()
-                            .get(public_key_index as usize)
-                            .unwrap()
-                            .clone();
+                        let me = self.supervisor.participants(view).unwrap()
+                            [public_key_index as usize]
+                            == self.crypto.public_key();
                         self.handle_finalize(public_key_index, finalize).await;
 
                         // Update round info
                         //
                         // If we are sending a finalize message, we must be in the next view
-                        if public_key == self.crypto.public_key() {
+                        if me {
                             let round = self.views.get_mut(&view).expect("missing round");
                             round.broadcast_finalize = true;
                         }
                     }
                     Voter::Finalization(finalization) => {
                         // Handle finalization
-                        let view = finalization.view();
                         self.handle_finalization(finalization).await;
 
                         // Update round info
@@ -2175,7 +2152,7 @@ impl<
                     // We opt to not filter by `interesting()` here because each message type has a different
                     // configuration for handling `future` messages.
                     view = msg.view();
-                    let handled = match msg {
+                    let interesting = match msg {
                         Voter::Notarize(notarize) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::notarize(&s)).inc();
                             self.notarize(&s, notarize).await
@@ -2201,7 +2178,7 @@ impl<
                             self.finalization(finalization).await
                         }
                     };
-                    if !handled {
+                    if !interesting {
                         trace!(sender=?s, view, "dropped message");
                         continue;
                     }

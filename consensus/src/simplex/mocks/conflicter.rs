@@ -1,16 +1,15 @@
 //! Byzantine participant that sends conflicting notarize/finalize messages.
 
 use crate::{
-    simplex::{
-        encoder::{finalize_namespace, notarize_namespace, proposal_message},
-        wire, View,
+    simplex::types::{
+        finalize_namespace, notarize_namespace, Finalize, Notarize, Proposal, View, Viewable, Voter,
     },
     Supervisor,
 };
+use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{Hasher, Scheme};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};
-use prost::Message;
 use rand::{CryptoRng, Rng};
 use std::marker::PhantomData;
 use tracing::debug;
@@ -63,156 +62,76 @@ impl<
         let (mut sender, mut receiver) = voter_network;
         while let Ok((s, msg)) = receiver.recv().await {
             // Parse message
-            let msg = match wire::Voter::decode(msg) {
+            let msg = match Voter::<C::Signature, H::Digest>::decode_cfg(msg, &usize::MAX) {
                 Ok(msg) => msg,
                 Err(err) => {
                     debug!(?err, sender = ?s, "failed to decode message");
                     continue;
                 }
             };
-            let payload = match msg.payload {
-                Some(payload) => payload,
-                None => {
-                    debug!(sender = ?s, "message missing payload");
-                    continue;
-                }
-            };
+            let view = msg.view();
 
             // Process message
-            match payload {
-                wire::voter::Payload::Notarize(notarize) => {
+            match msg {
+                Voter::Notarize(notarize) => {
                     // Get our index
-                    let proposal = match notarize.proposal {
-                        Some(proposal) => proposal,
-                        None => {
-                            debug!(sender = ?s, "notarize missing proposal");
-                            continue;
-                        }
-                    };
-                    let Ok(payload) = H::Digest::try_from(&proposal.payload) else {
-                        debug!(sender = ?s, "notarize invalid payload");
-                        continue;
-                    };
-                    let view = proposal.view;
                     let public_key_index = self
                         .supervisor
                         .is_participant(view, &self.crypto.public_key())
                         .unwrap();
 
                     // Notarize received digest
-                    let parent = proposal.parent;
-                    let msg = proposal_message(proposal.view, proposal.parent, &payload);
-                    let n = wire::Notarize {
-                        proposal: Some(proposal),
-                        signature: Some(wire::Signature {
-                            public_key: public_key_index,
-                            signature: self
-                                .crypto
-                                .sign(Some(&self.notarize_namespace), &msg)
-                                .to_vec(),
-                        }),
-                    };
-                    let msg = wire::Voter {
-                        payload: Some(wire::voter::Payload::Notarize(n)),
-                    }
-                    .encode_to_vec();
-                    sender
-                        .send(Recipients::All, msg.into(), true)
-                        .await
-                        .unwrap();
+                    let parent = notarize.proposal.parent;
+                    let msg = Notarize::sign(
+                        &mut self.crypto,
+                        public_key_index,
+                        notarize.proposal,
+                        &self.notarize_namespace,
+                    );
+                    let msg = Voter::Notarize(msg).encode().into();
+                    sender.send(Recipients::All, msg, true).await.unwrap();
 
                     // Notarize random digest
                     let payload = H::random(&mut self.context);
-                    let msg = proposal_message(view, parent, &payload);
-                    let n = wire::Notarize {
-                        proposal: Some(wire::Proposal {
-                            view,
-                            parent,
-                            payload: payload.to_vec(),
-                        }),
-                        signature: Some(wire::Signature {
-                            public_key: public_key_index,
-                            signature: self
-                                .crypto
-                                .sign(Some(&self.notarize_namespace), &msg)
-                                .to_vec(),
-                        }),
-                    };
-                    let msg = wire::Voter {
-                        payload: Some(wire::voter::Payload::Notarize(n)),
-                    }
-                    .encode_to_vec();
-                    sender
-                        .send(Recipients::All, msg.into(), true)
-                        .await
-                        .unwrap();
+                    let proposal = Proposal::new(view, parent, payload);
+                    let msg = Notarize::sign(
+                        &mut self.crypto,
+                        public_key_index,
+                        proposal,
+                        &self.notarize_namespace,
+                    );
+                    let msg = Voter::Notarize(msg).encode().into();
+                    sender.send(Recipients::All, msg, true).await.unwrap();
                 }
-                wire::voter::Payload::Finalize(finalize) => {
+                Voter::Finalize(finalize) => {
                     // Get our index
-                    let proposal = match finalize.proposal {
-                        Some(proposal) => proposal,
-                        None => {
-                            debug!(sender = ?s, "notarize missing proposal");
-                            continue;
-                        }
-                    };
-                    let Ok(payload) = H::Digest::try_from(&proposal.payload) else {
-                        debug!(sender = ?s, "notarize invalid payload");
-                        continue;
-                    };
-                    let view = proposal.view;
                     let public_key_index = self
                         .supervisor
                         .is_participant(view, &self.crypto.public_key())
                         .unwrap();
 
                     // Finalize provided digest
-                    let parent = proposal.parent;
-                    let msg = proposal_message(proposal.view, proposal.parent, &payload);
-                    let f = wire::Finalize {
-                        proposal: Some(proposal),
-                        signature: Some(wire::Signature {
-                            public_key: public_key_index,
-                            signature: self
-                                .crypto
-                                .sign(Some(&self.finalize_namespace), &msg)
-                                .to_vec(),
-                        }),
-                    };
-                    let msg = wire::Voter {
-                        payload: Some(wire::voter::Payload::Finalize(f)),
-                    }
-                    .encode_to_vec();
-                    sender
-                        .send(Recipients::All, msg.into(), true)
-                        .await
-                        .unwrap();
+                    let parent = finalize.proposal.parent;
+                    let msg = Finalize::sign(
+                        &mut self.crypto,
+                        public_key_index,
+                        finalize.proposal,
+                        &self.finalize_namespace,
+                    );
+                    let msg = Voter::Finalize(msg).encode().into();
+                    sender.send(Recipients::All, msg, true).await.unwrap();
 
                     // Finalize random digest
                     let payload = H::random(&mut self.context);
-                    let msg = proposal_message(view, parent, &payload);
-                    let f = wire::Finalize {
-                        proposal: Some(wire::Proposal {
-                            view,
-                            parent,
-                            payload: payload.to_vec(),
-                        }),
-                        signature: Some(wire::Signature {
-                            public_key: public_key_index,
-                            signature: self
-                                .crypto
-                                .sign(Some(&self.finalize_namespace), &msg)
-                                .to_vec(),
-                        }),
-                    };
-                    let msg = wire::Voter {
-                        payload: Some(wire::voter::Payload::Finalize(f)),
-                    }
-                    .encode_to_vec();
-                    sender
-                        .send(Recipients::All, msg.into(), true)
-                        .await
-                        .unwrap();
+                    let proposal = Proposal::new(view, parent, payload);
+                    let msg = Finalize::sign(
+                        &mut self.crypto,
+                        public_key_index,
+                        proposal,
+                        &self.finalize_namespace,
+                    );
+                    let msg = Voter::Finalize(msg).encode().into();
+                    sender.send(Recipients::All, msg, true).await.unwrap();
                 }
                 _ => continue,
             }
