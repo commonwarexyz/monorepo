@@ -149,7 +149,7 @@ impl<H: CHasher> Mmr<H> {
     }
 
     /// Add an element to the MMR and return its position in the MMR.
-    pub fn add(&mut self, hasher: &mut H, element: &H::Digest) -> u64 {
+    pub fn add(&mut self, hasher: &mut H, element: &[u8]) -> u64 {
         let element_pos = self.index_to_pos(self.nodes.len());
         let hash = Hasher::new(hasher).leaf_hash(element_pos, element);
         self.add_leaf_digest(hasher, hash);
