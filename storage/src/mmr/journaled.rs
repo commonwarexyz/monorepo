@@ -239,7 +239,7 @@ impl<E: RStorage + Clock + Metrics, H: Hasher> Mmr<E, H> {
 
     /// Add an element to the MMR and return its position in the MMR. Elements added to the MMR
     /// aren't persisted to disk until `sync` is called.
-    pub fn add(&mut self, h: &mut H, element: &H::Digest) -> u64 {
+    pub fn add(&mut self, h: &mut H, element: &[u8]) -> u64 {
         self.mem_mmr.add(h, element)
     }
 
