@@ -1,4 +1,4 @@
-use crate::{Blob as BlobTrait, Error, Storage as StorageTrait};
+use crate::Error;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use prometheus_client::registry::Registry;
 use std::sync::Arc;
@@ -68,7 +68,7 @@ impl<S> Storage<S> {
     }
 }
 
-impl<S: StorageTrait> StorageTrait for Storage<S> {
+impl<S: crate::Storage> crate::Storage for Storage<S> {
     type Blob = Blob<S::Blob>;
 
     async fn open(&self, partition: &str, name: &[u8]) -> Result<Self::Blob, Error> {
@@ -96,7 +96,7 @@ pub struct Blob<B> {
     metrics: Arc<Metrics>,
 }
 
-impl<B: BlobTrait> BlobTrait for Blob<B> {
+impl<B: crate::Blob> crate::Blob for Blob<B> {
     async fn len(&self) -> Result<u64, Error> {
         self.inner.len().await
     }
@@ -137,7 +137,7 @@ mod tests {
     use super::*;
     use crate::storage::memory::Storage as MemoryStorage;
     use crate::storage::tests::run_storage_tests;
-    use crate::Blob;
+    use crate::{Blob, Storage as _};
     use prometheus_client::registry::Registry;
 
     #[tokio::test]
