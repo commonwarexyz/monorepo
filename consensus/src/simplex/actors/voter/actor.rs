@@ -889,7 +889,9 @@ impl<
         round.leader_deadline = Some(self.context.current() + self.leader_timeout);
         round.advance_deadline = Some(self.context.current() + self.notarization_timeout);
         self.view = view;
-        info!(view, "entered view");
+
+        // Update metrics
+        self.current_view.set(view as i64);
 
         // Check if we should skip this view
         let leader = round.leader.clone();
@@ -970,6 +972,9 @@ impl<
                 .await
                 .expect("unable to prune journal");
         }
+
+        // Update metrics
+        self.tracked_views.set(self.views.len() as i64);
     }
 
     async fn notarize(&mut self, notarize: Notarize<C::Signature, D>) {
@@ -1867,14 +1872,24 @@ impl<
                     }
                 },
                 mailbox = self.mailbox_receiver.next() => {
+                    // Ensure view is still useful
+                    //
+                    // It is possible that we make a request to the backfiller and prune the view
+                    // before we receive the response. In this case, we should ignore the response (not
+                    // doing so may result in attempting to store before the prune boundary).
                     let msg = mailbox.unwrap();
+                    view = msg.view();
+                    if !self.interesting(view, false) {
+                        debug!(view, "backfilled message is not interesting");
+                        continue;
+                    }
                     match msg {
                         Message::Notarization(notarization)  => {
-                            view = notarization.view();
+                            debug!(view, "received notarization from backfiller");
                             self.handle_notarization(&notarization).await;
                         },
                         Message::Nullification(nullification) => {
-                            view = nullification.view();
+                            debug!(view, "received nullification from backfiller");
                             self.handle_nullification(&nullification).await;
                         },
                     }
@@ -1925,10 +1940,6 @@ impl<
             // After sending all required messages, prune any views
             // we no longer need
             self.prune_views().await;
-
-            // Update metrics
-            self.current_view.set(view as i64);
-            self.tracked_views.set(self.views.len() as i64);
         }
     }
 }
