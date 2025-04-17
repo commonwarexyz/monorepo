@@ -1,10 +1,9 @@
-use std::collections::HashSet;
-
 use crate::Supervisor;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error, FixedSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{Digest, Scheme, Verifier};
 use commonware_utils::{quorum, union, Array};
+use std::collections::HashSet;
 
 /// View is a monotonically increasing counter that represents the current focus of consensus.
 pub type View = u64;
