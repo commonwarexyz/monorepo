@@ -149,18 +149,16 @@ impl crate::Blob for Blob {
         }
 
         // Get the raw file descriptor
-        let fd = file.as_raw_fd();
+        let fd = types::Fd(file.as_raw_fd());
         let mut total_read = 0;
 
         while total_read < buf.len() {
             let remaining = &mut buf[total_read..];
 
             // Prepare the read operation
-            let read_e =
-                opcode::Read::new(types::Fd(fd), remaining.as_mut_ptr(), remaining.len() as _)
-                    .offset(offset as _)
-                    .build()
-                    .user_data(0); // User data can be used to identify the operation
+            let read_e = opcode::Read::new(fd, remaining.as_mut_ptr(), remaining.len() as _)
+                .offset(offset as _)
+                .build();
 
             // Submit the operation to the ring
             unsafe {
