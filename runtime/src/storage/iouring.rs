@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     fs::{self, File},
-    os::fd::AsRawFd as _,
+    os::fd::{AsRawFd as _, OwnedFd},
     path::PathBuf,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -134,15 +134,23 @@ impl IoUringRuntimeAdapter {
 
 #[derive(Clone)]
 pub struct Storage {
-    lock: Arc<Mutex<()>>,
-    pub storage_directory: PathBuf,
+    storage_directory: PathBuf,
+    io_ring: Arc<IoUringRuntimeAdapter>,
 }
 
 impl Storage {
     pub fn new(config: Config) -> Self {
+        let adapter = Arc::new(IoUringRuntimeAdapter::new());
+
+        // Start the background task for handling completions
+        let adapter_clone = adapter.clone();
+        tokio::spawn(async move {
+            adapter_clone.completion_handler().await;
+        });
+
         Self {
-            lock: Arc::new(Mutex::new(())),
             storage_directory: config.storage_directory,
+            io_ring: adapter,
         }
     }
 }
@@ -151,8 +159,6 @@ impl crate::Storage for Storage {
     type Blob = Blob;
 
     async fn open(&self, partition: &str, name: &[u8]) -> Result<Blob, Error> {
-        let _guard = self.lock.lock().map_err(|_| Error::LockGrabFailed)?;
-
         // Construct the full path
         let path = self.storage_directory.join(partition).join(hex(name));
         let parent = path
@@ -174,12 +180,16 @@ impl crate::Storage for Storage {
         // Get the file length
         let len = file.metadata().map_err(|_| Error::ReadFailed)?.len();
 
-        Ok(Blob::new(partition.into(), name, file, len))
+        Ok(Blob::new(
+            partition.into(),
+            name,
+            file,
+            len,
+            self.io_ring.clone(),
+        ))
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
-        let _guard = self.lock.lock().map_err(|_| Error::LockGrabFailed)?;
-
         let path = self.storage_directory.join(partition);
         if let Some(name) = name {
             let blob_path = path.join(hex(name));
@@ -192,8 +202,6 @@ impl crate::Storage for Storage {
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
-        let _guard = self.lock.lock().map_err(|_| Error::LockGrabFailed)?;
-
         let path = self.storage_directory.join(partition);
 
         let entries =
@@ -218,66 +226,78 @@ impl crate::Storage for Storage {
     }
 }
 
-#[derive(Clone)]
 pub struct Blob {
     partition: String,
     name: Vec<u8>,
-    // (underlying file, iouring, blob length)
-    file: Arc<Mutex<(File, IoUring, u64)>>,
+    fd: Arc<OwnedFd>,
+    len: AtomicU64,
+    io_ring: Arc<IoUringRuntimeAdapter>,
+}
+
+impl Clone for Blob {
+    fn clone(&self) -> Self {
+        // Duplicate the file descriptor
+
+        Self {
+            partition: self.partition.clone(),
+            name: self.name.clone(),
+            fd: self.fd.clone(),
+            len: AtomicU64::new(self.len.load(Ordering::Relaxed)),
+            io_ring: self.io_ring.clone(),
+        }
+    }
 }
 
 impl Blob {
-    pub fn new(partition: String, name: &[u8], file: File, len: u64) -> Self {
-        let ring = IoUring::new(32).unwrap();
+    pub fn new(
+        partition: String,
+        name: &[u8],
+        file: File,
+        len: u64,
+        io_ring: Arc<IoUringRuntimeAdapter>,
+    ) -> Self {
         Self {
             partition,
-            name: name.into(),
-            file: Arc::new(Mutex::new((file, ring, len))),
+            name: name.to_vec(),
+            fd: Arc::new(OwnedFd::from(file)),
+            len: AtomicU64::new(len),
+            io_ring,
         }
     }
 }
 
 impl crate::Blob for Blob {
     async fn len(&self) -> Result<u64, Error> {
-        let inner = self.file.lock().map_err(|_| Error::LockGrabFailed)?;
-        let (_, _, len) = &*inner;
-        Ok(*len)
+        Ok(self.len.load(Ordering::Relaxed))
     }
 
     async fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
-        let mut inner = self.file.lock().map_err(|_| Error::LockGrabFailed)?;
-        let (file, ring, len) = &mut *inner;
+        // let mut inner = self.file.lock().map_err(|_| Error::LockGrabFailed)?;
+        // let (file, ring, len) = &mut *inner;
 
-        if offset + buf.len() as u64 > *len {
+        let current_len = self.len.load(Ordering::Relaxed);
+        if offset + buf.len() as u64 > current_len {
             return Err(Error::BlobInsufficientLength);
         }
 
-        let fd = types::Fd(file.as_raw_fd());
+        let fd = types::Fd(self.fd.as_raw_fd());
         let mut total_read = 0;
 
         while total_read < buf.len() {
             let remaining = &mut buf[total_read..];
+            let offset = offset + total_read as u64;
 
-            // Prepare the read operation
-            let read_e = opcode::Read::new(fd, remaining.as_mut_ptr(), remaining.len() as _)
-                .offset(offset as _)
-                .build();
-
-            // Submit the operation to the ring
-            unsafe {
-                ring.submission()
-                    .push(&read_e)
-                    .map_err(|_| Error::ReadFailed)?;
-            }
-
-            // Wait for the operation to complete
-            ring.submit_and_wait(1).map_err(|_| Error::ReadFailed)?;
-
-            // Process the completion event
-            let cqe = ring.completion().next().ok_or(Error::ReadFailed)?;
+            let result = self
+                .io_ring
+                .submit_operation(
+                    opcode::Read::new(fd, remaining.as_mut_ptr(), remaining.len() as _)
+                        .offset(offset as _)
+                        .build(),
+                )
+                .await?;
 
             // If the return value is non-positive, it indicates an error.
-            let bytes_read: usize = cqe.result().try_into().map_err(|_| Error::ReadFailed)?;
+            let bytes_read: usize = result.try_into().map_err(|_| Error::ReadFailed)?;
             if bytes_read == 0 {
                 // Got EOF before filling buffer.
                 return Err(Error::BlobInsufficientLength);
@@ -290,36 +310,24 @@ impl crate::Blob for Blob {
     }
 
     async fn write_at(&self, buf: &[u8], offset: u64) -> Result<(), Error> {
-        let mut inner = self.file.lock().map_err(|_| Error::LockGrabFailed)?;
-        let (file, ring, len) = &mut *inner;
-
-        let fd = types::Fd(file.as_raw_fd());
+        let fd = types::Fd(self.fd.as_raw_fd());
         let mut total_written = 0;
 
         while total_written < buf.len() {
             let remaining = &buf[total_written..];
+            let offset = offset + total_written as u64;
 
-            // Prepare the write operation
-            let write_op = opcode::Write::new(fd, remaining.as_ptr(), remaining.len() as _)
-                .offset(offset as _)
-                .build();
+            // Submit write operation using the shared adapter
+            let result = self
+                .io_ring
+                .submit_operation(
+                    opcode::Write::new(fd, remaining.as_ptr(), remaining.len() as _)
+                        .offset(offset as _)
+                        .build(),
+                )
+                .await?;
 
-            // Submit the operation to the ring
-            unsafe {
-                ring.submission()
-                    .push(&write_op)
-                    .map_err(|_| Error::WriteFailed)?;
-            }
-
-            // Wait for the operation to complete
-            ring.submit_and_wait(1).map_err(|_| Error::WriteFailed)?;
-
-            // Process the completion event
-            let completed_op = ring.completion().next().ok_or(Error::WriteFailed)?;
-            let bytes_written: usize = completed_op
-                .result()
-                .try_into()
-                .map_err(|_| Error::WriteFailed)?;
+            let bytes_written: usize = result.try_into().map_err(|_| Error::WriteFailed)?;
             if bytes_written == 0 {
                 return Err(Error::WriteFailed);
             }
@@ -329,32 +337,40 @@ impl crate::Blob for Blob {
 
         // Update the virtual file size
         let max_len = offset + buf.len() as u64;
-        if max_len > *len {
-            *len = max_len;
+        if max_len > self.len.load(Ordering::Relaxed) {
+            self.len.store(max_len, Ordering::Relaxed);
         }
         Ok(())
     }
 
     async fn truncate(&self, len: u64) -> Result<(), Error> {
-        let mut file = self.file.lock().map_err(|_| Error::LockGrabFailed)?;
-        file.0
-            .set_len(len)
+        // Submit truncate operation via io_uring
+        self.io_ring
+            .submit_operation(
+                opcode::Fallocate::new(types::Fd(self.fd.as_raw_fd()), len)
+                    .mode(0) // 0 means truncate
+                    .build(),
+            )
+            .await
             .map_err(|_| Error::BlobTruncateFailed(self.partition.clone(), hex(&self.name)))?;
 
-        // Update the virtual file size
-        file.2 = len;
+        // Update length
+        self.len.store(len, Ordering::SeqCst);
         Ok(())
     }
 
     async fn sync(&self) -> Result<(), Error> {
-        let inner = self.file.lock().map_err(|_| Error::LockGrabFailed)?;
-        inner
-            .0
-            .sync_all()
-            .map_err(|_| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name)))
+        // Submit fsync operation via io_uring
+        self.io_ring
+            .submit_operation(opcode::Fsync::new(types::Fd(self.fd.as_raw_fd())).build())
+            .await
+            .map_err(|_| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name)))?;
+
+        Ok(())
     }
 
     async fn close(self) -> Result<(), Error> {
+        // Just sync before dropping
         self.sync().await
     }
 }
