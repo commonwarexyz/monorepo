@@ -14,12 +14,15 @@ use commonware_cryptography::{
 use commonware_utils::union;
 
 /// View is a monotonically increasing counter that represents the current focus of consensus.
+/// Each View corresponds to a round in the consensus protocol where validators attempt to agree
+/// on a block to commit.
 pub type View = u64;
 
 /// Context is a collection of metadata from consensus about a given payload.
+/// It provides information about the current view and the parent payload that new proposals are built on.
 #[derive(Clone)]
 pub struct Context<D: Digest> {
-    /// Current view of consensus.
+    /// Current view (round) of consensus.
     pub view: View,
 
     /// Parent the payload is built on.
@@ -31,51 +34,76 @@ pub struct Context<D: Digest> {
     pub parent: (View, D),
 }
 
+/// Viewable is a trait that provides access to the view (round) number.
+/// Any consensus message or object that is associated with a specific view should implement this.
 pub trait Viewable {
+    /// Returns the view associated with this object.
     fn view(&self) -> View;
 }
 
+/// Attributable is a trait that provides access to the signer index.
+/// This is used to identify which participant signed a given message.
 pub trait Attributable {
+    /// Returns the index of the signer (validator) who produced this message.
     fn signer(&self) -> u32;
 }
 
+// Constants for domain separation in signature verification
+// These are used to prevent cross-protocol attacks and message-type confusion
 const SEED_SUFFIX: &[u8] = b"_SEED";
 const NOTARIZE_SUFFIX: &[u8] = b"_NOTARIZE";
 const NULLIFY_SUFFIX: &[u8] = b"_NULLIFY";
 const FINALIZE_SUFFIX: &[u8] = b"_FINALIZE";
 
+/// Creates a message to be signed containing just the view number
 #[inline]
 fn view_message(view: View) -> Vec<u8> {
     View::encode(&view).into()
 }
 
+/// Creates a namespace for seed messages by appending the SEED_SUFFIX
+/// The seed is used for leader election and randomness generation
 #[inline]
 fn seed_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, SEED_SUFFIX)
 }
 
+/// Creates a namespace for notarize messages by appending the NOTARIZE_SUFFIX
+/// Domain separation prevents cross-protocol attacks
 #[inline]
 fn notarize_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, NOTARIZE_SUFFIX)
 }
 
+/// Creates a namespace for nullify messages by appending the NULLIFY_SUFFIX
+/// Domain separation prevents cross-protocol attacks
 #[inline]
 fn nullify_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, NULLIFY_SUFFIX)
 }
 
+/// Creates a namespace for finalize messages by appending the FINALIZE_SUFFIX
+/// Domain separation prevents cross-protocol attacks
 #[inline]
 fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, FINALIZE_SUFFIX)
 }
 
+/// Voter represents all possible message types that can be sent by validators
+/// in the consensus protocol.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Voter<D: Digest> {
+    /// A single validator notarize over a proposal
     Notarize(Notarize<D>),
+    /// An aggregated threshold signature for a notarization
     Notarization(Notarization<D>),
+    /// A single validator nullify to skip the current view (usually when leader is unresponsive)
     Nullify(Nullify),
+    /// An aggregated threshold signature for a nullification
     Nullification(Nullification),
+    /// A single validator finalize over a proposal
     Finalize(Finalize<D>),
+    /// An aggregated threshold signature for a finalization
     Finalization(Finalization<D>),
 }
 
@@ -172,14 +200,20 @@ impl<D: Digest> Viewable for Voter<D> {
     }
 }
 
+/// Proposal represents a proposed block in the protocol.
+/// It includes the view number, the parent view, and the actual payload (typically a digest of block data).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Proposal<D: Digest> {
+    /// The view (round) in which this proposal is made
     pub view: View,
+    /// The view of the parent proposal that this one builds upon
     pub parent: View,
+    /// The actual payload/content of the proposal (typically a digest of the block data)
     pub payload: D,
 }
 
 impl<D: Digest> Proposal<D> {
+    /// Creates a new proposal with the specified view, parent view, and payload.
     pub fn new(view: View, parent: View, payload: D) -> Self {
         Proposal {
             view,
@@ -220,14 +254,21 @@ impl<D: Digest> Viewable for Proposal<D> {
     }
 }
 
+/// Notarize represents a validator's vote to notarize a proposal.
+/// In threshold_simplex, it contains a partial signature on the proposal and a partial signature for the seed.
+/// The seed is used for leader election and as a source of randomness.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub struct Notarize<D: Digest> {
+    /// The proposal that is being notarized
     pub proposal: Proposal<D>,
+    /// The validator's partial signature on the proposal
     pub proposal_signature: PartialSignature,
+    /// The validator's partial signature on the seed (for leader election/randomness)
     pub seed_signature: PartialSignature,
 }
 
 impl<D: Digest> Notarize<D> {
+    /// Creates a new notarize with the given proposal and signatures.
     pub fn new(
         proposal: Proposal<D>,
         proposal_signature: PartialSignature,
@@ -240,6 +281,12 @@ impl<D: Digest> Notarize<D> {
         }
     }
 
+    /// Verifies the signatures on this notarize using BLS threshold verification.
+    ///
+    /// This ensures that:
+    /// 1. The notarize signature is valid for the claimed proposal
+    /// 2. The seed signature is valid for the view
+    /// 3. Both signatures are from the same signer
     pub fn verify(
         &self,
         namespace: &[u8],
@@ -262,6 +309,7 @@ impl<D: Digest> Notarize<D> {
         .is_ok()
     }
 
+    /// Creates a new signed notarize using BLS threshold signatures.
     pub fn sign(namespace: &[u8], share: &Share, proposal: Proposal<D>) -> Self {
         let notarize_namespace = notarize_namespace(namespace);
         let proposal_message = proposal.encode();
@@ -315,14 +363,21 @@ impl<D: Digest> FixedSize for Notarize<D> {
     const SIZE: usize = Proposal::<D>::SIZE + PartialSignature::SIZE + PartialSignature::SIZE;
 }
 
+/// Notarization represents an aggregated threshold signature certifying a proposal.
+/// When a proposal is notarized, it means at least 2f+1 validators have voted for it.
+/// The threshold signatures provide compact verification compared to collecting individual signatures.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub struct Notarization<D: Digest> {
+    /// The proposal that has been notarized
     pub proposal: Proposal<D>,
+    /// The aggregated threshold signature on the proposal
     pub proposal_signature: Signature,
+    /// The aggregated threshold signature on the seed (for leader election/randomness)
     pub seed_signature: Signature,
 }
 
 impl<D: Digest> Notarization<D> {
+    /// Creates a new notarization with the given proposal and aggregated signatures.
     pub fn new(
         proposal: Proposal<D>,
         proposal_signature: Signature,
@@ -335,6 +390,11 @@ impl<D: Digest> Notarization<D> {
         }
     }
 
+    /// Verifies the threshold signatures on this notarization.
+    ///
+    /// This ensures that:
+    /// 1. The notarization signature is a valid threshold signature for the proposal
+    /// 2. The seed signature is a valid threshold signature for the view
     pub fn verify(&self, namespace: &[u8], public_key: &Public) -> bool {
         let notarize_namespace = notarize_namespace(namespace);
         let notarize_message = self.proposal.encode();
@@ -384,14 +444,21 @@ impl<D: Digest> FixedSize for Notarization<D> {
     const SIZE: usize = Proposal::<D>::SIZE + Signature::SIZE + Signature::SIZE;
 }
 
+/// Nullify represents a validator's vote to skip the current view.
+/// This is typically used when the leader is unresponsive or fails to propose a valid block.
+/// It contains partial signatures for the view and seed.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub struct Nullify {
+    /// The view to be nullified (skipped)
     pub view: View,
+    /// The validator's partial signature on the view
     pub view_signature: PartialSignature,
+    /// The validator's partial signature on the seed (for leader election/randomness)
     pub seed_signature: PartialSignature,
 }
 
 impl Nullify {
+    /// Creates a new nullify with the given view and signatures.
     pub fn new(
         view: View,
         view_signature: PartialSignature,
@@ -404,6 +471,12 @@ impl Nullify {
         }
     }
 
+    /// Verifies the signatures on this nullify using BLS threshold verification.
+    ///
+    /// This ensures that:
+    /// 1. The view signature is valid for the given view
+    /// 2. The seed signature is valid for the view
+    /// 3. Both signatures are from the same signer
     pub fn verify(
         &self,
         namespace: &[u8],
@@ -425,6 +498,7 @@ impl Nullify {
         .is_ok()
     }
 
+    /// Creates a new signed nullify using BLS threshold signatures.
     pub fn sign(namespace: &[u8], share: &Share, view: View) -> Self {
         let nullify_namespace = nullify_namespace(namespace);
         let view_message = view_message(view);
@@ -477,14 +551,21 @@ impl FixedSize for Nullify {
     const SIZE: usize = View::SIZE + PartialSignature::SIZE + PartialSignature::SIZE;
 }
 
+/// Nullification represents an aggregated threshold signature to skip a view.
+/// When a view is nullified, the consensus moves to the next view without finalizing a block.
+/// The threshold signatures provide compact verification compared to collecting individual signatures.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub struct Nullification {
+    /// The view that has been nullified
     pub view: View,
+    /// The aggregated threshold signature on the view
     pub view_signature: Signature,
+    /// The aggregated threshold signature on the seed (for leader election/randomness)
     pub seed_signature: Signature,
 }
 
 impl Nullification {
+    /// Creates a new nullification with the given view and aggregated signatures.
     pub fn new(view: View, view_signature: Signature, seed_signature: Signature) -> Self {
         Nullification {
             view,
@@ -493,6 +574,11 @@ impl Nullification {
         }
     }
 
+    /// Verifies the threshold signatures on this nullification.
+    ///
+    /// This ensures that:
+    /// 1. The view signature is a valid threshold signature for the view
+    /// 2. The seed signature is a valid threshold signature for the view
     pub fn verify(&self, namespace: &[u8], public_key: &Public) -> bool {
         let nullify_namespace = nullify_namespace(namespace);
         let view_message = view_message(self.view);
@@ -541,13 +627,19 @@ impl FixedSize for Nullification {
     const SIZE: usize = View::SIZE + Signature::SIZE + Signature::SIZE;
 }
 
+/// Finalize represents a validator's vote to finalize a proposal.
+/// This happens after a proposal has been notarized, confirming it as the canonical block for this view.
+/// It contains a partial signature on the proposal.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub struct Finalize<D: Digest> {
+    /// The proposal to be finalized
     pub proposal: Proposal<D>,
+    /// The validator's partial signature on the proposal
     pub proposal_signature: PartialSignature,
 }
 
 impl<D: Digest> Finalize<D> {
+    /// Creates a new finalize with the given proposal and signature.
     pub fn new(proposal: Proposal<D>, proposal_signature: PartialSignature) -> Self {
         Finalize {
             proposal,
@@ -555,6 +647,9 @@ impl<D: Digest> Finalize<D> {
         }
     }
 
+    /// Verifies the signature on this finalize using BLS threshold verification.
+    ///
+    /// This ensures that the signature is valid for the given proposal.
     pub fn verify(
         &self,
         namespace: &[u8],
@@ -577,6 +672,7 @@ impl<D: Digest> Finalize<D> {
         .is_ok()
     }
 
+    /// Creates a new signed finalize using BLS threshold signatures.
     pub fn sign(namespace: &[u8], share: &Share, proposal: Proposal<D>) -> Self {
         let finalize_namespace = finalize_namespace(namespace);
         let message = proposal.encode();
@@ -620,14 +716,21 @@ impl<D: Digest> FixedSize for Finalize<D> {
     const SIZE: usize = Proposal::<D>::SIZE + PartialSignature::SIZE;
 }
 
+/// Finalization represents an aggregated threshold signature to finalize a proposal.
+/// When a proposal is finalized, it becomes the canonical block for its view.
+/// The threshold signatures provide compact verification compared to collecting individual signatures.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub struct Finalization<D: Digest> {
+    /// The proposal that has been finalized
     pub proposal: Proposal<D>,
+    /// The aggregated threshold signature on the proposal
     pub proposal_signature: Signature,
+    /// The aggregated threshold signature on the seed (for leader election/randomness)
     pub seed_signature: Signature,
 }
 
 impl<D: Digest> Finalization<D> {
+    /// Creates a new finalization with the given proposal and aggregated signatures.
     pub fn new(
         proposal: Proposal<D>,
         proposal_signature: Signature,
@@ -640,6 +743,11 @@ impl<D: Digest> Finalization<D> {
         }
     }
 
+    /// Verifies the threshold signatures on this finalization.
+    ///
+    /// This ensures that:
+    /// 1. The proposal signature is a valid threshold signature for the proposal
+    /// 2. The seed signature is a valid threshold signature for the view
     pub fn verify(&self, namespace: &[u8], public_key: &Public) -> bool {
         let finalize_namespace = finalize_namespace(namespace);
         let finalize_message = self.proposal.encode();
@@ -689,9 +797,13 @@ impl<D: Digest> FixedSize for Finalization<D> {
     const SIZE: usize = Proposal::<D>::SIZE + Signature::SIZE + Signature::SIZE;
 }
 
+/// Backfiller is a message type for requesting and receiving missing consensus artifacts.
+/// This is used to synchronize validators that have fallen behind or just joined the network.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Backfiller<D: Digest> {
+    /// Request for missing notarizations and nullifications
     Request(Request),
+    /// Response containing requested notarizations and nullifications
     Response(Response<D>),
 }
 
@@ -739,14 +851,20 @@ impl<D: Digest> Read<usize> for Backfiller<D> {
     }
 }
 
+/// Request is a message to request missing notarizations and nullifications.
+/// This is used by validators who need to catch up with the consensus state.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Request {
+    /// Unique identifier for this request (used to match responses)
     pub id: u64,
+    /// Views for which notarizations are requested
     pub notarizations: Vec<View>,
+    /// Views for which nullifications are requested
     pub nullifications: Vec<View>,
 }
 
 impl Request {
+    /// Creates a new request for missing notarizations and nullifications.
     pub fn new(id: u64, notarizations: Vec<View>, nullifications: Vec<View>) -> Self {
         Request {
             id,
@@ -784,14 +902,20 @@ impl Read<usize> for Request {
     }
 }
 
+/// Response is a message containing the requested notarizations and nullifications.
+/// This is sent in response to a Request message.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Response<D: Digest> {
+    /// Identifier matching the original request
     pub id: u64,
+    /// Notarizations for the requested views
     pub notarizations: Vec<Notarization<D>>,
+    /// Nullifications for the requested views
     pub nullifications: Vec<Nullification>,
 }
 
 impl<D: Digest> Response<D> {
+    /// Creates a new response with the given id, notarizations, and nullifications.
     pub fn new(
         id: u64,
         notarizations: Vec<Notarization<D>>,
@@ -833,16 +957,27 @@ impl<D: Digest> Read<usize> for Response<D> {
     }
 }
 
+/// Activity represents all possible activities that can occur in the consensus protocol.
+/// This includes both regular consensus messages and fault evidence.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub enum Activity<D: Digest> {
+    /// A single validator notarize over a proposal
     Notarize(Notarize<D>),
+    /// An aggregated threshold signature for a notarization
     Notarization(Notarization<D>),
+    /// A single validator nullify to skip the current view
     Nullify(Nullify),
+    /// An aggregated threshold signature for a nullification
     Nullification(Nullification),
+    /// A single validator finalize over a proposal
     Finalize(Finalize<D>),
+    /// An aggregated threshold signature for a finalization
     Finalization(Finalization<D>),
+    /// Evidence of a validator sending conflicting notarizes (Byzantine behavior)
     ConflictingNotarize(ConflictingNotarize<D>),
+    /// Evidence of a validator sending conflicting finalizes (Byzantine behavior)
     ConflictingFinalize(ConflictingFinalize<D>),
+    /// Evidence of a validator sending both nullify and finalize for the same view (Byzantine behavior)
     NullifyFinalize(NullifyFinalize<D>),
 }
 
@@ -969,18 +1104,28 @@ impl<D: Digest> Viewable for Activity<D> {
     }
 }
 
+/// ConflictingNotarize represents evidence of a Byzantine validator sending conflicting notarizes.
+/// This is used to prove that a validator has equivocated (voted for different proposals in the same view).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ConflictingNotarize<D: Digest> {
+    /// The view in which the conflict occurred
     pub view: View,
+    /// The parent view of the first conflicting proposal
     pub parent_1: View,
+    /// The payload of the first conflicting proposal
     pub payload_1: D,
+    /// The signature on the first conflicting proposal
     pub signature_1: PartialSignature,
+    /// The parent view of the second conflicting proposal
     pub parent_2: View,
+    /// The payload of the second conflicting proposal
     pub payload_2: D,
+    /// The signature on the second conflicting proposal
     pub signature_2: PartialSignature,
 }
 
 impl<D: Digest> ConflictingNotarize<D> {
+    /// Creates a new conflicting notarize evidence from two conflicting notarizes.
     pub fn new(notarize_1: Notarize<D>, notarize_2: Notarize<D>) -> Self {
         assert_eq!(notarize_1.view(), notarize_2.view());
         assert_eq!(notarize_1.signer(), notarize_2.signer());
@@ -995,6 +1140,7 @@ impl<D: Digest> ConflictingNotarize<D> {
         }
     }
 
+    /// Reconstructs the original proposals from this evidence.
     pub fn proposals(&self) -> (Proposal<D>, Proposal<D>) {
         (
             Proposal::new(self.view, self.parent_1, self.payload_1),
@@ -1002,6 +1148,7 @@ impl<D: Digest> ConflictingNotarize<D> {
         )
     }
 
+    /// Verifies that both conflicting signatures are valid, proving Byzantine behavior.
     pub fn verify(
         &self,
         namespace: &[u8],
@@ -1092,18 +1239,28 @@ impl<D: Digest> FixedSize for ConflictingNotarize<D> {
         + PartialSignature::SIZE;
 }
 
+/// ConflictingFinalize represents evidence of a Byzantine validator sending conflicting finalizes.
+/// Similar to ConflictingNotarize, but for finalizes.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ConflictingFinalize<D: Digest> {
+    /// The view in which the conflict occurred
     pub view: View,
+    /// The parent view of the first conflicting proposal
     pub parent_1: View,
+    /// The payload of the first conflicting proposal
     pub payload_1: D,
+    /// The signature on the first conflicting proposal
     pub signature_1: PartialSignature,
+    /// The parent view of the second conflicting proposal
     pub parent_2: View,
+    /// The payload of the second conflicting proposal
     pub payload_2: D,
+    /// The signature on the second conflicting proposal
     pub signature_2: PartialSignature,
 }
 
 impl<D: Digest> ConflictingFinalize<D> {
+    /// Creates a new conflicting finalize evidence from two conflicting finalizes.
     pub fn new(finalize_1: Finalize<D>, finalize_2: Finalize<D>) -> Self {
         assert_eq!(finalize_1.view(), finalize_2.view());
         assert_eq!(finalize_1.signer(), finalize_2.signer());
@@ -1118,6 +1275,7 @@ impl<D: Digest> ConflictingFinalize<D> {
         }
     }
 
+    /// Reconstructs the original proposals from this evidence.
     pub fn proposals(&self) -> (Proposal<D>, Proposal<D>) {
         (
             Proposal::new(self.view, self.parent_1, self.payload_1),
@@ -1125,6 +1283,7 @@ impl<D: Digest> ConflictingFinalize<D> {
         )
     }
 
+    /// Verifies that both conflicting signatures are valid, proving Byzantine behavior.
     pub fn verify(
         &self,
         namespace: &[u8],
@@ -1215,14 +1374,21 @@ impl<D: Digest> FixedSize for ConflictingFinalize<D> {
         + PartialSignature::SIZE;
 }
 
+/// NullifyFinalize represents evidence of a Byzantine validator sending both a nullify and finalize
+/// for the same view, which is contradictory behavior (a validator should either try to skip a view OR
+/// finalize a proposal, not both).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct NullifyFinalize<D: Digest> {
+    /// The proposal that the validator tried to finalize
     pub proposal: Proposal<D>,
+    /// The signature on the nullify
     pub view_signature: PartialSignature,
+    /// The signature on the finalize
     pub finalize_signature: PartialSignature,
 }
 
 impl<D: Digest> NullifyFinalize<D> {
+    /// Creates a new nullify-finalize evidence from a nullify and a finalize.
     pub fn new(nullify: Nullify, finalize: Finalize<D>) -> Self {
         assert_eq!(nullify.view(), finalize.view());
         assert_eq!(nullify.signer(), finalize.signer());
@@ -1233,6 +1399,7 @@ impl<D: Digest> NullifyFinalize<D> {
         }
     }
 
+    /// Verifies that both the nullify and finalize signatures are valid, proving Byzantine behavior.
     pub fn verify(
         &self,
         namespace: &[u8],
