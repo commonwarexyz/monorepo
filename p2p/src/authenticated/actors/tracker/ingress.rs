@@ -98,6 +98,21 @@ impl<E: Spawner + Metrics, C: Verifier> Mailbox<E, C> {
         rx.await.unwrap()
     }
 
+    pub fn try_release(&mut self, peer: C::PublicKey) -> bool {
+        let Err(e) = self.sender.try_send(Message::Release { peer }) else {
+            return true;
+        };
+        if e.is_full() {
+            return false;
+        }
+
+        // If any other error occurs, we should panic!
+        panic!(
+            "unexpected error while trying to release reservation: {:?}",
+            e
+        );
+    }
+
     pub async fn release(&mut self, peer: C::PublicKey) {
         self.sender.send(Message::Release { peer }).await.unwrap();
     }
@@ -150,11 +165,16 @@ impl<E: Spawner + Metrics, C: Verifier> Reservation<E, C> {
 impl<E: Spawner + Metrics, C: Verifier> Drop for Reservation<E, C> {
     fn drop(&mut self) {
         let (peer, mut mailbox) = self.closer.take().unwrap();
-        self.context
-            .clone()
-            .with_label("reservation")
-            .spawn(move |_| async move {
-                mailbox.release(peer).await;
-            });
+
+        // If the mailbox is not full, we can release the reservation immediately without spawning a task.
+        if mailbox.try_release(peer.clone()) {
+            return;
+        }
+
+        // If the mailbox is full, we need to spawn a task to handle the release. If we used `block_on` here,
+        // it could cause a deadlock.
+        self.context.spawn_ref()(async move {
+            mailbox.release(peer).await;
+        });
     }
 }

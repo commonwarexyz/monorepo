@@ -13,9 +13,9 @@ impl<'a, H: CHasher> Hasher<'a, H> {
     }
 
     /// Computes the hash for a leaf given its position and the element it represents.
-    pub(crate) fn leaf_hash(&mut self, pos: u64, element: &H::Digest) -> H::Digest {
+    pub(crate) fn leaf_hash(&mut self, pos: u64, element: &[u8]) -> H::Digest {
         self.update_with_pos(pos);
-        self.update_with_hash(element);
+        self.update_with_element(element);
         self.finalize_reset()
     }
 
@@ -51,6 +51,9 @@ impl<'a, H: CHasher> Hasher<'a, H> {
     }
     pub(crate) fn update_with_hash(&mut self, hash: &H::Digest) {
         self.hasher.update(hash.as_ref());
+    }
+    pub(crate) fn update_with_element(&mut self, element: &[u8]) {
+        self.hasher.update(element);
     }
     pub(crate) fn finalize_reset(&mut self) -> H::Digest {
         self.hasher.finalize()
