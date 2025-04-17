@@ -1,5 +1,4 @@
 use std::{
-    env,
     fs::{self, File},
     os::fd::AsRawFd as _,
     path::PathBuf,
@@ -8,7 +7,6 @@ use std::{
 
 use commonware_utils::{from_hex, hex};
 use io_uring::{opcode, types, IoUring};
-use rand::{rngs::OsRng, RngCore as _};
 
 use crate::Error;
 
@@ -35,12 +33,6 @@ impl Storage {
             lock: Arc::new(Mutex::new(())),
             storage_directory: config.storage_directory,
         }
-    }
-}
-
-impl Default for Storage {
-    fn default() -> Self {
-        Self::new(Config::default())
     }
 }
 
@@ -275,13 +267,17 @@ impl crate::Blob for Blob {
 
 #[cfg(test)]
 mod tests {
-    use crate::storage::tests::run_storage_tests;
-
     use super::*;
+    use crate::storage::tests::run_storage_tests;
+    use rand::{Rng as _, SeedableRng as _};
+    use std::env;
 
     #[tokio::test]
     async fn test_iouring_storage() {
-        let config = Config::default();
+        let mut rng = rand::rngs::StdRng::from_entropy();
+        let storage_directory =
+            env::temp_dir().join(format!("commonware_iouring_storage_{}", rng.gen::<u64>()));
+        let config = Config::new(storage_directory.clone());
         let storage = Storage::new(config.clone());
         run_storage_tests(storage).await;
     }
