@@ -64,7 +64,7 @@ impl crate::Storage for Storage {
         let len = file.metadata().map_err(|_| Error::ReadFailed)?.len();
 
         // Construct the blob
-        Ok(Blob::new(partition.into(), name, file, len as u32))
+        Ok(Blob::new(partition.into(), name, file, len))
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
@@ -117,11 +117,11 @@ pub struct Blob {
     partition: String,
     name: Vec<u8>,
     // (underlying file, iouring, blob length)
-    file: Arc<Mutex<(File, IoUring, u32)>>,
+    file: Arc<Mutex<(File, IoUring, u64)>>,
 }
 
 impl Blob {
-    pub fn new(partition: String, name: &[u8], file: File, len: u32) -> Self {
+    pub fn new(partition: String, name: &[u8], file: File, len: u64) -> Self {
         let ring = IoUring::new(32).unwrap();
         Self {
             partition,
@@ -230,8 +230,8 @@ impl crate::Blob for Blob {
 
         // Update the virtual file size
         let max_len = offset + buf.len() as u64;
-        if max_len > *len as u64 {
-            *len = max_len as u32;
+        if max_len > *len {
+            *len = max_len;
         }
         Ok(())
     }
@@ -244,7 +244,7 @@ impl crate::Blob for Blob {
             .map_err(|_| Error::BlobTruncateFailed(self.partition.clone(), hex(&self.name)))?;
 
         // Update the virtual file size
-        file.2 = len as u32; // todo danlaine: handle overflow
+        file.2 = len;
         Ok(())
     }
 
