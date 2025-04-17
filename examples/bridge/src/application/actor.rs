@@ -7,9 +7,7 @@ use super::{
 };
 use bytes::BufMut;
 use commonware_codec::{DecodeExt, Encode, FixedSize};
-use commonware_consensus::threshold_simplex::types::{
-    finalize_namespace, seed_namespace, Activity, Finalization, Viewable,
-};
+use commonware_consensus::threshold_simplex::types::{Activity, Finalization, Viewable};
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{self, Element},
@@ -115,11 +113,7 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                             let finalization = Finalization::<H::Digest>::decode(proof.as_ref())
                                 .expect("failed to decode finalization");
                             assert!(
-                                finalization.verify(
-                                    &self.other_public,
-                                    &finalize_namespace(&self.namespace),
-                                    &seed_namespace(&self.namespace),
-                                ),
+                                finalization.verify(&self.namespace, &self.other_public),
                                 "indexer is corrupt"
                             );
 
@@ -210,11 +204,7 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                     let proof = block[1..].to_vec();
                     let finalization = Finalization::<H::Digest>::decode(proof.as_ref())
                         .expect("failed to decode finalization");
-                    let result = finalization.verify(
-                        &self.other_public,
-                        &finalize_namespace(&self.namespace),
-                        &seed_namespace(&self.namespace),
-                    );
+                    let result = finalization.verify(&self.namespace, &self.other_public);
 
                     // If payload exists and is valid, return
                     let _ = response.send(result);

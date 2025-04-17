@@ -1,7 +1,5 @@
 use crate::{
-    ordered_broadcast::types::{
-        ack_namespace, chunk_namespace, Activity, Chunk, Epoch, Lock, Proposal,
-    },
+    ordered_broadcast::types::{Activity, Chunk, Epoch, Lock, Proposal},
     Reporter as Z,
 };
 use commonware_cryptography::{bls12381::primitives::group, Digest, Verifier};
@@ -71,7 +69,7 @@ impl<C: Verifier, D: Digest> Reporter<C, D> {
             match msg {
                 Message::Proposal(proposal) => {
                     // Verify properly constructed (not needed in production)
-                    if !proposal.verify(&chunk_namespace(&self.namespace)) {
+                    if !proposal.verify(&self.namespace) {
                         panic!("Invalid proof");
                     }
 
@@ -80,7 +78,7 @@ impl<C: Verifier, D: Digest> Reporter<C, D> {
                 }
                 Message::Locked(lock) => {
                     // Verify properly constructed (not needed in production)
-                    if !lock.verify(&self.public, &ack_namespace(&self.namespace)) {
+                    if !lock.verify(&self.namespace, &self.public) {
                         panic!("Invalid proof");
                     }
 

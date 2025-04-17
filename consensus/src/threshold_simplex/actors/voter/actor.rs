@@ -4,10 +4,9 @@ use crate::{
         actors::resolver,
         metrics,
         types::{
-            finalize_namespace, notarize_namespace, nullify_namespace, seed_namespace, Activity,
-            Attributable, ConflictingFinalize, ConflictingNotarize, Context, Finalization,
-            Finalize, Notarization, Notarize, Nullification, Nullify, NullifyFinalize, Proposal,
-            View, Viewable, Voter,
+            Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Context,
+            Finalization, Finalize, Notarization, Notarize, Nullification, Nullify,
+            NullifyFinalize, Proposal, View, Viewable, Voter,
         },
     },
     Automaton, Relay, Reporter, ThresholdSupervisor, LATENCY,
@@ -583,10 +582,7 @@ pub struct Actor<
 
     genesis: Option<D>,
 
-    seed_namespace: Vec<u8>,
-    notarize_namespace: Vec<u8>,
-    nullify_namespace: Vec<u8>,
-    finalize_namespace: Vec<u8>,
+    namespace: Vec<u8>,
 
     leader_timeout: Duration,
     notarization_timeout: Duration,
@@ -685,10 +681,7 @@ impl<
 
                 genesis: None,
 
-                seed_namespace: seed_namespace(&cfg.namespace),
-                notarize_namespace: notarize_namespace(&cfg.namespace),
-                nullify_namespace: nullify_namespace(&cfg.namespace),
-                finalize_namespace: finalize_namespace(&cfg.namespace),
+                namespace: cfg.namespace,
 
                 leader_timeout: cfg.leader_timeout,
                 notarization_timeout: cfg.notarization_timeout,
@@ -917,12 +910,7 @@ impl<
 
         // Construct nullify
         let share = self.supervisor.share(self.view).unwrap();
-        let nullify = Nullify::sign(
-            share,
-            self.view,
-            &self.nullify_namespace,
-            &self.seed_namespace,
-        );
+        let nullify = Nullify::sign(&self.namespace, share, self.view);
 
         // Handle the nullify
         self.handle_nullify(share.index, nullify.clone()).await;
@@ -959,12 +947,7 @@ impl<
         };
 
         // Verify signatures
-        if !nullify.verify(
-            identity,
-            Some(public_key_index),
-            &self.nullify_namespace,
-            &self.seed_namespace,
-        ) {
+        if !nullify.verify(&self.namespace, identity, Some(public_key_index)) {
             return false;
         }
 
@@ -1298,12 +1281,7 @@ impl<
         };
 
         // Verify signatures
-        if !notarize.verify(
-            identity,
-            Some(public_key_index),
-            &self.notarize_namespace,
-            &self.seed_namespace,
-        ) {
+        if !notarize.verify(&self.namespace, identity, Some(public_key_index)) {
             return false;
         }
 
@@ -1360,7 +1338,7 @@ impl<
             return false;
         };
         let public_key = poly::public(identity);
-        if !notarization.verify(public_key, &self.notarize_namespace, &self.seed_namespace) {
+        if !notarization.verify(&self.namespace, public_key) {
             return false;
         }
 
@@ -1416,7 +1394,7 @@ impl<
             return false;
         };
         let public_key = poly::public(identity);
-        if !nullification.verify(public_key, &self.nullify_namespace, &self.seed_namespace) {
+        if !nullification.verify(&self.namespace, public_key) {
             return false;
         }
 
@@ -1471,7 +1449,7 @@ impl<
         };
 
         // Verify signature
-        if !finalize.verify(identity, Some(public_key_index), &self.finalize_namespace) {
+        if !finalize.verify(&self.namespace, identity, Some(public_key_index)) {
             return false;
         }
 
@@ -1528,7 +1506,7 @@ impl<
             return false;
         };
         let public_key = poly::public(identity);
-        if !finalization.verify(public_key, &self.finalize_namespace, &self.seed_namespace) {
+        if !finalization.verify(&self.namespace, public_key) {
             return false;
         }
 
@@ -1586,12 +1564,7 @@ impl<
         // Construct notarize
         let share = self.supervisor.share(view).unwrap();
         let proposal = round.proposal.as_ref().unwrap();
-        Some(Notarize::sign(
-            share,
-            proposal.clone(),
-            &self.notarize_namespace,
-            &self.seed_namespace,
-        ))
+        Some(Notarize::sign(&self.namespace, share, proposal.clone()))
     }
 
     async fn construct_notarization(&mut self, view: u64, force: bool) -> Option<Notarization<D>> {
@@ -1635,11 +1608,7 @@ impl<
         let Some(proposal) = &round.proposal else {
             return None;
         };
-        Some(Finalize::sign(
-            share,
-            proposal.clone(),
-            &self.finalize_namespace,
-        ))
+        Some(Finalize::sign(&self.namespace, share, proposal.clone()))
     }
 
     async fn construct_finalization(&mut self, view: u64, force: bool) -> Option<Finalization<D>> {

@@ -1,10 +1,7 @@
 //! Byzantine participant that sends nullify and finalize messages for the same view.
 
 use crate::{
-    threshold_simplex::types::{
-        finalize_namespace, nullify_namespace, seed_namespace, Finalize, Nullify, View, Viewable,
-        Voter,
-    },
+    threshold_simplex::types::{Finalize, Nullify, View, Viewable, Voter},
     ThresholdSupervisor,
 };
 use commonware_codec::{DecodeExt, Encode};
@@ -28,11 +25,10 @@ pub struct Nuller<
 > {
     context: E,
     supervisor: S,
-    _hasher: PhantomData<H>,
 
-    seed_namespace: Vec<u8>,
-    nullify_namespace: Vec<u8>,
-    finalize_namespace: Vec<u8>,
+    namespace: Vec<u8>,
+
+    _hasher: PhantomData<H>,
 }
 
 impl<
@@ -45,11 +41,10 @@ impl<
         Self {
             context,
             supervisor: cfg.supervisor,
-            _hasher: PhantomData,
 
-            seed_namespace: seed_namespace(&cfg.namespace),
-            nullify_namespace: nullify_namespace(&cfg.namespace),
-            finalize_namespace: finalize_namespace(&cfg.namespace),
+            namespace: cfg.namespace,
+
+            _hasher: PhantomData,
         }
     }
 
@@ -75,14 +70,13 @@ impl<
                     // Nullify
                     let view = notarize.view();
                     let share = self.supervisor.share(view).unwrap();
-                    let n =
-                        Nullify::sign(share, view, &self.nullify_namespace, &self.seed_namespace);
+                    let n = Nullify::sign(&self.namespace, share, view);
                     let msg = Voter::<H::Digest>::Nullify(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
 
                     // Finalize digest
                     let proposal = notarize.proposal;
-                    let f = Finalize::sign(share, proposal, &self.finalize_namespace);
+                    let f = Finalize::sign(&self.namespace, share, proposal);
                     let msg = Voter::Finalize(f).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }

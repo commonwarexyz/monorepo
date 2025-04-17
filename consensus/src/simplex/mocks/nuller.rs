@@ -1,9 +1,7 @@
 //! Byzantine participant that sends nullify and finalize messages for the same view.
 
 use crate::{
-    simplex::types::{
-        finalize_namespace, nullify_namespace, Finalize, Nullify, View, Viewable, Voter,
-    },
+    simplex::types::{Finalize, Nullify, View, Viewable, Voter},
     Supervisor,
 };
 use commonware_codec::{Decode, Encode};
@@ -30,8 +28,7 @@ pub struct Nuller<
     supervisor: S,
     _hasher: PhantomData<H>,
 
-    nullify_namespace: Vec<u8>,
-    finalize_namespace: Vec<u8>,
+    namespace: Vec<u8>,
 }
 
 impl<E: Spawner, C: Scheme, H: Hasher, S: Supervisor<Index = View, PublicKey = C::PublicKey>>
@@ -44,8 +41,7 @@ impl<E: Spawner, C: Scheme, H: Hasher, S: Supervisor<Index = View, PublicKey = C
             supervisor: cfg.supervisor,
             _hasher: PhantomData,
 
-            nullify_namespace: nullify_namespace(&cfg.namespace),
-            finalize_namespace: finalize_namespace(&cfg.namespace),
+            namespace: cfg.namespace,
         }
     }
 
@@ -76,12 +72,8 @@ impl<E: Spawner, C: Scheme, H: Hasher, S: Supervisor<Index = View, PublicKey = C
                         .unwrap();
 
                     // Nullify
-                    let msg = Nullify::sign(
-                        &mut self.crypto,
-                        public_key_index,
-                        view,
-                        &self.nullify_namespace,
-                    );
+                    let msg =
+                        Nullify::sign(&self.namespace, &mut self.crypto, public_key_index, view);
                     let msg = Voter::Nullify::<C::Signature, H::Digest>(msg)
                         .encode()
                         .into();
@@ -89,10 +81,10 @@ impl<E: Spawner, C: Scheme, H: Hasher, S: Supervisor<Index = View, PublicKey = C
 
                     // Finalize digest
                     let msg = Finalize::sign(
+                        &self.namespace,
                         &mut self.crypto,
                         public_key_index,
                         notarize.proposal,
-                        &self.finalize_namespace,
                     );
                     let msg = Voter::Finalize(msg).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();

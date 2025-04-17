@@ -151,19 +151,19 @@ impl<P: Array, D: Digest> AckManager<P, D> {
 
 #[cfg(test)]
 mod tests {
-    use crate::ordered_broadcast::types::Chunk;
-
     use super::*;
+    use crate::ordered_broadcast::types::Chunk;
     use commonware_cryptography::{bls12381::dkg::ops::generate_shares, ed25519, sha256};
     use commonware_runtime::deterministic::Executor;
 
     /// Aggregated helper functions to reduce duplication in tests.
     mod helpers {
-        use crate::ordered_broadcast::types::{ack_namespace, Chunk};
-
         use super::*;
+        use crate::ordered_broadcast::types::Chunk;
         use commonware_codec::FixedSize;
         use commonware_cryptography::bls12381::primitives::group::Share;
+
+        const NAMESPACE: &[u8] = b"1234";
 
         /// Generate shares using the default executor.
         pub fn setup_shares(num_validators: u32, quorum: u32) -> Vec<Share> {
@@ -183,7 +183,7 @@ mod tests {
             chunk: Chunk<ed25519::PublicKey, sha256::Digest>,
             epoch: Epoch,
         ) -> Ack<ed25519::PublicKey, sha256::Digest> {
-            Ack::sign(share, chunk, epoch, ack_namespace(b"1234").as_slice())
+            Ack::sign(NAMESPACE, share, chunk, epoch)
         }
 
         /// Recover a threshold signature from a set of partials.

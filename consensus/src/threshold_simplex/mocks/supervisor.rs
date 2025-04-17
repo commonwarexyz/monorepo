@@ -1,7 +1,6 @@
 use crate::{
     threshold_simplex::types::{
-        finalize_namespace, notarize_namespace, nullify_namespace, seed_namespace, Activity,
-        Attributable, Finalization, Notarization, Nullification, View, Viewable,
+        Activity, Attributable, Finalization, Notarization, Nullification, View, Viewable,
     },
     Monitor, Reporter, Supervisor as Su, ThresholdSupervisor as TSu,
 };
@@ -38,10 +37,7 @@ type Faults<D, P> = HashMap<P, HashMap<View, HashSet<Activity<D>>>>;
 pub struct Supervisor<P: Array, D: Digest> {
     participants: BTreeMap<View, ViewInfo<P>>,
 
-    seed_namespace: Vec<u8>,
-    notarize_namespace: Vec<u8>,
-    nullify_namespace: Vec<u8>,
-    finalize_namespace: Vec<u8>,
+    namespace: Vec<u8>,
 
     pub leaders: Arc<Mutex<HashMap<View, P>>>,
     pub notarizes: Arc<Mutex<Participation<D, P>>>,
@@ -69,10 +65,7 @@ impl<P: Array, D: Digest> Supervisor<P, D> {
         }
         Self {
             participants: parsed_participants,
-            seed_namespace: seed_namespace(&cfg.namespace),
-            notarize_namespace: notarize_namespace(&cfg.namespace),
-            nullify_namespace: nullify_namespace(&cfg.namespace),
-            finalize_namespace: finalize_namespace(&cfg.namespace),
+            namespace: cfg.namespace,
             leaders: Arc::new(Mutex::new(HashMap::new())),
             notarizes: Arc::new(Mutex::new(HashMap::new())),
             notarizations: Arc::new(Mutex::new(HashMap::new())),
@@ -176,12 +169,7 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                         panic!("no participants in required range");
                     }
                 };
-                if !notarize.verify(
-                    identity,
-                    None,
-                    &self.notarize_namespace,
-                    &self.seed_namespace,
-                ) {
+                if !notarize.verify(&self.namespace, identity, None) {
                     panic!("signature verification failed");
                 }
                 let public_key = validators[notarize.signer() as usize].clone();
@@ -203,7 +191,7 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                     }
                 };
                 let public = public(identity);
-                if !notarization.verify(public, &self.notarize_namespace, &self.seed_namespace) {
+                if !notarization.verify(&self.namespace, public) {
                     panic!("signature verification failed");
                 }
                 self.notarizations
@@ -219,12 +207,7 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                         panic!("no participants in required range");
                     }
                 };
-                if !nullify.verify(
-                    identity,
-                    None,
-                    &self.nullify_namespace,
-                    &self.seed_namespace,
-                ) {
+                if !nullify.verify(&self.namespace, identity, None) {
                     panic!("signature verification failed");
                 }
                 let public_key = validators[nullify.signer() as usize].clone();
@@ -244,7 +227,7 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                     }
                 };
                 let public = public(identity);
-                if !nullification.verify(public, &self.nullify_namespace, &self.seed_namespace) {
+                if !nullification.verify(&self.namespace, public) {
                     panic!("signature verification failed");
                 }
                 self.nullifications
@@ -260,7 +243,7 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                         panic!("no participants in required range");
                     }
                 };
-                if !finalize.verify(identity, None, &self.finalize_namespace) {
+                if !finalize.verify(&self.namespace, identity, None) {
                     panic!("signature verification failed");
                 }
                 let public_key = validators[finalize.signer() as usize].clone();
@@ -282,7 +265,7 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                     }
                 };
                 let public = public(identity);
-                if !finalization.verify(public, &self.finalize_namespace, &self.seed_namespace) {
+                if !finalization.verify(&self.namespace, public) {
                     panic!("signature verification failed");
                 }
                 self.finalizations
@@ -305,7 +288,7 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                         panic!("no participants in required range");
                     }
                 };
-                if !conflicting.verify(identity, None, &self.notarize_namespace) {
+                if !conflicting.verify(&self.namespace, identity, None) {
                     panic!("signature verification failed");
                 }
                 let public_key = validators[conflicting.signer() as usize].clone();
@@ -326,7 +309,7 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                         panic!("no participants in required range");
                     }
                 };
-                if !conflicting.verify(identity, None, &self.finalize_namespace) {
+                if !conflicting.verify(&self.namespace, identity, None) {
                     panic!("signature verification failed");
                 }
                 let public_key = validators[conflicting.signer() as usize].clone();
@@ -347,12 +330,7 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                         panic!("no participants in required range");
                     }
                 };
-                if !nullify_finalize.verify(
-                    identity,
-                    None,
-                    &self.nullify_namespace,
-                    &self.finalize_namespace,
-                ) {
+                if !nullify_finalize.verify(&self.namespace, identity, None) {
                     panic!("signature verification failed");
                 }
                 let public_key = validators[nullify_finalize.signer() as usize].clone();

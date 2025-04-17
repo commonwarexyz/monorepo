@@ -40,10 +40,7 @@ mod tests {
     use crate::simplex::{
         actors::resolver,
         mocks,
-        types::{
-            finalize_namespace, notarize_namespace, Finalization, Finalize, Notarization, Notarize,
-            Proposal, Voter,
-        },
+        types::{Finalization, Finalize, Notarization, Notarize, Proposal, Voter},
     };
     use commonware_codec::Encode;
     use commonware_cryptography::{hash, Ed25519, Sha256, Signer};
@@ -180,17 +177,12 @@ mod tests {
             actor.start(backfiller, voter_sender, voter_receiver);
 
             // Send finalization over network (view 100)
-            let finalize_namespace = finalize_namespace(&namespace);
             let payload = hash(b"test");
             let proposal = Proposal::new(100, 50, payload);
             let mut signatures = Vec::new();
             for i in 0..threshold {
-                let finalization = Finalize::sign(
-                    &mut schemes[i as usize],
-                    i,
-                    proposal.clone(),
-                    &finalize_namespace,
-                );
+                let finalization =
+                    Finalize::sign(&namespace, &mut schemes[i as usize], i, proposal.clone());
                 signatures.push(finalization.signature);
             }
             let finalization = Finalization::new(proposal, signatures);
@@ -213,17 +205,12 @@ mod tests {
             }
 
             // Send old notarization from backfiller that should be ignored (view 50)
-            let notarize_namespace = notarize_namespace(&namespace);
             let payload = hash(b"test2");
             let proposal = Proposal::new(50, 49, payload);
             let mut signatures = Vec::new();
             for i in 0..threshold {
-                let notarization = Notarize::sign(
-                    &mut schemes[i as usize],
-                    i,
-                    proposal.clone(),
-                    &notarize_namespace,
-                );
+                let notarization =
+                    Notarize::sign(&namespace, &mut schemes[i as usize], i, proposal.clone());
                 signatures.push(notarization.signature);
             }
             let notarization = Notarization::new(proposal, signatures);
@@ -234,12 +221,8 @@ mod tests {
             let proposal = Proposal::new(300, 100, payload);
             let mut signatures = Vec::new();
             for i in 0..threshold {
-                let finalization = Finalize::sign(
-                    &mut schemes[i as usize],
-                    i,
-                    proposal.clone(),
-                    &finalize_namespace,
-                );
+                let finalization =
+                    Finalize::sign(&namespace, &mut schemes[i as usize], i, proposal.clone());
                 signatures.push(finalization.signature);
             }
             let finalization = Finalization::new(proposal, signatures);

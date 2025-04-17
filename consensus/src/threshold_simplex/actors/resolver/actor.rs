@@ -5,10 +5,7 @@ use super::{
 use crate::{
     threshold_simplex::{
         actors::voter,
-        types::{
-            notarize_namespace, nullify_namespace, seed_namespace, Backfiller, Notarization,
-            Nullification, Request, Response, View, Viewable,
-        },
+        types::{Backfiller, Notarization, Nullification, Request, Response, View, Viewable},
     },
     ThresholdSupervisor,
 };
@@ -24,7 +21,6 @@ use rand::{seq::IteratorRandom, Rng};
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
-    marker::PhantomData,
     time::{Duration, SystemTime},
 };
 use tracing::{debug, warn};
@@ -104,11 +100,8 @@ pub struct Actor<
 > {
     context: E,
     supervisor: S,
-    _digest: PhantomData<D>,
 
-    seed_namespace: Vec<u8>,
-    notarize_namespace: Vec<u8>,
-    nullify_namespace: Vec<u8>,
+    namespace: Vec<u8>,
 
     notarizations: BTreeMap<View, Notarization<D>>,
     nullifications: BTreeMap<View, Nullification>,
@@ -169,11 +162,8 @@ impl<
             Self {
                 context,
                 supervisor: cfg.supervisor,
-                _digest: PhantomData,
 
-                seed_namespace: seed_namespace(&cfg.namespace),
-                notarize_namespace: notarize_namespace(&cfg.namespace),
-                nullify_namespace: nullify_namespace(&cfg.namespace),
+                namespace: cfg.namespace,
 
                 notarizations: BTreeMap::new(),
                 nullifications: BTreeMap::new(),
@@ -505,7 +495,7 @@ impl<
                                     continue;
                                 };
                                 let public_key = poly::public(identity);
-                                if !notarization.verify(public_key, &self.notarize_namespace, &self.seed_namespace) {
+                                if !notarization.verify(&self.namespace, public_key) {
                                     warn!(view, sender = ?s, "invalid notarization");
                                     self.requester.block(s.clone());
                                     continue;
@@ -529,7 +519,7 @@ impl<
                                     continue;
                                 };
                                 let public_key = poly::public(identity);
-                                if !nullification.verify(public_key, &self.nullify_namespace, &self.seed_namespace) {
+                                if !nullification.verify(&self.namespace, public_key) {
                                     warn!(view, sender = ?s, "invalid nullification");
                                     self.requester.block(s.clone());
                                     continue;

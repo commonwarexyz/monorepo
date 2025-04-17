@@ -2,9 +2,7 @@ use bytes::Bytes;
 use clap::{value_parser, Arg, Command};
 use commonware_bridge::{wire, APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE};
 use commonware_codec::DecodeExt;
-use commonware_consensus::threshold_simplex::types::{
-    finalize_namespace, seed_namespace, Finalization, Viewable,
-};
+use commonware_consensus::threshold_simplex::types::{Finalization, Viewable};
 use commonware_cryptography::{
     bls12381::primitives::group::{self, Element},
     sha256::Digest as Sha256Digest,
@@ -188,11 +186,7 @@ fn main() {
                             continue;
                         };
                         let view = finalization.view();
-                        if !finalization.verify(
-                            public,
-                            &finalize_namespace(namespace),
-                            &seed_namespace(namespace),
-                        ) {
+                        if !finalization.verify(namespace, public) {
                             let _ = response.send(false);
                             continue;
                         }

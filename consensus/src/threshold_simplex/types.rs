@@ -39,28 +39,33 @@ pub trait Attributable {
     fn signer(&self) -> u32;
 }
 
-pub const SEED_SUFFIX: &[u8] = b"_SEED";
-pub const NOTARIZE_SUFFIX: &[u8] = b"_NOTARIZE";
-pub const NULLIFY_SUFFIX: &[u8] = b"_NULLIFY";
-pub const FINALIZE_SUFFIX: &[u8] = b"_FINALIZE";
+const SEED_SUFFIX: &[u8] = b"_SEED";
+const NOTARIZE_SUFFIX: &[u8] = b"_NOTARIZE";
+const NULLIFY_SUFFIX: &[u8] = b"_NULLIFY";
+const FINALIZE_SUFFIX: &[u8] = b"_FINALIZE";
 
-pub fn view_message(view: View) -> Vec<u8> {
+#[inline]
+fn view_message(view: View) -> Vec<u8> {
     View::encode(&view).into()
 }
 
-pub fn seed_namespace(namespace: &[u8]) -> Vec<u8> {
+#[inline]
+fn seed_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, SEED_SUFFIX)
 }
 
-pub fn notarize_namespace(namespace: &[u8]) -> Vec<u8> {
+#[inline]
+fn notarize_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, NOTARIZE_SUFFIX)
 }
 
-pub fn nullify_namespace(namespace: &[u8]) -> Vec<u8> {
+#[inline]
+fn nullify_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, NULLIFY_SUFFIX)
 }
 
-pub fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
+#[inline]
+fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, FINALIZE_SUFFIX)
 }
 
@@ -237,16 +242,17 @@ impl<D: Digest> Notarize<D> {
 
     pub fn verify(
         &self,
+        namespace: &[u8],
         identity: &Poly<Public>,
         public_key_index: Option<u32>,
-        notarize_namespace: &[u8],
-        seed_namespace: &[u8],
     ) -> bool {
         let public_key_index = public_key_index.unwrap_or(self.proposal_signature.index);
+        let notarize_namespace = notarize_namespace(namespace);
         let notarize_message = self.proposal.encode();
-        let notarize_message = (Some(notarize_namespace), notarize_message.as_ref());
+        let notarize_message = (Some(notarize_namespace.as_ref()), notarize_message.as_ref());
+        let seed_namespace = seed_namespace(namespace);
         let seed_message = view_message(self.proposal.view);
-        let seed_message = (Some(seed_namespace), seed_message.as_ref());
+        let seed_message = (Some(seed_namespace.as_ref()), seed_message.as_ref());
         partial_verify_multiple_messages(
             identity,
             public_key_index,
@@ -256,17 +262,15 @@ impl<D: Digest> Notarize<D> {
         .is_ok()
     }
 
-    pub fn sign(
-        share: &Share,
-        proposal: Proposal<D>,
-        notarize_namespace: &[u8],
-        seed_namespace: &[u8],
-    ) -> Self {
+    pub fn sign(namespace: &[u8], share: &Share, proposal: Proposal<D>) -> Self {
+        let notarize_namespace = notarize_namespace(namespace);
         let proposal_message = proposal.encode();
         let proposal_signature =
-            partial_sign_message(share, Some(notarize_namespace), &proposal_message);
+            partial_sign_message(share, Some(notarize_namespace.as_ref()), &proposal_message);
+        let seed_namespace = seed_namespace(namespace);
         let seed_message = view_message(proposal.view);
-        let seed_signature = partial_sign_message(share, Some(seed_namespace), &seed_message);
+        let seed_signature =
+            partial_sign_message(share, Some(seed_namespace.as_ref()), &seed_message);
         Notarize::new(proposal, proposal_signature, seed_signature)
     }
 }
@@ -331,16 +335,13 @@ impl<D: Digest> Notarization<D> {
         }
     }
 
-    pub fn verify(
-        &self,
-        public_key: &Public,
-        notarize_namespace: &[u8],
-        seed_namespace: &[u8],
-    ) -> bool {
+    pub fn verify(&self, namespace: &[u8], public_key: &Public) -> bool {
+        let notarize_namespace = notarize_namespace(namespace);
         let notarize_message = self.proposal.encode();
-        let notarize_message = (Some(notarize_namespace), notarize_message.as_ref());
+        let notarize_message = (Some(notarize_namespace.as_ref()), notarize_message.as_ref());
+        let seed_namespace = seed_namespace(namespace);
         let seed_message = view_message(self.proposal.view);
-        let seed_message = (Some(seed_namespace), seed_message.as_ref());
+        let seed_message = (Some(seed_namespace.as_ref()), seed_message.as_ref());
         let signature = aggregate_signatures(&[self.proposal_signature, self.seed_signature]);
         aggregate_verify_multiple_messages(
             public_key,
@@ -405,15 +406,16 @@ impl Nullify {
 
     pub fn verify(
         &self,
+        namespace: &[u8],
         identity: &Poly<Public>,
         public_key_index: Option<u32>,
-        nullify_namespace: &[u8],
-        seed_namespace: &[u8],
     ) -> bool {
         let public_key_index = public_key_index.unwrap_or(self.view_signature.index);
+        let nullify_namespace = nullify_namespace(namespace);
         let view_message = view_message(self.view);
-        let nullify_message = (Some(nullify_namespace), view_message.as_ref());
-        let seed_message = (Some(seed_namespace), view_message.as_ref());
+        let nullify_message = (Some(nullify_namespace.as_ref()), view_message.as_ref());
+        let seed_namespace = seed_namespace(namespace);
+        let seed_message = (Some(seed_namespace.as_ref()), view_message.as_ref());
         partial_verify_multiple_messages(
             identity,
             public_key_index,
@@ -423,15 +425,14 @@ impl Nullify {
         .is_ok()
     }
 
-    pub fn sign(
-        share: &Share,
-        view: View,
-        nullify_namespace: &[u8],
-        seed_namespace: &[u8],
-    ) -> Self {
+    pub fn sign(namespace: &[u8], share: &Share, view: View) -> Self {
+        let nullify_namespace = nullify_namespace(namespace);
         let view_message = view_message(view);
-        let view_signature = partial_sign_message(share, Some(nullify_namespace), &view_message);
-        let seed_signature = partial_sign_message(share, Some(seed_namespace), &view_message);
+        let view_signature =
+            partial_sign_message(share, Some(nullify_namespace.as_ref()), &view_message);
+        let seed_namespace = seed_namespace(namespace);
+        let seed_signature =
+            partial_sign_message(share, Some(seed_namespace.as_ref()), &view_message);
         Nullify::new(view, view_signature, seed_signature)
     }
 }
@@ -492,15 +493,12 @@ impl Nullification {
         }
     }
 
-    pub fn verify(
-        &self,
-        public_key: &Public,
-        nullify_namespace: &[u8],
-        seed_namespace: &[u8],
-    ) -> bool {
+    pub fn verify(&self, namespace: &[u8], public_key: &Public) -> bool {
+        let nullify_namespace = nullify_namespace(namespace);
         let view_message = view_message(self.view);
-        let nullify_message = (Some(nullify_namespace), view_message.as_ref());
-        let seed_message = (Some(seed_namespace), view_message.as_ref());
+        let nullify_message = (Some(nullify_namespace.as_ref()), view_message.as_ref());
+        let seed_namespace = seed_namespace(namespace);
+        let seed_message = (Some(seed_namespace.as_ref()), view_message.as_ref());
         let signature = aggregate_signatures(&[self.view_signature, self.seed_signature]);
         aggregate_verify_multiple_messages(
             public_key,
@@ -559,28 +557,31 @@ impl<D: Digest> Finalize<D> {
 
     pub fn verify(
         &self,
+        namespace: &[u8],
         identity: &Poly<Public>,
         public_key_index: Option<u32>,
-        finalize_namespace: &[u8],
     ) -> bool {
         if let Some(public_key_index) = public_key_index {
             if public_key_index != self.proposal_signature.index {
                 return false;
             }
         }
+        let finalize_namespace = finalize_namespace(namespace);
         let message = self.proposal.encode();
         partial_verify_message(
             identity,
-            Some(finalize_namespace),
+            Some(finalize_namespace.as_ref()),
             &message,
             &self.proposal_signature,
         )
         .is_ok()
     }
 
-    pub fn sign(share: &Share, proposal: Proposal<D>, finalize_namespace: &[u8]) -> Self {
+    pub fn sign(namespace: &[u8], share: &Share, proposal: Proposal<D>) -> Self {
+        let finalize_namespace = finalize_namespace(namespace);
         let message = proposal.encode();
-        let proposal_signature = partial_sign_message(share, Some(finalize_namespace), &message);
+        let proposal_signature =
+            partial_sign_message(share, Some(finalize_namespace.as_ref()), &message);
         Finalize::new(proposal, proposal_signature)
     }
 }
@@ -639,16 +640,13 @@ impl<D: Digest> Finalization<D> {
         }
     }
 
-    pub fn verify(
-        &self,
-        public_key: &Public,
-        finalize_namespace: &[u8],
-        seed_namespace: &[u8],
-    ) -> bool {
+    pub fn verify(&self, namespace: &[u8], public_key: &Public) -> bool {
+        let finalize_namespace = finalize_namespace(namespace);
         let finalize_message = self.proposal.encode();
-        let finalize_message = (Some(finalize_namespace), finalize_message.as_ref());
+        let finalize_message = (Some(finalize_namespace.as_ref()), finalize_message.as_ref());
+        let seed_namespace = seed_namespace(namespace);
         let seed_message = view_message(self.proposal.view);
-        let seed_message = (Some(seed_namespace), seed_message.as_ref());
+        let seed_message = (Some(seed_namespace.as_ref()), seed_message.as_ref());
         let signature = aggregate_signatures(&[self.proposal_signature, self.seed_signature]);
         aggregate_verify_multiple_messages(
             public_key,
@@ -996,15 +994,22 @@ impl<D: Digest> ConflictingNotarize<D> {
 
     pub fn verify(
         &self,
+        namespace: &[u8],
         identity: &Poly<Public>,
         public_key_index: Option<u32>,
-        notarize_namespace: &[u8],
     ) -> bool {
         let public_key_index = public_key_index.unwrap_or(self.signature_1.index);
+        let notarize_namespace = notarize_namespace(namespace);
         let notarize_message_1 = self.proposal_1.encode();
-        let notarize_message_1 = (Some(notarize_namespace), notarize_message_1.as_ref());
+        let notarize_message_1 = (
+            Some(notarize_namespace.as_ref()),
+            notarize_message_1.as_ref(),
+        );
         let notarize_message_2 = self.proposal_2.encode();
-        let notarize_message_2 = (Some(notarize_namespace), notarize_message_2.as_ref());
+        let notarize_message_2 = (
+            Some(notarize_namespace.as_ref()),
+            notarize_message_2.as_ref(),
+        );
         partial_verify_multiple_messages(
             identity,
             public_key_index,
@@ -1090,15 +1095,22 @@ impl<D: Digest> ConflictingFinalize<D> {
 
     pub fn verify(
         &self,
+        namespace: &[u8],
         identity: &Poly<Public>,
         public_key_index: Option<u32>,
-        finalize_namespace: &[u8],
     ) -> bool {
         let public_key_index = public_key_index.unwrap_or(self.signature_1.index);
+        let finalize_namespace = finalize_namespace(namespace);
         let finalize_message_1 = self.proposal_1.encode();
-        let finalize_message_1 = (Some(finalize_namespace), finalize_message_1.as_ref());
+        let finalize_message_1 = (
+            Some(finalize_namespace.as_ref()),
+            finalize_message_1.as_ref(),
+        );
         let finalize_message_2 = self.proposal_2.encode();
-        let finalize_message_2 = (Some(finalize_namespace), finalize_message_2.as_ref());
+        let finalize_message_2 = (
+            Some(finalize_namespace.as_ref()),
+            finalize_message_2.as_ref(),
+        );
         partial_verify_multiple_messages(
             identity,
             public_key_index,
@@ -1181,16 +1193,17 @@ impl<D: Digest> NullifyFinalize<D> {
 
     pub fn verify(
         &self,
+        namespace: &[u8],
         identity: &Poly<Public>,
         public_key_index: Option<u32>,
-        nullify_namespace: &[u8],
-        finalize_namespace: &[u8],
     ) -> bool {
         let public_key_index = public_key_index.unwrap_or(self.view_signature.index);
+        let nullify_namespace = nullify_namespace(namespace);
         let nullify_message = view_message(self.proposal.view);
-        let nullify_message = (Some(nullify_namespace), nullify_message.as_ref());
+        let nullify_message = (Some(nullify_namespace.as_ref()), nullify_message.as_ref());
+        let finalize_namespace = finalize_namespace(namespace);
         let finalize_message = self.proposal.encode();
-        let finalize_message = (Some(finalize_namespace), finalize_message.as_ref());
+        let finalize_message = (Some(finalize_namespace.as_ref()), finalize_message.as_ref());
         partial_verify_multiple_messages(
             identity,
             public_key_index,

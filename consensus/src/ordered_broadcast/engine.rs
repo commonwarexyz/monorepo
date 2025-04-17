@@ -9,10 +9,7 @@
 
 use super::{
     metrics,
-    types::{
-        ack_namespace, chunk_namespace, Ack, Activity, Chunk, Context, Epoch, Error, Lock, Node,
-        Parent, Proposal,
-    },
+    types::{Ack, Activity, Chunk, Context, Epoch, Error, Lock, Node, Parent, Proposal},
     AckManager, Config, TipManager,
 };
 use crate::{Automaton, Monitor, Relay, Reporter, Supervisor, ThresholdSupervisor};
@@ -88,11 +85,8 @@ pub struct Engine<
     // Namespace Constants
     ////////////////////////////////////////
 
-    // The namespace for chunk signatures.
-    chunk_namespace: Vec<u8>,
-
-    // The namespace for ack signatures.
-    ack_namespace: Vec<u8>,
+    // The namespace signatures.
+    namespace: Vec<u8>,
 
     ////////////////////////////////////////
     // Timeouts
@@ -226,8 +220,7 @@ impl<
             monitor: cfg.monitor,
             sequencers: cfg.sequencers,
             validators: cfg.validators,
-            chunk_namespace: chunk_namespace(&cfg.namespace),
-            ack_namespace: ack_namespace(&cfg.namespace),
+            namespace: cfg.namespace,
             rebroadcast_timeout: cfg.rebroadcast_timeout,
             rebroadcast_deadline: None,
             epoch_bounds: cfg.epoch_bounds,
@@ -495,7 +488,7 @@ impl<
         let Some(share) = self.validators.share(self.epoch) else {
             return Err(Error::UnknownShare(self.epoch));
         };
-        let ack = Ack::sign(share, tip.chunk.clone(), self.epoch, &self.ack_namespace);
+        let ack = Ack::sign(&self.namespace, share, tip.chunk.clone(), self.epoch);
 
         // Sync the journal to prevent ever acking two conflicting chunks at
         // the same height, even if the node crashes and restarts.
@@ -710,13 +703,7 @@ impl<
         }
 
         // Construct new node
-        let node = Node::sign(
-            &mut self.crypto,
-            height,
-            payload,
-            parent,
-            &self.chunk_namespace,
-        );
+        let node = Node::sign(&self.namespace, &mut self.crypto, height, payload, parent);
 
         // Deal with the chunk as if it were received over the network
         self.handle_node(&node).await;
@@ -850,7 +837,7 @@ impl<
         };
 
         // Verify the signature
-        node.verify(public, &self.chunk_namespace, &self.ack_namespace)
+        node.verify(&self.namespace, public)
             .map_err(|_| Error::InvalidNodeSignature)
     }
 
@@ -902,7 +889,7 @@ impl<
         let Some(identity) = self.validators.identity(ack.epoch) else {
             return Err(Error::UnknownIdentity(ack.epoch));
         };
-        if !ack.verify(identity, &self.ack_namespace) {
+        if !ack.verify(&self.namespace, identity) {
             return Err(Error::InvalidAckSignature);
         }
 
