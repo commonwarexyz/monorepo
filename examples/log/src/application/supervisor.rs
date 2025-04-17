@@ -1,15 +1,21 @@
-use commonware_consensus::{simplex::View, Activity, Proof, Supervisor as Su};
+use commonware_consensus::{
+    simplex::types::{Activity, View},
+    Reporter, Supervisor as Su,
+};
+use commonware_cryptography::Digest;
 use commonware_utils::Array;
-use std::collections::HashMap;
+use std::{collections::HashMap, marker::PhantomData};
 
 /// Implementation of `commonware-consensus::Supervisor`.
 #[derive(Clone)]
-pub struct Supervisor<P: Array> {
+pub struct Supervisor<P: Array, D: Digest> {
     participants: Vec<P>,
     participants_map: HashMap<P, u32>,
+
+    _phantom: PhantomData<D>,
 }
 
-impl<P: Array> Supervisor<P> {
+impl<P: Array, D: Digest> Supervisor<P, D> {
     pub fn new(mut participants: Vec<P>) -> Self {
         // Setup participants
         participants.sort();
@@ -22,11 +28,13 @@ impl<P: Array> Supervisor<P> {
         Self {
             participants,
             participants_map,
+
+            _phantom: PhantomData,
         }
     }
 }
 
-impl<P: Array> Su for Supervisor<P> {
+impl<P: Array, D: Digest> Su for Supervisor<P, D> {
     type Index = View;
     type PublicKey = P;
 
@@ -41,8 +49,12 @@ impl<P: Array> Su for Supervisor<P> {
     fn is_participant(&self, _: Self::Index, candidate: &Self::PublicKey) -> Option<u32> {
         self.participants_map.get(candidate).cloned()
     }
+}
 
-    async fn report(&self, _: Activity, _: Proof) {
+impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
+    type Activity = Activity<P, D>;
+
+    async fn report(&mut self, _: Activity<P, D>) {
         // We don't report activity in this example but you would otherwise use
         // this to collect uptime and fraud proofs.
     }

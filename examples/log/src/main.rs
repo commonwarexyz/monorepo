@@ -48,8 +48,8 @@ mod application;
 mod gui;
 
 use clap::{value_parser, Arg, Command};
-use commonware_consensus::simplex::{self, Engine, Prover};
-use commonware_cryptography::{sha256::Digest as Sha256Digest, Ed25519, Sha256, Signer};
+use commonware_consensus::simplex;
+use commonware_cryptography::{Ed25519, Sha256, Signer};
 use commonware_p2p::authenticated::{self, Network};
 use commonware_runtime::{
     tokio::{self, Executor},
@@ -199,11 +199,10 @@ fn main() {
 
         // Initialize application
         let namespace = union(APPLICATION_NAMESPACE, b"_CONSENSUS");
-        let prover: Prover<Ed25519, Sha256Digest> = Prover::new(&namespace);
         let (application, supervisor, mailbox) = application::Application::new(
             context.with_label("application"),
             application::Config {
-                prover,
+                namespace: namespace.clone(),
                 hasher: Sha256::default(),
                 mailbox_size: 1024,
                 participants: validators.clone(),
@@ -211,14 +210,14 @@ fn main() {
         );
 
         // Initialize consensus
-        let engine = Engine::new(
+        let engine = simplex::Engine::new(
             context.with_label("engine"),
             journal,
             simplex::Config {
                 crypto: signer.clone(),
                 automaton: mailbox.clone(),
                 relay: mailbox.clone(),
-                committer: mailbox,
+                reporter: supervisor.clone(),
                 supervisor,
                 namespace,
                 mailbox_size: 1024,
@@ -230,7 +229,7 @@ fn main() {
                 activity_timeout: 10,
                 skip_timeout: 5,
                 max_fetch_count: 32,
-                max_fetch_size: 1024 * 512,
+                max_participants: participants.len(),
                 fetch_concurrent: 2,
                 fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
             },
