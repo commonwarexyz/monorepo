@@ -197,10 +197,9 @@ impl Executor {
             .build()
             .expect("failed to create Tokio runtime");
         let (signaler, signal) = Signaler::new();
-
         let storage = Storage::new(
             runtime_registry,
-            StorageConfig::new(cfg.storage_directory.clone()),
+            StorageConfig::new(cfg.storage_directory.clone(), cfg.maximum_buffer_size),
         );
 
         let executor = Arc::new(Self {
