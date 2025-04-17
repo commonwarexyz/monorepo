@@ -74,7 +74,7 @@ fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
 #[inline]
 pub fn threshold<P: Array>(validators: &[P]) -> (u32, u32) {
     let len = validators.len() as u32;
-    let threshold = quorum(len).expect("not enough validators for a quorum");
+    let threshold = quorum(len);
     (threshold, len)
 }
 

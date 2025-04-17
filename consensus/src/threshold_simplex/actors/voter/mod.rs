@@ -63,7 +63,7 @@ mod tests {
     #[test_traced]
     fn test_stale_backfill() {
         let n = 5;
-        let threshold = quorum(n).expect("unable to calculate threshold");
+        let threshold = quorum(n);
         let namespace = b"consensus".to_vec();
         let (executor, mut context, _) = Executor::timed(Duration::from_secs(10));
         executor.start(async move {

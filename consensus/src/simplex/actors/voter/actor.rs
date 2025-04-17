@@ -1327,8 +1327,7 @@ impl<
                 return None;
             }
         };
-        let threshold =
-            quorum(validators.len() as u32).expect("not enough validators for a quorum");
+        let threshold = quorum(validators.len() as u32);
         let (proposal, proposal_notarizes, notarizes) = round.notarizable(threshold, force)?;
 
         // Construct notarization
@@ -1428,8 +1427,7 @@ impl<
                 return None;
             }
         };
-        let threshold =
-            quorum(validators.len() as u32).expect("not enough validators for a quorum");
+        let threshold = quorum(validators.len() as u32);
         let (proposal, proposal_finalizes, finalizes) = round.finalizable(threshold, force)?;
 
         // Construct finalization
