@@ -52,7 +52,7 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                 indexer: config.indexer,
                 namespace: config.namespace,
                 public: *poly::public(&config.identity),
-                other_public: config.other_public,
+                other_public: config.other_identity,
                 hasher: config.hasher,
                 mailbox,
             },

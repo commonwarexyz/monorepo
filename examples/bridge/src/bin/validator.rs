@@ -6,7 +6,7 @@ use commonware_consensus::threshold_simplex::{self, Engine};
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{self, Element},
-        poly::{self, Poly},
+        poly::Poly,
     },
     Ed25519, Sha256, Signer,
 };
@@ -230,7 +230,7 @@ fn main() {
                 indexer,
                 namespace: consensus_namespace.clone(),
                 identity,
-                other_public: other_identity,
+                other_identity,
                 hasher: Sha256::default(),
                 mailbox_size: 1024,
                 participants: validators.clone(),
