@@ -130,14 +130,14 @@ impl crate::Blob for Blob {
     async fn len(&self) -> Result<u64, Error> {
         let inner = self.file.lock().map_err(|_| Error::LockGrabFailed)?;
         let (_, _, len) = &*inner;
-        Ok(*len as u64)
+        Ok(*len)
     }
 
     async fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
         let mut inner = self.file.lock().map_err(|_| Error::LockGrabFailed)?;
         let (file, ring, len) = &mut *inner;
 
-        if offset + buf.len() as u64 > *len as u64 {
+        if offset + buf.len() as u64 > *len {
             return Err(Error::BlobInsufficientLength);
         }
 
