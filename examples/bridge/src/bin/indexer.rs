@@ -6,14 +6,14 @@ use commonware_consensus::threshold_simplex::types::{Finalization, Viewable};
 use commonware_cryptography::{
     bls12381::primitives::group::{self, Element},
     sha256::Digest as Sha256Digest,
-    Ed25519, Hasher, Sha256, Signer,
+    Digest, Ed25519, Hasher, Sha256, Signer,
 };
 use commonware_runtime::{tokio::Executor, Listener, Metrics, Network, Runner, Spawner};
 use commonware_stream::{
     public_key::{Config, Connection, IncomingConnection},
     Receiver, Sender,
 };
-use commonware_utils::{from_hex, union, Array};
+use commonware_utils::{from_hex, union};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
@@ -25,7 +25,7 @@ use std::{
 };
 use tracing::{debug, info};
 
-enum Message<D: Array> {
+enum Message<D: Digest> {
     PutBlock {
         incoming: wire::PutBlock,
         response: oneshot::Sender<bool>, // wait to broadcast consensus message

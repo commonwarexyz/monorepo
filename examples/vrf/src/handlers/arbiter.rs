@@ -117,12 +117,12 @@ impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
                             // Parse acks
                             let mut disqualify = false;
                             let mut ack_indices: Vec<u32> = Vec::new();
+                            let payload = payload(round, &sender, &commitment);
                             for (ack_index, signature) in acks {
                                 let Some(public_key) = self.contributors.get(ack_index as usize) else {
                                     disqualify = true;
                                     break;
                                 };
-                                let payload = payload(round, &sender, &commitment);
                                 if !C::verify(Some(ACK_NAMESPACE), &payload, public_key, &signature) {
                                     disqualify = true;
                                     break;

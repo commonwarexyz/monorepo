@@ -6,13 +6,12 @@
 
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
-use commonware_cryptography::bls12381::primitives::group;
-use commonware_utils::Array;
+use commonware_cryptography::{bls12381::primitives::group, Digest};
 
 /// Enum representing incoming messages from validators to the indexer.
 ///
 /// Used to interact with the indexer's storage of blocks and finality certificates.
-pub enum Inbound<D: Array> {
+pub enum Inbound<D: Digest> {
     /// Request to store a new block in the indexer's storage.
     PutBlock(PutBlock),
     /// Request to retrieve a block from the indexer's storage.
@@ -23,7 +22,7 @@ pub enum Inbound<D: Array> {
     GetFinalization(GetFinalization),
 }
 
-impl<D: Array> Write for Inbound<D> {
+impl<D: Digest> Write for Inbound<D> {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
             Inbound::PutBlock(block) => {
@@ -46,7 +45,7 @@ impl<D: Array> Write for Inbound<D> {
     }
 }
 
-impl<D: Array> Read for Inbound<D> {
+impl<D: Digest> Read for Inbound<D> {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let tag = u8::read(buf)?;
         match tag {
@@ -71,7 +70,7 @@ impl<D: Array> Read for Inbound<D> {
     }
 }
 
-impl<D: Array> EncodeSize for Inbound<D> {
+impl<D: Digest> EncodeSize for Inbound<D> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Inbound::PutBlock(block) => block.encode_size(),
@@ -112,21 +111,21 @@ impl EncodeSize for PutBlock {
 }
 
 /// Message to retrieve a block from the indexer's storage.
-pub struct GetBlock<D: Array> {
+pub struct GetBlock<D: Digest> {
     /// The network identifier for which the block belongs.
     pub network: group::Public,
     /// The digest of the block to retrieve.
     pub digest: D,
 }
 
-impl<D: Array> Write for GetBlock<D> {
+impl<D: Digest> Write for GetBlock<D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.network.write(buf);
         self.digest.write(buf);
     }
 }
 
-impl<D: Array> Read for GetBlock<D> {
+impl<D: Digest> Read for GetBlock<D> {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let network = group::Public::read(buf)?;
         let digest = D::read(buf)?;
@@ -134,7 +133,7 @@ impl<D: Array> Read for GetBlock<D> {
     }
 }
 
-impl<D: Array> EncodeSize for GetBlock<D> {
+impl<D: Digest> EncodeSize for GetBlock<D> {
     fn encode_size(&self) -> usize {
         group::Public::SIZE + self.digest.encode_size()
     }
@@ -251,7 +250,7 @@ impl Read for Outbound {
 impl EncodeSize for Outbound {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Outbound::Success(_) => bool::SIZE,
+            Outbound::Success(success) => success.encode_size(),
             Outbound::Block(data) => data.encode_size(),
             Outbound::Finalization(data) => data.encode_size(),
         }
