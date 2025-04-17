@@ -94,7 +94,10 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
                         debug!("dropping messages until receive start message from arbiter");
                         continue;
                     }
-                    let msg = match wire::Dkg::<C::Signature>::decode_cfg(msg, &(self.t as usize)) {
+                    let msg = match wire::Dkg::<C::Signature>::decode_cfg(
+                        msg,
+                        &self.contributors.len(),
+                    ) {
                         Ok(msg) => msg,
                         Err(err) => {
                             warn!(?err, "received invalid message from arbiter");
@@ -247,7 +250,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
                     result = receiver.recv() => {
                         match result {
                             Ok((s, msg)) => {
-                                let msg = match wire::Dkg::<C::Signature>::decode_cfg(msg, &(self.t as usize)) {
+                                let msg = match wire::Dkg::<C::Signature>::decode_cfg(msg, &self.contributors.len()) {
                                     Ok(msg) => msg,
                                     Err(_) => {
                                         warn!("received invalid message from arbiter");
@@ -376,7 +379,10 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
         loop {
             match receiver.recv().await {
                 Ok((s, msg)) => {
-                    let msg = match wire::Dkg::<C::Signature>::decode_cfg(msg, &(self.t as usize)) {
+                    let msg = match wire::Dkg::<C::Signature>::decode_cfg(
+                        msg,
+                        &self.contributors.len(),
+                    ) {
                         Ok(msg) => msg,
                         Err(_) => {
                             warn!("received invalid message from arbiter");

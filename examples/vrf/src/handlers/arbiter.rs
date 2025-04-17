@@ -99,7 +99,7 @@ impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
                     match result {
                         Ok((sender, msg)) =>{
                             // Parse msg
-                            let msg = match wire::Dkg::decode_cfg(msg, &(self.t as usize)) {
+                            let msg = match wire::Dkg::decode_cfg(msg, &self.contributors.len()) {
                                 Ok(msg) => msg,
                                 Err(_) => {
                                     arbiter.disqualify(sender);
