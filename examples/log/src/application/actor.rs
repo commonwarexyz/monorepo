@@ -1,12 +1,13 @@
+use std::marker::PhantomData;
+
 use super::{
     ingress::{Mailbox, Message},
     supervisor::Supervisor,
     Config,
 };
-use commonware_consensus::simplex::Prover;
-use commonware_cryptography::{Hasher, Scheme};
+use commonware_cryptography::Hasher;
 use commonware_runtime::{Handle, Spawner};
-use commonware_utils::hex;
+use commonware_utils::{hex, Array};
 use futures::{channel::mpsc, StreamExt};
 use rand::Rng;
 use tracing::info;
@@ -15,26 +16,27 @@ use tracing::info;
 const GENESIS: &[u8] = b"commonware is neat";
 
 /// Application actor.
-pub struct Application<R: Rng + Spawner, C: Scheme, H: Hasher> {
+pub struct Application<R: Rng + Spawner, P: Array, H: Hasher> {
     context: R,
-    prover: Prover<C, H::Digest>,
     hasher: H,
     mailbox: mpsc::Receiver<Message<H::Digest>>,
+
+    _phantom: PhantomData<P>,
 }
 
-impl<R: Rng + Spawner, C: Scheme, H: Hasher> Application<R, C, H> {
+impl<R: Rng + Spawner, P: Array, H: Hasher> Application<R, P, H> {
     /// Create a new application actor.
     pub fn new(
         context: R,
-        config: Config<C, H>,
-    ) -> (Self, Supervisor<C::PublicKey>, Mailbox<H::Digest>) {
+        config: Config<P, H>,
+    ) -> (Self, Supervisor<P, H::Digest>, Mailbox<H::Digest>) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
         (
             Self {
                 context,
-                prover: config.prover,
                 hasher: config.hasher,
                 mailbox,
+                _phantom: PhantomData,
             },
             Supervisor::new(config.participants),
             Mailbox::new(sender),
@@ -79,20 +81,6 @@ impl<R: Rng + Spawner, C: Scheme, H: Hasher> Application<R, C, H> {
                     // If we linked payloads to their parent, we would verify
                     // the parent included in the payload matches the provided context.
                     let _ = response.send(true);
-                }
-                Message::Prepared { proof, payload } => {
-                    let (view, _, _, _) = self
-                        .prover
-                        .deserialize_notarization(proof, u32::MAX, false)
-                        .unwrap();
-                    info!(view, ?payload, "prepared")
-                }
-                Message::Finalized { proof, payload } => {
-                    let (view, _, _, _) = self
-                        .prover
-                        .deserialize_finalization(proof, u32::MAX, false)
-                        .unwrap();
-                    info!(view, ?payload, "finalized")
                 }
             }
         }

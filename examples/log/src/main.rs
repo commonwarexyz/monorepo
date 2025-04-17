@@ -49,7 +49,7 @@ mod gui;
 
 use clap::{value_parser, Arg, Command};
 use commonware_consensus::simplex;
-use commonware_cryptography::{Ed25519, Sha256, Signer};
+use commonware_cryptography::{ed25519, Ed25519, Sha256, Signer};
 use commonware_p2p::authenticated::{self, Network};
 use commonware_runtime::{
     tokio::{self, Executor},
@@ -210,30 +210,27 @@ fn main() {
         );
 
         // Initialize consensus
-        let engine = simplex::Engine::new(
-            context.with_label("engine"),
-            journal,
-            simplex::Config {
-                crypto: signer.clone(),
-                automaton: mailbox.clone(),
-                relay: mailbox.clone(),
-                reporter: supervisor.clone(),
-                supervisor,
-                namespace,
-                mailbox_size: 1024,
-                replay_concurrency: 1,
-                leader_timeout: Duration::from_secs(1),
-                notarization_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(10),
-                fetch_timeout: Duration::from_secs(1),
-                activity_timeout: 10,
-                skip_timeout: 5,
-                max_fetch_count: 32,
-                max_participants: participants.len(),
-                fetch_concurrent: 2,
-                fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
-            },
-        );
+        let cfg = simplex::Config::<_, _, _, _, _, _> {
+            crypto: signer.clone(),
+            automaton: mailbox.clone(),
+            relay: mailbox.clone(),
+            reporter: supervisor.clone(),
+            supervisor,
+            namespace,
+            mailbox_size: 1024,
+            replay_concurrency: 1,
+            leader_timeout: Duration::from_secs(1),
+            notarization_timeout: Duration::from_secs(2),
+            nullify_retry: Duration::from_secs(10),
+            fetch_timeout: Duration::from_secs(1),
+            activity_timeout: 10,
+            skip_timeout: 5,
+            max_fetch_count: 32,
+            max_participants: participants.len(),
+            fetch_concurrent: 2,
+            fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+        };
+        let engine = simplex::Engine::new(context.with_label("engine"), journal, cfg);
 
         // Start consensus
         application.start();

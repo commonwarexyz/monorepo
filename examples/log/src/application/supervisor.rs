@@ -1,22 +1,22 @@
 use commonware_consensus::{
-    simplex::types::{Activity, View},
+    simplex::types::{Activity, View, Viewable},
     Reporter, Supervisor as Su,
 };
-use commonware_cryptography::Digest;
-use commonware_utils::Array;
+use commonware_cryptography::{Digest, Specification};
 use std::{collections::HashMap, marker::PhantomData};
+use tracing::info;
 
 /// Implementation of `commonware-consensus::Supervisor`.
 #[derive(Clone)]
-pub struct Supervisor<P: Array, D: Digest> {
-    participants: Vec<P>,
-    participants_map: HashMap<P, u32>,
+pub struct Supervisor<S: Specification, D: Digest> {
+    participants: Vec<S::PublicKey>,
+    participants_map: HashMap<S::PublicKey, u32>,
 
     _phantom: PhantomData<D>,
 }
 
-impl<P: Array, D: Digest> Supervisor<P, D> {
-    pub fn new(mut participants: Vec<P>) -> Self {
+impl<S: Specification, D: Digest> Supervisor<S, D> {
+    pub fn new(mut participants: Vec<S::PublicKey>) -> Self {
         // Setup participants
         participants.sort();
         let mut participants_map = HashMap::new();
@@ -34,9 +34,9 @@ impl<P: Array, D: Digest> Supervisor<P, D> {
     }
 }
 
-impl<P: Array, D: Digest> Su for Supervisor<P, D> {
+impl<S: Specification, D: Digest> Su for Supervisor<S, D> {
     type Index = View;
-    type PublicKey = P;
+    type PublicKey = S::PublicKey;
 
     fn leader(&self, index: Self::Index) -> Option<Self::PublicKey> {
         Some(self.participants[index as usize % self.participants.len()].clone())
@@ -51,11 +51,22 @@ impl<P: Array, D: Digest> Su for Supervisor<P, D> {
     }
 }
 
-impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
-    type Activity = Activity<P, D>;
+impl<S: Specification, D: Digest> Reporter for Supervisor<S, D> {
+    type Activity = Activity<S::Signature, D>;
 
-    async fn report(&mut self, _: Activity<P, D>) {
-        // We don't report activity in this example but you would otherwise use
-        // this to collect uptime and fraud proofs.
+    async fn report(&mut self, activity: Activity<S::Signature, D>) {
+        let view = activity.view();
+        match activity {
+            Activity::Notarization(notarization) => {
+                info!(view, payload = ?notarization.proposal.payload, "notarized");
+            }
+            Activity::Finalization(finalization) => {
+                info!(view, payload = ?finalization.proposal.payload, "finalized");
+            }
+            Activity::Nullification(_) => {
+                info!(view, "nullified");
+            }
+            _ => {}
+        }
     }
 }
