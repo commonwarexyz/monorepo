@@ -1,30 +1,43 @@
 //! Bit-vector implementation
+//!
+//! The bit-vector is a compact representation of a sequence of bits, using [`u8`] "blocks" for a
+//! more-efficient memory layout than doing a [`Vec<bool>`]. Thus, if the length of the bit-vector
+//! is not a multiple of 8, the last block will contain some bits that are not part of the vector.
+//! An invariant of the implementation is that any bits in the last block that are not part of the
+//! vector are set to 0.
+//!
+//! The implementation is focused on being compact when encoding small bit vectors, so [`u8`] is
+//! used over more performant types like [`usize`] or [`u64`]. Such types would result in more
+//! complex encoding and decoding logic.
 
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint, EncodeSize, Error as CodecError, FixedSize, RangeConfig, Read, ReadExt, Write,
 };
 use std::{
-    fmt,
+    fmt::{self, Write as _},
     ops::{BitAnd, BitOr, BitXor, Index},
 };
 
-/// Number of bits in a [`u64`] block.
-const BITS_PER_BLOCK: usize = 64;
+/// Type alias for the underlying block type.
+type Block = u8;
+
+/// Number of bits in a [`Block`].
+const BITS_PER_BLOCK: usize = std::mem::size_of::<Block>() * 8;
 
 /// Empty block of bits (all bits set to 0).
-const EMPTY_BLOCK: u64 = 0;
+const EMPTY_BLOCK: Block = 0;
 
 /// Full block of bits (all bits set to 1).
-const FULL_BLOCK: u64 = u64::MAX;
+const FULL_BLOCK: Block = Block::MAX;
 
 /// Represents a vector of bits.
 ///
-/// Stores bits using u64 blocks for efficient storage.
+/// Stores bits using [`u8`] blocks for efficient storage.
 #[derive(Clone, PartialEq, Eq)]
 pub struct BitVec {
     /// The underlying storage for the bits.
-    storage: Vec<u64>,
+    storage: Vec<Block>,
     /// The total number of bits
     num_bits: usize,
 }
@@ -243,6 +256,7 @@ impl BitVec {
     /// Panics if the lengths don't match.
     pub fn and(&mut self, other: &BitVec) {
         self.binary_op(other, |a, b| a & b);
+        self.clear_trailing_bits();
     }
 
     /// Performs a bitwise OR with another BitVec.
@@ -252,6 +266,7 @@ impl BitVec {
     /// Panics if the lengths don't match.
     pub fn or(&mut self, other: &BitVec) {
         self.binary_op(other, |a, b| a | b);
+        self.clear_trailing_bits();
     }
 
     /// Performs a bitwise XOR with another BitVec.
@@ -261,6 +276,7 @@ impl BitVec {
     /// Panics if the lengths don't match.
     pub fn xor(&mut self, other: &BitVec) {
         self.binary_op(other, |a, b| a ^ b);
+        self.clear_trailing_bits();
     }
 
     /// Flips all bits (1s become 0s and vice versa).
@@ -298,12 +314,12 @@ impl BitVec {
 
     /// Creates a mask with the first `num_bits` bits set to 1.
     #[inline(always)]
-    fn mask_over_first_n_bits(num_bits: usize) -> u64 {
+    fn mask_over_first_n_bits(num_bits: usize) -> Block {
         assert!(num_bits <= BITS_PER_BLOCK, "num_bits exceeds block size");
-        // Special-case for 64 bits to avoid shl overflow
+        // Special-case for `BITS_PER_BLOCK` bits to avoid shl overflow
         match num_bits {
             BITS_PER_BLOCK => FULL_BLOCK,
-            _ => (1u64 << num_bits) - 1,
+            _ => (1 << num_bits) - 1,
         }
     }
 
@@ -349,7 +365,7 @@ impl BitVec {
 
     /// Helper for binary operations (AND, OR, XOR)
     #[inline]
-    fn binary_op<F: Fn(u64, u64) -> u64>(&mut self, other: &BitVec, op: F) {
+    fn binary_op<F: Fn(Block, Block) -> Block>(&mut self, other: &BitVec, op: F) {
         self.assert_eq_len(other);
         for (a, b) in self.storage.iter_mut().zip(other.storage.iter()) {
             *a = op(*a, *b);
@@ -423,31 +439,38 @@ impl From<BitVec> for Vec<bool> {
 
 impl fmt::Debug for BitVec {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "BitVec[")?;
-
         // For very large BitVecs, only show a preview
         const MAX_DISPLAY: usize = 64;
         const HALF_DISPLAY: usize = MAX_DISPLAY / 2;
 
+        // Closure for writing a bit
+        let write_bit = |formatter: &mut fmt::Formatter<'_>, index: usize| -> fmt::Result {
+            formatter.write_char(if self.get_bit_unchecked(index) {
+                '1'
+            } else {
+                '0'
+            })
+        };
+
+        f.write_str("BitVec[")?;
         if self.num_bits <= MAX_DISPLAY {
             // Show all bits
             for i in 0..self.num_bits {
-                write!(f, "{}", if self.get_bit_unchecked(i) { "1" } else { "0" })?;
+                write_bit(f, i)?;
             }
         } else {
             // Show first and last bits with ellipsis
             for i in 0..HALF_DISPLAY {
-                write!(f, "{}", if self.get_bit_unchecked(i) { "1" } else { "0" })?;
+                write_bit(f, i)?;
             }
 
-            write!(f, "...")?;
+            f.write_str("...")?;
 
             for i in (self.num_bits - HALF_DISPLAY)..self.num_bits {
-                write!(f, "{}", if self.get_bit_unchecked(i) { "1" } else { "0" })?;
+                write_bit(f, i)?;
             }
         }
-
-        write!(f, "]")
+        f.write_str("]")
     }
 }
 
@@ -529,7 +552,7 @@ impl<R: RangeConfig> Read<R> for BitVec {
         let num_blocks = num_bits.div_ceil(BITS_PER_BLOCK);
         let mut storage = Vec::with_capacity(num_blocks);
         for _ in 0..num_blocks {
-            let block = u64::read(buf)?;
+            let block = Block::read(buf)?;
             storage.push(block);
         }
 
@@ -545,7 +568,7 @@ impl<R: RangeConfig> Read<R> for BitVec {
 
 impl EncodeSize for BitVec {
     fn encode_size(&self) -> usize {
-        varint::size(self.num_bits) + (u64::SIZE * self.storage.len())
+        varint::size(self.num_bits) + (Block::SIZE * self.storage.len())
     }
 }
 
@@ -891,7 +914,7 @@ mod tests {
             assert_eq!(bv.get(i), Some(true));
         }
         // Check trailing bits in the block were cleared
-        assert_eq!(bv.storage[0], (1u64 << 5) - 1);
+        assert_eq!(bv.storage[0], (1 << 5) - 1);
 
         // Clear all
         bv.clear_all();
@@ -923,13 +946,18 @@ mod tests {
     #[test]
     fn test_mask_over_first_n_bits() {
         // Test with various sizes
-        assert_eq!(BitVec::mask_over_first_n_bits(0), 0);
-        assert_eq!(BitVec::mask_over_first_n_bits(1), 1);
-        assert_eq!(BitVec::mask_over_first_n_bits(2), 3);
-        assert_eq!(BitVec::mask_over_first_n_bits(3), 7);
-        assert_eq!(BitVec::mask_over_first_n_bits(8), 255);
-        assert_eq!(BitVec::mask_over_first_n_bits(63), u64::MAX >> 1);
-        assert_eq!(BitVec::mask_over_first_n_bits(64), FULL_BLOCK);
+        for i in 0..=BITS_PER_BLOCK {
+            let mask = BitVec::mask_over_first_n_bits(i);
+            assert_eq!(mask.count_ones() as usize, i);
+            assert_eq!(mask.count_zeros() as usize, BITS_PER_BLOCK - i);
+            assert_eq!(
+                mask,
+                ((1 as Block)
+                    .checked_shl(i as u32)
+                    .unwrap_or(0)
+                    .wrapping_sub(1))
+            );
+        }
     }
 
     #[test]
@@ -962,7 +990,7 @@ mod tests {
     fn test_codec_error_trailing_bits() {
         let mut buf = BytesMut::new();
         varint::write(1, &mut buf);
-        2u64.write(&mut buf);
+        (2 as Block).write(&mut buf);
         assert!(matches!(
             BitVec::decode_cfg(&mut buf, &..),
             Err(CodecError::Invalid("BitVec", "trailing bits"))

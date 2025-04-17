@@ -1,6 +1,6 @@
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{
-    Encode, EncodeSize, Error, RangeConfig, Read, ReadExt, ReadRangeExt, Write,
+    varint, Encode, EncodeSize, Error, RangeConfig, Read, ReadExt, ReadRangeExt, Write,
 };
 use commonware_cryptography::Verifier;
 use commonware_utils::BitVec as BV;
