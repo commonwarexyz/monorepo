@@ -278,7 +278,7 @@ mod tests {
         let storage_directory =
             env::temp_dir().join(format!("commonware_iouring_storage_{}", rng.gen::<u64>()));
         let config = Config::new(storage_directory.clone());
-        let storage = Storage::new(config.clone());
+        let storage = Storage::new(config);
         run_storage_tests(storage).await;
     }
 }
