@@ -1,4 +1,6 @@
 pub mod audited;
+#[cfg(feature = "iouring")]
+pub mod iouring;
 pub mod memory;
 pub mod metered;
 #[cfg(not(target_arch = "wasm32"))]
