@@ -63,15 +63,12 @@ impl crate::Storage for Storage {
         // Get the file length
         let len = file.metadata().map_err(|_| Error::ReadFailed)?.len();
 
-        // Construct the blob
         Ok(Blob::new(partition.into(), name, file, len))
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
-        // Acquire the filesystem lock
         let _guard = self.lock.lock().map_err(|_| Error::LockGrabFailed)?;
 
-        // Remove all related files
         let path = self.storage_directory.join(partition);
         if let Some(name) = name {
             let blob_path = path.join(hex(name));
@@ -86,10 +83,8 @@ impl crate::Storage for Storage {
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
         let _guard = self.lock.lock().map_err(|_| Error::LockGrabFailed)?;
 
-        // Scan the partition directory
         let path = self.storage_directory.join(partition);
 
-        // Read the directory
         let entries =
             std::fs::read_dir(&path).map_err(|_| Error::PartitionMissing(partition.into()))?;
 
@@ -139,16 +134,13 @@ impl crate::Blob for Blob {
     }
 
     async fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
-        // Lock the file to ensure safe access
         let mut inner = self.file.lock().map_err(|_| Error::LockGrabFailed)?;
-
         let (file, ring, len) = &mut *inner;
 
         if offset + buf.len() as u64 > *len as u64 {
             return Err(Error::BlobInsufficientLength);
         }
 
-        // Get the raw file descriptor
         let fd = types::Fd(file.as_raw_fd());
         let mut total_read = 0;
 
@@ -164,7 +156,7 @@ impl crate::Blob for Blob {
             unsafe {
                 ring.submission()
                     .push(&read_e)
-                    .map_err(|_| Error::ReadFailed)?; // TODO danlaine: consider changing error values.
+                    .map_err(|_| Error::ReadFailed)?;
             }
 
             // Wait for the operation to complete
@@ -188,21 +180,18 @@ impl crate::Blob for Blob {
 
     async fn write_at(&self, buf: &[u8], offset: u64) -> Result<(), Error> {
         let mut inner = self.file.lock().map_err(|_| Error::LockGrabFailed)?;
-
         let (file, ring, len) = &mut *inner;
 
-        // Get the raw file descriptor
-        let fd = file.as_raw_fd();
+        let fd = types::Fd(file.as_raw_fd());
         let mut total_written = 0;
 
         while total_written < buf.len() {
             let remaining = &buf[total_written..];
 
             // Prepare the write operation
-            let write_op =
-                opcode::Write::new(types::Fd(fd), remaining.as_ptr(), remaining.len() as _)
-                    .offset(offset as _)
-                    .build();
+            let write_op = opcode::Write::new(fd, remaining.as_ptr(), remaining.len() as _)
+                .offset(offset as _)
+                .build();
 
             // Submit the operation to the ring
             unsafe {
@@ -223,6 +212,7 @@ impl crate::Blob for Blob {
             if bytes_written == 0 {
                 return Err(Error::WriteFailed);
             }
+
             total_written += bytes_written;
         }
 
@@ -235,7 +225,6 @@ impl crate::Blob for Blob {
     }
 
     async fn truncate(&self, len: u64) -> Result<(), Error> {
-        // Perform the truncate
         let mut file = self.file.lock().map_err(|_| Error::LockGrabFailed)?;
         file.0
             .set_len(len)
