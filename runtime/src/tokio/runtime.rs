@@ -1,5 +1,5 @@
 use crate::storage::metered::MeteredStorage;
-use crate::storage::tokio_storage::{Config as TokioStorageConfig, Storage as TokioStorage};
+use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
 use crate::Storage as StorageTrait;
 use crate::{utils::Signaler, Clock, Error, Handle, Signal, METRICS_PREFIX};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};

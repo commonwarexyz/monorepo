@@ -226,7 +226,7 @@ impl crate::Blob for Blob {
 mod tests {
     use crate::storage::{
         tests::run_storage_tests,
-        tokio_storage::{Config, Storage},
+        tokio::{Config, Storage},
     };
 
     #[tokio::test]
