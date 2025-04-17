@@ -281,7 +281,7 @@ mod tests {
         let output = result.unwrap();
 
         // Ensure right number of commitments picked
-        let expected_commitments = quorum(n_0).unwrap() as usize;
+        let expected_commitments = quorum(n_0) as usize;
         assert_eq!(output.commitments.len(), expected_commitments);
 
         // Ensure no reveals required
@@ -299,7 +299,7 @@ mod tests {
         }
 
         // Test that can generate proof-of-possession
-        let t = quorum(n_0).unwrap();
+        let t = quorum(n_0);
         let partials = outputs
             .values()
             .map(|s| partial_sign_proof_of_possession(&s.public, &s.share))
@@ -391,7 +391,7 @@ mod tests {
         let output = result.unwrap();
 
         // Ensure right number of commitments picked
-        let expected_commitments = quorum(n_0).unwrap() as usize;
+        let expected_commitments = quorum(n_0) as usize;
         assert_eq!(output.commitments.len(), expected_commitments);
 
         // Ensure no reveals required
@@ -410,7 +410,7 @@ mod tests {
         }
 
         // Test that can generate proof-of-possession
-        let t = quorum(n_1).unwrap();
+        let t = quorum(n_1);
         let partials = outputs
             .iter()
             .map(|s| partial_sign_proof_of_possession(&s.public, &s.share))
@@ -465,7 +465,7 @@ mod tests {
         let (_, _, shares) = Dealer::new(&mut rng, None, contributors.clone());
 
         // Create unrelated commitment of correct degree
-        let t = quorum(n).unwrap();
+        let t = quorum(n);
         let (public, _) = ops::generate_shares(&mut rng, None, n, t);
 
         // Create player
@@ -500,7 +500,7 @@ mod tests {
         let (_, commitment, shares) = Dealer::new(&mut rng, None, contributors.clone());
 
         // Create unrelated commitment of correct degree
-        let t = quorum(n).unwrap();
+        let t = quorum(n);
         let (other_commitment, _) = ops::generate_shares(&mut rng, None, n, t);
 
         // Create player
@@ -540,7 +540,7 @@ mod tests {
         let (_, commitment, shares) = Dealer::new(&mut rng, None, contributors.clone());
 
         // Create unrelated commitment of correct degree
-        let t = quorum(n).unwrap();
+        let t = quorum(n);
         let (_, other_shares) = ops::generate_shares(&mut rng, None, n, t);
 
         // Create player
@@ -748,7 +748,7 @@ mod tests {
     fn test_arbiter_reveals() {
         // Initialize test
         let n = 11;
-        let q = quorum(n as u32).unwrap() as usize;
+        let q = quorum(n as u32) as usize;
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create contributors (must be in sorted order)
@@ -986,7 +986,7 @@ mod tests {
         let (_, commitment, _) = Dealer::new(&mut rng, None, contributors.clone());
 
         // Create invalid shares
-        let t = quorum(n).unwrap();
+        let t = quorum(n);
         let (_, shares) = ops::generate_shares(&mut rng, None, n, t);
 
         // Create arbiter
@@ -1265,7 +1265,7 @@ mod tests {
     fn test_player_reveals() {
         // Initialize test
         let n = 11;
-        let q = quorum(n as u32).unwrap() as usize;
+        let q = quorum(n as u32) as usize;
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create contributors (must be in sorted order)
@@ -1308,7 +1308,7 @@ mod tests {
     fn test_player_missing_reveal() {
         // Initialize test
         let n = 11;
-        let q = quorum(n as u32).unwrap() as usize;
+        let q = quorum(n as u32) as usize;
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create contributors (must be in sorted order)
@@ -1388,7 +1388,7 @@ mod tests {
     fn test_player_misdirected_reveal() {
         // Initialize test
         let n = 11;
-        let q = quorum(n as u32).unwrap() as usize;
+        let q = quorum(n as u32) as usize;
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create contributors (must be in sorted order)
@@ -1432,7 +1432,7 @@ mod tests {
     fn test_player_invalid_commitment() {
         // Initialize test
         let n = 11;
-        let q = quorum(n as u32).unwrap() as usize;
+        let q = quorum(n as u32) as usize;
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create contributors (must be in sorted order)
@@ -1476,7 +1476,7 @@ mod tests {
     fn test_player_invalid_reveal() {
         // Initialize test
         let n = 11;
-        let q = quorum(n as u32).unwrap() as usize;
+        let q = quorum(n as u32) as usize;
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create contributors (must be in sorted order)
