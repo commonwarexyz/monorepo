@@ -313,7 +313,7 @@ mod tests {
     fn test_all_online() {
         // Create context
         let n = 5;
-        let threshold = quorum(n).expect("unable to calculate threshold");
+        let threshold = quorum(n);
         let max_exceptions = 4;
         let required_containers = 100;
         let activity_timeout = 10;
@@ -530,7 +530,7 @@ mod tests {
     fn test_unclean_shutdown() {
         // Create context
         let n = 5;
-        let threshold = quorum(n).expect("unable to calculate threshold");
+        let threshold = quorum(n);
         let required_containers = 100;
         let activity_timeout = 10;
         let skip_timeout = 5;
@@ -759,7 +759,7 @@ skip_timeout,
     fn test_backfill() {
         // Create context
         let n = 4;
-        let threshold = quorum(n).expect("unable to calculate threshold");
+        let threshold = quorum(n);
         let required_containers = 100;
         let activity_timeout = 10;
         let skip_timeout = 5;
@@ -1054,7 +1054,7 @@ skip_timeout,
     fn test_one_offline() {
         // Create context
         let n = 5;
-        let threshold = quorum(n).expect("unable to calculate threshold");
+        let threshold = quorum(n);
         let required_containers = 100;
         let activity_timeout = 10;
         let skip_timeout = 5;
@@ -1245,7 +1245,7 @@ skip_timeout,
     fn test_slow_validator() {
         // Create context
         let n = 5;
-        let threshold = quorum(n).expect("unable to calculate threshold");
+        let threshold = quorum(n);
         let required_containers = 50;
         let activity_timeout = 10;
         let skip_timeout = 5;
@@ -1436,7 +1436,7 @@ skip_timeout,
     fn test_all_recovery() {
         // Create context
         let n = 5;
-        let threshold = quorum(n).expect("unable to calculate threshold");
+        let threshold = quorum(n);
         let required_containers = 100;
         let activity_timeout = 10;
         let skip_timeout = 5;
@@ -1609,7 +1609,7 @@ skip_timeout,
     fn test_partition() {
         // Create context
         let n = 10;
-        let threshold = quorum(n).expect("unable to calculate threshold");
+        let threshold = quorum(n);
         let required_containers = 50;
         let activity_timeout = 10;
         let skip_timeout = 5;
@@ -1833,7 +1833,7 @@ skip_timeout,
     fn slow_and_lossy_links(seed: u64) -> String {
         // Create context
         let n = 5;
-        let threshold = quorum(n).expect("unable to calculate threshold");
+        let threshold = quorum(n);
         let required_containers = 50;
         let activity_timeout = 10;
         let skip_timeout = 5;
@@ -2017,7 +2017,7 @@ skip_timeout,
     fn test_conflicter() {
         // Create context
         let n = 4;
-        let threshold = quorum(n).expect("unable to calculate threshold");
+        let threshold = quorum(n);
         let required_containers = 50;
         let activity_timeout = 10;
         let skip_timeout = 5;
@@ -2203,7 +2203,7 @@ skip_timeout,
     fn test_nuller() {
         // Create context
         let n = 4;
-        let threshold = quorum(n).expect("unable to calculate threshold");
+        let threshold = quorum(n);
         let required_containers = 50;
         let activity_timeout = 10;
         let skip_timeout = 5;

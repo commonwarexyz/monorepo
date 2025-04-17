@@ -49,9 +49,9 @@ pub fn max_faults(n: u32) -> u32 {
 /// Compute the quorum size for a given set of `n` participants. This is the minimum integer `q`
 /// such that `3*q >= 2*n + 1`. It is also equal to `n - f`, where `f` is the maximum number of
 /// faults.
-/// 
+///
 /// # Panics
-/// 
+///
 /// Panics if `n` is zero.
 pub fn quorum(n: u32) -> u32 {
     assert!(n > 0, "n must not be zero");
@@ -169,30 +169,47 @@ mod tests {
     }
 
     #[test]
+    fn test_max_faults_zero() {
+        assert_eq!(max_faults(0), 0);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_quorum_zero() {
+        quorum(0);
+    }
+
+    #[test]
     fn test_quorum_and_max_faults() {
         // n, expected_f, expected_q
         let test_cases = [
-            (0, None, None),
-            (1, None, None),
-            (2, None, None),
-            (3, None, None),
-            (4, Some(1), Some(3)),
-            (5, Some(1), Some(4)),
-            (6, Some(1), Some(5)),
-            (7, Some(2), Some(5)),
-            (8, Some(2), Some(6)),
-            (9, Some(2), Some(7)),
-            (10, Some(3), Some(7)),
+            (1, 0, 1),
+            (2, 0, 2),
+            (3, 0, 3),
+            (4, 1, 3),
+            (5, 1, 4),
+            (6, 1, 5),
+            (7, 2, 5),
+            (8, 2, 6),
+            (9, 2, 7),
+            (10, 3, 7),
+            (11, 3, 8),
+            (12, 3, 9),
+            (13, 4, 9),
+            (14, 4, 10),
+            (15, 4, 11),
+            (16, 5, 11),
+            (17, 5, 12),
+            (18, 5, 13),
+            (19, 6, 13),
+            (20, 6, 14),
+            (21, 6, 15),
         ];
 
         for (n, ef, eq) in test_cases {
             assert_eq!(max_faults(n), ef);
             assert_eq!(quorum(n), eq);
-            if let (Some(f), Some(q)) = (ef, eq) {
-                assert_eq!(n, f + q);
-            } else {
-                assert!(ef.is_none() && eq.is_none());
-            }
+            assert_eq!(n, ef + eq);
         }
     }
 

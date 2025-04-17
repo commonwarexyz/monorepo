@@ -836,7 +836,7 @@ mod tests {
     fn test_partial_verify_multiple_messages() {
         // Generate polynomial and shares
         let n = 5;
-        let t = quorum(n).unwrap();
+        let t = quorum(n);
         let (public, shares) = generate_shares(&mut thread_rng(), None, n, t);
 
         // Select signer with index 0

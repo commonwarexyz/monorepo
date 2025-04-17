@@ -436,7 +436,7 @@ impl<C: Scheme, D: Array, S: Supervisor<Index = View, PublicKey = C::PublicKey>>
 
     pub fn at_least_one_honest(&self) -> Option<View> {
         let participants = self.supervisor.participants(self.view)?;
-        let threshold = quorum(participants.len() as u32)?;
+        let threshold = quorum(participants.len() as u32);
         let at_least_one_honest = (threshold - 1) / 2 + 1;
         for (_, notarizes) in self.notarizes.iter() {
             if notarizes.len() < at_least_one_honest as usize {
@@ -1693,8 +1693,7 @@ impl<
                 return None;
             }
         };
-        let threshold =
-            quorum(validators.len() as u32).expect("not enough validators for a quorum");
+        let threshold = quorum(validators.len() as u32);
         let (proposal, notarizes) = round.notarizable(threshold, force)?;
 
         // Construct notarization
@@ -1732,8 +1731,7 @@ impl<
                 return None;
             }
         };
-        let threshold =
-            quorum(validators.len() as u32).expect("not enough validators for a quorum");
+        let threshold = quorum(validators.len() as u32);
         let (_, nullifies) = round.nullifiable(threshold, force)?;
 
         // Construct nullification
@@ -1812,8 +1810,7 @@ impl<
                 return None;
             }
         };
-        let threshold =
-            quorum(validators.len() as u32).expect("not enough validators for a quorum");
+        let threshold = quorum(validators.len() as u32);
         let (proposal, finalizes) = round.finalizable(threshold, force)?;
 
         // Construct finalization

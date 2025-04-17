@@ -62,7 +62,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
                 crypto,
                 dkg_phase_timeout,
                 arbiter,
-                t: quorum(contributors.len() as u32).unwrap(),
+                t: quorum(contributors.len() as u32),
                 contributors,
                 contributors_ordered,
 

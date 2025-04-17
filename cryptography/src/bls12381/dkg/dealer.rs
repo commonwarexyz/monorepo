@@ -48,7 +48,7 @@ impl<P: Array> Dealer<P> {
 
         // Generate shares and commitment
         let players_len = players.len() as u32;
-        let threshold = quorum(players_len).expect("insufficient players");
+        let threshold = quorum(players_len);
         let (commitment, shares) = ops::generate_shares(rng, share, players_len, threshold);
         (
             Self {
