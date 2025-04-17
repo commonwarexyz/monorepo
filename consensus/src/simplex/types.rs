@@ -1,3 +1,5 @@
+//! Types used in [`simplex`](crate::simplex).
+
 use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error, FixedSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{Digest, Scheme, Verifier};
