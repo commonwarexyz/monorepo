@@ -8,6 +8,7 @@ use std::{collections::HashMap, marker::PhantomData};
 use tracing::info;
 
 /// Implementation of `commonware-consensus::Supervisor`.
+// TODO(#755): Use `commonware-cryptography::Specification`.
 #[derive(Clone)]
 pub struct Supervisor<P: Array, S: Array, D: Digest> {
     participants: Vec<P>,
