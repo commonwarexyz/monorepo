@@ -197,18 +197,18 @@ impl crate::Blob for Blob {
             unsafe {
                 ring.submission()
                     .push(&write_op)
-                    .map_err(|_| Error::WriteFailed)?; // TODO danlaine: consider changing error values.
+                    .map_err(|_| Error::WriteFailed)?;
             }
 
             // Wait for the operation to complete
             ring.submit_and_wait(1).map_err(|_| Error::WriteFailed)?;
 
             // Process the completion event
-            let completed_op = ring.completion().next().ok_or(Error::ReadFailed)?;
+            let completed_op = ring.completion().next().ok_or(Error::WriteFailed)?;
             let bytes_written: usize = completed_op
                 .result()
                 .try_into()
-                .map_err(|_| Error::ReadFailed)?;
+                .map_err(|_| Error::WriteFailed)?;
             if bytes_written == 0 {
                 return Err(Error::WriteFailed);
             }
