@@ -26,8 +26,10 @@ use commonware_codec::{
     Error::{self, Invalid},
     FixedSize, Read, ReadExt, Write,
 };
+use commonware_utils::hex;
 use rand::RngCore;
 use std::{
+    fmt::{Debug, Display},
     hash::{Hash, Hasher},
     ptr,
 };
@@ -72,7 +74,7 @@ pub trait Point: Element {
 }
 
 /// A scalar representing an element of the BLS12-381 finite field.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 #[repr(transparent)]
 pub struct Scalar(blst_fr);
 
@@ -101,7 +103,7 @@ const BLST_FR_ONE: Scalar = Scalar(blst_fr {
 });
 
 /// A point on the BLS12-381 G1 curve.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 #[repr(transparent)]
 pub struct G1(blst_p1);
 
@@ -120,7 +122,7 @@ pub const G1_PROOF_OF_POSSESSION: DST = b"BLS_POP_BLS12381G1_XMD:SHA-256_SSWU_RO
 pub const G1_MESSAGE: DST = b"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_";
 
 /// A point on the BLS12-381 G2 curve.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 #[repr(transparent)]
 pub struct G2(blst_p2);
 
@@ -322,8 +324,20 @@ impl Hash for Scalar {
     }
 }
 
+impl Debug for Scalar {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", hex(&self.as_slice()))
+    }
+}
+
+impl Display for Scalar {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", hex(&self.as_slice()))
+    }
+}
+
 /// A share of a threshold signing key.
-#[derive(Debug, Clone, PartialEq, Copy, Hash)]
+#[derive(Clone, PartialEq, Copy, Hash)]
 pub struct Share {
     /// The share's index in the polynomial.
     pub index: u32,
@@ -369,6 +383,18 @@ impl Read for Share {
 
 impl FixedSize for Share {
     const SIZE: usize = u32::SIZE + Private::SIZE;
+}
+
+impl Display for Share {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Share(index={}, private={})", self.index, self.private)
+    }
+}
+
+impl Debug for Share {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Share(index={}, private={})", self.index, self.private)
+    }
 }
 
 impl G1 {
@@ -488,6 +514,18 @@ impl Point for G1 {
     }
 }
 
+impl Debug for G1 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", hex(&self.as_slice()))
+    }
+}
+
+impl Display for G1 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", hex(&self.as_slice()))
+    }
+}
+
 impl G2 {
     /// Encodes the G2 element into a slice.
     fn as_slice(&self) -> [u8; Self::SIZE] {
@@ -602,6 +640,18 @@ impl Point for G2 {
                 0,
             );
         }
+    }
+}
+
+impl Debug for G2 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", hex(&self.as_slice()))
+    }
+}
+
+impl Display for G2 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", hex(&self.as_slice()))
     }
 }
 
