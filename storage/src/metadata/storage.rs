@@ -6,7 +6,6 @@ use commonware_utils::{Array, SystemTimeExt as _};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::{
     collections::BTreeMap,
-    marker::PhantomData,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tracing::{trace, warn};
@@ -25,8 +24,6 @@ pub struct Metadata<E: Clock + Storage + Metrics, K: Array> {
 
     syncs: Counter,
     keys: Gauge,
-
-    _phantom_e: PhantomData<E>,
 }
 
 impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
@@ -79,8 +76,6 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
 
             syncs,
             keys,
-
-            _phantom_e: PhantomData,
         })
     }
 
