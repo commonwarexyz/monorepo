@@ -31,11 +31,15 @@ pub struct Supervisor<C: Verifier, D: Digest> {
 
     pub leaders: Arc<Mutex<HashMap<View, C::PublicKey>>>,
     pub notarizes: Arc<Mutex<Participation<C::PublicKey, D>>>,
+    #[allow(clippy::type_complexity)]
     pub notarizations: Arc<Mutex<HashMap<View, Notarization<C::Signature, D>>>>,
     pub nullifies: Arc<Mutex<HashMap<View, HashSet<C::PublicKey>>>>,
     pub nullifications: Arc<Mutex<HashMap<View, Nullification<C::Signature>>>>,
+    #[allow(clippy::type_complexity)]
     pub finalizes: Arc<Mutex<Participation<C::PublicKey, D>>>,
+    #[allow(clippy::type_complexity)]
     pub finalizations: Arc<Mutex<HashMap<View, Finalization<C::Signature, D>>>>,
+    #[allow(clippy::type_complexity)]
     pub faults: Arc<Mutex<Faults<C::PublicKey, C::Signature, D>>>,
 
     latest: Arc<Mutex<View>>,
