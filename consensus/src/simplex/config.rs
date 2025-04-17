@@ -55,8 +55,11 @@ pub struct Config<
     /// and persist activity derived from validator messages.
     pub activity_timeout: View,
 
-    /// Maximum number of participants...
-    /// TODO
+    /// Maximum number of participants to track in a single round.
+    ///
+    /// This is used to limit the size of notarization, nullification, and finalization messages,
+    /// which include up to one signature per participant. This number can be set to a reasonably high
+    /// value that we never expect to reach (it is just how many signatures we are willing to parse, not verify).
     pub max_participants: usize,
 
     /// Move to nullify immediately if the selected leader has been inactive
