@@ -143,10 +143,10 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
             }
             Activity::Notarization(notarization) => {
                 let view = notarization.view();
-                if !notarization.verify::<_, C>(self, &self.notarize_namespace) {
+                let participants = self.participants(view).unwrap();
+                if !notarization.verify::<_, C>(participants, &self.notarize_namespace) {
                     panic!("signature verification failed");
                 }
-                let participants = self.participants(view).unwrap();
                 let mut notarizes = self.notarizes.lock().unwrap();
                 let notarizes = notarizes
                     .entry(view)
@@ -179,10 +179,10 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
             }
             Activity::Nullification(nullification) => {
                 let view = nullification.view();
-                if !nullification.verify::<_, C>(self, &self.nullify_namespace) {
+                let participants = self.participants(view).unwrap();
+                if !nullification.verify::<_, C>(participants, &self.nullify_namespace) {
                     panic!("signature verification failed");
                 }
-                let participants = self.participants(view).unwrap();
                 let mut nullifies = self.nullifies.lock().unwrap();
                 let nullifies = nullifies.entry(view).or_default();
                 for signature in &nullification.signatures {
@@ -213,10 +213,10 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
             }
             Activity::Finalization(finalization) => {
                 let view = finalization.view();
-                if !finalization.verify::<_, C>(self, &self.finalize_namespace) {
+                let participants = self.participants(view).unwrap();
+                if !finalization.verify::<_, C>(participants, &self.finalize_namespace) {
                     panic!("signature verification failed");
                 }
-                let participants = self.participants(view).unwrap();
                 let mut finalizes = self.finalizes.lock().unwrap();
                 let finalizes = finalizes
                     .entry(view)
