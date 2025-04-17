@@ -387,7 +387,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher> Any<E, K, V,
             .map(|op| Any::<E, _, _, _>::op_digest(hasher, op))
             .collect::<Vec<_>>();
 
-        proof.verify_range_inclusion(hasher, &digests, start_pos, end_pos, root_hash)
+        proof.verify_range_inclusion(hasher, digests, start_pos, end_pos, root_hash)
     }
 
     /// Commit any pending operations to the db, ensuring they are persisted to disk &
