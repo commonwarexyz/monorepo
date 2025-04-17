@@ -1,10 +1,7 @@
 //! Byzantine participant that sends conflicting notarize/finalize messages.
 
 use crate::{
-    threshold_simplex::types::{
-        finalize_namespace, notarize_namespace, seed_namespace, Finalize, Notarize, Proposal, View,
-        Viewable, Voter,
-    },
+    threshold_simplex::types::{Finalize, Notarize, Proposal, View, Viewable, Voter},
     ThresholdSupervisor,
 };
 use commonware_codec::{DecodeExt, Encode};
@@ -29,11 +26,10 @@ pub struct Conflicter<
 > {
     context: E,
     supervisor: S,
-    _hasher: PhantomData<H>,
 
-    seed_namespace: Vec<u8>,
-    notarize_namespace: Vec<u8>,
-    finalize_namespace: Vec<u8>,
+    namespace: Vec<u8>,
+
+    _hasher: PhantomData<H>,
 }
 
 impl<
@@ -46,11 +42,10 @@ impl<
         Self {
             context,
             supervisor: cfg.supervisor,
-            _hasher: PhantomData,
 
-            seed_namespace: seed_namespace(&cfg.namespace),
-            notarize_namespace: notarize_namespace(&cfg.namespace),
-            finalize_namespace: finalize_namespace(&cfg.namespace),
+            namespace: cfg.namespace,
+
+            _hasher: PhantomData,
         }
     }
 
@@ -78,24 +73,14 @@ impl<
                     let share = self.supervisor.share(view).unwrap();
                     let proposal = notarize.proposal;
                     let parent = proposal.parent;
-                    let n = Notarize::sign(
-                        share,
-                        proposal,
-                        &self.notarize_namespace,
-                        &self.seed_namespace,
-                    );
+                    let n = Notarize::sign(&self.namespace, share, proposal);
                     let msg = Voter::Notarize(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
 
                     // Notarize random digest
                     let payload = H::random(&mut self.context);
                     let proposal = Proposal::new(view, parent, payload);
-                    let n = Notarize::sign(
-                        share,
-                        proposal,
-                        &self.notarize_namespace,
-                        &self.seed_namespace,
-                    );
+                    let n = Notarize::sign(&self.namespace, share, proposal);
                     let msg = Voter::Notarize(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
@@ -105,14 +90,14 @@ impl<
                     let share = self.supervisor.share(view).unwrap();
                     let proposal = finalize.proposal;
                     let parent = proposal.parent;
-                    let f = Finalize::sign(share, proposal, &self.finalize_namespace);
+                    let f = Finalize::sign(&self.namespace, share, proposal);
                     let msg = Voter::Finalize(f).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
 
                     // Finalize random digest
                     let payload = H::random(&mut self.context);
                     let proposal = Proposal::new(view, parent, payload);
-                    let f = Finalize::sign(share, proposal, &self.finalize_namespace);
+                    let f = Finalize::sign(&self.namespace, share, proposal);
                     let msg = Voter::Finalize(f).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }

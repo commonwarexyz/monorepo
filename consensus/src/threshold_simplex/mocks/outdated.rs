@@ -1,10 +1,7 @@
 //! Byzantine participant that sends outdated notarize and finalize messages.
 
 use crate::{
-    threshold_simplex::types::{
-        finalize_namespace, notarize_namespace, seed_namespace, Finalize, Notarize, Proposal, View,
-        Viewable, Voter,
-    },
+    threshold_simplex::types::{Finalize, Notarize, Proposal, View, Viewable, Voter},
     ThresholdSupervisor,
 };
 use commonware_codec::{DecodeExt, Encode};
@@ -32,9 +29,7 @@ pub struct Outdated<
     supervisor: S,
     _hasher: PhantomData<H>,
 
-    seed_namespace: Vec<u8>,
-    notarize_namespace: Vec<u8>,
-    finalize_namespace: Vec<u8>,
+    namespace: Vec<u8>,
 
     history: HashMap<u64, Proposal<H::Digest>>,
     view_delta: u64,
@@ -52,9 +47,7 @@ impl<
             supervisor: cfg.supervisor,
             _hasher: PhantomData,
 
-            seed_namespace: seed_namespace(&cfg.namespace),
-            notarize_namespace: notarize_namespace(&cfg.namespace),
-            finalize_namespace: finalize_namespace(&cfg.namespace),
+            namespace: cfg.namespace,
 
             history: HashMap::new(),
             view_delta: cfg.view_delta,
@@ -91,12 +84,7 @@ impl<
                         continue;
                     };
                     debug!(?view, "notarizing old proposal");
-                    let n = Notarize::sign(
-                        share,
-                        proposal.clone(),
-                        &self.notarize_namespace,
-                        &self.seed_namespace,
-                    );
+                    let n = Notarize::sign(&self.namespace, share, proposal.clone());
                     let msg = Voter::Notarize(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
@@ -111,7 +99,7 @@ impl<
                         continue;
                     };
                     debug!(?view, "finalizing old proposal");
-                    let f = Finalize::sign(share, proposal.clone(), &self.finalize_namespace);
+                    let f = Finalize::sign(&self.namespace, share, proposal.clone());
                     let msg = Voter::Finalize(f).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
