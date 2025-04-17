@@ -27,7 +27,6 @@ governor = { workspace = true }
 prometheus-client = { workspace = true }
 zstd = { workspace = true }
 either = { workspace = true }
-bitvec = "1.0.1"
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
