@@ -282,14 +282,10 @@ impl crate::Blob for Blob {
             let remaining = &mut buf[total_read..];
             let offset = offset + total_read as u64;
 
-            let result = self
-                .io_ring
-                .submit_operation(
-                    opcode::Read::new(fd, remaining.as_mut_ptr(), remaining.len() as _)
-                        .offset(offset as _)
-                        .build(),
-                )
-                .await?;
+            let op = opcode::Read::new(fd, remaining.as_mut_ptr(), remaining.len() as _)
+                .offset(offset as _)
+                .build();
+            let result = self.io_ring.submit_operation(op).await?;
 
             // If the return value is non-positive, it indicates an error.
             let bytes_read: usize = result.try_into().map_err(|_| Error::ReadFailed)?;
@@ -313,14 +309,10 @@ impl crate::Blob for Blob {
             let offset = offset + total_written as u64;
 
             // Submit write operation using the shared adapter
-            let result = self
-                .io_ring
-                .submit_operation(
-                    opcode::Write::new(fd, remaining.as_ptr(), remaining.len() as _)
-                        .offset(offset as _)
-                        .build(),
-                )
-                .await?;
+            let op = opcode::Write::new(fd, remaining.as_ptr(), remaining.len() as _)
+                .offset(offset as _)
+                .build();
+            let result = self.io_ring.submit_operation(op).await?;
 
             let bytes_written: usize = result.try_into().map_err(|_| Error::WriteFailed)?;
             if bytes_written == 0 {
@@ -339,13 +331,11 @@ impl crate::Blob for Blob {
     }
 
     async fn truncate(&self, len: u64) -> Result<(), Error> {
-        // Submit truncate operation via io_uring
+        let op = opcode::Fallocate::new(types::Fd(self.fd.as_raw_fd()), len)
+            .mode(0) // 0 means truncate
+            .build();
         self.io_ring
-            .submit_operation(
-                opcode::Fallocate::new(types::Fd(self.fd.as_raw_fd()), len)
-                    .mode(0) // 0 means truncate
-                    .build(),
-            )
+            .submit_operation(op)
             .await
             .map_err(|_| Error::BlobTruncateFailed(self.partition.clone(), hex(&self.name)))?;
 
@@ -355,9 +345,10 @@ impl crate::Blob for Blob {
     }
 
     async fn sync(&self) -> Result<(), Error> {
+        let op = opcode::Fsync::new(types::Fd(self.fd.as_raw_fd())).build();
         // Submit fsync operation via io_uring
         self.io_ring
-            .submit_operation(opcode::Fsync::new(types::Fd(self.fd.as_raw_fd())).build())
+            .submit_operation(op)
             .await
             .map_err(|_| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name)))?;
 
