@@ -24,7 +24,7 @@ pub struct Config<H: Hasher, Si: Sink, St: Stream, P: Array> {
 
     pub namespace: Vec<u8>,
     pub identity: poly::Public,
-    pub other_identity: group::Public,
+    pub other_public: group::Public,
 
     /// Participants active in consensus.
     pub participants: Vec<P>,

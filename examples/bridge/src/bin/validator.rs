@@ -49,11 +49,7 @@ fn main() {
         .arg(Arg::new("indexer").long("indexer").required(true))
         .arg(Arg::new("identity").long("identity").required(true))
         .arg(Arg::new("share").long("share").required(true))
-        .arg(
-            Arg::new("other-identity")
-                .long("other-identity")
-                .required(true),
-        )
+        .arg(Arg::new("other-public").long("other-public").required(true))
         .get_matches();
 
     // Create logger
@@ -138,13 +134,13 @@ fn main() {
     let indexer = Ed25519::from_seed(indexer_key).public_key();
     let indexer_address = SocketAddr::from_str(parts[1]).expect("Indexer address not well-formed");
 
-    // Configure other identity
-    let other_identity = matches
-        .get_one::<String>("other-identity")
-        .expect("Please provide other identity");
-    let other_identity = from_hex(other_identity).expect("Other identity not well-formed");
-    let other_identity =
-        group::Public::deserialize(&other_identity).expect("Other identity not well-formed");
+    // Configure other public
+    let other_public = matches
+        .get_one::<String>("other-public")
+        .expect("Please provide other public");
+    let other_public = from_hex(other_public).expect("Other identity not well-formed");
+    let other_public =
+        group::Public::deserialize(&other_public).expect("Other identity not well-formed");
 
     // Initialize context
     let runtime_cfg = tokio::Config {
@@ -230,7 +226,7 @@ fn main() {
                 indexer,
                 namespace: consensus_namespace.clone(),
                 identity,
-                other_identity,
+                other_public,
                 hasher: Sha256::default(),
                 mailbox_size: 1024,
                 participants: validators.clone(),
