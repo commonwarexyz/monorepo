@@ -1,9 +1,9 @@
 #[cfg(all(feature = "iouring", target_os = "linux"))]
 use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage};
-use crate::storage::metered::MeteredStorage;
 #[cfg(not(all(feature = "iouring", target_os = "linux")))]
-use crate::storage::tokio_storage::{Config as TokioStorageConfig, Storage as TokioStorage};
-use crate::Storage as StorageTrait;
+use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
+
+use crate::storage::metered::Storage as MeteredStorage;
 use crate::{utils::Signaler, Clock, Error, Handle, Signal, METRICS_PREFIX};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
@@ -642,7 +642,7 @@ impl RngCore for Context {
 impl CryptoRng for Context {}
 
 impl crate::Storage for Context {
-    type Blob = <Storage as StorageTrait>::Blob;
+    type Blob = <Storage as crate::Storage>::Blob;
 
     async fn open(&self, partition: &str, name: &[u8]) -> Result<Self::Blob, Error> {
         self.storage.open(partition, name).await

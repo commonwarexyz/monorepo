@@ -1,4 +1,4 @@
-use crate::{Blob as BlobTrait, Error, Storage as StorageTrait};
+use crate::Error;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use prometheus_client::registry::Registry;
 use std::sync::Arc;
@@ -54,12 +54,12 @@ impl Metrics {
 
 /// A wrapper around a `Storage` implementation that tracks metrics.
 #[derive(Clone)]
-pub struct MeteredStorage<S> {
+pub struct Storage<S> {
     inner: S,
     metrics: Arc<Metrics>,
 }
 
-impl<S> MeteredStorage<S> {
+impl<S> Storage<S> {
     pub fn new(inner: S, registry: &mut Registry) -> Self {
         Self {
             inner,
@@ -68,13 +68,13 @@ impl<S> MeteredStorage<S> {
     }
 }
 
-impl<S: StorageTrait> StorageTrait for MeteredStorage<S> {
-    type Blob = MeteredBlob<S::Blob>;
+impl<S: crate::Storage> crate::Storage for Storage<S> {
+    type Blob = Blob<S::Blob>;
 
     async fn open(&self, partition: &str, name: &[u8]) -> Result<Self::Blob, Error> {
         self.metrics.open_blobs.inc();
         let inner = self.inner.open(partition, name).await?;
-        Ok(MeteredBlob {
+        Ok(Blob {
             inner,
             metrics: self.metrics.clone(),
         })
@@ -91,12 +91,12 @@ impl<S: StorageTrait> StorageTrait for MeteredStorage<S> {
 
 /// A wrapper around a `Blob` implementation that tracks metrics
 #[derive(Clone)]
-pub struct MeteredBlob<B> {
+pub struct Blob<B> {
     inner: B,
     metrics: Arc<Metrics>,
 }
 
-impl<B: BlobTrait> BlobTrait for MeteredBlob<B> {
+impl<B: crate::Blob> crate::Blob for Blob<B> {
     async fn len(&self) -> Result<u64, Error> {
         self.inner.len().await
     }
@@ -126,6 +126,7 @@ impl<B: BlobTrait> BlobTrait for MeteredBlob<B> {
     // TODO danlaine: This is error-prone because the metrics will be
     // incorrect if the blob is dropped before it's closed. We should
     // consider using a `Drop` implementation to decrement the metric.
+    // https://github.com/commonwarexyz/monorepo/issues/754
     async fn close(self) -> Result<(), Error> {
         self.metrics.open_blobs.dec();
         self.inner.close().await
@@ -137,14 +138,14 @@ mod tests {
     use super::*;
     use crate::storage::memory::Storage as MemoryStorage;
     use crate::storage::tests::run_storage_tests;
-    use crate::{Blob, Storage};
+    use crate::{Blob, Storage as _};
     use prometheus_client::registry::Registry;
 
     #[tokio::test]
     async fn test_metered_storage() {
         let mut registry = Registry::default();
         let inner = MemoryStorage::default();
-        let storage = MeteredStorage::new(inner, &mut registry);
+        let storage = Storage::new(inner, &mut registry);
 
         run_storage_tests(storage).await;
     }
@@ -154,7 +155,7 @@ mod tests {
     async fn test_metered_blob_metrics() {
         let mut registry = Registry::default();
         let inner = MemoryStorage::default();
-        let storage = MeteredStorage::new(inner, &mut registry);
+        let storage = Storage::new(inner, &mut registry);
 
         // Open a blob
         let blob = storage.open("partition", b"test_blob").await.unwrap();
@@ -209,7 +210,7 @@ mod tests {
     async fn test_metered_blob_multiple_blobs() {
         let mut registry = Registry::default();
         let inner = MemoryStorage::default();
-        let storage = MeteredStorage::new(inner, &mut registry);
+        let storage = Storage::new(inner, &mut registry);
 
         // Open multiple blobs
         let blob1 = storage.open("partition", b"blob1").await.unwrap();

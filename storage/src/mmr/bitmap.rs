@@ -72,9 +72,27 @@ impl<H: CHasher> Bitmap<H> {
         }
     }
 
-    /// Return the number of bits currently stored in the bitmap.
+    /// Return the number of bitmap bytes that have been pruned.
+    fn pruned_bytes(&self) -> usize {
+        self.mmr.oldest_retained_pos as usize * Self::CHUNK_SIZE
+    }
+
+    /// Return the number of bits currently stored in the bitmap, irrespective of any pruning.
     pub fn bit_count(&self) -> u64 {
-        (self.bitmap.len() * 8 - Self::CHUNK_SIZE * 8 + self.next_bit) as u64
+        ((self.pruned_bytes() + self.bitmap.len()) * 8 - Self::CHUNK_SIZE * 8 + self.next_bit)
+            as u64
+    }
+
+    /// Prune the bitmap to the most recent chunk boundary that contains the referenced bit. Panics
+    /// if the referenced bit has been pruned or is greater than the number of bits in the bitmap.
+    pub fn prune_to_bit(&mut self, bit_offset: u64) {
+        let chunk_pos = bit_offset as usize / 8 / Self::CHUNK_SIZE;
+        let mut byte_offset = chunk_pos * Self::CHUNK_SIZE;
+        let pruned_bytes = self.pruned_bytes();
+        assert!(byte_offset >= pruned_bytes, "bit pruned");
+        byte_offset -= pruned_bytes;
+        self.mmr.prune_to_pos(chunk_pos as u64);
+        self.bitmap.drain(0..byte_offset);
     }
 
     /// Return the last chunk of the bitmap as a digest.
@@ -89,9 +107,13 @@ impl<H: CHasher> Bitmap<H> {
         &mut self.bitmap[len - Self::CHUNK_SIZE..len]
     }
 
-    /// Returns the bitmap chunk containing the specified bit as a digest.
+    /// Returns the bitmap chunk containing the specified bit as a digest. Panics if the bit doesn't
+    /// exist or has been pruned.
     fn get_chunk(&self, bit_offset: u64) -> H::Digest {
-        let byte_offset = bit_offset as usize / 8 / Self::CHUNK_SIZE * Self::CHUNK_SIZE;
+        let mut byte_offset = bit_offset as usize / 8 / Self::CHUNK_SIZE * Self::CHUNK_SIZE;
+        let pruned_bytes = self.pruned_bytes();
+        assert!(byte_offset >= pruned_bytes, "bit pruned");
+        byte_offset -= pruned_bytes;
         H::Digest::try_from(&self.bitmap[byte_offset..byte_offset + Self::CHUNK_SIZE]).unwrap()
     }
 
@@ -167,19 +189,26 @@ impl<H: CHasher> Bitmap<H> {
         leaf_num_to_pos(leaf_num)
     }
 
-    /// Get the value of a bit.
+    /// Get the value of a bit. Panics if the bit doesn't exist or has been pruned.
     pub fn get_bit(&self, bit_offset: u64) -> bool {
         assert!(bit_offset < self.bit_count(), "out of bounds");
-
-        let byte_offset = bit_offset as usize / 8;
+        let chunk_pos = bit_offset / 8 / Self::CHUNK_SIZE as u64;
+        if chunk_pos < self.mmr.oldest_retained_pos {
+            panic!("bit pruned");
+        }
+        let byte_offset = bit_offset as usize / 8 - self.pruned_bytes();
         self.bitmap[byte_offset] & Self::chunk_byte_bit_mask(bit_offset) != 0
     }
 
-    /// Set the value of an existing bit.
+    /// Set the value of the referenced bit. Panics if the bit doesn't exist or has been pruned.
     pub fn set_bit(&mut self, hasher: &mut H, bit_offset: u64, bit: bool) {
         assert!(bit_offset < self.bit_count(), "out of bounds");
+        let chunk_pos = bit_offset / 8 / Self::CHUNK_SIZE as u64;
+        if chunk_pos < self.mmr.oldest_retained_pos {
+            panic!("bit pruned");
+        }
 
-        let byte_offset = bit_offset as usize / 8;
+        let byte_offset = bit_offset as usize / 8 - self.pruned_bytes();
         let mask = Self::chunk_byte_bit_mask(bit_offset);
         if bit {
             self.bitmap[byte_offset] |= mask;
@@ -267,6 +296,48 @@ mod tests {
     use super::*;
     use commonware_cryptography::{hash, Sha256};
     use commonware_runtime::{deterministic::Executor, Runner};
+
+    #[test]
+    fn test_bitmap_empty_then_one() {
+        let mut bitmap = Bitmap::<Sha256>::new();
+        assert_eq!(bitmap.bit_count(), 0);
+        assert_eq!(bitmap.pruned_bytes(), 0);
+        bitmap.prune_to_bit(0);
+        assert_eq!(bitmap.pruned_bytes(), 0);
+        let empty_digest =
+            <Sha256 as CHasher>::Digest::try_from(&[0u8; <Sha256 as CHasher>::Digest::SIZE][..])
+                .unwrap();
+        assert_eq!(bitmap.last_chunk(), empty_digest);
+
+        // Add a single bit
+        let mut hasher = Sha256::new();
+        let root = bitmap.root(&mut hasher);
+        bitmap.append(&mut Sha256::new(), true);
+        // Root should change
+        assert!(root != bitmap.root(&mut hasher));
+        let root = bitmap.root(&mut hasher);
+        bitmap.prune_to_bit(1);
+        assert_eq!(bitmap.bit_count(), 1);
+        assert!(bitmap.last_chunk() != empty_digest);
+        // Pruning should be a no-op since we're not beyond a chunk boundary.
+        assert_eq!(bitmap.pruned_bytes(), 0);
+        assert_eq!(root, bitmap.root(&mut hasher));
+
+        // Fill up a full chunk
+        for i in 0..(Bitmap::<Sha256>::CHUNK_SIZE * 8 - 1) {
+            bitmap.append(&mut hasher, i % 2 != 0);
+        }
+        assert_eq!(bitmap.bit_count(), 256);
+        assert!(root != bitmap.root(&mut hasher));
+        let root = bitmap.root(&mut hasher);
+        // Now pruning all bits should matter.
+        bitmap.prune_to_bit(256);
+        assert_eq!(bitmap.bit_count(), 256);
+        assert_eq!(bitmap.pruned_bytes(), 32);
+        assert_eq!(root, bitmap.root(&mut hasher));
+        // Last digest should be empty again
+        assert_eq!(bitmap.last_chunk(), empty_digest);
+    }
 
     #[test]
     fn test_bitmap_building() {
@@ -366,6 +437,12 @@ mod tests {
         assert_eq!(bitmap.bit_count(), 256 * 3 + 1);
         let newer_root = bitmap.root(&mut hasher);
         assert!(new_root != newer_root);
+
+        // Confirm pruning everything doesn't affect the root hash.
+        bitmap.prune_to_bit(bitmap.bit_count());
+        assert_eq!(bitmap.bit_count(), 256 * 3 + 1);
+        let pruned_root = bitmap.root(&mut hasher);
+        assert_eq!(pruned_root, newer_root);
     }
 
     #[test]
@@ -419,30 +496,58 @@ mod tests {
 
             let root = bitmap.root(&mut hasher);
 
-            // Try and prove every bit.
-            for i in 0..bitmap.bit_count() {
-                let (proof, chunk) = bitmap.proof(&mut hasher, i).await.unwrap();
+            // Make sure every bit is provable, even after pruning in intervals of 251 bits (251 is
+            // the largest prime that is less than the size of one chunk in bits).
+            for prune_to_bit in (0..bitmap.bit_count()).step_by(251) {
+                assert_eq!(bitmap.root(&mut hasher), root);
+                bitmap.prune_to_bit(prune_to_bit);
+                for i in prune_to_bit..bitmap.bit_count() {
+                    let (proof, chunk) = bitmap.proof(&mut hasher, i).await.unwrap();
 
-                // Proof should verify for the original chunk containing the bit.
-                assert!(
-                    Bitmap::verify_bit_inclusion(&mut hasher, &proof, &chunk, i, &root),
-                    "failed to prove bit {}",
-                    i
-                );
+                    // Proof should verify for the original chunk containing the bit.
+                    assert!(
+                        Bitmap::verify_bit_inclusion(&mut hasher, &proof, &chunk, i, &root),
+                        "failed to prove bit {}",
+                        i
+                    );
 
-                // Flip the bit in the chunk and make sure the proof fails.
-                let mask: u8 = Bitmap::<Sha256>::chunk_byte_bit_mask(i);
-                let byte_offset = Bitmap::<Sha256>::chunk_byte_offset(i);
-                let corrupted = {
-                    let mut tmp = chunk.as_ref().to_vec();
-                    tmp[byte_offset] ^= mask;
-                    <Sha256 as CHasher>::Digest::try_from(&tmp).unwrap()
-                };
-                assert!(
-                    !Bitmap::verify_bit_inclusion(&mut hasher, &proof, &corrupted, i, &root),
-                    "proving bit {} after flipping should have failed",
-                    i
-                );
+                    // Flip the bit in the chunk and make sure the proof fails.
+                    let mask: u8 = Bitmap::<Sha256>::chunk_byte_bit_mask(i);
+                    let byte_offset = Bitmap::<Sha256>::chunk_byte_offset(i);
+                    let corrupted = {
+                        let mut tmp = chunk.as_ref().to_vec();
+                        tmp[byte_offset] ^= mask;
+                        <Sha256 as CHasher>::Digest::try_from(&tmp).unwrap()
+                    };
+                    assert!(
+                        !Bitmap::verify_bit_inclusion(&mut hasher, &proof, &corrupted, i, &root),
+                        "proving bit {} after flipping should have failed",
+                        i
+                    );
+
+                    let (proof, chunk) = bitmap.proof(&mut hasher, i).await.unwrap();
+
+                    // Proof should verify for the original chunk containing the bit.
+                    assert!(
+                        Bitmap::verify_bit_inclusion(&mut hasher, &proof, &chunk, i, &root),
+                        "failed to prove bit {}",
+                        i
+                    );
+
+                    // Flip the bit in the chunk and make sure the proof fails.
+                    let mask: u8 = Bitmap::<Sha256>::chunk_byte_bit_mask(i);
+                    let byte_offset = Bitmap::<Sha256>::chunk_byte_offset(i);
+                    let corrupted = {
+                        let mut tmp = chunk.as_ref().to_vec();
+                        tmp[byte_offset] ^= mask;
+                        <Sha256 as CHasher>::Digest::try_from(&tmp).unwrap()
+                    };
+                    assert!(
+                        !Bitmap::verify_bit_inclusion(&mut hasher, &proof, &corrupted, i, &root),
+                        "proving bit {} after flipping should have failed",
+                        i
+                    );
+                }
             }
         })
     }

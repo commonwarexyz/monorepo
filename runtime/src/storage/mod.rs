@@ -1,12 +1,14 @@
 //! Implementations of the `Storage` trait that can be used by the runtime.
-//! `audited`
 pub mod audited;
 #[cfg(all(feature = "iouring", target_os = "linux"))]
 pub mod iouring;
 pub mod memory;
 pub mod metered;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod tokio_storage;
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    not(all(feature = "iouring", target_os = "linux")),
+))]
+pub mod tokio;
 
 #[cfg(test)]
 pub(crate) mod tests {

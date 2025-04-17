@@ -31,10 +31,10 @@ pub struct Mmr<H: CHasher> {
 
     // The position of the oldest element still retained by the MMR, or the size of the MMR if there
     // are no retained nodes because the MMR is empty or it has been fully pruned.
-    oldest_retained_pos: u64,
+    pub(crate) oldest_retained_pos: u64,
 
     // The auxiliary map from node position to the digest of any pinned node.
-    pinned_nodes: HashMap<u64, H::Digest>,
+    pub(crate) pinned_nodes: HashMap<u64, H::Digest>,
 }
 
 impl<H: CHasher> Default for Mmr<H> {
@@ -149,7 +149,7 @@ impl<H: CHasher> Mmr<H> {
     }
 
     /// Add an element to the MMR and return its position in the MMR.
-    pub fn add(&mut self, hasher: &mut H, element: &H::Digest) -> u64 {
+    pub fn add(&mut self, hasher: &mut H, element: &[u8]) -> u64 {
         let element_pos = self.index_to_pos(self.nodes.len());
         let hash = Hasher::new(hasher).leaf_hash(element_pos, element);
         self.add_leaf_digest(hasher, hash);
@@ -204,12 +204,7 @@ impl<H: CHasher> Mmr<H> {
     /// useful if you want to use the MMR implementation as an updatable binary Merkle tree, and
     /// otherwise should be avoided. Returns ElementPruned if some element required to update the
     /// tree has been pruned.
-    pub fn update_leaf(
-        &mut self,
-        hasher: &mut H,
-        pos: u64,
-        element: &H::Digest,
-    ) -> Result<(), Error> {
+    pub fn update_leaf(&mut self, hasher: &mut H, pos: u64, element: &[u8]) -> Result<(), Error> {
         if pos < self.oldest_retained_pos {
             return Err(ElementPruned(pos));
         }

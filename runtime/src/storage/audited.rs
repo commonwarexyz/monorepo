@@ -1,19 +1,19 @@
-use crate::{deterministic::Auditor, Blob as BlobTrait, Error, Storage as StorageTrait};
+use crate::{deterministic::Auditor, Error};
 use std::sync::Arc;
 
 #[derive(Clone)]
-pub struct Storage<S: StorageTrait> {
+pub struct Storage<S: crate::Storage> {
     inner: S,
     auditor: Arc<Auditor>,
 }
 
-impl<S: StorageTrait> Storage<S> {
+impl<S: crate::Storage> Storage<S> {
     pub fn new(inner: S, auditor: Arc<Auditor>) -> Self {
         Self { inner, auditor }
     }
 }
 
-impl<S: StorageTrait> StorageTrait for Storage<S> {
+impl<S: crate::Storage> crate::Storage for Storage<S> {
     type Blob = Blob<S::Blob>;
 
     async fn open(&self, partition: &str, name: &[u8]) -> Result<Self::Blob, Error> {
@@ -38,14 +38,14 @@ impl<S: StorageTrait> StorageTrait for Storage<S> {
 }
 
 #[derive(Clone)]
-pub struct Blob<B: BlobTrait> {
+pub struct Blob<B: crate::Blob> {
     auditor: Arc<Auditor>,
     partition: String,
     name: Vec<u8>,
     inner: B,
 }
 
-impl<B: BlobTrait> crate::Blob for Blob<B> {
+impl<B: crate::Blob> crate::Blob for Blob<B> {
     async fn len(&self) -> Result<u64, Error> {
         self.auditor.len(&self.partition, &self.name);
         self.inner.len().await
