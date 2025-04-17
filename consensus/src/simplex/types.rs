@@ -325,7 +325,8 @@ pub struct Notarization<S: Array, D: Digest> {
 }
 
 impl<S: Array, D: Digest> Notarization<S, D> {
-    pub fn new(proposal: Proposal<D>, signatures: Vec<Signature<S>>) -> Self {
+    pub fn new(proposal: Proposal<D>, mut signatures: Vec<Signature<S>>) -> Self {
+        signatures.sort_by_key(|s| s.public_key);
         Self {
             proposal,
             signatures,
@@ -489,7 +490,8 @@ pub struct Nullification<S: Array> {
 }
 
 impl<S: Array> Nullification<S> {
-    pub fn new(view: View, signatures: Vec<Signature<S>>) -> Self {
+    pub fn new(view: View, mut signatures: Vec<Signature<S>>) -> Self {
+        signatures.sort_by_key(|s| s.public_key);
         Self { view, signatures }
     }
 
@@ -652,7 +654,8 @@ pub struct Finalization<S: Array, D: Digest> {
 }
 
 impl<S: Array, D: Digest> Finalization<S, D> {
-    pub fn new(proposal: Proposal<D>, signatures: Vec<Signature<S>>) -> Self {
+    pub fn new(proposal: Proposal<D>, mut signatures: Vec<Signature<S>>) -> Self {
+        signatures.sort_by_key(|s| s.public_key);
         Self {
             proposal,
             signatures,
