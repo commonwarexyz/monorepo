@@ -585,6 +585,8 @@ impl<P: Array, D: Digest> FixedSize for Ack<P, D> {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Activity<C: Verifier, D: Digest> {
     /// A new proposal from a sequencer
+    ///
+    /// This activity is only emitted if the application has first verified the proposal.
     Proposal(Proposal<C, D>),
     /// A threshold signature for a chunk, indicating it has been acknowledged by a quorum
     Lock(Lock<C::PublicKey, D>),
