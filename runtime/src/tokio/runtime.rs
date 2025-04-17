@@ -1,4 +1,4 @@
-use crate::storage::metered::MeteredStorage;
+use crate::storage::metered::Storage;
 use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
 use crate::Storage as StorageTrait;
 use crate::{utils::Signaler, Clock, Error, Handle, Signal, METRICS_PREFIX};
@@ -198,7 +198,7 @@ impl Executor {
             .expect("failed to create Tokio runtime");
         let (signaler, signal) = Signaler::new();
 
-        let storage = MeteredStorage::new(
+        let storage = Storage::new(
             TokioStorage::new(TokioStorageConfig::new(
                 cfg.storage_directory.clone(),
                 cfg.maximum_buffer_size,
@@ -257,7 +257,7 @@ pub struct Context {
     label: String,
     spawned: bool,
     executor: Arc<Executor>,
-    storage: MeteredStorage<TokioStorage>,
+    storage: Storage<TokioStorage>,
 }
 
 impl Clone for Context {
@@ -624,7 +624,7 @@ impl RngCore for Context {
 impl CryptoRng for Context {}
 
 impl crate::Storage for Context {
-    type Blob = <MeteredStorage<TokioStorage> as StorageTrait>::Blob;
+    type Blob = <Storage<TokioStorage> as StorageTrait>::Blob;
 
     async fn open(&self, partition: &str, name: &[u8]) -> Result<Self::Blob, Error> {
         self.storage.open(partition, name).await
