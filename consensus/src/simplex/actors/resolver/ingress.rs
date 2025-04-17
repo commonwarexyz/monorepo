@@ -26,7 +26,7 @@ pub struct Mailbox<S: Array, D: Digest> {
 }
 
 impl<S: Array, D: Digest> Mailbox<S, D> {
-    pub(super) fn new(sender: mpsc::Sender<Message<S, D>>) -> Self {
+    pub fn new(sender: mpsc::Sender<Message<S, D>>) -> Self {
         Self { sender }
     }
 
