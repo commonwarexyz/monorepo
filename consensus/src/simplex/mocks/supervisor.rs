@@ -1,9 +1,11 @@
 use crate::{
     simplex::types::{
-        Activity, Attributable, Finalization, Notarization, Nullification, View, Viewable,
+        Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization, Finalize,
+        Notarization, Notarize, Nullification, Nullify, NullifyFinalize, View, Viewable,
     },
     Monitor, Reporter, Supervisor as Su,
 };
+use commonware_codec::{Decode, DecodeExt, Encode};
 use commonware_cryptography::{Digest, Verifier};
 use futures::channel::mpsc::{Receiver, Sender};
 use std::{
@@ -127,6 +129,8 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
                 if !notarize.verify::<C::PublicKey, C>(&self.namespace, &public_key) {
                     panic!("signature verification failed");
                 }
+                let encoded = notarize.encode();
+                Notarize::<C::Signature, D>::decode(encoded).unwrap();
                 self.notarizes
                     .lock()
                     .unwrap()
@@ -142,6 +146,8 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
                 if !notarization.verify::<_, C>(&self.namespace, participants) {
                     panic!("signature verification failed");
                 }
+                let encoded = notarization.encode();
+                Notarization::<C::Signature, D>::decode_cfg(encoded, &participants.len()).unwrap();
                 let mut notarizes = self.notarizes.lock().unwrap();
                 let notarizes = notarizes
                     .entry(view)
@@ -165,6 +171,8 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
                 if !nullify.verify::<C::PublicKey, C>(&self.namespace, &public_key) {
                     panic!("signature verification failed");
                 }
+                let encoded = nullify.encode();
+                Nullify::<C::Signature>::decode(encoded).unwrap();
                 self.nullifies
                     .lock()
                     .unwrap()
@@ -178,6 +186,8 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
                 if !nullification.verify::<_, C>(&self.namespace, participants) {
                     panic!("signature verification failed");
                 }
+                let encoded = nullification.encode();
+                Nullification::<C::Signature>::decode_cfg(encoded, &participants.len()).unwrap();
                 let mut nullifies = self.nullifies.lock().unwrap();
                 let nullifies = nullifies.entry(view).or_default();
                 for signature in &nullification.signatures {
@@ -197,6 +207,8 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
                 if !finalize.verify::<C::PublicKey, C>(&self.namespace, &public_key) {
                     panic!("signature verification failed");
                 }
+                let encoded = finalize.encode();
+                Finalize::<C::Signature, D>::decode(encoded).unwrap();
                 self.finalizes
                     .lock()
                     .unwrap()
@@ -212,6 +224,8 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
                 if !finalization.verify::<_, C>(&self.namespace, participants) {
                     panic!("signature verification failed");
                 }
+                let encoded = finalization.encode();
+                Finalization::<C::Signature, D>::decode_cfg(encoded, &participants.len()).unwrap();
                 let mut finalizes = self.finalizes.lock().unwrap();
                 let finalizes = finalizes
                     .entry(view)
@@ -242,6 +256,8 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
                 if !conflicting.verify::<C::PublicKey, C>(&self.namespace, &public_key) {
                     panic!("signature verification failed");
                 }
+                let encoded = conflicting.encode();
+                ConflictingNotarize::<C::Signature, D>::decode(encoded).unwrap();
                 self.faults
                     .lock()
                     .unwrap()
@@ -258,6 +274,8 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
                 if !conflicting.verify::<C::PublicKey, C>(&self.namespace, &public_key) {
                     panic!("signature verification failed");
                 }
+                let encoded = conflicting.encode();
+                ConflictingFinalize::<C::Signature, D>::decode(encoded).unwrap();
                 self.faults
                     .lock()
                     .unwrap()
@@ -274,6 +292,8 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
                 if !conflicting.verify::<C::PublicKey, C>(&self.namespace, &public_key) {
                     panic!("signature verification failed");
                 }
+                let encoded = conflicting.encode();
+                NullifyFinalize::<C::Signature, D>::decode(encoded).unwrap();
                 self.faults
                     .lock()
                     .unwrap()
