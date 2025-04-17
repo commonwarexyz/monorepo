@@ -1,11 +1,16 @@
 use std::{
+    collections::HashMap,
     fs::{self, File},
     os::fd::AsRawFd as _,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
 };
 
 use commonware_utils::{from_hex, hex};
+use futures::channel::oneshot;
 use io_uring::{opcode, types, IoUring};
 
 use crate::Error;
@@ -18,6 +23,79 @@ pub struct Config {
 impl Config {
     pub fn new(storage_directory: PathBuf) -> Self {
         Self { storage_directory }
+    }
+}
+
+// New type to handle io_uring operations
+struct IoUringRuntimeAdapter {
+    // The shared io_uring instance
+    ring: Mutex<IoUring>,
+    // Notification mechanism for completion events
+    work_available: tokio::sync::Notify,
+    // Map of operation tokens to their completion status
+    operations: Mutex<HashMap<u64, oneshot::Sender<io_uring::cqueue::Entry>>>,
+    // Counter for generating unique operation IDs
+    next_token: AtomicU64,
+}
+
+impl IoUringRuntimeAdapter {
+    // Submit an operation to the ring and get a future for completion
+    pub async fn submit_operation(&self, op: io_uring::squeue::Entry) -> Result<i32, Error> {
+        let token = self.next_token.fetch_add(1, Ordering::SeqCst);
+        let (sender, receiver) = oneshot::channel();
+
+        {
+            let mut operations = self.operations.lock().unwrap();
+            operations.insert(token, sender);
+        }
+
+        let op = op.user_data(token);
+
+        // Build and submit the operation with the token
+        {
+            let mut ring = self.ring.lock().unwrap();
+            unsafe {
+                ring.submission()
+                    .push(&op)
+                    .map_err(|_| Error::WriteFailed)?;
+            }
+            ring.submit().map_err(|_| Error::WriteFailed)?;
+        }
+
+        // Notify the completion handler
+        self.work_available.notify_one();
+
+        // Wait for completion
+        let cqe = receiver.await.map_err(|_| Error::RecvFailed)?; // TODO danlaine: update error
+        Ok(cqe.result())
+    }
+
+    // Background task that polls for completions
+    pub async fn completion_handler(self: Arc<Self>) {
+        loop {
+            // Wait for the next submission
+            self.work_available.notified().await;
+
+            // Collect all completed operations
+            let mut completed = Vec::new();
+            {
+                let mut ring = self.ring.lock().unwrap();
+                while let Some(cqe) = ring.completion().next() {
+                    let token = cqe.user_data();
+                    completed.push((token, cqe));
+                }
+            }
+
+            // Notify waiters outside the lock
+            {
+                let mut operations = self.operations.lock().unwrap();
+                for (token, cqe) in completed {
+                    if let Some(sender) = operations.remove(&token) {
+                        let _ = sender.send(cqe);
+                    }
+                }
+            }
+        }
     }
 }
 
