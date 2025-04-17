@@ -236,8 +236,6 @@ pub struct Blob {
 
 impl Clone for Blob {
     fn clone(&self) -> Self {
-        // Duplicate the file descriptor
-
         Self {
             partition: self.partition.clone(),
             name: self.name.clone(),
@@ -249,7 +247,7 @@ impl Clone for Blob {
 }
 
 impl Blob {
-    pub fn new(
+    fn new(
         partition: String,
         name: &[u8],
         file: File,
@@ -272,9 +270,6 @@ impl crate::Blob for Blob {
     }
 
     async fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
-        // let mut inner = self.file.lock().map_err(|_| Error::LockGrabFailed)?;
-        // let (file, ring, len) = &mut *inner;
-
         let current_len = self.len.load(Ordering::Relaxed);
         if offset + buf.len() as u64 > current_len {
             return Err(Error::BlobInsufficientLength);
