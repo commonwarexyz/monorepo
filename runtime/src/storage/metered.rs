@@ -126,6 +126,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
     // TODO danlaine: This is error-prone because the metrics will be
     // incorrect if the blob is dropped before it's closed. We should
     // consider using a `Drop` implementation to decrement the metric.
+    // https://github.com/commonwarexyz/monorepo/issues/754
     async fn close(self) -> Result<(), Error> {
         self.metrics.open_blobs.dec();
         self.inner.close().await
