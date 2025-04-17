@@ -33,25 +33,36 @@ struct IoUringRuntimeAdapter {
     // Notification mechanism for completion events
     work_available: tokio::sync::Notify,
     // Map of operation tokens to their completion status
-    operations: Mutex<HashMap<u64, oneshot::Sender<io_uring::cqueue::Entry>>>,
+    work: Mutex<HashMap<u64, oneshot::Sender<i32>>>,
     // Counter for generating unique operation IDs
     next_token: AtomicU64,
 }
 
 impl IoUringRuntimeAdapter {
+    pub fn new() -> Self {
+        Self {
+            ring: Mutex::new(IoUring::new(128).expect("Failed to create io_uring instance")),
+            work_available: tokio::sync::Notify::new(),
+            work: Mutex::new(HashMap::new()),
+            next_token: AtomicU64::new(1),
+        }
+    }
+
     // Submit an operation to the ring and get a future for completion
     pub async fn submit_operation(&self, op: io_uring::squeue::Entry) -> Result<i32, Error> {
         let token = self.next_token.fetch_add(1, Ordering::SeqCst);
         let (sender, receiver) = oneshot::channel();
 
+        // Add operation to pending work
         {
-            let mut operations = self.operations.lock().unwrap();
-            operations.insert(token, sender);
+            let mut work = self.work.lock().unwrap();
+            work.insert(token, sender);
         }
 
+        // Wrap the operation with this unique token to identify it later
         let op = op.user_data(token);
 
-        // Build and submit the operation with the token
+        // Submit the operation to the ring
         {
             let mut ring = self.ring.lock().unwrap();
             unsafe {
@@ -66,35 +77,57 @@ impl IoUringRuntimeAdapter {
         self.work_available.notify_one();
 
         // Wait for completion
-        let cqe = receiver.await.map_err(|_| Error::RecvFailed)?; // TODO danlaine: update error
-        Ok(cqe.result())
+        let res = receiver.await.map_err(|_| Error::RecvFailed)?; // TODO danlaine: update error
+        Ok(res)
     }
 
     // Background task that polls for completions
     pub async fn completion_handler(self: Arc<Self>) {
         loop {
-            // Wait for the next submission
-            self.work_available.notified().await;
+            // Process any completions that might be ready
+            let found_finished_work = self.process_completions();
 
-            // Collect all completed operations
-            let mut completed = Vec::new();
-            {
-                let mut ring = self.ring.lock().unwrap();
-                while let Some(cqe) = ring.completion().next() {
-                    let token = cqe.user_data();
-                    completed.push((token, cqe));
+            // Check if we still have pending operations
+            let has_unfinished_work = {
+                let operations = self.work.lock().unwrap();
+                !operations.is_empty()
+            };
+
+            if !has_unfinished_work && !found_finished_work {
+                // No pending operations and no completions found
+                // Wait for notification about new work
+                self.work_available.notified().await;
+            } else if !found_finished_work {
+                // We have pending operations but no completions were ready
+                // Yield briefly then check again
+                tokio::task::yield_now().await;
+            }
+            // If we found completions, loop immediately to check for more
+        }
+    }
+
+    fn process_completions(&self) -> bool {
+        let mut completed = Vec::new();
+        {
+            let mut ring = self.ring.lock().unwrap();
+            ring.submit().unwrap_or(0);
+
+            while let Some(cqe) = ring.completion().next() {
+                let token = cqe.user_data();
+                completed.push((token, cqe.result()));
+            }
+        }
+
+        if !completed.is_empty() {
+            let mut operations = self.work.lock().unwrap();
+            for (token, result) in completed {
+                if let Some(sender) = operations.remove(&token) {
+                    let _ = sender.send(result);
                 }
             }
-
-            // Notify waiters outside the lock
-            {
-                let mut operations = self.operations.lock().unwrap();
-                for (token, cqe) in completed {
-                    if let Some(sender) = operations.remove(&token) {
-                        let _ = sender.send(cqe);
-                    }
-                }
-            }
+            true
+        } else {
+            false
         }
     }
 }
