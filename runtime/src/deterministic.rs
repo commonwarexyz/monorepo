@@ -22,9 +22,10 @@
 //! println!("Auditor state: {}", auditor.state());
 //! ```
 
-use crate::storage::audited::Storage as AuditedStorage;
-use crate::storage::memory::Storage as MemStorage;
-use crate::{mocks, utils::Signaler, Clock, Error, Handle, Signal, METRICS_PREFIX};
+use crate::{
+    mocks, storage::audited::Storage as AuditedStorage, storage::memory::Storage as MemStorage,
+    utils::Signaler, Clock, Error, Handle, Signal, METRICS_PREFIX,
+};
 use commonware_utils::{hex, SystemTimeExt};
 use futures::{
     channel::mpsc,
