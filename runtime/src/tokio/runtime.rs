@@ -199,7 +199,10 @@ impl Executor {
         let (signaler, signal) = Signaler::new();
 
         let storage = MeteredStorage::new(
-            TokioStorage::new(TokioStorageConfig::new(cfg.storage_directory.clone())),
+            TokioStorage::new(TokioStorageConfig::new(
+                cfg.storage_directory.clone(),
+                cfg.maximum_buffer_size,
+            )),
             runtime_registry,
         );
 

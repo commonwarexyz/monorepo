@@ -11,11 +11,15 @@ use tokio::{
 #[derive(Clone)]
 pub struct Config {
     pub storage_directory: PathBuf,
+    pub maximum_buffer_size: usize,
 }
 
 impl Config {
-    pub fn new(storage_directory: PathBuf) -> Self {
-        Self { storage_directory }
+    pub fn new(storage_directory: PathBuf, maximum_buffer_size: usize) -> Self {
+        Self {
+            storage_directory,
+            maximum_buffer_size,
+        }
     }
 }
 
@@ -38,6 +42,12 @@ impl Storage {
 pub struct Blob {
     partition: String,
     name: Vec<u8>,
+    // Files must be seeked prior to any read or write operation and are thus
+    // not safe to concurrently interact with. If we switched to mapping files
+    // we could remove this lock.
+    //
+    // We also track the virtual file size because metadata isn't updated until
+    // the file is synced (not to mention it is a lot less fs calls).
     file: Arc<AsyncMutex<(fs::File, u64)>>,
 }
 
@@ -71,7 +81,7 @@ impl crate::Storage for Storage {
             .map_err(|_| Error::PartitionCreationFailed(partition.into()))?;
 
         // Open the file in read-write mode, create if it does not exist
-        let file = fs::OpenOptions::new()
+        let mut file = fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
@@ -79,6 +89,9 @@ impl crate::Storage for Storage {
             .open(&path)
             .await
             .map_err(|_| Error::BlobOpenFailed(partition.into(), hex(name)))?;
+
+        // Set the maximum buffer size
+        file.set_max_buf_size(self.cfg.maximum_buffer_size);
 
         // Get the file length
         let len = file.metadata().await.map_err(|_| Error::ReadFailed)?.len();
@@ -218,7 +231,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_storage() {
-        let storage = Storage::new(Config::new("test_storage".into()));
+        let config = Config::new("test_storage".into(), 2 * 1024 * 1024);
+        let storage = Storage::new(config);
         run_storage_tests(storage).await;
     }
 }

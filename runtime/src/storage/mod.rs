@@ -1,3 +1,5 @@
+//! Implementations of the `Storage` trait that can be used by the runtime.
+//! `audited`
 pub mod audited;
 pub mod memory;
 pub mod metered;
