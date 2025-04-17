@@ -40,17 +40,13 @@ impl crate::Storage for Storage {
     type Blob = Blob;
 
     async fn open(&self, partition: &str, name: &[u8]) -> Result<Blob, Error> {
-        let _guard = self.lock.lock().map_err(|_| Error::ReadFailed)?;
+        let _guard = self.lock.lock().map_err(|_| Error::LockGrabFailed)?;
 
         // Construct the full path
         let path = self.storage_directory.join(partition).join(hex(name));
         let parent = path
             .parent()
-            .ok_or_else(|| Error::PartitionCreationFailed(partition.into()))?;
-        // let parent = match path.parent() {
-        //     Some(parent) => parent,
-        //     None => return Err(Error::PartitionCreationFailed(partition.into())),
-        // };
+            .ok_or_else(|| Error::BlobOpenFailed(partition.into(), hex(name)))?;
 
         // Create the partition directory if it does not exist
         fs::create_dir_all(parent).map_err(|_| Error::PartitionCreationFailed(partition.into()))?;
@@ -73,7 +69,7 @@ impl crate::Storage for Storage {
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
         // Acquire the filesystem lock
-        let _guard = self.lock.lock().map_err(|_| Error::ReadFailed)?;
+        let _guard = self.lock.lock().map_err(|_| Error::LockGrabFailed)?;
 
         // Remove all related files
         let path = self.storage_directory.join(partition);
@@ -88,7 +84,7 @@ impl crate::Storage for Storage {
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
-        let _guard = self.lock.lock().map_err(|_| Error::ReadFailed)?;
+        let _guard = self.lock.lock().map_err(|_| Error::LockGrabFailed)?;
 
         // Scan the partition directory
         let path = self.storage_directory.join(partition);
@@ -137,14 +133,14 @@ impl Blob {
 
 impl crate::Blob for Blob {
     async fn len(&self) -> Result<u64, Error> {
-        let inner = self.file.lock().map_err(|_| Error::ReadFailed)?;
+        let inner = self.file.lock().map_err(|_| Error::LockGrabFailed)?;
         let (_, _, len) = &*inner;
         Ok(*len as u64)
     }
 
     async fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
         // Lock the file to ensure safe access
-        let mut inner = self.file.lock().map_err(|_| Error::ReadFailed)?;
+        let mut inner = self.file.lock().map_err(|_| Error::LockGrabFailed)?;
 
         let (file, ring, len) = &mut *inner;
 
@@ -193,7 +189,7 @@ impl crate::Blob for Blob {
     }
 
     async fn write_at(&self, buf: &[u8], offset: u64) -> Result<(), Error> {
-        let mut inner = self.file.lock().map_err(|_| Error::ReadFailed)?;
+        let mut inner = self.file.lock().map_err(|_| Error::LockGrabFailed)?;
 
         let (file, ring, len) = &mut *inner;
 
@@ -242,7 +238,7 @@ impl crate::Blob for Blob {
 
     async fn truncate(&self, len: u64) -> Result<(), Error> {
         // Perform the truncate
-        let mut file = self.file.lock().map_err(|_| Error::ReadFailed)?;
+        let mut file = self.file.lock().map_err(|_| Error::LockGrabFailed)?;
         file.0
             .set_len(len)
             .map_err(|_| Error::BlobTruncateFailed(self.partition.clone(), hex(&self.name)))?;
@@ -253,7 +249,7 @@ impl crate::Blob for Blob {
     }
 
     async fn sync(&self) -> Result<(), Error> {
-        let inner = self.file.lock().map_err(|_| Error::ReadFailed)?;
+        let inner = self.file.lock().map_err(|_| Error::LockGrabFailed)?;
         inner
             .0
             .sync_all()

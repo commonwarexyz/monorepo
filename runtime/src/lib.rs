@@ -67,6 +67,8 @@ pub enum Error {
     PartitionMissing(String),
     #[error("partition corrupt: {0}")]
     PartitionCorrupt(String),
+    #[error("lock grab failed")]
+    LockGrabFailed,
     #[error("blob open failed: {0}/{1}")]
     BlobOpenFailed(String, String),
     #[error("blob missing: {0}/{1}")]
