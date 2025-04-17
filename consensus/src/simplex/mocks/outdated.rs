@@ -1,23 +1,21 @@
 //! Byzantine participant that sends outdated notarize and finalize messages.
 
 use crate::{
-    threshold_simplex::types::{
-        finalize_namespace, notarize_namespace, seed_namespace, Finalize, Notarize, Proposal, View,
-        Viewable, Voter,
+    simplex::types::{
+        finalize_namespace, notarize_namespace, Finalize, Notarize, Proposal, View, Viewable, Voter,
     },
-    ThresholdSupervisor,
+    Supervisor,
 };
-use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::{bls12381::primitives::group, Hasher};
+use commonware_codec::{Decode, Encode};
+use commonware_cryptography::{Hasher, Scheme};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};
 use rand::{CryptoRng, Rng};
 use std::{collections::HashMap, marker::PhantomData};
 use tracing::debug;
 
-pub struct Config<
-    S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
-> {
+pub struct Config<C: Scheme, S: Supervisor<Index = View>> {
+    pub crypto: C,
     pub supervisor: S,
     pub namespace: Vec<u8>,
     pub view_delta: u64,
@@ -25,14 +23,15 @@ pub struct Config<
 
 pub struct Outdated<
     E: Clock + Rng + CryptoRng + Spawner,
+    C: Scheme,
     H: Hasher,
-    S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
+    S: Supervisor<Index = View, PublicKey = C::PublicKey>,
 > {
     context: E,
+    crypto: C,
     supervisor: S,
     _hasher: PhantomData<H>,
 
-    seed_namespace: Vec<u8>,
     notarize_namespace: Vec<u8>,
     finalize_namespace: Vec<u8>,
 
@@ -42,17 +41,18 @@ pub struct Outdated<
 
 impl<
         E: Clock + Rng + CryptoRng + Spawner,
+        C: Scheme,
         H: Hasher,
-        S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
-    > Outdated<E, H, S>
+        S: Supervisor<Index = View, PublicKey = C::PublicKey>,
+    > Outdated<E, C, H, S>
 {
-    pub fn new(context: E, cfg: Config<S>) -> Self {
+    pub fn new(context: E, cfg: Config<C, S>) -> Self {
         Self {
             context,
+            crypto: cfg.crypto,
             supervisor: cfg.supervisor,
             _hasher: PhantomData,
 
-            seed_namespace: seed_namespace(&cfg.namespace),
             notarize_namespace: notarize_namespace(&cfg.namespace),
             finalize_namespace: finalize_namespace(&cfg.namespace),
 
@@ -69,7 +69,7 @@ impl<
         let (mut sender, mut receiver) = voter_network;
         while let Ok((s, msg)) = receiver.recv().await {
             // Parse message
-            let msg = match Voter::<H::Digest>::decode(msg) {
+            let msg = match Voter::<C::Signature, H::Digest>::decode_cfg(msg, &usize::MAX) {
                 Ok(msg) => msg,
                 Err(err) => {
                     debug!(?err, sender = ?s, "failed to decode message");
@@ -86,33 +86,44 @@ impl<
 
                     // Notarize old digest
                     let view = view.saturating_sub(self.view_delta);
-                    let share = self.supervisor.share(view).unwrap();
+                    let public_key_index = self
+                        .supervisor
+                        .is_participant(view, &self.crypto.public_key())
+                        .unwrap();
                     let Some(proposal) = self.history.get(&view) else {
                         continue;
                     };
                     debug!(?view, "notarizing old proposal");
-                    let n = Notarize::sign(
-                        share,
+                    let msg = Notarize::sign(
+                        &mut self.crypto,
+                        public_key_index,
                         proposal.clone(),
                         &self.notarize_namespace,
-                        &self.seed_namespace,
                     );
-                    let msg = Voter::Notarize(n).encode().into();
+                    let msg = Voter::Notarize(msg).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
                 Voter::Finalize(finalize) => {
                     // Store proposal
                     self.history.insert(view, finalize.proposal.clone());
 
-                    // Finalize old digest
+                    // Finalize provided digest
                     let view = view.saturating_sub(self.view_delta);
-                    let share = self.supervisor.share(view).unwrap();
+                    let public_key_index = self
+                        .supervisor
+                        .is_participant(view, &self.crypto.public_key())
+                        .unwrap();
                     let Some(proposal) = self.history.get(&view) else {
                         continue;
                     };
                     debug!(?view, "finalizing old proposal");
-                    let f = Finalize::sign(share, proposal.clone(), &self.finalize_namespace);
-                    let msg = Voter::Finalize(f).encode().into();
+                    let msg = Finalize::sign(
+                        &mut self.crypto,
+                        public_key_index,
+                        proposal.clone(),
+                        &self.finalize_namespace,
+                    );
+                    let msg = Voter::Finalize(msg).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
                 _ => continue,

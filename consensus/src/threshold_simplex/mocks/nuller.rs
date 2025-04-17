@@ -2,16 +2,13 @@
 
 use crate::{
     threshold_simplex::types::{
-        finalize_namespace, nullify_namespace, seed_namespace, view_message, Finalize, Nullify,
-        View, Viewable, Voter,
+        finalize_namespace, nullify_namespace, seed_namespace, Finalize, Nullify, View, Viewable,
+        Voter,
     },
     ThresholdSupervisor,
 };
 use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::{
-    bls12381::primitives::{group, ops},
-    Hasher,
-};
+use commonware_cryptography::{bls12381::primitives::group, Hasher};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Handle, Spawner};
 use std::marker::PhantomData;
@@ -78,21 +75,14 @@ impl<
                     // Nullify
                     let view = notarize.view();
                     let share = self.supervisor.share(view).unwrap();
-                    let message = view_message(view);
-                    let view_signature =
-                        ops::partial_sign_message(share, Some(&self.nullify_namespace), &message);
-                    let seed_signature =
-                        ops::partial_sign_message(share, Some(&self.seed_namespace), &message);
-                    let n = Nullify::new(view, view_signature, seed_signature);
+                    let n =
+                        Nullify::sign(share, view, &self.nullify_namespace, &self.seed_namespace);
                     let msg = Voter::<H::Digest>::Nullify(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
 
                     // Finalize digest
                     let proposal = notarize.proposal;
-                    let message = proposal.encode();
-                    let proposal_signature =
-                        ops::partial_sign_message(share, Some(&self.finalize_namespace), &message);
-                    let f = Finalize::new(proposal, proposal_signature);
+                    let f = Finalize::sign(share, proposal, &self.finalize_namespace);
                     let msg = Voter::Finalize(f).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
