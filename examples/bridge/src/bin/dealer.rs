@@ -45,7 +45,7 @@ fn main() {
     }
     validators.sort_by(|(_, a), (_, b)| a.cmp(b));
     let n = validators.len() as u32;
-    let t = quorum(n).expect("unable to compute threshold");
+    let t = quorum(n);
 
     // Generate secret
     let mut rng = StdRng::seed_from_u64(seed);

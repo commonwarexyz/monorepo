@@ -7,7 +7,7 @@ use crate::{Automaton, Relay, Reporter, Supervisor};
 use commonware_cryptography::{Digest, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Sender};
-use commonware_runtime::{Blob, Clock, Handle, Metrics, Spawner, Storage};
+use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
 use commonware_storage::journal::variable::Journal;
 use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
@@ -15,8 +15,7 @@ use tracing::debug;
 
 /// Instance of `simplex` consensus engine.
 pub struct Engine<
-    B: Blob,
-    E: Clock + GClock + Rng + CryptoRng + Spawner + Storage<B> + Metrics,
+    E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
     C: Scheme,
     D: Digest,
     A: Automaton<Context = Context<D>, Digest = D>,
@@ -33,18 +32,17 @@ pub struct Engine<
 }
 
 impl<
-        B: Blob,
-        E: Clock + GClock + Rng + CryptoRng + Spawner + Storage<B> + Metrics,
+        E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
         C: Scheme,
         D: Digest,
         A: Automaton<Context = Context<D>, Digest = D>,
         R: Relay<Digest = D>,
         F: Reporter<Activity = Activity<C::Signature, D>>,
         S: Supervisor<Index = View, PublicKey = C::PublicKey>,
-    > Engine<B, E, C, D, A, R, F, S>
+    > Engine<E, C, D, A, R, F, S>
 {
     /// Create a new `simplex` consensus engine.
-    pub fn new(context: E, journal: Journal<B, E>, cfg: Config<C, D, A, R, F, S>) -> Self {
+    pub fn new(context: E, journal: Journal<E>, cfg: Config<C, D, A, R, F, S>) -> Self {
         // Ensure configuration is valid
         cfg.assert();
 

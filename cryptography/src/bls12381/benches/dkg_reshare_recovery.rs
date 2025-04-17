@@ -36,7 +36,7 @@ fn benchmark_dkg_reshare_recovery(c: &mut Criterion) {
         }
 
         // Create commitments and send shares to players
-        let t = quorum(n as u32).unwrap();
+        let t = quorum(n as u32);
         let mut commitments = HashMap::new();
         for (dealer_idx, dealer) in contributors.iter().take(t as usize).enumerate() {
             let (_, commitment, shares) = Dealer::new(&mut rng, None, contributors.clone());

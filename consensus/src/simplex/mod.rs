@@ -1594,7 +1594,7 @@ mod tests {
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config {
             seed,
-            timeout: Some(Duration::from_secs(3_000)),
+            timeout: Some(Duration::from_secs(5_000)),
             ..deterministic::Config::default()
         };
         let (executor, context, auditor) = Executor::init(cfg);

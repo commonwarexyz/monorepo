@@ -245,7 +245,7 @@ fn main() {
         }
 
         // Infer threshold
-        let threshold = quorum(contributors.len() as u32).expect("insufficient participants");
+        let threshold = quorum(contributors.len() as u32);
         info!(threshold, "inferred parameters");
 
         // Check if I am the arbiter

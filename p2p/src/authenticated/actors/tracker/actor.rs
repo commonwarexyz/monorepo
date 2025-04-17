@@ -356,7 +356,7 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
             let peer = match set.sorted.get(order) {
                 Some(peer) => peer,
                 None => {
-                    if *bit {
+                    if bit {
                         return Err(Error::BitVecExtraBit);
                     }
 
@@ -367,7 +367,7 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
             };
 
             // Check if the peer already knows of this peer
-            if *bit {
+            if bit {
                 continue;
             }
 
@@ -419,7 +419,7 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
         self.connections.insert(peer.clone());
         self.reserved_connections.inc();
         Some(Reservation::new(
-            self.context.clone(),
+            self.context.with_label("reservation"),
             peer,
             Mailbox::new(self.sender.clone()),
         ))
@@ -645,9 +645,9 @@ mod tests {
             assert!(bit_vec.index == 0);
             for (idx, bit) in bit_vec.bits.iter().enumerate() {
                 if idx == me_idx {
-                    assert!(*bit);
+                    assert!(bit);
                 } else {
-                    assert!(!*bit);
+                    assert!(!bit);
                 }
             }
 
@@ -673,9 +673,9 @@ mod tests {
             assert!(bit_vec.index == 0);
             for (idx, bit) in bit_vec.bits.iter().enumerate() {
                 if idx == me_idx || idx == peer1_idx {
-                    assert!(*bit);
+                    assert!(bit);
                 } else {
-                    assert!(!*bit);
+                    assert!(!bit);
                 }
             }
 
@@ -696,16 +696,16 @@ mod tests {
                     0 => {
                         for (idx, bit) in bit_vec.bits.iter().enumerate() {
                             if idx == me_idx || idx == peer1_idx {
-                                assert!(*bit);
+                                assert!(bit);
                             } else {
-                                assert!(!*bit);
+                                assert!(!bit);
                             }
                         }
                         index_0_returned = true
                     }
                     1 => {
                         for bit in bit_vec.bits.iter() {
-                            assert!(!*bit);
+                            assert!(!bit);
                         }
                         index_1_returned = true
                     }
@@ -734,13 +734,13 @@ mod tests {
                 match bit_vec.index {
                     1 => {
                         for bit in bit_vec.bits.iter() {
-                            assert!(!*bit);
+                            assert!(!bit);
                         }
                         index_1_returned = true
                     }
                     2 => {
                         for bit in bit_vec.bits.iter() {
-                            assert!(!*bit);
+                            assert!(!bit);
                         }
                         index_2_returned = true
                     }

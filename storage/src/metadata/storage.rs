@@ -6,7 +6,6 @@ use commonware_utils::{Array, SystemTimeExt as _};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::{
     collections::BTreeMap,
-    marker::PhantomData,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tracing::{trace, warn};
@@ -15,21 +14,19 @@ const BLOB_NAMES: [&[u8]; 2] = [b"left", b"right"];
 const SECONDS_IN_NANOSECONDS: u128 = 1_000_000_000;
 
 /// Implementation of `Metadata` storage.
-pub struct Metadata<B: Blob, E: Clock + Storage<B> + Metrics, K: Array> {
+pub struct Metadata<E: Clock + Storage + Metrics, K: Array> {
     context: E,
 
     // Data is stored in a BTreeMap to enable deterministic serialization.
     data: BTreeMap<K, Bytes>,
     cursor: usize,
-    blobs: [(B, u128); 2],
+    blobs: [(E::Blob, u128); 2],
 
     syncs: Counter,
     keys: Gauge,
-
-    _phantom_e: PhantomData<E>,
 }
 
-impl<B: Blob, E: Clock + Storage<B> + Metrics, K: Array> Metadata<B, E, K> {
+impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
     /// Initialize a new `Metadata` instance.
     pub async fn init(context: E, cfg: Config) -> Result<Self, Error<K>> {
         // Open dedicated blobs
@@ -79,12 +76,13 @@ impl<B: Blob, E: Clock + Storage<B> + Metrics, K: Array> Metadata<B, E, K> {
 
             syncs,
             keys,
-
-            _phantom_e: PhantomData,
         })
     }
 
-    async fn load(index: usize, blob: &B) -> Result<Option<(u128, BTreeMap<K, Bytes>)>, Error<K>> {
+    async fn load(
+        index: usize,
+        blob: &E::Blob,
+    ) -> Result<Option<(u128, BTreeMap<K, Bytes>)>, Error<K>> {
         // Get blob length
         let len = blob.len().await?;
         if len == 0 {

@@ -1,10 +1,9 @@
-use bitvec::{order::Lsb0, vec};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{
-    util as CodecUtil, varint, Encode, EncodeSize, Error, RangeConfig, Read, ReadExt, ReadRangeExt,
-    Write,
+    varint, Encode, EncodeSize, Error, RangeConfig, Read, ReadExt, ReadRangeExt, Write,
 };
 use commonware_cryptography::Verifier;
+use commonware_utils::BitVec as UtilsBitVec;
 use std::net::SocketAddr;
 
 #[derive(Clone)]
@@ -95,72 +94,27 @@ pub struct BitVec {
     pub index: u64,
 
     /// The bit vector itself.
-    pub bits: vec::BitVec<u8, Lsb0>,
+    pub bits: UtilsBitVec,
 }
 
 impl EncodeSize for BitVec {
     fn encode_size(&self) -> usize {
-        let len32 = u32::try_from(self.bits.len()).unwrap();
-        let num_bytes = self.bits.len().div_ceil(8);
-        self.index.encode_size() + varint::size(len32) + num_bytes
+        self.index.encode_size() + self.bits.encode_size()
     }
 }
 
 impl Write for BitVec {
     fn write(&self, buf: &mut impl BufMut) {
         self.index.write(buf);
-        let len32 = u32::try_from(self.bits.len()).unwrap();
-        varint::write(len32, buf);
-
-        // There may be extra bits set in the last byte.
-        let slice = self.bits.as_raw_slice();
-        let trailing_bits = self.bits.len() % 8;
-        if trailing_bits != 0 {
-            // The last byte is not aligned with the byte size.
-            let last_index = slice.len().checked_sub(1).unwrap();
-            // Copy all but the last byte.
-            buf.put_slice(&slice[..last_index]);
-            // Copy the last byte, masking out any extra bits.
-            let last_byte = slice[last_index];
-            let mask = u8::MAX >> (8 - trailing_bits);
-            buf.put_u8(last_byte & mask);
-        } else {
-            // The last byte is aligned with the byte size. Copy the entire slice.
-            buf.put_slice(slice);
-        }
+        self.bits.write(buf);
     }
 }
 
 impl Read<usize> for BitVec {
     fn read_cfg(buf: &mut impl Buf, max_bits: &usize) -> Result<Self, Error> {
         let index = u64::read(buf)?;
-        let len32: u32 = varint::read(buf)?;
-        let len = usize::try_from(len32).map_err(|_| Error::InvalidVarint)?;
-        if len > *max_bits {
-            return Err(Error::InvalidLength(len));
-        }
-
-        // Read in the raw vector of bits.
-        let num_bytes = len.div_ceil(8);
-        CodecUtil::at_least(buf, num_bytes)?;
-        let mut vec = vec![0; num_bytes];
-        buf.copy_to_slice(&mut vec);
-        let mut bits = vec::BitVec::<u8, Lsb0>::from_vec(vec);
-
-        // Return an error if any extra bits are set in the last byte.
-        assert!(len <= bits.len());
-        for i in len..bits.len() {
-            if *bits.get(i).unwrap() {
-                return Err(Error::Invalid("BitVec", "Extra bit set"));
-            }
-        }
-
-        // Set the length of the bit vector correctly. It may not be aligned with the byte size.
-        unsafe {
-            bits.set_len(len);
-        }
-
-        Ok(BitVec { index, bits })
+        let bits = UtilsBitVec::read_cfg(buf, &..=*max_bits)?;
+        Ok(Self { index, bits })
     }
 }
 
@@ -242,20 +196,20 @@ pub struct Data {
 
 impl EncodeSize for Data {
     fn encode_size(&self) -> usize {
-        self.channel.encode_size() + self.message.encode_size()
+        varint::size(self.channel) + self.message.encode_size()
     }
 }
 
 impl Write for Data {
     fn write(&self, buf: &mut impl BufMut) {
-        self.channel.write(buf);
+        varint::write(self.channel, buf);
         self.message.write(buf);
     }
 }
 
 impl<R: RangeConfig> Read<R> for Data {
     fn read_cfg(buf: &mut impl Buf, range: &R) -> Result<Self, Error> {
-        let channel = u32::read(buf)?;
+        let channel = varint::read::<u32>(buf)?;
         let message = Bytes::read_cfg(buf, range)?;
         Ok(Data { channel, message })
     }
@@ -281,32 +235,15 @@ mod tests {
 
     #[test]
     fn test_bitvec_codec() {
-        let mut bits = bitvec::vec::BitVec::<u8, Lsb0>::from_vec(vec![170; 10]);
-        unsafe {
-            bits.set_len(71);
-        }
-        let mut original = BitVec { index: 1234, bits };
+        let original = BitVec {
+            index: 1234,
+            bits: UtilsBitVec::ones(71),
+        };
         let decoded = BitVec::decode_cfg(original.encode(), &71).unwrap();
         assert_eq!(original, decoded);
 
         let too_short = BitVec::decode_cfg(original.encode(), &70);
         assert!(matches!(too_short, Err(Error::InvalidLength(71))));
-
-        // Test with a bit vector aligned with the byte size
-        unsafe {
-            original.bits.set_len(64);
-        }
-        let encoded = original.encode();
-        let decoded = BitVec::decode_cfg(encoded, &64).unwrap();
-        assert_eq!(original, decoded);
-
-        // Test a zero-length bit vector
-        unsafe {
-            original.bits.set_len(0);
-        }
-        let encoded = original.encode();
-        let decoded = BitVec::decode_cfg(encoded, &0).unwrap();
-        assert_eq!(original, decoded);
     }
 
     #[test]
@@ -354,11 +291,10 @@ mod tests {
         };
 
         // Test BitVec
-        let mut bits = bitvec::vec::BitVec::<u8, Lsb0>::from_vec(vec![170; 10]);
-        unsafe {
-            bits.set_len(71);
-        }
-        let original = BitVec { index: 1234, bits };
+        let original = BitVec {
+            index: 1234,
+            bits: UtilsBitVec::ones(100),
+        };
         let encoded: BytesMut = Payload::<Secp256r1>::BitVec(original.clone()).encode();
         let decoded = match Payload::<Secp256r1>::decode_cfg(encoded, &cfg) {
             Ok(Payload::<Secp256r1>::BitVec(b)) => b,
