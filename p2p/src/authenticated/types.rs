@@ -3,7 +3,7 @@ use commonware_codec::{
     varint, Encode, EncodeSize, Error, RangeConfig, Read, ReadExt, ReadRangeExt, Write,
 };
 use commonware_cryptography::Verifier;
-use commonware_utils::BitVec as BV;
+use commonware_utils::BitVec as UtilsBitVec;
 use std::net::SocketAddr;
 
 #[derive(Clone)]
@@ -94,7 +94,7 @@ pub struct BitVec {
     pub index: u64,
 
     /// The bit vector itself.
-    pub bits: BV,
+    pub bits: UtilsBitVec,
 }
 
 impl EncodeSize for BitVec {
@@ -113,7 +113,7 @@ impl Write for BitVec {
 impl Read<usize> for BitVec {
     fn read_cfg(buf: &mut impl Buf, max_bits: &usize) -> Result<Self, Error> {
         let index = u64::read(buf)?;
-        let bits = BV::read_cfg(buf, &..=*max_bits)?;
+        let bits = UtilsBitVec::read_cfg(buf, &..=*max_bits)?;
         Ok(Self { index, bits })
     }
 }
@@ -237,7 +237,7 @@ mod tests {
     fn test_bitvec_codec() {
         let original = BitVec {
             index: 1234,
-            bits: BV::ones(71),
+            bits: UtilsBitVec::ones(71),
         };
         let decoded = BitVec::decode_cfg(original.encode(), &71).unwrap();
         assert_eq!(original, decoded);
@@ -293,7 +293,7 @@ mod tests {
         // Test BitVec
         let original = BitVec {
             index: 1234,
-            bits: BV::ones(100),
+            bits: UtilsBitVec::ones(100),
         };
         let encoded: BytesMut = Payload::<Secp256r1>::BitVec(original.clone()).encode();
         let decoded = match Payload::<Secp256r1>::decode_cfg(encoded, &cfg) {
