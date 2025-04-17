@@ -6,8 +6,8 @@ use super::{
     Config,
 };
 use bytes::BufMut;
-use commonware_codec::FixedSize;
-use commonware_consensus::threshold_simplex::types::{Activity, Viewable};
+use commonware_codec::{DecodeExt, FixedSize};
+use commonware_consensus::threshold_simplex::types::{Activity, Finalization, Viewable};
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{self, Element},
@@ -49,7 +49,7 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
             Self {
                 context,
                 indexer: config.indexer,
-                public: poly::public(&config.identity),
+                public: *poly::public(&config.identity),
                 namespace: config.namespace,
                 other_public: config.other_public,
                 other_namespace: config.other_namespace,
@@ -112,9 +112,17 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                             };
 
                             // Verify certificate
-                            self.other_prover
-                                .deserialize_finalization(proof.clone().into())
-                                .expect("indexer is corrupt");
+                            let msg = proof.clone();
+                            let finalizaton = Finalization::decode(msg.into())
+                                .expect("failed to decode finalization");
+                            assert!(
+                                finalizaton.verify(
+                                    &self.other_public,
+                                    finalize_namespace,
+                                    seed_namespace
+                                ),
+                                "indexer is corrupt"
+                            );
 
                             // Use certificate as message
                             let mut msg = Vec::with_capacity(u8::SIZE + proof.len());
