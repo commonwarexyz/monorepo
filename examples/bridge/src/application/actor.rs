@@ -6,8 +6,10 @@ use super::{
     Config,
 };
 use bytes::BufMut;
-use commonware_codec::{DecodeExt, FixedSize};
-use commonware_consensus::threshold_simplex::types::{Activity, Finalization, Viewable};
+use commonware_codec::{DecodeExt, Encode, FixedSize};
+use commonware_consensus::threshold_simplex::types::{
+    finalize_namespace, seed_namespace, Activity, Finalization, Viewable,
+};
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{self, Element},
@@ -112,14 +114,13 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                             };
 
                             // Verify certificate
-                            let msg = proof.clone();
-                            let finalizaton = Finalization::decode(msg.into())
+                            let finalizaton = Finalization::<H::Digest>::decode(proof.as_ref())
                                 .expect("failed to decode finalization");
                             assert!(
                                 finalizaton.verify(
                                     &self.other_public,
-                                    finalize_namespace,
-                                    seed_namespace
+                                    &finalize_namespace(&self.other_namespace),
+                                    &seed_namespace(&self.namespace),
                                 ),
                                 "indexer is corrupt"
                             );
@@ -209,10 +210,13 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
 
                     // Verify consensus certificate
                     let proof = block[1..].to_vec();
-                    let result = self
-                        .other_prover
-                        .deserialize_finalization(proof.into())
-                        .is_some();
+                    let finalization = Finalization::<H::Digest>::decode(proof.as_ref())
+                        .expect("failed to decode finalization");
+                    let result = finalization.verify(
+                        &self.other_public,
+                        &finalize_namespace(&self.namespace),
+                        &seed_namespace(&self.other_namespace),
+                    );
 
                     // If payload exists and is valid, return
                     let _ = response.send(result);
@@ -225,37 +229,38 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                         }
                         Activity::Finalization(finalization) => {
                             info!(view, payload = ?finalization.proposal.payload, signature=?finalization.proposal_signature, seed=?finalization.seed_signature, "finalized");
+
+                            // Post finalization
+                            let msg = wire::PutFinalization {
+                                network: self.public.serialize(),
+                                data: finalization.encode().into(),
+                            };
+                            let msg = wire::Inbound {
+                                payload: Some(wire::inbound::Payload::PutFinalization(msg)),
+                            }
+                            .encode_to_vec();
+                            indexer_sender
+                                .send(&msg)
+                                .await
+                                .expect("failed to send finalization to indexer");
+                            let result = indexer_receiver
+                                .receive()
+                                .await
+                                .expect("failed to receive from indexer");
+                            let msg =
+                                wire::Outbound::decode(result).expect("failed to decode result");
+                            let payload = msg.payload.expect("missing payload");
+                            let success = match payload {
+                                wire::outbound::Payload::Success(s) => s,
+                                _ => panic!("unexpected response"),
+                            };
+                            debug!(view, success, "finalization posted");
                         }
                         Activity::Nullification(nullification) => {
                             info!(view, signature=?nullification.view_signature, seed=?nullification.seed_signature, "nullified");
                         }
                         _ => {}
                     }
-
-                    // Post finalization
-                    let msg = wire::PutFinalization {
-                        network: self.public.clone(),
-                        data: proof,
-                    };
-                    let msg = wire::Inbound {
-                        payload: Some(wire::inbound::Payload::PutFinalization(msg)),
-                    }
-                    .encode_to_vec();
-                    indexer_sender
-                        .send(&msg)
-                        .await
-                        .expect("failed to send finalization to indexer");
-                    let result = indexer_receiver
-                        .receive()
-                        .await
-                        .expect("failed to receive from indexer");
-                    let msg = wire::Outbound::decode(result).expect("failed to decode result");
-                    let payload = msg.payload.expect("missing payload");
-                    let success = match payload {
-                        wire::outbound::Payload::Success(s) => s,
-                        _ => panic!("unexpected response"),
-                    };
-                    debug!(view, success, "finalization posted");
                 }
             }
         }

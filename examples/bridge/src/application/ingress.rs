@@ -8,6 +8,7 @@ use futures::{
     SinkExt,
 };
 
+#[allow(clippy::large_enum_variant)]
 pub enum Message<D: Digest> {
     Genesis {
         response: oneshot::Sender<D>,
@@ -95,8 +96,7 @@ impl<D: Digest> Reporter for Mailbox<D> {
     type Activity = Activity<D>;
 
     async fn report(&mut self, activity: Self::Activity) {
-        let _ = self
-            .sender
+        self.sender
             .send(Message::Report { activity })
             .await
             .expect("Failed to send report");
