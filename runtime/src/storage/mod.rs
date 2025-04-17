@@ -1,5 +1,5 @@
 pub mod audited;
-#[cfg(feature = "iouring")]
+#[cfg(all(feature = "iouring", target_os = "linux"))]
 pub mod iouring;
 pub mod memory;
 pub mod metered;

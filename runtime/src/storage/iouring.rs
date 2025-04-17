@@ -1,9 +1,13 @@
 use std::{
-    env, fs,
+    env,
+    fs::{self, File},
+    os::fd::AsRawFd as _,
     path::PathBuf,
     sync::{Arc, Mutex},
 };
 
+use commonware_utils::{from_hex, hex};
+use io_uring::{opcode, types, IoUring};
 use rand::{rngs::OsRng, RngCore as _};
 
 use crate::Error;
@@ -29,6 +33,15 @@ pub struct Storage {
     pub storage_directory: PathBuf,
 }
 
+impl Storage {
+    pub fn new(config: Config) -> Self {
+        Self {
+            lock: Arc::new(Mutex::new(())),
+            storage_directory: config.storage_directory,
+        }
+    }
+}
+
 impl Default for Storage {
     fn default() -> Self {
         Self::new(Config::default())
@@ -39,7 +52,7 @@ impl crate::Storage for Storage {
     type Blob = Blob;
 
     async fn open(&self, partition: &str, name: &[u8]) -> Result<Blob, Error> {
-        let _ = self.lock.lock().await;
+        let _guard = self.lock.lock().map_err(|_| Error::ReadFailed)?;
 
         // Construct the full path
         let path = self.storage_directory.join(partition).join(hex(name));
@@ -72,7 +85,7 @@ impl crate::Storage for Storage {
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
         // Acquire the filesystem lock
-        let _ = self.lock.lock().await;
+        let _guard = self.lock.lock().map_err(|_| Error::ReadFailed)?;
 
         // Remove all related files
         let path = self.storage_directory.join(partition);
@@ -87,7 +100,7 @@ impl crate::Storage for Storage {
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
-        let _ = self.lock.lock().await;
+        let _guard = self.lock.lock().map_err(|_| Error::ReadFailed)?;
 
         // Scan the partition directory
         let path = self.storage_directory.join(partition);
@@ -113,13 +126,6 @@ impl crate::Storage for Storage {
 
         Ok(blobs)
     }
-
-    // fn new(config: Self::Config) -> Self {
-    //     Storage {
-    //         lock: Mutex::new(()).into(),
-    //         storage_directory: config.storage_directory,
-    //     }
-    // }
 }
 
 #[derive(Clone)]
@@ -143,12 +149,14 @@ impl Blob {
 
 impl crate::Blob for Blob {
     async fn len(&self) -> Result<u64, Error> {
-        Ok(self.file.lock().await.2 as u64)
+        let inner = self.file.lock().map_err(|_| Error::ReadFailed)?;
+        let (_, _, len) = &*inner;
+        Ok(*len as u64)
     }
 
     async fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
         // Lock the file to ensure safe access
-        let mut inner = self.file.lock().await;
+        let mut inner = self.file.lock().map_err(|_| Error::ReadFailed)?;
 
         let (file, ring, len) = &mut *inner;
 
@@ -197,7 +205,7 @@ impl crate::Blob for Blob {
     }
 
     async fn write_at(&self, buf: &[u8], offset: u64) -> Result<(), Error> {
-        let mut inner = self.file.lock().await;
+        let mut inner = self.file.lock().map_err(|_| Error::ReadFailed)?;
 
         let (file, ring, len) = &mut *inner;
 
@@ -246,7 +254,7 @@ impl crate::Blob for Blob {
 
     async fn truncate(&self, len: u64) -> Result<(), Error> {
         // Perform the truncate
-        let mut file = self.file.lock().await;
+        let mut file = self.file.lock().map_err(|_| Error::ReadFailed)?;
         file.0
             .set_len(len)
             .map_err(|_| Error::BlobTruncateFailed(self.partition.clone(), hex(&self.name)))?;
@@ -257,7 +265,7 @@ impl crate::Blob for Blob {
     }
 
     async fn sync(&self) -> Result<(), Error> {
-        let inner = self.file.lock().await;
+        let inner = self.file.lock().map_err(|_| Error::ReadFailed)?;
         inner
             .0
             .sync_all()
@@ -266,5 +274,19 @@ impl crate::Blob for Blob {
 
     async fn close(self) -> Result<(), Error> {
         self.sync().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::storage::tests::run_storage_tests;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn test_iouring_storage() {
+        let config = Config::default();
+        let storage = Storage::new(config.clone());
+        run_storage_tests(storage).await;
     }
 }
