@@ -204,12 +204,7 @@ impl<H: CHasher> Mmr<H> {
     /// useful if you want to use the MMR implementation as an updatable binary Merkle tree, and
     /// otherwise should be avoided. Returns ElementPruned if some element required to update the
     /// tree has been pruned.
-    pub fn update_leaf(
-        &mut self,
-        hasher: &mut H,
-        pos: u64,
-        element: &H::Digest,
-    ) -> Result<(), Error> {
+    pub fn update_leaf(&mut self, hasher: &mut H, pos: u64, element: &[u8]) -> Result<(), Error> {
         if pos < self.oldest_retained_pos {
             return Err(ElementPruned(pos));
         }
