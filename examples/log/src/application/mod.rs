@@ -15,9 +15,6 @@ pub struct Config<P: Array, H: Hasher> {
     /// Hashing scheme to use.
     pub hasher: H,
 
-    /// Namespace of the application.
-    pub namespace: Vec<u8>,
-
     /// Participants active in consensus.
     pub participants: Vec<P>,
 

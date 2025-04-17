@@ -49,7 +49,7 @@ mod gui;
 
 use clap::{value_parser, Arg, Command};
 use commonware_consensus::simplex;
-use commonware_cryptography::{ed25519, Ed25519, Sha256, Signer};
+use commonware_cryptography::{Ed25519, Sha256, Signer};
 use commonware_p2p::authenticated::{self, Network};
 use commonware_runtime::{
     tokio::{self, Executor},
@@ -111,12 +111,13 @@ fn main() {
     let participants = matches
         .get_many::<u64>("participants")
         .expect("Please provide allowed keys")
-        .copied();
-    if participants.len() == 0 {
+        .cloned()
+        .collect::<Vec<_>>();
+    if participants.is_empty() {
         panic!("Please provide at least one participant");
     }
-    for peer in participants {
-        let verifier = Ed25519::from_seed(peer).public_key();
+    for peer in &participants {
+        let verifier = Ed25519::from_seed(*peer).public_key();
         tracing::info!(key = ?verifier, "registered authorized key",);
         validators.push(verifier);
     }
@@ -202,7 +203,6 @@ fn main() {
         let (application, supervisor, mailbox) = application::Application::new(
             context.with_label("application"),
             application::Config {
-                namespace: namespace.clone(),
                 hasher: Sha256::default(),
                 mailbox_size: 1024,
                 participants: validators.clone(),

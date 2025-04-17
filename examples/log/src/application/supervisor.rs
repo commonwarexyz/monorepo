@@ -2,21 +2,23 @@ use commonware_consensus::{
     simplex::types::{Activity, View, Viewable},
     Reporter, Supervisor as Su,
 };
-use commonware_cryptography::{Digest, Specification};
+use commonware_cryptography::Digest;
+use commonware_utils::Array;
 use std::{collections::HashMap, marker::PhantomData};
 use tracing::info;
 
 /// Implementation of `commonware-consensus::Supervisor`.
 #[derive(Clone)]
-pub struct Supervisor<S: Specification, D: Digest> {
-    participants: Vec<S::PublicKey>,
-    participants_map: HashMap<S::PublicKey, u32>,
+pub struct Supervisor<P: Array, S: Array, D: Digest> {
+    participants: Vec<P>,
+    participants_map: HashMap<P, u32>,
 
-    _phantom: PhantomData<D>,
+    _phantom_s: PhantomData<S>,
+    _phantom_d: PhantomData<D>,
 }
 
-impl<S: Specification, D: Digest> Supervisor<S, D> {
-    pub fn new(mut participants: Vec<S::PublicKey>) -> Self {
+impl<P: Array, S: Array, D: Digest> Supervisor<P, S, D> {
+    pub fn new(mut participants: Vec<P>) -> Self {
         // Setup participants
         participants.sort();
         let mut participants_map = HashMap::new();
@@ -29,14 +31,15 @@ impl<S: Specification, D: Digest> Supervisor<S, D> {
             participants,
             participants_map,
 
-            _phantom: PhantomData,
+            _phantom_s: PhantomData,
+            _phantom_d: PhantomData,
         }
     }
 }
 
-impl<S: Specification, D: Digest> Su for Supervisor<S, D> {
+impl<P: Array, S: Array, D: Digest> Su for Supervisor<P, S, D> {
     type Index = View;
-    type PublicKey = S::PublicKey;
+    type PublicKey = P;
 
     fn leader(&self, index: Self::Index) -> Option<Self::PublicKey> {
         Some(self.participants[index as usize % self.participants.len()].clone())
@@ -51,10 +54,10 @@ impl<S: Specification, D: Digest> Su for Supervisor<S, D> {
     }
 }
 
-impl<S: Specification, D: Digest> Reporter for Supervisor<S, D> {
-    type Activity = Activity<S::Signature, D>;
+impl<P: Array, S: Array, D: Digest> Reporter for Supervisor<P, S, D> {
+    type Activity = Activity<S, D>;
 
-    async fn report(&mut self, activity: Activity<S::Signature, D>) {
+    async fn report(&mut self, activity: Activity<S, D>) {
         let view = activity.view();
         match activity {
             Activity::Notarization(notarization) => {

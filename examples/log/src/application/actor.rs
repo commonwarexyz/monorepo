@@ -16,27 +16,30 @@ use tracing::info;
 const GENESIS: &[u8] = b"commonware is neat";
 
 /// Application actor.
-pub struct Application<R: Rng + Spawner, P: Array, H: Hasher> {
+pub struct Application<R: Rng + Spawner, P: Array, S: Array, H: Hasher> {
     context: R,
     hasher: H,
     mailbox: mpsc::Receiver<Message<H::Digest>>,
 
-    _phantom: PhantomData<P>,
+    _phantom_p: PhantomData<P>,
+    _phantom_s: PhantomData<S>,
 }
 
-impl<R: Rng + Spawner, P: Array, H: Hasher> Application<R, P, H> {
+impl<R: Rng + Spawner, P: Array, S: Array, H: Hasher> Application<R, P, S, H> {
     /// Create a new application actor.
+    #[allow(clippy::type_complexity)]
     pub fn new(
         context: R,
         config: Config<P, H>,
-    ) -> (Self, Supervisor<P, H::Digest>, Mailbox<H::Digest>) {
+    ) -> (Self, Supervisor<P, S, H::Digest>, Mailbox<H::Digest>) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
         (
             Self {
                 context,
                 hasher: config.hasher,
                 mailbox,
-                _phantom: PhantomData,
+                _phantom_s: PhantomData,
+                _phantom_p: PhantomData,
             },
             Supervisor::new(config.participants),
             Mailbox::new(sender),
