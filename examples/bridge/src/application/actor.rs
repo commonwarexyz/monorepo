@@ -7,9 +7,12 @@ use super::{
 };
 use bytes::BufMut;
 use commonware_codec::FixedSize;
-use commonware_consensus::threshold_simplex::Prover;
+use commonware_consensus::threshold_simplex::types::{Activity, Viewable};
 use commonware_cryptography::{
-    bls12381::primitives::{group::Element, poly},
+    bls12381::primitives::{
+        group::{self, Element},
+        poly,
+    },
     Hasher,
 };
 use commonware_runtime::{Sink, Spawner, Stream};
@@ -27,10 +30,10 @@ const GENESIS: &[u8] = b"commonware is neat";
 pub struct Application<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> {
     context: R,
     indexer: Connection<Si, St>,
-    prover: Prover<H::Digest>,
-    other_prover: Prover<H::Digest>,
-    public: Vec<u8>,
-    other_public: Vec<u8>,
+    public: group::Public,
+    namespace: Vec<u8>,
+    other_public: group::Public,
+    other_namespace: Vec<u8>,
     hasher: H,
     mailbox: mpsc::Receiver<Message<H::Digest>>,
 }
@@ -46,10 +49,10 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
             Self {
                 context,
                 indexer: config.indexer,
-                prover: config.prover,
-                other_prover: config.other_prover,
-                public: poly::public(&config.identity).serialize(),
-                other_public: config.other_network.serialize(),
+                public: poly::public(&config.identity),
+                namespace: config.namespace,
+                other_public: config.other_public,
+                other_namespace: config.other_namespace,
                 hasher: config.hasher,
                 mailbox,
             },
@@ -82,7 +85,7 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                         false => {
                             // Fetch a certificate from the indexer for the other network
                             let msg = wire::GetFinalization {
-                                network: self.other_public.clone(),
+                                network: self.other_public.serialize(),
                             };
                             let msg = wire::Inbound {
                                 payload: Some(wire::inbound::Payload::GetFinalization(msg)),
@@ -128,7 +131,7 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
 
                     // Publish to indexer
                     let msg = wire::PutBlock {
-                        network: self.public.clone(),
+                        network: self.public.serialize(),
                         data: msg.into(),
                     };
                     let msg = wire::Inbound {
@@ -160,7 +163,7 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                 Message::Verify { payload, response } => {
                     // Fetch payload from indexer
                     let msg = wire::GetBlock {
-                        network: self.public.clone(),
+                        network: self.public.serialize(),
                         digest: payload.to_vec(),
                     };
                     let msg = wire::Inbound {
@@ -206,19 +209,20 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                     // If payload exists and is valid, return
                     let _ = response.send(result);
                 }
-                Message::Prepared { proof, payload } => {
-                    let (view, _, _, signature, seed) =
-                        self.prover.deserialize_notarization(proof).unwrap();
-                    let signature = hex(&signature.serialize());
-                    let seed = hex(&seed.serialize());
-                    info!(view, ?payload, ?signature, ?seed, "prepared")
-                }
-                Message::Finalized { proof, payload } => {
-                    let (view, _, _, signature, seed) =
-                        self.prover.deserialize_finalization(proof.clone()).unwrap();
-                    let signature = hex(&signature.serialize());
-                    let seed = hex(&seed.serialize());
-                    info!(view, ?payload, ?signature, ?seed, "finalized");
+                Message::Report { activity } => {
+                    let view = activity.view();
+                    match activity {
+                        Activity::Notarization(notarization) => {
+                            info!(view, payload = ?notarization.proposal.payload, signature=?notarization.proposal_signature, seed=?notarization.seed_signature, "notarized");
+                        }
+                        Activity::Finalization(finalization) => {
+                            info!(view, payload = ?finalization.proposal.payload, signature=?finalization.proposal_signature, seed=?finalization.seed_signature, "finalized");
+                        }
+                        Activity::Nullification(nullification) => {
+                            info!(view, signature=?nullification.view_signature, seed=?nullification.seed_signature, "nullified");
+                        }
+                        _ => {}
+                    }
 
                     // Post finalization
                     let msg = wire::PutFinalization {

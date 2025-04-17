@@ -58,7 +58,7 @@ impl<P: Array, S: Array, D: Digest> Su for Supervisor<P, S, D> {
 impl<P: Array, S: Array, D: Digest> Reporter for Supervisor<P, S, D> {
     type Activity = Activity<S, D>;
 
-    async fn report(&mut self, activity: Activity<S, D>) {
+    async fn report(&mut self, activity: Self::Activity) {
         let view = activity.view();
         match activity {
             Activity::Notarization(notarization) => {
