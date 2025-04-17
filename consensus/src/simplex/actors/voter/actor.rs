@@ -28,16 +28,16 @@ use prometheus_client::metrics::{
     counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
 };
 use rand::Rng;
+use std::sync::atomic::AtomicI64;
 use std::{
     cmp::max,
-    collections::{BTreeMap, HashMap},
+    collections::{btree_map::Entry, BTreeMap, HashMap},
     time::{Duration, SystemTime},
 };
-use std::{collections::hash_map::Entry, sync::atomic::AtomicI64};
 use tracing::{debug, info, trace, warn};
 
 type Notarizable<'a, V, D> = Option<(Proposal<D>, &'a Vec<u32>, &'a Vec<Option<Notarize<V, D>>>)>;
-type Nullifiable<'a, V> = Option<(View, &'a HashMap<u32, Nullify<V>>)>;
+type Nullifiable<'a, V> = Option<(View, &'a BTreeMap<u32, Nullify<V>>)>;
 type Finalizable<'a, V, D> = Option<(Proposal<D>, &'a Vec<u32>, &'a Vec<Option<Finalize<V, D>>>)>;
 
 const GENESIS_VIEW: View = 0;
@@ -70,7 +70,7 @@ struct Round<
     broadcast_notarization: bool,
 
     // Track nullifies (ensuring any participant only has one recorded nullify)
-    nullifies: HashMap<u32, Nullify<C::Signature>>,
+    nullifies: BTreeMap<u32, Nullify<C::Signature>>, // we use BTreeMap for deterministic ordering
     broadcast_nullify: bool,
     broadcast_nullification: bool,
 
@@ -111,7 +111,7 @@ impl<
             broadcast_notarize: false,
             broadcast_notarization: false,
 
-            nullifies: HashMap::new(),
+            nullifies: BTreeMap::new(),
             broadcast_nullify: false,
             broadcast_nullification: false,
 
