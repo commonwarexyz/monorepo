@@ -1083,8 +1083,13 @@ impl<D: Digest> Read for ConflictingNotarize<D> {
 }
 
 impl<D: Digest> FixedSize for ConflictingNotarize<D> {
-    const SIZE: usize =
-        Proposal::<D>::SIZE + PartialSignature::SIZE + Proposal::<D>::SIZE + PartialSignature::SIZE;
+    const SIZE: usize = View::SIZE
+        + View::SIZE
+        + D::SIZE
+        + PartialSignature::SIZE
+        + View::SIZE
+        + D::SIZE
+        + PartialSignature::SIZE;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -1201,8 +1206,13 @@ impl<D: Digest> Read for ConflictingFinalize<D> {
 }
 
 impl<D: Digest> FixedSize for ConflictingFinalize<D> {
-    const SIZE: usize =
-        Proposal::<D>::SIZE + PartialSignature::SIZE + Proposal::<D>::SIZE + PartialSignature::SIZE;
+    const SIZE: usize = View::SIZE
+        + View::SIZE
+        + D::SIZE
+        + PartialSignature::SIZE
+        + View::SIZE
+        + D::SIZE
+        + PartialSignature::SIZE;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
