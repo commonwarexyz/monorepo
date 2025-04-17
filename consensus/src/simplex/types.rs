@@ -2,7 +2,6 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error, FixedSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{Digest, Scheme, Verifier};
 use commonware_utils::{quorum, union, Array};
-use std::collections::HashSet;
 
 /// View is a monotonically increasing counter that represents the current focus of consensus.
 pub type View = u64;
@@ -350,13 +349,16 @@ impl<S: Array, D: Digest> Notarization<S, D> {
 
         // Verify signatures
         let notarize_namespace = notarize_namespace(namespace);
-        let mut seen = HashSet::new();
+        let mut last_seen = None;
         let message = self.proposal.encode();
         for signature in &self.signatures {
-            // Ensure this isn't a duplicate
-            if !seen.insert(&signature.public_key) {
-                return false;
+            // Ensure this isn't a duplicate (and the signatures are sorted)
+            if let Some(last_seen) = last_seen {
+                if last_seen >= signature.public_key {
+                    return false;
+                }
             }
+            last_seen = Some(signature.public_key);
 
             // Get public key
             let Some(public_key) = participants.get(signature.public_key as usize) else {
@@ -507,13 +509,16 @@ impl<S: Array> Nullification<S> {
 
         // Verify signatures
         let nullify_namespace = nullify_namespace(namespace);
-        let mut seen = HashSet::new();
+        let mut last_seen = None;
         let message = view_message(self.view);
         for signature in &self.signatures {
-            // Ensure this isn't a duplicate
-            if !seen.insert(&signature.public_key) {
-                return false;
+            // Ensure this isn't a duplicate (and the signatures are sorted)
+            if let Some(last_seen) = last_seen {
+                if last_seen >= signature.public_key {
+                    return false;
+                }
             }
+            last_seen = Some(signature.public_key);
 
             // Get public key
             let Some(public_key) = participants.get(signature.public_key as usize) else {
@@ -670,13 +675,16 @@ impl<S: Array, D: Digest> Finalization<S, D> {
 
         // Verify signatures
         let finalize_namespace = finalize_namespace(namespace);
-        let mut seen = HashSet::new();
+        let mut last_seen = None;
         let message = self.proposal.encode();
         for signature in &self.signatures {
-            // Ensure this isn't a duplicate
-            if !seen.insert(&signature.public_key) {
-                return false;
+            // Ensure this isn't a duplicate (and the signatures are sorted)
+            if let Some(last_seen) = last_seen {
+                if last_seen >= signature.public_key {
+                    return false;
+                }
             }
+            last_seen = Some(signature.public_key);
 
             // Get public key
             let Some(public_key) = participants.get(signature.public_key as usize) else {
