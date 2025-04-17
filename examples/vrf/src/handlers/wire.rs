@@ -153,7 +153,7 @@ impl<Sig: Array> Write for Payload<Sig> {
 impl<Sig: Array> Read<usize> for Payload<Sig> {
     fn read_cfg(buf: &mut impl Buf, p: &usize) -> Result<Self, Error> {
         let tag = u8::read(buf)?;
-        let t = quorum(u32::try_from(*p).unwrap()).unwrap() as usize; // threshold
+        let t = quorum(u32::try_from(*p).unwrap()) as usize; // threshold
         let result = match tag {
             0 => Payload::Start {
                 group: Option::<poly::Public>::read_cfg(buf, &t)?,
