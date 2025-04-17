@@ -114,22 +114,13 @@ impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
                                 continue;
                             };
 
-                            // Parse acks
-                            let mut disqualify = false;
-                            let mut ack_indices: Vec<u32> = Vec::new();
+                            // Validate the signature of each ack
                             let payload = payload(round, &sender, &commitment);
-                            for (ack_index, signature) in acks {
-                                let Some(public_key) = self.contributors.get(ack_index as usize) else {
-                                    disqualify = true;
-                                    break;
-                                };
-                                if !C::verify(Some(ACK_NAMESPACE), &payload, public_key, &signature) {
-                                    disqualify = true;
-                                    break;
-                                }
-                                ack_indices.push(ack_index);
-                            }
-                            if disqualify {
+                            if !acks.iter().all(|(i, sig)| {
+                                self.contributors.get(*i as usize).map(|signer| {
+                                    C::verify(Some(ACK_NAMESPACE), &payload, signer, sig)
+                                }).unwrap_or(false)
+                            }) {
                                 arbiter.disqualify(sender);
                                 continue;
                             }
@@ -137,6 +128,7 @@ impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
                             // Check dealer commitment
                             //
                             // Any faults here will be considered as a disqualification.
+                            let ack_indices: Vec<u32> = acks.keys().copied().collect();
                             if let Err(e) = arbiter.commitment(sender.clone(), commitment, ack_indices, reveals) {
                                 warn!(round, error = ?e, ?sender, "failed to process commitment");
                                 break;
