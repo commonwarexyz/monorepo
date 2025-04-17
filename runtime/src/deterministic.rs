@@ -24,7 +24,8 @@
 
 use crate::{
     mocks, storage::audited::Storage as AuditedStorage, storage::memory::Storage as MemStorage,
-    utils::Signaler, Clock, Error, Handle, Signal, METRICS_PREFIX,
+    storage::metered::Storage as MeteredStorage, utils::Signaler, Clock, Error, Handle, Signal,
+    METRICS_PREFIX,
 };
 use commonware_utils::{hex, SystemTimeExt};
 use futures::{
@@ -469,6 +470,10 @@ impl Executor {
             .timeout
             .map(|timeout| start_time.checked_add(timeout).expect("timeout overflowed"));
         let (signaler, signal) = Signaler::new();
+        let storage = MeteredStorage::new(
+            AuditedStorage::new(MemStorage::default(), auditor.clone()),
+            runtime_registry,
+        );
         let executor = Arc::new(Self {
             registry: Mutex::new(registry),
             cycle: cfg.cycle,
@@ -497,7 +502,7 @@ impl Executor {
                 spawned: false,
                 executor,
                 networking: Arc::new(Networking::new(metrics, auditor.clone())),
-                storage: AuditedStorage::new(MemStorage::default(), auditor.clone()),
+                storage,
             },
             auditor,
         )
@@ -703,7 +708,7 @@ pub struct Context {
     spawned: bool,
     executor: Arc<Executor>,
     networking: Arc<Networking>,
-    storage: AuditedStorage<MemStorage>,
+    storage: MeteredStorage<AuditedStorage<MemStorage>>,
 }
 
 impl Context {
@@ -1261,7 +1266,7 @@ impl RngCore for Context {
 impl CryptoRng for Context {}
 
 impl crate::Storage for Context {
-    type Blob = <AuditedStorage<MemStorage> as crate::Storage>::Blob;
+    type Blob = <MeteredStorage<AuditedStorage<MemStorage>> as crate::Storage>::Blob;
 
     async fn open(&self, partition: &str, name: &[u8]) -> Result<Self::Blob, Error> {
         self.storage.open(partition, name).await
