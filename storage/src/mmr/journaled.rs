@@ -630,9 +630,12 @@ mod tests {
                 .range_proof(test_element_pos, last_element_pos)
                 .await
                 .unwrap();
+            let mut leaf_iter = leaves[TEST_ELEMENT..last_element + 1]
+                .iter()
+                .map(|x| x.as_ref());
             assert!(proof.verify_range_inclusion(
                 &mut hasher,
-                &leaves[TEST_ELEMENT..last_element + 1],
+                &mut leaf_iter,
                 test_element_pos,
                 last_element_pos,
                 &root
