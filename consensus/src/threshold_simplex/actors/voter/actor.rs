@@ -182,12 +182,7 @@ impl<
             }
 
             // Create fault
-            let activity = ConflictingNotarize::new(
-                previous.proposal.clone(),
-                previous.proposal_signature.clone(),
-                notarize.proposal,
-                notarize.proposal_signature,
-            );
+            let activity = ConflictingNotarize::new(previous.clone(), notarize);
             self.reporter
                 .report(Activity::ConflictingNotarize(activity))
                 .await;
@@ -230,11 +225,7 @@ impl<
         };
 
         // Create fault
-        let activity = NullifyFinalize::new(
-            finalize.proposal.clone(),
-            finalize.proposal_signature.clone(),
-            nullify.view_signature,
-        );
+        let activity = NullifyFinalize::new(nullify, finalize.clone());
         self.reporter
             .report(Activity::NullifyFinalize(activity))
             .await;
@@ -254,11 +245,7 @@ impl<
         // Check if also issued nullify
         if let Some(previous) = self.nullifies.get(&public_key_index) {
             // Create fault
-            let activity = NullifyFinalize::new(
-                finalize.proposal.clone(),
-                finalize.proposal_signature.clone(),
-                previous.view_signature.clone(),
-            );
+            let activity = NullifyFinalize::new(previous.clone(), finalize);
             self.reporter
                 .report(Activity::NullifyFinalize(activity))
                 .await;
@@ -278,12 +265,7 @@ impl<
             }
 
             // Create fault
-            let activity = ConflictingFinalize::new(
-                previous.proposal.clone(),
-                previous.proposal_signature.clone(),
-                finalize.proposal.clone(),
-                finalize.proposal_signature.clone(),
-            );
+            let activity = ConflictingFinalize::new(previous.clone(), finalize);
             self.reporter
                 .report(Activity::ConflictingFinalize(activity))
                 .await;

@@ -2,7 +2,6 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error, FixedSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{Digest, Scheme, Verifier};
 use commonware_utils::{quorum, union, Array};
-use std::collections::HashSet;
 
 /// View is a monotonically increasing counter that represents the current focus of consensus.
 pub type View = u64;
@@ -326,7 +325,8 @@ pub struct Notarization<S: Array, D: Digest> {
 }
 
 impl<S: Array, D: Digest> Notarization<S, D> {
-    pub fn new(proposal: Proposal<D>, signatures: Vec<Signature<S>>) -> Self {
+    pub fn new(proposal: Proposal<D>, mut signatures: Vec<Signature<S>>) -> Self {
+        signatures.sort_by_key(|s| s.public_key);
         Self {
             proposal,
             signatures,
@@ -350,13 +350,16 @@ impl<S: Array, D: Digest> Notarization<S, D> {
 
         // Verify signatures
         let notarize_namespace = notarize_namespace(namespace);
-        let mut seen = HashSet::new();
+        let mut last_seen = None;
         let message = self.proposal.encode();
         for signature in &self.signatures {
-            // Ensure this isn't a duplicate
-            if !seen.insert(&signature.public_key) {
-                return false;
+            // Ensure this isn't a duplicate (and the signatures are sorted)
+            if let Some(last_seen) = last_seen {
+                if last_seen >= signature.public_key {
+                    return false;
+                }
             }
+            last_seen = Some(signature.public_key);
 
             // Get public key
             let Some(public_key) = participants.get(signature.public_key as usize) else {
@@ -487,7 +490,8 @@ pub struct Nullification<S: Array> {
 }
 
 impl<S: Array> Nullification<S> {
-    pub fn new(view: View, signatures: Vec<Signature<S>>) -> Self {
+    pub fn new(view: View, mut signatures: Vec<Signature<S>>) -> Self {
+        signatures.sort_by_key(|s| s.public_key);
         Self { view, signatures }
     }
 
@@ -507,13 +511,16 @@ impl<S: Array> Nullification<S> {
 
         // Verify signatures
         let nullify_namespace = nullify_namespace(namespace);
-        let mut seen = HashSet::new();
+        let mut last_seen = None;
         let message = view_message(self.view);
         for signature in &self.signatures {
-            // Ensure this isn't a duplicate
-            if !seen.insert(&signature.public_key) {
-                return false;
+            // Ensure this isn't a duplicate (and the signatures are sorted)
+            if let Some(last_seen) = last_seen {
+                if last_seen >= signature.public_key {
+                    return false;
+                }
             }
+            last_seen = Some(signature.public_key);
 
             // Get public key
             let Some(public_key) = participants.get(signature.public_key as usize) else {
@@ -647,7 +654,8 @@ pub struct Finalization<S: Array, D: Digest> {
 }
 
 impl<S: Array, D: Digest> Finalization<S, D> {
-    pub fn new(proposal: Proposal<D>, signatures: Vec<Signature<S>>) -> Self {
+    pub fn new(proposal: Proposal<D>, mut signatures: Vec<Signature<S>>) -> Self {
+        signatures.sort_by_key(|s| s.public_key);
         Self {
             proposal,
             signatures,
@@ -670,13 +678,16 @@ impl<S: Array, D: Digest> Finalization<S, D> {
 
         // Verify signatures
         let finalize_namespace = finalize_namespace(namespace);
-        let mut seen = HashSet::new();
+        let mut last_seen = None;
         let message = self.proposal.encode();
         for signature in &self.signatures {
-            // Ensure this isn't a duplicate
-            if !seen.insert(&signature.public_key) {
-                return false;
+            // Ensure this isn't a duplicate (and the signatures are sorted)
+            if let Some(last_seen) = last_seen {
+                if last_seen >= signature.public_key {
+                    return false;
+                }
             }
+            last_seen = Some(signature.public_key);
 
             // Get public key
             let Some(public_key) = participants.get(signature.public_key as usize) else {
@@ -995,16 +1006,41 @@ impl<S: Array, D: Digest> Viewable for Activity<S, D> {
 
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub struct ConflictingNotarize<S: Array, D: Digest> {
-    pub notarize_1: Notarize<S, D>,
-    pub notarize_2: Notarize<S, D>,
+    pub view: View,
+    pub parent_1: View,
+    pub payload_1: D,
+    pub signature_1: Signature<S>,
+    pub parent_2: View,
+    pub payload_2: D,
+    pub signature_2: Signature<S>,
 }
 
 impl<S: Array, D: Digest> ConflictingNotarize<S, D> {
     pub fn new(notarize_1: Notarize<S, D>, notarize_2: Notarize<S, D>) -> Self {
+        assert_eq!(notarize_1.view(), notarize_2.view());
+        assert_eq!(notarize_1.signer(), notarize_2.signer());
         Self {
-            notarize_1,
-            notarize_2,
+            view: notarize_1.view(),
+            parent_1: notarize_1.proposal.parent,
+            payload_1: notarize_1.proposal.payload,
+            signature_1: notarize_1.signature,
+            parent_2: notarize_2.proposal.parent,
+            payload_2: notarize_2.proposal.payload,
+            signature_2: notarize_2.signature,
         }
+    }
+
+    pub fn notarizes(&self) -> (Notarize<S, D>, Notarize<S, D>) {
+        (
+            Notarize::new(
+                Proposal::new(self.view, self.parent_1, self.payload_1),
+                self.signature_1.clone(),
+            ),
+            Notarize::new(
+                Proposal::new(self.view, self.parent_2, self.payload_2),
+                self.signature_2.clone(),
+            ),
+        )
     }
 
     pub fn verify<P: Array, V: Verifier<PublicKey = P, Signature = S>>(
@@ -1012,69 +1048,110 @@ impl<S: Array, D: Digest> ConflictingNotarize<S, D> {
         namespace: &[u8],
         public_key: &P,
     ) -> bool {
-        self.notarize_1.verify::<P, V>(namespace, public_key)
-            && self.notarize_2.verify::<P, V>(namespace, public_key)
+        let (notarize_1, notarize_2) = self.notarizes();
+        notarize_1.verify::<P, V>(namespace, public_key)
+            && notarize_2.verify::<P, V>(namespace, public_key)
     }
 }
 
 impl<S: Array, D: Digest> Write for ConflictingNotarize<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
-        self.notarize_1.write(writer);
-        self.notarize_2.write(writer);
+        self.view.write(writer);
+        self.parent_1.write(writer);
+        self.payload_1.write(writer);
+        self.signature_1.write(writer);
+        self.parent_2.write(writer);
+        self.payload_2.write(writer);
+        self.signature_2.write(writer);
     }
 }
 
 impl<S: Array, D: Digest> Read for ConflictingNotarize<S, D> {
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let notarize_1 = Notarize::<S, D>::read(reader)?;
-        let notarize_2 = Notarize::<S, D>::read(reader)?;
-        if notarize_1.view() != notarize_2.view() {
-            return Err(Error::Invalid(
-                "consensus::simplex::ConflictingNotarize",
-                "notarizes must have the same view",
-            ));
-        }
-        if notarize_1.signer() != notarize_2.signer() {
+        let view = View::read(reader)?;
+        let parent_1 = View::read(reader)?;
+        let payload_1 = D::read_cfg(reader, &())?;
+        let signature_1 = Signature::<S>::read(reader)?;
+        let parent_2 = View::read(reader)?;
+        let payload_2 = D::read_cfg(reader, &())?;
+        let signature_2 = Signature::<S>::read(reader)?;
+        if signature_1.signer() != signature_2.signer() {
             return Err(Error::Invalid(
                 "consensus::simplex::ConflictingNotarize",
                 "notarizes must have the same public key",
             ));
         }
         Ok(Self {
-            notarize_1,
-            notarize_2,
+            view,
+            parent_1,
+            payload_1,
+            signature_1,
+            parent_2,
+            payload_2,
+            signature_2,
         })
     }
 }
 
 impl<S: Array, D: Digest> FixedSize for ConflictingNotarize<S, D> {
-    const SIZE: usize = Notarize::<S, D>::SIZE + Notarize::<S, D>::SIZE;
+    const SIZE: usize = View::SIZE
+        + View::SIZE
+        + D::SIZE
+        + Signature::<S>::SIZE
+        + View::SIZE
+        + D::SIZE
+        + Signature::<S>::SIZE;
 }
 
 impl<S: Array, D: Digest> Viewable for ConflictingNotarize<S, D> {
     fn view(&self) -> View {
-        self.notarize_1.view()
+        self.view
     }
 }
 
 impl<S: Array, D: Digest> Attributable for ConflictingNotarize<S, D> {
     fn signer(&self) -> u32 {
-        self.notarize_1.signer()
+        self.signature_1.signer()
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub struct ConflictingFinalize<S: Array, D: Digest> {
-    pub finalize_1: Finalize<S, D>,
-    pub finalize_2: Finalize<S, D>,
+    pub view: View,
+    pub parent_1: View,
+    pub payload_1: D,
+    pub signature_1: Signature<S>,
+    pub parent_2: View,
+    pub payload_2: D,
+    pub signature_2: Signature<S>,
 }
 
 impl<S: Array, D: Digest> ConflictingFinalize<S, D> {
     pub fn new(finalize_1: Finalize<S, D>, finalize_2: Finalize<S, D>) -> Self {
+        assert_eq!(finalize_1.view(), finalize_2.view());
+        assert_eq!(finalize_1.signer(), finalize_2.signer());
         Self {
-            finalize_1,
-            finalize_2,
+            view: finalize_1.view(),
+            parent_1: finalize_1.proposal.parent,
+            payload_1: finalize_1.proposal.payload,
+            signature_1: finalize_1.signature,
+            parent_2: finalize_2.proposal.parent,
+            payload_2: finalize_2.proposal.payload,
+            signature_2: finalize_2.signature,
         }
+    }
+
+    pub fn finalizes(&self) -> (Finalize<S, D>, Finalize<S, D>) {
+        (
+            Finalize::new(
+                Proposal::new(self.view, self.parent_1, self.payload_1),
+                self.signature_1.clone(),
+            ),
+            Finalize::new(
+                Proposal::new(self.view, self.parent_2, self.payload_2),
+                self.signature_2.clone(),
+            ),
+        )
     }
 
     pub fn verify<P: Array, V: Verifier<PublicKey = P, Signature = S>>(
@@ -1082,67 +1159,89 @@ impl<S: Array, D: Digest> ConflictingFinalize<S, D> {
         namespace: &[u8],
         public_key: &P,
     ) -> bool {
-        self.finalize_1.verify::<P, V>(namespace, public_key)
-            && self.finalize_2.verify::<P, V>(namespace, public_key)
+        let (finalize_1, finalize_2) = self.finalizes();
+        finalize_1.verify::<P, V>(namespace, public_key)
+            && finalize_2.verify::<P, V>(namespace, public_key)
     }
 }
 
 impl<S: Array, D: Digest> Write for ConflictingFinalize<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
-        self.finalize_1.write(writer);
-        self.finalize_2.write(writer);
+        self.view.write(writer);
+        self.parent_1.write(writer);
+        self.payload_1.write(writer);
+        self.signature_1.write(writer);
+        self.parent_2.write(writer);
+        self.payload_2.write(writer);
+        self.signature_2.write(writer);
     }
 }
 
 impl<S: Array, D: Digest> Read for ConflictingFinalize<S, D> {
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let finalize_1 = Finalize::<S, D>::read(reader)?;
-        let finalize_2 = Finalize::<S, D>::read(reader)?;
-        if finalize_1.view() != finalize_2.view() {
-            return Err(Error::Invalid(
-                "consensus::simplex::ConflictingFinalize",
-                "finalizes must have the same view",
-            ));
-        }
-        if finalize_1.signer() != finalize_2.signer() {
+        let view = View::read(reader)?;
+        let parent_1 = View::read(reader)?;
+        let payload_1 = D::read_cfg(reader, &())?;
+        let signature_1 = Signature::<S>::read(reader)?;
+        let parent_2 = View::read(reader)?;
+        let payload_2 = D::read_cfg(reader, &())?;
+        let signature_2 = Signature::<S>::read(reader)?;
+        if signature_1.signer() != signature_2.signer() {
             return Err(Error::Invalid(
                 "consensus::simplex::ConflictingFinalize",
                 "finalizes must have the same public key",
             ));
         }
         Ok(Self {
-            finalize_1,
-            finalize_2,
+            view,
+            parent_1,
+            payload_1,
+            signature_1,
+            parent_2,
+            payload_2,
+            signature_2,
         })
     }
 }
 
 impl<S: Array, D: Digest> FixedSize for ConflictingFinalize<S, D> {
-    const SIZE: usize =
-        Proposal::<D>::SIZE + Signature::<S>::SIZE + Proposal::<D>::SIZE + Signature::<S>::SIZE;
+    const SIZE: usize = View::SIZE
+        + View::SIZE
+        + D::SIZE
+        + Signature::<S>::SIZE
+        + View::SIZE
+        + D::SIZE
+        + Signature::<S>::SIZE;
 }
 
 impl<S: Array, D: Digest> Viewable for ConflictingFinalize<S, D> {
     fn view(&self) -> View {
-        self.finalize_1.view()
+        self.view
     }
 }
 
 impl<S: Array, D: Digest> Attributable for ConflictingFinalize<S, D> {
     fn signer(&self) -> u32 {
-        self.finalize_1.signer()
+        self.signature_1.signer()
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub struct NullifyFinalize<S: Array, D: Digest> {
-    pub nullify: Nullify<S>,
-    pub finalize: Finalize<S, D>,
+    pub proposal: Proposal<D>,
+    pub view_signature: Signature<S>,
+    pub finalize_signature: Signature<S>,
 }
 
 impl<S: Array, D: Digest> NullifyFinalize<S, D> {
     pub fn new(nullify: Nullify<S>, finalize: Finalize<S, D>) -> Self {
-        Self { nullify, finalize }
+        assert_eq!(nullify.view(), finalize.view());
+        assert_eq!(nullify.signer(), finalize.signer());
+        Self {
+            proposal: finalize.proposal,
+            view_signature: nullify.signature,
+            finalize_signature: finalize.signature,
+        }
     }
 
     pub fn verify<P: Array, V: Verifier<PublicKey = P, Signature = S>>(
@@ -1150,50 +1249,52 @@ impl<S: Array, D: Digest> NullifyFinalize<S, D> {
         namespace: &[u8],
         public_key: &P,
     ) -> bool {
-        self.nullify.verify::<P, V>(namespace, public_key)
-            && self.finalize.verify::<P, V>(namespace, public_key)
+        let nullify = Nullify::new(self.proposal.view(), self.view_signature.clone());
+        let finalize = Finalize::new(self.proposal.clone(), self.finalize_signature.clone());
+        nullify.verify::<P, V>(namespace, public_key)
+            && finalize.verify::<P, V>(namespace, public_key)
     }
 }
 
 impl<S: Array, D: Digest> Write for NullifyFinalize<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
-        self.nullify.write(writer);
-        self.finalize.write(writer);
+        self.proposal.write(writer);
+        self.view_signature.write(writer);
+        self.finalize_signature.write(writer);
     }
 }
 
 impl<S: Array, D: Digest> Read for NullifyFinalize<S, D> {
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let nullify = Nullify::<S>::read(reader)?;
-        let finalize = Finalize::<S, D>::read(reader)?;
-        if nullify.view() != finalize.view() {
-            return Err(Error::Invalid(
-                "consensus::simplex::NullifyFinalize",
-                "nullification and finalization must have the same view",
-            ));
-        }
-        if nullify.signer() != finalize.signer() {
+        let proposal = Proposal::<D>::read(reader)?;
+        let view_signature = Signature::<S>::read(reader)?;
+        let finalize_signature = Signature::<S>::read(reader)?;
+        if view_signature.signer() != finalize_signature.signer() {
             return Err(Error::Invalid(
                 "consensus::simplex::NullifyFinalize",
                 "nullification and finalization must have the same public key",
             ));
         }
-        Ok(Self { nullify, finalize })
+        Ok(Self {
+            proposal,
+            view_signature,
+            finalize_signature,
+        })
     }
 }
 
 impl<S: Array, D: Digest> FixedSize for NullifyFinalize<S, D> {
-    const SIZE: usize = Nullify::<S>::SIZE + Finalize::<S, D>::SIZE;
+    const SIZE: usize = Proposal::<D>::SIZE + Signature::<S>::SIZE + Signature::<S>::SIZE;
 }
 
 impl<S: Array, D: Digest> Viewable for NullifyFinalize<S, D> {
     fn view(&self) -> View {
-        self.nullify.view()
+        self.proposal.view()
     }
 }
 
 impl<S: Array, D: Digest> Attributable for NullifyFinalize<S, D> {
     fn signer(&self) -> u32 {
-        self.nullify.signer()
+        self.view_signature.signer()
     }
 }

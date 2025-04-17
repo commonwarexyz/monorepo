@@ -1,9 +1,11 @@
 use crate::{
     threshold_simplex::types::{
-        Activity, Attributable, Finalization, Notarization, Nullification, View, Viewable,
+        Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization, Finalize,
+        Notarization, Notarize, Nullification, Nullify, NullifyFinalize, View, Viewable,
     },
     Monitor, Reporter, Supervisor as Su, ThresholdSupervisor as TSu,
 };
+use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{self, Element},
@@ -172,6 +174,8 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                 if !notarize.verify(&self.namespace, identity, None) {
                     panic!("signature verification failed");
                 }
+                let encoded = notarize.encode();
+                Notarize::<D>::decode(encoded).unwrap();
                 let public_key = validators[notarize.signer() as usize].clone();
                 self.notarizes
                     .lock()
@@ -194,6 +198,8 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                 if !notarization.verify(&self.namespace, public) {
                     panic!("signature verification failed");
                 }
+                let encoded = notarization.encode();
+                Notarization::<D>::decode(encoded).unwrap();
                 self.notarizations
                     .lock()
                     .unwrap()
@@ -210,6 +216,8 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                 if !nullify.verify(&self.namespace, identity, None) {
                     panic!("signature verification failed");
                 }
+                let encoded = nullify.encode();
+                Nullify::decode(encoded).unwrap();
                 let public_key = validators[nullify.signer() as usize].clone();
                 self.nullifies
                     .lock()
@@ -230,6 +238,8 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                 if !nullification.verify(&self.namespace, public) {
                     panic!("signature verification failed");
                 }
+                let encoded = nullification.encode();
+                Nullification::decode(encoded).unwrap();
                 self.nullifications
                     .lock()
                     .unwrap()
@@ -246,6 +256,8 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                 if !finalize.verify(&self.namespace, identity, None) {
                     panic!("signature verification failed");
                 }
+                let encoded = finalize.encode();
+                Finalize::<D>::decode(encoded).unwrap();
                 let public_key = validators[finalize.signer() as usize].clone();
                 self.finalizes
                     .lock()
@@ -268,6 +280,8 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                 if !finalization.verify(&self.namespace, public) {
                     panic!("signature verification failed");
                 }
+                let encoded = finalization.encode();
+                Finalization::<D>::decode(encoded).unwrap();
                 self.finalizations
                     .lock()
                     .unwrap()
@@ -291,6 +305,8 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                 if !conflicting.verify(&self.namespace, identity, None) {
                     panic!("signature verification failed");
                 }
+                let encoded = conflicting.encode();
+                ConflictingNotarize::<D>::decode(encoded).unwrap();
                 let public_key = validators[conflicting.signer() as usize].clone();
                 self.faults
                     .lock()
@@ -312,6 +328,8 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                 if !conflicting.verify(&self.namespace, identity, None) {
                     panic!("signature verification failed");
                 }
+                let encoded = conflicting.encode();
+                ConflictingFinalize::<D>::decode(encoded).unwrap();
                 let public_key = validators[conflicting.signer() as usize].clone();
                 self.faults
                     .lock()
@@ -333,6 +351,8 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                 if !nullify_finalize.verify(&self.namespace, identity, None) {
                     panic!("signature verification failed");
                 }
+                let encoded = nullify_finalize.encode();
+                NullifyFinalize::<D>::decode(encoded).unwrap();
                 let public_key = validators[nullify_finalize.signer() as usize].clone();
                 self.faults
                     .lock()

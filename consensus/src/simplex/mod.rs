@@ -133,9 +133,8 @@ pub mod mocks;
 
 #[cfg(test)]
 mod tests {
-    use crate::Monitor;
-
     use super::*;
+    use crate::Monitor;
     use commonware_cryptography::{sha256::Digest as Sha256Digest, Ed25519, Sha256, Signer};
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};
