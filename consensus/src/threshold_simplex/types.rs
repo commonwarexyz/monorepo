@@ -978,17 +978,14 @@ pub struct ConflictingNotarize<D: Digest> {
 }
 
 impl<D: Digest> ConflictingNotarize<D> {
-    pub fn new(
-        proposal_1: Proposal<D>,
-        signature_1: PartialSignature,
-        proposal_2: Proposal<D>,
-        signature_2: PartialSignature,
-    ) -> Self {
+    pub fn new(notarize_1: Notarize<D>, notarize_2: Notarize<D>) -> Self {
+        assert_eq!(notarize_1.view(), notarize_2.view());
+        assert_eq!(notarize_1.signer(), notarize_2.signer());
         ConflictingNotarize {
-            proposal_1,
-            signature_1,
-            proposal_2,
-            signature_2,
+            proposal_1: notarize_1.proposal,
+            signature_1: notarize_1.proposal_signature,
+            proposal_2: notarize_2.proposal,
+            signature_2: notarize_2.proposal_signature,
         }
     }
 
@@ -1079,17 +1076,14 @@ pub struct ConflictingFinalize<D: Digest> {
 }
 
 impl<D: Digest> ConflictingFinalize<D> {
-    pub fn new(
-        proposal_1: Proposal<D>,
-        signature_1: PartialSignature,
-        proposal_2: Proposal<D>,
-        signature_2: PartialSignature,
-    ) -> Self {
+    pub fn new(finalize_1: Finalize<D>, finalize_2: Finalize<D>) -> Self {
+        assert_eq!(finalize_1.view(), finalize_2.view());
+        assert_eq!(finalize_1.signer(), finalize_2.signer());
         ConflictingFinalize {
-            proposal_1,
-            signature_1,
-            proposal_2,
-            signature_2,
+            proposal_1: finalize_1.proposal,
+            signature_1: finalize_1.proposal_signature,
+            proposal_2: finalize_2.proposal,
+            signature_2: finalize_2.proposal_signature,
         }
     }
 
@@ -1179,15 +1173,13 @@ pub struct NullifyFinalize<D: Digest> {
 }
 
 impl<D: Digest> NullifyFinalize<D> {
-    pub fn new(
-        proposal: Proposal<D>,
-        view_signature: PartialSignature,
-        finalize_signature: PartialSignature,
-    ) -> Self {
+    pub fn new(nullify: Nullify, finalize: Finalize<D>) -> Self {
+        assert_eq!(nullify.view(), finalize.view());
+        assert_eq!(nullify.signer(), finalize.signer());
         NullifyFinalize {
-            proposal,
-            view_signature,
-            finalize_signature,
+            proposal: finalize.proposal,
+            view_signature: nullify.view_signature,
+            finalize_signature: finalize.proposal_signature,
         }
     }
 
