@@ -17,13 +17,9 @@ pub struct Config {
     pub storage_directory: PathBuf,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        // Generate a random directory name to avoid conflicts (used in tests, so we shouldn't need to reload)
-        let rng = OsRng.next_u64();
-        Self {
-            storage_directory: env::temp_dir().join(format!("commonware_iouring_storage_{}", rng)),
-        }
+impl Config {
+    pub fn new(storage_directory: PathBuf) -> Self {
+        Self { storage_directory }
     }
 }
 

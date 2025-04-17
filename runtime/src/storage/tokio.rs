@@ -224,6 +224,10 @@ impl crate::Blob for Blob {
 
 #[cfg(test)]
 mod tests {
+    use std::env;
+
+    use rand::{Rng as _, SeedableRng};
+
     use crate::storage::{
         tests::run_storage_tests,
         tokio::{Config, Storage},
@@ -231,7 +235,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_storage() {
-        let config = Config::new("test_storage".into(), 2 * 1024 * 1024);
+        let mut rng = rand::rngs::StdRng::from_entropy();
+        let storage_directory =
+            env::temp_dir().join(format!("commonware_iouring_storage_{}", rng.gen::<u64>()));
+        let config = Config::new(storage_directory, 2 * 1024 * 1024);
         let storage = Storage::new(config);
         run_storage_tests(storage).await;
     }
