@@ -32,10 +32,9 @@ const GENESIS: &[u8] = b"commonware is neat";
 pub struct Application<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> {
     context: R,
     indexer: Connection<Si, St>,
-    public: group::Public,
     namespace: Vec<u8>,
+    public: group::Public,
     other_public: group::Public,
-    other_namespace: Vec<u8>,
     hasher: H,
     mailbox: mpsc::Receiver<Message<H::Digest>>,
 }
@@ -51,10 +50,9 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
             Self {
                 context,
                 indexer: config.indexer,
-                public: *poly::public(&config.identity),
                 namespace: config.namespace,
+                public: *poly::public(&config.identity),
                 other_public: config.other_public,
-                other_namespace: config.other_namespace,
                 hasher: config.hasher,
                 mailbox,
             },
@@ -114,12 +112,12 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                             };
 
                             // Verify certificate
-                            let finalizaton = Finalization::<H::Digest>::decode(proof.as_ref())
+                            let finalization = Finalization::<H::Digest>::decode(proof.as_ref())
                                 .expect("failed to decode finalization");
                             assert!(
-                                finalizaton.verify(
+                                finalization.verify(
                                     &self.other_public,
-                                    &finalize_namespace(&self.other_namespace),
+                                    &finalize_namespace(&self.namespace),
                                     &seed_namespace(&self.namespace),
                                 ),
                                 "indexer is corrupt"
@@ -215,7 +213,7 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                     let result = finalization.verify(
                         &self.other_public,
                         &finalize_namespace(&self.namespace),
-                        &seed_namespace(&self.other_namespace),
+                        &seed_namespace(&self.namespace),
                     );
 
                     // If payload exists and is valid, return

@@ -22,11 +22,9 @@ pub struct Config<H: Hasher, Si: Sink, St: Stream, P: Array> {
     /// Hashing scheme to use.
     pub hasher: H,
 
-    pub identity: poly::Public,
     pub namespace: Vec<u8>,
-
+    pub identity: poly::Public,
     pub other_public: group::Public,
-    pub other_namespace: Vec<u8>,
 
     /// Participants active in consensus.
     pub participants: Vec<P>,
