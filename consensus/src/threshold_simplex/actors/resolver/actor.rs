@@ -21,7 +21,6 @@ use rand::{seq::IteratorRandom, Rng};
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
-    marker::PhantomData,
     time::{Duration, SystemTime},
 };
 use tracing::{debug, warn};
@@ -101,7 +100,6 @@ pub struct Actor<
 > {
     context: E,
     supervisor: S,
-    _digest: PhantomData<D>,
 
     namespace: Vec<u8>,
 
@@ -164,7 +162,6 @@ impl<
             Self {
                 context,
                 supervisor: cfg.supervisor,
-                _digest: PhantomData,
 
                 namespace: cfg.namespace,
 

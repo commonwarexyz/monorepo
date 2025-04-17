@@ -4,10 +4,9 @@ use crate::{
         actors::resolver,
         metrics,
         types::{
-            finalize_namespace, notarize_namespace, nullify_namespace, threshold, Activity,
-            Attributable, ConflictingFinalize, ConflictingNotarize, Context, Finalization,
-            Finalize, Notarization, Notarize, Nullification, Nullify, NullifyFinalize, Proposal,
-            View, Viewable, Voter,
+            threshold, Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Context,
+            Finalization, Finalize, Notarization, Notarize, Nullification, Nullify,
+            NullifyFinalize, Proposal, View, Viewable, Voter,
         },
     },
     Automaton, Relay, Reporter, Supervisor, LATENCY,
@@ -317,9 +316,7 @@ pub struct Actor<
 
     genesis: Option<D>,
 
-    notarize_namespace: Vec<u8>,
-    nullify_namespace: Vec<u8>,
-    finalize_namespace: Vec<u8>,
+    namespace: Vec<u8>,
 
     leader_timeout: Duration,
     notarization_timeout: Duration,
@@ -413,9 +410,7 @@ impl<
 
                 genesis: None,
 
-                notarize_namespace: notarize_namespace(&cfg.namespace),
-                nullify_namespace: nullify_namespace(&cfg.namespace),
-                finalize_namespace: finalize_namespace(&cfg.namespace),
+                namespace: cfg.namespace,
 
                 leader_timeout: cfg.leader_timeout,
                 notarization_timeout: cfg.notarization_timeout,
@@ -640,10 +635,10 @@ impl<
             .is_participant(self.view, &self.crypto.public_key())
             .unwrap();
         let nullify = Nullify::sign(
+            &self.namespace,
             &mut self.crypto,
             public_key_index,
             self.view,
-            &self.nullify_namespace,
         );
 
         // Handle the nullify
@@ -681,7 +676,7 @@ impl<
         };
 
         // Verify the signature
-        if !nullify.verify::<C::PublicKey, C>(public_key, &self.nullify_namespace) {
+        if !nullify.verify::<C::PublicKey, C>(&self.namespace, public_key) {
             return false;
         }
 
@@ -994,7 +989,7 @@ impl<
         };
 
         // Verify the signature
-        if !notarize.verify::<C::PublicKey, C>(public_key, &self.notarize_namespace) {
+        if !notarize.verify::<C::PublicKey, C>(&self.namespace, public_key) {
             return false;
         }
 
@@ -1048,7 +1043,7 @@ impl<
         let Some(participants) = self.supervisor.participants(view) else {
             return false;
         };
-        if !notarization.verify::<S::PublicKey, C>(participants, &self.notarize_namespace) {
+        if !notarization.verify::<S::PublicKey, C>(&self.namespace, participants) {
             return false;
         }
 
@@ -1119,7 +1114,7 @@ impl<
         let Some(participants) = self.supervisor.participants(nullification.view) else {
             return false;
         };
-        if !nullification.verify::<S::PublicKey, C>(participants, &self.nullify_namespace) {
+        if !nullification.verify::<S::PublicKey, C>(&self.namespace, participants) {
             return false;
         }
 
@@ -1178,7 +1173,7 @@ impl<
         };
 
         // Verify the signature
-        if !finalize.verify::<C::PublicKey, C>(public_key, &self.finalize_namespace) {
+        if !finalize.verify::<C::PublicKey, C>(&self.namespace, public_key) {
             return false;
         }
 
@@ -1232,7 +1227,7 @@ impl<
         let Some(participants) = self.supervisor.participants(view) else {
             return false;
         };
-        if !finalization.verify::<S::PublicKey, C>(participants, &self.finalize_namespace) {
+        if !finalization.verify::<S::PublicKey, C>(&self.namespace, participants) {
             return false;
         }
 
@@ -1307,10 +1302,10 @@ impl<
             .is_participant(view, &self.crypto.public_key())?;
         round.broadcast_notarize = true;
         Some(Notarize::sign(
+            &self.namespace,
             &mut self.crypto,
             public_key_index,
             round.proposal.as_ref().unwrap().clone(),
-            &self.notarize_namespace,
         ))
     }
 
@@ -1410,10 +1405,10 @@ impl<
             .is_participant(view, &self.crypto.public_key())?;
         round.broadcast_finalize = true;
         Some(Finalize::sign(
+            &self.namespace,
             &mut self.crypto,
             public_key_index,
             round.proposal.as_ref().unwrap().clone(),
-            &self.finalize_namespace,
         ))
     }
 

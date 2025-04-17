@@ -1,9 +1,7 @@
 //! Byzantine participant that sends conflicting notarize/finalize messages.
 
 use crate::{
-    simplex::types::{
-        finalize_namespace, notarize_namespace, Finalize, Notarize, Proposal, View, Viewable, Voter,
-    },
+    simplex::types::{Finalize, Notarize, Proposal, View, Viewable, Voter},
     Supervisor,
 };
 use commonware_codec::{Decode, Encode};
@@ -31,8 +29,7 @@ pub struct Conflicter<
     supervisor: S,
     _hasher: PhantomData<H>,
 
-    notarize_namespace: Vec<u8>,
-    finalize_namespace: Vec<u8>,
+    namespace: Vec<u8>,
 }
 
 impl<
@@ -49,8 +46,7 @@ impl<
             supervisor: cfg.supervisor,
             _hasher: PhantomData,
 
-            notarize_namespace: notarize_namespace(&cfg.namespace),
-            finalize_namespace: finalize_namespace(&cfg.namespace),
+            namespace: cfg.namespace,
         }
     }
 
@@ -83,10 +79,10 @@ impl<
                     // Notarize received digest
                     let parent = notarize.proposal.parent;
                     let msg = Notarize::sign(
+                        &self.namespace,
                         &mut self.crypto,
                         public_key_index,
                         notarize.proposal,
-                        &self.notarize_namespace,
                     );
                     let msg = Voter::Notarize(msg).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
@@ -95,10 +91,10 @@ impl<
                     let payload = H::random(&mut self.context);
                     let proposal = Proposal::new(view, parent, payload);
                     let msg = Notarize::sign(
+                        &self.namespace,
                         &mut self.crypto,
                         public_key_index,
                         proposal,
-                        &self.notarize_namespace,
                     );
                     let msg = Voter::Notarize(msg).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
@@ -113,10 +109,10 @@ impl<
                     // Finalize provided digest
                     let parent = finalize.proposal.parent;
                     let msg = Finalize::sign(
+                        &self.namespace,
                         &mut self.crypto,
                         public_key_index,
                         finalize.proposal,
-                        &self.finalize_namespace,
                     );
                     let msg = Voter::Finalize(msg).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
@@ -125,10 +121,10 @@ impl<
                     let payload = H::random(&mut self.context);
                     let proposal = Proposal::new(view, parent, payload);
                     let msg = Finalize::sign(
+                        &self.namespace,
                         &mut self.crypto,
                         public_key_index,
                         proposal,
-                        &self.finalize_namespace,
                     );
                     let msg = Voter::Finalize(msg).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();

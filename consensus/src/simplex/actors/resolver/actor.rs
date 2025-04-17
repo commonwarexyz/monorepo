@@ -5,10 +5,7 @@ use super::{
 use crate::{
     simplex::{
         actors::voter,
-        types::{
-            notarize_namespace, nullify_namespace, Backfiller, Notarization, Nullification,
-            Request, Response, View, Viewable,
-        },
+        types::{Backfiller, Notarization, Nullification, Request, Response, View, Viewable},
     },
     Supervisor,
 };
@@ -24,7 +21,6 @@ use rand::{seq::IteratorRandom, Rng};
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
-    marker::PhantomData,
     time::{Duration, SystemTime},
 };
 use tracing::{debug, warn};
@@ -104,10 +100,8 @@ pub struct Actor<
 > {
     context: E,
     supervisor: S,
-    _digest: PhantomData<D>,
 
-    notarize_namespace: Vec<u8>,
-    nullify_namespace: Vec<u8>,
+    namespace: Vec<u8>,
 
     notarizations: BTreeMap<View, Notarization<C::Signature, D>>,
     nullifications: BTreeMap<View, Nullification<C::Signature>>,
@@ -169,10 +163,8 @@ impl<
             Self {
                 context,
                 supervisor: cfg.supervisor,
-                _digest: PhantomData,
 
-                notarize_namespace: notarize_namespace(&cfg.namespace),
-                nullify_namespace: nullify_namespace(&cfg.namespace),
+                namespace: cfg.namespace,
 
                 notarizations: BTreeMap::new(),
                 nullifications: BTreeMap::new(),
@@ -507,7 +499,7 @@ impl<
                                     debug!(view, sender = ?s, "unknown view");
                                     continue;
                                 };
-                                if !notarization.verify::<S::PublicKey, C>(participants, &self.notarize_namespace) {
+                                if !notarization.verify::<S::PublicKey, C>(&self.namespace, participants) {
                                     warn!(view, sender = ?s, "invalid notarization");
                                     self.requester.block(s.clone());
                                     continue;
@@ -530,7 +522,7 @@ impl<
                                     debug!(view, sender = ?s, "unknown view");
                                     continue;
                                 };
-                                if !nullification.verify::<S::PublicKey, C>(participants, &self.nullify_namespace) {
+                                if !nullification.verify::<S::PublicKey, C>(&self.namespace, participants) {
                                     warn!(view, sender = ?s, "invalid nullification");
                                     self.requester.block(s.clone());
                                     continue;

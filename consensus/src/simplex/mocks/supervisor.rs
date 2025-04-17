@@ -1,7 +1,6 @@
 use crate::{
     simplex::types::{
-        finalize_namespace, notarize_namespace, nullify_namespace, Activity, Attributable,
-        Finalization, Notarization, Nullification, View, Viewable,
+        Activity, Attributable, Finalization, Notarization, Nullification, View, Viewable,
     },
     Monitor, Reporter, Supervisor as Su,
 };
@@ -25,9 +24,7 @@ type Participants<P> = BTreeMap<View, (HashMap<P, u32>, Vec<P>)>;
 pub struct Supervisor<C: Verifier, D: Digest> {
     participants: Participants<C::PublicKey>,
 
-    notarize_namespace: Vec<u8>,
-    nullify_namespace: Vec<u8>,
-    finalize_namespace: Vec<u8>,
+    namespace: Vec<u8>,
 
     pub leaders: Arc<Mutex<HashMap<View, C::PublicKey>>>,
     pub notarizes: Arc<Mutex<Participation<C::PublicKey, D>>>,
@@ -60,9 +57,7 @@ impl<C: Verifier, D: Digest> Supervisor<C, D> {
         Self {
             leaders: Arc::new(Mutex::new(HashMap::new())),
             participants: parsed_participants,
-            notarize_namespace: notarize_namespace(&cfg.namespace),
-            nullify_namespace: nullify_namespace(&cfg.namespace),
-            finalize_namespace: finalize_namespace(&cfg.namespace),
+            namespace: cfg.namespace,
             notarizes: Arc::new(Mutex::new(HashMap::new())),
             notarizations: Arc::new(Mutex::new(HashMap::new())),
             nullifies: Arc::new(Mutex::new(HashMap::new())),
@@ -129,7 +124,7 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
                 let view = notarize.view();
                 let participants = self.participants(view).unwrap();
                 let public_key = participants[notarize.signer() as usize].clone();
-                if !notarize.verify::<C::PublicKey, C>(&public_key, &self.notarize_namespace) {
+                if !notarize.verify::<C::PublicKey, C>(&self.namespace, &public_key) {
                     panic!("signature verification failed");
                 }
                 self.notarizes
@@ -144,7 +139,7 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
             Activity::Notarization(notarization) => {
                 let view = notarization.view();
                 let participants = self.participants(view).unwrap();
-                if !notarization.verify::<_, C>(participants, &self.notarize_namespace) {
+                if !notarization.verify::<_, C>(&self.namespace, participants) {
                     panic!("signature verification failed");
                 }
                 let mut notarizes = self.notarizes.lock().unwrap();
@@ -167,7 +162,7 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
                 let view = nullify.view();
                 let participants = self.participants(view).unwrap();
                 let public_key = participants[nullify.signer() as usize].clone();
-                if !nullify.verify::<C::PublicKey, C>(&public_key, &self.nullify_namespace) {
+                if !nullify.verify::<C::PublicKey, C>(&self.namespace, &public_key) {
                     panic!("signature verification failed");
                 }
                 self.nullifies
@@ -180,7 +175,7 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
             Activity::Nullification(nullification) => {
                 let view = nullification.view();
                 let participants = self.participants(view).unwrap();
-                if !nullification.verify::<_, C>(participants, &self.nullify_namespace) {
+                if !nullification.verify::<_, C>(&self.namespace, participants) {
                     panic!("signature verification failed");
                 }
                 let mut nullifies = self.nullifies.lock().unwrap();
@@ -199,7 +194,7 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
                 let view = finalize.view();
                 let participants = self.participants(view).unwrap();
                 let public_key = participants[finalize.signer() as usize].clone();
-                if !finalize.verify::<C::PublicKey, C>(&public_key, &self.finalize_namespace) {
+                if !finalize.verify::<C::PublicKey, C>(&self.namespace, &public_key) {
                     panic!("signature verification failed");
                 }
                 self.finalizes
@@ -214,7 +209,7 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
             Activity::Finalization(finalization) => {
                 let view = finalization.view();
                 let participants = self.participants(view).unwrap();
-                if !finalization.verify::<_, C>(participants, &self.finalize_namespace) {
+                if !finalization.verify::<_, C>(&self.namespace, participants) {
                     panic!("signature verification failed");
                 }
                 let mut finalizes = self.finalizes.lock().unwrap();
@@ -244,7 +239,7 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
                 let view = conflicting.view();
                 let participants = self.participants(view).unwrap();
                 let public_key = participants[conflicting.signer() as usize].clone();
-                if !conflicting.verify::<C::PublicKey, C>(&public_key, &self.notarize_namespace) {
+                if !conflicting.verify::<C::PublicKey, C>(&self.namespace, &public_key) {
                     panic!("signature verification failed");
                 }
                 self.faults
@@ -260,7 +255,7 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
                 let view = conflicting.view();
                 let participants = self.participants(view).unwrap();
                 let public_key = participants[conflicting.signer() as usize].clone();
-                if !conflicting.verify::<C::PublicKey, C>(&public_key, &self.finalize_namespace) {
+                if !conflicting.verify::<C::PublicKey, C>(&self.namespace, &public_key) {
                     panic!("signature verification failed");
                 }
                 self.faults
@@ -276,11 +271,7 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
                 let view = conflicting.view();
                 let participants = self.participants(view).unwrap();
                 let public_key = participants[conflicting.signer() as usize].clone();
-                if !conflicting.verify::<C::PublicKey, C>(
-                    &public_key,
-                    &self.nullify_namespace,
-                    &self.finalize_namespace,
-                ) {
+                if !conflicting.verify::<C::PublicKey, C>(&self.namespace, &public_key) {
                     panic!("signature verification failed");
                 }
                 self.faults

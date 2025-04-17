@@ -30,26 +30,31 @@ pub trait Attributable {
     fn signer(&self) -> u32;
 }
 
-pub const NOTARIZE_SUFFIX: &[u8] = b"_NOTARIZE";
-pub const NULLIFY_SUFFIX: &[u8] = b"_NULLIFY";
-pub const FINALIZE_SUFFIX: &[u8] = b"_FINALIZE";
+const NOTARIZE_SUFFIX: &[u8] = b"_NOTARIZE";
+const NULLIFY_SUFFIX: &[u8] = b"_NULLIFY";
+const FINALIZE_SUFFIX: &[u8] = b"_FINALIZE";
 
-pub fn view_message(view: View) -> Vec<u8> {
+#[inline]
+fn view_message(view: View) -> Vec<u8> {
     View::encode(&view).into()
 }
 
-pub fn notarize_namespace(namespace: &[u8]) -> Vec<u8> {
+#[inline]
+fn notarize_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, NOTARIZE_SUFFIX)
 }
 
-pub fn nullify_namespace(namespace: &[u8]) -> Vec<u8> {
+#[inline]
+fn nullify_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, NULLIFY_SUFFIX)
 }
 
-pub fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
+#[inline]
+fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, FINALIZE_SUFFIX)
 }
 
+#[inline]
 pub fn threshold<P: Array>(validators: &[P]) -> (u32, u32) {
     let len = validators.len() as u32;
     let threshold = quorum(len).expect("not enough validators for a quorum");
@@ -251,12 +256,13 @@ impl<S: Array, D: Digest> Notarize<S, D> {
 
     pub fn verify<P: Array, V: Verifier<PublicKey = P, Signature = S>>(
         &self,
+        namespace: &[u8],
         public_key: &P,
-        notarize_namespace: &[u8],
     ) -> bool {
+        let notarize_namespace = notarize_namespace(namespace);
         let message = self.proposal.encode();
         V::verify(
-            Some(notarize_namespace),
+            Some(notarize_namespace.as_ref()),
             &message,
             public_key,
             &self.signature.signature,
@@ -264,13 +270,14 @@ impl<S: Array, D: Digest> Notarize<S, D> {
     }
 
     pub fn sign<C: Scheme<Signature = S>>(
+        namespace: &[u8],
         scheme: &mut C,
         public_key_index: u32,
         proposal: Proposal<D>,
-        notarize_namespace: &[u8],
     ) -> Self {
+        let notarize_namespace = notarize_namespace(namespace);
         let message = proposal.encode();
-        let signature = scheme.sign(Some(notarize_namespace), &message);
+        let signature = scheme.sign(Some(notarize_namespace.as_ref()), &message);
         Self {
             proposal,
             signature: Signature::new(public_key_index, signature),
@@ -329,8 +336,8 @@ impl<S: Array, D: Digest> Notarization<S, D> {
     // TODO(#755): Use `commonware-cryptography::Specification`
     pub fn verify<P: Array, V: Verifier<PublicKey = P, Signature = S>>(
         &self,
+        namespace: &[u8],
         participants: &[P],
-        notarize_namespace: &[u8],
     ) -> bool {
         // Get allowed signers
         let (threshold, count) = threshold(participants);
@@ -342,6 +349,7 @@ impl<S: Array, D: Digest> Notarization<S, D> {
         }
 
         // Verify signatures
+        let notarize_namespace = notarize_namespace(namespace);
         let mut seen = HashSet::new();
         let message = self.proposal.encode();
         for signature in &self.signatures {
@@ -357,7 +365,7 @@ impl<S: Array, D: Digest> Notarization<S, D> {
 
             // Verify signature
             if !V::verify(
-                Some(notarize_namespace),
+                Some(notarize_namespace.as_ref()),
                 &message,
                 public_key,
                 &signature.signature,
@@ -412,12 +420,13 @@ impl<S: Array> Nullify<S> {
 
     pub fn verify<P: Array, V: Verifier<PublicKey = P, Signature = S>>(
         &self,
+        namespace: &[u8],
         public_key: &P,
-        nullify_namespace: &[u8],
     ) -> bool {
+        let nullify_namespace = nullify_namespace(namespace);
         let message = view_message(self.view);
         V::verify(
-            Some(nullify_namespace),
+            Some(nullify_namespace.as_ref()),
             &message,
             public_key,
             &self.signature.signature,
@@ -425,13 +434,14 @@ impl<S: Array> Nullify<S> {
     }
 
     pub fn sign<C: Scheme<Signature = S>>(
+        namespace: &[u8],
         scheme: &mut C,
         public_key_index: u32,
         view: View,
-        nullify_namespace: &[u8],
     ) -> Self {
+        let nullify_namespace = nullify_namespace(namespace);
         let message = view_message(view);
-        let signature = scheme.sign(Some(nullify_namespace), &message);
+        let signature = scheme.sign(Some(nullify_namespace.as_ref()), &message);
         Self {
             view,
             signature: Signature::new(public_key_index, signature),
@@ -483,8 +493,8 @@ impl<S: Array> Nullification<S> {
 
     pub fn verify<P: Array, V: Verifier<PublicKey = P, Signature = S>>(
         &self,
+        namespace: &[u8],
         participants: &[P],
-        nullify_namespace: &[u8],
     ) -> bool {
         // Get allowed signers
         let (threshold, count) = threshold(participants);
@@ -496,6 +506,7 @@ impl<S: Array> Nullification<S> {
         }
 
         // Verify signatures
+        let nullify_namespace = nullify_namespace(namespace);
         let mut seen = HashSet::new();
         let message = view_message(self.view);
         for signature in &self.signatures {
@@ -511,7 +522,7 @@ impl<S: Array> Nullification<S> {
 
             // Verify signature
             if !V::verify(
-                Some(nullify_namespace),
+                Some(nullify_namespace.as_ref()),
                 &message,
                 public_key,
                 &signature.signature,
@@ -566,12 +577,13 @@ impl<S: Array, D: Digest> Finalize<S, D> {
 
     pub fn verify<P: Array, V: Verifier<PublicKey = P, Signature = S>>(
         &self,
+        namespace: &[u8],
         public_key: &P,
-        finalize_namespace: &[u8],
     ) -> bool {
+        let finalize_namespace = finalize_namespace(namespace);
         let message = self.proposal.encode();
         V::verify(
-            Some(finalize_namespace),
+            Some(finalize_namespace.as_ref()),
             &message,
             public_key,
             &self.signature.signature,
@@ -579,13 +591,14 @@ impl<S: Array, D: Digest> Finalize<S, D> {
     }
 
     pub fn sign<C: Scheme<Signature = S>>(
+        namespace: &[u8],
         scheme: &mut C,
         public_key_index: u32,
         proposal: Proposal<D>,
-        finalize_namespace: &[u8],
     ) -> Self {
+        let finalize_namespace = finalize_namespace(namespace);
         let message = proposal.encode();
-        let signature = scheme.sign(Some(finalize_namespace), &message);
+        let signature = scheme.sign(Some(finalize_namespace.as_ref()), &message);
         Self {
             proposal,
             signature: Signature::new(public_key_index, signature),
@@ -643,8 +656,8 @@ impl<S: Array, D: Digest> Finalization<S, D> {
 
     pub fn verify<P: Array, V: Verifier<PublicKey = P, Signature = S>>(
         &self,
+        namespace: &[u8],
         participants: &[P],
-        finalize_namespace: &[u8],
     ) -> bool {
         // Get allowed signers
         let (threshold, count) = threshold(participants);
@@ -656,6 +669,7 @@ impl<S: Array, D: Digest> Finalization<S, D> {
         }
 
         // Verify signatures
+        let finalize_namespace = finalize_namespace(namespace);
         let mut seen = HashSet::new();
         let message = self.proposal.encode();
         for signature in &self.signatures {
@@ -671,7 +685,7 @@ impl<S: Array, D: Digest> Finalization<S, D> {
 
             // Verify signature
             if !V::verify(
-                Some(finalize_namespace),
+                Some(finalize_namespace.as_ref()),
                 &message,
                 public_key,
                 &signature.signature,
@@ -995,14 +1009,11 @@ impl<S: Array, D: Digest> ConflictingNotarize<S, D> {
 
     pub fn verify<P: Array, V: Verifier<PublicKey = P, Signature = S>>(
         &self,
+        namespace: &[u8],
         public_key: &P,
-        notarize_namespace: &[u8],
     ) -> bool {
-        self.notarize_1
-            .verify::<P, V>(public_key, notarize_namespace)
-            && self
-                .notarize_2
-                .verify::<P, V>(public_key, notarize_namespace)
+        self.notarize_1.verify::<P, V>(namespace, public_key)
+            && self.notarize_2.verify::<P, V>(namespace, public_key)
     }
 }
 
@@ -1068,14 +1079,11 @@ impl<S: Array, D: Digest> ConflictingFinalize<S, D> {
 
     pub fn verify<P: Array, V: Verifier<PublicKey = P, Signature = S>>(
         &self,
+        namespace: &[u8],
         public_key: &P,
-        finalize_namespace: &[u8],
     ) -> bool {
-        self.finalize_1
-            .verify::<P, V>(public_key, finalize_namespace)
-            && self
-                .finalize_2
-                .verify::<P, V>(public_key, finalize_namespace)
+        self.finalize_1.verify::<P, V>(namespace, public_key)
+            && self.finalize_2.verify::<P, V>(namespace, public_key)
     }
 }
 
@@ -1139,12 +1147,11 @@ impl<S: Array, D: Digest> NullifyFinalize<S, D> {
 
     pub fn verify<P: Array, V: Verifier<PublicKey = P, Signature = S>>(
         &self,
+        namespace: &[u8],
         public_key: &P,
-        nullify_namespace: &[u8],
-        finalize_namespace: &[u8],
     ) -> bool {
-        self.nullify.verify::<P, V>(public_key, nullify_namespace)
-            && self.finalize.verify::<P, V>(public_key, finalize_namespace)
+        self.nullify.verify::<P, V>(namespace, public_key)
+            && self.finalize.verify::<P, V>(namespace, public_key)
     }
 }
 
