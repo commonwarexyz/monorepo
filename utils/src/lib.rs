@@ -41,24 +41,21 @@ pub fn from_hex_formatted(hex: &str) -> Option<Vec<u8>> {
 }
 
 /// Compute the maximum number of `f` (faults) that can be tolerated for a given set of `n`
-/// participants. This is the maximum integer `f` such that `n >= 3*f + 1`.
-///
-/// If the value of `n` is too small to tolerate any faults, this function returns `None`.
-pub fn max_faults(n: u32) -> Option<u32> {
-    let f = n.checked_sub(1)? / 3;
-    if f == 0 {
-        return None;
-    }
-    Some(f)
+/// participants. This is the maximum integer `f` such that `n >= 3*f + 1`. `f` may be zero.
+pub fn max_faults(n: u32) -> u32 {
+    n.saturating_sub(1) / 3
 }
 
 /// Compute the quorum size for a given set of `n` participants. This is the minimum integer `q`
-/// such that `3*q >= 2*n + 1`. It is also equal to `n - f`, where `f` is the maximum number of faults.
-///
-/// If the value of `n` is too small to tolerate any faults, this function returns `None`.
-pub fn quorum(n: u32) -> Option<u32> {
-    let f = max_faults(n)?;
-    Some(n.checked_sub(f).unwrap())
+/// such that `3*q >= 2*n + 1`. It is also equal to `n - f`, where `f` is the maximum number of
+/// faults.
+/// 
+/// # Panics
+/// 
+/// Panics if `n` is zero.
+pub fn quorum(n: u32) -> u32 {
+    assert!(n > 0, "n must not be zero");
+    n - max_faults(n)
 }
 
 /// Computes the union of two byte slices.
