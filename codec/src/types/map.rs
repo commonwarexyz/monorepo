@@ -1,4 +1,4 @@
-//! Codec implementations for HashMap.
+//! Codec implementations for various map types.
 //!
 //! For portability and consistency between architectures,
 //! the size of the map must fit within a [`u32`].
@@ -9,9 +9,89 @@ use crate::{
     RangeCfg,
 };
 use bytes::{Buf, BufMut};
-use std::{collections::HashMap, hash::Hash};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, HashMap},
+    hash::Hash,
+};
 
-// Write implementation for HashMap
+// ---------- BTreeMap ----------
+
+impl<K: Ord + Hash + Eq + Write, V: Write> Write for BTreeMap<K, V> {
+    fn write(&self, buf: &mut impl BufMut) {
+        let len = u32::try_from(self.len()).expect("BTreeMap length exceeds u32::MAX");
+        varint::write(len, buf);
+
+        // Keys are already sorted in BTreeMap, so we can iterate directly
+        for (key, value) in self {
+            key.write(buf);
+            value.write(buf);
+        }
+    }
+}
+
+impl<K: Ord + Hash + Eq + EncodeSize, V: EncodeSize> EncodeSize for BTreeMap<K, V> {
+    fn encode_size(&self) -> usize {
+        // Start with the varint size of the length
+        let len = u32::try_from(self.len()).expect("BTreeMap length exceeds u32::MAX");
+        let mut size = varint::size(len);
+
+        // Add the encoded size of each key and value
+        for (key, value) in self {
+            size += key.encode_size();
+            size += value.encode_size();
+        }
+        size
+    }
+}
+
+impl<
+        R: RangeConfig,
+        KCfg: Config,
+        VCfg: Config,
+        K: Read<KCfg> + Clone + Ord + Hash + Eq,
+        V: Read<VCfg> + Clone,
+    > Read<(R, (KCfg, VCfg))> for BTreeMap<K, V>
+{
+    fn read_cfg(
+        buf: &mut impl Buf,
+        (range, (k_cfg, v_cfg)): &(R, (KCfg, VCfg)),
+    ) -> Result<Self, Error> {
+        // Read and validate the length prefix
+        let len32 = varint::read::<u32>(buf)?;
+        let len = usize::try_from(len32).map_err(|_| Error::InvalidVarint)?;
+        if !range.contains(&len) {
+            return Err(Error::InvalidLength(len));
+        }
+        let mut map = BTreeMap::new(); // BTreeMap does not have a capacity method
+
+        // Keep track of the last key read
+        let mut last_key: Option<K> = None;
+
+        // Read each key-value pair
+        for _ in 0..len {
+            let key = K::read_cfg(buf, k_cfg)?;
+
+            // Check if keys are in ascending order relative to the previous key
+            if let Some(ref last) = last_key {
+                match key.cmp(last) {
+                    Ordering::Equal => return Err(Error::Invalid("HashMap", "Duplicate key")),
+                    Ordering::Less => return Err(Error::Invalid("HashMap", "Keys must ascend")),
+                    _ => {}
+                }
+            }
+            last_key = Some(key.clone());
+
+            let value = V::read_cfg(buf, v_cfg)?;
+            map.insert(key, value);
+        }
+
+        Ok(map)
+    }
+}
+
+// ---------- HashMap ----------
+
 impl<K: Ord + Hash + Eq + Write, V: Write> Write for HashMap<K, V> {
     fn write(&self, buf: &mut impl BufMut) {
         self.len().write(buf);
@@ -26,7 +106,6 @@ impl<K: Ord + Hash + Eq + Write, V: Write> Write for HashMap<K, V> {
     }
 }
 
-// EncodeSize implementation for HashMap
 impl<K: Ord + Hash + Eq + EncodeSize, V: EncodeSize> EncodeSize for HashMap<K, V> {
     fn encode_size(&self) -> usize {
         // Start with the size of the length prefix
@@ -60,7 +139,6 @@ impl<K: Read + Clone + Ord + Hash + Eq, V: Read + Clone> Read for HashMap<K, V> 
 
             // Check if keys are in ascending order relative to the previous key
             if let Some(ref last) = last_key {
-                use std::cmp::Ordering;
                 match key.cmp(last) {
                     Ordering::Equal => return Err(Error::Invalid("HashMap", "Duplicate key")),
                     Ordering::Less => return Err(Error::Invalid("HashMap", "Keys must ascend")),
