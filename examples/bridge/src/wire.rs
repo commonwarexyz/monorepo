@@ -6,19 +6,21 @@
 
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
+use commonware_consensus::threshold_simplex::types::Finalization;
 use commonware_cryptography::{bls12381::primitives::group, Digest};
 
 /// Enum representing incoming messages from validators to the indexer.
 ///
 /// Used to interact with the indexer's storage of blocks and finality certificates.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum Inbound<D: Digest> {
     /// Request to store a new block in the indexer's storage.
     PutBlock(PutBlock),
     /// Request to retrieve a block from the indexer's storage.
     GetBlock(GetBlock<D>),
     /// Request to store a finality certificate in the indexer's storage.
-    PutFinalization(PutFinalization),
+    PutFinalization(PutFinalization<D>),
     /// Request to retrieve the latest finality certificate from the indexer's storage.
     GetFinalization(GetFinalization),
 }
@@ -136,40 +138,39 @@ impl<D: Digest> Read for GetBlock<D> {
     }
 }
 
-impl<D: Digest> EncodeSize for GetBlock<D> {
-    fn encode_size(&self) -> usize {
-        group::Public::SIZE + self.digest.encode_size()
-    }
+impl<D: Digest> FixedSize for GetBlock<D> {
+    const SIZE: usize = group::Public::SIZE + D::SIZE;
 }
 
 /// Message to store a finality certificate in the indexer's storage.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PutFinalization {
+pub struct PutFinalization<D: Digest> {
     /// The network identifier for which the finality certificate belongs.
     pub network: group::Public,
-    /// The finality certificate data to be stored.
-    pub data: Bytes,
+    /// The finality certificate
+    pub finalization: Finalization<D>,
 }
 
-impl Write for PutFinalization {
+impl<D: Digest> Write for PutFinalization<D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.network.write(buf);
-        self.data.write(buf);
+        self.finalization.write(buf);
     }
 }
 
-impl Read for PutFinalization {
+impl<D: Digest> Read for PutFinalization<D> {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let network = group::Public::read(buf)?;
-        let data = Bytes::read_cfg(buf, &..)?;
-        Ok(PutFinalization { network, data })
+        let finalization = Finalization::read(buf)?;
+        Ok(PutFinalization {
+            network,
+            finalization,
+        })
     }
 }
 
-impl EncodeSize for PutFinalization {
-    fn encode_size(&self) -> usize {
-        group::Public::SIZE + self.data.encode_size()
-    }
+impl<D: Digest> FixedSize for PutFinalization<D> {
+    const SIZE: usize = group::Public::SIZE + Finalization::<D>::SIZE;
 }
 
 /// Message to retrieve the latest finality certificate from the indexer's storage.
@@ -202,17 +203,18 @@ impl EncodeSize for GetFinalization {
 ///
 /// These responses correspond to the results of the operations requested by `Inbound` messages.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Outbound {
+#[allow(clippy::large_enum_variant)]
+pub enum Outbound<D: Digest> {
     /// Indicates the success or failure of a `Put` operation,
     /// or if a `Get` operation found the requested item.
     Success(bool),
     /// Contains the requested block data in response to a `GetBlock` message.
     Block(Bytes),
     /// Contains the requested finality certificate in response to a `GetFinalization` message.
-    Finalization(Bytes),
+    Finalization(Finalization<D>),
 }
 
-impl Write for Outbound {
+impl<D: Digest> Write for Outbound<D> {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
             Outbound::Success(success) => {
@@ -231,7 +233,7 @@ impl Write for Outbound {
     }
 }
 
-impl Read for Outbound {
+impl<D: Digest> Read for Outbound<D> {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let tag = u8::read(buf)?;
         match tag {
@@ -244,20 +246,20 @@ impl Read for Outbound {
                 Ok(Outbound::Block(data))
             }
             2 => {
-                let data = Bytes::read_cfg(buf, &..)?;
-                Ok(Outbound::Finalization(data))
+                let finalization = Finalization::read(buf)?;
+                Ok(Outbound::Finalization(finalization))
             }
             _ => Err(Error::InvalidEnum(tag)),
         }
     }
 }
 
-impl EncodeSize for Outbound {
+impl<D: Digest> EncodeSize for Outbound<D> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Outbound::Success(success) => success.encode_size(),
             Outbound::Block(data) => data.encode_size(),
-            Outbound::Finalization(data) => data.encode_size(),
+            Outbound::Finalization(finalization) => finalization.encode_size(),
         }
     }
 }
@@ -266,8 +268,9 @@ impl EncodeSize for Outbound {
 mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, Encode};
+    use commonware_consensus::threshold_simplex::types::Proposal;
     use commonware_cryptography::{
-        bls12381::primitives::group::{self, Element},
+        bls12381::primitives::group::{self, Element, G2},
         sha256::Digest as Sha256Digest,
     };
     use rand::thread_rng;
@@ -284,6 +287,23 @@ mod tests {
         let scalar = group::Scalar::rand(&mut thread_rng());
         result.mul(&scalar);
         result
+    }
+
+    fn new_finalization() -> Finalization<Sha256Digest> {
+        let scalar = group::Scalar::rand(&mut thread_rng());
+        let mut proposal_signature = G2::one();
+        proposal_signature.mul(&scalar);
+        let mut seed_signature = G2::one();
+        seed_signature.mul(&scalar);
+        Finalization {
+            proposal: Proposal {
+                view: 12345,
+                parent: 54321,
+                payload: new_digest(),
+            },
+            proposal_signature,
+            seed_signature,
+        }
     }
 
     #[test]
@@ -309,7 +329,7 @@ mod tests {
         // PutFinalization
         let original = Inbound::<Sha256Digest>::PutFinalization(PutFinalization {
             network: new_group_public(),
-            data: new_data(),
+            finalization: new_finalization(),
         });
         let encoded = original.encode();
         let decoded = Inbound::decode(encoded).unwrap();
@@ -327,19 +347,19 @@ mod tests {
     #[test]
     fn test_outbound_codec() {
         // Success
-        let original = Outbound::Success(true);
+        let original = Outbound::<Sha256Digest>::Success(true);
         let encoded = original.encode();
         let decoded = Outbound::decode(encoded).unwrap();
         assert_eq!(original, decoded);
 
         // Block
-        let original = Outbound::Block(new_data());
+        let original = Outbound::<Sha256Digest>::Block(new_data());
         let encoded = original.encode();
         let decoded = Outbound::decode(encoded).unwrap();
         assert_eq!(original, decoded);
 
         // Finalization
-        let original = Outbound::Finalization(new_data());
+        let original = Outbound::<Sha256Digest>::Finalization(new_finalization());
         let encoded = original.encode();
         let decoded = Outbound::decode(encoded).unwrap();
         assert_eq!(original, decoded);

@@ -4,8 +4,7 @@ use super::{
     Config,
 };
 use crate::wire::{self, Inbound, Outbound};
-use bytes::BufMut;
-use commonware_codec::{DecodeExt, Encode, FixedSize};
+use commonware_codec::{DecodeExt, Encode};
 use commonware_consensus::threshold_simplex::types::{Activity, Finalization, Viewable};
 use commonware_cryptography::{
     bls12381::primitives::{group, poly},
@@ -90,8 +89,9 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                                 .receive()
                                 .await
                                 .expect("failed to receive from indexer");
-                            let msg = Outbound::decode(result).expect("failed to decode result");
-                            let proof = match msg {
+                            let msg = Outbound::<H::Digest>::decode(result)
+                                .expect("failed to decode result");
+                            let finalization = match msg {
                                 Outbound::Success(_) => {
                                     debug!("no finalization found");
                                     continue;
@@ -101,18 +101,13 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                             };
 
                             // Verify certificate
-                            let finalization = Finalization::<H::Digest>::decode(proof.as_ref())
-                                .expect("failed to decode finalization");
                             assert!(
                                 finalization.verify(&self.namespace, &self.other_public),
                                 "indexer is corrupt"
                             );
 
                             // Use certificate as message
-                            let mut msg = Vec::with_capacity(u8::SIZE + proof.len());
-                            msg.put_u8(1);
-                            msg.extend(proof);
-                            msg
+                            (1u8, finalization).encode().into()
                         }
                     };
 
@@ -135,7 +130,8 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                         .receive()
                         .await
                         .expect("failed to receive from indexer");
-                    let msg = Outbound::decode(result).expect("failed to decode result");
+                    let msg =
+                        Outbound::<H::Digest>::decode(result).expect("failed to decode result");
                     let Outbound::Success(success) = msg else {
                         panic!("unexpected response");
                     };
@@ -162,7 +158,8 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                         .receive()
                         .await
                         .expect("failed to receive from indexer");
-                    let msg = Outbound::decode(result).expect("failed to decode result");
+                    let msg =
+                        Outbound::<H::Digest>::decode(result).expect("failed to decode result");
                     let block = match msg {
                         Outbound::Success(b) => {
                             if b {
@@ -204,7 +201,7 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                             let msg =
                                 Inbound::PutFinalization::<H::Digest>(wire::PutFinalization {
                                     network: self.public,
-                                    data: finalization.encode().into(),
+                                    finalization,
                                 })
                                 .encode();
                             indexer_sender
@@ -215,8 +212,8 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                                 .receive()
                                 .await
                                 .expect("failed to receive from indexer");
-                            let message =
-                                Outbound::decode(result).expect("failed to decode result");
+                            let message = Outbound::<H::Digest>::decode(result)
+                                .expect("failed to decode result");
                             let Outbound::Success(success) = message else {
                                 panic!("unexpected response");
                             };

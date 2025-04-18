@@ -7,7 +7,7 @@ use commonware_bridge::{
 use commonware_codec::{DecodeExt, Encode};
 use commonware_consensus::threshold_simplex::types::{Finalization, Viewable};
 use commonware_cryptography::{
-    bls12381::primitives::group::{self, Element},
+    bls12381::primitives::group::{self, Element, G1},
     sha256::Digest as Sha256Digest,
     Digest, Ed25519, Hasher, Sha256, Signer,
 };
@@ -28,6 +28,7 @@ use std::{
 };
 use tracing::{debug, info};
 
+#[allow(clippy::large_enum_variant)]
 enum Message<D: Digest> {
     PutBlock {
         incoming: wire::PutBlock,
@@ -38,12 +39,12 @@ enum Message<D: Digest> {
         response: oneshot::Sender<Option<Bytes>>,
     },
     PutFinalization {
-        incoming: wire::PutFinalization,
+        incoming: wire::PutFinalization<D>,
         response: oneshot::Sender<bool>, // wait to delete from validator storage
     },
     GetFinalization {
         incoming: wire::GetFinalization,
-        response: oneshot::Sender<Option<Bytes>>,
+        response: oneshot::Sender<Option<Finalization<D>>>,
     },
 }
 
@@ -108,9 +109,9 @@ fn main() {
     }
 
     // Configure networks
-    let mut namespaces = HashMap::new();
-    let mut blocks = HashMap::new();
-    let mut finalizations = HashMap::new();
+    let mut namespaces: HashMap<G1, (G1, Vec<u8>)> = HashMap::new();
+    let mut blocks: HashMap<G1, HashMap<Sha256Digest, Bytes>> = HashMap::new();
+    let mut finalizations: HashMap<G1, BTreeMap<u64, Finalization<Sha256Digest>>> = HashMap::new();
     let networks = matches
         .get_many::<String>("networks")
         .expect("Please provide networks");
@@ -177,20 +178,14 @@ fn main() {
                             let _ = response.send(false);
                             continue;
                         };
-                        let Ok(finalization) =
-                            Finalization::<Sha256Digest>::decode(incoming.data.as_ref())
-                        else {
-                            let _ = response.send(false);
-                            continue;
-                        };
-                        let view = finalization.view();
-                        if !finalization.verify(namespace, public) {
+                        if !incoming.finalization.verify(namespace, public) {
                             let _ = response.send(false);
                             continue;
                         }
 
                         // Store finalization
-                        network.insert(view, incoming.data);
+                        let view = incoming.finalization.view();
+                        network.insert(view, incoming.finalization);
                         let _ = response.send(true);
                         info!(
                             network = ?incoming.network,
@@ -287,7 +282,7 @@ fn main() {
                                     .await
                                     .expect("failed to send message");
                                 let success = receiver.await.expect("failed to receive response");
-                                let msg = Outbound::Success(success).encode();
+                                let msg = Outbound::<Sha256Digest>::Success(success).encode();
                                 if sender.send(&msg).await.is_err() {
                                     debug!(?peer, "failed to send message");
                                     return;
@@ -304,15 +299,15 @@ fn main() {
                                     .expect("failed to send message");
                                 let response = receiver.await.expect("failed to receive response");
                                 match response {
-                                    Some(data) => {
-                                        let msg = Outbound::Block(data).encode();
+                                    Some(response) => {
+                                        let msg = response.encode();
                                         if sender.send(&msg).await.is_err() {
                                             debug!(?peer, "failed to send message");
                                             return;
                                         }
                                     }
                                     None => {
-                                        let msg = Outbound::Success(false).encode();
+                                        let msg = Outbound::<Sha256Digest>::Success(false).encode();
                                         if sender.send(&msg).await.is_err() {
                                             debug!(?peer, "failed to send message");
                                             return;
@@ -330,7 +325,7 @@ fn main() {
                                     .await
                                     .expect("failed to send message");
                                 let success = receiver.await.expect("failed to receive response");
-                                let msg = Outbound::Success(success).encode();
+                                let msg = Outbound::<Sha256Digest>::Success(success).encode();
                                 if sender.send(&msg).await.is_err() {
                                     debug!(?peer, "failed to send message");
                                     return;
@@ -355,7 +350,7 @@ fn main() {
                                         }
                                     }
                                     None => {
-                                        let msg = Outbound::Success(false).encode();
+                                        let msg = Outbound::<Sha256Digest>::Success(false).encode();
                                         if sender.send(&msg).await.is_err() {
                                             debug!(?peer, "failed to send message");
                                             return;
