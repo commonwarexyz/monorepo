@@ -35,6 +35,9 @@ pub enum Error {
     /// The parent was provided for a genesis chunk (height 0)
     #[error("Parent on genesis chunk")]
     ParentOnGenesis,
+    /// Verification failed because no public key was provided
+    #[error("Public key required")]
+    PublicKeyRequired,
 
     // Application Verification Errors
     /// The verification was canceled by the application
@@ -368,7 +371,10 @@ impl<C: Verifier, D: Digest> Node<C, D> {
 
         // Verify parent (if present)
         let Some(public) = public else {
-            unreachable!("public should always be present when parent is present");
+            // We would otherwise require the public key to always be present,
+            // however, it is not clear what the caller should provide when there is
+            // no parent (e.g. genesis chunk).
+            return Err(Error::PublicKeyRequired);
         };
         let parent_chunk = Chunk::new(
             self.chunk.sequencer.clone(),
