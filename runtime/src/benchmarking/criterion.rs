@@ -76,17 +76,11 @@ pub mod tokio {
 
     impl AsyncExecutor for Executor {
         fn block_on<T>(&self, future: impl Future<Output = T>) -> T {
-            // Create a tokio runtime directly that supports non-Send futures
-            let runtime = ::tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("Failed to build tokio runtime");
-
             // Create and store our context
             let (executor, context) = crate::tokio::Executor::default();
             set_context(context);
 
-            // Run the future using tokio's runtime
+            // Run the future
             let result = executor.start(future);
 
             // Clean up
@@ -141,12 +135,11 @@ pub mod deterministic {
         fn block_on<T>(&self, future: impl Future<Output = T>) -> T {
             // Create and store our context
             let seed = self.0;
-            let (_, context, _) = crate::deterministic::Executor::seeded(seed);
+            let (executor, context, _) = crate::deterministic::Executor::seeded(seed);
             set_context(context);
 
-            // Run the future using the futures crate's executor
-            // which doesn't require futures to be Send
-            let result = futures::executor::block_on(future);
+            // Run the future
+            let result = executor.start(future);
 
             // Clean up
             clear_contexts();
