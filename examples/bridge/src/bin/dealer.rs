@@ -1,9 +1,7 @@
 use clap::{value_parser, Arg, Command};
+use commonware_codec::Encode;
 use commonware_cryptography::{
-    bls12381::{
-        dkg::ops,
-        primitives::{group::Element, poly},
-    },
+    bls12381::{dkg::ops, primitives::poly},
     Ed25519, Signer,
 };
 use commonware_utils::{hex, quorum};
@@ -52,16 +50,10 @@ fn main() {
     let (public, shares) = ops::generate_shares(&mut rng, None, n, t);
 
     // Log secret
-    println!("polynomial: {}", hex(&public.serialize()));
-    let public = poly::public(&public);
-    println!("public: {}", hex(&public.serialize()));
+    println!("polynomial: {}", hex(&public.encode()));
+    println!("public: {}", poly::public(&public));
     for share in shares {
         let validator = validators[share.index as usize].0;
-        println!(
-            "share (index={} validator={}): {}",
-            share.index,
-            validator,
-            hex(&share.serialize())
-        );
+        println!("validator={}: {}", validator, share,);
     }
 }

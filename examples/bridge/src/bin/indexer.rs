@@ -10,7 +10,7 @@ use commonware_bridge::{
 use commonware_codec::{DecodeExt, Encode};
 use commonware_consensus::threshold_simplex::types::{Finalization, Viewable};
 use commonware_cryptography::{
-    bls12381::primitives::group::{self, Element, G1},
+    bls12381::primitives::group::{self, G1},
     sha256::Digest as Sha256Digest,
     Digest, Ed25519, Hasher, Sha256, Signer,
 };
@@ -123,7 +123,7 @@ fn main() {
     }
     for network in networks {
         let network = from_hex(network).expect("Network not well-formed");
-        let public = group::Public::deserialize(&network).expect("Network not well-formed");
+        let public = group::Public::decode(network.as_ref()).expect("Network not well-formed");
         let namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
         namespaces.insert(public, (public, namespace));
         blocks.insert(public, HashMap::new());
