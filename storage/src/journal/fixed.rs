@@ -48,16 +48,17 @@
 //! The `replay` method iterates over multiple blobs concurrently to support fast reading of all
 //! unpruned items into memory.
 
-use super::Error;
+use std::{collections::BTreeMap, marker::PhantomData};
+
 use bytes::BufMut;
-use commonware_codec::FixedSize;
+use commonware_codec::{FixedSize, ReadExt};
 use commonware_runtime::{Blob, Error as RError, Metrics, Storage};
 use commonware_utils::{hex, Array};
 use futures::stream::{self, Stream, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
-use std::collections::BTreeMap;
-use std::marker::PhantomData;
 use tracing::{debug, trace, warn};
+
+use super::Error;
 
 /// Configuration for `Journal` storage.
 #[derive(Clone)]
@@ -322,7 +323,7 @@ impl<E: Storage + Metrics, A: Array> Journal<E, A> {
         if checksum != stored_checksum {
             return Err(Error::ChecksumMismatch(stored_checksum, checksum));
         }
-        Ok(buf[..A::SIZE].try_into().unwrap())
+        Ok(A::read(&mut &buf[..A::SIZE]).unwrap())
     }
 
     /// Returns an unordered stream of all items in the journal.
@@ -452,11 +453,12 @@ impl<E: Storage + Metrics, A: Array> Journal<E, A> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use commonware_cryptography::{hash, sha256::Digest};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic::Executor, Blob, Runner, Storage};
     use futures::{pin_mut, StreamExt};
+
+    use super::*;
 
     /// Generate a SHA-256 digest for the given value.
     fn test_digest(value: u64) -> Digest {

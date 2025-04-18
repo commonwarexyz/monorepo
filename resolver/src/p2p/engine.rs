@@ -1,11 +1,5 @@
-use super::{
-    config::Config,
-    fetcher::Fetcher,
-    ingress::{Mailbox, Message},
-    metrics,
-};
-use super::{wire, Coordinator, Producer};
-use crate::Consumer;
+use std::{collections::HashMap, marker::PhantomData};
+
 use bytes::Bytes;
 use commonware_codec::{DecodeExt, Encode};
 use commonware_macros::select;
@@ -15,7 +9,10 @@ use commonware_runtime::{
         histogram,
         status::{CounterExt, Status},
     },
-    Clock, Handle, Metrics, Spawner,
+    Clock,
+    Handle,
+    Metrics,
+    Spawner,
 };
 use commonware_utils::{futures::Pool as FuturesPool, Array};
 use futures::{
@@ -25,8 +22,18 @@ use futures::{
 };
 use governor::clock::Clock as GClock;
 use rand::Rng;
-use std::{collections::HashMap, marker::PhantomData};
 use tracing::{debug, error, trace, warn};
+
+use super::{
+    config::Config,
+    fetcher::Fetcher,
+    ingress::{Mailbox, Message},
+    metrics,
+    wire,
+    Coordinator,
+    Producer,
+};
+use crate::Consumer;
 
 /// Represents a pending serve operation.
 struct Serve<E: Clock, P: Array> {

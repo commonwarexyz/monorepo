@@ -1,7 +1,9 @@
-use crate::handlers::{
-    utils::{payload, public_hex, ACK_NAMESPACE},
-    wire,
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
 };
+
+use commonware_codec::ReadExt;
 use commonware_cryptography::{
     bls12381::{
         dkg,
@@ -17,11 +19,12 @@ use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};
 use commonware_utils::hex;
 use prost::Message;
-use std::{
-    collections::{HashMap, HashSet},
-    time::Duration,
-};
 use tracing::{debug, info, warn};
+
+use crate::handlers::{
+    utils::{payload, public_hex, ACK_NAMESPACE},
+    wire,
+};
 
 pub struct Arbiter<E: Clock + Spawner, C: Scheme> {
     context: E,
@@ -142,7 +145,7 @@ impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
                                     break;
                                 };
                                 let payload = payload(round, &sender, &msg.commitment);
-                                let Ok(sig) = C::Signature::try_from(&ack.signature) else {
+                                let Ok(sig) = C::Signature::read(&mut ack.signature.as_ref()) else {
                                     disqualify = true;
                                     break;
                                 };

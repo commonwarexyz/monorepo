@@ -1,13 +1,17 @@
-use crate::{Array, BatchScheme, Error, Signer, Specification, Verifier};
+use std::{
+    borrow::Cow,
+    fmt::{Debug, Display},
+    hash::{Hash, Hasher},
+    ops::Deref,
+};
+
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, Write};
 use commonware_utils::{hex, union_unique};
 use ed25519_consensus::{self, VerificationKey};
 use rand::{CryptoRng, Rng, RngCore};
-use std::borrow::Cow;
-use std::fmt::{Debug, Display};
-use std::hash::{Hash, Hasher};
-use std::ops::Deref;
+
+use crate::{Array, BatchScheme, Error, Signer, Specification, Verifier};
 
 const CURVE_NAME: &str = "ed25519";
 const PRIVATE_KEY_LENGTH: usize = 32;
@@ -135,7 +139,22 @@ impl Write for PrivateKey {
 
 impl Read for PrivateKey {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
+        let len = Self::SIZE;
+        if buf.remaining() < len {
+            return Err(CodecError::EndOfBuffer);
+        }
+
+        let chunk = buf.chunk();
+        if chunk.len() >= len {
+            let array = Self::try_from(&chunk[..len])
+                .map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
+            buf.advance(len);
+            return Ok(array);
+        }
+
+        let mut temp = vec![0u8; len];
+        buf.copy_to_slice(&mut temp);
+        Self::try_from(temp).map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))
     }
 }
 
@@ -143,9 +162,7 @@ impl FixedSize for PrivateKey {
     const SIZE: usize = PRIVATE_KEY_LENGTH;
 }
 
-impl Array for PrivateKey {
-    type Error = Error;
-}
+impl Array for PrivateKey {}
 
 impl Eq for PrivateKey {}
 
@@ -245,7 +262,22 @@ impl Write for PublicKey {
 
 impl Read for PublicKey {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
+        let len = Self::SIZE;
+        if buf.remaining() < len {
+            return Err(CodecError::EndOfBuffer);
+        }
+
+        let chunk = buf.chunk();
+        if chunk.len() >= len {
+            let array = Self::try_from(&chunk[..len])
+                .map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
+            buf.advance(len);
+            return Ok(array);
+        }
+
+        let mut temp = vec![0u8; len];
+        buf.copy_to_slice(&mut temp);
+        Self::try_from(temp).map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))
     }
 }
 
@@ -253,9 +285,7 @@ impl FixedSize for PublicKey {
     const SIZE: usize = PUBLIC_KEY_LENGTH;
 }
 
-impl Array for PublicKey {
-    type Error = Error;
-}
+impl Array for PublicKey {}
 
 impl AsRef<[u8]> for PublicKey {
     fn as_ref(&self) -> &[u8] {
@@ -329,7 +359,22 @@ impl Write for Signature {
 
 impl Read for Signature {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
+        let len = Self::SIZE;
+        if buf.remaining() < len {
+            return Err(CodecError::EndOfBuffer);
+        }
+
+        let chunk = buf.chunk();
+        if chunk.len() >= len {
+            let array = Self::try_from(&chunk[..len])
+                .map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
+            buf.advance(len);
+            return Ok(array);
+        }
+
+        let mut temp = vec![0u8; len];
+        buf.copy_to_slice(&mut temp);
+        Self::try_from(temp).map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))
     }
 }
 
@@ -337,9 +382,7 @@ impl FixedSize for Signature {
     const SIZE: usize = SIGNATURE_LENGTH;
 }
 
-impl Array for Signature {
-    type Error = Error;
-}
+impl Array for Signature {}
 
 impl Hash for Signature {
     fn hash<H: Hasher>(&self, state: &mut H) {
@@ -422,9 +465,10 @@ impl Display for Signature {
 /// Test vectors sourced from https://datatracker.ietf.org/doc/html/rfc8032#section-7.1.
 #[cfg(test)]
 mod tests {
-    use super::*;
     use commonware_codec::{DecodeExt, Encode};
     use rand::rngs::OsRng;
+
+    use super::*;
 
     fn test_sign_and_verify(
         private_key: PrivateKey,

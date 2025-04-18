@@ -1,6 +1,8 @@
-use super::parsed;
-use commonware_cryptography::{Digest, Scheme};
 use std::collections::{hash_map::Entry, HashMap};
+
+use commonware_cryptography::{Digest, Scheme};
+
+use super::parsed;
 
 /// Manages the highest-height chunk for each sequencer.
 #[derive(Default, Debug)]
@@ -55,20 +57,21 @@ impl<C: Scheme, D: Digest> TipManager<C, D> {
 
 #[cfg(test)]
 mod tests {
-    use super::{super::parsed, *};
     use bytes::Bytes;
-    use commonware_codec::FixedSize;
+    use commonware_codec::{FixedSize, ReadExt};
     use commonware_cryptography::{
         ed25519::{self, Ed25519, PublicKey, Signature},
         sha256::{self, Digest},
     };
-    use commonware_utils::Array;
     use rand::SeedableRng;
+
+    use super::{super::parsed, *};
 
     /// Helper functions for TipManager tests.
     mod helpers {
-        use super::*;
         use commonware_cryptography::Signer;
+
+        use super::*;
 
         /// Creates a dummy link for testing.
         pub fn create_dummy_node(
@@ -78,7 +81,7 @@ mod tests {
         ) -> parsed::Node<Ed25519, Digest> {
             let signature = {
                 let mut data = Bytes::from(vec![3u8; Signature::SIZE]);
-                Signature::read_from(&mut data).unwrap()
+                Signature::read(&mut data).unwrap()
             };
             parsed::Node::<Ed25519, Digest> {
                 chunk: parsed::Chunk {

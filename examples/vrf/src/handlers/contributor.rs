@@ -1,7 +1,6 @@
-use crate::handlers::{
-    utils::{payload, public_hex, ACK_NAMESPACE},
-    wire,
-};
+use std::{collections::HashMap, time::Duration};
+
+use commonware_codec::ReadExt;
 use commonware_cryptography::{
     bls12381::{
         dkg::{player::Output, Dealer, Player},
@@ -16,8 +15,12 @@ use commonware_utils::quorum;
 use futures::{channel::mpsc, SinkExt};
 use prost::Message;
 use rand::Rng;
-use std::{collections::HashMap, time::Duration};
 use tracing::{debug, info, warn};
+
+use crate::handlers::{
+    utils::{payload, public_hex, ACK_NAMESPACE},
+    wire,
+};
 
 /// A DKG/Resharing contributor that can be configured to behave honestly
 /// or deviate as a rogue, lazy, or forger.
@@ -305,7 +308,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
 
                                         // Verify signature on incoming ack
                                         let payload = payload(round, &me, commitment);
-                                        let Ok(signature) = C::Signature::try_from(&msg.signature) else {
+                                        let Ok(signature) = C::Signature::read(&mut msg.signature.as_ref()) else {
                                             warn!(round, sender = ?s, "received invalid ack signature");
                                             continue;
                                         };

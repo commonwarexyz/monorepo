@@ -2,19 +2,21 @@
 //!
 //! The proofs contain threshold signatures of validators that have seen and validated a chunk.
 
-use super::{namespace, parsed, serializer, Context, Epoch};
-use crate::Proof;
+use std::marker::PhantomData;
+
 use bytes::{Buf, BufMut};
-use commonware_codec::FixedSize;
+use commonware_codec::{FixedSize, ReadExt};
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{self, Element},
         ops,
     },
-    Digest, Scheme,
+    Digest,
+    Scheme,
 };
-use commonware_utils::Array;
-use std::marker::PhantomData;
+
+use super::{namespace, parsed, serializer, Context, Epoch};
+use crate::Proof;
 
 /// Encode and decode proofs of broadcast.
 ///
@@ -77,9 +79,9 @@ impl<C: Scheme, D: Digest> Prover<C, D> {
         }
 
         // Decode proof
-        let sequencer = C::PublicKey::read_from(&mut proof).ok()?;
+        let sequencer = C::PublicKey::read(&mut proof).ok()?;
         let height = proof.get_u64();
-        let Ok(payload) = D::read_from(&mut proof) else {
+        let Ok(payload) = D::read(&mut proof) else {
             return None;
         };
         let epoch = proof.get_u64();

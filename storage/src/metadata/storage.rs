@@ -1,14 +1,16 @@
-use super::{Config, Error};
-use bytes::{BufMut, Bytes};
-use commonware_codec::FixedSize;
-use commonware_runtime::{Blob, Clock, Metrics, Storage};
-use commonware_utils::{Array, SystemTimeExt as _};
-use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::{
     collections::BTreeMap,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+use bytes::{BufMut, Bytes};
+use commonware_codec::{FixedSize, ReadExt};
+use commonware_runtime::{Blob, Clock, Metrics, Storage};
+use commonware_utils::{Array, SystemTimeExt as _};
+use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use tracing::{trace, warn};
+
+use super::{Config, Error};
 
 const BLOB_NAMES: [&[u8]; 2] = [b"left", b"right"];
 const SECONDS_IN_NANOSECONDS: u128 = 1_000_000_000;
@@ -137,7 +139,7 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         while cursor < checksum_index {
             // Read key
             let next_cursor = cursor + K::SIZE;
-            let key = K::read_from(&mut buf[cursor..next_cursor].as_ref()).unwrap();
+            let key = K::read(&mut buf[cursor..next_cursor].as_ref()).unwrap();
             cursor = next_cursor;
 
             // Read value length

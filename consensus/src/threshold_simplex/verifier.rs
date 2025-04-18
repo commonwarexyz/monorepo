@@ -1,8 +1,4 @@
-use super::{
-    encoder::{nullify_message, proposal_message, seed_message},
-    wire, View,
-};
-use crate::ThresholdSupervisor;
+use commonware_codec::ReadExt;
 use commonware_cryptography::bls12381::primitives::{
     group::{self, Element},
     ops::{aggregate_signatures, aggregate_verify_multiple_messages},
@@ -10,6 +6,13 @@ use commonware_cryptography::bls12381::primitives::{
 };
 use commonware_utils::Array;
 use tracing::debug;
+
+use super::{
+    encoder::{nullify_message, proposal_message, seed_message},
+    wire,
+    View,
+};
+use crate::ThresholdSupervisor;
 
 pub fn verify_notarization<
     D: Array,
@@ -30,7 +33,7 @@ pub fn verify_notarization<
     };
 
     // Ensure payload is well-formed
-    let Ok(payload) = D::try_from(&proposal.payload) else {
+    let Ok(payload) = D::read(&mut proposal.payload.as_ref()) else {
         debug!(reason = "invalid payload", "dropping notarization");
         return false;
     };
@@ -163,7 +166,7 @@ pub fn verify_finalization<
     };
 
     // Ensure payload is well-formed
-    let Ok(payload) = D::try_from(&proposal.payload) else {
+    let Ok(payload) = D::read(&mut proposal.payload.as_ref()) else {
         debug!(reason = "invalid payload", "dropping finalization");
         return false;
     };

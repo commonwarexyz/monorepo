@@ -4,23 +4,28 @@
 //! used to preserve digests required for root and proof generation that would have otherwise been
 //! pruned.
 
-use crate::journal::{
-    fixed::{Config as JConfig, Journal},
-    Error as JError,
-};
-use crate::metadata::{Config as MConfig, Metadata};
-use crate::mmr::{
-    iterator::PeakIterator,
-    mem::Mmr as MemMmr,
-    verification::{Proof, Storage},
-    Error,
-};
+use std::collections::HashMap;
+
 use bytes::Bytes;
+use commonware_codec::ReadExt;
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::array::prefixed_u64::U64;
-use std::collections::HashMap;
 use tracing::{debug, error, warn};
+
+use crate::{
+    journal::{
+        fixed::{Config as JConfig, Journal},
+        Error as JError,
+    },
+    metadata::{Config as MConfig, Metadata},
+    mmr::{
+        iterator::PeakIterator,
+        mem::Mmr as MemMmr,
+        verification::{Proof, Storage},
+        Error,
+    },
+};
 
 /// Configuration for a journal-backed MMR.
 #[derive(Clone)]
@@ -212,7 +217,7 @@ impl<E: RStorage + Clock + Metrics, H: Hasher> Mmr<E, H> {
     ) -> Result<H::Digest, Error> {
         if let Some(bytes) = metadata.get(&U64::new(0, pos)) {
             debug!(pos, "read node from metadata");
-            let digest = H::Digest::try_from(bytes.as_ref());
+            let digest = H::Digest::read(&mut bytes.as_ref());
             let Ok(digest) = digest else {
                 error!(
                     pos,
@@ -472,12 +477,13 @@ impl<E: RStorage + Clock + Metrics, H: Hasher> Mmr<E, H> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::mmr::{iterator::leaf_num_to_pos, mem::tests::ROOTS};
     use commonware_cryptography::{hash, sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic::Executor, Blob as _, Runner};
     use commonware_utils::hex;
+
+    use super::*;
+    use crate::mmr::{iterator::leaf_num_to_pos, mem::tests::ROOTS};
 
     fn test_digest(v: usize) -> Digest {
         hash(&v.to_be_bytes())

@@ -1,33 +1,41 @@
 //! Implementation of a simulated p2p network.
 
-use super::{
-    ingress::{self, Oracle},
-    metrics, Error,
-};
-use crate::{Channel, Message, Recipients};
-use bytes::Bytes;
-use commonware_codec::FixedSize;
-use commonware_macros::select;
-use commonware_runtime::{
-    deterministic::{Listener, Sink, Stream},
-    Clock, Handle, Listener as _, Metrics, Network as RNetwork, Spawner,
-};
-use commonware_stream::utils::codec::{recv_frame, send_frame};
-use commonware_utils::Array;
-use futures::{
-    channel::{mpsc, oneshot},
-    SinkExt, StreamExt,
-};
-use prometheus_client::metrics::{counter::Counter, family::Family};
-use rand::Rng;
-use rand_distr::{Distribution, Normal};
 use std::{
     collections::{BTreeMap, HashMap},
     net::{IpAddr, Ipv4Addr, SocketAddr},
     time::Duration,
 };
+
+use bytes::Bytes;
+use commonware_codec::{FixedSize, ReadExt};
+use commonware_macros::select;
+use commonware_runtime::{
+    deterministic::{Listener, Sink, Stream},
+    Clock,
+    Handle,
+    Listener as _,
+    Metrics,
+    Network as RNetwork,
+    Spawner,
+};
+use commonware_stream::utils::codec::{recv_frame, send_frame};
+use commonware_utils::Array;
+use futures::{
+    channel::{mpsc, oneshot},
+    SinkExt,
+    StreamExt,
+};
+use prometheus_client::metrics::{counter::Counter, family::Family};
+use rand::Rng;
+use rand_distr::{Distribution, Normal};
 use tracing::{error, trace};
 
+use super::{
+    ingress::{self, Oracle},
+    metrics,
+    Error,
+};
+use crate::{Channel, Message, Recipients};
 /// Task type representing a message to be sent within the network.
 type Task<P> = (Channel, P, Recipients<P>, Bytes, oneshot::Sender<Vec<P>>);
 
@@ -584,7 +592,7 @@ impl<P: Array> Peer<P> {
                                     return;
                                 }
                             };
-                            let Ok(dialer) = P::try_from(dialer.as_ref()) else {
+                            let Ok(dialer) = P::read(&mut dialer.as_ref()) else {
                                 error!("received public key is invalid");
                                 return;
                             };
@@ -693,12 +701,13 @@ impl Link {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use commonware_cryptography::{Ed25519, Signer, Specification};
     use commonware_runtime::{
         deterministic::{Context, Executor},
         Runner,
     };
+
+    use super::*;
 
     const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 

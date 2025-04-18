@@ -20,16 +20,18 @@
 //! println!("digest: {:?}", digest);
 //! ```
 
-use crate::{Array, Error, Hasher};
+use std::{
+    fmt::{Debug, Display},
+    ops::Deref,
+};
+
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, Write};
 use commonware_utils::hex;
 use rand::{CryptoRng, Rng};
 use sha2::{Digest as _, Sha256 as ISha256};
-use std::{
-    fmt::{Debug, Display},
-    ops::Deref,
-};
+
+use crate::{Array, Error, Hasher};
 
 const DIGEST_LENGTH: usize = 32;
 
@@ -101,7 +103,22 @@ impl Write for Digest {
 
 impl Read for Digest {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        Self::read_from(buf).map_err(|err| CodecError::Wrapped("Digest", err.into()))
+        let len = Self::SIZE;
+        if buf.remaining() < len {
+            return Err(CodecError::EndOfBuffer);
+        }
+
+        let chunk = buf.chunk();
+        if chunk.len() >= len {
+            let array = Self::try_from(&chunk[..len])
+                .map_err(|e| CodecError::Wrapped("Digest", e.into()))?;
+            buf.advance(len);
+            return Ok(array);
+        }
+
+        let mut temp = vec![0u8; len];
+        buf.copy_to_slice(&mut temp);
+        Self::try_from(temp).map_err(|e| CodecError::Wrapped("Digest", e.into()))
     }
 }
 
@@ -109,9 +126,7 @@ impl FixedSize for Digest {
     const SIZE: usize = DIGEST_LENGTH;
 }
 
-impl Array for Digest {
-    type Error = Error;
-}
+impl Array for Digest {}
 
 impl From<[u8; DIGEST_LENGTH]> for Digest {
     fn from(value: [u8; DIGEST_LENGTH]) -> Self {
@@ -184,9 +199,10 @@ impl crate::Digest for Digest {}
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use commonware_codec::{DecodeExt, Encode};
     use commonware_utils::hex;
+
+    use super::*;
 
     const HELLO_DIGEST: &str = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
 

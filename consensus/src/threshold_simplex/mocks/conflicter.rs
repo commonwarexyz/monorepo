@@ -1,15 +1,9 @@
 //! Byzantine participant that sends conflicting notarize/finalize messages.
 
-use crate::{
-    threshold_simplex::{
-        encoder::{
-            finalize_namespace, notarize_namespace, proposal_message, seed_message, seed_namespace,
-        },
-        wire, View,
-    },
-    ThresholdSupervisor,
-};
+use std::marker::PhantomData;
+
 use bytes::Bytes;
+use commonware_codec::ReadExt;
 use commonware_cryptography::{
     bls12381::primitives::{group, ops},
     Hasher,
@@ -18,8 +12,22 @@ use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};
 use prost::Message;
 use rand::{CryptoRng, Rng};
-use std::marker::PhantomData;
 use tracing::debug;
+
+use crate::{
+    threshold_simplex::{
+        encoder::{
+            finalize_namespace,
+            notarize_namespace,
+            proposal_message,
+            seed_message,
+            seed_namespace,
+        },
+        wire,
+        View,
+    },
+    ThresholdSupervisor,
+};
 
 pub struct Config<
     S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
@@ -94,7 +102,7 @@ impl<
                             continue;
                         }
                     };
-                    let Ok(payload) = H::Digest::try_from(&proposal.payload) else {
+                    let Ok(payload) = H::Digest::read(&mut proposal.payload.as_ref()) else {
                         debug!(sender = ?s, "invalid payload");
                         continue;
                     };
@@ -155,7 +163,7 @@ impl<
                             continue;
                         }
                     };
-                    let Ok(payload) = H::Digest::try_from(&proposal.payload) else {
+                    let Ok(payload) = H::Digest::read(&mut proposal.payload.as_ref()) else {
                         debug!(sender = ?s, "invalid payload");
                         continue;
                     };

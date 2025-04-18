@@ -1,19 +1,20 @@
 //! Defines the inclusion `Proof` structure, functions for generating them from any MMR implementing
 //! the `Storage` trait, and functions for verifying them against a root hash.
 
+use std::future::Future;
+
+use bytes::{Buf, BufMut};
+use commonware_codec::{FixedSize, ReadExt};
+use commonware_cryptography::{Digest, Hasher as CHasher};
+use futures::future::try_join_all;
+use tracing::debug;
+
 use crate::mmr::{
     hasher::Hasher,
     iterator::{PathIterator, PeakIterator},
     Error,
     Error::*,
 };
-use bytes::{Buf, BufMut};
-use commonware_codec::FixedSize;
-use commonware_cryptography::{Digest, Hasher as CHasher};
-use commonware_utils::Array;
-use futures::future::try_join_all;
-use std::future::Future;
-use tracing::debug;
 
 /// Contains the information necessary for proving the inclusion of an element, or some range of elements, in the MMR
 /// from its root hash.
@@ -191,7 +192,7 @@ impl<H: CHasher> Proof<H> {
         }
         let mut hashes = Vec::with_capacity(hashes_len);
         for _ in 0..hashes_len {
-            let digest = H::Digest::read_from(&mut buf).ok()?;
+            let digest = H::Digest::read(&mut buf).ok()?;
             hashes.push(digest);
         }
         Some(Self { size, hashes })
@@ -405,10 +406,11 @@ fn peak_hash_from_range<'a, H: CHasher>(
 
 #[cfg(test)]
 mod tests {
-    use super::Proof;
-    use crate::mmr::mem::Mmr;
     use commonware_cryptography::{hash, sha256::Digest, Sha256};
     use commonware_runtime::{deterministic::Executor, Runner};
+
+    use super::Proof;
+    use crate::mmr::mem::Mmr;
 
     fn test_digest(v: u8) -> Digest {
         hash(&[v])

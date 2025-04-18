@@ -3,26 +3,27 @@
 //! The `Operation` enum implements the `Array` trait, allowing for a persistent log of operations
 //! based on a `crate::Journal`.
 
-use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedSize, Read, Write};
-use commonware_utils::Array;
 use std::{
     cmp::{Ord, PartialOrd},
     fmt::{Debug, Display},
     hash::Hash,
     ops::Deref,
 };
+
+use bytes::{Buf, BufMut};
+use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_utils::Array;
 use thiserror::Error;
 
 /// Errors returned by `Operation` functions.
 #[derive(Error, Debug)]
-pub enum Error<K: Array, V: Array> {
+pub enum Error {
     #[error("invalid length")]
     InvalidLength,
     #[error("invalid key: {0}")]
-    InvalidKey(<K as Array>::Error),
+    InvalidKey(CodecError),
     #[error("invalid value: {0}")]
-    InvalidValue(<V as Array>::Error),
+    InvalidValue(CodecError),
     #[error("invalid context byte")]
     InvalidContextByte,
     #[error("delete operation has non-zero value")]
@@ -116,15 +117,15 @@ impl<K: Array, V: Array> Operation<K, V> {
     }
 
     pub fn to_key(&self) -> K {
-        K::try_from(&self.data[1..K::SIZE + 1]).unwrap()
+        K::read(&mut &self.data[1..K::SIZE + 1]).unwrap()
     }
 
     pub fn to_type(&self) -> Type<K, V> {
-        let key = K::try_from(&self.data[1..K::SIZE + 1]).unwrap();
+        let key = K::read(&mut &self.data[1..K::SIZE + 1]).unwrap();
         match self.data[0] {
             Self::DELETE_CONTEXT => Type::Deleted(key),
             Self::UPDATE_CONTEXT => {
-                let value = V::try_from(&self.data[K::SIZE + 1..]).unwrap();
+                let value = V::read(&mut &self.data[K::SIZE + 1..]).unwrap();
                 Type::Update(key, value)
             }
             Self::COMMIT_CONTEXT => {
@@ -138,7 +139,7 @@ impl<K: Array, V: Array> Operation<K, V> {
     pub fn to_value(&self) -> Option<V> {
         match self.data[0] {
             Self::DELETE_CONTEXT => None,
-            Self::UPDATE_CONTEXT => Some(V::try_from(&self.data[K::SIZE + 1..]).unwrap()),
+            Self::UPDATE_CONTEXT => Some(V::read(&mut &self.data[K::SIZE + 1..]).unwrap()),
             Self::COMMIT_CONTEXT => None,
             _ => unreachable!(),
         }
@@ -156,7 +157,7 @@ impl<K: Array, V: Array> Read for Operation<K, V> {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let mut value = vec![0u8; Self::SIZE];
         buf.copy_to_slice(&mut value);
-        Self::try_from(&value).map_err(|e: Error<K, V>| CodecError::Wrapped("Operation", e.into()))
+        Self::try_from(&value).map_err(|e| CodecError::Wrapped("Operation", e.into()))
     }
 }
 
@@ -164,23 +165,21 @@ impl<K: Array, V: Array> FixedSize for Operation<K, V> {
     const SIZE: usize = K::SIZE + 1 + V::SIZE;
 }
 
-impl<K: Array, V: Array> Array for Operation<K, V> {
-    type Error = Error<K, V>;
-}
+impl<K: Array, V: Array> Array for Operation<K, V> {}
 
 impl<K: Array, V: Array> TryFrom<&[u8]> for Operation<K, V> {
-    type Error = Error<K, V>;
+    type Error = Error;
 
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
         if value.len() != Self::SIZE {
             return Err(Error::InvalidLength);
         }
 
-        let _ = K::try_from(&value[1..K::SIZE + 1]).map_err(|e| Error::InvalidKey(e))?;
+        let _ = K::read(&mut &value[1..K::SIZE + 1]).map_err(Error::InvalidKey)?;
 
         match value[0] {
             Self::UPDATE_CONTEXT => {
-                let _ = V::try_from(&value[K::SIZE + 1..]).map_err(|e| Error::InvalidValue(e))?;
+                let _ = V::read(&mut &value[K::SIZE + 1..]).map_err(Error::InvalidValue)?;
             }
             Self::DELETE_CONTEXT => {
                 // Check if the remaining bytes are all zeros
@@ -207,7 +206,7 @@ impl<K: Array, V: Array> TryFrom<&[u8]> for Operation<K, V> {
 }
 
 impl<K: Array, V: Array> TryFrom<&Vec<u8>> for Operation<K, V> {
-    type Error = Error<K, V>;
+    type Error = Error;
 
     fn try_from(value: &Vec<u8>) -> Result<Self, Self::Error> {
         Self::try_from(value.as_slice())
@@ -215,7 +214,7 @@ impl<K: Array, V: Array> TryFrom<&Vec<u8>> for Operation<K, V> {
 }
 
 impl<K: Array, V: Array> TryFrom<Vec<u8>> for Operation<K, V> {
-    type Error = Error<K, V>;
+    type Error = Error;
 
     fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
         Self::try_from(value.as_slice())
@@ -247,9 +246,10 @@ impl<K: Array, V: Array> Display for Operation<K, V> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use commonware_codec::{DecodeExt, Encode};
     use commonware_utils::array::U64;
+
+    use super::*;
 
     #[test]
     fn test_operation_array_basic() {

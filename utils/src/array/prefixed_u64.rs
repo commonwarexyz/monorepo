@@ -1,15 +1,17 @@
 //! A `u64` array type with a prefix byte to allow for multiple key contexts.
 
-use crate::Array;
-use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use std::{
     cmp::{Ord, PartialOrd},
     fmt::{Debug, Display},
     hash::Hash,
     ops::Deref,
 };
+
+use bytes::{Buf, BufMut};
+use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use thiserror::Error;
+
+use crate::Array;
 
 // Errors returned by `U64` functions.
 #[derive(Error, Debug, PartialEq)]
@@ -57,9 +59,7 @@ impl FixedSize for U64 {
     const SIZE: usize = u64::SIZE + 1;
 }
 
-impl Array for U64 {
-    type Error = Error;
-}
+impl Array for U64 {}
 
 impl From<[u8; U64::SIZE]> for U64 {
     fn from(value: [u8; U64::SIZE]) -> Self {

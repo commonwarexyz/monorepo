@@ -1,16 +1,11 @@
-use super::{
-    ingress::{Mailbox, Message},
-    Config,
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet},
+    marker::PhantomData,
+    time::{Duration, SystemTime},
 };
-use crate::{
-    simplex::{
-        actors::voter,
-        encoder::{notarize_namespace, nullify_namespace},
-        verifier::{verify_notarization, verify_nullification},
-        wire, View,
-    },
-    Parsed, Supervisor,
-};
+
+use commonware_codec::ReadExt;
 use commonware_cryptography::Scheme;
 use commonware_macros::select;
 use commonware_p2p::{utils::requester, Receiver, Recipients, Sender};
@@ -21,13 +16,23 @@ use governor::clock::Clock as GClock;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use prost::Message as _;
 use rand::{seq::IteratorRandom, Rng};
-use std::{
-    cmp::Ordering,
-    collections::{BTreeMap, BTreeSet},
-    marker::PhantomData,
-    time::{Duration, SystemTime},
-};
 use tracing::{debug, warn};
+
+use super::{
+    ingress::{Mailbox, Message},
+    Config,
+};
+use crate::{
+    simplex::{
+        actors::voter,
+        encoder::{notarize_namespace, nullify_namespace},
+        verifier::{verify_notarization, verify_nullification},
+        wire,
+        View,
+    },
+    Parsed,
+    Supervisor,
+};
 
 /// Task in the required set.
 #[derive(Clone, Copy, Eq, PartialEq, PartialOrd, Ord)]
@@ -549,7 +554,7 @@ impl<
                                     },
                                 };
                                 let view = proposal.view;
-                                let Ok(payload) = D::try_from(&proposal.payload) else {
+                                let Ok(payload) = D::read(&mut proposal.payload.as_ref()) else {
                                     warn!(view, sender = ?s, "invalid proposal");
                                     self.requester.block(s.clone());
                                     continue;

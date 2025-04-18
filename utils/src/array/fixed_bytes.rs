@@ -1,13 +1,15 @@
-use crate::{hex, Array};
-use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use std::{
     cmp::{Ord, PartialOrd},
     fmt::{Debug, Display},
     hash::Hash,
     ops::Deref,
 };
+
+use bytes::{Buf, BufMut};
+use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use thiserror::Error;
+
+use crate::{hex, Array};
 
 /// Errors returned by `Bytes` functions.
 #[derive(Error, Debug, PartialEq)]
@@ -44,9 +46,7 @@ impl<const N: usize> FixedSize for FixedBytes<N> {
     const SIZE: usize = N;
 }
 
-impl<const N: usize> Array for FixedBytes<N> {
-    type Error = Error;
-}
+impl<const N: usize> Array for FixedBytes<N> {}
 
 impl<const N: usize> TryFrom<&[u8]> for FixedBytes<N> {
     type Error = Error;
@@ -99,10 +99,10 @@ impl<const N: usize> Display for FixedBytes<N> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::array::Error as ArrayError;
     use bytes::{Buf, BytesMut};
     use commonware_codec::{DecodeExt, Encode};
+
+    use super::*;
 
     #[test]
     fn test_codec() {
@@ -151,16 +151,16 @@ mod tests {
     #[test]
     fn test_read_from() {
         let mut buf = BytesMut::from(&[1, 2, 3, 4][..]);
-        let bytes = FixedBytes::<4>::read_from(&mut buf).unwrap();
+        let bytes = FixedBytes::<4>::read(&mut buf).unwrap();
         assert_eq!(bytes.as_ref(), &[1, 2, 3, 4]);
         assert_eq!(buf.remaining(), 0);
 
         let mut buf = BytesMut::from(&[1, 2, 3][..]);
-        let result = FixedBytes::<4>::read_from(&mut buf);
-        assert_eq!(result, Err(ArrayError::InsufficientBytes));
+        let result = FixedBytes::<4>::read(&mut buf);
+        assert!(matches!(result, Err(CodecError::EndOfBuffer)));
 
         let mut buf = BytesMut::from(&[1, 2, 3, 4, 5][..]);
-        let bytes = FixedBytes::<4>::read_from(&mut buf).unwrap();
+        let bytes = FixedBytes::<4>::read(&mut buf).unwrap();
         assert_eq!(bytes.as_ref(), &[1, 2, 3, 4]);
         assert_eq!(buf.remaining(), 1);
         assert_eq!(buf[0], 5);
