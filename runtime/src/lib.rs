@@ -92,8 +92,7 @@ pub trait Runner {
     /// to context before starting task execution.
     fn start<F>(self, f: F) -> F::Output
     where
-        F: Future + Send + 'static,
-        F::Output: Send + 'static;
+        F: Future;
 }
 
 /// Interface that any task scheduler must implement to spawn tasks.
