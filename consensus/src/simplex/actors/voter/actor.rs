@@ -27,17 +27,25 @@ use prometheus_client::metrics::{
     counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
 };
 use rand::Rng;
-use std::sync::atomic::AtomicI64;
 use std::{
     cmp::max,
     collections::{btree_map::Entry, BTreeMap, HashMap},
     time::{Duration, SystemTime},
 };
+use std::{collections::BTreeSet, sync::atomic::AtomicI64};
 use tracing::{debug, trace, warn};
 
-type Notarizable<'a, V, D> = Option<(Proposal<D>, &'a Vec<u32>, &'a Vec<Option<Notarize<V, D>>>)>;
+type Notarizable<'a, V, D> = Option<(
+    Proposal<D>,
+    &'a BTreeSet<u32>,
+    &'a Vec<Option<Notarize<V, D>>>,
+)>;
 type Nullifiable<'a, V> = Option<(View, &'a BTreeMap<u32, Nullify<V>>)>;
-type Finalizable<'a, V, D> = Option<(Proposal<D>, &'a Vec<u32>, &'a Vec<Option<Finalize<V, D>>>)>;
+type Finalizable<'a, V, D> = Option<(
+    Proposal<D>,
+    &'a BTreeSet<u32>,
+    &'a Vec<Option<Finalize<V, D>>>,
+)>;
 
 const GENESIS_VIEW: View = 0;
 
@@ -63,18 +71,18 @@ struct Round<
     verified_proposal: bool,
 
     // Track notarizes for all proposals (ensuring any participant only has one recorded notarize)
-    notarized_proposals: HashMap<Proposal<D>, Vec<u32>>,
+    notarized_proposals: HashMap<Proposal<D>, BTreeSet<u32>>,
     notarizes: Vec<Option<Notarize<C::Signature, D>>>,
     broadcast_notarize: bool,
     broadcast_notarization: bool,
 
     // Track nullifies (ensuring any participant only has one recorded nullify)
-    nullifies: BTreeMap<u32, Nullify<C::Signature>>, // we use BTreeMap for deterministic ordering
+    nullifies: BTreeMap<u32, Nullify<C::Signature>>,
     broadcast_nullify: bool,
     broadcast_nullification: bool,
 
     // Track finalizes for all proposals (ensuring any participant only has one recorded finalize)
-    finalized_proposals: HashMap<Proposal<D>, Vec<u32>>,
+    finalized_proposals: HashMap<Proposal<D>, BTreeSet<u32>>,
     finalizes: Vec<Option<Finalize<C::Signature, D>>>,
     broadcast_finalize: bool,
     broadcast_finalization: bool,
@@ -144,11 +152,13 @@ impl<
         }
 
         // Store the notarize
-        if let Some(vec) = self.notarized_proposals.get_mut(&notarize.proposal) {
-            vec.push(public_key_index);
+        if let Some(set) = self.notarized_proposals.get_mut(&notarize.proposal) {
+            set.insert(public_key_index);
         } else {
+            let mut set = BTreeSet::new();
+            set.insert(public_key_index);
             self.notarized_proposals
-                .insert(notarize.proposal.clone(), vec![public_key_index]);
+                .insert(notarize.proposal.clone(), set);
         }
         self.notarizes[public_key_index as usize] = Some(notarize.clone());
         self.reporter.report(Activity::Notarize(notarize)).await;
@@ -245,11 +255,13 @@ impl<
         }
 
         // Store the finalize
-        if let Some(vec) = self.finalized_proposals.get_mut(&finalize.proposal) {
-            vec.push(public_key_index);
+        if let Some(set) = self.finalized_proposals.get_mut(&finalize.proposal) {
+            set.insert(public_key_index);
         } else {
+            let mut set = BTreeSet::new();
+            set.insert(public_key_index);
             self.finalized_proposals
-                .insert(finalize.proposal.clone(), vec![public_key_index]);
+                .insert(finalize.proposal.clone(), set);
         }
         self.finalizes[public_key_index as usize] = Some(finalize.clone());
         self.reporter.report(Activity::Finalize(finalize)).await;
@@ -674,7 +686,7 @@ impl<
         };
 
         // Verify the signature
-        if !nullify.verify::<C::PublicKey, C>(&self.namespace, public_key) {
+        if !nullify.verify::<C>(&self.namespace, public_key) {
             return false;
         }
 
@@ -987,7 +999,7 @@ impl<
         };
 
         // Verify the signature
-        if !notarize.verify::<C::PublicKey, C>(&self.namespace, public_key) {
+        if !notarize.verify::<C>(&self.namespace, public_key) {
             return false;
         }
 
@@ -1041,7 +1053,7 @@ impl<
         let Some(participants) = self.supervisor.participants(view) else {
             return false;
         };
-        if !notarization.verify::<S::PublicKey, C>(&self.namespace, participants) {
+        if !notarization.verify::<C>(&self.namespace, participants) {
             return false;
         }
 
@@ -1112,7 +1124,7 @@ impl<
         let Some(participants) = self.supervisor.participants(nullification.view) else {
             return false;
         };
-        if !nullification.verify::<S::PublicKey, C>(&self.namespace, participants) {
+        if !nullification.verify::<C>(&self.namespace, participants) {
             return false;
         }
 
@@ -1171,7 +1183,7 @@ impl<
         };
 
         // Verify the signature
-        if !finalize.verify::<C::PublicKey, C>(&self.namespace, public_key) {
+        if !finalize.verify::<C>(&self.namespace, public_key) {
             return false;
         }
 
@@ -1225,7 +1237,7 @@ impl<
         let Some(participants) = self.supervisor.participants(view) else {
             return false;
         };
-        if !finalization.verify::<S::PublicKey, C>(&self.namespace, participants) {
+        if !finalization.verify::<C>(&self.namespace, participants) {
             return false;
         }
 

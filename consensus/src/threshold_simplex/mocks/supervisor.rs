@@ -171,7 +171,7 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                         panic!("no participants in required range");
                     }
                 };
-                if !notarize.verify(&self.namespace, identity, None) {
+                if !notarize.verify(&self.namespace, identity) {
                     panic!("signature verification failed");
                 }
                 let encoded = notarize.encode();
@@ -213,7 +213,7 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                         panic!("no participants in required range");
                     }
                 };
-                if !nullify.verify(&self.namespace, identity, None) {
+                if !nullify.verify(&self.namespace, identity) {
                     panic!("signature verification failed");
                 }
                 let encoded = nullify.encode();
@@ -253,7 +253,7 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                         panic!("no participants in required range");
                     }
                 };
-                if !finalize.verify(&self.namespace, identity, None) {
+                if !finalize.verify(&self.namespace, identity) {
                     panic!("signature verification failed");
                 }
                 let encoded = finalize.encode();
@@ -302,7 +302,7 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                         panic!("no participants in required range");
                     }
                 };
-                if !conflicting.verify(&self.namespace, identity, None) {
+                if !conflicting.verify(&self.namespace, identity) {
                     panic!("signature verification failed");
                 }
                 let encoded = conflicting.encode();
@@ -325,7 +325,7 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                         panic!("no participants in required range");
                     }
                 };
-                if !conflicting.verify(&self.namespace, identity, None) {
+                if !conflicting.verify(&self.namespace, identity) {
                     panic!("signature verification failed");
                 }
                 let encoded = conflicting.encode();
@@ -348,7 +348,7 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                         panic!("no participants in required range");
                     }
                 };
-                if !nullify_finalize.verify(&self.namespace, identity, None) {
+                if !nullify_finalize.verify(&self.namespace, identity) {
                     panic!("signature verification failed");
                 }
                 let encoded = nullify_finalize.encode();

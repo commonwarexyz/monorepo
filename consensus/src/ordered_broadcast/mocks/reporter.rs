@@ -2,6 +2,7 @@ use crate::{
     ordered_broadcast::types::{Activity, Chunk, Epoch, Lock, Proposal},
     Reporter as Z,
 };
+use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{bls12381::primitives::group, Digest, Verifier};
 use futures::{
     channel::{mpsc, oneshot},
@@ -73,6 +74,10 @@ impl<C: Verifier, D: Digest> Reporter<C, D> {
                         panic!("Invalid proof");
                     }
 
+                    // Test encoding/decoding
+                    let encoded = proposal.encode();
+                    Proposal::<C, D>::decode(encoded).unwrap();
+
                     // Store the proposal
                     self.proposals.insert(proposal.chunk);
                 }
@@ -81,6 +86,10 @@ impl<C: Verifier, D: Digest> Reporter<C, D> {
                     if !lock.verify(&self.namespace, &self.public) {
                         panic!("Invalid proof");
                     }
+
+                    // Test encoding/decoding
+                    let encoded = lock.encode();
+                    Lock::<C::PublicKey, D>::decode(encoded).unwrap();
 
                     // Check if the proposal is known
                     if let Some(misses_allowed) = self.limit_misses {

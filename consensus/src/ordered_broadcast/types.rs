@@ -35,6 +35,9 @@ pub enum Error {
     /// The parent was provided for a genesis chunk (height 0)
     #[error("Parent on genesis chunk")]
     ParentOnGenesis,
+    /// Verification failed because no public key was provided
+    #[error("Public key required")]
+    PublicKeyRequired,
 
     // Application Verification Errors
     /// The verification was canceled by the application
@@ -368,11 +371,17 @@ impl<C: Verifier, D: Digest> Node<C, D> {
 
         // Verify parent (if present)
         let Some(public) = public else {
-            unreachable!("public should always be present when parent is present");
+            // We would otherwise require the public key to always be present,
+            // however, it is not clear what the caller should provide when there is
+            // no parent (e.g. genesis chunk).
+            return Err(Error::PublicKeyRequired);
         };
         let parent_chunk = Chunk::new(
             self.chunk.sequencer.clone(),
-            self.chunk.height - 1, // Will not parse if height is 0 and parent exists
+            self.chunk
+                .height
+                .checked_sub(1)
+                .ok_or(Error::ParentMissing)?,
             parent.digest,
         );
 
@@ -586,7 +595,7 @@ impl<P: Array, D: Digest> FixedSize for Ack<P, D> {
 pub enum Activity<C: Verifier, D: Digest> {
     /// A new proposal from a sequencer
     ///
-    /// This activity is only emitted if the application has first verified the proposal.
+    /// This activity is only emitted when the application has verified a peer proposal.
     Proposal(Proposal<C, D>),
     /// A threshold signature for a chunk, indicating it has been acknowledged by a quorum
     Lock(Lock<C::PublicKey, D>),
@@ -779,4 +788,772 @@ impl<P: Array, D: Digest> Read for Lock<P, D> {
 
 impl<P: Array, D: Digest> FixedSize for Lock<P, D> {
     const SIZE: usize = Chunk::<P, D>::SIZE + Epoch::SIZE + Signature::SIZE;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_codec::{DecodeExt, Encode};
+    use commonware_cryptography::{
+        bls12381::{
+            dkg::ops,
+            primitives::{
+                group::{Element, Share, G2},
+                ops::{partial_sign_message, threshold_signature_recover},
+                poly,
+            },
+        },
+        ed25519::PublicKey,
+        sha256::Digest as Sha256Digest,
+        Ed25519, Signer,
+    };
+    use commonware_utils::quorum;
+    use rand::{rngs::StdRng, SeedableRng};
+
+    const NAMESPACE: &[u8] = b"test";
+
+    // Helper function to create a sample digest
+    fn sample_digest(v: u8) -> Sha256Digest {
+        Sha256Digest::from([v; 32]) // Simple fixed digest for testing
+    }
+
+    // Helper function to create a sample Ed25519 scheme
+    fn sample_scheme(v: u64) -> Ed25519 {
+        Ed25519::from_seed(v)
+    }
+
+    // Helper function to generate BLS shares and polynomial
+    fn generate_test_data(n: usize, t: u32, seed: u64) -> (poly::Public, Vec<Share>) {
+        let mut rng = StdRng::seed_from_u64(seed);
+        ops::generate_shares(&mut rng, None, n as u32, t)
+    }
+
+    #[test]
+    fn test_chunk_encode_decode() {
+        let public_key = sample_scheme(0).public_key();
+        let chunk = Chunk::new(public_key, 42, sample_digest(1));
+        let encoded = chunk.encode();
+        let decoded = Chunk::<PublicKey, Sha256Digest>::decode(encoded).unwrap();
+        assert_eq!(chunk, decoded);
+    }
+
+    #[test]
+    fn test_parent_encode_decode() {
+        // Generate proper BLS shares and keys
+        let n = 4;
+        let t = quorum(n as u32);
+        let (identity, shares) = generate_test_data(n, t, 0);
+
+        // Create a chunk that would be signed
+        let public_key = sample_scheme(0).public_key();
+        let chunk = Chunk::new(public_key, 0, sample_digest(1));
+        let epoch = 5;
+
+        // Generate partial signatures for the chunk
+        let message = Ack::payload(&chunk, &epoch);
+        let ack_namespace = ack_namespace(NAMESPACE);
+        let partials: Vec<_> = shares
+            .iter()
+            .take(t as usize)
+            .map(|s| partial_sign_message(s, Some(ack_namespace.as_ref()), &message))
+            .collect();
+
+        // Recover threshold signature
+        let signature = threshold_signature_recover(t, &partials).unwrap();
+
+        // Create and test parent
+        let parent = Parent::new(sample_digest(1), epoch, signature);
+        let encoded = parent.encode();
+        let decoded = Parent::<Sha256Digest>::decode(encoded).unwrap();
+        assert_eq!(parent, decoded);
+
+        // Verify the signature is valid
+        let public = poly::public(&identity);
+        let lock = Lock::new(chunk, epoch, signature);
+        assert!(lock.verify(NAMESPACE, public));
+    }
+
+    #[test]
+    fn test_node_encode_decode() {
+        let mut scheme = sample_scheme(0);
+        let public_key = scheme.public_key();
+        let chunk_namespace = chunk_namespace(NAMESPACE);
+
+        // Test with no parent (genesis)
+        let chunk = Chunk::new(public_key.clone(), 0, sample_digest(1));
+        let message = chunk.encode();
+        let signature = scheme.sign(Some(chunk_namespace.as_ref()), &message);
+        let node = Node::<Ed25519, Sha256Digest>::new(chunk, signature.clone(), None);
+        let encoded = node.encode();
+        let decoded = Node::<Ed25519, Sha256Digest>::decode(encoded).unwrap();
+        assert_eq!(decoded.chunk, node.chunk);
+        assert_eq!(decoded.signature, node.signature);
+        assert_eq!(decoded.parent, node.parent);
+
+        // Test with parent - generate a proper threshold signature
+        let n = 4;
+        let t = quorum(n as u32);
+        let (identity, shares) = generate_test_data(n, t, 0);
+
+        // Create parent chunk and signature
+        let parent_chunk = Chunk::new(public_key.clone(), 0, sample_digest(0));
+        let parent_epoch = 5;
+
+        // Generate partial signatures for the parent chunk
+        let parent_message = Ack::payload(&parent_chunk, &parent_epoch);
+        let ack_namespace = ack_namespace(NAMESPACE);
+        let partials: Vec<_> = shares
+            .iter()
+            .take(t as usize)
+            .map(|s| partial_sign_message(s, Some(ack_namespace.as_ref()), &parent_message))
+            .collect();
+
+        // Recover threshold signature for parent
+        let parent_signature = threshold_signature_recover(t, &partials).unwrap();
+
+        // Create proper parent with valid threshold signature
+        let parent = Some(Parent::new(
+            parent_chunk.payload,
+            parent_epoch,
+            parent_signature,
+        ));
+
+        // Create child node
+        let chunk2 = Chunk::new(public_key.clone(), 1, sample_digest(2));
+        let message2 = chunk2.encode();
+        let signature2 = scheme.sign(Some(chunk_namespace.as_ref()), &message2);
+        let node2 = Node::<Ed25519, Sha256Digest>::new(chunk2, signature2, parent);
+
+        // Test encode/decode
+        let encoded2 = node2.encode();
+        let decoded2 = Node::<Ed25519, Sha256Digest>::decode(encoded2).unwrap();
+        assert_eq!(decoded2.chunk, node2.chunk);
+        assert_eq!(decoded2.signature, node2.signature);
+        assert_eq!(decoded2.parent, node2.parent);
+
+        // Verify that the parent signature is valid
+        let public = poly::public(&identity);
+        let lock = Lock::new(parent_chunk, parent_epoch, parent_signature);
+        assert!(lock.verify(NAMESPACE, public));
+    }
+
+    #[test]
+    fn test_ack_encode_decode() {
+        let n = 4;
+        let t = quorum(n as u32);
+        let (identity, shares) = generate_test_data(n, t, 0);
+
+        let public_key = sample_scheme(0).public_key();
+        let chunk = Chunk::new(public_key, 42, sample_digest(1));
+        let epoch = 5;
+
+        let ack = Ack::sign(NAMESPACE, &shares[0], chunk, epoch);
+        let encoded = ack.encode();
+        let decoded = Ack::<PublicKey, Sha256Digest>::decode(encoded).unwrap();
+
+        assert_eq!(decoded.chunk, ack.chunk);
+        assert_eq!(decoded.epoch, ack.epoch);
+        assert_eq!(decoded.signature.index, ack.signature.index);
+        assert_eq!(decoded.signature.value, ack.signature.value);
+
+        // Verify signature
+        assert!(decoded.verify(NAMESPACE, &identity));
+    }
+
+    #[test]
+    fn test_activity_encode_decode() {
+        let mut scheme = sample_scheme(0);
+        let public_key = scheme.public_key();
+        let chunk_namespace = chunk_namespace(NAMESPACE);
+
+        // Test Proposal
+        let chunk = Chunk::new(public_key.clone(), 42, sample_digest(1));
+        let message = chunk.encode();
+        let signature = scheme.sign(Some(chunk_namespace.as_ref()), &message);
+        let proposal = Proposal::<Ed25519, Sha256Digest>::new(chunk.clone(), signature.clone());
+        let activity = Activity::Proposal(proposal);
+        let encoded = activity.encode();
+        let decoded = Activity::<Ed25519, Sha256Digest>::decode(encoded).unwrap();
+
+        match decoded {
+            Activity::Proposal(p) => {
+                assert_eq!(p.chunk, chunk);
+                assert_eq!(p.signature, signature);
+            }
+            _ => panic!("Decoded activity has wrong type"),
+        }
+
+        // Test Lock with proper threshold signature
+        let n = 4;
+        let t = quorum(n as u32);
+        let (identity, shares) = generate_test_data(n, t, 0);
+
+        let epoch = 5;
+        // Generate partial signatures for the chunk
+        let lock_message = Ack::payload(&chunk, &epoch);
+        let ack_namespace = ack_namespace(NAMESPACE);
+        let partials: Vec<_> = shares
+            .iter()
+            .take(t as usize)
+            .map(|s| partial_sign_message(s, Some(ack_namespace.as_ref()), &lock_message))
+            .collect();
+
+        // Recover threshold signature
+        let bls_signature = threshold_signature_recover(t, &partials).unwrap();
+
+        // Create lock and verify it
+        let lock = Lock::new(chunk.clone(), epoch, bls_signature);
+        let public = poly::public(&identity);
+        assert!(lock.verify(NAMESPACE, public));
+
+        // Test activity with the lock
+        let activity = Activity::<Ed25519, Sha256Digest>::Lock(lock);
+        let encoded = activity.encode();
+        let decoded = Activity::<Ed25519, Sha256Digest>::decode(encoded).unwrap();
+
+        match decoded {
+            Activity::Lock(l) => {
+                assert_eq!(l.chunk, chunk);
+                assert_eq!(l.epoch, epoch);
+                assert_eq!(l.signature, bls_signature);
+                assert!(l.verify(NAMESPACE, public));
+            }
+            _ => panic!("Decoded activity has wrong type"),
+        }
+    }
+
+    #[test]
+    fn test_proposal_encode_decode() {
+        let mut scheme = sample_scheme(0);
+        let public_key = scheme.public_key();
+        let chunk = Chunk::new(public_key, 42, sample_digest(1));
+
+        // Create a properly signed proposal
+        let chunk_namespace = chunk_namespace(NAMESPACE);
+        let message = chunk.encode();
+        let signature = scheme.sign(Some(chunk_namespace.as_ref()), &message);
+
+        let proposal = Proposal::<Ed25519, Sha256Digest>::new(chunk, signature);
+        let encoded = proposal.encode();
+        let decoded = Proposal::<Ed25519, Sha256Digest>::decode(encoded).unwrap();
+
+        assert_eq!(decoded.chunk, proposal.chunk);
+        assert_eq!(decoded.signature, proposal.signature);
+
+        // Verify the decoded proposal
+        assert!(decoded.verify(NAMESPACE));
+    }
+
+    #[test]
+    fn test_lock_encode_decode() {
+        let public_key = sample_scheme(0).public_key();
+        let chunk = Chunk::new(public_key, 42, sample_digest(1));
+        let epoch = 5;
+
+        // Generate proper BLS shares and threshold signature
+        let n = 4;
+        let t = quorum(n as u32);
+        let (identity, shares) = generate_test_data(n, t, 0);
+
+        // Generate partial signatures for the chunk
+        let message = Ack::payload(&chunk, &epoch);
+        let ack_namespace = ack_namespace(NAMESPACE);
+        let partials: Vec<_> = shares
+            .iter()
+            .take(t as usize)
+            .map(|s| partial_sign_message(s, Some(ack_namespace.as_ref()), &message))
+            .collect();
+
+        // Recover threshold signature
+        let signature = threshold_signature_recover(t, &partials).unwrap();
+
+        // Create lock, encode and decode
+        let lock = Lock::new(chunk, epoch, signature);
+        let encoded = lock.encode();
+        let decoded = Lock::<PublicKey, Sha256Digest>::decode(encoded).unwrap();
+
+        assert_eq!(decoded.chunk, lock.chunk);
+        assert_eq!(decoded.epoch, lock.epoch);
+        assert_eq!(decoded.signature, lock.signature);
+
+        // Verify the signature in the decoded lock
+        let public = poly::public(&identity);
+        assert!(decoded.verify(NAMESPACE, public));
+    }
+
+    #[test]
+    fn test_node_sign_verify() {
+        let mut scheme = sample_scheme(0);
+        let public_key = scheme.public_key();
+
+        // Test genesis node (no parent)
+        let node =
+            Node::<Ed25519, Sha256Digest>::sign(NAMESPACE, &mut scheme, 0, sample_digest(1), None);
+        let result = node.verify(NAMESPACE, None);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+
+        // Test node with parent
+        let n = 4;
+        let t = quorum(n as u32);
+        let (identity, shares) = generate_test_data(n, t, 0);
+
+        let parent_chunk = Chunk::new(public_key.clone(), 0, sample_digest(1));
+        let parent_epoch = 5;
+
+        // Create threshold signature for parent
+        let message = Ack::payload(&parent_chunk, &parent_epoch);
+        let ack_namespace = ack_namespace(NAMESPACE);
+        let parent_sigs: Vec<_> = shares
+            .iter()
+            .map(|s| partial_sign_message(s, Some(ack_namespace.as_ref()), &message))
+            .collect();
+        let parent_threshold = threshold_signature_recover(t, &parent_sigs).unwrap();
+
+        let parent = Some(Parent::new(
+            parent_chunk.payload,
+            parent_epoch,
+            parent_threshold,
+        ));
+        let node = Node::<Ed25519, Sha256Digest>::sign(
+            NAMESPACE,
+            &mut scheme,
+            1,
+            sample_digest(2),
+            parent,
+        );
+
+        let public = poly::public(&identity);
+        let result = node.verify(NAMESPACE, Some(public));
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_some());
+    }
+
+    #[test]
+    fn test_ack_sign_verify() {
+        let n = 4;
+        let t = quorum(n as u32);
+        let (identity, shares) = generate_test_data(n, t, 0);
+
+        let public_key = sample_scheme(0).public_key();
+        let chunk = Chunk::new(public_key, 42, sample_digest(1));
+        let epoch = 5;
+
+        let ack = Ack::sign(NAMESPACE, &shares[0], chunk, epoch);
+        assert!(ack.verify(NAMESPACE, &identity));
+
+        // Test that verification fails with wrong namespace
+        assert!(!ack.verify(b"wrong", &identity));
+    }
+
+    #[test]
+    fn test_threshold_recovery() {
+        let n = 4;
+        let t = quorum(n as u32);
+        let (identity, shares) = generate_test_data(n, t, 0);
+
+        let public_key = sample_scheme(0).public_key();
+        let chunk = Chunk::new(public_key, 42, sample_digest(1));
+        let epoch = 5;
+
+        // Create t partial signatures
+        let acks: Vec<_> = shares
+            .iter()
+            .take(t as usize)
+            .map(|s| Ack::sign(NAMESPACE, s, chunk.clone(), epoch))
+            .collect();
+
+        // Extract partial signatures
+        let partials: Vec<_> = acks.iter().map(|a| a.signature.clone()).collect();
+
+        // Recover threshold signature
+        let threshold = threshold_signature_recover(t, &partials).unwrap();
+
+        // Create lock with threshold signature
+        let lock = Lock::new(chunk, epoch, threshold);
+
+        // Verify lock
+        let public = poly::public(&identity);
+        assert!(lock.verify(NAMESPACE, public));
+    }
+
+    #[test]
+    fn test_lock_verify() {
+        let n = 4;
+        let t = quorum(n as u32);
+        let (identity, shares) = generate_test_data(n, t, 0);
+
+        let public_key = sample_scheme(0).public_key();
+        let chunk = Chunk::new(public_key, 42, sample_digest(1));
+        let epoch = 5;
+
+        // Create threshold signature
+        let message = Ack::payload(&chunk, &epoch);
+        let ack_namespace = ack_namespace(NAMESPACE);
+        let partials: Vec<_> = shares
+            .iter()
+            .take(t as usize)
+            .map(|s| partial_sign_message(s, Some(ack_namespace.as_ref()), &message))
+            .collect();
+        let threshold = threshold_signature_recover(t, &partials).unwrap();
+
+        // Create lock
+        let lock = Lock::new(chunk, epoch, threshold);
+
+        // Verify lock
+        let public = poly::public(&identity);
+        assert!(lock.verify(NAMESPACE, public));
+
+        // Test that verification fails with wrong namespace
+        assert!(!lock.verify(b"wrong", public));
+    }
+
+    #[test]
+    fn test_proposal_verify() {
+        let mut scheme = sample_scheme(0);
+        let chunk = Chunk::new(scheme.public_key(), 42, sample_digest(1));
+
+        // Sign and create proposal
+        let chunk_namespace = chunk_namespace(NAMESPACE);
+        let message = chunk.encode();
+        let signature = scheme.sign(Some(chunk_namespace.as_ref()), &message);
+        let proposal = Proposal::<Ed25519, Sha256Digest>::new(chunk, signature);
+
+        // Verify proposal
+        assert!(proposal.verify(NAMESPACE));
+
+        // Test that verification fails with wrong namespace
+        assert!(!proposal.verify(b"wrong"));
+    }
+
+    #[test]
+    #[should_panic(expected = "ParentOnGenesis")]
+    fn test_node_genesis_with_parent_panics() {
+        // Try to create a genesis node (height 0) with a parent - should panic on decode
+        let public_key = sample_scheme(0).public_key();
+        let chunk = Chunk::new(public_key.clone(), 0, sample_digest(1));
+        let chunk_namespace = chunk_namespace(NAMESPACE);
+        let message = chunk.encode();
+        let signature = sample_scheme(0).sign(Some(chunk_namespace.as_ref()), &message);
+
+        // Generate a valid parent signature
+        let n = 4;
+        let t = quorum(n as u32);
+        let (_, shares) = generate_test_data(n, t, 0);
+
+        let parent_chunk = Chunk::new(public_key, 0, sample_digest(0));
+        let parent_epoch = 5;
+        let parent_message = Ack::payload(&parent_chunk, &parent_epoch);
+        let ack_namespace = ack_namespace(NAMESPACE);
+        let partials: Vec<_> = shares
+            .iter()
+            .take(t as usize)
+            .map(|s| partial_sign_message(s, Some(ack_namespace.as_ref()), &parent_message))
+            .collect();
+        let parent_signature = threshold_signature_recover(t, &partials).unwrap();
+
+        let parent = Parent::new(sample_digest(0), parent_epoch, parent_signature);
+
+        let encoded = Node::<Ed25519, Sha256Digest>::new(chunk, signature, Some(parent)).encode();
+        let _decoded = Node::<Ed25519, Sha256Digest>::decode(encoded).unwrap();
+    }
+
+    #[test]
+    #[should_panic(expected = "ParentMissing")]
+    fn test_node_non_genesis_without_parent_panics() {
+        // Try to create a non-genesis node (height > 0) without a parent - should panic on decode
+        let public_key = sample_scheme(0).public_key();
+        let chunk = Chunk::new(public_key, 1, sample_digest(1));
+        let chunk_namespace = chunk_namespace(NAMESPACE);
+        let message = chunk.encode();
+        let signature = sample_scheme(0).sign(Some(chunk_namespace.as_ref()), &message);
+
+        let encoded = Node::<Ed25519, Sha256Digest>::new(chunk, signature, None).encode();
+        let _decoded = Node::<Ed25519, Sha256Digest>::decode(encoded).unwrap();
+    }
+
+    #[test]
+    fn test_node_verify_invalid_signature() {
+        let mut scheme = sample_scheme(0);
+        let public_key = scheme.public_key();
+
+        // Create a valid chunk
+        let chunk = Chunk::new(public_key.clone(), 0, sample_digest(1));
+
+        // Create a valid signature
+        let chunk_namespace = chunk_namespace(NAMESPACE);
+        let message = chunk.encode();
+        let signature = scheme.sign(Some(chunk_namespace.as_ref()), &message);
+
+        // Create a node with valid signature
+        let node = Node::<Ed25519, Sha256Digest>::new(chunk.clone(), signature, None);
+
+        // Verification should succeed
+        assert!(node.verify(NAMESPACE, None).is_ok());
+
+        // Now create a node with invalid signature
+        let tampered_signature = scheme.sign(Some(chunk_namespace.as_ref()), &node.encode());
+        let invalid_node = Node::<Ed25519, Sha256Digest>::new(chunk, tampered_signature, None);
+
+        // Verification should fail
+        assert!(matches!(
+            invalid_node.verify(NAMESPACE, None),
+            Err(Error::InvalidSequencerSignature)
+        ));
+    }
+
+    #[test]
+    fn test_node_verify_invalid_parent_signature() {
+        let mut scheme = sample_scheme(0);
+        let public_key = scheme.public_key();
+
+        // Generate BLS keys for threshold signature verification
+        let n = 4;
+        let t = quorum(n as u32);
+        let (commitment, shares) = generate_test_data(n, t, 0);
+
+        // Create parent and child chunks
+        let parent_chunk = Chunk::new(public_key.clone(), 0, sample_digest(0));
+        let child_chunk = Chunk::new(public_key.clone(), 1, sample_digest(1));
+        let epoch = 5;
+
+        // Generate a valid threshold signature for the parent
+        let message = Ack::payload(&parent_chunk, &epoch);
+        let ack_namespace = ack_namespace(NAMESPACE);
+        let partials: Vec<_> = shares
+            .iter()
+            .take(t as usize)
+            .map(|s| partial_sign_message(s, Some(ack_namespace.as_ref()), &message))
+            .collect();
+        let signature = threshold_signature_recover(t, &partials).unwrap();
+
+        // Create parent with valid threshold signature
+        let parent = Parent::new(parent_chunk.payload, epoch, signature);
+
+        // Create child node
+        let chunk_namespace = chunk_namespace(NAMESPACE);
+        let message = child_chunk.encode();
+        let node_signature = scheme.sign(Some(chunk_namespace.as_ref()), &message);
+        let node = Node::<Ed25519, Sha256Digest>::new(
+            child_chunk.clone(),
+            node_signature.clone(),
+            Some(parent),
+        );
+
+        // Get the BLS public key from the commitment
+        let public = poly::public(&commitment);
+
+        // Verification should succeed
+        assert!(node.verify(NAMESPACE, Some(public)).is_ok());
+
+        // Now create a parent with invalid threshold signature
+        // Generate a different set of BLS keys/shares
+        let (_, wrong_shares) = generate_test_data(n, t, 1);
+
+        // Generate threshold signature with the wrong keys
+        let partials: Vec<_> = wrong_shares
+            .iter()
+            .take(t as usize)
+            .map(|s| partial_sign_message(s, Some(ack_namespace.as_ref()), &message))
+            .collect();
+        let wrong_signature = threshold_signature_recover(t, &partials).unwrap();
+
+        // Create parent with wrong threshold signature
+        let wrong_parent = Parent::new(parent_chunk.payload, epoch, wrong_signature);
+
+        // Create child node with wrong parent
+        let node =
+            Node::<Ed25519, Sha256Digest>::new(child_chunk, node_signature, Some(wrong_parent));
+
+        // Verification should fail because the parent signature doesn't verify with the correct public key
+        assert!(matches!(
+            node.verify(NAMESPACE, Some(public)),
+            Err(Error::InvalidThresholdSignature)
+        ));
+    }
+
+    #[test]
+    fn test_ack_verify_invalid_signature() {
+        let n = 4;
+        let t = quorum(n as u32);
+        let (identity, shares) = generate_test_data(n, t, 0);
+
+        // Create a chunk and ack
+        let public_key = sample_scheme(0).public_key();
+        let chunk = Chunk::new(public_key, 42, sample_digest(1));
+        let epoch = 5;
+
+        // Create a valid ack
+        let ack = Ack::sign(NAMESPACE, &shares[0], chunk.clone(), epoch);
+
+        // Verification should succeed
+        assert!(ack.verify(NAMESPACE, &identity));
+
+        // Create an ack with invalid signature
+        let mut invalid_signature = ack.signature.clone();
+        invalid_signature.value.add(&G2::one());
+        let invalid_ack = Ack::new(chunk, epoch, invalid_signature);
+
+        // Verification should fail
+        assert!(!invalid_ack.verify(NAMESPACE, &identity));
+    }
+
+    #[test]
+    fn test_ack_verify_wrong_validator() {
+        let n = 4;
+        let t = quorum(n as u32);
+        let (identity, shares) = generate_test_data(n, t, 0);
+
+        // Create another set of BLS shares with a different polynomial
+        let (wrong_identity, _) = generate_test_data(n, t, 1);
+
+        // Create a chunk and ack
+        let public_key = sample_scheme(0).public_key();
+        let chunk = Chunk::new(public_key, 42, sample_digest(1));
+        let epoch = 5;
+
+        // Create a valid ack
+        let ack = Ack::sign(NAMESPACE, &shares[0], chunk, epoch);
+
+        // Verification should succeed with correct identity
+        assert!(ack.verify(NAMESPACE, &identity));
+
+        // Verification should fail with wrong identity
+        assert!(!ack.verify(NAMESPACE, &wrong_identity));
+    }
+
+    #[test]
+    fn test_lock_verify_invalid_signature() {
+        let n = 4;
+        let t = quorum(n as u32);
+        let (identity, shares) = generate_test_data(n, t, 0);
+
+        let public_key = sample_scheme(0).public_key();
+        let chunk = Chunk::new(public_key, 42, sample_digest(1));
+        let epoch = 5;
+
+        // Generate threshold signature
+        let message = Ack::payload(&chunk, &epoch);
+        let ack_namespace = ack_namespace(NAMESPACE);
+        let partials: Vec<_> = shares
+            .iter()
+            .take(t as usize)
+            .map(|s| partial_sign_message(s, Some(ack_namespace.as_ref()), &message))
+            .collect();
+        let signature = threshold_signature_recover(t, &partials).unwrap();
+
+        // Create lock
+        let lock = Lock::new(chunk.clone(), epoch, signature);
+
+        // Get the BLS public key from the commitment
+        let public = poly::public(&identity);
+
+        // Verification should succeed
+        assert!(lock.verify(NAMESPACE, public));
+
+        // Create another set of BLS shares with a different polynomial
+        let (wrong_identity, wrong_shares) = generate_test_data(n, t, 1);
+
+        // Generate threshold signature with the wrong keys
+        let partials: Vec<_> = wrong_shares
+            .iter()
+            .take(t as usize)
+            .map(|s| partial_sign_message(s, Some(ack_namespace.as_ref()), &message))
+            .collect();
+        let wrong_signature = threshold_signature_recover(t, &partials).unwrap();
+
+        // Create lock with wrong signature
+        let wrong_lock = Lock::new(chunk, epoch, wrong_signature);
+
+        // Verification should fail with the original public key
+        assert!(!wrong_lock.verify(NAMESPACE, public));
+
+        // But succeed with the matching wrong public key
+        let wrong_public = poly::public(&wrong_identity);
+        assert!(wrong_lock.verify(NAMESPACE, wrong_public));
+    }
+
+    #[test]
+    fn test_proposal_verify_wrong_namespace() {
+        let mut scheme = sample_scheme(0);
+        let chunk = Chunk::new(scheme.public_key(), 42, sample_digest(1));
+
+        // Sign and create proposal
+        let chunk_namespace = chunk_namespace(NAMESPACE);
+        let message = chunk.encode();
+        let signature = scheme.sign(Some(chunk_namespace.as_ref()), &message);
+        let proposal = Proposal::<Ed25519, Sha256Digest>::new(chunk, signature);
+
+        // Verify with correct namespace - should pass
+        assert!(proposal.verify(NAMESPACE));
+
+        // Verify with wrong namespace - should fail
+        assert!(!proposal.verify(b"wrong_namespace"));
+    }
+
+    #[test]
+    fn test_proposal_verify_wrong_sequencer() {
+        let scheme1 = sample_scheme(0);
+        let mut scheme2 = sample_scheme(1); // Different key
+
+        // Create chunk with scheme1's public key
+        let chunk = Chunk::new(scheme1.public_key(), 42, sample_digest(1));
+
+        // But sign it with scheme2 (wrong key)
+        let chunk_namespace = chunk_namespace(NAMESPACE);
+        let message = chunk.encode();
+        let signature = scheme2.sign(Some(chunk_namespace.as_ref()), &message);
+        let proposal = Proposal::<Ed25519, Sha256Digest>::new(chunk, signature);
+
+        // Verification should fail because the signature doesn't match the sequencer's public key
+        assert!(!proposal.verify(NAMESPACE));
+    }
+
+    #[test]
+    fn test_node_genesis_with_parent_fails() {
+        // Try to create a node with height 0 and a parent
+        let public_key = sample_scheme(0).public_key();
+        let chunk = Chunk::new(public_key.clone(), 0, sample_digest(1));
+        let chunk_namespace = chunk_namespace(NAMESPACE);
+        let message = chunk.encode();
+        let signature = sample_scheme(0).sign(Some(chunk_namespace.as_ref()), &message);
+
+        // Create a parent with a random BLS signature (content doesn't matter for this test)
+        let n = 4;
+        let t = quorum(n as u32);
+        let (_, shares) = generate_test_data(n, t, 0);
+
+        let dummy_message = vec![0u8; 32];
+        let dummy_sig = partial_sign_message(&shares[0], None, &dummy_message);
+
+        // Convert the partial signature to a full signature
+        let signatures = vec![dummy_sig];
+        let full_sig = threshold_signature_recover(1, &signatures).unwrap();
+
+        let parent = Parent::new(sample_digest(0), 5, full_sig);
+
+        // Create the genesis node with a parent - should fail to decode
+        let encoded = Node::<Ed25519, Sha256Digest>::new(chunk, signature, Some(parent)).encode();
+
+        // This should error because genesis nodes can't have parents
+        let result = Node::<Ed25519, Sha256Digest>::decode(encoded);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_node_non_genesis_without_parent_fails() {
+        // Try to create a non-genesis node without a parent
+        let public_key = sample_scheme(0).public_key();
+        let chunk = Chunk::new(public_key, 1, sample_digest(1)); // Height > 0
+        let chunk_namespace = chunk_namespace(NAMESPACE);
+        let message = chunk.encode();
+        let signature = sample_scheme(0).sign(Some(chunk_namespace.as_ref()), &message);
+
+        // Create the node without a parent - should fail to decode
+        let encoded = Node::<Ed25519, Sha256Digest>::new(chunk, signature, None).encode();
+
+        // This should error because non-genesis nodes must have parents
+        let result = Node::<Ed25519, Sha256Digest>::decode(encoded);
+        assert!(result.is_err());
+    }
 }

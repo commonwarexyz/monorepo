@@ -499,7 +499,7 @@ impl<
                                     debug!(view, sender = ?s, "unknown view");
                                     continue;
                                 };
-                                if !notarization.verify::<S::PublicKey, C>(&self.namespace, participants) {
+                                if !notarization.verify::<C>(&self.namespace, participants) {
                                     warn!(view, sender = ?s, "invalid notarization");
                                     self.requester.block(s.clone());
                                     continue;
@@ -522,7 +522,7 @@ impl<
                                     debug!(view, sender = ?s, "unknown view");
                                     continue;
                                 };
-                                if !nullification.verify::<S::PublicKey, C>(&self.namespace, participants) {
+                                if !nullification.verify::<C>(&self.namespace, participants) {
                                     warn!(view, sender = ?s, "invalid nullification");
                                     self.requester.block(s.clone());
                                     continue;

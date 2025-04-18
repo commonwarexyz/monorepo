@@ -126,7 +126,7 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
                 let view = notarize.view();
                 let participants = self.participants(view).unwrap();
                 let public_key = participants[notarize.signer() as usize].clone();
-                if !notarize.verify::<C::PublicKey, C>(&self.namespace, &public_key) {
+                if !notarize.verify::<C>(&self.namespace, &public_key) {
                     panic!("signature verification failed");
                 }
                 let encoded = notarize.encode();
@@ -143,7 +143,7 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
             Activity::Notarization(notarization) => {
                 let view = notarization.view();
                 let participants = self.participants(view).unwrap();
-                if !notarization.verify::<_, C>(&self.namespace, participants) {
+                if !notarization.verify::<C>(&self.namespace, participants) {
                     panic!("signature verification failed");
                 }
                 let encoded = notarization.encode();
@@ -168,7 +168,7 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
                 let view = nullify.view();
                 let participants = self.participants(view).unwrap();
                 let public_key = participants[nullify.signer() as usize].clone();
-                if !nullify.verify::<C::PublicKey, C>(&self.namespace, &public_key) {
+                if !nullify.verify::<C>(&self.namespace, &public_key) {
                     panic!("signature verification failed");
                 }
                 let encoded = nullify.encode();
@@ -183,7 +183,7 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
             Activity::Nullification(nullification) => {
                 let view = nullification.view();
                 let participants = self.participants(view).unwrap();
-                if !nullification.verify::<_, C>(&self.namespace, participants) {
+                if !nullification.verify::<C>(&self.namespace, participants) {
                     panic!("signature verification failed");
                 }
                 let encoded = nullification.encode();
@@ -204,7 +204,7 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
                 let view = finalize.view();
                 let participants = self.participants(view).unwrap();
                 let public_key = participants[finalize.signer() as usize].clone();
-                if !finalize.verify::<C::PublicKey, C>(&self.namespace, &public_key) {
+                if !finalize.verify::<C>(&self.namespace, &public_key) {
                     panic!("signature verification failed");
                 }
                 let encoded = finalize.encode();
@@ -221,7 +221,7 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
             Activity::Finalization(finalization) => {
                 let view = finalization.view();
                 let participants = self.participants(view).unwrap();
-                if !finalization.verify::<_, C>(&self.namespace, participants) {
+                if !finalization.verify::<C>(&self.namespace, participants) {
                     panic!("signature verification failed");
                 }
                 let encoded = finalization.encode();
@@ -253,7 +253,7 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
                 let view = conflicting.view();
                 let participants = self.participants(view).unwrap();
                 let public_key = participants[conflicting.signer() as usize].clone();
-                if !conflicting.verify::<C::PublicKey, C>(&self.namespace, &public_key) {
+                if !conflicting.verify::<C>(&self.namespace, &public_key) {
                     panic!("signature verification failed");
                 }
                 let encoded = conflicting.encode();
@@ -271,7 +271,7 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
                 let view = conflicting.view();
                 let participants = self.participants(view).unwrap();
                 let public_key = participants[conflicting.signer() as usize].clone();
-                if !conflicting.verify::<C::PublicKey, C>(&self.namespace, &public_key) {
+                if !conflicting.verify::<C>(&self.namespace, &public_key) {
                     panic!("signature verification failed");
                 }
                 let encoded = conflicting.encode();
@@ -289,7 +289,7 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
                 let view = conflicting.view();
                 let participants = self.participants(view).unwrap();
                 let public_key = participants[conflicting.signer() as usize].clone();
-                if !conflicting.verify::<C::PublicKey, C>(&self.namespace, &public_key) {
+                if !conflicting.verify::<C>(&self.namespace, &public_key) {
                     panic!("signature verification failed");
                 }
                 let encoded = conflicting.encode();
