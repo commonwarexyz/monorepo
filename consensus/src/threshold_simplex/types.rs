@@ -1433,3 +1433,350 @@ impl<D: Digest> Read for NullifyFinalize<D> {
 impl<D: Digest> FixedSize for NullifyFinalize<D> {
     const SIZE: usize = Proposal::<D>::SIZE + PartialSignature::SIZE + PartialSignature::SIZE;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_codec::{Decode, DecodeExt, Encode};
+    use commonware_cryptography::{
+        bls12381::{
+            dkg::ops,
+            primitives::{group::Share, ops::threshold_signature_recover, poly},
+        },
+        sha256::Digest as Sha256,
+    };
+    use commonware_utils::quorum;
+    use rand::{rngs::StdRng, SeedableRng};
+
+    const NAMESPACE: &[u8] = b"test";
+
+    // Helper function to create a sample digest
+    fn sample_digest(v: u8) -> Sha256 {
+        Sha256::from([v; 32]) // Simple fixed digest for testing
+    }
+
+    // Helper function to generate BLS shares and polynomial
+    fn generate_test_data(n: usize, t: u32) -> (poly::Public, Vec<Share>) {
+        let mut rng = StdRng::seed_from_u64(0);
+        ops::generate_shares(&mut rng, None, n as u32, t)
+    }
+
+    #[test]
+    fn test_view_encode_decode() {
+        let view: View = 42;
+        let encoded = view.encode();
+        let decoded = View::decode(encoded).unwrap();
+        assert_eq!(view, decoded);
+    }
+
+    #[test]
+    fn test_proposal_encode_decode() {
+        let proposal = Proposal::new(10, 5, sample_digest(1));
+        let encoded = proposal.encode();
+        let decoded = Proposal::<Sha256>::decode(encoded).unwrap();
+        assert_eq!(proposal, decoded);
+    }
+
+    #[test]
+    fn test_notarize_encode_decode() {
+        let n = 5;
+        let t = quorum(n as u32);
+        let (commitment, shares) = generate_test_data(n, t);
+
+        let proposal = Proposal::new(10, 5, sample_digest(1));
+        let notarize = Notarize::sign(NAMESPACE, &shares[0], proposal);
+
+        let encoded = notarize.encode();
+        let decoded = Notarize::<Sha256>::decode(encoded).unwrap();
+
+        assert_eq!(notarize, decoded);
+        assert!(decoded.verify(NAMESPACE, &commitment));
+    }
+
+    #[test]
+    fn test_notarization_encode_decode() {
+        let n = 5;
+        let t = quorum(n as u32);
+        let (commitment, shares) = generate_test_data(n, t);
+
+        let proposal = Proposal::new(10, 5, sample_digest(1));
+
+        // Create notarizes
+        let notarizes: Vec<_> = shares
+            .iter()
+            .map(|s| Notarize::sign(NAMESPACE, s, proposal.clone()))
+            .collect();
+
+        // Recover threshold signature
+        let proposal_partials = notarizes.iter().map(|n| &n.proposal_signature);
+        let proposal_signature = threshold_signature_recover(t, proposal_partials).unwrap();
+        let seed_partials = notarizes.iter().map(|n| &n.seed_signature);
+        let seed_signature = threshold_signature_recover(t, seed_partials).unwrap();
+
+        // Create notarization
+        let notarization = Notarization::new(proposal, proposal_signature, seed_signature);
+
+        let encoded = notarization.encode();
+        let decoded = Notarization::<Sha256>::decode(encoded).unwrap();
+
+        assert_eq!(notarization, decoded);
+
+        // Verify the notarization
+        let public_key = poly::public(&commitment);
+        assert!(decoded.verify(NAMESPACE, public_key));
+    }
+
+    #[test]
+    fn test_nullify_encode_decode() {
+        let n = 5;
+        let t = quorum(n as u32);
+        let (commitment, shares) = generate_test_data(n, t);
+
+        let nullify = Nullify::sign(NAMESPACE, &shares[0], 10);
+
+        let encoded = nullify.encode();
+        let decoded = Nullify::decode(encoded).unwrap();
+
+        assert_eq!(nullify, decoded);
+        assert!(decoded.verify(NAMESPACE, &commitment));
+    }
+
+    #[test]
+    fn test_nullification_encode_decode() {
+        let n = 5;
+        let t = quorum(n as u32);
+        let (commitment, shares) = generate_test_data(n, t);
+
+        // Create nullifies
+        let nullifies: Vec<_> = shares
+            .iter()
+            .map(|s| Nullify::sign(NAMESPACE, s, 10))
+            .collect();
+
+        // Recover threshold signature
+        let view_partials = nullifies.iter().map(|n| &n.view_signature);
+        let view_signature = threshold_signature_recover(t, view_partials).unwrap();
+        let seed_partials = nullifies.iter().map(|n| &n.seed_signature);
+        let seed_signature = threshold_signature_recover(t, seed_partials).unwrap();
+
+        // Create nullification
+        let nullification = Nullification::new(10, view_signature, seed_signature);
+
+        let encoded = nullification.encode();
+        let decoded = Nullification::decode(encoded).unwrap();
+
+        assert_eq!(nullification, decoded);
+
+        // Verify the nullification
+        let public_key = poly::public(&commitment);
+        assert!(decoded.verify(NAMESPACE, public_key));
+    }
+
+    #[test]
+    fn test_finalize_encode_decode() {
+        let n = 5;
+        let t = quorum(n as u32);
+        let (commitment, shares) = generate_test_data(n, t);
+
+        let proposal = Proposal::new(10, 5, sample_digest(1));
+        let finalize = Finalize::sign(NAMESPACE, &shares[0], proposal);
+
+        let encoded = finalize.encode();
+        let decoded = Finalize::<Sha256>::decode(encoded).unwrap();
+
+        assert_eq!(finalize, decoded);
+        assert!(decoded.verify(NAMESPACE, &commitment));
+    }
+
+    #[test]
+    fn test_finalization_encode_decode() {
+        let n = 5;
+        let t = quorum(n as u32);
+        let (commitment, shares) = generate_test_data(n, t);
+
+        let proposal = Proposal::new(10, 5, sample_digest(1));
+
+        // Create finalizes
+        let notarizes: Vec<_> = shares
+            .iter()
+            .map(|s| Notarize::sign(NAMESPACE, s, proposal.clone()))
+            .collect();
+        let finalizes: Vec<_> = shares
+            .iter()
+            .map(|s| Finalize::sign(NAMESPACE, s, proposal.clone()))
+            .collect();
+
+        // Recover threshold signatures
+        let proposal_partials = finalizes.iter().map(|f| &f.proposal_signature);
+        let proposal_signature = threshold_signature_recover(t, proposal_partials).unwrap();
+        let seed_partials = notarizes.iter().map(|n| &n.seed_signature);
+        let seed_signature = threshold_signature_recover(t, seed_partials).unwrap();
+
+        // Create finalization
+        let finalization = Finalization::new(proposal, proposal_signature, seed_signature);
+
+        let encoded = finalization.encode();
+        let decoded = Finalization::<Sha256>::decode(encoded).unwrap();
+
+        assert_eq!(finalization, decoded);
+
+        // Verify the finalization
+        let public_key = poly::public(&commitment);
+        assert!(decoded.verify(NAMESPACE, public_key));
+    }
+
+    #[test]
+    fn test_backfiller_encode_decode() {
+        // Test Request
+        let request = Request::new(1, vec![10, 11], vec![12, 13]);
+        let backfiller = Backfiller::Request::<Sha256>(request.clone());
+        let encoded = backfiller.encode();
+        let decoded = Backfiller::<Sha256>::decode_cfg(encoded, &usize::MAX).unwrap();
+        assert!(matches!(decoded, Backfiller::Request(r) if r == request));
+
+        // Test Response
+        let n = 5;
+        let t = quorum(n as u32);
+        let (_, shares) = generate_test_data(n, t);
+
+        // Create a notarization
+        let proposal = Proposal::new(10, 5, sample_digest(1));
+        let notarizes: Vec<_> = shares
+            .iter()
+            .map(|s| Notarize::sign(NAMESPACE, s, proposal.clone()))
+            .collect();
+
+        let proposal_partials = notarizes.iter().map(|n| &n.proposal_signature);
+        let proposal_signature = threshold_signature_recover(t, proposal_partials).unwrap();
+        let seed_partials = notarizes.iter().map(|n| &n.seed_signature);
+        let seed_signature = threshold_signature_recover(t, seed_partials).unwrap();
+
+        let notarization = Notarization::new(proposal, proposal_signature, seed_signature);
+
+        // Create a nullification
+        let nullifies: Vec<_> = shares
+            .iter()
+            .map(|s| Nullify::sign(NAMESPACE, s, 11))
+            .collect();
+
+        let view_partials = nullifies.iter().map(|n| &n.view_signature);
+        let view_signature = threshold_signature_recover(t, view_partials).unwrap();
+        let seed_partials = nullifies.iter().map(|n| &n.seed_signature);
+        let seed_signature = threshold_signature_recover(t, seed_partials).unwrap();
+
+        let nullification = Nullification::new(11, view_signature, seed_signature);
+
+        // Create a response
+        let response = Response::new(1, vec![notarization], vec![nullification]);
+        let backfiller = Backfiller::Response::<Sha256>(response.clone());
+        let encoded = backfiller.encode();
+        let decoded = Backfiller::<Sha256>::decode_cfg(encoded, &usize::MAX).unwrap();
+        assert!(matches!(decoded, Backfiller::Response(r) if r.id == response.id));
+    }
+
+    #[test]
+    fn test_request_encode_decode() {
+        let request = Request::new(1, vec![10, 11], vec![12, 13]);
+        let encoded = request.encode();
+        let decoded = Request::decode_cfg(encoded, &usize::MAX).unwrap();
+        assert_eq!(request, decoded);
+    }
+
+    #[test]
+    fn test_response_encode_decode() {
+        let n = 5;
+        let t = quorum(n as u32);
+        let (_, shares) = generate_test_data(n, t);
+
+        // Create a notarization
+        let proposal = Proposal::new(10, 5, sample_digest(1));
+        let notarizes: Vec<_> = shares
+            .iter()
+            .map(|s| Notarize::sign(NAMESPACE, s, proposal.clone()))
+            .collect();
+
+        let proposal_partials = notarizes.iter().map(|n| &n.proposal_signature);
+        let proposal_signature = threshold_signature_recover(t, proposal_partials).unwrap();
+        let seed_partials = notarizes.iter().map(|n| &n.seed_signature);
+        let seed_signature = threshold_signature_recover(t, seed_partials).unwrap();
+
+        let notarization = Notarization::new(proposal, proposal_signature, seed_signature);
+
+        // Create a nullification
+        let nullifies: Vec<_> = shares
+            .iter()
+            .map(|s| Nullify::sign(NAMESPACE, s, 11))
+            .collect();
+
+        let view_partials = nullifies.iter().map(|n| &n.view_signature);
+        let view_signature = threshold_signature_recover(t, view_partials).unwrap();
+        let seed_partials = nullifies.iter().map(|n| &n.seed_signature);
+        let seed_signature = threshold_signature_recover(t, seed_partials).unwrap();
+
+        let nullification = Nullification::new(11, view_signature, seed_signature);
+
+        // Create a response
+        let response = Response::new(1, vec![notarization], vec![nullification]);
+        let encoded = response.encode();
+        let decoded = Response::<Sha256>::decode_cfg(encoded, &usize::MAX).unwrap();
+        assert_eq!(response.id, decoded.id);
+        assert_eq!(response.notarizations.len(), decoded.notarizations.len());
+        assert_eq!(response.nullifications.len(), decoded.nullifications.len());
+    }
+
+    #[test]
+    fn test_conflicting_notarize_encode_decode() {
+        let n = 5;
+        let t = quorum(n as u32);
+        let (commitment, shares) = generate_test_data(n, t);
+
+        let proposal1 = Proposal::new(10, 5, sample_digest(1));
+        let proposal2 = Proposal::new(10, 5, sample_digest(2));
+        let notarize1 = Notarize::sign(NAMESPACE, &shares[0], proposal1);
+        let notarize2 = Notarize::sign(NAMESPACE, &shares[0], proposal2);
+        let conflicting_notarize = ConflictingNotarize::new(notarize1, notarize2);
+
+        let encoded = conflicting_notarize.encode();
+        let decoded = ConflictingNotarize::<Sha256>::decode(encoded).unwrap();
+
+        assert_eq!(conflicting_notarize, decoded);
+        assert!(decoded.verify(NAMESPACE, &commitment));
+    }
+
+    #[test]
+    fn test_conflicting_finalize_encode_decode() {
+        let n = 5;
+        let t = quorum(n as u32);
+        let (commitment, shares) = generate_test_data(n, t);
+
+        let proposal1 = Proposal::new(10, 5, sample_digest(1));
+        let proposal2 = Proposal::new(10, 5, sample_digest(2));
+        let finalize1 = Finalize::sign(NAMESPACE, &shares[0], proposal1);
+        let finalize2 = Finalize::sign(NAMESPACE, &shares[0], proposal2);
+        let conflicting_finalize = ConflictingFinalize::new(finalize1, finalize2);
+
+        let encoded = conflicting_finalize.encode();
+        let decoded = ConflictingFinalize::<Sha256>::decode(encoded).unwrap();
+
+        assert_eq!(conflicting_finalize, decoded);
+        assert!(decoded.verify(NAMESPACE, &commitment));
+    }
+
+    #[test]
+    fn test_nullify_finalize_encode_decode() {
+        let n = 5;
+        let t = quorum(n as u32);
+        let (commitment, shares) = generate_test_data(n, t);
+
+        let proposal = Proposal::new(10, 5, sample_digest(1));
+        let nullify = Nullify::sign(NAMESPACE, &shares[0], 10);
+        let finalize = Finalize::sign(NAMESPACE, &shares[0], proposal);
+        let nullify_finalize = NullifyFinalize::new(nullify, finalize);
+
+        let encoded = nullify_finalize.encode();
+        let decoded = NullifyFinalize::<Sha256>::decode(encoded).unwrap();
+
+        assert_eq!(nullify_finalize, decoded);
+        assert!(decoded.verify(NAMESPACE, &commitment));
+    }
+}
