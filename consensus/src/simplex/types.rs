@@ -297,10 +297,10 @@ impl<S: Array, D: Digest> Notarize<S, D> {
     /// Verifies the signature on this notarize using the provided verifier.
     ///
     /// This ensures that the notarize was actually produced by the claimed validator.
-    pub fn verify<P: Array, V: Verifier<PublicKey = P, Signature = S>>(
+    pub fn verify<V: Verifier<Signature = S>>(
         &self,
         namespace: &[u8],
-        public_key: &P,
+        public_key: &V::PublicKey,
     ) -> bool {
         let notarize_namespace = notarize_namespace(namespace);
         let message = self.proposal.encode();
@@ -394,11 +394,10 @@ impl<S: Array, D: Digest> Notarization<S, D> {
     /// 3. All signers are in the validator set
     ///
     /// In `read_cfg`, we ensure that the signatures are sorted by public key index and are unique.
-    // TODO(#755): Use `commonware-cryptography::Specification`
-    pub fn verify<P: Array, V: Verifier<PublicKey = P, Signature = S>>(
+    pub fn verify<V: Verifier<Signature = S>>(
         &self,
         namespace: &[u8],
-        participants: &[P],
+        participants: &[V::PublicKey],
     ) -> bool {
         // Get allowed signers
         let (threshold, count) = threshold(participants);
@@ -489,10 +488,10 @@ impl<S: Array> Nullify<S> {
     }
 
     /// Verifies the signature on this nullify using the provided verifier.
-    pub fn verify<P: Array, V: Verifier<PublicKey = P, Signature = S>>(
+    pub fn verify<V: Verifier<Signature = S>>(
         &self,
         namespace: &[u8],
-        public_key: &P,
+        public_key: &V::PublicKey,
     ) -> bool {
         let nullify_namespace = nullify_namespace(namespace);
         let message = view_message(self.view);
@@ -575,10 +574,10 @@ impl<S: Array> Nullification<S> {
     /// Verifies all signatures in this nullification using the provided verifier.
     ///
     /// Similar to Notarization::verify, ensures quorum of valid signatures from validators.
-    pub fn verify<P: Array, V: Verifier<PublicKey = P, Signature = S>>(
+    pub fn verify<V: Verifier<Signature = S>>(
         &self,
         namespace: &[u8],
-        participants: &[P],
+        participants: &[V::PublicKey],
     ) -> bool {
         // Get allowed signers
         let (threshold, count) = threshold(participants);
@@ -670,10 +669,10 @@ impl<S: Array, D: Digest> Finalize<S, D> {
     }
 
     /// Verifies the signature on this finalize using the provided verifier.
-    pub fn verify<P: Array, V: Verifier<PublicKey = P, Signature = S>>(
+    pub fn verify<V: Verifier<Signature = S>>(
         &self,
         namespace: &[u8],
-        public_key: &P,
+        public_key: &V::PublicKey,
     ) -> bool {
         let finalize_namespace = finalize_namespace(namespace);
         let message = self.proposal.encode();
@@ -762,10 +761,10 @@ impl<S: Array, D: Digest> Finalization<S, D> {
     /// Verifies all signatures in this finalization using the provided verifier.
     ///
     /// Similar to Notarization::verify, ensures quorum of valid signatures from validators.
-    pub fn verify<P: Array, V: Verifier<PublicKey = P, Signature = S>>(
+    pub fn verify<V: Verifier<Signature = S>>(
         &self,
         namespace: &[u8],
-        participants: &[P],
+        participants: &[V::PublicKey],
     ) -> bool {
         // Get allowed signers
         let (threshold, count) = threshold(participants);
@@ -1183,14 +1182,14 @@ impl<S: Array, D: Digest> ConflictingNotarize<S, D> {
     }
 
     /// Verifies that both conflicting signatures are valid, proving Byzantine behavior.
-    pub fn verify<P: Array, V: Verifier<PublicKey = P, Signature = S>>(
+    pub fn verify<V: Verifier<Signature = S>>(
         &self,
         namespace: &[u8],
-        public_key: &P,
+        public_key: &V::PublicKey,
     ) -> bool {
         let (notarize_1, notarize_2) = self.notarizes();
-        notarize_1.verify::<P, V>(namespace, public_key)
-            && notarize_2.verify::<P, V>(namespace, public_key)
+        notarize_1.verify::<V>(namespace, public_key)
+            && notarize_2.verify::<V>(namespace, public_key)
     }
 }
 
@@ -1306,14 +1305,14 @@ impl<S: Array, D: Digest> ConflictingFinalize<S, D> {
     }
 
     /// Verifies that both conflicting signatures are valid, proving Byzantine behavior.
-    pub fn verify<P: Array, V: Verifier<PublicKey = P, Signature = S>>(
+    pub fn verify<V: Verifier<Signature = S>>(
         &self,
         namespace: &[u8],
-        public_key: &P,
+        public_key: &V::PublicKey,
     ) -> bool {
         let (finalize_1, finalize_2) = self.finalizes();
-        finalize_1.verify::<P, V>(namespace, public_key)
-            && finalize_2.verify::<P, V>(namespace, public_key)
+        finalize_1.verify::<V>(namespace, public_key)
+            && finalize_2.verify::<V>(namespace, public_key)
     }
 }
 
@@ -1404,15 +1403,14 @@ impl<S: Array, D: Digest> NullifyFinalize<S, D> {
     }
 
     /// Verifies that both the nullify and finalize signatures are valid, proving Byzantine behavior.
-    pub fn verify<P: Array, V: Verifier<PublicKey = P, Signature = S>>(
+    pub fn verify<V: Verifier<Signature = S>>(
         &self,
         namespace: &[u8],
-        public_key: &P,
+        public_key: &V::PublicKey,
     ) -> bool {
         let nullify = Nullify::new(self.proposal.view(), self.view_signature.clone());
         let finalize = Finalize::new(self.proposal.clone(), self.finalize_signature.clone());
-        nullify.verify::<P, V>(namespace, public_key)
-            && finalize.verify::<P, V>(namespace, public_key)
+        nullify.verify::<V>(namespace, public_key) && finalize.verify::<V>(namespace, public_key)
     }
 }
 
@@ -1456,5 +1454,204 @@ impl<S: Array, D: Digest> Viewable for NullifyFinalize<S, D> {
 impl<S: Array, D: Digest> Attributable for NullifyFinalize<S, D> {
     fn signer(&self) -> u32 {
         self.view_signature.signer()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_codec::{Decode, DecodeExt, Encode};
+    use commonware_cryptography::{ed25519, sha256::Digest as Sha256Digest, Ed25519, Signer};
+    use commonware_utils::array::U64;
+
+    const NAMESPACE: &[u8] = b"test";
+
+    // Helper function to create a sample digest
+    fn sample_digest(v: u8) -> Sha256Digest {
+        Sha256Digest::from([v; 32]) // Simple fixed digest for testing
+    }
+
+    fn sample_scheme(v: u64) -> Ed25519 {
+        Ed25519::from_seed(v)
+    }
+
+    #[test]
+    fn test_view_encode_decode() {
+        let view: View = 42;
+        let encoded = view.encode();
+        let decoded = View::decode(encoded).unwrap();
+        assert_eq!(view, decoded);
+    }
+
+    #[test]
+    fn test_proposal_encode_decode() {
+        let proposal = Proposal::new(10, 5, sample_digest(1));
+        let encoded = proposal.encode();
+        let decoded = Proposal::<Sha256Digest>::decode(encoded).unwrap();
+        assert_eq!(proposal, decoded);
+    }
+
+    #[test]
+    fn test_notarize_encode_decode() {
+        let mut scheme = sample_scheme(0);
+        let proposal = Proposal::new(10, 5, sample_digest(1));
+        let notarize = Notarize::sign(NAMESPACE, &mut scheme, 0, proposal);
+        let encoded = notarize.encode();
+        let decoded = Notarize::<ed25519::Signature, Sha256Digest>::decode(encoded).unwrap();
+        assert_eq!(notarize, decoded);
+        assert!(decoded.verify::<Ed25519>(NAMESPACE, &scheme.public_key()));
+    }
+
+    #[test]
+    fn test_notarization_encode_decode() {
+        let mut scheme_1 = sample_scheme(0);
+        let mut scheme_2 = sample_scheme(1);
+        let proposal = Proposal::new(10, 5, sample_digest(1));
+        let notarize_1 = Notarize::sign(NAMESPACE, &mut scheme_1, 0, proposal.clone());
+        let notarize_2 = Notarize::sign(NAMESPACE, &mut scheme_2, 1, proposal.clone());
+        let signatures = vec![notarize_1.signature.clone(), notarize_2.signature.clone()];
+        let notarization = Notarization::new(proposal.clone(), signatures.clone());
+        let encoded = notarization.encode();
+        let decoded =
+            Notarization::<ed25519::Signature, Sha256Digest>::decode_cfg(encoded, &usize::MAX)
+                .unwrap();
+        assert_eq!(notarization, decoded);
+        assert!(
+            decoded.verify::<Ed25519>(NAMESPACE, &[scheme_1.public_key(), scheme_2.public_key()])
+        );
+    }
+
+    #[test]
+    fn test_nullify_encode_decode() {
+        let mut scheme = sample_scheme(0);
+        let nullify = Nullify::sign(NAMESPACE, &mut scheme, 0, 10);
+        let encoded = nullify.encode();
+        let decoded = Nullify::<ed25519::Signature>::decode(encoded).unwrap();
+        assert_eq!(nullify, decoded);
+        assert!(decoded.verify::<Ed25519>(NAMESPACE, &scheme.public_key()));
+    }
+
+    #[test]
+    fn test_nullification_encode_decode() {
+        let mut scheme_1 = sample_scheme(0);
+        let mut scheme_2 = sample_scheme(1);
+        let nullify_1 = Nullify::sign(NAMESPACE, &mut scheme_1, 0, 10);
+        let nullify_2 = Nullify::sign(NAMESPACE, &mut scheme_2, 1, 10);
+        let signatures = vec![nullify_1.signature.clone(), nullify_2.signature.clone()];
+        let nullification = Nullification::new(10, signatures.clone());
+        let encoded = nullification.encode();
+        let decoded =
+            Nullification::<ed25519::Signature>::decode_cfg(encoded, &usize::MAX).unwrap();
+        assert_eq!(nullification, decoded);
+        assert!(
+            decoded.verify::<Ed25519>(NAMESPACE, &[scheme_1.public_key(), scheme_2.public_key()])
+        );
+    }
+
+    #[test]
+    fn test_finalize_encode_decode() {
+        let mut scheme = sample_scheme(0);
+        let proposal = Proposal::new(10, 5, sample_digest(1));
+        let finalize = Finalize::sign(NAMESPACE, &mut scheme, 0, proposal);
+        let encoded = finalize.encode();
+        let decoded = Finalize::<ed25519::Signature, Sha256Digest>::decode(encoded).unwrap();
+        assert_eq!(finalize, decoded);
+    }
+
+    #[test]
+    fn test_finalization_encode_decode() {
+        let mut scheme_1 = sample_scheme(0);
+        let mut scheme_2 = sample_scheme(1);
+        let proposal = Proposal::new(10, 5, sample_digest(1));
+        let finalize_1 = Finalize::sign(NAMESPACE, &mut scheme_1, 0, proposal.clone());
+        let finalize_2 = Finalize::sign(NAMESPACE, &mut scheme_2, 1, proposal.clone());
+        let signatures = vec![finalize_1.signature.clone(), finalize_2.signature.clone()];
+        let finalization = Finalization::new(proposal.clone(), signatures.clone());
+        let encoded = finalization.encode();
+        let decoded =
+            Finalization::<ed25519::Signature, Sha256Digest>::decode_cfg(encoded, &usize::MAX)
+                .unwrap();
+        assert_eq!(finalization, decoded);
+        assert!(
+            decoded.verify::<Ed25519>(NAMESPACE, &[scheme_1.public_key(), scheme_2.public_key()])
+        );
+    }
+
+    #[test]
+    fn test_backfiller_encode_decode() {
+        let request = Request::new(1, vec![10, 11], vec![12, 13]);
+        let backfiller = Backfiller::Request::<U64, Sha256Digest>(request.clone());
+        let encoded = backfiller.encode();
+        let decoded =
+            Backfiller::<U64, Sha256Digest>::decode_cfg(encoded, &(usize::MAX, usize::MAX))
+                .unwrap();
+        assert!(matches!(decoded, Backfiller::Request(r) if r == request));
+    }
+
+    #[test]
+    fn test_request_encode_decode() {
+        let request = Request::new(1, vec![10, 11], vec![12, 13]);
+        let encoded = request.encode();
+        let decoded = Request::decode_cfg(encoded, &usize::MAX).unwrap();
+        assert_eq!(request, decoded);
+    }
+
+    #[test]
+    fn test_response_encode_decode() {
+        let mut scheme = sample_scheme(0);
+        let proposal = Proposal::new(10, 5, sample_digest(1));
+        let notarize = Notarize::sign(NAMESPACE, &mut scheme, 0, proposal.clone());
+        let notarization = Notarization::new(proposal.clone(), vec![notarize.signature.clone()]);
+        let response = Response::new(1, vec![notarization], vec![]);
+        let encoded = response.encode();
+        let decoded = Response::<ed25519::Signature, Sha256Digest>::decode_cfg(
+            encoded,
+            &(usize::MAX, usize::MAX),
+        )
+        .unwrap();
+        assert_eq!(response, decoded);
+    }
+
+    #[test]
+    fn test_conflicting_notarize_encode_decode() {
+        let mut scheme = sample_scheme(0);
+        let proposal1 = Proposal::new(10, 5, sample_digest(1));
+        let proposal2 = Proposal::new(10, 6, sample_digest(2));
+        let notarize1 = Notarize::sign(NAMESPACE, &mut scheme, 0, proposal1.clone());
+        let notarize2 = Notarize::sign(NAMESPACE, &mut scheme, 0, proposal2.clone());
+        let conflicting = ConflictingNotarize::new(notarize1, notarize2);
+        let encoded = conflicting.encode();
+        let decoded =
+            ConflictingNotarize::<ed25519::Signature, Sha256Digest>::decode(encoded).unwrap();
+        assert_eq!(conflicting, decoded);
+        assert!(conflicting.verify::<Ed25519>(NAMESPACE, &scheme.public_key()));
+    }
+
+    #[test]
+    fn test_conflicting_finalize_encode_decode() {
+        let mut scheme = sample_scheme(0);
+        let proposal1 = Proposal::new(10, 5, sample_digest(1));
+        let proposal2 = Proposal::new(10, 6, sample_digest(2));
+        let finalize1 = Finalize::sign(NAMESPACE, &mut scheme, 0, proposal1.clone());
+        let finalize2 = Finalize::sign(NAMESPACE, &mut scheme, 0, proposal2.clone());
+        let conflicting = ConflictingFinalize::new(finalize1, finalize2);
+        let encoded = conflicting.encode();
+        let decoded =
+            ConflictingFinalize::<ed25519::Signature, Sha256Digest>::decode(encoded).unwrap();
+        assert_eq!(conflicting, decoded);
+        assert!(conflicting.verify::<Ed25519>(NAMESPACE, &scheme.public_key()));
+    }
+
+    #[test]
+    fn test_nullify_finalize_encode_decode() {
+        let mut scheme = sample_scheme(0);
+        let proposal = Proposal::new(10, 5, sample_digest(1));
+        let nullify = Nullify::sign(NAMESPACE, &mut scheme, 1, 10);
+        let finalize = Finalize::sign(NAMESPACE, &mut scheme, 1, proposal.clone());
+        let nullify_finalize = NullifyFinalize::new(nullify, finalize);
+        let encoded = nullify_finalize.encode();
+        let decoded = NullifyFinalize::<ed25519::Signature, Sha256Digest>::decode(encoded).unwrap();
+        assert_eq!(nullify_finalize, decoded);
+        assert!(nullify_finalize.verify::<Ed25519>(NAMESPACE, &scheme.public_key()));
     }
 }
