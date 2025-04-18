@@ -330,11 +330,8 @@ fn main() {
                                     .await
                                     .expect("failed to send message");
                                 let success = receiver.await.expect("failed to receive response");
-                                if sender
-                                    .send(Outbound::Success(success).encode().as_ref())
-                                    .await
-                                    .is_err()
-                                {
+                                let msg = Outbound::Success(success).encode();
+                                if sender.send(&msg).await.is_err() {
                                     debug!(?peer, "failed to send message");
                                     return;
                                 }

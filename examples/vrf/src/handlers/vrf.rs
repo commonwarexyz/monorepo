@@ -10,7 +10,7 @@ use commonware_cryptography::bls12381::{
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};
-use commonware_utils::{hex, Array};
+use commonware_utils::Array;
 use futures::{channel::mpsc, StreamExt};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -171,7 +171,7 @@ impl<E: Clock + Spawner, P: Array> Vrf<E, P> {
             {
                 Some(signature) => {
                     let signature = signature.serialize();
-                    info!(round, signature = hex(&signature), "generated signature");
+                    info!(round, ?signature, "generated signature");
                 }
                 None => {
                     warn!(round, "failed to generate signature");

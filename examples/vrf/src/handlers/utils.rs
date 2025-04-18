@@ -1,6 +1,6 @@
 use commonware_codec::{EncodeSize, FixedSize, Write};
-use commonware_cryptography::bls12381::primitives::{group::Element, poly};
-use commonware_utils::{hex, Array};
+use commonware_cryptography::bls12381::primitives::poly;
+use commonware_utils::Array;
 
 pub const ACK_NAMESPACE: &[u8] = b"_COMMONWARE_DKG_ACK_";
 
@@ -11,10 +11,4 @@ pub fn payload<P: Array>(round: u64, dealer: &P, commitment: &poly::Public) -> V
     dealer.write(&mut payload);
     commitment.write(&mut payload);
     payload
-}
-
-/// Convert a public polynomial to a hexadecimal representation of
-/// the public key.
-pub fn public_hex(public: &poly::Public) -> String {
-    hex(&poly::public(public).serialize())
 }

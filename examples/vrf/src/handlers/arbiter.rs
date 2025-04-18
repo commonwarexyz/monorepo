@@ -1,5 +1,5 @@
 use crate::handlers::{
-    utils::{payload, public_hex, ACK_NAMESPACE},
+    utils::{payload, ACK_NAMESPACE},
     wire,
 };
 use commonware_codec::{Decode, Encode};
@@ -10,7 +10,6 @@ use commonware_cryptography::{
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};
-use commonware_utils::hex;
 use std::{
     collections::{HashMap, HashSet},
     time::Duration,
@@ -55,7 +54,7 @@ impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
 
         // Send round start message to contributors
         if let Some(previous) = &previous {
-            info!(round, public = hex(&previous.encode()), "starting reshare");
+            info!(round, public=?previous, "starting reshare");
         } else {
             info!(round, "starting key generation");
         }
@@ -237,7 +236,7 @@ impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
                 Some(public) => {
                     info!(
                         round,
-                        public = public_hex(&public),
+                        ?public,
                         disqualified = ?disqualified.into_iter().map(|pk| pk.to_string()).collect::<Vec<_>>(),
                         "round complete"
                     );

@@ -122,11 +122,10 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                     info!(msg = hex(&msg), payload = ?digest, "proposed");
 
                     // Publish to indexer
-                    let msg = wire::PutBlock {
+                    let msg = Inbound::PutBlock::<H::Digest>(wire::PutBlock {
                         network: self.public,
                         data: msg.into(),
-                    }
-                    .encode();
+                    }).encode();
                     indexer_sender
                         .send(&msg)
                         .await
@@ -136,9 +135,8 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                         .await
                         .expect("failed to receive from indexer");
                     let msg = Outbound::decode(result).expect("failed to decode result");
-                    let success = match msg {
-                        Outbound::Success(s) => s,
-                        _ => panic!("unexpected response"),
+                    let Outbound::Success(success) = msg else {
+                        panic!("unexpected response");
                     };
                     debug!(view = index, success, "block published");
                     if !success {

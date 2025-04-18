@@ -1,5 +1,5 @@
 use crate::handlers::{
-    utils::{payload, public_hex, ACK_NAMESPACE},
+    utils::{payload, ACK_NAMESPACE},
     wire,
 };
 use commonware_codec::{Decode, Encode};
@@ -124,7 +124,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
         match (&previous, &public) {
             (Some(previous), None) => {
                 warn!(
-                    expected = public_hex(&previous.public),
+                    expected = ?previous.public,
                     "previous group polynomial but found none"
                 );
                 should_deal = false;
@@ -132,8 +132,8 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
             (Some(previous), Some(public)) => {
                 if previous.public != *public {
                     warn!(
-                        expected = public_hex(&previous.public),
-                        found = public_hex(public),
+                        expected = ?previous.public,
+                        found = ?public,
                         "group polynomial does not match expected"
                     );
                     should_deal = false;
@@ -141,7 +141,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
             }
             (None, Some(public)) => {
                 warn!(
-                    found = public_hex(public),
+                    found = ?public,
                     "found group polynomial but expected none"
                 );
                 should_deal = false;
@@ -471,7 +471,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
                     continue;
                 }
                 Some(output) => {
-                    info!(round, public = public_hex(&output.public), "round success");
+                    info!(round, public = ?output.public, "round success");
 
                     // Generate signature over round
                     self.signatures.send((round, output.clone())).await.unwrap();
