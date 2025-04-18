@@ -590,6 +590,9 @@ impl crate::Runner for Runner {
             for task in tasks {
                 match task {
                     WorkItem::Root => {
+                        // Audit
+                        self.executor.auditor.process_task(u128::MAX, "");
+
                         // meter poll
                         self.executor
                             .metrics
