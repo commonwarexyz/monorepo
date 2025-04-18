@@ -55,24 +55,27 @@ impl<H: CHasher> Proof<H> {
     pub fn verify_element_inclusion(
         &self,
         hasher: &mut H,
-        element: &H::Digest,
+        element: &[u8],
         element_pos: u64,
         root_hash: &H::Digest,
     ) -> bool {
-        self.verify_range_inclusion(hasher, &[*element], element_pos, element_pos, root_hash)
+        self.verify_range_inclusion(hasher, &[element], element_pos, element_pos, root_hash)
     }
 
     /// Return true if `proof` proves that the `elements` appear consecutively between positions
     /// `start_element_pos` through `end_element_pos` (inclusive) within the MMR with root hash
     /// `root_hash`.
-    pub fn verify_range_inclusion(
+    pub fn verify_range_inclusion<T>(
         &self,
         hasher: &mut H,
-        elements: &[H::Digest],
+        elements: T,
         start_element_pos: u64,
         end_element_pos: u64,
         root_hash: &H::Digest,
-    ) -> bool {
+    ) -> bool
+    where
+        T: IntoIterator<Item: AsRef<[u8]>>,
+    {
         let peak_hashes = match self.reconstruct_peak_hashes(
             hasher,
             elements,
@@ -92,17 +95,20 @@ impl<H: CHasher> Proof<H> {
     /// Reconstruct the peak hashes of the MMR that produced this proof, returning `MissingHashes`
     /// error if there are not enough proof hashes, or `ExtraHashes` error if not all proof hashes
     /// were used in the reconstruction.
-    fn reconstruct_peak_hashes(
+    fn reconstruct_peak_hashes<T>(
         &self,
         hasher: &mut H,
-        elements: &[H::Digest],
+        elements: T,
         start_element_pos: u64,
         end_element_pos: u64,
-    ) -> Result<Vec<H::Digest>, Error> {
+    ) -> Result<Vec<H::Digest>, Error>
+    where
+        T: IntoIterator<Item: AsRef<[u8]>>,
+    {
         let mut proof_hashes_iter = self.hashes.iter();
-        let mut elements_iter = elements.iter();
         let mut siblings_iter = self.hashes.iter().rev();
         let mut mmr_hasher = Hasher::<H>::new(hasher);
+        let mut elements_iter = elements.into_iter();
 
         // Include peak hashes only for trees that have no elements from the range, and keep track
         // of the starting and ending trees of those that do contain some.
@@ -334,20 +340,25 @@ impl<H: CHasher> Proof<H> {
     }
 }
 
-fn peak_hash_from_range<'a, H: CHasher>(
+fn peak_hash_from_range<'a, H, I, S>(
     hasher: &mut Hasher<H>,
     pos: u64,           // current node position in the tree
     two_h: u64,         // 2^height of the current node
     leftmost_pos: u64,  // leftmost leaf in the tree to be traversed
     rightmost_pos: u64, // rightmost leaf in the tree to be traversed
-    elements: &mut impl Iterator<Item = &'a H::Digest>,
-    sibling_hashes: &mut impl Iterator<Item = &'a H::Digest>,
-) -> Result<H::Digest, ()> {
+    elements: &mut I,
+    sibling_hashes: &mut S,
+) -> Result<H::Digest, ()>
+where
+    H: CHasher,
+    I: Iterator<Item: AsRef<[u8]>>,
+    S: Iterator<Item = &'a H::Digest>,
+{
     assert_ne!(two_h, 0);
     if two_h == 1 {
         // we are at a leaf
         match elements.next() {
-            Some(element) => return Ok(hasher.leaf_hash(pos, element)),
+            Some(element) => return Ok(hasher.leaf_hash(pos, element.as_ref())),
             None => return Err(()),
         }
     }
@@ -510,10 +521,11 @@ mod tests {
     #[test]
     fn test_verification_verify_range() {
         let (executor, _, _) = Executor::default();
+
         executor.start(async move {
             // create a new MMR and add a non-trivial amount (49) of elements
             let mut mmr: Mmr<Sha256> = Mmr::default();
-            let mut elements = Vec::<Digest>::new();
+            let mut elements = Vec::new();
             let mut element_positions = Vec::<u64>::new();
             let mut hasher = Sha256::default();
             for i in 0..49 {
@@ -567,7 +579,7 @@ mod tests {
                 assert!(
                     !range_proof.verify_range_inclusion(
                         &mut hasher,
-                        &Vec::new(),
+                        Vec::<&[u8]>::new(),
                         start_pos,
                         end_pos,
                         &root_hash,
@@ -578,15 +590,18 @@ mod tests {
             // confirm proof fails with invalid element hashes
             for i in 0..elements.len() {
                 for j in i..elements.len() {
+                    if i == start_index && j == end_index {
+                        // skip the valid range
+                        continue;
+                    }
                     assert!(
-                        (i == start_index && j == end_index) // exclude the valid element range
-                                    || !range_proof.verify_range_inclusion(
-                                        &mut hasher,
-                                        &elements[i..j + 1],
-                                        start_pos,
-                                        end_pos,
-                                        &root_hash,
-                                    ),
+                        !range_proof.verify_range_inclusion(
+                            &mut hasher,
+                            &elements[i..j + 1],
+                            start_pos,
+                            end_pos,
+                            &root_hash,
+                        ),
                         "range proof with invalid elements should fail {}:{}",
                         i,
                         j
@@ -778,14 +793,14 @@ mod tests {
             let end_pos = *element_positions.last().unwrap();
             let range_proof = mmr.range_proof(start_pos, end_pos).await.unwrap();
             assert!(
-		range_proof.verify_range_inclusion(
+                range_proof.verify_range_inclusion(
                     &mut hasher,
-                    &elements,
+                    elements,
                     start_pos,
                     end_pos,
                     &updated_root_hash,
-		),
-		"valid range proof over remaining elements after 2 pruning rounds should verify successfully",
+                ),
+                "valid range proof over remaining elements after 2 pruning rounds should verify successfully",
             );
         });
     }
