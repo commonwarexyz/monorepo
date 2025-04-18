@@ -219,8 +219,7 @@ impl Executor {
             },
             Context {
                 storage,
-                label: String::new(),
-                spawned: false,
+                spawner: Spawner::new(String::new(), executor.clone()),
                 executor,
             },
         )
@@ -252,29 +251,17 @@ impl crate::Runner for Runner {
 /// Implementation of [`crate::Spawner`], [`crate::Clock`],
 /// [`crate::Network`], and [`crate::Storage`] for the `tokio`
 /// runtime.
+#[derive(Clone)]
 pub struct Context {
-    label: String,
-    spawned: bool,
+    spawner: Spawner,
     executor: Arc<Executor>,
     storage: Storage<TokioStorage>,
-}
-
-impl Clone for Context {
-    fn clone(&self) -> Self {
-        Self {
-            label: self.label.clone(),
-            spawned: false,
-            executor: self.executor.clone(),
-            storage: self.storage.clone(),
-        }
-    }
 }
 
 #[derive(Clone)]
 struct Spawner {
     label: String,
     spawned: bool,
-    catch_panics: bool,
     executor: Arc<Executor>,
 }
 
@@ -283,7 +270,6 @@ impl Spawner {
         Self {
             label,
             spawned: false,
-            catch_panics: executor.cfg.catch_panics,
             executor,
         }
     }
@@ -412,34 +398,13 @@ impl crate::Spawner for Context {
         Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        // Ensure a context only spawns one task
-        assert!(!self.spawned, "already spawned");
-
-        // Get metrics
-        let work = Work {
-            label: self.label.clone(),
-        };
-        self.executor
-            .metrics
-            .tasks_spawned
-            .get_or_create(&work)
-            .inc();
-        let gauge = self
-            .executor
-            .metrics
-            .tasks_running
-            .get_or_create(&work)
-            .clone();
-
-        // Set up the task
-        let catch_panics = self.executor.cfg.catch_panics;
-        let executor = self.executor.clone();
-        let future = f(self);
-        let (f, handle) = Handle::init(future, gauge, catch_panics);
-
-        // Spawn the task
-        executor.runtime.spawn(f);
-        handle
+        // Create a closure that adapts f to what Spawner::spawn expects
+        let context = self.clone();
+        // Now we can pass the adapter to spawner.spawn
+        self.spawner.spawn(|_| {
+            // Call the original function with our context
+            f(context)
+        })
     }
 
     fn spawn_ref<F, T>(&mut self) -> impl FnOnce(F) -> Handle<T> + 'static
@@ -447,35 +412,7 @@ impl crate::Spawner for Context {
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        // Ensure a context only spawns one task
-        assert!(!self.spawned, "already spawned");
-        self.spawned = true;
-
-        // Get metrics
-        let work = Work {
-            label: self.label.clone(),
-        };
-        self.executor
-            .metrics
-            .tasks_spawned
-            .get_or_create(&work)
-            .inc();
-        let gauge = self
-            .executor
-            .metrics
-            .tasks_running
-            .get_or_create(&work)
-            .clone();
-
-        // Set up the task
-        let executor = self.executor.clone();
-        move |f: F| {
-            let (f, handle) = Handle::init(f, gauge, executor.cfg.catch_panics);
-
-            // Spawn the task
-            executor.runtime.spawn(f);
-            handle
-        }
+        self.spawner.spawn_ref()
     }
 
     fn spawn_blocking<F, T>(self, f: F) -> Handle<T>
@@ -483,31 +420,8 @@ impl crate::Spawner for Context {
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
     {
-        // Ensure a context only spawns one task
-        assert!(!self.spawned, "already spawned");
-
-        // Get metrics
-        let work = Work {
-            label: self.label.clone(),
-        };
-        self.executor
-            .metrics
-            .blocking_tasks_spawned
-            .get_or_create(&work)
-            .inc();
-        let gauge = self
-            .executor
-            .metrics
-            .blocking_tasks_running
-            .get_or_create(&work)
-            .clone();
-
-        // Initialize the blocking task using the new function
-        let (f, handle) = Handle::init_blocking(f, gauge, self.executor.cfg.catch_panics);
-
-        // Spawn the blocking task
-        self.executor.runtime.spawn_blocking(f);
-        handle
+        // Use the inner spawner
+        self.spawner.spawn_blocking(f)
     }
 
     fn stop(&self, value: i32) {
@@ -522,7 +436,7 @@ impl crate::Spawner for Context {
 impl crate::Metrics for Context {
     fn with_label(&self, label: &str) -> Self {
         let label = {
-            let prefix = self.label.clone();
+            let prefix = self.spawner.label.clone();
             if prefix.is_empty() {
                 label.to_string()
             } else {
@@ -534,21 +448,20 @@ impl crate::Metrics for Context {
             "using runtime label is not allowed"
         );
         Self {
-            label,
-            spawned: false,
+            spawner: Spawner::new(label, self.executor.clone()),
             executor: self.executor.clone(),
             storage: self.storage.clone(),
         }
     }
 
     fn label(&self) -> String {
-        self.label.clone()
+        self.spawner.label.clone()
     }
 
     fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
         let name = name.into();
         let prefixed_name = {
-            let prefix = &self.label;
+            let prefix = &self.spawner.label;
             if prefix.is_empty() {
                 name
             } else {
