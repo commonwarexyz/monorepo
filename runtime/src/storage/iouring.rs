@@ -36,9 +36,6 @@ impl Config {
     }
 }
 
-// New type to handle io_uring operations
-struct IoUringRuntimeAdapter {}
-
 /// A future that resolves to the next completion queue entry when available
 struct NextCompletionFuture<'a> {
     ring: &'a mut IoUring,
@@ -73,56 +70,47 @@ impl<'a> Future for NextCompletionFuture<'a> {
     }
 }
 
-impl IoUringRuntimeAdapter {
-    fn new() -> Self {
-        Self {}
-    }
+/// Background task that polls for completed work and notifies waiters on completion.
+async fn do_work(mut receiver: mpsc::Receiver<(io_uring::squeue::Entry, oneshot::Sender<i32>)>) {
+    // Create ring
+    let mut id: u64 = 0;
+    let mut ring = IoUring::new(IOURING_SIZE).expect("failed to create io_uring instance");
+    let mut waiters: HashMap<_, oneshot::Sender<i32>> =
+        HashMap::with_capacity(IOURING_SIZE as usize);
 
-    /// Background task that polls for completed work and notifies waiters on completion.
-    async fn do_work(
-        self,
-        mut receiver: mpsc::Receiver<(io_uring::squeue::Entry, oneshot::Sender<i32>)>,
-    ) {
-        // Create ring
-        let mut id: u64 = 0;
-        let mut ring = IoUring::new(IOURING_SIZE).expect("failed to create io_uring instance");
-        let mut waiters: HashMap<_, oneshot::Sender<i32>> =
-            HashMap::with_capacity(IOURING_SIZE as usize);
+    loop {
+        let completion = NextCompletionFuture::new(&mut ring);
+        let work = if waiters.len() < IOURING_SIZE as usize {
+            Either::Left(receiver.next())
+        } else {
+            Either::Right(futures::future::pending())
+        };
 
-        loop {
-            let completion = NextCompletionFuture::new(&mut ring);
-            let work = if waiters.len() < IOURING_SIZE as usize {
-                Either::Left(receiver.next())
-            } else {
-                Either::Right(futures::future::pending())
-            };
+        select! {
+            next_work = work => {
+                let Some((op,sender)) = next_work else {
+                    // Channel closed, exit the loop
+                    break;
+                };
 
-            select! {
-                next_work = work => {
-                    let Some((op,sender)) = next_work else {
-                        // Channel closed, exit the loop
-                        break;
-                    };
+                // Assign a unique id
+                let work_id = id;
+                id = id.wrapping_add(1);
 
-                    // Assign a unique id
-                    let work_id = id;
-                    id = id.wrapping_add(1);
+                // Register the waiter
+                waiters.insert(work_id, sender);
 
-                    // Register the waiter
-                    waiters.insert(work_id, sender);
-
-                    // Submit the operation to the ring
-                    unsafe {
-                        ring.submission().push(&op).expect("unable to push to queue");
-                    }
-                },
-                cqe = completion => {
-                    let work_id = cqe.user_data();
-                    let result = cqe.result();
-                    let sender = waiters.remove(&work_id).expect("work is missing");
-                    let _ =  sender.send(result);
-                },
-            }
+                // Submit the operation to the ring
+                unsafe {
+                    ring.submission().push(&op).expect("unable to push to queue");
+                }
+            },
+            cqe = completion => {
+                let work_id = cqe.user_data();
+                let result = cqe.result();
+                let sender = waiters.remove(&work_id).expect("work is missing");
+                let _ =  sender.send(result);
+            },
         }
     }
 }
@@ -130,32 +118,19 @@ impl IoUringRuntimeAdapter {
 #[derive(Clone)]
 pub struct Storage {
     storage_directory: PathBuf,
-    io_ring: Arc<IoUringRuntimeAdapter>,
+    io_sender: mpsc::Sender<(io_uring::squeue::Entry, oneshot::Sender<i32>)>,
 }
 
 impl Storage {
-    pub fn new(config: Config) -> Self {
-        let adapter = Arc::new(IoUringRuntimeAdapter::new());
-
-        Self {
-            storage_directory: config.storage_directory,
-            io_ring: adapter,
-        }
-    }
-}
-
-impl Storage {
-    pub fn start<S: Spawner>(
-        &self,
-        spawner: S,
-    ) -> mpsc::Sender<(io_uring::squeue::Entry, oneshot::Sender<i32>)> {
-        let (sender, mut receiver) = mpsc::channel::<(io_uring::squeue::Entry, oneshot::Sender<i32>)>(
-            2 * IOURING_SIZE as usize,
-        );
-        // Spawn the background task
-        // TODO
-        // Return the sender to the caller
-        sender
+    pub fn start<S: Spawner>(&self, spawner: S) -> Self {
+        let (sender, receiver) =
+            mpsc::channel::<(io_uring::squeue::Entry, oneshot::Sender<i32>)>(IOURING_SIZE as usize);
+        let storage = Storage {
+            storage_directory: self.storage_directory.clone(),
+            io_sender: sender.clone(),
+        };
+        spawner.spawn(|_| do_work(receiver));
+        storage
     }
 }
 
@@ -189,7 +164,7 @@ impl crate::Storage for Storage {
             name,
             file,
             len,
-            self.io_ring.clone(),
+            self.io_sender.clone(),
         ))
     }
 
@@ -235,7 +210,7 @@ pub struct Blob {
     name: Vec<u8>,
     fd: Arc<OwnedFd>,
     len: AtomicU64,
-    io_ring: Arc<IoUringRuntimeAdapter>,
+    io_sender: mpsc::Sender<(io_uring::squeue::Entry, oneshot::Sender<i32>)>,
 }
 
 impl Clone for Blob {
@@ -245,7 +220,7 @@ impl Clone for Blob {
             name: self.name.clone(),
             fd: self.fd.clone(),
             len: AtomicU64::new(self.len.load(Ordering::Relaxed)),
-            io_ring: self.io_ring.clone(),
+            io_sender: self.io_sender.clone(),
         }
     }
 }
@@ -256,14 +231,14 @@ impl Blob {
         name: &[u8],
         file: File,
         len: u64,
-        io_ring: Arc<IoUringRuntimeAdapter>,
+        io_sender: mpsc::Sender<(io_uring::squeue::Entry, oneshot::Sender<i32>)>,
     ) -> Self {
         Self {
             partition,
             name: name.to_vec(),
             fd: Arc::new(OwnedFd::from(file)),
             len: AtomicU64::new(len),
-            io_ring,
+            io_sender,
         }
     }
 }
@@ -282,6 +257,7 @@ impl crate::Blob for Blob {
         let fd = types::Fd(self.fd.as_raw_fd());
         let mut total_read = 0;
 
+        let mut io_sender = self.io_sender.clone();
         while total_read < buf.len() {
             let remaining = &mut buf[total_read..];
             let offset = offset + total_read as u64;
@@ -289,7 +265,14 @@ impl crate::Blob for Blob {
             let op = opcode::Read::new(fd, remaining.as_mut_ptr(), remaining.len() as _)
                 .offset(offset as _)
                 .build();
-            let result = self.io_ring.submit_work(op).await?;
+
+            let (sender, receiver) = oneshot::channel();
+            let _ = io_sender
+                .send((op, sender))
+                .await
+                .map_err(|_| Error::ReadFailed)?;
+            // Wait for the operation to complete
+            let result = receiver.await.map_err(|_| Error::ReadFailed)?;
 
             // If the return value is non-positive, it indicates an error.
             let bytes_read: usize = result.try_into().map_err(|_| Error::ReadFailed)?;
@@ -308,6 +291,7 @@ impl crate::Blob for Blob {
         let fd = types::Fd(self.fd.as_raw_fd());
         let mut total_written = 0;
 
+        let mut io_sender = self.io_sender.clone();
         while total_written < buf.len() {
             let remaining = &buf[total_written..];
             let offset = offset + total_written as u64;
@@ -316,7 +300,13 @@ impl crate::Blob for Blob {
             let op = opcode::Write::new(fd, remaining.as_ptr(), remaining.len() as _)
                 .offset(offset as _)
                 .build();
-            let result = self.io_ring.submit_work(op).await?;
+            let (sender, receiver) = oneshot::channel();
+            let _ = io_sender
+                .send((op, sender))
+                .await
+                .map_err(|_| Error::WriteFailed)?;
+            // Wait for the operation to complete
+            let result = receiver.await.map_err(|_| Error::WriteFailed)?;
 
             let bytes_written: usize = result.try_into().map_err(|_| Error::WriteFailed)?;
             if bytes_written == 0 {
@@ -338,11 +328,26 @@ impl crate::Blob for Blob {
         let op = opcode::Fallocate::new(types::Fd(self.fd.as_raw_fd()), len)
             .mode(0) // 0 means truncate
             .build();
-        self.io_ring
-            .submit_work(op)
+
+        let (sender, receiver) = oneshot::channel();
+        let _ = self
+            .io_sender
+            .clone()
+            .send((op, sender))
+            .await
+            .map_err(|_| Error::BlobTruncateFailed(self.partition.clone(), hex(&self.name)))?;
+        // Wait for the operation to complete
+        let result = receiver
             .await
             .map_err(|_| Error::BlobTruncateFailed(self.partition.clone(), hex(&self.name)))?;
 
+        // If the return value is non-positive, it indicates an error.
+        if result <= 0 {
+            return Err(Error::BlobTruncateFailed(
+                self.partition.clone(),
+                hex(&self.name),
+            ));
+        }
         // Update length
         self.len.store(len, Ordering::SeqCst);
         Ok(())
@@ -350,11 +355,25 @@ impl crate::Blob for Blob {
 
     async fn sync(&self) -> Result<(), Error> {
         let op = opcode::Fsync::new(types::Fd(self.fd.as_raw_fd())).build();
-        // Submit fsync operation via io_uring
-        self.io_ring
-            .submit_work(op)
+
+        let (sender, receiver) = oneshot::channel();
+        let _ = self
+            .io_sender
+            .clone()
+            .send((op, sender))
             .await
             .map_err(|_| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name)))?;
+        // Wait for the operation to complete
+        let result = receiver
+            .await
+            .map_err(|_| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name)))?;
+        // If the return value is non-positive, it indicates an error.
+        if result <= 0 {
+            return Err(Error::BlobSyncFailed(
+                self.partition.clone(),
+                hex(&self.name),
+            ));
+        }
 
         Ok(())
     }

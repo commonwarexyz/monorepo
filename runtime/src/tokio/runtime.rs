@@ -203,9 +203,12 @@ impl Executor {
 
         #[cfg(all(feature = "iouring", target_os = "linux"))]
         let storage = MeteredStorage::new(
-            IoUringStorage::new(IoUringConfig {
-                storage_directory: cfg.storage_directory.clone(),
-            }),
+            IoUringStorage::start(
+                IoUringConfig {
+                    storage_directory: cfg.storage_directory.clone(),
+                },
+                runtime,
+            ),
             runtime_registry,
         );
 
