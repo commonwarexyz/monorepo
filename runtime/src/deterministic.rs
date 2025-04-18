@@ -30,7 +30,7 @@ use crate::{
 use commonware_utils::{hex, SystemTimeExt};
 use futures::{
     channel::mpsc,
-    task::{waker_ref, ArcWake},
+    task::{noop_waker_ref, waker_ref, ArcWake},
     SinkExt, StreamExt,
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
@@ -351,7 +351,6 @@ struct Task {
 
     tasks: Arc<Tasks>,
 
-    root: bool,
     future: Mutex<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>,
 
     completed: Mutex<bool>,
@@ -372,7 +371,6 @@ impl Tasks {
     fn register(
         arc_self: &Arc<Self>,
         label: &str,
-        root: bool,
         future: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
     ) {
         let mut queue = arc_self.queue.lock().unwrap();
@@ -385,7 +383,6 @@ impl Tasks {
         queue.push(Arc::new(Task {
             id,
             label: label.to_string(),
-            root,
             future: Mutex::new(future),
             tasks: arc_self.clone(),
             completed: Mutex::new(false),
@@ -544,27 +541,16 @@ pub struct Runner {
 impl crate::Runner for Runner {
     fn start<F>(self, f: F) -> F::Output
     where
-        F: Future + Send + 'static,
-        F::Output: Send + 'static,
+        F: Future,
     {
-        // Add root task to the queue
-        let output = Arc::new(Mutex::new(None));
-        Tasks::register(
-            &self.executor.tasks,
-            "",
-            true,
-            Box::pin({
-                let output = output.clone();
-                async move {
-                    *output.lock().unwrap() = Some(f.await);
-                }
-            }),
-        );
+        // Root future lives on the heap; it need **not** be `Send`.
+        let mut root_future = Box::pin(f);
 
-        // Process tasks until root task completes or progress stalls
+        // Event‑loop iteration counter (for tracing / debugging only).
         let mut iter = 0;
+
         loop {
-            // Ensure we have not exceeded our deadline
+            // Deadline check
             {
                 let current = self.executor.time.lock().unwrap();
                 if let Some(deadline) = self.executor.deadline {
@@ -574,38 +560,51 @@ impl crate::Runner for Runner {
                 }
             }
 
-            // Snapshot available tasks
-            let mut tasks = self.executor.tasks.drain();
+            // ------------------------------------------------------------------
+            // 1. Poll ROOT future
+            // ------------------------------------------------------------------
+            let root_pending = {
+                let waker = noop_waker_ref();
+                let mut cx = task::Context::from_waker(waker);
+                match root_future.as_mut().poll(&mut cx) {
+                    Poll::Ready(out) => {
+                        *self.executor.finished.lock().unwrap() = true;
+                        return out;
+                    }
+                    Poll::Pending => true,
+                }
+            };
 
-            // Shuffle tasks
+            // ------------------------------------------------------------------
+            // 2. Snapshot & shuffle runnable tasks
+            // ------------------------------------------------------------------
+            let mut tasks = self.executor.tasks.drain();
             {
                 let mut rng = self.executor.rng.lock().unwrap();
                 tasks.shuffle(&mut *rng);
             }
 
-            // Run all snapshotted tasks
-            //
-            // This approach is more efficient than randomly selecting a task one-at-a-time
-            // because it ensures we don't pull the same pending task multiple times in a row (without
-            // processing a different task required for other tasks to make progress).
             trace!(iter, tasks = tasks.len(), "starting loop");
+
+            // ------------------------------------------------------------------
+            // 3. Process each task once
+            // ------------------------------------------------------------------
             for task in tasks {
-                // Record task for auditing
+                // Audit
                 self.executor.auditor.process_task(task.id, &task.label);
 
-                // Check if task is already complete
+                // Skip if already completed
                 if *task.completed.lock().unwrap() {
                     trace!(id = task.id, "skipping already completed task");
                     continue;
                 }
-                trace!(id = task.id, "processing task");
 
-                // Prepare task for polling
+                // Prepare waker / context
                 let waker = waker_ref(&task);
-                let mut context = task::Context::from_waker(&waker);
+                let mut cx = task::Context::from_waker(&waker);
                 let mut future = task.future.lock().unwrap();
 
-                // Record task poll
+                // Metric: poll count
                 self.executor
                     .metrics
                     .task_polls
@@ -614,29 +613,21 @@ impl crate::Runner for Runner {
                     })
                     .inc();
 
-                // Task is re-queued in its `wake_by_ref` implementation as soon as we poll here (regardless
-                // of whether it is Pending/Ready).
-                let pending = future.as_mut().poll(&mut context).is_pending();
+                // Poll once; task will re‑queue itself via its `wake_by_ref`
+                let pending = future.as_mut().poll(&mut cx).is_pending();
                 if pending {
-                    trace!(id = task.id, "task is still pending");
+                    trace!(id = task.id, "task still pending");
                     continue;
                 }
 
-                // Mark task as completed
+                // Mark complete
                 *task.completed.lock().unwrap() = true;
-                trace!(id = task.id, "task is complete");
-
-                // Root task completed
-                if task.root {
-                    *self.executor.finished.lock().unwrap() = true;
-                    return output.lock().unwrap().take().unwrap();
-                }
+                trace!(id = task.id, "task complete");
             }
 
-            // Advance time by cycle
-            //
-            // This approach prevents starvation if some task never yields (to approximate this,
-            // duration can be set to 1ns).
+            // ------------------------------------------------------------------
+            // 4. Advance / skip time
+            // ------------------------------------------------------------------
             let mut current;
             {
                 let mut time = self.executor.time.lock().unwrap();
@@ -645,56 +636,59 @@ impl crate::Runner for Runner {
                     .expect("executor time overflowed");
                 current = *time;
             }
-            trace!(now = current.epoch_millis(), "time advanced",);
+            trace!(now = current.epoch_millis(), "time advanced");
 
-            // Skip time if there is nothing to do
+            // Fast‑forward if nothing runnable
             if self.executor.tasks.len() == 0 {
-                let mut skip = None;
+                let mut skip_to = None;
                 {
                     let sleeping = self.executor.sleeping.lock().unwrap();
                     if let Some(next) = sleeping.peek() {
                         if next.time > current {
-                            skip = Some(next.time);
+                            skip_to = Some(next.time);
                         }
                     }
                 }
-                if skip.is_some() {
-                    {
-                        let mut time = self.executor.time.lock().unwrap();
-                        *time = skip.unwrap();
-                        current = *time;
-                    }
-                    trace!(now = current.epoch_millis(), "time skipped",);
+                if let Some(t) = skip_to {
+                    let mut time = self.executor.time.lock().unwrap();
+                    *time = t;
+                    current = *time;
+                    trace!(now = current.epoch_millis(), "time skipped");
                 }
             }
 
-            // Wake all sleeping tasks that are ready
+            // ------------------------------------------------------------------
+            // 5. Wake sleepers
+            // ------------------------------------------------------------------
             let mut to_wake = Vec::new();
             let mut remaining;
             {
                 let mut sleeping = self.executor.sleeping.lock().unwrap();
                 while let Some(next) = sleeping.peek() {
                     if next.time <= current {
-                        let sleeper = sleeping.pop().unwrap();
-                        to_wake.push(sleeper.waker);
+                        let alarm = sleeping.pop().unwrap();
+                        to_wake.push(alarm.waker);
                     } else {
                         break;
                     }
                 }
                 remaining = sleeping.len();
             }
-            for waker in to_wake {
-                waker.wake();
+            for w in to_wake {
+                w.wake();
             }
 
-            // Account for remaining tasks
+            // ------------------------------------------------------------------
+            // 6. Stall detection
+            // ------------------------------------------------------------------
             remaining += self.executor.tasks.len();
-
-            // If there are no tasks to run and no tasks sleeping, the executor is stalled
-            // and will never finish.
+            if root_pending {
+                remaining += 1; // root future still pending
+            }
             if remaining == 0 {
                 panic!("runtime stalled");
             }
+
             iter += 1;
         }
     }
@@ -829,7 +823,7 @@ impl crate::Spawner for Context {
         let (f, handle) = Handle::init(future, gauge, false);
 
         // Spawn the task
-        Tasks::register(&executor.tasks, &label, false, Box::pin(f));
+        Tasks::register(&executor.tasks, &label, Box::pin(f));
         handle
     }
 
@@ -865,7 +859,7 @@ impl crate::Spawner for Context {
             let (f, handle) = Handle::init(f, gauge, false);
 
             // Spawn the task
-            Tasks::register(&executor.tasks, &label, false, Box::pin(f));
+            Tasks::register(&executor.tasks, &label, Box::pin(f));
             handle
         }
     }
@@ -899,7 +893,7 @@ impl crate::Spawner for Context {
 
         // Spawn the task
         let f = async move { f() };
-        Tasks::register(&self.executor.tasks, &self.label, false, Box::pin(f));
+        Tasks::register(&self.executor.tasks, &self.label, Box::pin(f));
         handle
     }
 
