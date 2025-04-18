@@ -653,7 +653,7 @@ impl<
     /// Returns whether at least one honest participant has notarized a proposal.
     pub fn at_least_one_honest(&self) -> Option<View> {
         let participants = self.supervisor.participants(self.view)?;
-        let threshold = quorum(participants.len() as u32)?;
+        let threshold = quorum(participants.len() as u32);
         let at_least_one_honest = (threshold - 1) / 2 + 1;
         for (_, notarizes) in self.notarizes.iter() {
             if notarizes.len() < at_least_one_honest as usize {

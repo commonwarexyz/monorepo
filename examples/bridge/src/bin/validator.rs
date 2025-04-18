@@ -114,7 +114,7 @@ fn main() {
         .expect("Please provide storage directory");
 
     // Configure threshold
-    let threshold = quorum(validators.len() as u32).expect("Threshold not well-formed");
+    let threshold = quorum(validators.len() as u32);
     let identity = matches
         .get_one::<String>("identity")
         .expect("Please provide identity");

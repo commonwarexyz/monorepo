@@ -37,12 +37,14 @@ pub struct Bitmap<H: CHasher> {
     /// The bitmap itself, in chunks of size DIGEST_SIZE bytes. The number of valid bits in the last
     /// chunk is given by `self.next_bit`. Within each byte, lowest order bits are treated as coming
     /// before higher order bits in the bit ordering.
+    ///
+    /// Invariant: The last chunk in the bitmap always has room for at least one more bit.
     bitmap: Vec<u8>,
 
     /// The position within the last chunk of the bitmap where the next bit is to be appended.
     ///
     /// Invariant: This value is always in the range [0, DIGEST_SIZE * 8).
-    next_bit: usize,
+    next_bit: u64,
 
     /// A Merkle tree with each leaf representing DIGEST_SIZE*8 bits of the bitmap.
     ///
@@ -61,7 +63,11 @@ impl<H: CHasher> Default for Bitmap<H> {
 }
 
 impl<H: CHasher> Bitmap<H> {
-    const CHUNK_SIZE: usize = H::Digest::SIZE;
+    /// The size of a chunk in bytes.
+    pub const CHUNK_SIZE: usize = H::Digest::SIZE;
+
+    /// The size of a chunk in bits.
+    const CHUNK_SIZE_BITS: u64 = Self::CHUNK_SIZE as u64 * 8;
 
     /// Return a new empty bitmap.
     pub fn new() -> Self {
@@ -79,14 +85,13 @@ impl<H: CHasher> Bitmap<H> {
 
     /// Return the number of bits currently stored in the bitmap, irrespective of any pruning.
     pub fn bit_count(&self) -> u64 {
-        ((self.pruned_bytes() + self.bitmap.len()) * 8 - Self::CHUNK_SIZE * 8 + self.next_bit)
-            as u64
+        (self.pruned_bytes() + self.bitmap.len()) as u64 * 8 - Self::CHUNK_SIZE_BITS + self.next_bit
     }
 
     /// Prune the bitmap to the most recent chunk boundary that contains the referenced bit. Panics
     /// if the referenced bit has been pruned or is greater than the number of bits in the bitmap.
     pub fn prune_to_bit(&mut self, bit_offset: u64) {
-        let chunk_pos = bit_offset as usize / 8 / Self::CHUNK_SIZE;
+        let chunk_pos = Self::chunk_pos(bit_offset);
         let mut byte_offset = chunk_pos * Self::CHUNK_SIZE;
         let pruned_bytes = self.pruned_bytes();
         assert!(byte_offset >= pruned_bytes, "bit pruned");
@@ -110,7 +115,7 @@ impl<H: CHasher> Bitmap<H> {
     /// Returns the bitmap chunk containing the specified bit as a digest. Panics if the bit doesn't
     /// exist or has been pruned.
     fn get_chunk(&self, bit_offset: u64) -> H::Digest {
-        let mut byte_offset = bit_offset as usize / 8 / Self::CHUNK_SIZE * Self::CHUNK_SIZE;
+        let mut byte_offset = Self::chunk_pos(bit_offset) * Self::CHUNK_SIZE;
         let pruned_bytes = self.pruned_bytes();
         assert!(byte_offset >= pruned_bytes, "bit pruned");
         byte_offset -= pruned_bytes;
@@ -145,12 +150,12 @@ impl<H: CHasher> Bitmap<H> {
             "cannot add byte when not byte aligned"
         );
 
-        let chunk_byte = self.next_bit / 8;
+        let chunk_byte = (self.next_bit / 8) as usize;
         self.last_chunk_mut()[chunk_byte] = byte;
         self.next_bit += 8;
-        assert!(self.next_bit <= Self::CHUNK_SIZE * 8);
+        assert!(self.next_bit <= Self::CHUNK_SIZE_BITS);
 
-        if self.next_bit == Self::CHUNK_SIZE * 8 {
+        if self.next_bit == Self::CHUNK_SIZE_BITS {
             self.commit_last_chunk(hasher);
         }
     }
@@ -158,13 +163,13 @@ impl<H: CHasher> Bitmap<H> {
     /// Add a single bit to the bitmap.
     pub fn append(&mut self, hasher: &mut H, bit: bool) {
         if bit {
-            let chunk_byte = self.next_bit / 8;
-            self.last_chunk_mut()[chunk_byte] |= Self::chunk_byte_bit_mask(self.next_bit as u64);
+            let chunk_byte = (self.next_bit / 8) as usize;
+            self.last_chunk_mut()[chunk_byte] |= Self::chunk_byte_bit_mask(self.next_bit);
         }
         self.next_bit += 1;
-        assert!(self.next_bit <= Self::CHUNK_SIZE * 8);
+        assert!(self.next_bit <= Self::CHUNK_SIZE_BITS);
 
-        if self.next_bit == Self::CHUNK_SIZE * 8 {
+        if self.next_bit == Self::CHUNK_SIZE_BITS {
             self.commit_last_chunk(hasher);
         }
     }
@@ -179,21 +184,25 @@ impl<H: CHasher> Bitmap<H> {
     #[allow(dead_code)] // Remove when we start using this outside the test module.
     #[inline]
     pub(crate) fn chunk_byte_offset(bit_offset: u64) -> usize {
-        (bit_offset as usize / 8) % Self::CHUNK_SIZE
+        (bit_offset / 8) as usize % Self::CHUNK_SIZE
     }
 
     /// Convert a bit offset into the position of the Merkle tree leaf it belongs to.
     #[inline]
     pub(crate) fn leaf_pos(bit_offset: u64) -> u64 {
-        let leaf_num = bit_offset / 8 / Self::CHUNK_SIZE as u64;
-        leaf_num_to_pos(leaf_num)
+        leaf_num_to_pos(Self::chunk_pos(bit_offset) as u64)
+    }
+
+    // Convert a bit offset into the position of the chunk it belongs to.
+    #[inline]
+    fn chunk_pos(bit_offset: u64) -> usize {
+        (bit_offset / 8) as usize / Self::CHUNK_SIZE
     }
 
     /// Get the value of a bit. Panics if the bit doesn't exist or has been pruned.
     pub fn get_bit(&self, bit_offset: u64) -> bool {
         assert!(bit_offset < self.bit_count(), "out of bounds");
-        let chunk_pos = bit_offset / 8 / Self::CHUNK_SIZE as u64;
-        if chunk_pos < self.mmr.oldest_retained_pos {
+        if Self::chunk_pos(bit_offset) < self.mmr.oldest_retained_pos as usize {
             panic!("bit pruned");
         }
         let byte_offset = bit_offset as usize / 8 - self.pruned_bytes();
@@ -203,8 +212,7 @@ impl<H: CHasher> Bitmap<H> {
     /// Set the value of the referenced bit. Panics if the bit doesn't exist or has been pruned.
     pub fn set_bit(&mut self, hasher: &mut H, bit_offset: u64, bit: bool) {
         assert!(bit_offset < self.bit_count(), "out of bounds");
-        let chunk_pos = bit_offset / 8 / Self::CHUNK_SIZE as u64;
-        if chunk_pos < self.mmr.oldest_retained_pos {
+        if Self::chunk_pos(bit_offset) < self.mmr.oldest_retained_pos as usize {
             panic!("bit pruned");
         }
 
