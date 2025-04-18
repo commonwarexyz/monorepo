@@ -74,10 +74,7 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                     let block = match self.context.gen_bool(0.5) {
                         true => {
                             // Generate a random message
-                            let v1 = self.context.next_u64();
-                            let v2 = self.context.next_u64();
-                            let value: u128 = ((v1 as u128) << 64) | (v2 as u128);
-                            BlockFormat::<H::Digest>::Random(value)
+                            BlockFormat::<H::Digest>::Random(self.context.gen())
                         }
                         false => {
                             // Fetch a certificate from the indexer for the other network
