@@ -279,7 +279,6 @@ struct SpawnerConfig {
 impl Spawner {
     fn new(label: String, cfg: SpawnerConfig, reg: &mut Registry, runtime: Arc<Runtime>) -> Self {
         let (signaler, signal) = Signaler::new();
-
         Self {
             cfg,
             label,
@@ -292,18 +291,6 @@ impl Spawner {
     }
 
     fn with_label(&self, label: String) -> Self {
-        let label = {
-            let prefix = self.label.clone();
-            if prefix.is_empty() {
-                label
-            } else {
-                format!("{}_{}", prefix, label)
-            }
-        };
-        assert!(
-            !label.starts_with(METRICS_PREFIX),
-            "using runtime label is not allowed"
-        );
         Self {
             cfg: self.cfg.clone(),
             label,
