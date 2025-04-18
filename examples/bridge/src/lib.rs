@@ -42,7 +42,7 @@
 //!
 //! # Usage
 //!
-//! _To run this example, you must first install [Rust](https://www.rust-lang.org/tools/install) and [protoc](https://grpc.io/docs/protoc-installation)._
+//! _To run this example, you must first install [Rust](https://www.rust-lang.org/tools/install)._
 //!
 //! ## Generate Shared Secrets
 //!
@@ -149,11 +149,9 @@
 //! ```
 
 #[doc(hidden)]
-pub mod wire {
-    include!(concat!(env!("OUT_DIR"), "/wire.rs"));
-}
-#[doc(hidden)]
 pub mod application;
+#[doc(hidden)]
+pub mod types;
 #[doc(hidden)]
 pub const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_BRIDGE";
 #[doc(hidden)]
