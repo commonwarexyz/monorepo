@@ -125,7 +125,8 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                     let msg = Inbound::PutBlock::<H::Digest>(wire::PutBlock {
                         network: self.public,
                         data: msg.into(),
-                    }).encode();
+                    })
+                    .encode();
                     indexer_sender
                         .send(&msg)
                         .await

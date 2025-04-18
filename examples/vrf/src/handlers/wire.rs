@@ -247,34 +247,45 @@ impl FixedSize for Vrf {
 mod tests {
     use super::*;
     use commonware_codec::{Decode, Encode};
-    use commonware_cryptography::bls12381::primitives::group::Element;
-    use commonware_cryptography::bls12381::primitives::{group, poly};
-    use commonware_cryptography::ed25519::Signature;
+    use commonware_cryptography::{
+        bls12381::primitives::{
+            group::{self, Element},
+            poly,
+        },
+        ed25519::Signature,
+    };
+    use rand::thread_rng;
     use std::collections::HashMap;
 
     const N: usize = 11;
     const T: usize = 8;
 
-    fn signature_from(b: u8) -> Signature {
+    fn new_signature(b: u8) -> Signature {
         Signature::try_from(&[b; Signature::SIZE][..]).unwrap()
     }
 
     fn new_share(v: u32) -> group::Share {
         group::Share {
             index: v,
-            private: group::Private::one(),
+            private: group::Private::rand(&mut thread_rng()),
         }
     }
 
     fn new_eval(v: u32) -> Eval<group::Signature> {
+        let mut signature = group::Signature::one();
+        let scalar = group::Scalar::rand(&mut thread_rng());
+        signature.mul(&scalar);
         Eval {
             index: v,
-            value: group::Signature::one(),
+            value: signature,
         }
     }
 
     fn new_poly() -> poly::Public {
-        poly::Public::from(vec![group::Public::one(); T])
+        let mut public = group::Public::one();
+        let scalar = group::Scalar::rand(&mut thread_rng());
+        public.mul(&scalar);
+        poly::Public::from(vec![public; T])
     }
 
     #[test]
@@ -310,7 +321,7 @@ mod tests {
             round: 1,
             payload: Payload::Ack {
                 public_key: 1,
-                signature: signature_from(123),
+                signature: new_signature(123),
             },
         };
         let encoded = original.encode();
@@ -322,7 +333,7 @@ mod tests {
     fn test_dkg_commitment_codec() {
         let commitment = new_poly();
         let mut acks = HashMap::<u32, Signature>::new();
-        acks.insert(1, signature_from(123));
+        acks.insert(1, new_signature(123));
         let num_reveals = N - acks.len();
         let reveals_vec = vec![new_share(4321); num_reveals];
 
