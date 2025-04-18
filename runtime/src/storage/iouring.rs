@@ -39,7 +39,7 @@ struct IoUringRuntimeAdapter {
 }
 
 impl IoUringRuntimeAdapter {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self {
             ring: Mutex::new(IoUring::new(128).expect("Failed to create io_uring instance")),
             work_available: tokio::sync::Notify::new(),
@@ -48,8 +48,11 @@ impl IoUringRuntimeAdapter {
         }
     }
 
-    // Submit an operation to the ring and get a future for completion
-    pub async fn submit_operation(&self, op: io_uring::squeue::Entry) -> Result<i32, Error> {
+    // Submit the operation to the ring and get a future that contains
+    // the result of the operation.
+    // The meaning of the result depends on the operation type.
+    // The user data field of `op` will be overwritten by this method.
+    async fn submit_work(&self, op: io_uring::squeue::Entry) -> Result<i32, Error> {
         let token = self.next_token.fetch_add(1, Ordering::SeqCst);
         let (sender, receiver) = oneshot::channel();
 
@@ -82,23 +85,20 @@ impl IoUringRuntimeAdapter {
     }
 
     // Background task that polls for completions
-    pub async fn completion_handler(self: Arc<Self>) {
+    async fn do_work(self: Arc<Self>) {
         loop {
             // Process any completions that might be ready
-            let found_finished_work = self.process_completions();
+            let found_completed_work = self.handle_completed_work();
 
-            // Check if we still have pending operations
-            let has_unfinished_work = {
-                let operations = self.work.lock().unwrap();
-                !operations.is_empty()
-            };
-
-            if !has_unfinished_work && !found_finished_work {
-                // No pending operations and no completions found
-                // Wait for notification about new work
+            // Check if we still have more work to do
+            let has_uncompleted_work = self.work.lock().unwrap().is_empty();
+            if !has_uncompleted_work && !found_completed_work {
+                // We're not waiting for any work to finish and we didn't find any
+                // completed work last time we checked.
+                // Wait for notification about new work.
                 self.work_available.notified().await;
-            } else if !found_finished_work {
-                // We have pending operations but no completions were ready
+            } else if !found_completed_work {
+                // We have pending operations but no completions were ready.
                 // Yield briefly then check again
                 tokio::task::yield_now().await;
             }
@@ -106,7 +106,9 @@ impl IoUringRuntimeAdapter {
         }
     }
 
-    fn process_completions(&self) -> bool {
+    // Removes all completed operations from `self.ring` and `self.work`.
+    // For each, notifies the awaiting task with the operation's result.
+    fn handle_completed_work(&self) -> bool {
         let mut completed = Vec::new();
         {
             let mut ring = self.ring.lock().unwrap();
@@ -119,6 +121,7 @@ impl IoUringRuntimeAdapter {
         }
 
         if !completed.is_empty() {
+            // Notify that each operation has completed.
             let mut operations = self.work.lock().unwrap();
             for (token, result) in completed {
                 if let Some(sender) = operations.remove(&token) {
@@ -142,16 +145,18 @@ impl Storage {
     pub fn new(config: Config) -> Self {
         let adapter = Arc::new(IoUringRuntimeAdapter::new());
 
-        // Start the background task for handling completions
-        let adapter_clone = adapter.clone();
-        tokio::spawn(async move {
-            adapter_clone.completion_handler().await;
-        });
-
         Self {
             storage_directory: config.storage_directory,
             io_ring: adapter,
         }
+    }
+}
+
+impl Storage {
+    pub fn start(&self) {
+        // Start the completion handler in a separate task
+        let ring = self.io_ring.clone();
+        tokio::spawn(ring.do_work());
     }
 }
 
@@ -285,7 +290,7 @@ impl crate::Blob for Blob {
             let op = opcode::Read::new(fd, remaining.as_mut_ptr(), remaining.len() as _)
                 .offset(offset as _)
                 .build();
-            let result = self.io_ring.submit_operation(op).await?;
+            let result = self.io_ring.submit_work(op).await?;
 
             // If the return value is non-positive, it indicates an error.
             let bytes_read: usize = result.try_into().map_err(|_| Error::ReadFailed)?;
@@ -312,7 +317,7 @@ impl crate::Blob for Blob {
             let op = opcode::Write::new(fd, remaining.as_ptr(), remaining.len() as _)
                 .offset(offset as _)
                 .build();
-            let result = self.io_ring.submit_operation(op).await?;
+            let result = self.io_ring.submit_work(op).await?;
 
             let bytes_written: usize = result.try_into().map_err(|_| Error::WriteFailed)?;
             if bytes_written == 0 {
@@ -335,7 +340,7 @@ impl crate::Blob for Blob {
             .mode(0) // 0 means truncate
             .build();
         self.io_ring
-            .submit_operation(op)
+            .submit_work(op)
             .await
             .map_err(|_| Error::BlobTruncateFailed(self.partition.clone(), hex(&self.name)))?;
 
@@ -348,7 +353,7 @@ impl crate::Blob for Blob {
         let op = opcode::Fsync::new(types::Fd(self.fd.as_raw_fd())).build();
         // Submit fsync operation via io_uring
         self.io_ring
-            .submit_operation(op)
+            .submit_work(op)
             .await
             .map_err(|_| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name)))?;
 
