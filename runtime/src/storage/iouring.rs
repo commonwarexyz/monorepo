@@ -15,6 +15,8 @@ use io_uring::{opcode, types, IoUring};
 
 use crate::Error;
 
+const IOURING_SIZE: u32 = 128;
+
 #[derive(Clone)]
 pub struct Config {
     pub storage_directory: PathBuf,
@@ -39,7 +41,7 @@ struct IoUringRuntimeAdapter {
 
 impl IoUringRuntimeAdapter {
     fn new() -> Self {
-        let ring = IoUring::new(128).expect("Failed to create io_uring instance");
+        let ring = IoUring::new(IOURING_SIZE).expect("Failed to create io_uring instance");
         Self {
             work: Mutex::new((ring, HashMap::new())),
             is_incomplete_work: tokio::sync::Notify::new(),
