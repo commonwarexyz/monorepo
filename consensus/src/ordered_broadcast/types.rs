@@ -372,7 +372,10 @@ impl<C: Verifier, D: Digest> Node<C, D> {
         };
         let parent_chunk = Chunk::new(
             self.chunk.sequencer.clone(),
-            self.chunk.height - 1, // Will not parse if height is 0 and parent exists
+            self.chunk
+                .height
+                .checked_sub(1)
+                .ok_or(Error::ParentMissing)?,
             parent.digest,
         );
 
