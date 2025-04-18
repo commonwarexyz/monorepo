@@ -270,6 +270,141 @@ impl Clone for Context {
     }
 }
 
+#[derive(Clone)]
+struct Spawner {
+    label: String,
+    spawned: bool,
+    catch_panics: bool,
+    executor: Arc<Executor>,
+}
+
+impl Spawner {
+    fn new(label: String, executor: Arc<Executor>) -> Self {
+        Self {
+            label,
+            spawned: false,
+            catch_panics: executor.cfg.catch_panics,
+            executor,
+        }
+    }
+}
+
+impl crate::Spawner for Spawner {
+    fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
+    where
+        F: FnOnce(Self) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        // Ensure a spawner only spawns one task
+        assert!(!self.spawned, "already spawned");
+
+        // Get metrics
+        let work = Work {
+            label: self.label.clone(),
+        };
+        self.executor
+            .metrics
+            .tasks_spawned
+            .get_or_create(&work)
+            .inc();
+        let gauge = self
+            .executor
+            .metrics
+            .tasks_running
+            .get_or_create(&work)
+            .clone();
+
+        // Set up the task
+        let catch_panics = self.executor.cfg.catch_panics;
+        let executor = self.executor.clone();
+        let future = f(self);
+        let (f, handle) = Handle::init(future, gauge, catch_panics);
+
+        // Spawn the task
+        executor.runtime.spawn(f);
+        handle
+    }
+
+    fn spawn_ref<F, T>(&mut self) -> impl FnOnce(F) -> Handle<T> + 'static
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        // Ensure a spawner only spawns one task
+        assert!(!self.spawned, "already spawned");
+        self.spawned = true;
+
+        // Get metrics
+        let work = Work {
+            label: self.label.clone(),
+        };
+        self.executor
+            .metrics
+            .tasks_spawned
+            .get_or_create(&work)
+            .inc();
+        let gauge = self
+            .executor
+            .metrics
+            .tasks_running
+            .get_or_create(&work)
+            .clone();
+
+        // Set up the task
+        let executor = self.executor.clone();
+        let catch_panics = executor.cfg.catch_panics;
+
+        move |f: F| {
+            let (f, handle) = Handle::init(f, gauge, catch_panics);
+
+            // Spawn the task
+            executor.runtime.spawn(f);
+            handle
+        }
+    }
+
+    fn spawn_blocking<F, T>(self, f: F) -> Handle<T>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        // Ensure a spawner only spawns one task
+        assert!(!self.spawned, "already spawned");
+
+        // Get metrics
+        let work = Work {
+            label: self.label.clone(),
+        };
+        self.executor
+            .metrics
+            .blocking_tasks_spawned
+            .get_or_create(&work)
+            .inc();
+        let gauge = self
+            .executor
+            .metrics
+            .blocking_tasks_running
+            .get_or_create(&work)
+            .clone();
+
+        // Initialize the blocking task using the new function
+        let (f, handle) = Handle::init_blocking(f, gauge, self.executor.cfg.catch_panics);
+
+        // Spawn the blocking task
+        self.executor.runtime.spawn_blocking(f);
+        handle
+    }
+
+    fn stop(&self, value: i32) {
+        self.executor.signaler.lock().unwrap().signal(value);
+    }
+
+    fn stopped(&self) -> Signal {
+        self.executor.signal.clone()
+    }
+}
+
 impl crate::Spawner for Context {
     fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
     where
