@@ -102,6 +102,10 @@ pub(crate) mod tests {
     {
         let blob = storage.open("partition", b"test_blob").await.unwrap();
 
+        // Initialize blob with data of sufficient length first
+        blob.write_at(b"concurrent write", 0).await.unwrap();
+
+        // Read and write concurrently
         let write_task = tokio::spawn({
             let blob = blob.clone();
             async move {
