@@ -19,12 +19,9 @@ use tracing::{debug, info, warn};
 
 pub struct Arbiter<E: Clock + Spawner, C: Scheme> {
     context: E,
-
     dkg_frequency: Duration,
     dkg_phase_timeout: Duration,
-
     contributors: Vec<C::PublicKey>,
-    t: u32,
 }
 
 /// Implementation of a "trusted arbiter" that tracks commitments,
@@ -35,17 +32,13 @@ impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
         dkg_frequency: Duration,
         dkg_phase_timeout: Duration,
         mut contributors: Vec<C::PublicKey>,
-        t: u32,
     ) -> Self {
         contributors.sort();
         Self {
             context,
-
             dkg_frequency,
             dkg_phase_timeout,
-
             contributors,
-            t,
         }
     }
 

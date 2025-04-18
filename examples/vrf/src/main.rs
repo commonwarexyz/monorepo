@@ -304,7 +304,6 @@ fn main() {
                 DKG_FREQUENCY,
                 DKG_PHASE_TIMEOUT,
                 contributors,
-                threshold,
             );
             arbiter.start(arbiter_sender, arbiter_receiver);
         }
