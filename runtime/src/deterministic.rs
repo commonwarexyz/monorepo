@@ -27,10 +27,10 @@ use crate::{
     storage::metered::Storage as MeteredStorage, utils::Signaler, Clock, Error, Handle, Signal,
     METRICS_PREFIX,
 };
-use commonware_utils::{hex, SystemTimeExt};
+use commonware_utils::hex;
 use futures::{
     channel::mpsc,
-    task::{noop_waker_ref, waker_ref, ArcWake},
+    task::{waker_ref, ArcWake},
     SinkExt, StreamExt,
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
@@ -533,7 +533,14 @@ impl Executor {
     }
 }
 
-/// Implementation of [`crate::Runner`] for the `deterministic` runtime.
+/// A work item in the executor’s ready‑queue – either a spawned task or
+/// the root future itself (polled in the same round‑robin list).
+enum WorkItem {
+    Root,
+    Task(Arc<Task>),
+}
+
+/// Implementation of [`crate::Runner`] for the deterministic runtime.
 pub struct Runner {
     executor: Arc<Executor>,
 }
@@ -541,156 +548,158 @@ pub struct Runner {
 impl crate::Runner for Runner {
     fn start<F>(self, f: F) -> F::Output
     where
-        F: Future,
+        F: Future, // root need not be `Send`
     {
-        // Root future lives on the heap; it need **not** be `Send`.
-        let mut root_future = Box::pin(f);
+        // Root future and its eventual output
+        let mut root = Box::pin(f);
+        let mut root_out: Option<F::Output> = None;
 
-        // Event‑loop iteration counter (for tracing / debugging only).
+        // Metrics label for the root task (empty string)
+        let root_work = Work {
+            label: String::new(),
+        };
+
         let mut iter = 0;
-
         loop {
-            // Deadline check
+            // ----------------------------------------------------------------
+            // 1.  Deadline / timeout guard
+            // ----------------------------------------------------------------
             {
-                let current = self.executor.time.lock().unwrap();
-                if let Some(deadline) = self.executor.deadline {
-                    if *current >= deadline {
+                let now = *self.executor.time.lock().unwrap();
+                if let Some(dl) = self.executor.deadline {
+                    if now >= dl {
                         panic!("runtime timeout");
                     }
                 }
             }
 
-            // ------------------------------------------------------------------
-            // 1. Poll ROOT future
-            // ------------------------------------------------------------------
-            let root_pending = {
-                let waker = noop_waker_ref();
-                let mut cx = task::Context::from_waker(waker);
-                match root_future.as_mut().poll(&mut cx) {
-                    Poll::Ready(out) => {
-                        *self.executor.finished.lock().unwrap() = true;
-                        return out;
-                    }
-                    Poll::Pending => true,
-                }
-            };
+            // ----------------------------------------------------------------
+            // 2.  Snapshot ready queue & add ROOT, then shuffle deterministically
+            // ----------------------------------------------------------------
+            let mut items: Vec<WorkItem> = self
+                .executor
+                .tasks
+                .drain()
+                .into_iter()
+                .map(WorkItem::Task)
+                .collect();
+            items.push(WorkItem::Root);
 
-            // ------------------------------------------------------------------
-            // 2. Snapshot & shuffle runnable tasks
-            // ------------------------------------------------------------------
-            let mut tasks = self.executor.tasks.drain();
             {
                 let mut rng = self.executor.rng.lock().unwrap();
-                tasks.shuffle(&mut *rng);
+                items.shuffle(&mut *rng);
             }
 
-            trace!(iter, tasks = tasks.len(), "starting loop");
+            trace!(iter, tasks = items.len(), "starting loop");
 
-            // ------------------------------------------------------------------
-            // 3. Process each task once
-            // ------------------------------------------------------------------
-            for task in tasks {
-                // Audit
-                self.executor.auditor.process_task(task.id, &task.label);
+            // ----------------------------------------------------------------
+            // 3.  Poll every work item exactly once
+            // ----------------------------------------------------------------
+            for item in items {
+                match item {
+                    WorkItem::Root => {
+                        // Already finished?
+                        if root_out.is_some() {
+                            continue;
+                        }
 
-                // Skip if already completed
-                if *task.completed.lock().unwrap() {
-                    trace!(id = task.id, "skipping already completed task");
-                    continue;
-                }
+                        // metrics
+                        self.executor
+                            .metrics
+                            .task_polls
+                            .get_or_create(&root_work)
+                            .inc();
 
-                // Prepare waker / context
-                let waker = waker_ref(&task);
-                let mut cx = task::Context::from_waker(&waker);
-                let mut future = task.future.lock().unwrap();
+                        // poll
+                        let waker = futures::task::noop_waker_ref();
+                        let mut cx = task::Context::from_waker(waker);
+                        if let Poll::Ready(v) = root.as_mut().poll(&mut cx) {
+                            root_out = Some(v);
+                        }
+                    }
+                    WorkItem::Task(task) => {
+                        // audit
+                        self.executor.auditor.process_task(task.id, &task.label);
 
-                // Metric: poll count
-                self.executor
-                    .metrics
-                    .task_polls
-                    .get_or_create(&Work {
-                        label: task.label.clone(),
-                    })
-                    .inc();
+                        // skip finished
+                        if *task.completed.lock().unwrap() {
+                            continue;
+                        }
 
-                // Poll once; task will re‑queue itself via its `wake_by_ref`
-                let pending = future.as_mut().poll(&mut cx).is_pending();
-                if pending {
-                    trace!(id = task.id, "task still pending");
-                    continue;
-                }
+                        // metrics
+                        self.executor
+                            .metrics
+                            .task_polls
+                            .get_or_create(&Work {
+                                label: task.label.clone(),
+                            })
+                            .inc();
 
-                // Mark complete
-                *task.completed.lock().unwrap() = true;
-                trace!(id = task.id, "task complete");
-            }
-
-            // ------------------------------------------------------------------
-            // 4. Advance / skip time
-            // ------------------------------------------------------------------
-            let mut current;
-            {
-                let mut time = self.executor.time.lock().unwrap();
-                *time = time
-                    .checked_add(self.executor.cycle)
-                    .expect("executor time overflowed");
-                current = *time;
-            }
-            trace!(now = current.epoch_millis(), "time advanced");
-
-            // Fast‑forward if nothing runnable
-            if self.executor.tasks.len() == 0 {
-                let mut skip_to = None;
-                {
-                    let sleeping = self.executor.sleeping.lock().unwrap();
-                    if let Some(next) = sleeping.peek() {
-                        if next.time > current {
-                            skip_to = Some(next.time);
+                        // poll
+                        let waker = waker_ref(&task);
+                        let mut cx = task::Context::from_waker(&waker);
+                        let mut fut = task.future.lock().unwrap();
+                        if fut.as_mut().poll(&mut cx).is_ready() {
+                            *task.completed.lock().unwrap() = true;
                         }
                     }
                 }
-                if let Some(t) = skip_to {
-                    let mut time = self.executor.time.lock().unwrap();
-                    *time = t;
-                    current = *time;
-                    trace!(now = current.epoch_millis(), "time skipped");
-                }
             }
 
-            // ------------------------------------------------------------------
-            // 5. Wake sleepers
-            // ------------------------------------------------------------------
-            let mut to_wake = Vec::new();
-            let mut remaining;
-            {
-                let mut sleeping = self.executor.sleeping.lock().unwrap();
-                while let Some(next) = sleeping.peek() {
-                    if next.time <= current {
-                        let alarm = sleeping.pop().unwrap();
-                        to_wake.push(alarm.waker);
-                    } else {
-                        break;
-                    }
-                }
-                remaining = sleeping.len();
-            }
-            for w in to_wake {
-                w.wake();
+            // Root completed → return its output
+            if let Some(out) = root_out {
+                *self.executor.finished.lock().unwrap() = true;
+                return out;
             }
 
-            // ------------------------------------------------------------------
-            // 6. Stall detection
-            // ------------------------------------------------------------------
-            remaining += self.executor.tasks.len();
-            if root_pending {
-                remaining += 1; // root future still pending
-            }
-            if remaining == 0 {
-                panic!("runtime stalled");
-            }
-
+            // ----------------------------------------------------------------
+            // 4.  Drive time forward, wake sleepers, detect stall
+            // ----------------------------------------------------------------
+            advance_clock_and_wake_sleepers(&self.executor);
             iter += 1;
         }
+    }
+}
+
+/// Advance virtual time by the configured cycle, fast‑forward if idle,
+/// wake sleepers, and panic if no progress is possible.
+fn advance_clock_and_wake_sleepers(exe: &Executor) {
+    // advance by cycle
+    let mut now = {
+        let mut t = exe.time.lock().unwrap();
+        *t = t.checked_add(exe.cycle).expect("time overflow");
+        *t
+    };
+
+    // fast‑forward to next alarm if no runnable tasks
+    if exe.tasks.len() == 0 {
+        if let Some(next) = exe.sleeping.lock().unwrap().peek() {
+            if next.time > now {
+                now = next.time;
+                *exe.time.lock().unwrap() = now;
+            }
+        }
+    }
+
+    // wake sleepers ready at `now`
+    let mut ready = Vec::new();
+    {
+        let mut sleeping = exe.sleeping.lock().unwrap();
+        while let Some(alarm) = sleeping.peek() {
+            if alarm.time <= now {
+                ready.push(sleeping.pop().unwrap().waker);
+            } else {
+                break;
+            }
+        }
+    }
+    for w in ready {
+        w.wake();
+    }
+
+    // stall detection
+    if exe.tasks.len() + exe.sleeping.lock().unwrap().len() == 0 {
+        panic!("runtime stalled");
     }
 }
 
