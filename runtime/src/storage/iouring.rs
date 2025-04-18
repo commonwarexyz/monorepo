@@ -35,7 +35,7 @@ struct IoUringRuntimeAdapter {
     // Map of operation tokens to their completion status
     work: Mutex<HashMap<u64, oneshot::Sender<i32>>>,
     // Counter for generating unique operation IDs
-    next_token: AtomicU64,
+    next_work_id: AtomicU64,
 }
 
 impl IoUringRuntimeAdapter {
@@ -44,7 +44,7 @@ impl IoUringRuntimeAdapter {
             ring: Mutex::new(IoUring::new(128).expect("Failed to create io_uring instance")),
             work_available: tokio::sync::Notify::new(),
             work: Mutex::new(HashMap::new()),
-            next_token: AtomicU64::new(1),
+            next_work_id: AtomicU64::new(1),
         }
     }
 
@@ -53,17 +53,17 @@ impl IoUringRuntimeAdapter {
     // The meaning of the result depends on the operation type.
     // The user data field of `op` will be overwritten by this method.
     async fn submit_work(&self, op: io_uring::squeue::Entry) -> Result<i32, Error> {
-        let token = self.next_token.fetch_add(1, Ordering::SeqCst);
+        let work_id = self.next_work_id.fetch_add(1, Ordering::SeqCst);
         let (sender, receiver) = oneshot::channel();
 
         // Add operation to pending work
         {
             let mut work = self.work.lock().unwrap();
-            work.insert(token, sender);
+            work.insert(work_id, sender);
         }
 
-        // Wrap the operation with this unique token to identify it later
-        let op = op.user_data(token);
+        // Wrap the operation with this unique work_id to identify it later
+        let op = op.user_data(work_id);
 
         // Submit the operation to the ring
         {
@@ -115,16 +115,16 @@ impl IoUringRuntimeAdapter {
             ring.submit().unwrap_or(0);
 
             while let Some(cqe) = ring.completion().next() {
-                let token = cqe.user_data();
-                completed.push((token, cqe.result()));
+                let work_id = cqe.user_data();
+                completed.push((work_id, cqe.result()));
             }
         }
 
         if !completed.is_empty() {
             // Notify that each operation has completed.
             let mut operations = self.work.lock().unwrap();
-            for (token, result) in completed {
-                if let Some(sender) = operations.remove(&token) {
+            for (work_id, result) in completed {
+                if let Some(sender) = operations.remove(&work_id) {
                     let _ = sender.send(result);
                 }
             }
