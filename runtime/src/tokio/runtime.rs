@@ -175,7 +175,6 @@ pub struct Executor {
     cfg: Config,
     registry: Mutex<Registry>,
     metrics: Arc<Metrics>,
-    runtime: Runtime,
 }
 
 impl Executor {
@@ -187,18 +186,23 @@ impl Executor {
 
         // Initialize runtime
         let metrics = Arc::new(Metrics::init(runtime_registry));
-        let spawner = Spawner::new(
-            SpawnerConfig {
-                catch_panics: cfg.catch_panics,
-            },
-            runtime_registry,
-        );
+
         let runtime = Builder::new_multi_thread()
             .worker_threads(cfg.worker_threads)
             .max_blocking_threads(cfg.max_blocking_threads)
             .enable_all()
             .build()
             .expect("failed to create Tokio runtime");
+        let runtime = Arc::new(runtime);
+
+        let spawner = Spawner::new(
+            String::new(),
+            SpawnerConfig {
+                catch_panics: cfg.catch_panics,
+            },
+            runtime_registry,
+            runtime.clone(),
+        );
 
         let storage = Storage::new(
             TokioStorage::new(TokioStorageConfig::new(
@@ -212,12 +216,9 @@ impl Executor {
             cfg,
             registry: Mutex::new(registry),
             metrics,
-            runtime,
         });
         (
-            Runner {
-                executor: executor.clone(),
-            },
+            Runner { runtime },
             Context {
                 storage,
                 spawner,
@@ -236,7 +237,7 @@ impl Executor {
 
 /// Implementation of [`crate::Runner`] for the `tokio` runtime.
 pub struct Runner {
-    executor: Arc<Executor>,
+    runtime: Arc<Runtime>,
 }
 
 impl crate::Runner for Runner {
@@ -245,7 +246,7 @@ impl crate::Runner for Runner {
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        self.executor.runtime.block_on(f)
+        self.runtime.block_on(f)
     }
 }
 
@@ -267,6 +268,7 @@ struct Spawner {
     metrics: Arc<SpawnerMetrics>,
     signaler: Arc<Mutex<Signaler>>,
     signal: Signal,
+    runtime: Arc<Runtime>,
 }
 
 #[derive(Clone)]
@@ -275,16 +277,41 @@ struct SpawnerConfig {
 }
 
 impl Spawner {
-    fn new(cfg: SpawnerConfig, reg: &mut Registry) -> Self {
+    fn new(label: String, cfg: SpawnerConfig, reg: &mut Registry, runtime: Arc<Runtime>) -> Self {
         let (signaler, signal) = Signaler::new();
 
         Self {
             cfg,
-            label: String::new(),
+            label,
             spawned: false,
             metrics: Arc::new(SpawnerMetrics::new(reg)),
             signaler: Arc::new(Mutex::new(signaler)),
             signal,
+            runtime,
+        }
+    }
+
+    fn with_label(&self, label: String) -> Self {
+        let label = {
+            let prefix = self.label.clone();
+            if prefix.is_empty() {
+                label
+            } else {
+                format!("{}_{}", prefix, label)
+            }
+        };
+        assert!(
+            !label.starts_with(METRICS_PREFIX),
+            "using runtime label is not allowed"
+        );
+        Self {
+            cfg: self.cfg.clone(),
+            label,
+            spawned: false,
+            metrics: self.metrics.clone(),
+            signaler: self.signaler.clone(),
+            signal: self.signal.clone(),
+            runtime: self.runtime.clone(),
         }
     }
 }
@@ -347,12 +374,12 @@ impl crate::Spawner for Spawner {
 
         // Set up the task
         let catch_panics = self.cfg.catch_panics;
-        let executor = self.executor.clone();
+        let runtime = self.runtime.clone();
         let future = f(self);
         let (f, handle) = Handle::init(future, gauge, catch_panics);
 
         // Spawn the task
-        executor.runtime.spawn(f);
+        runtime.spawn(f);
         handle
     }
 
@@ -373,14 +400,14 @@ impl crate::Spawner for Spawner {
         let gauge = self.metrics.tasks_running.get_or_create(&work).clone();
 
         // Set up the task
-        let executor = self.executor.clone();
-        let catch_panics = executor.cfg.catch_panics;
+        let runtime = self.runtime.clone();
+        let catch_panics = self.cfg.catch_panics;
 
         move |f: F| {
             let (f, handle) = Handle::init(f, gauge, catch_panics);
 
             // Spawn the task
-            executor.runtime.spawn(f);
+            runtime.spawn(f);
             handle
         }
     }
@@ -411,7 +438,7 @@ impl crate::Spawner for Spawner {
         let (f, handle) = Handle::init_blocking(f, gauge, self.cfg.catch_panics);
 
         // Spawn the blocking task
-        self.executor.runtime.spawn_blocking(f);
+        self.runtime.spawn_blocking(f);
         handle
     }
 
@@ -481,7 +508,7 @@ impl crate::Metrics for Context {
             "using runtime label is not allowed"
         );
         Self {
-            spawner: Spawner::new(label, self.executor.clone()),
+            spawner: self.spawner.with_label(label),
             executor: self.executor.clone(),
             storage: self.storage.clone(),
         }
