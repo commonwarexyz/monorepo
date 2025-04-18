@@ -57,14 +57,6 @@ impl<const N: usize> TryFrom<&[u8]> for FixedBytes<N> {
     }
 }
 
-impl<const N: usize> TryFrom<&Vec<u8>> for FixedBytes<N> {
-    type Error = Error;
-
-    fn try_from(value: &Vec<u8>) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_slice())
-    }
-}
-
 impl<const N: usize> TryFrom<Vec<u8>> for FixedBytes<N> {
     type Error = Error;
 
@@ -124,9 +116,6 @@ mod tests {
         assert_eq!(bytes_from_slice, bytes);
 
         let vec = vec![1, 2, 3, 4];
-        let bytes_from_vec_ref = FixedBytes::try_from(&vec).unwrap();
-        assert_eq!(bytes_from_vec_ref, bytes);
-
         let bytes_from_vec = FixedBytes::try_from(vec).unwrap();
         assert_eq!(bytes_from_vec, bytes);
 
@@ -139,28 +128,24 @@ mod tests {
 
         let vec_too_long = vec![1, 2, 3, 4, 5];
         assert_eq!(
-            FixedBytes::<4>::try_from(&vec_too_long),
-            Err(Error::InvalidLength)
-        );
-        assert_eq!(
             FixedBytes::<4>::try_from(vec_too_long),
             Err(Error::InvalidLength)
         );
     }
 
     #[test]
-    fn test_read_from() {
+    fn test_decode() {
         let mut buf = BytesMut::from(&[1, 2, 3, 4][..]);
-        let bytes = FixedBytes::<4>::read_from(&mut buf).unwrap();
+        let bytes = FixedBytes::<4>::decode(&mut buf).unwrap();
         assert_eq!(bytes.as_ref(), &[1, 2, 3, 4]);
         assert_eq!(buf.remaining(), 0);
 
         let mut buf = BytesMut::from(&[1, 2, 3][..]);
-        let result = FixedBytes::<4>::read_from(&mut buf);
+        let result = FixedBytes::<4>::decode(&mut buf);
         assert_eq!(result, Err(ArrayError::InsufficientBytes));
 
         let mut buf = BytesMut::from(&[1, 2, 3, 4, 5][..]);
-        let bytes = FixedBytes::<4>::read_from(&mut buf).unwrap();
+        let bytes = FixedBytes::<4>::decode(&mut buf).unwrap();
         assert_eq!(bytes.as_ref(), &[1, 2, 3, 4]);
         assert_eq!(buf.remaining(), 1);
         assert_eq!(buf[0], 5);

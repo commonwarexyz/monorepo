@@ -174,7 +174,7 @@ mod tests {
 
         /// Generate a fixed public key for testing.
         pub fn gen_public_key(val: u8) -> ed25519::PublicKey {
-            ed25519::PublicKey::try_from(&[val; ed25519::PublicKey::SIZE][..]).unwrap()
+            ed25519::PublicKey::decode([val; ed25519::PublicKey::SIZE][..]).unwrap()
         }
 
         /// Create an Ack by signing a partial with the provided share.

@@ -116,15 +116,15 @@ impl<K: Array, V: Array> Operation<K, V> {
     }
 
     pub fn to_key(&self) -> K {
-        K::try_from(&self.data[1..K::SIZE + 1]).unwrap()
+        K::decode(self.data[1..K::SIZE + 1]).unwrap()
     }
 
     pub fn to_type(&self) -> Type<K, V> {
-        let key = K::try_from(&self.data[1..K::SIZE + 1]).unwrap();
+        let key = K::decode(self.data[1..K::SIZE + 1]).unwrap();
         match self.data[0] {
             Self::DELETE_CONTEXT => Type::Deleted(key),
             Self::UPDATE_CONTEXT => {
-                let value = V::try_from(&self.data[K::SIZE + 1..]).unwrap();
+                let value = V::decode(self.data[K::SIZE + 1..]).unwrap();
                 Type::Update(key, value)
             }
             Self::COMMIT_CONTEXT => {
@@ -138,7 +138,7 @@ impl<K: Array, V: Array> Operation<K, V> {
     pub fn to_value(&self) -> Option<V> {
         match self.data[0] {
             Self::DELETE_CONTEXT => None,
-            Self::UPDATE_CONTEXT => Some(V::try_from(&self.data[K::SIZE + 1..]).unwrap()),
+            Self::UPDATE_CONTEXT => Some(V::decode(self.data[K::SIZE + 1..]).unwrap()),
             Self::COMMIT_CONTEXT => None,
             _ => unreachable!(),
         }
@@ -156,7 +156,7 @@ impl<K: Array, V: Array> Read for Operation<K, V> {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let mut value = vec![0u8; Self::SIZE];
         buf.copy_to_slice(&mut value);
-        Self::try_from(&value).map_err(|e: Error<K, V>| CodecError::Wrapped("Operation", e.into()))
+        Self::try_from(value).map_err(|e: Error<K, V>| CodecError::Wrapped("Operation", e.into()))
     }
 }
 
@@ -176,11 +176,11 @@ impl<K: Array, V: Array> TryFrom<&[u8]> for Operation<K, V> {
             return Err(Error::InvalidLength);
         }
 
-        let _ = K::try_from(&value[1..K::SIZE + 1]).map_err(|e| Error::InvalidKey(e))?;
+        let _ = K::decode(value[1..K::SIZE + 1]).map_err(|e| Error::InvalidKey(e))?;
 
         match value[0] {
             Self::UPDATE_CONTEXT => {
-                let _ = V::try_from(&value[K::SIZE + 1..]).map_err(|e| Error::InvalidValue(e))?;
+                let _ = V::decode(value[K::SIZE + 1..]).map_err(|e| Error::InvalidValue(e))?;
             }
             Self::DELETE_CONTEXT => {
                 // Check if the remaining bytes are all zeros
@@ -203,14 +203,6 @@ impl<K: Array, V: Array> TryFrom<&[u8]> for Operation<K, V> {
             data: value.to_vec(),
             _phantom: std::marker::PhantomData,
         })
-    }
-}
-
-impl<K: Array, V: Array> TryFrom<&Vec<u8>> for Operation<K, V> {
-    type Error = Error<K, V>;
-
-    fn try_from(value: &Vec<u8>) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_slice())
     }
 }
 
@@ -264,7 +256,7 @@ mod tests {
 
         let vec = update_op.to_vec();
 
-        let from = Operation::<U64, U64>::try_from(&vec).unwrap();
+        let from = Operation::<U64, U64>::decode(vec).unwrap();
         assert_eq!(key, from.to_key());
         assert_eq!(value, from.to_value().unwrap());
         assert_eq!(update_op, from);
@@ -290,19 +282,19 @@ mod tests {
         // test non-zero byte detection in delete operation
         let mut invalid = delete_op.to_vec();
         invalid[U64::SIZE + 4] = 0xFF;
-        let try_from = Operation::<U64, U64>::try_from(&invalid);
+        let try_from = Operation::<U64, U64>::decode(invalid);
         assert!(matches!(try_from.unwrap_err(), Error::InvalidDeleteOp));
 
         // test invalid context byte detection
         let mut invalid = delete_op.to_vec();
         invalid[0] = 0xFF;
-        let try_from = Operation::<U64, U64>::try_from(&invalid);
+        let try_from = Operation::<U64, U64>::decode(invalid);
         assert!(matches!(try_from.unwrap_err(), Error::InvalidContextByte));
 
         // test invalid length detection
         let mut invalid = update_op.to_vec();
         invalid.pop();
-        let try_from = Operation::<U64, U64>::try_from(&invalid);
+        let try_from = Operation::<U64, U64>::decode(invalid);
         assert!(matches!(try_from.unwrap_err(), Error::InvalidLength));
     }
 

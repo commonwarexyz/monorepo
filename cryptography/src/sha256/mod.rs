@@ -101,7 +101,7 @@ impl Write for Digest {
 
 impl Read for Digest {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        Self::read_from(buf).map_err(|err| CodecError::Wrapped("Digest", err.into()))
+        Self::decode(buf).map_err(|err| CodecError::Wrapped("Digest", err.into()))
     }
 }
 
@@ -128,13 +128,6 @@ impl TryFrom<&[u8]> for Digest {
         let array: [u8; DIGEST_LENGTH] =
             value.try_into().map_err(|_| Error::InvalidDigestLength)?;
         Ok(Self(array))
-    }
-}
-
-impl TryFrom<&Vec<u8>> for Digest {
-    type Error = Error;
-    fn try_from(value: &Vec<u8>) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_slice())
     }
 }
 

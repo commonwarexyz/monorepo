@@ -135,7 +135,7 @@ impl Write for PrivateKey {
 
 impl Read for PrivateKey {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
+        Self::decode(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
     }
 }
 
@@ -204,13 +204,6 @@ impl TryFrom<&[u8]> for PrivateKey {
     }
 }
 
-impl TryFrom<&Vec<u8>> for PrivateKey {
-    type Error = Error;
-    fn try_from(value: &Vec<u8>) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_slice())
-    }
-}
-
 impl TryFrom<Vec<u8>> for PrivateKey {
     type Error = Error;
     fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
@@ -245,7 +238,7 @@ impl Write for PublicKey {
 
 impl Read for PublicKey {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
+        Self::decode(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
     }
 }
 
@@ -288,13 +281,6 @@ impl TryFrom<&[u8]> for PublicKey {
     }
 }
 
-impl TryFrom<&Vec<u8>> for PublicKey {
-    type Error = Error;
-    fn try_from(value: &Vec<u8>) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_slice())
-    }
-}
-
 impl TryFrom<Vec<u8>> for PublicKey {
     type Error = Error;
     fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
@@ -329,7 +315,7 @@ impl Write for Signature {
 
 impl Read for Signature {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
+        Self::decode(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
     }
 }
 
@@ -390,13 +376,6 @@ impl TryFrom<&[u8]> for Signature {
             .map_err(|_| Error::InvalidSignatureLength)?;
         let signature = ed25519_consensus::Signature::from(raw);
         Ok(Self { raw, signature })
-    }
-}
-
-impl TryFrom<&Vec<u8>> for Signature {
-    type Error = Error;
-    fn try_from(value: &Vec<u8>) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_slice())
     }
 }
 

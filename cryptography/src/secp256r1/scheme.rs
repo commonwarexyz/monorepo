@@ -2,7 +2,7 @@ use crate::{
     Array, Error, Signer as CommonwareSigner, Specification, Verifier as CommonwareVerifier,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedSize, Read, Write};
+use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_utils::{hex, union_unique};
 use p256::{
     ecdsa::{
@@ -105,7 +105,7 @@ impl Write for PrivateKey {
 
 impl Read for PrivateKey {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
+        Self::decode(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
     }
 }
 
@@ -166,13 +166,6 @@ impl TryFrom<&[u8]> for PrivateKey {
     }
 }
 
-impl TryFrom<&Vec<u8>> for PrivateKey {
-    type Error = Error;
-    fn try_from(value: &Vec<u8>) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_slice())
-    }
-}
-
 impl TryFrom<Vec<u8>> for PrivateKey {
     type Error = Error;
     fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
@@ -207,7 +200,7 @@ impl Write for PublicKey {
 
 impl Read for PublicKey {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
+        Self::decode(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
     }
 }
 
@@ -257,13 +250,6 @@ impl TryFrom<&[u8]> for PublicKey {
     }
 }
 
-impl TryFrom<&Vec<u8>> for PublicKey {
-    type Error = Error;
-    fn try_from(value: &Vec<u8>) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_slice())
-    }
-}
-
 impl TryFrom<Vec<u8>> for PublicKey {
     type Error = Error;
     fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
@@ -298,7 +284,8 @@ impl Write for Signature {
 
 impl Read for Signature {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
+        let raw = <[u8; Self::SIZE]>::read(buf)?;
+        Self::try_from(raw).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
     }
 }
 
@@ -361,13 +348,6 @@ impl TryFrom<&[u8]> for Signature {
             return Err(Error::InvalidSignature);
         }
         Ok(Self { raw, signature })
-    }
-}
-
-impl TryFrom<&Vec<u8>> for Signature {
-    type Error = Error;
-    fn try_from(value: &Vec<u8>) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_slice())
     }
 }
 
@@ -606,11 +586,12 @@ mod tests {
 
         let uncompressed_public_key = parse_public_key_as_uncompressed_vector(qx_hex, qy_hex);
         let public_key =
-            <Secp256r1 as Specification>::PublicKey::try_from(&uncompressed_public_key);
-        assert_eq!(public_key, Err(Error::InvalidPublicKeyLength));
+            <Secp256r1 as Specification>::PublicKey::decode(uncompressed_public_key.as_ref());
+        assert!(matches!(public_key, Err(CodecError::ExtraData(_))));
 
         let compressed_public_key = parse_public_key_as_compressed_vector(qx_hex, qy_hex);
-        let public_key = <Secp256r1 as Specification>::PublicKey::try_from(&compressed_public_key);
+        let public_key =
+            <Secp256r1 as Specification>::PublicKey::decode(compressed_public_key.as_ref());
         assert!(public_key.is_ok());
     }
 
@@ -631,7 +612,7 @@ mod tests {
         signature.extend_from_slice(s);
 
         // Try to parse signature
-        assert!(Signature::try_from(&signature).is_err());
+        assert!(Signature::decode(signature.as_ref()).is_err());
     }
 
     #[test]
@@ -652,7 +633,7 @@ mod tests {
         signature.extend(s);
 
         // Try to parse signature
-        assert!(Signature::try_from(&signature).is_err());
+        assert!(Signature::decode(signature.as_ref()).is_err());
     }
 
     #[test]
@@ -704,7 +685,7 @@ mod tests {
 
         for (n, test) in cases.iter() {
             let (public_key, exp_valid) = test;
-            let res = <Secp256r1 as Specification>::PublicKey::try_from(public_key);
+            let res = <Secp256r1 as Specification>::PublicKey::decode(public_key.as_ref());
             assert_eq!(
                 *exp_valid,
                 res.is_ok(),

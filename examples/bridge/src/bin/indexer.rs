@@ -166,7 +166,15 @@ fn main() {
                             let _ = response.send(None);
                             continue;
                         };
+<<<<<<< HEAD
                         let data = network.get(&incoming.digest);
+=======
+                        let Ok(digest) = Sha256Digest::decode(incoming.digest) else {
+                            let _ = response.send(None);
+                            continue;
+                        };
+                        let data = network.get(&digest);
+>>>>>>> 71283a73 (temp)
                         let _ = response.send(data.cloned());
                     }
                     Message::PutFinalization { incoming, response } => {

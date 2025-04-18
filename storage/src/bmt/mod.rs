@@ -285,7 +285,7 @@ impl<H: Hasher> Proof<H> {
         // Deserialize the siblings
         let mut siblings = Vec::with_capacity(num_siblings);
         for _ in 0..num_siblings {
-            let hash = H::Digest::read_from(&mut buf).map_err(|_| Error::InvalidDigest)?;
+            let hash = H::Digest::decode(&mut buf).map_err(|_| Error::InvalidDigest)?;
             siblings.push(hash);
         }
         Ok(Self { siblings })

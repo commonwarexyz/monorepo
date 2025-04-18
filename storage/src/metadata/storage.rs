@@ -137,7 +137,7 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         while cursor < checksum_index {
             // Read key
             let next_cursor = cursor + K::SIZE;
-            let key = K::read_from(&mut buf[cursor..next_cursor].as_ref()).unwrap();
+            let key = K::decode(&mut buf[cursor..next_cursor].as_ref()).unwrap();
             cursor = next_cursor;
 
             // Read value length

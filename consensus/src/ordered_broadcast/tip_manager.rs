@@ -79,7 +79,7 @@ mod tests {
         ) -> Node<Ed25519, Digest> {
             let signature = {
                 let mut data = Bytes::from(vec![3u8; Signature::SIZE]);
-                Signature::read_from(&mut data).unwrap()
+                Signature::decode(&mut data).unwrap()
             };
             Node::new(
                 Chunk::new(sequencer, height, sha256::hash(payload.as_bytes())),
