@@ -280,7 +280,7 @@ mod tests {
     fn test_all_online() {
         // Create context
         let n = 5;
-        let threshold = quorum(n).expect("unable to calculate threshold");
+        let threshold = quorum(n);
         let max_exceptions = 4;
         let required_containers = 100;
         let activity_timeout = 10;

@@ -89,8 +89,8 @@ impl<P: Array> Arbiter<P> {
             .collect::<HashMap<P, _>>();
         players.sort();
         Self {
-            dealer_threshold: quorum(dealers.len() as u32).expect("insufficient dealers"),
-            player_threshold: quorum(players.len() as u32).expect("insufficient players"),
+            dealer_threshold: quorum(dealers.len() as u32),
+            player_threshold: quorum(players.len() as u32),
             previous,
             concurrency,
 
@@ -163,7 +163,7 @@ impl<P: Array> Arbiter<P> {
 
         // Ensure reveals less than max_faults and for players not yet ack'd
         let reveals_len = reveals.len();
-        let max_faults = max_faults(players_len).unwrap() as usize;
+        let max_faults = max_faults(players_len) as usize;
         if reveals_len > max_faults {
             self.disqualified.insert(dealer);
             return Err(Error::TooManyReveals);

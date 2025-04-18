@@ -64,8 +64,8 @@ impl<P: Array> Player<P> {
         }
         Self {
             me: me_idx.expect("player not in recipients") as u32,
-            dealer_threshold: quorum(dealers.len() as u32).expect("insufficient dealers"),
-            player_threshold: quorum(recipients.len() as u32).expect("insufficient participants"),
+            dealer_threshold: quorum(dealers.len() as u32),
+            player_threshold: quorum(recipients.len() as u32),
             previous,
             concurrency,
 
