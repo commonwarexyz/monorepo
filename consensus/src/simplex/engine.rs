@@ -1,15 +1,14 @@
 use super::{
     actors::{resolver, voter},
     config::Config,
-    Context, View,
+    types::{Activity, Context, View},
 };
-use crate::{Automaton, Committer, Relay, Supervisor};
-use commonware_cryptography::Scheme;
+use crate::{Automaton, Relay, Reporter, Supervisor};
+use commonware_cryptography::{Digest, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Sender};
 use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
 use commonware_storage::journal::variable::Journal;
-use commonware_utils::Array;
 use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
 use tracing::debug;
@@ -18,27 +17,27 @@ use tracing::debug;
 pub struct Engine<
     E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
     C: Scheme,
-    D: Array,
+    D: Digest,
     A: Automaton<Context = Context<D>, Digest = D>,
     R: Relay<Digest = D>,
-    F: Committer<Digest = D>,
+    F: Reporter<Activity = Activity<C::Signature, D>>,
     S: Supervisor<Index = View, PublicKey = C::PublicKey>,
 > {
     context: E,
 
     voter: voter::Actor<E, C, D, A, R, F, S>,
-    voter_mailbox: voter::Mailbox<D>,
+    voter_mailbox: voter::Mailbox<C::Signature, D>,
     resolver: resolver::Actor<E, C, D, S>,
-    resolver_mailbox: resolver::Mailbox,
+    resolver_mailbox: resolver::Mailbox<C::Signature, D>,
 }
 
 impl<
         E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
         C: Scheme,
-        D: Array,
+        D: Digest,
         A: Automaton<Context = Context<D>, Digest = D>,
         R: Relay<Digest = D>,
-        F: Committer<Digest = D>,
+        F: Reporter<Activity = Activity<C::Signature, D>>,
         S: Supervisor<Index = View, PublicKey = C::PublicKey>,
     > Engine<E, C, D, A, R, F, S>
 {
@@ -55,10 +54,11 @@ impl<
                 crypto: cfg.crypto.clone(),
                 automaton: cfg.automaton,
                 relay: cfg.relay,
-                committer: cfg.committer,
+                reporter: cfg.reporter,
                 supervisor: cfg.supervisor.clone(),
                 mailbox_size: cfg.mailbox_size,
                 namespace: cfg.namespace.clone(),
+                max_participants: cfg.max_participants,
                 leader_timeout: cfg.leader_timeout,
                 notarization_timeout: cfg.notarization_timeout,
                 nullify_retry: cfg.nullify_retry,
@@ -76,11 +76,11 @@ impl<
                 supervisor: cfg.supervisor,
                 mailbox_size: cfg.mailbox_size,
                 namespace: cfg.namespace,
+                max_participants: cfg.max_participants,
                 activity_timeout: cfg.activity_timeout,
                 fetch_timeout: cfg.fetch_timeout,
                 fetch_concurrent: cfg.fetch_concurrent,
                 max_fetch_count: cfg.max_fetch_count,
-                max_fetch_size: cfg.max_fetch_size,
                 fetch_rate_per_peer: cfg.fetch_rate_per_peer,
             },
         );

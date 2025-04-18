@@ -1,17 +1,17 @@
-use super::{Context, View};
-use crate::{Automaton, Committer, Relay, Supervisor};
-use commonware_cryptography::Scheme;
-use commonware_utils::Array;
+use crate::{Automaton, Relay, Reporter, Supervisor};
+use commonware_cryptography::{Digest, Scheme};
 use governor::Quota;
 use std::time::Duration;
+
+use super::types::{Activity, Context, View};
 
 /// Configuration for the consensus engine.
 pub struct Config<
     C: Scheme,
-    D: Array,
+    D: Digest,
     A: Automaton<Context = Context<D>, Digest = D>,
     R: Relay<Digest = D>,
-    F: Committer<Digest = D>,
+    F: Reporter<Activity = Activity<C::Signature, D>>,
     S: Supervisor<Index = View>,
 > {
     /// Cryptographic primitives.
@@ -23,8 +23,8 @@ pub struct Config<
     /// Relay for the consensus engine.
     pub relay: R,
 
-    /// Committer for the consensus engine.
-    pub committer: F,
+    /// Reporter for the consensus engine.
+    pub reporter: F,
 
     /// Supervisor for the consensus engine.
     pub supervisor: S,
@@ -55,6 +55,13 @@ pub struct Config<
     /// and persist activity derived from validator messages.
     pub activity_timeout: View,
 
+    /// Maximum number of participants to track in a single round.
+    ///
+    /// This is used to limit the size of notarization, nullification, and finalization messages,
+    /// which include up to one signature per participant. This number can be set to a reasonably high
+    /// value that we never expect to reach (it is just how many signatures we are willing to parse, not verify).
+    pub max_participants: usize,
+
     /// Move to nullify immediately if the selected leader has been inactive
     /// for this many views.
     ///
@@ -68,9 +75,6 @@ pub struct Config<
     /// Maximum number of notarizations/nullifications to request/respond with at once.
     pub max_fetch_count: usize,
 
-    /// Maximum number of bytes to respond with at once.
-    pub max_fetch_size: usize,
-
     /// Maximum rate of requests to send to a given peer.
     ///
     /// Inbound rate limiting is handled by `commonware-p2p`.
@@ -82,10 +86,10 @@ pub struct Config<
 
 impl<
         C: Scheme,
-        D: Array,
+        D: Digest,
         A: Automaton<Context = Context<D>, Digest = D>,
         R: Relay<Digest = D>,
-        F: Committer<Digest = D>,
+        F: Reporter<Activity = Activity<C::Signature, D>>,
         S: Supervisor<Index = View>,
     > Config<C, D, A, R, F, S>
 {
@@ -126,10 +130,6 @@ impl<
         assert!(
             self.max_fetch_count > 0,
             "it must be possible to fetch at least one container per request"
-        );
-        assert!(
-            self.max_fetch_size > 0,
-            "it must be possible to fetch at least one byte"
         );
         assert!(
             self.fetch_concurrent > 0,

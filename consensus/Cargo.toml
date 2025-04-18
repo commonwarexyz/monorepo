@@ -15,9 +15,9 @@ commonware-codec = { workspace = true }
 commonware-cryptography = { workspace = true }
 commonware-utils = { workspace = true }
 bytes = { workspace = true }
-prost = { workspace = true }
 cfg-if = { workspace = true }
 thiserror = { workspace = true }
+futures = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 commonware-macros = { workspace = true }
@@ -26,13 +26,9 @@ commonware-runtime = { workspace = true }
 commonware-storage = { workspace = true }
 prometheus-client = { workspace = true }
 governor = { workspace = true }
-futures = { workspace = true }
 rand = { workspace = true }
 rand_distr = { workspace = true }
 tracing = { workspace = true }
-
-[build-dependencies]
-prost-build = { workspace = true }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }

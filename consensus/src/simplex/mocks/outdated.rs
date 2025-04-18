@@ -1,4 +1,4 @@
-//! Byzantine participant that sends conflicting notarize/finalize messages.
+//! Byzantine participant that sends outdated notarize and finalize messages.
 
 use crate::{
     simplex::types::{Finalize, Notarize, Proposal, View, Viewable, Voter},
@@ -9,16 +9,17 @@ use commonware_cryptography::{Hasher, Scheme};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};
 use rand::{CryptoRng, Rng};
-use std::marker::PhantomData;
+use std::collections::HashMap;
 use tracing::debug;
 
 pub struct Config<C: Scheme, S: Supervisor<Index = View>> {
     pub crypto: C,
     pub supervisor: S,
     pub namespace: Vec<u8>,
+    pub view_delta: u64,
 }
 
-pub struct Conflicter<
+pub struct Outdated<
     E: Clock + Rng + CryptoRng + Spawner,
     C: Scheme,
     H: Hasher,
@@ -27,9 +28,11 @@ pub struct Conflicter<
     context: E,
     crypto: C,
     supervisor: S,
-    _hasher: PhantomData<H>,
 
     namespace: Vec<u8>,
+
+    history: HashMap<u64, Proposal<H::Digest>>,
+    view_delta: u64,
 }
 
 impl<
@@ -37,16 +40,18 @@ impl<
         C: Scheme,
         H: Hasher,
         S: Supervisor<Index = View, PublicKey = C::PublicKey>,
-    > Conflicter<E, C, H, S>
+    > Outdated<E, C, H, S>
 {
     pub fn new(context: E, cfg: Config<C, S>) -> Self {
         Self {
             context,
             crypto: cfg.crypto,
             supervisor: cfg.supervisor,
-            _hasher: PhantomData,
 
             namespace: cfg.namespace,
+
+            history: HashMap::new(),
+            view_delta: cfg.view_delta,
         }
     }
 
@@ -70,61 +75,47 @@ impl<
             // Process message
             match msg {
                 Voter::Notarize(notarize) => {
-                    // Get our index
+                    // Store proposal
+                    self.history.insert(view, notarize.proposal.clone());
+
+                    // Notarize old digest
+                    let view = view.saturating_sub(self.view_delta);
                     let public_key_index = self
                         .supervisor
                         .is_participant(view, &self.crypto.public_key())
                         .unwrap();
-
-                    // Notarize received digest
-                    let parent = notarize.proposal.parent;
+                    let Some(proposal) = self.history.get(&view) else {
+                        continue;
+                    };
+                    debug!(?view, "notarizing old proposal");
                     let msg = Notarize::sign(
                         &self.namespace,
                         &mut self.crypto,
                         public_key_index,
-                        notarize.proposal,
-                    );
-                    let msg = Voter::Notarize(msg).encode().into();
-                    sender.send(Recipients::All, msg, true).await.unwrap();
-
-                    // Notarize random digest
-                    let payload = H::random(&mut self.context);
-                    let proposal = Proposal::new(view, parent, payload);
-                    let msg = Notarize::sign(
-                        &self.namespace,
-                        &mut self.crypto,
-                        public_key_index,
-                        proposal,
+                        proposal.clone(),
                     );
                     let msg = Voter::Notarize(msg).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
                 Voter::Finalize(finalize) => {
-                    // Get our index
+                    // Store proposal
+                    self.history.insert(view, finalize.proposal.clone());
+
+                    // Finalize provided digest
+                    let view = view.saturating_sub(self.view_delta);
                     let public_key_index = self
                         .supervisor
                         .is_participant(view, &self.crypto.public_key())
                         .unwrap();
-
-                    // Finalize provided digest
-                    let parent = finalize.proposal.parent;
+                    let Some(proposal) = self.history.get(&view) else {
+                        continue;
+                    };
+                    debug!(?view, "finalizing old proposal");
                     let msg = Finalize::sign(
                         &self.namespace,
                         &mut self.crypto,
                         public_key_index,
-                        finalize.proposal,
-                    );
-                    let msg = Voter::Finalize(msg).encode().into();
-                    sender.send(Recipients::All, msg, true).await.unwrap();
-
-                    // Finalize random digest
-                    let payload = H::random(&mut self.context);
-                    let proposal = Proposal::new(view, parent, payload);
-                    let msg = Finalize::sign(
-                        &self.namespace,
-                        &mut self.crypto,
-                        public_key_index,
-                        proposal,
+                        proposal.clone(),
                     );
                     let msg = Voter::Finalize(msg).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();

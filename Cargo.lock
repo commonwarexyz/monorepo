@@ -998,8 +998,6 @@ dependencies = [
  "futures",
  "governor",
  "prometheus-client",
- "prost",
- "prost-build",
  "rand",
  "rand_distr",
  "thiserror 2.0.12",

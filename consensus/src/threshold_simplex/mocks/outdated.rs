@@ -1,4 +1,4 @@
-//! Byzantine participant that sends conflicting notarize/finalize messages.
+//! Byzantine participant that sends outdated notarize and finalize messages.
 
 use crate::{
     threshold_simplex::types::{Finalize, Notarize, Proposal, View, Viewable, Voter},
@@ -9,7 +9,7 @@ use commonware_cryptography::{bls12381::primitives::group, Hasher};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};
 use rand::{CryptoRng, Rng};
-use std::marker::PhantomData;
+use std::{collections::HashMap, marker::PhantomData};
 use tracing::debug;
 
 pub struct Config<
@@ -17,35 +17,40 @@ pub struct Config<
 > {
     pub supervisor: S,
     pub namespace: Vec<u8>,
+    pub view_delta: u64,
 }
 
-pub struct Conflicter<
+pub struct Outdated<
     E: Clock + Rng + CryptoRng + Spawner,
     H: Hasher,
     S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
 > {
     context: E,
     supervisor: S,
+    _hasher: PhantomData<H>,
 
     namespace: Vec<u8>,
 
-    _hasher: PhantomData<H>,
+    history: HashMap<u64, Proposal<H::Digest>>,
+    view_delta: u64,
 }
 
 impl<
         E: Clock + Rng + CryptoRng + Spawner,
         H: Hasher,
         S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
-    > Conflicter<E, H, S>
+    > Outdated<E, H, S>
 {
     pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
             context,
             supervisor: cfg.supervisor,
+            _hasher: PhantomData,
 
             namespace: cfg.namespace,
 
-            _hasher: PhantomData,
+            history: HashMap::new(),
+            view_delta: cfg.view_delta,
         }
     }
 
@@ -64,40 +69,37 @@ impl<
                     continue;
                 }
             };
+            let view = msg.view();
 
             // Process message
             match msg {
                 Voter::Notarize(notarize) => {
-                    // Notarize received digest
-                    let view = notarize.view();
-                    let share = self.supervisor.share(view).unwrap();
-                    let proposal = notarize.proposal;
-                    let parent = proposal.parent;
-                    let n = Notarize::sign(&self.namespace, share, proposal);
-                    let msg = Voter::Notarize(n).encode().into();
-                    sender.send(Recipients::All, msg, true).await.unwrap();
+                    // Store proposal
+                    self.history.insert(view, notarize.proposal.clone());
 
-                    // Notarize random digest
-                    let payload = H::random(&mut self.context);
-                    let proposal = Proposal::new(view, parent, payload);
-                    let n = Notarize::sign(&self.namespace, share, proposal);
+                    // Notarize old digest
+                    let view = view.saturating_sub(self.view_delta);
+                    let share = self.supervisor.share(view).unwrap();
+                    let Some(proposal) = self.history.get(&view) else {
+                        continue;
+                    };
+                    debug!(?view, "notarizing old proposal");
+                    let n = Notarize::sign(&self.namespace, share, proposal.clone());
                     let msg = Voter::Notarize(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
                 Voter::Finalize(finalize) => {
-                    // Finalize provided digest
-                    let view = finalize.view();
-                    let share = self.supervisor.share(view).unwrap();
-                    let proposal = finalize.proposal;
-                    let parent = proposal.parent;
-                    let f = Finalize::sign(&self.namespace, share, proposal);
-                    let msg = Voter::Finalize(f).encode().into();
-                    sender.send(Recipients::All, msg, true).await.unwrap();
+                    // Store proposal
+                    self.history.insert(view, finalize.proposal.clone());
 
-                    // Finalize random digest
-                    let payload = H::random(&mut self.context);
-                    let proposal = Proposal::new(view, parent, payload);
-                    let f = Finalize::sign(&self.namespace, share, proposal);
+                    // Finalize old digest
+                    let view = view.saturating_sub(self.view_delta);
+                    let share = self.supervisor.share(view).unwrap();
+                    let Some(proposal) = self.history.get(&view) else {
+                        continue;
+                    };
+                    debug!(?view, "finalizing old proposal");
+                    let f = Finalize::sign(&self.namespace, share, proposal.clone());
                     let msg = Voter::Finalize(f).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
