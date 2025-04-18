@@ -69,14 +69,6 @@ impl TryFrom<&[u8]> for U64 {
     }
 }
 
-impl TryFrom<&Vec<u8>> for U64 {
-    type Error = Error;
-
-    fn try_from(value: &Vec<u8>) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_slice())
-    }
-}
-
 impl TryFrom<Vec<u8>> for U64 {
     type Error = Error;
 
@@ -133,7 +125,6 @@ mod tests {
         assert_eq!(value, U64::from(array.0).to_u64());
 
         let vec = array.to_vec();
-        assert_eq!(value, U64::try_from(&vec).unwrap().to_u64());
         assert_eq!(value, U64::try_from(vec).unwrap().to_u64());
     }
 

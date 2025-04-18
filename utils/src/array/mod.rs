@@ -46,7 +46,6 @@ pub trait Array:
     + AsRef<[u8]>
     + Deref<Target = [u8]>
     + for<'a> TryFrom<&'a [u8], Error = <Self as Array>::Error>
-    + for<'a> TryFrom<&'a Vec<u8>, Error = <Self as Array>::Error>
     + TryFrom<Vec<u8>, Error = <Self as Array>::Error>
     + FixedSize
     + Encode

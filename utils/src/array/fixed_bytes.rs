@@ -57,14 +57,6 @@ impl<const N: usize> TryFrom<&[u8]> for FixedBytes<N> {
     }
 }
 
-impl<const N: usize> TryFrom<&Vec<u8>> for FixedBytes<N> {
-    type Error = Error;
-
-    fn try_from(value: &Vec<u8>) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_slice())
-    }
-}
-
 impl<const N: usize> TryFrom<Vec<u8>> for FixedBytes<N> {
     type Error = Error;
 
@@ -124,9 +116,6 @@ mod tests {
         assert_eq!(bytes_from_slice, bytes);
 
         let vec = vec![1, 2, 3, 4];
-        let bytes_from_vec_ref = FixedBytes::try_from(&vec).unwrap();
-        assert_eq!(bytes_from_vec_ref, bytes);
-
         let bytes_from_vec = FixedBytes::try_from(vec).unwrap();
         assert_eq!(bytes_from_vec, bytes);
 
@@ -138,10 +127,6 @@ mod tests {
         );
 
         let vec_too_long = vec![1, 2, 3, 4, 5];
-        assert_eq!(
-            FixedBytes::<4>::try_from(&vec_too_long),
-            Err(Error::InvalidLength)
-        );
         assert_eq!(
             FixedBytes::<4>::try_from(vec_too_long),
             Err(Error::InvalidLength)

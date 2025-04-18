@@ -156,7 +156,7 @@ impl<K: Array, V: Array> Read for Operation<K, V> {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let mut value = vec![0u8; Self::SIZE];
         buf.copy_to_slice(&mut value);
-        Self::try_from(&value).map_err(|e: Error<K, V>| CodecError::Wrapped("Operation", e.into()))
+        Self::try_from(value).map_err(|e: Error<K, V>| CodecError::Wrapped("Operation", e.into()))
     }
 }
 
@@ -203,14 +203,6 @@ impl<K: Array, V: Array> TryFrom<&[u8]> for Operation<K, V> {
             data: value.to_vec(),
             _phantom: std::marker::PhantomData,
         })
-    }
-}
-
-impl<K: Array, V: Array> TryFrom<&Vec<u8>> for Operation<K, V> {
-    type Error = Error<K, V>;
-
-    fn try_from(value: &Vec<u8>) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_slice())
     }
 }
 

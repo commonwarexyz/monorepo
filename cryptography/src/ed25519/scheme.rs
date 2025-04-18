@@ -204,13 +204,6 @@ impl TryFrom<&[u8]> for PrivateKey {
     }
 }
 
-impl TryFrom<&Vec<u8>> for PrivateKey {
-    type Error = Error;
-    fn try_from(value: &Vec<u8>) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_slice())
-    }
-}
-
 impl TryFrom<Vec<u8>> for PrivateKey {
     type Error = Error;
     fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
@@ -285,13 +278,6 @@ impl TryFrom<&[u8]> for PublicKey {
             .map_err(|_| Error::InvalidPublicKeyLength)?;
         let key = VerificationKey::try_from(value).map_err(|_| Error::InvalidPublicKey)?;
         Ok(Self { raw, key })
-    }
-}
-
-impl TryFrom<&Vec<u8>> for PublicKey {
-    type Error = Error;
-    fn try_from(value: &Vec<u8>) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_slice())
     }
 }
 
@@ -390,13 +376,6 @@ impl TryFrom<&[u8]> for Signature {
             .map_err(|_| Error::InvalidSignatureLength)?;
         let signature = ed25519_consensus::Signature::from(raw);
         Ok(Self { raw, signature })
-    }
-}
-
-impl TryFrom<&Vec<u8>> for Signature {
-    type Error = Error;
-    fn try_from(value: &Vec<u8>) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_slice())
     }
 }
 
