@@ -176,8 +176,6 @@ pub struct Executor {
     registry: Mutex<Registry>,
     metrics: Arc<Metrics>,
     runtime: Runtime,
-    signaler: Mutex<Signaler>,
-    signal: Signal,
 }
 
 impl Executor {
@@ -189,13 +187,18 @@ impl Executor {
 
         // Initialize runtime
         let metrics = Arc::new(Metrics::init(runtime_registry));
+        let spawner = Spawner::new(
+            SpawnerConfig {
+                catch_panics: cfg.catch_panics,
+            },
+            runtime_registry,
+        );
         let runtime = Builder::new_multi_thread()
             .worker_threads(cfg.worker_threads)
             .max_blocking_threads(cfg.max_blocking_threads)
             .enable_all()
             .build()
             .expect("failed to create Tokio runtime");
-        let (signaler, signal) = Signaler::new();
 
         let storage = Storage::new(
             TokioStorage::new(TokioStorageConfig::new(
@@ -210,8 +213,6 @@ impl Executor {
             registry: Mutex::new(registry),
             metrics,
             runtime,
-            signaler: Mutex::new(signaler),
-            signal,
         });
         (
             Runner {
@@ -219,7 +220,7 @@ impl Executor {
             },
             Context {
                 storage,
-                spawner: Spawner::new(String::new(), executor.clone()),
+                spawner,
                 executor,
             },
         )
@@ -260,18 +261,70 @@ pub struct Context {
 
 #[derive(Clone)]
 struct Spawner {
+    cfg: SpawnerConfig,
     label: String,
     spawned: bool,
-    executor: Arc<Executor>,
+    metrics: Arc<SpawnerMetrics>,
+    signaler: Arc<Mutex<Signaler>>,
+    signal: Signal,
+}
+
+#[derive(Clone)]
+struct SpawnerConfig {
+    catch_panics: bool,
 }
 
 impl Spawner {
-    fn new(label: String, executor: Arc<Executor>) -> Self {
+    fn new(cfg: SpawnerConfig, reg: &mut Registry) -> Self {
+        let (signaler, signal) = Signaler::new();
+
         Self {
-            label,
+            cfg,
+            label: String::new(),
             spawned: false,
-            executor,
+            metrics: Arc::new(SpawnerMetrics::new(reg)),
+            signaler: Arc::new(Mutex::new(signaler)),
+            signal,
         }
+    }
+}
+
+struct SpawnerMetrics {
+    tasks_spawned: Family<Work, Counter>,
+    tasks_running: Family<Work, Gauge>,
+    blocking_tasks_spawned: Family<Work, Counter>,
+    blocking_tasks_running: Family<Work, Gauge>,
+}
+
+impl SpawnerMetrics {
+    fn new(registry: &mut Registry) -> Self {
+        let metrics = Self {
+            tasks_spawned: Family::default(),
+            tasks_running: Family::default(),
+            blocking_tasks_spawned: Family::default(),
+            blocking_tasks_running: Family::default(),
+        };
+        registry.register(
+            "tasks_spawned",
+            "Total number of tasks spawned",
+            metrics.tasks_spawned.clone(),
+        );
+        registry.register(
+            "tasks_running",
+            "Number of tasks currently running",
+            metrics.tasks_running.clone(),
+        );
+        registry.register(
+            "blocking_tasks_spawned",
+            "Total number of blocking tasks spawned",
+            metrics.blocking_tasks_spawned.clone(),
+        );
+        registry.register(
+            "blocking_tasks_running",
+            "Number of blocking tasks currently running",
+            metrics.blocking_tasks_running.clone(),
+        );
+        metrics
     }
 }
 
@@ -289,20 +342,11 @@ impl crate::Spawner for Spawner {
         let work = Work {
             label: self.label.clone(),
         };
-        self.executor
-            .metrics
-            .tasks_spawned
-            .get_or_create(&work)
-            .inc();
-        let gauge = self
-            .executor
-            .metrics
-            .tasks_running
-            .get_or_create(&work)
-            .clone();
+        self.metrics.tasks_spawned.get_or_create(&work).inc();
+        let gauge = self.metrics.tasks_running.get_or_create(&work).clone();
 
         // Set up the task
-        let catch_panics = self.executor.cfg.catch_panics;
+        let catch_panics = self.cfg.catch_panics;
         let executor = self.executor.clone();
         let future = f(self);
         let (f, handle) = Handle::init(future, gauge, catch_panics);
@@ -325,17 +369,8 @@ impl crate::Spawner for Spawner {
         let work = Work {
             label: self.label.clone(),
         };
-        self.executor
-            .metrics
-            .tasks_spawned
-            .get_or_create(&work)
-            .inc();
-        let gauge = self
-            .executor
-            .metrics
-            .tasks_running
-            .get_or_create(&work)
-            .clone();
+        self.metrics.tasks_spawned.get_or_create(&work).inc();
+        let gauge = self.metrics.tasks_running.get_or_create(&work).clone();
 
         // Set up the task
         let executor = self.executor.clone();
@@ -362,20 +397,18 @@ impl crate::Spawner for Spawner {
         let work = Work {
             label: self.label.clone(),
         };
-        self.executor
-            .metrics
+        self.metrics
             .blocking_tasks_spawned
             .get_or_create(&work)
             .inc();
         let gauge = self
-            .executor
             .metrics
             .blocking_tasks_running
             .get_or_create(&work)
             .clone();
 
         // Initialize the blocking task using the new function
-        let (f, handle) = Handle::init_blocking(f, gauge, self.executor.cfg.catch_panics);
+        let (f, handle) = Handle::init_blocking(f, gauge, self.cfg.catch_panics);
 
         // Spawn the blocking task
         self.executor.runtime.spawn_blocking(f);
@@ -383,11 +416,11 @@ impl crate::Spawner for Spawner {
     }
 
     fn stop(&self, value: i32) {
-        self.executor.signaler.lock().unwrap().signal(value);
+        self.signaler.lock().unwrap().signal(value);
     }
 
     fn stopped(&self) -> Signal {
-        self.executor.signal.clone()
+        self.signal.clone()
     }
 }
 
@@ -425,11 +458,11 @@ impl crate::Spawner for Context {
     }
 
     fn stop(&self, value: i32) {
-        self.executor.signaler.lock().unwrap().signal(value);
+        self.spawner.stop(value);
     }
 
     fn stopped(&self) -> Signal {
-        self.executor.signal.clone()
+        self.spawner.stopped()
     }
 }
 
