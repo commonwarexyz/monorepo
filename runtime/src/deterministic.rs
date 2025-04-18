@@ -605,7 +605,6 @@ impl crate::Runner for Runner {
                             *self.executor.finished.lock().unwrap() = true;
                             return v;
                         }
-                        continue;
                     }
                     WorkItem::Task(task) => {
                         // Audit & skip if done
