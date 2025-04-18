@@ -382,13 +382,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher> Any<E, K, V,
         let end_loc = start_loc + ops.len() as u64 - 1;
         let end_pos = leaf_num_to_pos(end_loc);
 
-        let digests: Vec<_> = ops
+        let digests = ops
             .iter()
-            .map(|op| Any::<E, K, V, H>::op_digest(hasher, op))
-            .collect();
-        let elements = digests.iter().map(|d| d.as_ref());
+            .map(|op| Any::<E, _, _, _>::op_digest(&mut H::new(), op));
 
-        proof.verify_range_inclusion(hasher, elements, start_pos, end_pos, root_hash)
+        proof.verify_range_inclusion(hasher, digests, start_pos, end_pos, root_hash)
     }
 
     /// Commit any pending operations to the db, ensuring they are persisted to disk &
