@@ -1,19 +1,27 @@
 use std::{
     collections::HashMap,
     fs::{self, File},
+    future::Future,
     os::fd::{AsRawFd as _, OwnedFd},
     path::PathBuf,
+    pin::Pin,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex,
     },
+    task::{Context, Poll},
 };
 
+use commonware_macros::select;
 use commonware_utils::{from_hex, hex};
-use futures::channel::oneshot;
+use futures::{
+    channel::{mpsc, oneshot},
+    future::Either,
+    SinkExt as _, StreamExt as _,
+};
 use io_uring::{opcode, types, IoUring};
 
-use crate::Error;
+use crate::{Error, Spawner};
 
 const IOURING_SIZE: u32 = 128;
 
@@ -29,98 +37,91 @@ impl Config {
 }
 
 // New type to handle io_uring operations
-struct IoUringRuntimeAdapter {
-    // (iouring, waiters) where waiters maps a work_id to a sender that
-    // will be notified when the work (i.e. database operation) completes.
-    work: Mutex<(IoUring, HashMap<u64, oneshot::Sender<i32>>)>,
-    // Notification mechanism for completion events
-    is_incomplete_work: tokio::sync::Notify,
-    // Counter for generating unique operation IDs
-    next_work_id: AtomicU64,
+struct IoUringRuntimeAdapter {}
+
+/// A future that resolves to the next completion queue entry when available
+struct NextCompletionFuture<'a> {
+    ring: &'a mut IoUring,
+}
+
+impl<'a> NextCompletionFuture<'a> {
+    fn new(ring: &'a mut IoUring) -> Self {
+        Self { ring }
+    }
+}
+
+impl<'a> Future for NextCompletionFuture<'a> {
+    type Output = io_uring::cqueue::Entry;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // Try to get a completion
+        if let Some(cqe) = self.ring.completion().next() {
+            return Poll::Ready(cqe);
+        }
+
+        // Submit any pending operations, which might generate completions
+        self.ring.submit().expect("unable to submit to ring");
+
+        // Try again after submitting
+        if let Some(cqe) = self.ring.completion().next() {
+            return Poll::Ready(cqe);
+        }
+
+        // No completions yet, register waker and return Pending
+        cx.waker().wake_by_ref();
+        Poll::Pending
+    }
 }
 
 impl IoUringRuntimeAdapter {
     fn new() -> Self {
-        let ring = IoUring::new(IOURING_SIZE).expect("Failed to create io_uring instance");
-        Self {
-            work: Mutex::new((ring, HashMap::new())),
-            is_incomplete_work: tokio::sync::Notify::new(),
-            next_work_id: AtomicU64::new(1),
-        }
-    }
-
-    /// Submit the operation to the ring and get a future that contains
-    /// the result of the operation.
-    /// The meaning of the result depends on the operation type.
-    /// The `op`'s user data field will be overwritten by this method.
-    async fn submit_work(&self, op: io_uring::squeue::Entry) -> Result<i32, Error> {
-        // Wrap the operation with this unique work_id to identify it later
-        let work_id = self.next_work_id.fetch_add(1, Ordering::SeqCst);
-        let op = op.user_data(work_id);
-
-        // Add operation to submission queue and create a channel to wait for completion
-        let (sender, receiver) = oneshot::channel();
-        {
-            let mut work = self.work.lock().unwrap();
-            let (ring, waiters) = &mut *work;
-
-            waiters.insert(work_id, sender);
-            unsafe {
-                ring.submission()
-                    .push(&op)
-                    .map_err(|_| Error::WriteFailed)?;
-            }
-            ring.submit().map_err(|_| Error::WriteFailed)?;
-        }
-
-        // Notify there's incomplete work
-        self.is_incomplete_work.notify_one();
-
-        // Wait for completion
-        let res = receiver.await.map_err(|_| Error::RecvFailed)?; // TODO danlaine: update error
-        Ok(res)
+        Self {}
     }
 
     /// Background task that polls for completed work and notifies waiters on completion.
-    async fn do_work(self: Arc<Self>) {
+    async fn do_work(
+        self,
+        mut receiver: mpsc::Receiver<(io_uring::squeue::Entry, oneshot::Sender<i32>)>,
+    ) {
+        // Create ring
+        let mut id: u64 = 0;
+        let mut ring = IoUring::new(IOURING_SIZE).expect("failed to create io_uring instance");
+        let mut waiters: HashMap<_, oneshot::Sender<i32>> =
+            HashMap::with_capacity(IOURING_SIZE as usize);
+
         loop {
-            // Process any new items on the completion queue
-            let (is_incomplete_work, is_completed_work) = {
-                let mut work = self.work.lock().unwrap();
-                let (ring, waiters) = &mut *work;
-                ring.submit().unwrap_or(0);
-
-                let mut completed = Vec::new();
-                while let Some(cqe) = ring.completion().next() {
-                    let work_id = cqe.user_data();
-                    completed.push((work_id, cqe.result()));
-                }
-
-                // Notify that each operation has completed.
-                for (work_id, result) in completed.iter() {
-                    if let Some(sender) = waiters.remove(work_id) {
-                        let _ = sender.send(*result);
-                    }
-                }
-
-                (!waiters.is_empty(), !completed.is_empty())
+            let completion = NextCompletionFuture::new(&mut ring);
+            let work = if waiters.len() < IOURING_SIZE as usize {
+                Either::Left(receiver.next())
+            } else {
+                Either::Right(futures::future::pending())
             };
 
-            match (is_incomplete_work, is_completed_work) {
-                (_, true) => {
-                    // We found completed work last; optimistically loop back to check for more
-                    continue;
-                }
-                (true, false) => {
-                    // We're waiting for work to complete but didn't find any completed work.
-                    // Yield to allow other tasks to run before checking again.
-                    tokio::task::yield_now().await;
-                }
-                (false, false) => {
-                    // We're not waiting for any work to finish.
-                    // Wait for notification about new work.
-                    self.is_incomplete_work.notified().await;
-                }
+            select! {
+                next_work = work => {
+                    let Some((op,sender)) = next_work else {
+                        // Channel closed, exit the loop
+                        break;
+                    };
+
+                    // Assign a unique id
+                    let work_id = id;
+                    id = id.wrapping_add(1);
+
+                    // Register the waiter
+                    waiters.insert(work_id, sender);
+
+                    // Submit the operation to the ring
+                    unsafe {
+                        ring.submission().push(&op).expect("unable to push to queue");
+                    }
+                },
+                cqe = completion => {
+                    let work_id = cqe.user_data();
+                    let result = cqe.result();
+                    let sender = waiters.remove(&work_id).expect("work is missing");
+                    let _ =  sender.send(result);
+                },
             }
         }
     }
@@ -144,10 +145,17 @@ impl Storage {
 }
 
 impl Storage {
-    pub fn start(&self) {
-        // Start the completion handler in a separate task
-        let ring = self.io_ring.clone();
-        tokio::spawn(ring.do_work());
+    pub fn start<S: Spawner>(
+        &self,
+        spawner: S,
+    ) -> mpsc::Sender<(io_uring::squeue::Entry, oneshot::Sender<i32>)> {
+        let (sender, mut receiver) = mpsc::channel::<(io_uring::squeue::Entry, oneshot::Sender<i32>)>(
+            2 * IOURING_SIZE as usize,
+        );
+        // Spawn the background task
+        // TODO
+        // Return the sender to the caller
+        sender
     }
 }
 
