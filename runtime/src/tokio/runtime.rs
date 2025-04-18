@@ -182,7 +182,7 @@ pub struct Executor {
 
 impl Executor {
     /// Initialize a new `tokio` runtime with the given number of threads.
-    pub fn init(cfg: Config) -> (Runner, Context) {
+    pub fn new(cfg: Config) -> Self {
         // Create a new registry
         let mut registry = Registry::default();
         let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
@@ -197,46 +197,33 @@ impl Executor {
             .expect("failed to create Tokio runtime");
         let (signaler, signal) = Signaler::new();
 
-        let storage = Storage::new(
-            TokioStorage::new(TokioStorageConfig::new(
-                cfg.storage_directory.clone(),
-                cfg.maximum_buffer_size,
-            )),
-            runtime_registry,
-        );
-
-        let executor = Arc::new(Self {
+        Self {
             cfg,
             registry: Mutex::new(registry),
             metrics,
             runtime,
             signaler: Mutex::new(signaler),
             signal,
-        });
-        (
-            Runner {
-                executor: executor.clone(),
-            },
-            Context {
-                storage,
-                label: String::new(),
-                spawned: false,
-                executor,
-            },
-        )
+        }
     }
+}
 
-    /// Initialize a new `tokio` runtime with default configuration.
-    // We'd love to implement the trait but we can't because of the return type.
-    #[allow(clippy::should_implement_trait)]
-    pub fn default() -> (Runner, Context) {
-        Self::init(Config::default())
+impl Default for Executor {
+    fn default() -> Self {
+        Self::new(Config::default())
     }
 }
 
 /// Implementation of [`crate::Runner`] for the `tokio` runtime.
 pub struct Runner {
     executor: Arc<Executor>,
+}
+
+impl Runner {
+    /// Create a new `tokio` runtime with the given configuration.
+    pub fn new(executor: Arc<Executor>) -> Self {
+        Self { executor }
+    }
 }
 
 impl crate::Runner for Runner {
@@ -257,6 +244,30 @@ pub struct Context {
     spawned: bool,
     executor: Arc<Executor>,
     storage: Storage<TokioStorage>,
+}
+
+impl Context {
+    /// Create a new context with the given label.
+    pub fn new(executor: Executor) -> Self {
+        let storage = Storage::new(
+            TokioStorage::new(TokioStorageConfig::new(
+                executor.cfg.storage_directory.clone(),
+                executor.cfg.maximum_buffer_size,
+            )),
+            &mut executor.registry.lock().unwrap(),
+        );
+        Self {
+            label: String::new(),
+            spawned: false,
+            executor: Arc::new(executor),
+            storage,
+        }
+    }
+
+    /// Get the executor associated with this context.
+    pub fn executor(&self) -> Arc<Executor> {
+        self.executor.clone()
+    }
 }
 
 impl Clone for Context {

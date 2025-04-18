@@ -1196,87 +1196,112 @@ mod tests {
 
     #[test]
     fn test_tokio_error_future() {
-        let (runner, _) = tokio::Executor::default();
+        let executor = tokio::Executor::default();
+        let runner = tokio::Runner::new(executor.into());
         test_error_future(runner);
     }
 
     #[test]
     fn test_tokio_clock_sleep() {
-        let (executor, context) = tokio::Executor::default();
-        test_clock_sleep(executor, context);
+        let executor = tokio::Executor::default();
+        let context = tokio::Context::new(executor);
+        let runner = tokio::Runner::new(context.executor());
+        test_clock_sleep(runner, context);
     }
 
     #[test]
     fn test_tokio_clock_sleep_until() {
-        let (executor, context) = tokio::Executor::default();
-        test_clock_sleep_until(executor, context);
+        let executor = tokio::Executor::default();
+        let context = tokio::Context::new(executor);
+        let runner = tokio::Runner::new(context.executor());
+        test_clock_sleep_until(runner, context);
     }
 
     #[test]
     fn test_tokio_root_finishes() {
-        let (executor, context) = tokio::Executor::default();
-        test_root_finishes(executor, context);
+        let executor = tokio::Executor::default();
+        let context = tokio::Context::new(executor);
+        let runner = tokio::Runner::new(context.executor());
+        test_root_finishes(runner, context);
     }
 
     #[test]
     fn test_tokio_spawn_abort() {
-        let (executor, context) = tokio::Executor::default();
-        test_spawn_abort(executor, context);
+        let executor = tokio::Executor::default();
+        let context = tokio::Context::new(executor);
+        let runner = tokio::Runner::new(context.executor());
+        test_spawn_abort(runner, context);
     }
 
     #[test]
     fn test_tokio_panic_aborts_root() {
-        let (runner, _) = tokio::Executor::default();
+        let executor = tokio::Executor::default();
+        let runner = tokio::Runner::new(executor.into());
         test_panic_aborts_root(runner);
     }
 
     #[test]
     fn test_tokio_panic_aborts_spawn() {
-        let (executor, context) = tokio::Executor::default();
-        test_panic_aborts_spawn(executor, context);
+        let executor = tokio::Executor::default();
+        let context = tokio::Context::new(executor);
+        let runner = tokio::Runner::new(context.executor());
+        test_panic_aborts_spawn(runner, context);
     }
 
     #[test]
     fn test_tokio_select() {
-        let (executor, _) = tokio::Executor::default();
-        test_select(executor);
+        let executor = tokio::Executor::default();
+        let runner = tokio::Runner::new(executor.into());
+        test_select(runner);
     }
 
     #[test]
     fn test_tokio_select_loop() {
-        let (executor, context) = tokio::Executor::default();
-        test_select_loop(executor, context);
+        let executor = tokio::Executor::default();
+        let context = tokio::Context::new(executor);
+        let runner = tokio::Runner::new(context.executor());
+        test_select_loop(runner, context);
     }
 
     #[test]
     fn test_tokio_storage_operations() {
-        let (executor, context) = tokio::Executor::default();
-        test_storage_operations(executor, context);
+        let executor = tokio::Executor::default();
+        let context = tokio::Context::new(executor);
+        let runner = tokio::Runner::new(context.executor());
+        test_storage_operations(runner, context);
     }
 
     #[test]
     fn test_tokio_blob_read_write() {
-        let (executor, context) = tokio::Executor::default();
-        test_blob_read_write(executor, context);
+        let executor = tokio::Executor::default();
+        let context = tokio::Context::new(executor);
+        let runner = tokio::Runner::new(context.executor());
+        test_blob_read_write(runner, context);
     }
 
     #[test]
     fn test_tokio_many_partition_read_write() {
-        let (executor, context) = tokio::Executor::default();
-        test_many_partition_read_write(executor, context);
+        let executor = tokio::Executor::default();
+        let context = tokio::Context::new(executor);
+        let runner = tokio::Runner::new(context.executor());
+        test_many_partition_read_write(runner, context);
     }
 
     #[test]
     fn test_tokio_blob_read_past_length() {
-        let (executor, context) = tokio::Executor::default();
-        test_blob_read_past_length(executor, context);
+        let executor = tokio::Executor::default();
+        let context = tokio::Context::new(executor);
+        let runner = tokio::Runner::new(context.executor());
+        test_blob_read_past_length(runner, context);
     }
 
     #[test]
     fn test_tokio_blob_clone_and_concurrent_read() {
         // Run test
-        let (executor, context) = tokio::Executor::default();
-        test_blob_clone_and_concurrent_read(executor, context.clone());
+        let executor = tokio::Executor::default();
+        let context = tokio::Context::new(executor);
+        let runner = tokio::Runner::new(context.executor());
+        test_blob_clone_and_concurrent_read(runner, context.clone());
 
         // Ensure no blobs still open
         let buffer = context.encode();
@@ -1285,40 +1310,52 @@ mod tests {
 
     #[test]
     fn test_tokio_shutdown() {
-        let (executor, context) = tokio::Executor::default();
-        test_shutdown(executor, context);
+        let executor = tokio::Executor::default();
+        let context = tokio::Context::new(executor);
+        let runner = tokio::Runner::new(context.executor());
+        test_shutdown(runner, context);
     }
 
     #[test]
     fn test_tokio_spawn_ref() {
-        let (executor, context) = tokio::Executor::default();
-        test_spawn_ref(executor, context);
+        let executor = tokio::Executor::default();
+        let context = tokio::Context::new(executor);
+        let runner = tokio::Runner::new(context.executor());
+        test_spawn_ref(runner, context);
     }
 
     #[test]
     #[should_panic]
     fn test_tokio_spawn_ref_duplicate() {
-        let (executor, context) = tokio::Executor::default();
-        test_spawn_ref_duplicate(executor, context);
+        let executor = tokio::Executor::default();
+        let context = tokio::Context::new(executor);
+        let runner = tokio::Runner::new(context.executor());
+        test_spawn_ref_duplicate(runner, context);
     }
 
     #[test]
     #[should_panic]
     fn test_tokio_spawn_duplicate() {
-        let (executor, context) = tokio::Executor::default();
-        test_spawn_duplicate(executor, context);
+        let executor = tokio::Executor::default();
+        let context = tokio::Context::new(executor);
+        let runner = tokio::Runner::new(context.executor());
+        test_spawn_duplicate(runner, context);
     }
 
     #[test]
     fn test_tokio_spawn_blocking() {
-        let (executor, context) = tokio::Executor::default();
-        test_spawn_blocking(executor, context);
+        let executor = tokio::Executor::default();
+        let context = tokio::Context::new(executor);
+        let runner = tokio::Runner::new(context.executor());
+        test_spawn_blocking(runner, context);
     }
 
     #[test]
     fn test_tokio_spawn_blocking_panic() {
-        let (executor, context) = tokio::Executor::default();
-        executor.start(async move {
+        let executor = tokio::Executor::default();
+        let context = tokio::Context::new(executor);
+        let runner = tokio::Runner::new(context.executor());
+        runner.start(async move {
             let handle = context.spawn_blocking(|| {
                 panic!("blocking task panicked");
             });
@@ -1329,26 +1366,34 @@ mod tests {
 
     #[test]
     fn test_tokio_spawn_blocking_abort() {
-        let (executor, context) = tokio::Executor::default();
-        test_spawn_blocking_abort(executor, context);
+        let executor = tokio::Executor::default();
+        let context = tokio::Context::new(executor);
+        let runner = tokio::Runner::new(context.executor());
+        test_spawn_blocking_abort(runner, context);
     }
 
     #[test]
     fn test_tokio_metrics() {
-        let (executor, context) = tokio::Executor::default();
-        test_metrics(executor, context);
+        let executor = tokio::Executor::default();
+        let context = tokio::Context::new(executor);
+        let runner = tokio::Runner::new(context.executor());
+        test_metrics(runner, context);
     }
 
     #[test]
     #[should_panic]
     fn test_tokio_metrics_label() {
-        let (executor, context) = tokio::Executor::default();
-        test_metrics_label(executor, context);
+        let executor = tokio::Executor::default();
+        let context = tokio::Context::new(executor);
+        let runner = tokio::Runner::new(context.executor());
+        test_metrics_label(runner, context);
     }
 
     #[test]
     fn test_tokio_metrics_serve() {
-        let (executor, context) = tokio::Executor::default();
-        test_metrics_serve(executor, context);
+        let executor = tokio::Executor::default();
+        let context = tokio::Context::new(executor);
+        let runner = tokio::Runner::new(context.executor());
+        test_metrics_serve(runner, context);
     }
 }
