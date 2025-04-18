@@ -1654,4 +1654,166 @@ mod tests {
         assert_eq!(nullify_finalize, decoded);
         assert!(nullify_finalize.verify::<Ed25519>(NAMESPACE, &scheme.public_key()));
     }
+
+    #[test]
+    fn test_notarize_verify_wrong_namespace() {
+        let mut scheme = sample_scheme(0);
+        let proposal = Proposal::new(10, 5, sample_digest(1));
+        let notarize = Notarize::sign(NAMESPACE, &mut scheme, 0, proposal);
+
+        // Verify with wrong namespace - should fail
+        assert!(!notarize.verify::<Ed25519>(b"wrong_namespace", &scheme.public_key()));
+    }
+
+    #[test]
+    fn test_notarize_verify_wrong_public_key() {
+        let mut scheme1 = sample_scheme(0);
+        let scheme2 = sample_scheme(1); // Different key
+        let proposal = Proposal::new(10, 5, sample_digest(1));
+        let notarize = Notarize::sign(NAMESPACE, &mut scheme1, 0, proposal);
+
+        // Verify with wrong public key - should fail
+        assert!(!notarize.verify::<Ed25519>(NAMESPACE, &scheme2.public_key()));
+    }
+
+    #[test]
+    fn test_notarization_verify_insufficient_signatures() {
+        let mut scheme_1 = sample_scheme(0);
+        let mut scheme_2 = sample_scheme(1);
+        let proposal = Proposal::new(10, 5, sample_digest(1));
+        let notarize_1 = Notarize::sign(NAMESPACE, &mut scheme_1, 0, proposal.clone());
+        let notarize_2 = Notarize::sign(NAMESPACE, &mut scheme_2, 1, proposal.clone());
+
+        // Create a notarization with only 2 signatures
+        let signatures = vec![notarize_1.signature.clone(), notarize_2.signature.clone()];
+        let notarization = Notarization::new(proposal.clone(), signatures);
+
+        // Create a validator set of 4, which needs 3 signatures for quorum
+        let validators = vec![
+            scheme_1.public_key(),
+            scheme_2.public_key(),
+            sample_scheme(2).public_key(),
+            sample_scheme(3).public_key(),
+        ];
+
+        // Should fail because we only have 2 signatures but need 3 for quorum
+        assert!(!notarization.verify::<Ed25519>(NAMESPACE, &validators));
+    }
+
+    #[test]
+    fn test_notarization_verify_invalid_validator_index() {
+        let mut scheme_1 = sample_scheme(0);
+        let mut scheme_2 = sample_scheme(1);
+        let proposal = Proposal::new(10, 5, sample_digest(1));
+
+        // Create notarize with invalid public key index (3, which is out of bounds)
+        let notarize_1 = Notarize::sign(NAMESPACE, &mut scheme_1, 0, proposal.clone());
+        let invalid_sig = Signature::new(3, scheme_2.sign(Some(NAMESPACE), &proposal.encode()));
+
+        // Create a notarization with an invalid signature (refers to index 3, but there are only 2 validators)
+        let signatures = vec![notarize_1.signature.clone(), invalid_sig];
+        let notarization = Notarization::new(proposal.clone(), signatures);
+
+        // Create a validator set of 2
+        let validators = vec![scheme_1.public_key(), scheme_2.public_key()];
+
+        // Should fail because the second signature refers to an invalid validator index
+        assert!(!notarization.verify::<Ed25519>(NAMESPACE, &validators));
+    }
+
+    #[test]
+    fn test_conflicting_notarize_detection() {
+        let mut scheme = sample_scheme(0);
+
+        // Create two different proposals for the same view
+        let proposal1 = Proposal::new(10, 5, sample_digest(1));
+        let proposal2 = Proposal::new(10, 6, sample_digest(2)); // Different parent
+
+        // Create notarizes for both proposals from the same validator
+        let notarize1 = Notarize::sign(NAMESPACE, &mut scheme, 0, proposal1.clone());
+        let notarize2 = Notarize::sign(NAMESPACE, &mut scheme, 0, proposal2.clone());
+
+        // Create conflict evidence
+        let conflict = ConflictingNotarize::new(notarize1, notarize2);
+
+        // Verify the evidence is valid - both signatures should be valid
+        assert!(conflict.verify::<Ed25519>(NAMESPACE, &scheme.public_key()));
+
+        // Now create invalid evidence
+        let mut scheme2 = sample_scheme(1);
+        let invalid_notarize = Notarize::sign(NAMESPACE, &mut scheme2, 1, proposal1.clone());
+
+        // This will compile but should fail verification since the signatures are from different validators
+        let (_, n2) = conflict.notarizes();
+        let invalid_conflict = ConflictingNotarize {
+            view: n2.view(),
+            parent_1: n2.proposal.parent,
+            payload_1: n2.proposal.payload,
+            signature_1: n2.signature,
+            parent_2: invalid_notarize.proposal.parent,
+            payload_2: invalid_notarize.proposal.payload,
+            signature_2: invalid_notarize.signature,
+        };
+
+        // Verify should fail with either key because the signatures are from different validators
+        assert!(!invalid_conflict.verify::<Ed25519>(NAMESPACE, &scheme.public_key()));
+        assert!(!invalid_conflict.verify::<Ed25519>(NAMESPACE, &scheme2.public_key()));
+    }
+
+    #[test]
+    fn test_nullify_finalize_detection() {
+        let mut scheme = sample_scheme(0);
+        let view = 10;
+
+        // Create a nullify for view 10
+        let nullify = Nullify::sign(NAMESPACE, &mut scheme, 0, view);
+
+        // Create a finalize for the same view
+        let proposal = Proposal::new(view, 5, sample_digest(1));
+        let finalize = Finalize::sign(NAMESPACE, &mut scheme, 0, proposal.clone());
+
+        // Create nullify+finalize evidence
+        let conflict = NullifyFinalize::new(nullify, finalize);
+
+        // Verify the evidence is valid
+        assert!(conflict.verify::<Ed25519>(NAMESPACE, &scheme.public_key()));
+
+        // Now create invalid evidence with different validators
+        let mut scheme2 = sample_scheme(1);
+        let nullify2 = Nullify::sign(NAMESPACE, &mut scheme2, 1, view);
+        let finalize2 = Finalize::sign(NAMESPACE, &mut scheme2, 1, proposal);
+
+        // This will compile but verification with wrong key should fail
+        let conflict2 = NullifyFinalize::new(nullify2, finalize2);
+        assert!(!conflict2.verify::<Ed25519>(NAMESPACE, &scheme.public_key())); // Wrong key
+    }
+
+    #[test]
+    fn test_nullification_invalid_signatures() {
+        let mut scheme_1 = sample_scheme(0);
+        let mut scheme_2 = sample_scheme(1);
+
+        // Create nullify for view 10
+        let nullify_1 = Nullify::sign(NAMESPACE, &mut scheme_1, 0, 10);
+        let nullify_2 = Nullify::sign(NAMESPACE, &mut scheme_2, 1, 10);
+
+        // Create a nullification with valid signatures
+        let signatures = vec![nullify_1.signature.clone(), nullify_2.signature.clone()];
+        let nullification = Nullification::new(10, signatures);
+
+        // Create a validator set of 2
+        let validators = vec![scheme_1.public_key(), scheme_2.public_key()];
+
+        // Valid verification
+        assert!(nullification.verify::<Ed25519>(NAMESPACE, &validators));
+
+        // Create a nullification with tampered signature
+        let tampered_sig = Signature::new(2, scheme_1.sign(Some(NAMESPACE), &nullify_1.encode()));
+
+        let invalid_signatures = vec![nullify_1.signature.clone(), tampered_sig];
+        let invalid_nullification = Nullification::new(10, invalid_signatures);
+
+        // Verification should fail with tampered signature
+        assert!(!invalid_nullification.verify::<Ed25519>(NAMESPACE, &validators));
+    }
 }
