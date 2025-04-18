@@ -927,7 +927,10 @@ impl<
         };
 
         // Verify signatures
-        if !nullify.verify(&self.namespace, identity, Some(public_key_index)) {
+        if public_key_index != nullify.signer() {
+            return false;
+        }
+        if !nullify.verify(&self.namespace, identity) {
             return false;
         }
 
@@ -1261,7 +1264,10 @@ impl<
         };
 
         // Verify signatures
-        if !notarize.verify(&self.namespace, identity, Some(public_key_index)) {
+        if public_key_index != notarize.signer() {
+            return false;
+        }
+        if !notarize.verify(&self.namespace, identity) {
             return false;
         }
 
@@ -1429,7 +1435,10 @@ impl<
         };
 
         // Verify signature
-        if !finalize.verify(&self.namespace, identity, Some(public_key_index)) {
+        if public_key_index != finalize.signer() {
+            return false;
+        }
+        if !finalize.verify(&self.namespace, identity) {
             return false;
         }
 

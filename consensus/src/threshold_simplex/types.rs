@@ -289,13 +289,7 @@ impl<D: Digest> Notarize<D> {
     /// 1. The notarize signature is valid for the claimed proposal
     /// 2. The seed signature is valid for the view
     /// 3. Both signatures are from the same signer
-    pub fn verify(
-        &self,
-        namespace: &[u8],
-        identity: &Poly<Public>,
-        public_key_index: Option<u32>,
-    ) -> bool {
-        let public_key_index = public_key_index.unwrap_or(self.proposal_signature.index);
+    pub fn verify(&self, namespace: &[u8], identity: &Poly<Public>) -> bool {
         let notarize_namespace = notarize_namespace(namespace);
         let notarize_message = self.proposal.encode();
         let notarize_message = (Some(notarize_namespace.as_ref()), notarize_message.as_ref());
@@ -304,7 +298,7 @@ impl<D: Digest> Notarize<D> {
         let seed_message = (Some(seed_namespace.as_ref()), seed_message.as_ref());
         partial_verify_multiple_messages(
             identity,
-            public_key_index,
+            self.signer(),
             &[notarize_message, seed_message],
             [&self.proposal_signature, &self.seed_signature],
         )
@@ -482,13 +476,7 @@ impl Nullify {
     /// 1. The view signature is valid for the given view
     /// 2. The seed signature is valid for the view
     /// 3. Both signatures are from the same signer
-    pub fn verify(
-        &self,
-        namespace: &[u8],
-        identity: &Poly<Public>,
-        public_key_index: Option<u32>,
-    ) -> bool {
-        let public_key_index = public_key_index.unwrap_or(self.view_signature.index);
+    pub fn verify(&self, namespace: &[u8], identity: &Poly<Public>) -> bool {
         let nullify_namespace = nullify_namespace(namespace);
         let view_message = view_message(self.view);
         let nullify_message = (Some(nullify_namespace.as_ref()), view_message.as_ref());
@@ -496,7 +484,7 @@ impl Nullify {
         let seed_message = (Some(seed_namespace.as_ref()), view_message.as_ref());
         partial_verify_multiple_messages(
             identity,
-            public_key_index,
+            self.signer(),
             &[nullify_message, seed_message],
             [&self.view_signature, &self.seed_signature],
         )
@@ -658,17 +646,7 @@ impl<D: Digest> Finalize<D> {
     /// Verifies the signature on this finalize using BLS threshold verification.
     ///
     /// This ensures that the signature is valid for the given proposal.
-    pub fn verify(
-        &self,
-        namespace: &[u8],
-        identity: &Poly<Public>,
-        public_key_index: Option<u32>,
-    ) -> bool {
-        if let Some(public_key_index) = public_key_index {
-            if public_key_index != self.proposal_signature.index {
-                return false;
-            }
-        }
+    pub fn verify(&self, namespace: &[u8], identity: &Poly<Public>) -> bool {
         let finalize_namespace = finalize_namespace(namespace);
         let message = self.proposal.encode();
         partial_verify_message(
@@ -1157,13 +1135,7 @@ impl<D: Digest> ConflictingNotarize<D> {
     }
 
     /// Verifies that both conflicting signatures are valid, proving Byzantine behavior.
-    pub fn verify(
-        &self,
-        namespace: &[u8],
-        identity: &Poly<Public>,
-        public_key_index: Option<u32>,
-    ) -> bool {
-        let public_key_index = public_key_index.unwrap_or(self.signature_1.index);
+    pub fn verify(&self, namespace: &[u8], identity: &Poly<Public>) -> bool {
         let (proposal_1, proposal_2) = self.proposals();
         let notarize_namespace = notarize_namespace(namespace);
         let notarize_message_1 = proposal_1.encode();
@@ -1178,7 +1150,7 @@ impl<D: Digest> ConflictingNotarize<D> {
         );
         partial_verify_multiple_messages(
             identity,
-            public_key_index,
+            self.signer(),
             &[notarize_message_1, notarize_message_2],
             [&self.signature_1, &self.signature_2],
         )
@@ -1292,13 +1264,7 @@ impl<D: Digest> ConflictingFinalize<D> {
     }
 
     /// Verifies that both conflicting signatures are valid, proving Byzantine behavior.
-    pub fn verify(
-        &self,
-        namespace: &[u8],
-        identity: &Poly<Public>,
-        public_key_index: Option<u32>,
-    ) -> bool {
-        let public_key_index = public_key_index.unwrap_or(self.signature_1.index);
+    pub fn verify(&self, namespace: &[u8], identity: &Poly<Public>) -> bool {
         let (proposal_1, proposal_2) = self.proposals();
         let finalize_namespace = finalize_namespace(namespace);
         let finalize_message_1 = proposal_1.encode();
@@ -1313,7 +1279,7 @@ impl<D: Digest> ConflictingFinalize<D> {
         );
         partial_verify_multiple_messages(
             identity,
-            public_key_index,
+            self.signer(),
             &[finalize_message_1, finalize_message_2],
             [&self.signature_1, &self.signature_2],
         )
@@ -1408,13 +1374,7 @@ impl<D: Digest> NullifyFinalize<D> {
     }
 
     /// Verifies that both the nullify and finalize signatures are valid, proving Byzantine behavior.
-    pub fn verify(
-        &self,
-        namespace: &[u8],
-        identity: &Poly<Public>,
-        public_key_index: Option<u32>,
-    ) -> bool {
-        let public_key_index = public_key_index.unwrap_or(self.view_signature.index);
+    pub fn verify(&self, namespace: &[u8], identity: &Poly<Public>) -> bool {
         let nullify_namespace = nullify_namespace(namespace);
         let nullify_message = view_message(self.proposal.view);
         let nullify_message = (Some(nullify_namespace.as_ref()), nullify_message.as_ref());
@@ -1423,7 +1383,7 @@ impl<D: Digest> NullifyFinalize<D> {
         let finalize_message = (Some(finalize_namespace.as_ref()), finalize_message.as_ref());
         partial_verify_multiple_messages(
             identity,
-            public_key_index,
+            self.signer(),
             &[nullify_message, finalize_message],
             [&self.view_signature, &self.finalize_signature],
         )
