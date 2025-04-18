@@ -1,34 +1,30 @@
 /// Criterion benchmark executor implementations.
 use criterion::async_executor::AsyncExecutor;
 use futures::Future;
-use std::any::{Any, TypeId};
+use std::any::Any;
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::thread_local;
 
 thread_local! {
-    static CONTEXT_MAP: RefCell<HashMap<TypeId, Box<dyn Any + Send>>> = RefCell::new(HashMap::new());
+    static CONTEXT: RefCell<Option<Box<dyn Any + Send>>> = RefCell::new(None);
 }
 
-/// Set a context value of type C in the thread-local context map
+/// Set the context value
 fn set_context<C: Clone + Send + 'static>(context: C) {
-    CONTEXT_MAP.with(|cell| {
-        let mut map = cell.borrow_mut();
-        map.insert(TypeId::of::<C>(), Box::new(context));
+    CONTEXT.with(|cell| {
+        *cell.borrow_mut() = Some(Box::new(context));
     });
 }
 
-/// Get a context value of type C from the thread-local context map
+/// Get the context value
 pub fn context<C: Clone + Send + 'static>() -> C {
-    CONTEXT_MAP.with(|cell| {
-        let map = cell.borrow();
-        match map.get(&TypeId::of::<C>()) {
-            Some(context) => {
-                let context = context
-                    .downcast_ref::<C>()
-                    .expect("Context type mismatch - internal error");
-                context.clone()
-            }
+    CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        match borrow.as_ref() {
+            Some(any) => any
+                .downcast_ref::<C>()
+                .expect("Context type mismatch ‑ internal error")
+                .clone(),
             None => panic!(
                 "No context of type {} available. Make sure you're using the correct executor.",
                 std::any::type_name::<C>()
@@ -37,11 +33,10 @@ pub fn context<C: Clone + Send + 'static>() -> C {
     })
 }
 
-/// Clear all contexts from the thread-local context map
-fn clear_contexts() {
-    CONTEXT_MAP.with(|cell| {
-        let mut map = cell.borrow_mut();
-        map.clear();
+/// Clear the context value
+fn clear_context() {
+    CONTEXT.with(|cell| {
+        *cell.borrow_mut() = None;
     });
 }
 
@@ -84,7 +79,7 @@ pub mod tokio {
             let result = executor.start(future);
 
             // Clean up
-            clear_contexts();
+            clear_context();
 
             result
         }
@@ -93,6 +88,8 @@ pub mod tokio {
 
 /// Convenience module for deterministic-specific executor
 pub mod deterministic {
+    use crate::Runner;
+
     use super::*;
 
     /// Executor for the deterministic runtime
@@ -142,7 +139,7 @@ pub mod deterministic {
             let result = executor.start(future);
 
             // Clean up
-            clear_contexts();
+            clear_context();
 
             result
         }

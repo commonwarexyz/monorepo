@@ -32,6 +32,7 @@ cfg_if::cfg_if! {
         pub mod tokio;
     }
 }
+pub mod benchmarking;
 mod storage;
 pub mod telemetry;
 mod utils;
