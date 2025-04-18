@@ -1,5 +1,9 @@
-use crate::storage::metered::Storage;
+#[cfg(all(feature = "iouring", target_os = "linux"))]
+use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage};
+#[cfg(not(all(feature = "iouring", target_os = "linux")))]
 use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
+
+use crate::storage::metered::Storage as MeteredStorage;
 use crate::{utils::Signaler, Clock, Error, Handle, Signal, METRICS_PREFIX};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
@@ -197,7 +201,16 @@ impl Executor {
             .expect("failed to create Tokio runtime");
         let (signaler, signal) = Signaler::new();
 
-        let storage = Storage::new(
+        #[cfg(all(feature = "iouring", target_os = "linux"))]
+        let storage = MeteredStorage::new(
+            IoUringStorage::new(IoUringConfig {
+                storage_directory: cfg.storage_directory.clone(),
+            }),
+            runtime_registry,
+        );
+
+        #[cfg(not(all(feature = "iouring", target_os = "linux")))]
+        let storage = MeteredStorage::new(
             TokioStorage::new(TokioStorageConfig::new(
                 cfg.storage_directory.clone(),
                 cfg.maximum_buffer_size,
@@ -249,6 +262,12 @@ impl crate::Runner for Runner {
     }
 }
 
+#[cfg(all(feature = "iouring", target_os = "linux"))]
+type Storage = MeteredStorage<IoUringStorage>;
+
+#[cfg(not(all(feature = "iouring", target_os = "linux")))]
+type Storage = MeteredStorage<TokioStorage>;
+
 /// Implementation of [`crate::Spawner`], [`crate::Clock`],
 /// [`crate::Network`], and [`crate::Storage`] for the `tokio`
 /// runtime.
@@ -256,7 +275,7 @@ pub struct Context {
     label: String,
     spawned: bool,
     executor: Arc<Executor>,
-    storage: Storage<TokioStorage>,
+    storage: Storage,
 }
 
 impl Clone for Context {
@@ -623,7 +642,7 @@ impl RngCore for Context {
 impl CryptoRng for Context {}
 
 impl crate::Storage for Context {
-    type Blob = <Storage<TokioStorage> as crate::Storage>::Blob;
+    type Blob = <Storage as crate::Storage>::Blob;
 
     async fn open(&self, partition: &str, name: &[u8]) -> Result<Self::Blob, Error> {
         self.storage.open(partition, name).await
