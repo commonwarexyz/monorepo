@@ -1,6 +1,10 @@
 use clap::{value_parser, Arg, Command};
 use commonware_bridge::{
-    wire::{self, BlockFormat, Inbound, Outbound},
+    types::{
+        block::BlockFormat,
+        inbound::{self, Inbound},
+        outbound::Outbound,
+    },
     APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE,
 };
 use commonware_codec::{DecodeExt, Encode};
@@ -30,19 +34,19 @@ use tracing::{debug, info};
 #[allow(clippy::large_enum_variant)]
 enum Message<D: Digest> {
     PutBlock {
-        incoming: wire::PutBlock<D>,
+        incoming: inbound::PutBlock<D>,
         response: oneshot::Sender<bool>, // wait to broadcast consensus message
     },
     GetBlock {
-        incoming: wire::GetBlock<D>,
+        incoming: inbound::GetBlock<D>,
         response: oneshot::Sender<Option<BlockFormat<D>>>,
     },
     PutFinalization {
-        incoming: wire::PutFinalization<D>,
+        incoming: inbound::PutFinalization<D>,
         response: oneshot::Sender<bool>, // wait to delete from validator storage
     },
     GetFinalization {
-        incoming: wire::GetFinalization,
+        incoming: inbound::GetFinalization,
         response: oneshot::Sender<Option<Finalization<D>>>,
     },
 }
@@ -298,8 +302,8 @@ fn main() {
                                     .expect("failed to send message");
                                 let response = receiver.await.expect("failed to receive response");
                                 match response {
-                                    Some(response) => {
-                                        let msg = response.encode();
+                                    Some(block) => {
+                                        let msg = Outbound::Block(block).encode();
                                         if sender.send(&msg).await.is_err() {
                                             debug!(?peer, "failed to send message");
                                             return;

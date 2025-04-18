@@ -151,7 +151,7 @@
 #[doc(hidden)]
 pub mod application;
 #[doc(hidden)]
-pub mod wire;
+pub mod types;
 #[doc(hidden)]
 pub const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_BRIDGE";
 #[doc(hidden)]

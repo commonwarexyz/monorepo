@@ -1,13 +1,9 @@
-//! Wire protocol messages for the Commonware Bridge example.
-//!
-//! This module defines the messages used for communication between validators and the indexer
-//! in the Commonware Bridge example. The messages are used to store and retrieve blocks and
-//! finality certificates, facilitating the exchange of consensus certificates between two networks.
-
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use commonware_consensus::threshold_simplex::types::Finalization;
 use commonware_cryptography::{bls12381::primitives::group, Digest};
+
+use super::block::BlockFormat;
 
 /// Enum representing incoming messages from validators to the indexer.
 ///
@@ -199,123 +195,6 @@ impl EncodeSize for GetFinalization {
     }
 }
 
-/// Enum representing responses from the indexer to validators.
-///
-/// These responses correspond to the results of the operations requested by `Inbound` messages.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(clippy::large_enum_variant)]
-pub enum Outbound<D: Digest> {
-    /// Indicates the success or failure of a `Put` operation,
-    /// or if a `Get` operation found the requested item.
-    Success(bool),
-    /// Contains the requested block data in response to a `GetBlock` message.
-    Block(BlockFormat<D>),
-    /// Contains the requested finality certificate in response to a `GetFinalization` message.
-    Finalization(Finalization<D>),
-}
-
-impl<D: Digest> Write for Outbound<D> {
-    fn write(&self, buf: &mut impl BufMut) {
-        match self {
-            Outbound::Success(success) => {
-                buf.put_u8(0);
-                success.write(buf);
-            }
-            Outbound::Block(data) => {
-                buf.put_u8(1);
-                data.write(buf);
-            }
-            Outbound::Finalization(data) => {
-                buf.put_u8(2);
-                data.write(buf);
-            }
-        }
-    }
-}
-
-impl<D: Digest> Read for Outbound<D> {
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let tag = u8::read(buf)?;
-        match tag {
-            0 => {
-                let success = bool::read(buf)?;
-                Ok(Outbound::Success(success))
-            }
-            1 => {
-                let block = BlockFormat::<D>::read(buf)?;
-                Ok(Outbound::Block(block))
-            }
-            2 => {
-                let finalization = Finalization::read(buf)?;
-                Ok(Outbound::Finalization(finalization))
-            }
-            _ => Err(Error::InvalidEnum(tag)),
-        }
-    }
-}
-
-impl<D: Digest> EncodeSize for Outbound<D> {
-    fn encode_size(&self) -> usize {
-        1 + match self {
-            Outbound::Success(success) => success.encode_size(),
-            Outbound::Block(data) => data.encode_size(),
-            Outbound::Finalization(finalization) => finalization.encode_size(),
-        }
-    }
-}
-
-/// Enum representing the valid formats for blocks.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(clippy::large_enum_variant)]
-pub enum BlockFormat<D: Digest> {
-    /// A random set of arbitrary data.
-    Random(u128),
-
-    /// A finalization certificate of a block from a different network.
-    Bridge(Finalization<D>),
-}
-
-impl<D: Digest> Write for BlockFormat<D> {
-    fn write(&self, buf: &mut impl BufMut) {
-        match self {
-            BlockFormat::Random(random) => {
-                0u8.write(buf);
-                random.write(buf);
-            }
-            BlockFormat::Bridge(finalization) => {
-                1u8.write(buf);
-                finalization.write(buf);
-            }
-        }
-    }
-}
-
-impl<D: Digest> Read for BlockFormat<D> {
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let tag = u8::read(buf)?;
-        match tag {
-            0 => {
-                let random = u128::read(buf)?;
-                Ok(BlockFormat::Random(random))
-            }
-            1 => {
-                let finalization = Finalization::read(buf)?;
-                Ok(BlockFormat::Bridge(finalization))
-            }
-            _ => Err(Error::InvalidEnum(tag)),
-        }
-    }
-}
-
-impl<D: Digest> EncodeSize for BlockFormat<D> {
-    fn encode_size(&self) -> usize {
-        1 + match self {
-            BlockFormat::Random(random) => random.encode_size(),
-            BlockFormat::Bridge(finalization) => finalization.encode_size(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,27 +273,6 @@ mod tests {
         });
         let encoded = original.encode();
         let decoded = Inbound::decode(encoded).unwrap();
-        assert_eq!(original, decoded);
-    }
-
-    #[test]
-    fn test_outbound_codec() {
-        // Success
-        let original = Outbound::<Sha256Digest>::Success(true);
-        let encoded = original.encode();
-        let decoded = Outbound::decode(encoded).unwrap();
-        assert_eq!(original, decoded);
-
-        // Block
-        let original = Outbound::<Sha256Digest>::Block(new_block());
-        let encoded = original.encode();
-        let decoded = Outbound::decode(encoded).unwrap();
-        assert_eq!(original, decoded);
-
-        // Finalization
-        let original = Outbound::<Sha256Digest>::Finalization(new_finalization());
-        let encoded = original.encode();
-        let decoded = Outbound::decode(encoded).unwrap();
         assert_eq!(original, decoded);
     }
 }

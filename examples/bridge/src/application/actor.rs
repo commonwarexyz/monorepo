@@ -3,7 +3,11 @@ use super::{
     supervisor::Supervisor,
     Config,
 };
-use crate::wire::{self, BlockFormat, Inbound, Outbound};
+use crate::types::{
+    block::BlockFormat,
+    inbound::{self, Inbound},
+    outbound::Outbound,
+};
 use commonware_codec::{DecodeExt, Encode};
 use commonware_consensus::threshold_simplex::types::{Activity, Viewable};
 use commonware_cryptography::{
@@ -78,7 +82,7 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                         false => {
                             // Fetch a certificate from the indexer for the other network
                             let msg =
-                                Inbound::GetFinalization::<H::Digest>(wire::GetFinalization {
+                                Inbound::GetFinalization::<H::Digest>(inbound::GetFinalization {
                                     network: self.other_public,
                                 })
                                 .encode();
@@ -118,7 +122,7 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                     info!(?block, payload = ?digest, "proposed");
 
                     // Publish to indexer
-                    let msg = Inbound::PutBlock::<H::Digest>(wire::PutBlock {
+                    let msg = Inbound::PutBlock::<H::Digest>(inbound::PutBlock {
                         network: self.public,
                         block,
                     })
@@ -146,7 +150,7 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                 }
                 Message::Verify { payload, response } => {
                     // Fetch payload from indexer
-                    let msg = Inbound::GetBlock(wire::GetBlock {
+                    let msg = Inbound::GetBlock(inbound::GetBlock {
                         network: self.public,
                         digest: payload,
                     })
@@ -192,7 +196,7 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
 
                             // Post finalization
                             let msg =
-                                Inbound::PutFinalization::<H::Digest>(wire::PutFinalization {
+                                Inbound::PutFinalization::<H::Digest>(inbound::PutFinalization {
                                     network: self.public,
                                     finalization,
                                 })
