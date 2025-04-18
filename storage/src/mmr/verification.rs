@@ -197,7 +197,7 @@ impl<H: CHasher> Proof<H> {
         }
         let mut hashes = Vec::with_capacity(hashes_len);
         for _ in 0..hashes_len {
-            let digest = H::Digest::read_from(&mut buf).ok()?;
+            let digest = H::Digest::decode(&mut buf).ok()?;
             hashes.push(digest);
         }
         Some(Self { size, hashes })

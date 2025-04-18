@@ -134,18 +134,18 @@ mod tests {
     }
 
     #[test]
-    fn test_read_from() {
+    fn test_decode() {
         let mut buf = BytesMut::from(&[1, 2, 3, 4][..]);
-        let bytes = FixedBytes::<4>::read_from(&mut buf).unwrap();
+        let bytes = FixedBytes::<4>::decode(&mut buf).unwrap();
         assert_eq!(bytes.as_ref(), &[1, 2, 3, 4]);
         assert_eq!(buf.remaining(), 0);
 
         let mut buf = BytesMut::from(&[1, 2, 3][..]);
-        let result = FixedBytes::<4>::read_from(&mut buf);
+        let result = FixedBytes::<4>::decode(&mut buf);
         assert_eq!(result, Err(ArrayError::InsufficientBytes));
 
         let mut buf = BytesMut::from(&[1, 2, 3, 4, 5][..]);
-        let bytes = FixedBytes::<4>::read_from(&mut buf).unwrap();
+        let bytes = FixedBytes::<4>::decode(&mut buf).unwrap();
         assert_eq!(bytes.as_ref(), &[1, 2, 3, 4]);
         assert_eq!(buf.remaining(), 1);
         assert_eq!(buf[0], 5);

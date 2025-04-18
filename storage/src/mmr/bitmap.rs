@@ -103,7 +103,7 @@ impl<H: CHasher> Bitmap<H> {
     /// Return the last chunk of the bitmap as a digest.
     fn last_chunk(&self) -> H::Digest {
         let len = self.bitmap.len();
-        H::Digest::try_from(&self.bitmap[len - Self::CHUNK_SIZE..len]).unwrap()
+        H::Digest::decode(self.bitmap[len - Self::CHUNK_SIZE..len]).unwrap()
     }
 
     /// Return the last chunk of the bitmap as a mutable slice.
@@ -119,7 +119,7 @@ impl<H: CHasher> Bitmap<H> {
         let pruned_bytes = self.pruned_bytes();
         assert!(byte_offset >= pruned_bytes, "bit pruned");
         byte_offset -= pruned_bytes;
-        H::Digest::try_from(&self.bitmap[byte_offset..byte_offset + Self::CHUNK_SIZE]).unwrap()
+        H::Digest::decode(self.bitmap[byte_offset..byte_offset + Self::CHUNK_SIZE]).unwrap()
     }
 
     /// Commit the last chunk of the bitmap to the Merkle tree and initialize the next chunk.
@@ -313,7 +313,7 @@ mod tests {
         bitmap.prune_to_bit(0);
         assert_eq!(bitmap.pruned_bytes(), 0);
         let empty_digest =
-            <Sha256 as CHasher>::Digest::try_from(&[0u8; <Sha256 as CHasher>::Digest::SIZE][..])
+            <Sha256 as CHasher>::Digest::decode([0u8; <Sha256 as CHasher>::Digest::SIZE][..])
                 .unwrap();
         assert_eq!(bitmap.last_chunk(), empty_digest);
 
@@ -525,7 +525,7 @@ mod tests {
                     let corrupted = {
                         let mut tmp = chunk.as_ref().to_vec();
                         tmp[byte_offset] ^= mask;
-                        <Sha256 as CHasher>::Digest::try_from(&tmp).unwrap()
+                        <Sha256 as CHasher>::Digest::decode(tmp).unwrap()
                     };
                     assert!(
                         !Bitmap::verify_bit_inclusion(&mut hasher, &proof, &corrupted, i, &root),
@@ -548,7 +548,7 @@ mod tests {
                     let corrupted = {
                         let mut tmp = chunk.as_ref().to_vec();
                         tmp[byte_offset] ^= mask;
-                        <Sha256 as CHasher>::Digest::try_from(&tmp).unwrap()
+                        <Sha256 as CHasher>::Digest::decode(tmp).unwrap()
                     };
                     assert!(
                         !Bitmap::verify_bit_inclusion(&mut hasher, &proof, &corrupted, i, &root),

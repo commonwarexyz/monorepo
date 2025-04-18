@@ -229,7 +229,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: Array> Application<E, H, P> {
                 parsed_view, context.view
             ));
         }
-        let Ok(parent) = H::Digest::read_from(&mut contents) else {
+        let Ok(parent) = H::Digest::decode(&mut contents) else {
             self.panic("invalid parent");
         };
         if parent != context.parent.1 {
