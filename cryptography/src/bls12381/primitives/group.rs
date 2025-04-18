@@ -17,8 +17,9 @@ use blst::{
     blst_p1_from_affine, blst_p1_in_g1, blst_p1_is_inf, blst_p1_mult, blst_p1_to_affine,
     blst_p1_uncompress, blst_p2, blst_p2_add_or_double, blst_p2_affine, blst_p2_compress,
     blst_p2_from_affine, blst_p2_in_g2, blst_p2_is_inf, blst_p2_mult, blst_p2_to_affine,
-    blst_p2_uncompress, blst_scalar, blst_scalar_from_bendian, blst_scalar_from_fr, blst_sk_check,
-    Pairing, BLS12_381_G1, BLS12_381_G2, BLS12_381_NEG_G1, BLST_ERROR,
+    blst_p2_uncompress, blst_p2s_mult_pippenger, blst_p2s_mult_pippenger_scratch_sizeof,
+    blst_p2s_mult_wbits_scratch_sizeof, blst_scalar, blst_scalar_from_bendian, blst_scalar_from_fr,
+    blst_sk_check, Pairing, BLS12_381_G1, BLS12_381_G2, BLS12_381_NEG_G1, BLST_ERROR,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -496,6 +497,68 @@ impl G2 {
             blst_p2_compress(slice.as_mut_ptr(), &self.0);
         }
         slice
+    }
+
+    pub fn multi_scalar_mul(scalars: &[Scalar], points: &[Self]) -> Self {
+        if scalars.is_empty() || points.is_empty() || scalars.len() != points.len() {
+            return Self::zero(); // Handle edge case
+        }
+
+        // Step 1: Convert points to affine form
+        let affine_points: Vec<blst_p2_affine> = points
+            .iter()
+            .map(|p| {
+                let mut affine = blst_p2_affine::default();
+                unsafe {
+                    blst_p2_to_affine(&mut affine, &p.0);
+                }
+                affine
+            })
+            .collect();
+
+        // Step 2: Create a vector of pointers to affine points
+        let affine_ptrs: Vec<*const blst_p2_affine> = affine_points
+            .iter()
+            .map(|p| p as *const blst_p2_affine)
+            .collect();
+
+        // Step 3: Convert scalars to blst_scalar
+        let blst_scalars: Vec<blst_scalar> = scalars
+            .iter()
+            .map(|s| {
+                let mut scalar = blst_scalar::default();
+                unsafe {
+                    blst_scalar_from_fr(&mut scalar, &s.0);
+                }
+                scalar
+            })
+            .collect();
+
+        // Step 4: Create a vector of pointers to scalar bytes
+        let scalar_ptrs: Vec<*const u8> = blst_scalars
+            .iter()
+            .map(|s| s.b.as_ptr()) // Access the byte array inside blst_scalar
+            .collect();
+
+        // Step 5: Allocate scratch space as Vec<u64>
+        let scratch_size = unsafe { blst_p2s_mult_pippenger_scratch_sizeof(points.len()) };
+        let scratch_len = (scratch_size as usize) / std::mem::size_of::<u64>();
+        let mut scratch = vec![0u64; scratch_len];
+
+        // Step 6: Perform multi-scalar multiplication
+        let mut out = blst_p2::default();
+        unsafe {
+            blst_p2s_mult_pippenger(
+                &mut out,             // Output point
+                affine_ptrs.as_ptr(), // Pointer to array of pointers
+                points.len(),         // Number of points/scalars
+                scalar_ptrs.as_ptr(), // Pointer to array of byte pointers
+                255,                  // Bit length of scalars (BLS12-381)
+                scratch.as_mut_ptr(), // Scratch space as *mut u64
+            );
+        }
+
+        Self(out)
     }
 }
 
