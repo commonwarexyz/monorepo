@@ -1,7 +1,6 @@
-use bytes::Bytes;
 use clap::{value_parser, Arg, Command};
 use commonware_bridge::{
-    wire::{self, Inbound, Outbound},
+    wire::{self, BlockFormat, Inbound, Outbound},
     APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE,
 };
 use commonware_codec::{DecodeExt, Encode};
@@ -31,12 +30,12 @@ use tracing::{debug, info};
 #[allow(clippy::large_enum_variant)]
 enum Message<D: Digest> {
     PutBlock {
-        incoming: wire::PutBlock,
+        incoming: wire::PutBlock<D>,
         response: oneshot::Sender<bool>, // wait to broadcast consensus message
     },
     GetBlock {
         incoming: wire::GetBlock<D>,
-        response: oneshot::Sender<Option<Bytes>>,
+        response: oneshot::Sender<Option<BlockFormat<D>>>,
     },
     PutFinalization {
         incoming: wire::PutFinalization<D>,
@@ -110,7 +109,7 @@ fn main() {
 
     // Configure networks
     let mut namespaces: HashMap<G1, (G1, Vec<u8>)> = HashMap::new();
-    let mut blocks: HashMap<G1, HashMap<Sha256Digest, Bytes>> = HashMap::new();
+    let mut blocks: HashMap<G1, HashMap<Sha256Digest, BlockFormat<Sha256Digest>>> = HashMap::new();
     let mut finalizations: HashMap<G1, BTreeMap<u64, Finalization<Sha256Digest>>> = HashMap::new();
     let networks = matches
         .get_many::<String>("networks")
@@ -146,11 +145,11 @@ fn main() {
                         };
 
                         // Compute digest
-                        hasher.update(&incoming.data);
+                        hasher.update(&incoming.block.encode());
                         let digest = hasher.finalize();
 
                         // Store block
-                        network.insert(digest, incoming.data);
+                        network.insert(digest, incoming.block);
                         let _ = response.send(true);
                         info!(
                             network = ?incoming.network,

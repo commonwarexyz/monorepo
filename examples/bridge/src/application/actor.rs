@@ -3,16 +3,16 @@ use super::{
     supervisor::Supervisor,
     Config,
 };
-use crate::wire::{self, Inbound, Outbound};
+use crate::wire::{self, BlockFormat, Inbound, Outbound};
 use commonware_codec::{DecodeExt, Encode};
-use commonware_consensus::threshold_simplex::types::{Activity, Finalization, Viewable};
+use commonware_consensus::threshold_simplex::types::{Activity, Viewable};
 use commonware_cryptography::{
     bls12381::primitives::{group, poly},
     Hasher,
 };
 use commonware_runtime::{Sink, Spawner, Stream};
 use commonware_stream::{public_key::Connection, Receiver, Sender};
-use commonware_utils::{hex, Array};
+use commonware_utils::Array;
 use futures::{channel::mpsc, StreamExt};
 use rand::Rng;
 use tracing::{debug, info};
@@ -67,12 +67,13 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                 }
                 Message::Propose { index, response } => {
                     // Either propose a random message (prefix=0) or include a consensus certificate (prefix=1)
-                    let msg = match self.context.gen_bool(0.5) {
+                    let block = match self.context.gen_bool(0.5) {
                         true => {
                             // Generate a random message
-                            let mut msg = vec![0; 17];
-                            self.context.fill(&mut msg[1..]);
-                            msg
+                            let v1 = self.context.next_u64();
+                            let v2 = self.context.next_u64();
+                            let value: u128 = ((v1 as u128) << 64) | (v2 as u128);
+                            BlockFormat::<H::Digest>::Random(value)
                         }
                         false => {
                             // Fetch a certificate from the indexer for the other network
@@ -107,19 +108,19 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                             );
 
                             // Use certificate as message
-                            (1u8, finalization).encode().into()
+                            BlockFormat::Bridge(finalization)
                         }
                     };
 
                     // Hash the message
-                    self.hasher.update(&msg);
+                    self.hasher.update(&block.encode());
                     let digest = self.hasher.finalize();
-                    info!(msg = hex(&msg), payload = ?digest, "proposed");
+                    info!(?block, payload = ?digest, "proposed");
 
                     // Publish to indexer
                     let msg = Inbound::PutBlock::<H::Digest>(wire::PutBlock {
                         network: self.public,
-                        data: msg.into(),
+                        block,
                     })
                     .encode();
                     indexer_sender
@@ -161,32 +162,24 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                     let msg =
                         Outbound::<H::Digest>::decode(result).expect("failed to decode result");
                     let block = match msg {
-                        Outbound::Success(b) => {
-                            if b {
-                                panic!("unexpected success");
-                            }
+                        Outbound::Block(b) => b,
+                        Outbound::Success(false) => {
                             let _ = response.send(false);
                             debug!("block not found");
                             continue;
                         }
-                        Outbound::Block(b) => b,
                         _ => panic!("unexpected response"),
                     };
 
-                    // If first byte is 0, then its just a hash
-                    if block[0] == 0 {
-                        let _ = response.send(block.len() == 17);
-                        continue;
+                    match block {
+                        BlockFormat::Random(_) => {
+                            let _ = response.send(true);
+                        }
+                        BlockFormat::Bridge(finalization) => {
+                            let result = finalization.verify(&self.namespace, &self.other_public);
+                            let _ = response.send(result);
+                        }
                     }
-
-                    // Verify consensus certificate
-                    let proof = block[1..].to_vec();
-                    let finalization = Finalization::<H::Digest>::decode(proof.as_ref())
-                        .expect("failed to decode finalization");
-                    let result = finalization.verify(&self.namespace, &self.other_public);
-
-                    // If payload exists and is valid, return
-                    let _ = response.send(result);
                 }
                 Message::Report { activity } => {
                     let view = activity.view();
