@@ -375,9 +375,11 @@ pub struct Notarization<S: Array, D: Digest> {
 
 impl<S: Array, D: Digest> Notarization<S, D> {
     /// Creates a new notarization with the given proposal and set of signatures.
-    /// The signatures are sorted by the public key index for deterministic ordering.
-    pub fn new(proposal: Proposal<D>, mut signatures: Vec<Signature<S>>) -> Self {
-        signatures.sort_by_key(|s| s.public_key);
+    ///
+    /// # Warning
+    ///
+    /// The signatures must be sorted by the public key index.
+    pub fn new(proposal: Proposal<D>, signatures: Vec<Signature<S>>) -> Self {
         Self {
             proposal,
             signatures,
@@ -388,9 +390,10 @@ impl<S: Array, D: Digest> Notarization<S, D> {
     ///
     /// This ensures that:
     /// 1. There are at least threshold valid signatures
-    /// 2. No duplicate signers
-    /// 3. All signatures are valid
-    /// 4. All signers are in the validator set
+    /// 2. All signatures are valid
+    /// 3. All signers are in the validator set
+    ///
+    /// In `read_cfg`, we ensure that the signatures are sorted by public key index and are unique.
     // TODO(#755): Use `commonware-cryptography::Specification`
     pub fn verify<P: Array, V: Verifier<PublicKey = P, Signature = S>>(
         &self,
@@ -408,17 +411,8 @@ impl<S: Array, D: Digest> Notarization<S, D> {
 
         // Verify signatures
         let notarize_namespace = notarize_namespace(namespace);
-        let mut last_seen = None;
         let message = self.proposal.encode();
         for signature in &self.signatures {
-            // Ensure this isn't a duplicate (and the signatures are sorted)
-            if let Some(last_seen) = last_seen {
-                if last_seen >= signature.public_key {
-                    return false;
-                }
-            }
-            last_seen = Some(signature.public_key);
-
             // Get public key
             let Some(public_key) = participants.get(signature.public_key as usize) else {
                 return false;
@@ -449,6 +443,16 @@ impl<S: Array, D: Digest> Read<usize> for Notarization<S, D> {
     fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
         let proposal = Proposal::<D>::read(reader)?;
         let signatures = Vec::<Signature<S>>::read_range(reader, ..=*max_len)?;
+
+        // Ensure the signatures are sorted by public key index and are unique
+        for i in 1..signatures.len() {
+            if signatures[i - 1].public_key >= signatures[i].public_key {
+                return Err(Error::Invalid(
+                    "consensus::simplex::Notarization",
+                    "Signatures are not sorted by public key index",
+                ));
+            }
+        }
         Ok(Self {
             proposal,
             signatures,
@@ -560,9 +564,11 @@ pub struct Nullification<S: Array> {
 
 impl<S: Array> Nullification<S> {
     /// Creates a new nullification with the given view and set of signatures.
-    /// The signatures are sorted by the public key index for deterministic ordering.
-    pub fn new(view: View, mut signatures: Vec<Signature<S>>) -> Self {
-        signatures.sort_by_key(|s| s.public_key);
+    ///
+    /// # Warning
+    ///
+    /// The signatures must be sorted by the public key index.
+    pub fn new(view: View, signatures: Vec<Signature<S>>) -> Self {
         Self { view, signatures }
     }
 
@@ -585,17 +591,8 @@ impl<S: Array> Nullification<S> {
 
         // Verify signatures
         let nullify_namespace = nullify_namespace(namespace);
-        let mut last_seen = None;
         let message = view_message(self.view);
         for signature in &self.signatures {
-            // Ensure this isn't a duplicate (and the signatures are sorted)
-            if let Some(last_seen) = last_seen {
-                if last_seen >= signature.public_key {
-                    return false;
-                }
-            }
-            last_seen = Some(signature.public_key);
-
             // Get public key
             let Some(public_key) = participants.get(signature.public_key as usize) else {
                 return false;
@@ -626,6 +623,16 @@ impl<S: Array> Read<usize> for Nullification<S> {
     fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
         let view = View::read(reader)?;
         let signatures = Vec::<Signature<S>>::read_range(reader, ..=*max_len)?;
+
+        // Ensure the signatures are sorted by public key index and are unique
+        for i in 1..signatures.len() {
+            if signatures[i - 1].public_key >= signatures[i].public_key {
+                return Err(Error::Invalid(
+                    "consensus::simplex::Nullification",
+                    "Signatures are not sorted by public key index",
+                ));
+            }
+        }
         Ok(Self { view, signatures })
     }
 }
@@ -741,9 +748,11 @@ pub struct Finalization<S: Array, D: Digest> {
 
 impl<S: Array, D: Digest> Finalization<S, D> {
     /// Creates a new finalization with the given proposal and set of signatures.
-    /// The signatures are sorted by the public key index for deterministic ordering.
-    pub fn new(proposal: Proposal<D>, mut signatures: Vec<Signature<S>>) -> Self {
-        signatures.sort_by_key(|s| s.public_key);
+    ///
+    /// # Warning
+    ///
+    /// The signatures must be sorted by the public key index.
+    pub fn new(proposal: Proposal<D>, signatures: Vec<Signature<S>>) -> Self {
         Self {
             proposal,
             signatures,
@@ -769,17 +778,8 @@ impl<S: Array, D: Digest> Finalization<S, D> {
 
         // Verify signatures
         let finalize_namespace = finalize_namespace(namespace);
-        let mut last_seen = None;
         let message = self.proposal.encode();
         for signature in &self.signatures {
-            // Ensure this isn't a duplicate (and the signatures are sorted)
-            if let Some(last_seen) = last_seen {
-                if last_seen >= signature.public_key {
-                    return false;
-                }
-            }
-            last_seen = Some(signature.public_key);
-
             // Get public key
             let Some(public_key) = participants.get(signature.public_key as usize) else {
                 return false;
@@ -810,6 +810,16 @@ impl<S: Array, D: Digest> Read<usize> for Finalization<S, D> {
     fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
         let proposal = Proposal::<D>::read(reader)?;
         let signatures = Vec::<Signature<S>>::read_range(reader, ..=*max_len)?;
+
+        // Ensure the signatures are sorted by public key index and are unique
+        for i in 1..signatures.len() {
+            if signatures[i - 1].public_key >= signatures[i].public_key {
+                return Err(Error::Invalid(
+                    "consensus::simplex::Finalization",
+                    "Signatures are not sorted by public key index",
+                ));
+            }
+        }
         Ok(Self {
             proposal,
             signatures,
