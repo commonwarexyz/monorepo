@@ -8,10 +8,7 @@ use bytes::BufMut;
 use commonware_codec::{DecodeExt, Encode, FixedSize};
 use commonware_consensus::threshold_simplex::types::{Activity, Finalization, Viewable};
 use commonware_cryptography::{
-    bls12381::primitives::{
-        group::{self, Element},
-        poly,
-    },
+    bls12381::primitives::{group, poly},
     Hasher,
 };
 use commonware_runtime::{Sink, Spawner, Stream};
@@ -80,10 +77,11 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                         }
                         false => {
                             // Fetch a certificate from the indexer for the other network
-                            let msg = wire::GetFinalization {
-                                network: self.other_public.serialize(),
-                            };
-                            let msg = wire::Inbound::GetFinalization(msg).encode().into();
+                            let msg =
+                                Inbound::GetFinalization::<H::Digest>(wire::GetFinalization {
+                                    network: self.other_public,
+                                })
+                                .encode();
                             indexer_sender
                                 .send(&msg)
                                 .await
@@ -103,18 +101,12 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                             };
 
                             // Verify certificate
-<<<<<<< HEAD
                             let finalization = Finalization::<H::Digest>::decode(proof.as_ref())
                                 .expect("failed to decode finalization");
                             assert!(
                                 finalization.verify(&self.namespace, &self.other_public),
                                 "indexer is corrupt"
                             );
-=======
-                            self.other_prover
-                                .deserialize_finalization(proof.clone())
-                                .expect("indexer is corrupt");
->>>>>>> 79b4084c (more cleanup)
 
                             // Use certificate as message
                             let mut msg = Vec::with_capacity(u8::SIZE + proof.len());
@@ -131,9 +123,9 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
 
                     // Publish to indexer
                     let msg = wire::PutBlock {
-                        network: self.public.serialize(),
+                        network: self.public,
                         data: msg.into(),
-                    })
+                    }
                     .encode();
                     indexer_sender
                         .send(&msg)
@@ -158,11 +150,11 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                 }
                 Message::Verify { payload, response } => {
                     // Fetch payload from indexer
-                    let msg = wire::GetBlock {
-                        network: self.public.serialize(),
-                        digest: payload.to_vec(),
-                    };
-                    let msg = wire::Inbound::GetBlock(msg).encode().into();
+                    let msg = Inbound::GetBlock(wire::GetBlock {
+                        network: self.public,
+                        digest: payload,
+                    })
+                    .encode();
                     indexer_sender
                         .send(&msg)
                         .await
@@ -210,14 +202,12 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                             info!(view, payload = ?finalization.proposal.payload, signature=?finalization.proposal_signature, seed=?finalization.seed_signature, "finalized");
 
                             // Post finalization
-                            let msg = wire::PutFinalization {
-                                network: self.public.serialize(),
-                                data: finalization.encode().into(),
-                            };
-                            let msg = wire::Inbound {
-                                payload: Some(wire::inbound::Payload::PutFinalization(msg)),
-                            }
-                            .encode_to_vec();
+                            let msg =
+                                Inbound::PutFinalization::<H::Digest>(wire::PutFinalization {
+                                    network: self.public,
+                                    data: finalization.encode().into(),
+                                })
+                                .encode();
                             indexer_sender
                                 .send(&msg)
                                 .await
@@ -226,12 +216,10 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                                 .receive()
                                 .await
                                 .expect("failed to receive from indexer");
-                            let msg =
-                                wire::Outbound::decode(result).expect("failed to decode result");
-                            let payload = msg.payload.expect("missing payload");
-                            let success = match payload {
-                                wire::outbound::Payload::Success(s) => s,
-                                _ => panic!("unexpected response"),
+                            let message =
+                                Outbound::decode(result).expect("failed to decode result");
+                            let Outbound::Success(success) = message else {
+                                panic!("unexpected response");
                             };
                             debug!(view, success, "finalization posted");
                         }

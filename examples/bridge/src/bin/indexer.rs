@@ -1,7 +1,10 @@
 use bytes::Bytes;
 use clap::{value_parser, Arg, Command};
-use commonware_bridge::{wire, APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE};
-use commonware_codec::DecodeExt;
+use commonware_bridge::{
+    wire::{self, Inbound, Outbound},
+    APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE,
+};
+use commonware_codec::{DecodeExt, Encode};
 use commonware_consensus::threshold_simplex::types::{Finalization, Viewable};
 use commonware_cryptography::{
     bls12381::primitives::group::{self, Element},
@@ -118,9 +121,9 @@ fn main() {
         let network = from_hex(network).expect("Network not well-formed");
         let public = group::Public::deserialize(&network).expect("Network not well-formed");
         let namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
-        namespaces.insert(network.clone(), (public, namespace));
-        blocks.insert(network.clone(), HashMap::new());
-        finalizations.insert(network, BTreeMap::new());
+        namespaces.insert(public, (public, namespace));
+        blocks.insert(public, HashMap::new());
+        finalizations.insert(public, BTreeMap::new());
     }
 
     // Create context
@@ -264,7 +267,7 @@ fn main() {
                     // Handle messages
                     while let Ok(msg) = receiver.receive().await {
                         // Decode message
-                        let msg = match wire::Inbound::decode(msg) {
+                        let msg = match Inbound::decode(msg) {
                             Ok(msg) => msg,
                             Err(err) => {
                                 debug!(?err, ?peer, "failed to decode message");
@@ -274,7 +277,7 @@ fn main() {
 
                         // Handle message
                         match msg {
-                            wire::Inbound::PutBlock(msg) => {
+                            Inbound::PutBlock(msg) => {
                                 let (response, receiver) = oneshot::channel();
                                 handler
                                     .send(Message::PutBlock {
@@ -284,13 +287,13 @@ fn main() {
                                     .await
                                     .expect("failed to send message");
                                 let success = receiver.await.expect("failed to receive response");
-                                let msg = wire::Outbound::Success(success).encode();
+                                let msg = Outbound::Success(success).encode();
                                 if sender.send(&msg).await.is_err() {
                                     debug!(?peer, "failed to send message");
                                     return;
                                 }
                             }
-                            wire::Inbound::GetBlock(msg) => {
+                            Inbound::GetBlock(msg) => {
                                 let (response, receiver) = oneshot::channel();
                                 handler
                                     .send(Message::GetBlock {
@@ -302,14 +305,14 @@ fn main() {
                                 let response = receiver.await.expect("failed to receive response");
                                 match response {
                                     Some(data) => {
-                                        let msg = wire::Outbound::Block(data).encode();
+                                        let msg = Outbound::Block(data).encode();
                                         if sender.send(&msg).await.is_err() {
                                             debug!(?peer, "failed to send message");
                                             return;
                                         }
                                     }
                                     None => {
-                                        let msg = wire::Outbound::Success(false).encode();
+                                        let msg = Outbound::Success(false).encode();
                                         if sender.send(&msg).await.is_err() {
                                             debug!(?peer, "failed to send message");
                                             return;
@@ -317,7 +320,7 @@ fn main() {
                                     }
                                 }
                             }
-                            wire::Inbound::PutFinalization(msg) => {
+                            Inbound::PutFinalization(msg) => {
                                 let (response, receiver) = oneshot::channel();
                                 handler
                                     .send(Message::PutFinalization {
@@ -328,7 +331,7 @@ fn main() {
                                     .expect("failed to send message");
                                 let success = receiver.await.expect("failed to receive response");
                                 if sender
-                                    .send(wire::Outbound::Success(success).encode().as_ref())
+                                    .send(Outbound::Success(success).encode().as_ref())
                                     .await
                                     .is_err()
                                 {
@@ -336,7 +339,7 @@ fn main() {
                                     return;
                                 }
                             }
-                            wire::Inbound::GetFinalization(msg) => {
+                            Inbound::GetFinalization(msg) => {
                                 let (response, receiver) = oneshot::channel();
                                 handler
                                     .send(Message::GetFinalization {
@@ -348,14 +351,14 @@ fn main() {
                                 let response = receiver.await.expect("failed to receive response");
                                 match response {
                                     Some(data) => {
-                                        let msg = wire::Outbound::Finalization(data).encode();
+                                        let msg = Outbound::Finalization(data).encode();
                                         if sender.send(&msg).await.is_err() {
                                             debug!(?peer, "failed to send message");
                                             return;
                                         }
                                     }
                                     None => {
-                                        let msg = wire::Outbound::Success(false).encode();
+                                        let msg = Outbound::Success(false).encode();
                                         if sender.send(&msg).await.is_err() {
                                             debug!(?peer, "failed to send message");
                                             return;
