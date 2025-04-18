@@ -28,46 +28,41 @@ impl Config {
 
 // New type to handle io_uring operations
 struct IoUringRuntimeAdapter {
-    // The shared io_uring instance
-    ring: Mutex<IoUring>,
+    // (iouring, waiters) where waiters maps a work_id to a sender that
+    // will be notified when the work (i.e. database operation) completes.
+    work: Mutex<(IoUring, HashMap<u64, oneshot::Sender<i32>>)>,
     // Notification mechanism for completion events
-    work_available: tokio::sync::Notify,
-    // Map of operation tokens to their completion status
-    work: Mutex<HashMap<u64, oneshot::Sender<i32>>>,
+    is_incomplete_work: tokio::sync::Notify,
     // Counter for generating unique operation IDs
     next_work_id: AtomicU64,
 }
 
 impl IoUringRuntimeAdapter {
     fn new() -> Self {
+        let ring = IoUring::new(128).expect("Failed to create io_uring instance");
         Self {
-            ring: Mutex::new(IoUring::new(128).expect("Failed to create io_uring instance")),
-            work_available: tokio::sync::Notify::new(),
-            work: Mutex::new(HashMap::new()),
+            work: Mutex::new((ring, HashMap::new())),
+            is_incomplete_work: tokio::sync::Notify::new(),
             next_work_id: AtomicU64::new(1),
         }
     }
 
-    // Submit the operation to the ring and get a future that contains
-    // the result of the operation.
-    // The meaning of the result depends on the operation type.
-    // The user data field of `op` will be overwritten by this method.
+    /// Submit the operation to the ring and get a future that contains
+    /// the result of the operation.
+    /// The meaning of the result depends on the operation type.
+    /// The `op`'s user data field will be overwritten by this method.
     async fn submit_work(&self, op: io_uring::squeue::Entry) -> Result<i32, Error> {
-        let work_id = self.next_work_id.fetch_add(1, Ordering::SeqCst);
-        let (sender, receiver) = oneshot::channel();
-
-        // Add operation to pending work
-        {
-            let mut work = self.work.lock().unwrap();
-            work.insert(work_id, sender);
-        }
-
         // Wrap the operation with this unique work_id to identify it later
+        let work_id = self.next_work_id.fetch_add(1, Ordering::SeqCst);
         let op = op.user_data(work_id);
 
-        // Submit the operation to the ring
+        // Add operation to submission queue and create a channel to wait for completion
+        let (sender, receiver) = oneshot::channel();
         {
-            let mut ring = self.ring.lock().unwrap();
+            let mut work = self.work.lock().unwrap();
+            let (ring, waiters) = &mut *work;
+
+            waiters.insert(work_id, sender);
             unsafe {
                 ring.submission()
                     .push(&op)
@@ -76,61 +71,55 @@ impl IoUringRuntimeAdapter {
             ring.submit().map_err(|_| Error::WriteFailed)?;
         }
 
-        // Notify the completion handler
-        self.work_available.notify_one();
+        // Notify there's incomplete work
+        self.is_incomplete_work.notify_one();
 
         // Wait for completion
         let res = receiver.await.map_err(|_| Error::RecvFailed)?; // TODO danlaine: update error
         Ok(res)
     }
 
-    // Background task that polls for completions
+    /// Background task that polls for completed work and notifies waiters on completion.
     async fn do_work(self: Arc<Self>) {
         loop {
-            // Process any completions that might be ready
-            let found_completed_work = self.handle_completed_work();
+            // Process any new items on the completion queue
+            let (is_incomplete_work, is_completed_work) = {
+                let mut work = self.work.lock().unwrap();
+                let (ring, waiters) = &mut *work;
+                ring.submit().unwrap_or(0);
 
-            // Check if we still have more work to do
-            let has_uncompleted_work = self.work.lock().unwrap().is_empty();
-            if !has_uncompleted_work && !found_completed_work {
-                // We're not waiting for any work to finish and we didn't find any
-                // completed work last time we checked.
-                // Wait for notification about new work.
-                self.work_available.notified().await;
-            } else if !found_completed_work {
-                // We have pending operations but no completions were ready.
-                // Yield briefly then check again
-                tokio::task::yield_now().await;
-            }
-            // If we found completions, loop immediately to check for more
-        }
-    }
+                let mut completed = Vec::new();
+                while let Some(cqe) = ring.completion().next() {
+                    let work_id = cqe.user_data();
+                    completed.push((work_id, cqe.result()));
+                }
 
-    // Removes all completed operations from `self.ring` and `self.work`.
-    // For each, notifies the awaiting task with the operation's result.
-    fn handle_completed_work(&self) -> bool {
-        let mut completed = Vec::new();
-        {
-            let mut ring = self.ring.lock().unwrap();
-            ring.submit().unwrap_or(0);
+                // Notify that each operation has completed.
+                for (work_id, result) in completed.iter() {
+                    if let Some(sender) = waiters.remove(work_id) {
+                        let _ = sender.send(*result);
+                    }
+                }
 
-            while let Some(cqe) = ring.completion().next() {
-                let work_id = cqe.user_data();
-                completed.push((work_id, cqe.result()));
-            }
-        }
+                (!waiters.is_empty(), !completed.is_empty())
+            };
 
-        if !completed.is_empty() {
-            // Notify that each operation has completed.
-            let mut operations = self.work.lock().unwrap();
-            for (work_id, result) in completed {
-                if let Some(sender) = operations.remove(&work_id) {
-                    let _ = sender.send(result);
+            match (is_incomplete_work, is_completed_work) {
+                (_, true) => {
+                    // We found completed work last; optimistically loop back to check for more
+                    continue;
+                }
+                (true, false) => {
+                    // We're waiting for work to complete but didn't find any completed work.
+                    // Yield to allow other tasks to run before checking again.
+                    tokio::task::yield_now().await;
+                }
+                (false, false) => {
+                    // We're not waiting for any work to finish.
+                    // Wait for notification about new work.
+                    self.is_incomplete_work.notified().await;
                 }
             }
-            true
-        } else {
-            false
         }
     }
 }
