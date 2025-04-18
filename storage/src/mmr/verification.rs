@@ -75,7 +75,7 @@ impl<H: CHasher> Proof<H> {
         root_hash: &H::Digest,
     ) -> bool
     where
-        T: IntoIterator<Item = &'a [u8]>,
+        T: Iterator<Item: AsRef<[u8]>>,
     {
         let peak_hashes = match self.reconstruct_peak_hashes(
             hasher,
@@ -104,7 +104,7 @@ impl<H: CHasher> Proof<H> {
         end_element_pos: u64,
     ) -> Result<Vec<H::Digest>, Error>
     where
-        T: IntoIterator<Item = &'a [u8]>,
+        T: Iterator<Item: AsRef<[u8]>>,
     {
         let mut proof_hashes_iter = self.hashes.iter();
         let mut siblings_iter = self.hashes.iter().rev();
@@ -341,7 +341,7 @@ impl<H: CHasher> Proof<H> {
     }
 }
 
-fn peak_hash_from_range<'a, 'b, H, I, S>(
+fn peak_hash_from_range<'a, H, I, S>(
     hasher: &mut Hasher<H>,
     pos: u64,           // current node position in the tree
     two_h: u64,         // 2^height of the current node
@@ -352,14 +352,14 @@ fn peak_hash_from_range<'a, 'b, H, I, S>(
 ) -> Result<H::Digest, ()>
 where
     H: CHasher,
-    I: Iterator<Item = &'a [u8]>,
-    S: Iterator<Item = &'b H::Digest>,
+    I: Iterator<Item: AsRef<[u8]>>,
+    S: Iterator<Item = &'a H::Digest>,
 {
     assert_ne!(two_h, 0);
     if two_h == 1 {
         // we are at a leaf
         match elements.next() {
-            Some(element) => return Ok(hasher.leaf_hash(pos, element)),
+            Some(element) => return Ok(hasher.leaf_hash(pos, element.as_ref())),
             None => return Err(()),
         }
     }
