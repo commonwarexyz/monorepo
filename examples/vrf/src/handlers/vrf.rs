@@ -2,10 +2,7 @@ use crate::handlers::wire;
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::bls12381::{
     dkg::player::Output,
-    primitives::{
-        group::{self, Element},
-        ops,
-    },
+    primitives::{group, ops},
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
@@ -170,7 +167,6 @@ impl<E: Clock + Spawner, P: Array> Vrf<E, P> {
                 .await
             {
                 Some(signature) => {
-                    let signature = signature.serialize();
                     info!(round, ?signature, "generated signature");
                 }
                 None => {

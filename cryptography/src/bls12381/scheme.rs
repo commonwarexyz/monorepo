@@ -25,7 +25,7 @@ use super::primitives::{
 };
 use crate::{Array, Error, Signer, Specification, Verifier};
 use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedSize, Read, Write};
+use commonware_codec::{DecodeExt, EncodeFixed, Error as CodecError, FixedSize, Read, Write};
 use commonware_utils::hex;
 use rand::{CryptoRng, Rng};
 use std::{
@@ -153,7 +153,7 @@ impl Deref for PrivateKey {
 
 impl From<Scalar> for PrivateKey {
     fn from(key: Scalar) -> Self {
-        let raw: [u8; group::PRIVATE_KEY_LENGTH] = key.serialize().try_into().unwrap();
+        let raw = key.encode_fixed();
         Self { raw, key }
     }
 }
@@ -164,7 +164,7 @@ impl TryFrom<&[u8]> for PrivateKey {
         let raw: [u8; group::PRIVATE_KEY_LENGTH] = value
             .try_into()
             .map_err(|_| Error::InvalidPrivateKeyLength)?;
-        let key = Scalar::deserialize(value).ok_or(Error::InvalidPrivateKey)?;
+        let key = Scalar::decode(value).map_err(|_| Error::InvalidPrivateKey)?;
         Ok(Self { raw, key })
     }
 }
@@ -255,7 +255,7 @@ impl Deref for PublicKey {
 
 impl From<group::Public> for PublicKey {
     fn from(key: group::Public) -> Self {
-        let raw = key.serialize().try_into().unwrap();
+        let raw = key.encode_fixed();
         Self { raw, key }
     }
 }
@@ -266,7 +266,7 @@ impl TryFrom<&[u8]> for PublicKey {
         let raw: [u8; group::PUBLIC_KEY_LENGTH] = value
             .try_into()
             .map_err(|_| Error::InvalidPublicKeyLength)?;
-        let key = group::Public::deserialize(value).ok_or(Error::InvalidPublicKey)?;
+        let key = group::Public::decode(value).map_err(|_| Error::InvalidPublicKey)?;
         Ok(Self { raw, key })
     }
 }
@@ -357,7 +357,7 @@ impl Deref for Signature {
 
 impl From<group::Signature> for Signature {
     fn from(signature: group::Signature) -> Self {
-        let raw = signature.serialize().try_into().unwrap();
+        let raw = signature.encode_fixed();
         Self { raw, signature }
     }
 }
@@ -368,7 +368,7 @@ impl TryFrom<&[u8]> for Signature {
         let raw: [u8; group::SIGNATURE_LENGTH] = value
             .try_into()
             .map_err(|_| Error::InvalidSignatureLength)?;
-        let signature = group::Signature::deserialize(value).ok_or(Error::InvalidSignature)?;
+        let signature = group::Signature::decode(value).map_err(|_| Error::InvalidSignature)?;
         Ok(Self { raw, signature })
     }
 }

@@ -11,9 +11,7 @@ use crate::bls12381::primitives::{
     Error,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{
-    Decode, DecodeExt, Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write,
-};
+use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
 use rand::{rngs::OsRng, RngCore};
 use std::hash::Hash;
 
@@ -38,18 +36,6 @@ pub const PARTIAL_SIGNATURE_LENGTH: usize = u32::SIZE + group::SIGNATURE_LENGTH;
 pub struct Eval<C: Element> {
     pub index: u32,
     pub value: C,
-}
-
-impl<C: Element> Eval<C> {
-    /// Canonically serializes the evaluation.
-    pub fn serialize(&self) -> Vec<u8> {
-        self.encode().into()
-    }
-
-    /// Deserializes a canonically encoded evaluation.
-    pub fn deserialize(bytes: &[u8]) -> Option<Self> {
-        Self::decode(bytes).ok()
-    }
 }
 
 impl<C: Element> Write for Eval<C> {
@@ -173,16 +159,6 @@ impl<C: Element> Poly<C> {
         }
 
         self.0.iter_mut().zip(&other.0).for_each(|(a, b)| a.add(b))
-    }
-
-    /// Canonically serializes the polynomial.
-    pub fn serialize(&self) -> Vec<u8> {
-        self.encode().into()
-    }
-
-    /// Deserializes a canonically encoded polynomial.
-    pub fn deserialize(bytes: &[u8], expected: u32) -> Option<Self> {
-        Self::decode_cfg(bytes, &(expected as usize)).ok()
     }
 
     /// Evaluates the polynomial at the specified value.
@@ -322,6 +298,8 @@ pub fn public(public: &Public) -> &group::Public {
 
 #[cfg(test)]
 pub mod tests {
+    use commonware_codec::{Decode, Encode};
+
     // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/b0ef82ff79769d085a5a7d3f4fe690b1c8fe6dc9/crates/threshold-bls/src/poly.rs#L355-L604
     use super::*;
     use crate::bls12381::primitives::group::{Scalar, G2};
@@ -478,8 +456,8 @@ pub mod tests {
     #[test]
     fn test_codec() {
         let original = new(5);
-        let encoded = original.serialize();
-        let decoded = Poly::<Scalar>::deserialize(&encoded, original.required()).unwrap();
+        let encoded = original.encode();
+        let decoded = Poly::<Scalar>::decode_cfg(encoded, &(original.required() as usize)).unwrap();
         assert_eq!(original, decoded);
     }
 }
