@@ -27,17 +27,14 @@ use commonware_storage::journal::variable::Journal;
 use commonware_utils::quorum;
 use futures::{
     channel::{mpsc, oneshot},
-    future::{join, Either},
+    future::Either,
     pin_mut, StreamExt,
 };
 use prometheus_client::metrics::{
     counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
 };
 use rand::Rng;
-use std::{
-    collections::hash_map::Entry,
-    sync::{atomic::AtomicI64, Arc},
-};
+use std::{collections::hash_map::Entry, sync::atomic::AtomicI64};
 use std::{
     collections::{BTreeMap, HashMap},
     time::{Duration, SystemTime},
@@ -49,7 +46,6 @@ const GENESIS_VIEW: View = 0;
 struct Round<
     C: Scheme,
     D: Digest,
-    E: Spawner + Metrics + Clock,
     R: Reporter<Activity = Activity<D>>,
     S: ThresholdSupervisor<
         Seed = group::Signature,
@@ -59,7 +55,6 @@ struct Round<
     >,
 > {
     start: SystemTime,
-    context: E,
     reporter: R,
     supervisor: S,
 
@@ -78,20 +73,20 @@ struct Round<
 
     // Track notarizes for all proposals (ensuring any participant only has one recorded notarize)
     notarized_proposals: HashMap<Proposal<D>, Vec<u32>>,
-    notarizes: Arc<Vec<Option<Notarize<D>>>>,
+    notarizes: Vec<Option<Notarize<D>>>,
     notarization: Option<Notarization<D>>,
     broadcast_notarize: bool,
     broadcast_notarization: bool,
 
     // Track nullifies (ensuring any participant only has one recorded nullify)
-    nullifies: Arc<HashMap<u32, Nullify>>,
+    nullifies: HashMap<u32, Nullify>,
     nullification: Option<Nullification>,
     broadcast_nullify: bool,
     broadcast_nullification: bool,
 
     // Track finalizes for all proposals (ensuring any participant only has one recorded finalize)
     finalized_proposals: HashMap<Proposal<D>, Vec<u32>>,
-    finalizes: Arc<Vec<Option<Finalize<D>>>>,
+    finalizes: Vec<Option<Finalize<D>>>,
     finalization: Option<Finalization<D>>,
     broadcast_finalize: bool,
     broadcast_finalization: bool,
@@ -100,7 +95,6 @@ struct Round<
 impl<
         C: Scheme,
         D: Digest,
-        E: Spawner + Metrics + Clock,
         R: Reporter<Activity = Activity<D>>,
         S: ThresholdSupervisor<
             Seed = group::Signature,
@@ -108,13 +102,12 @@ impl<
             Share = group::Share,
             PublicKey = C::PublicKey,
         >,
-    > Round<C, D, E, R, S>
+    > Round<C, D, R, S>
 {
-    pub fn new(ctx: E, reporter: R, supervisor: S, view: View) -> Self {
+    pub fn new(clock: &impl Clock, reporter: R, supervisor: S, view: View) -> Self {
         let participants = supervisor.participants(view).unwrap().len();
         Self {
-            start: ctx.current(),
-            context: ctx,
+            start: clock.current(),
             reporter,
             supervisor,
 
@@ -131,18 +124,18 @@ impl<
             verified_proposal: false,
 
             notarized_proposals: HashMap::new(),
-            notarizes: Arc::new(vec![None; participants]),
+            notarizes: vec![None; participants],
             notarization: None,
             broadcast_notarize: false,
             broadcast_notarization: false,
 
-            nullifies: Arc::new(HashMap::new()),
+            nullifies: HashMap::new(),
             nullification: None,
             broadcast_nullify: false,
             broadcast_nullification: false,
 
             finalized_proposals: HashMap::new(),
-            finalizes: Arc::new(vec![None; participants]),
+            finalizes: vec![None; participants],
             finalization: None,
             broadcast_finalize: false,
             broadcast_finalization: false,
@@ -201,8 +194,7 @@ impl<
             self.notarized_proposals
                 .insert(notarize.proposal.clone(), vec![public_key_index]);
         }
-        Arc::get_mut(&mut self.notarizes).unwrap()[public_key_index as usize] =
-            Some(notarize.clone());
+        self.notarizes[public_key_index as usize] = Some(notarize.clone());
         self.reporter.report(Activity::Notarize(notarize)).await;
         true
     }
@@ -211,9 +203,7 @@ impl<
         // Check if already issued finalize
         let Some(finalize) = self.finalizes[public_key_index as usize].as_ref() else {
             // Store the nullify
-            let item = Arc::get_mut(&mut self.nullifies)
-                .unwrap()
-                .entry(public_key_index);
+            let item = self.nullifies.entry(public_key_index);
             return match item {
                 Entry::Occupied(_) => false,
                 Entry::Vacant(v) => {
@@ -284,8 +274,7 @@ impl<
             self.finalized_proposals
                 .insert(finalize.proposal.clone(), vec![public_key_index]);
         }
-        Arc::get_mut(&mut self.finalizes).unwrap()[public_key_index as usize] =
-            Some(finalize.clone());
+        self.finalizes[public_key_index as usize] = Some(finalize.clone());
         self.reporter.report(Activity::Finalize(finalize)).await;
         true
     }
@@ -368,39 +357,22 @@ impl<
                 "broadcasting notarization"
             );
 
+            // Only select notarizes that are for this proposal
+            let notarizes = notarizes
+                .iter()
+                .filter_map(|x| self.notarizes[*x as usize].as_ref());
+
             // Recover threshold signature
-            let proposal_signature = self
-                .context
-                .with_label("notarization_recovery")
-                .spawn_blocking({
-                    let notarizes = self.notarizes.clone();
-                    move || {
-                        let proposals = notarizes
-                            .iter()
-                            .filter_map(|x| x.as_ref())
-                            .map(|x| &x.proposal_signature);
-                        threshold_signature_recover(threshold, proposals).unwrap()
-                    }
-                });
-            let seed_signature = self.context.with_label("seed_recovery").spawn_blocking({
-                let notarizes = self.notarizes.clone();
-                move || {
-                    let seeds = notarizes
-                        .iter()
-                        .filter_map(|x| x.as_ref())
-                        .map(|x| &x.seed_signature);
-                    threshold_signature_recover(threshold, seeds).unwrap()
-                }
-            });
-            let (proposal_signature, seed_signature) =
-                join(proposal_signature, seed_signature).await;
+            let proposals = notarizes.clone().map(|x| &x.proposal_signature);
+            let proposal_signature = threshold_signature_recover(threshold, proposals)
+                .expect("failed to recover threshold signature");
+            let seeds = notarizes.map(|x| &x.seed_signature);
+            let seed_signature = threshold_signature_recover(threshold, seeds)
+                .expect("failed to recover threshold signature");
 
             // Construct notarization
-            let notarization = Notarization::new(
-                proposal.clone(),
-                proposal_signature.unwrap(),
-                seed_signature.unwrap(),
-            );
+            let notarization =
+                Notarization::new(proposal.clone(), proposal_signature, seed_signature);
             self.broadcast_notarization = true;
             return Some(notarization);
         }
@@ -426,28 +398,16 @@ impl<
         debug!(view = self.view, "broadcasting nullification");
 
         // Recover threshold signature
-        let view_signature = self
-            .context
-            .with_label("nullification_recovery")
-            .spawn_blocking({
-                let nullifies = self.nullifies.clone();
-                move || {
-                    let views = nullifies.values().map(|x| &x.view_signature);
-                    threshold_signature_recover(threshold, views).unwrap()
-                }
-            });
-        let seed_signature = self.context.with_label("seed_recovery").spawn_blocking({
-            let nullifies = self.nullifies.clone();
-            move || {
-                let seeds = nullifies.values().map(|x| &x.seed_signature);
-                threshold_signature_recover(threshold, seeds).unwrap()
-            }
-        });
-        let (view_signature, seed_signature) = join(view_signature, seed_signature).await;
+        let nullifies = self.nullifies.values();
+        let views = nullifies.clone().map(|x| &x.view_signature);
+        let view_signature = threshold_signature_recover(threshold, views)
+            .expect("failed to recover threshold signature");
+        let seeds = nullifies.map(|x| &x.seed_signature);
+        let seed_signature = threshold_signature_recover(threshold, seeds)
+            .expect("failed to recover threshold signature");
 
         // Construct nullification
-        let nullification =
-            Nullification::new(self.view, view_signature.unwrap(), seed_signature.unwrap());
+        let nullification = Nullification::new(self.view, view_signature, seed_signature);
         self.broadcast_nullification = true;
         Some(nullification)
     }
@@ -494,28 +454,19 @@ impl<
                 "broadcasting finalization"
             );
 
+            // Only select finalizes that are for this proposal
+            let finalizes = finalizes
+                .iter()
+                .filter_map(|x| self.finalizes[*x as usize].as_ref());
+
             // Recover threshold signature
-            let proposal_signature = self
-                .context
-                .with_label("finalization_recovery")
-                .spawn_blocking({
-                    let finalizes = self.finalizes.clone();
-                    move || {
-                        let proposals = finalizes
-                            .iter()
-                            .filter_map(|x| x.as_ref())
-                            .map(|x| &x.proposal_signature);
-                        threshold_signature_recover(threshold, proposals).unwrap()
-                    }
-                })
-                .await;
+            let proposals = finalizes.map(|x| &x.proposal_signature);
+            let proposal_signature = threshold_signature_recover(threshold, proposals)
+                .expect("failed to recover threshold signature");
 
             // Construct finalization
-            let finalization = Finalization::new(
-                proposal.clone(),
-                proposal_signature.unwrap(),
-                seed_signature,
-            );
+            let finalization =
+                Finalization::new(proposal.clone(), proposal_signature, seed_signature);
             self.broadcast_finalization = true;
             return Some(finalization);
         }
@@ -575,7 +526,7 @@ pub struct Actor<
 
     last_finalized: View,
     view: View,
-    views: BTreeMap<View, Round<C, D, E, F, S>>,
+    views: BTreeMap<View, Round<C, D, F, S>>,
 
     current_view: Gauge,
     tracked_views: Gauge,
@@ -944,7 +895,7 @@ impl<
         let view = nullify.view;
         let round = self.views.entry(view).or_insert_with(|| {
             Round::new(
-                self.context.with_label("round"),
+                &self.context,
                 self.reporter.clone(),
                 self.supervisor.clone(),
                 view,
@@ -1145,7 +1096,7 @@ impl<
         // Setup new view
         let round = self.views.entry(view).or_insert_with(|| {
             Round::new(
-                self.context.with_label("round"),
+                &self.context,
                 self.reporter.clone(),
                 self.supervisor.clone(),
                 view,
@@ -1281,7 +1232,7 @@ impl<
         let view = notarize.view();
         let round = self.views.entry(view).or_insert_with(|| {
             Round::new(
-                self.context.with_label("round"),
+                &self.context,
                 self.reporter.clone(),
                 self.supervisor.clone(),
                 view,
@@ -1338,7 +1289,7 @@ impl<
         let view = notarization.view();
         let round = self.views.entry(view).or_insert_with(|| {
             Round::new(
-                self.context.with_label("round"),
+                &self.context,
                 self.reporter.clone(),
                 self.supervisor.clone(),
                 view,
@@ -1394,7 +1345,7 @@ impl<
         let view = nullification.view;
         let round = self.views.entry(view).or_insert_with(|| {
             Round::new(
-                self.context.with_label("round"),
+                &self.context,
                 self.reporter.clone(),
                 self.supervisor.clone(),
                 nullification.view,
@@ -1452,7 +1403,7 @@ impl<
         let view = finalize.view();
         let round = self.views.entry(view).or_insert_with(|| {
             Round::new(
-                self.context.with_label("round"),
+                &self.context,
                 self.reporter.clone(),
                 self.supervisor.clone(),
                 view,
@@ -1509,7 +1460,7 @@ impl<
         let view = finalization.view();
         let round = self.views.entry(view).or_insert_with(|| {
             Round::new(
-                self.context.with_label("round"),
+                &self.context,
                 self.reporter.clone(),
                 self.supervisor.clone(),
                 view,
