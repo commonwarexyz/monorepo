@@ -7,8 +7,6 @@
 
 use commonware_utils::Array;
 use rand::{CryptoRng, Rng, RngCore, SeedableRng};
-use std::fmt::Debug;
-use thiserror::Error;
 
 pub mod bls12381;
 pub use bls12381::Bls12381;
@@ -18,25 +16,6 @@ pub mod sha256;
 pub use sha256::{hash, Sha256};
 pub mod secp256r1;
 pub use secp256r1::Secp256r1;
-
-/// Errors that can occur when interacting with cryptographic primitives.
-#[derive(Error, Debug, PartialEq)]
-pub enum Error {
-    #[error("invalid digest length")]
-    InvalidDigestLength,
-    #[error("invalid private key")]
-    InvalidPrivateKey,
-    #[error("invalid private key length")]
-    InvalidPrivateKeyLength,
-    #[error("invalid public key")]
-    InvalidPublicKey,
-    #[error("invalid public key length")]
-    InvalidPublicKeyLength,
-    #[error("invalid signature")]
-    InvalidSignature,
-    #[error("invalid signature length")]
-    InvalidSignatureLength,
-}
 
 /// Any implementation of a cryptographic primitive must specify a `PublicKey` and `Signature`.
 pub trait Specification {
