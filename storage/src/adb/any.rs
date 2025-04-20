@@ -548,6 +548,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher> Any<E, K, V,
 mod test {
     use super::*;
     use crate::mmr::mem::Mmr as MemMmr;
+    use commonware_codec::DecodeExt;
     use commonware_cryptography::{hash, sha256::Digest, Hasher as CHasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic::Context, deterministic::Executor, Runner};
@@ -582,8 +583,8 @@ mod test {
             assert_eq!(db.root(&mut hasher), MemMmr::default().root(&mut hasher));
 
             // Make sure closing/reopening gets us back to the same state, even after adding an uncommitted op.
-            let d1 = <Sha256 as CHasher>::Digest::try_from(&vec![1u8; 32]).unwrap();
-            let d2 = <Sha256 as CHasher>::Digest::try_from(&vec![2u8; 32]).unwrap();
+            let d1 = <Sha256 as CHasher>::Digest::decode(vec![1u8; 32].as_ref()).unwrap();
+            let d2 = <Sha256 as CHasher>::Digest::decode(vec![2u8; 32].as_ref()).unwrap();
             let root = db.root(&mut hasher);
             db.update(&mut hasher, d1, d2).await.unwrap();
             db.close().await.unwrap();
@@ -616,8 +617,8 @@ mod test {
             let mut hasher = Sha256::new();
             let mut db = open_db(context.clone(), &mut hasher).await;
 
-            let d1 = <Sha256 as CHasher>::Digest::try_from(&vec![1u8; 32]).unwrap();
-            let d2 = <Sha256 as CHasher>::Digest::try_from(&vec![2u8; 32]).unwrap();
+            let d1 = <Sha256 as CHasher>::Digest::decode(vec![1u8; 32].as_ref()).unwrap();
+            let d2 = <Sha256 as CHasher>::Digest::decode(vec![2u8; 32].as_ref()).unwrap();
 
             assert!(db.get(&d1).await.unwrap().is_none());
             assert!(db.get(&d2).await.unwrap().is_none());
@@ -675,7 +676,7 @@ mod test {
             assert_eq!(db.root(&mut hasher), root);
 
             // Deletions of non-existent keys should be a no-op.
-            let d3 = <Sha256 as CHasher>::Digest::try_from(&vec![2u8; 32]).unwrap();
+            let d3 = <Sha256 as CHasher>::Digest::decode(vec![2u8; 32].as_ref()).unwrap();
             db.delete(&mut hasher, d3).await.unwrap();
             assert_eq!(db.log.size().await.unwrap(), 8);
             assert_eq!(db.root(&mut hasher), root);

@@ -57,50 +57,11 @@ impl FixedSize for U64 {
     const SIZE: usize = u64::SIZE + 1;
 }
 
-impl Array for U64 {
-    type Error = Error;
-}
+impl Array for U64 {}
 
 impl From<[u8; U64::SIZE]> for U64 {
     fn from(value: [u8; U64::SIZE]) -> Self {
         Self(value)
-    }
-}
-
-impl TryFrom<&[u8]> for U64 {
-    type Error = Error;
-
-    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        if value.len() != U64::SIZE {
-            return Err(Error::InvalidLength);
-        }
-        let array: [u8; U64::SIZE] = value.try_into().map_err(|_| Error::InvalidLength)?;
-        Ok(Self(array))
-    }
-}
-
-impl TryFrom<&Vec<u8>> for U64 {
-    type Error = Error;
-
-    fn try_from(value: &Vec<u8>) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_slice())
-    }
-}
-
-impl TryFrom<Vec<u8>> for U64 {
-    type Error = Error;
-
-    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
-        if value.len() != U64::SIZE {
-            return Err(Error::InvalidLength);
-        }
-
-        // If the length is correct, we can safely convert the vector into a boxed slice without any
-        // copies.
-        let boxed_slice = value.into_boxed_slice();
-        let boxed_array: Box<[u8; U64::SIZE]> =
-            boxed_slice.try_into().map_err(|_| Error::InvalidLength)?;
-        Ok(Self(*boxed_array))
     }
 }
 
@@ -136,27 +97,23 @@ impl Display for U64 {
 
 #[cfg(test)]
 mod tests {
-    use commonware_codec::{DecodeExt, Encode};
-
     use super::*;
+    use commonware_codec::{DecodeExt, Encode};
 
     #[test]
     fn test_prefixed_u64() {
         let prefix = 69u8;
         let value = 42u64;
         let array = U64::new(prefix, value);
-        let try_from = U64::try_from(array.as_ref()).unwrap();
-        assert_eq!(value, try_from.to_u64());
-        assert_eq!(prefix, try_from.prefix());
+        let decoded = U64::decode(array.as_ref()).unwrap();
+        assert_eq!(value, decoded.to_u64());
+        assert_eq!(prefix, decoded.prefix());
         let from = U64::from(array.0);
         assert_eq!(value, from.to_u64());
         assert_eq!(prefix, from.prefix());
 
         let vec = array.to_vec();
-        let from_vec = U64::try_from(&vec).unwrap();
-        assert_eq!(value, from_vec.to_u64());
-        assert_eq!(prefix, from_vec.prefix());
-        let from_vec = U64::try_from(vec).unwrap();
+        let from_vec = U64::decode(vec.as_ref()).unwrap();
         assert_eq!(value, from_vec.to_u64());
         assert_eq!(prefix, from_vec.prefix());
     }

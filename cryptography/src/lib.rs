@@ -201,13 +201,13 @@ pub trait Hasher: Clone + Send + Sync + 'static {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::FixedSize;
+    use commonware_codec::{DecodeExt, FixedSize};
     use rand::rngs::OsRng;
 
     fn test_validate<C: Scheme>() {
         let signer = C::new(&mut OsRng);
         let public_key = signer.public_key();
-        assert!(C::PublicKey::try_from(public_key.as_ref()).is_ok());
+        assert!(C::PublicKey::decode(public_key.as_ref()).is_ok());
     }
 
     fn test_from_valid_private_key<C: Scheme>() {
@@ -218,12 +218,9 @@ mod tests {
         assert_eq!(public_key, signer.public_key());
     }
 
-    fn test_validate_invalid_public_key<C: Signer>()
-    where
-        C::PublicKey: TryFrom<Vec<u8>, Error = Error>,
-    {
-        let result = C::PublicKey::try_from(vec![0; 1024]);
-        assert_eq!(result, Err(Error::InvalidPublicKeyLength));
+    fn test_validate_invalid_public_key<C: Signer>() {
+        let result = C::PublicKey::decode(vec![0; 1024].as_ref());
+        assert!(result.is_err());
     }
 
     fn test_sign_and_verify<C: Scheme>() {
@@ -454,13 +451,13 @@ mod tests {
         let mut hasher = H::new();
         hasher.update(b"hello world");
         let digest = hasher.finalize();
-        assert!(H::Digest::try_from(digest.as_ref()).is_ok());
+        assert!(H::Digest::decode(digest.as_ref()).is_ok());
         assert_eq!(digest.as_ref().len(), H::Digest::SIZE);
 
         // Reuse hasher without reset
         hasher.update(b"hello world");
         let digest_again = hasher.finalize();
-        assert!(H::Digest::try_from(digest_again.as_ref()).is_ok());
+        assert!(H::Digest::decode(digest_again.as_ref()).is_ok());
         assert_eq!(digest, digest_again);
 
         // Reuse hasher with reset
@@ -468,13 +465,13 @@ mod tests {
         hasher.reset();
         hasher.update(b"hello world");
         let digest_reset = hasher.finalize();
-        assert!(H::Digest::try_from(digest_reset.as_ref()).is_ok());
+        assert!(H::Digest::decode(digest_reset.as_ref()).is_ok());
         assert_eq!(digest, digest_reset);
 
         // Hash different data
         hasher.update(b"hello mars");
         let digest_mars = hasher.finalize();
-        assert!(H::Digest::try_from(digest_mars.as_ref()).is_ok());
+        assert!(H::Digest::decode(digest_mars.as_ref()).is_ok());
         assert_ne!(digest, digest_mars);
     }
 
@@ -484,20 +481,20 @@ mod tests {
         hasher.update(b"hello");
         hasher.update(b" world");
         let digest = hasher.finalize();
-        assert!(H::Digest::try_from(digest.as_ref()).is_ok());
+        assert!(H::Digest::decode(digest.as_ref()).is_ok());
 
         // Generate hash in oneshot
         let mut hasher = H::new();
         hasher.update(b"hello world");
         let digest_oneshot = hasher.finalize();
-        assert!(H::Digest::try_from(digest_oneshot.as_ref()).is_ok());
+        assert!(H::Digest::decode(digest_oneshot.as_ref()).is_ok());
         assert_eq!(digest, digest_oneshot);
     }
 
     fn test_hasher_empty_input<H: Hasher>() {
         let mut hasher = H::new();
         let digest = hasher.finalize();
-        assert!(H::Digest::try_from(digest.as_ref()).is_ok());
+        assert!(H::Digest::decode(digest.as_ref()).is_ok());
     }
 
     fn test_hasher_large_input<H: Hasher>() {
@@ -505,7 +502,7 @@ mod tests {
         let data = vec![1; 1024];
         hasher.update(&data);
         let digest = hasher.finalize();
-        assert!(H::Digest::try_from(digest.as_ref()).is_ok());
+        assert!(H::Digest::decode(digest.as_ref()).is_ok());
     }
 
     #[test]

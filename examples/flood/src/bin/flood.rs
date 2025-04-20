@@ -1,4 +1,5 @@
 use clap::{Arg, Command};
+use commonware_codec::DecodeExt;
 use commonware_cryptography::{
     ed25519::{PrivateKey, PublicKey},
     Ed25519, Signer,
@@ -40,7 +41,7 @@ fn main() {
         .into_iter()
         .map(|host| {
             let key = from_hex_formatted(&host.name).expect("Could not parse host key");
-            let key = PublicKey::try_from(key).expect("Peer key is invalid");
+            let key = PublicKey::decode(key.as_ref()).expect("Peer key is invalid");
             (key, host.ip)
         })
         .collect();
@@ -53,7 +54,7 @@ fn main() {
     // Parse config
     info!(peers = peers.len(), "loaded peers");
     let key = from_hex_formatted(&config.private_key).expect("Could not parse private key");
-    let key = PrivateKey::try_from(key).expect("Private key is invalid");
+    let key = PrivateKey::decode(key.as_ref()).expect("Private key is invalid");
     let signer = <Ed25519 as Signer>::from(key).expect("Could not create signer");
     let public_key = signer.public_key();
 
@@ -96,7 +97,7 @@ fn main() {
         let mut bootstrappers = Vec::new();
         for bootstrapper in &config.bootstrappers {
             let key = from_hex_formatted(bootstrapper).expect("Could not parse bootstrapper key");
-            let key = PublicKey::try_from(key).expect("Bootstrapper key is invalid");
+            let key = PublicKey::decode(key.as_ref()).expect("Bootstrapper key is invalid");
             let ip = peers.get(&key).expect("Could not find bootstrapper in IPs");
             let bootstrapper_socket = format!("{}:{}", ip, config.port);
             let bootstrapper_socket = SocketAddr::from_str(&bootstrapper_socket)

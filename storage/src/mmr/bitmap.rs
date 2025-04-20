@@ -3,6 +3,7 @@
 use crate::mmr::{
     iterator::leaf_num_to_pos, mem::Mmr, verification::Proof, verification::Storage, Error,
 };
+use commonware_codec::{DecodeExt, FixedSize};
 use commonware_cryptography::Hasher as CHasher;
 use std::collections::VecDeque;
 

@@ -61,14 +61,13 @@ mod tests {
         ed25519::{self, Ed25519, PublicKey, Signature},
         sha256::{self, Digest},
     };
-    use commonware_utils::Array;
     use rand::SeedableRng;
 
     /// Helper functions for TipManager tests.
     mod helpers {
         use super::*;
         use crate::ordered_broadcast::types::Chunk;
-        use commonware_codec::FixedSize;
+        use commonware_codec::{DecodeExt, FixedSize};
         use commonware_cryptography::Signer;
 
         /// Creates a dummy link for testing.
@@ -79,7 +78,7 @@ mod tests {
         ) -> Node<Ed25519, Digest> {
             let signature = {
                 let mut data = Bytes::from(vec![3u8; Signature::SIZE]);
-                Signature::read_from(&mut data).unwrap()
+                Signature::decode(&mut data).unwrap()
             };
             Node::new(
                 Chunk::new(sequencer, height, sha256::hash(payload.as_bytes())),

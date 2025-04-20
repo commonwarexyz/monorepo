@@ -246,7 +246,7 @@ impl FixedSize for Vrf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::{Decode, Encode};
+    use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
         bls12381::primitives::{
             group::{self, Element},
@@ -261,7 +261,7 @@ mod tests {
     const T: usize = 8;
 
     fn new_signature(b: u8) -> Signature {
-        Signature::try_from(&[b; Signature::SIZE][..]).unwrap()
+        Signature::decode([b; Signature::SIZE].as_ref()).unwrap()
     }
 
     fn new_share(v: u32) -> group::Share {
