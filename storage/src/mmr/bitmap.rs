@@ -50,7 +50,7 @@ pub struct Bitmap<H: CHasher, const N: usize> {
     ///
     /// When a chunk of N*8 bits is accumulated by the bitmap, it is added to this tree. Because
     /// leaf elements can be updated when bits in the bitmap are flipped, this tree, while based on
-    /// an MMR structure, is not an MMR but a Merkle tree.  The MMR structure results in reduced
+    /// an MMR structure, is not an MMR but a Merkle tree. The MMR structure results in reduced
     /// update overhead for elements being appended or updated near the tip compared to a more
     /// typical balanced Merkle tree.
     mmr: Mmr<H>,
@@ -81,11 +81,13 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
     }
 
     /// Return the number of bitmap chunks that have been pruned.
+    #[inline]
     fn pruned_chunks(&self) -> usize {
         self.mmr.oldest_retained_pos as usize
     }
 
     /// Return the number of bits currently stored in the bitmap, irrespective of any pruning.
+    #[inline]
     pub fn bit_count(&self) -> u64 {
         (self.pruned_chunks() + self.bitmap.len()) as u64 * Self::CHUNK_SIZE_BITS
             - Self::CHUNK_SIZE_BITS
@@ -104,15 +106,17 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         let chunk_index = chunk_pos - pruned_pos;
         self.bitmap.drain(0..chunk_index);
 
-        self.mmr.prune_to_pos(Self::chunk_pos(bit_offset) as u64);
+        self.mmr.prune_to_pos(chunk_pos as u64);
     }
 
     /// Return the last chunk of the bitmap.
+    #[inline]
     fn last_chunk(&self) -> &[u8; N] {
         &self.bitmap[self.bitmap.len() - 1]
     }
 
     /// Return the last chunk of the bitmap as a mutable slice.
+    #[inline]
     fn last_chunk_mut(&mut self) -> &mut [u8] {
         let len = self.bitmap.len();
         &mut self.bitmap[len - 1]
@@ -374,6 +378,10 @@ mod tests {
             assert_eq!(root, bitmap.root(&mut hasher));
             // Last chunk should be empty again
             assert_eq!(bitmap.last_chunk(), &[0u8; 32]);
+
+            // Pruning to an earlier point should be a no-op.
+            bitmap.prune_to_bit(10);
+            assert_eq!(root, bitmap.root(&mut hasher));
         });
     }
 
@@ -494,10 +502,6 @@ mod tests {
         // Confirm pruning everything doesn't affect the root hash.
         bitmap.prune_to_bit(bitmap.bit_count());
         assert_eq!(bitmap.bit_count(), 256 * 3 + 1);
-        assert_eq!(newer_root, bitmap.root(&mut hasher));
-
-        // Pruning to an earlier point should be a no-op.
-        bitmap.prune_to_bit(bitmap.bit_count() / 2);
         assert_eq!(newer_root, bitmap.root(&mut hasher));
     }
 
