@@ -470,6 +470,7 @@ impl Executor {
     }
 }
 
+/// The operation that a task is performing.
 enum Operation {
     Root,
     Work {
@@ -478,6 +479,7 @@ enum Operation {
     },
 }
 
+/// A task that is being executed by the runtime.
 struct Task {
     id: u128,
     label: String,
@@ -492,14 +494,18 @@ impl ArcWake for Task {
     }
 }
 
+/// A task queue that is used to manage the tasks that are being executed by the runtime.
 struct Tasks {
+    /// The current task counter.
     counter: Mutex<u128>,
+    /// The queue of tasks that are waiting to be executed.
     queue: Mutex<Vec<Arc<Task>>>,
-
+    /// Indicates whether the root task has been registered.
     root_registered: Mutex<bool>,
 }
 
 impl Tasks {
+    /// Create a new task queue.
     fn new() -> Self {
         Self {
             counter: Mutex::new(0),
@@ -508,6 +514,7 @@ impl Tasks {
         }
     }
 
+    /// Increment the task counter and return the old value.
     fn increment(&self) -> u128 {
         let mut counter = self.counter.lock().unwrap();
         let old = *counter;
@@ -515,6 +522,9 @@ impl Tasks {
         old
     }
 
+    /// Register the root task.
+    ///
+    /// If the root task has already been registered, this function will panic.
     fn register_root(arc_self: &Arc<Self>) {
         {
             let mut registered = arc_self.root_registered.lock().unwrap();
@@ -531,6 +541,7 @@ impl Tasks {
         }));
     }
 
+    /// Register a new task to be executed.
     fn register_work(
         arc_self: &Arc<Self>,
         label: &str,
@@ -549,17 +560,20 @@ impl Tasks {
         }));
     }
 
+    /// Enqueue an already registered task to be executed.
     fn enqueue(&self, task: Arc<Task>) {
         let mut queue = self.queue.lock().unwrap();
         queue.push(task);
     }
 
+    /// Dequeue all tasks that are ready to execute.
     fn drain(&self) -> Vec<Arc<Task>> {
         let mut queue = self.queue.lock().unwrap();
         let len = queue.len();
         replace(&mut *queue, Vec::with_capacity(len))
     }
 
+    /// Get the number of tasks in the queue.
     fn len(&self) -> usize {
         self.queue.lock().unwrap().len()
     }
