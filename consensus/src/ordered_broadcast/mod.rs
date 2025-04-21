@@ -490,7 +490,7 @@ mod tests {
             timeout: Some(Duration::from_secs(40)),
             ..deterministic::Config::default()
         };
-        let (runner, mut context, auditor) = Executor::init(cfg);
+        let (runner, mut context, auditor) = Executor::new(cfg);
         let (identity, mut shares_vec) =
             ops::generate_shares(&mut context, None, num_validators, quorum);
         shares_vec.sort_by(|a, b| a.index.cmp(&b.index));

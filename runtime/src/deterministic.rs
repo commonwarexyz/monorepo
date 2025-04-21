@@ -447,14 +447,107 @@ pub struct Executor {
     recovered: Mutex<bool>,
 }
 
-impl Executor {
+impl Runner {
     /// Initialize a new `deterministic` runtime with the given seed and cycle duration.
-    pub fn init(cfg: Config) -> (Runner, Context, Arc<Auditor>) {
+    pub fn new(cfg: Config) -> Self {
         // Ensure config is valid
         if cfg.timeout.is_some() && cfg.cycle == Duration::default() {
             panic!("cycle duration must be non-zero when timeout is set");
         }
 
+        Runner { cfg }
+
+        // // Create a new registry
+        // let mut registry = Registry::default();
+        // let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
+
+        // Initialize runtime
+        // let metrics = Arc::new(Metrics::init(runtime_registry));
+        // let auditor = Arc::new(Auditor::default());
+        // let start_time = UNIX_EPOCH;
+        // let deadline = cfg
+        //     .timeout
+        //     .map(|timeout| start_time.checked_add(timeout).expect("timeout overflowed"));
+        // let (signaler, signal) = Signaler::new();
+        // let storage = MeteredStorage::new(
+        //     AuditedStorage::new(MemStorage::default(), auditor.clone()),
+        //     runtime_registry,
+        // );
+        // let executor = Arc::new(Self {
+        //     registry: Mutex::new(registry),
+        //     cycle: cfg.cycle,
+        //     deadline,
+        //     metrics: metrics.clone(),
+        //     auditor: auditor.clone(),
+        //     rng: Mutex::new(StdRng::seed_from_u64(cfg.seed)),
+        //     time: Mutex::new(start_time),
+        //     tasks: Arc::new(Tasks {
+        //         queue: Mutex::new(Vec::new()),
+        //         counter: Mutex::new(1), // Reserve 0 for the root task
+        //     }),
+        //     sleeping: Mutex::new(BinaryHeap::new()),
+        //     partitions: Mutex::new(HashMap::new()),
+        //     signaler: Mutex::new(signaler),
+        //     signal,
+        //     finished: Mutex::new(false),
+        //     recovered: Mutex::new(false),
+        // });
+        // TODO danlaine: remove
+        // Context {
+        //     label: String::new(),
+        //     spawned: false,
+        //     executor,
+        //     networking: Arc::new(Networking::new(metrics, auditor.clone())),
+        //     storage,
+        // },
+    }
+
+    /// Initialize a new `deterministic` runtime with the default configuration
+    /// and the provided seed.
+    pub fn seeded(seed: u64) -> Runner {
+        let cfg = Config {
+            seed,
+            ..Config::default()
+        };
+        Self::new(cfg)
+    }
+
+    /// Initialize a new `deterministic` runtime with the default configuration
+    /// but exit after the given timeout.
+    pub fn timed(timeout: Duration) -> Runner {
+        let cfg = Config {
+            timeout: Some(timeout),
+            ..Config::default()
+        };
+        Self::new(cfg)
+    }
+}
+
+impl Default for Runner {
+    fn default() -> Self {
+        Self::new(Config::default())
+    }
+}
+
+/// A work item in the ready‑queue – either a spawned task or the root future.
+enum WorkItem {
+    Root,
+    Task(Arc<Task>),
+}
+
+/// Implementation of [`crate::Runner`] for the `deterministic` runtime.
+pub struct Runner {
+    cfg: Config,
+}
+
+impl crate::Runner for Runner {
+    type Context = Context;
+
+    fn start<F, Fut>(self, f: F) -> Fut::Output
+    where
+        F: FnOnce(Self::Context) -> Fut,
+        Fut: Future,
+    {
         // Create a new registry
         let mut registry = Registry::default();
         let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
@@ -463,7 +556,8 @@ impl Executor {
         let metrics = Arc::new(Metrics::init(runtime_registry));
         let auditor = Arc::new(Auditor::default());
         let start_time = UNIX_EPOCH;
-        let deadline = cfg
+        let deadline = self
+            .cfg
             .timeout
             .map(|timeout| start_time.checked_add(timeout).expect("timeout overflowed"));
         let (signaler, signal) = Signaler::new();
@@ -471,13 +565,13 @@ impl Executor {
             AuditedStorage::new(MemStorage::default(), auditor.clone()),
             runtime_registry,
         );
-        let executor = Arc::new(Self {
+        let executor = Arc::new(Executor {
             registry: Mutex::new(registry),
-            cycle: cfg.cycle,
+            cycle: self.cfg.cycle,
             deadline,
             metrics: metrics.clone(),
             auditor: auditor.clone(),
-            rng: Mutex::new(StdRng::seed_from_u64(cfg.seed)),
+            rng: Mutex::new(StdRng::seed_from_u64(self.cfg.seed)),
             time: Mutex::new(start_time),
             tasks: Arc::new(Tasks {
                 queue: Mutex::new(Vec::new()),
@@ -490,67 +584,14 @@ impl Executor {
             finished: Mutex::new(false),
             recovered: Mutex::new(false),
         });
-        (
-            Runner {
-                executor: executor.clone(),
-            },
-            Context {
-                label: String::new(),
-                spawned: false,
-                executor,
-                networking: Arc::new(Networking::new(metrics, auditor.clone())),
-                storage,
-            },
-            auditor,
-        )
-    }
-
-    /// Initialize a new `deterministic` runtime with the default configuration
-    /// and the provided seed.
-    pub fn seeded(seed: u64) -> (Runner, Context, Arc<Auditor>) {
-        let cfg = Config {
-            seed,
-            ..Config::default()
+        let context = Context {
+            label: String::new(),
+            spawned: false,
+            executor,
+            networking: Arc::new(Networking::new(metrics, auditor.clone())),
+            storage,
         };
-        Self::init(cfg)
-    }
 
-    /// Initialize a new `deterministic` runtime with the default configuration
-    /// but exit after the given timeout.
-    pub fn timed(timeout: Duration) -> (Runner, Context, Arc<Auditor>) {
-        let cfg = Config {
-            timeout: Some(timeout),
-            ..Config::default()
-        };
-        Self::init(cfg)
-    }
-
-    /// Initialize a new `deterministic` runtime with the default configuration.
-    // We'd love to implement the trait but we can't because of the return type.
-    #[allow(clippy::should_implement_trait)]
-    pub fn default() -> (Runner, Context, Arc<Auditor>) {
-        Self::init(Config::default())
-    }
-}
-
-/// A work item in the ready‑queue – either a spawned task or the root future.
-enum WorkItem {
-    Root,
-    Task(Arc<Task>),
-}
-
-/// Implementation of [`crate::Runner`] for the `deterministic` runtime.
-pub struct Runner {
-    executor: Arc<Executor>,
-}
-
-impl crate::Runner for Runner {
-    type Context = Context;
-
-    fn start<F>(self, f: F) -> F::Output
-    where
-        F: Future,
-    {
         // Pin root task to the heap
         let mut root = Box::pin(f);
 
@@ -559,8 +600,8 @@ impl crate::Runner for Runner {
         loop {
             // Ensure we have not exceeded our deadline
             {
-                let current = self.executor.time.lock().unwrap();
-                if let Some(deadline) = self.executor.deadline {
+                let current = executor.time.lock().unwrap();
+                if let Some(deadline) = executor.deadline {
                     if *current >= deadline {
                         panic!("runtime timeout");
                     }
@@ -568,8 +609,7 @@ impl crate::Runner for Runner {
             }
 
             // Snapshot available tasks
-            let mut tasks: Vec<WorkItem> = self
-                .executor
+            let mut tasks: Vec<WorkItem> = executor
                 .tasks
                 .drain()
                 .into_iter()
@@ -581,7 +621,7 @@ impl crate::Runner for Runner {
 
             // Shuffle tasks
             {
-                let mut rng = self.executor.rng.lock().unwrap();
+                let mut rng = executor.rng.lock().unwrap();
                 tasks.shuffle(&mut *rng);
             }
 
@@ -595,7 +635,7 @@ impl crate::Runner for Runner {
                 match task {
                     WorkItem::Root => {
                         // Record task for auditing
-                        self.executor.auditor.process_task(0, ""); // 0 is reserved for the root task
+                        executor.auditor.process_task(0, ""); // 0 is reserved for the root task
                         trace!(id = 0, "processing task");
 
                         // Prepare task for polling
@@ -603,7 +643,7 @@ impl crate::Runner for Runner {
                         let mut cx = task::Context::from_waker(waker);
 
                         // Record task poll
-                        self.executor
+                        executor
                             .metrics
                             .task_polls
                             .get_or_create(&Work {
@@ -615,7 +655,7 @@ impl crate::Runner for Runner {
                         // of whether it is Pending/Ready).
                         if let Poll::Ready(v) = root.as_mut().poll(&mut cx) {
                             trace!(id = 0, "task is complete");
-                            *self.executor.finished.lock().unwrap() = true;
+                            *executor.finished.lock().unwrap() = true;
                             return v;
                         }
                         trace!(id = 0, "task is still pending");
@@ -627,7 +667,7 @@ impl crate::Runner for Runner {
                         }
 
                         // Record task for auditing
-                        self.executor.auditor.process_task(task.id, &task.label);
+                        executor.auditor.process_task(task.id, &task.label);
                         trace!(id = task.id, "processing task");
 
                         // Prepare task for polling
@@ -636,7 +676,7 @@ impl crate::Runner for Runner {
                         let mut fut = task.future.lock().unwrap();
 
                         // Record task poll
-                        self.executor
+                        executor
                             .metrics
                             .task_polls
                             .get_or_create(&Work {
@@ -664,19 +704,19 @@ impl crate::Runner for Runner {
             // duration can be set to 1ns).
             let mut current;
             {
-                let mut time = self.executor.time.lock().unwrap();
+                let mut time = executor.time.lock().unwrap();
                 *time = time
-                    .checked_add(self.executor.cycle)
+                    .checked_add(executor.cycle)
                     .expect("executor time overflowed");
                 current = *time;
             }
             trace!(now = current.epoch_millis(), "time advanced",);
 
             // Skip time if there is nothing to do
-            if self.executor.tasks.len() == 0 {
+            if executor.tasks.len() == 0 {
                 let mut skip = None;
                 {
-                    let sleeping = self.executor.sleeping.lock().unwrap();
+                    let sleeping = executor.sleeping.lock().unwrap();
                     if let Some(next) = sleeping.peek() {
                         if next.time > current {
                             skip = Some(next.time);
@@ -685,7 +725,7 @@ impl crate::Runner for Runner {
                 }
                 if skip.is_some() {
                     {
-                        let mut time = self.executor.time.lock().unwrap();
+                        let mut time = executor.time.lock().unwrap();
                         *time = skip.unwrap();
                         current = *time;
                     }
@@ -697,7 +737,7 @@ impl crate::Runner for Runner {
             let mut to_wake = Vec::new();
             let mut remaining;
             {
-                let mut sleeping = self.executor.sleeping.lock().unwrap();
+                let mut sleeping = executor.sleeping.lock().unwrap();
                 while let Some(next) = sleeping.peek() {
                     if next.time <= current {
                         let sleeper = sleeping.pop().unwrap();
@@ -713,7 +753,7 @@ impl crate::Runner for Runner {
             }
 
             // Account for remaining tasks
-            remaining += self.executor.tasks.len() + 1; // +1 for the root task
+            remaining += executor.tasks.len() + 1; // +1 for the root task
 
             // If there are no tasks to run and no tasks sleeping, the executor is stalled
             // and will never finish.
@@ -795,7 +835,7 @@ impl Context {
         });
         (
             Runner {
-                executor: executor.clone(),
+                cfg: Config::default(), // TODO danlaine: replace this
             },
             Self {
                 label: String::new(),
@@ -1404,7 +1444,7 @@ mod tests {
             cycle: Duration::default(),
             ..Config::default()
         };
-        Executor::init(cfg);
+        Executor::new(cfg);
     }
 
     #[test]

@@ -1597,7 +1597,7 @@ mod tests {
             timeout: Some(Duration::from_secs(5_000)),
             ..deterministic::Config::default()
         };
-        let (executor, context, auditor) = Executor::init(cfg);
+        let (executor, context, auditor) = Executor::new(cfg);
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
