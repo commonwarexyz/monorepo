@@ -640,7 +640,6 @@ impl crate::Runner for Runner {
                 // Prepare task for polling
                 let waker = waker_ref(&task);
                 let mut cx = task::Context::from_waker(&waker);
-
                 match &task.operation {
                     Operation::Root => {
                         // Poll the root task
