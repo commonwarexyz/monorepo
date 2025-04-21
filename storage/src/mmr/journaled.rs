@@ -421,6 +421,11 @@ impl<E: RStorage + Clock + Metrics, H: Hasher> Mmr<E, H> {
         Ok(())
     }
 
+    /// Return the position at which this MMR was last pruned.
+    pub fn pruned_to_pos(&self) -> u64 {
+        self.pruned_to_pos
+    }
+
     /// Return the position of the oldest retained node in the MMR, not including pinned nodes.
     pub fn oldest_retained_pos(&self) -> Option<u64> {
         if self.pruned_to_pos == self.size() {

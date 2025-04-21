@@ -83,7 +83,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
     /// Return the number of bitmap chunks that have been pruned.
     #[inline]
     fn pruned_chunks(&self) -> usize {
-        self.mmr.oldest_retained_pos as usize
+        self.mmr.pruned_to_pos() as usize
     }
 
     /// Return the number of bits currently stored in the bitmap, irrespective of any pruning.
