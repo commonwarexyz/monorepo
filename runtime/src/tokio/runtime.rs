@@ -186,7 +186,6 @@ impl Executor {
 
         // Initialize runtime
         let metrics = Arc::new(Metrics::init(runtime_registry));
-
         let runtime = Builder::new_multi_thread()
             .worker_threads(cfg.worker_threads)
             .max_blocking_threads(cfg.max_blocking_threads)
