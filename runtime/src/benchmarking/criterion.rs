@@ -10,25 +10,24 @@ thread_local! {
 }
 
 /// Set the context value
-fn set_context<C: Clone + Send + 'static>(context: C) {
+fn set_context<C: Send + 'static>(context: C) {
     CONTEXT.with(|cell| {
         *cell.borrow_mut() = Some(Box::new(context));
     });
 }
 
 /// Get the context value
-pub fn context<C: Clone + Send + 'static>() -> C {
+pub fn context<C: Send + 'static>() -> C {
     CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        match borrow.as_ref() {
-            Some(any) => any
-                .downcast_ref::<C>()
-                .expect("Context type mismatch ‑ internal error")
-                .clone(),
-            None => panic!(
-                "No context of type {} available. Make sure you're using the correct executor.",
-                std::any::type_name::<C>()
-            ),
+        // Attempt to take the context from the thread-local storage
+        let mut borrow = cell.borrow_mut();
+        match borrow.take() {
+            Some(context) => {
+                // Convert the context back to the original type
+                let context = context.downcast::<C>().expect("failed to downcast context");
+                *context
+            }
+            None => panic!("no context set"),
         }
     })
 }
