@@ -29,8 +29,8 @@ pub struct Mmr<H: CHasher> {
     // from the from tallest tree to shortest.
     nodes: VecDeque<H::Digest>,
 
-    // The position of the oldest element still retained by the MMR, or the size of the MMR if there
-    // are no retained nodes because the MMR is empty or it has been fully pruned.
+    // The highest position for which this MMR has been pruned, or 0 if this MMR has never been
+    // pruned.
     pruned_to_pos: u64,
 
     // The auxiliary map from node position to the digest of any pinned node.
@@ -98,7 +98,8 @@ impl<H: CHasher> Mmr<H> {
         Some(PeakIterator::last_leaf_pos(self.size()))
     }
 
-    /// The position this MMR was last pruned to.
+    // The highest position for which this MMR has been pruned, or 0 if this MMR has never been
+    // pruned.
     pub fn pruned_to_pos(&self) -> u64 {
         self.pruned_to_pos
     }
