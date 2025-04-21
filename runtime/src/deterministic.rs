@@ -345,66 +345,6 @@ impl Auditor {
     }
 }
 
-struct Task {
-    id: u128,
-    label: String,
-
-    tasks: Arc<Tasks>,
-
-    future: Mutex<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>,
-
-    completed: Mutex<bool>,
-}
-
-impl ArcWake for Task {
-    fn wake_by_ref(arc_self: &Arc<Self>) {
-        arc_self.tasks.enqueue(arc_self.clone());
-    }
-}
-
-struct Tasks {
-    counter: Mutex<u128>,
-    queue: Mutex<Vec<Arc<Task>>>,
-}
-
-impl Tasks {
-    fn register(
-        arc_self: &Arc<Self>,
-        label: &str,
-        future: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
-    ) {
-        let mut queue = arc_self.queue.lock().unwrap();
-        let id = {
-            let mut l = arc_self.counter.lock().unwrap();
-            let old = *l;
-            *l = l.checked_add(1).expect("task counter overflow");
-            old
-        };
-        queue.push(Arc::new(Task {
-            id,
-            label: label.to_string(),
-            future: Mutex::new(future),
-            tasks: arc_self.clone(),
-            completed: Mutex::new(false),
-        }));
-    }
-
-    fn enqueue(&self, task: Arc<Task>) {
-        let mut queue = self.queue.lock().unwrap();
-        queue.push(task);
-    }
-
-    fn drain(&self) -> Vec<Arc<Task>> {
-        let mut queue = self.queue.lock().unwrap();
-        let len = queue.len();
-        replace(&mut *queue, Vec::with_capacity(len))
-    }
-
-    fn len(&self) -> usize {
-        self.queue.lock().unwrap().len()
-    }
-}
-
 /// Configuration for the `deterministic` runtime.
 #[derive(Clone)]
 pub struct Config {
@@ -479,10 +419,7 @@ impl Executor {
             auditor: auditor.clone(),
             rng: Mutex::new(StdRng::seed_from_u64(cfg.seed)),
             time: Mutex::new(start_time),
-            tasks: Arc::new(Tasks {
-                queue: Mutex::new(Vec::new()),
-                counter: Mutex::new(1), // Reserve 0 for the root task
-            }),
+            tasks: Arc::new(Tasks::new()),
             sleeping: Mutex::new(BinaryHeap::new()),
             partitions: Mutex::new(HashMap::new()),
             signaler: Mutex::new(signaler),
@@ -533,25 +470,112 @@ impl Executor {
     }
 }
 
-/// A work item in the ready‑queue – either a spawned task or the root future.
-enum WorkItem {
-    Root,
-    Task(Arc<Task>),
+enum Operation {
+    Root {
+        tasks: Arc<Tasks>,
+    },
+    Work {
+        tasks: Arc<Tasks>,
+        future: Mutex<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>,
+        completed: Mutex<bool>,
+    },
 }
 
-/// Waker for the *root* future.
-///
-/// Because the root future isn’t stored inside `Tasks`, normal `ArcWake`
-/// machinery doesn’t apply.  When it’s woken we push a **completed**, dummy
-/// task into the ready‑queue; that guarantees the executor spins a new
-/// iteration and polls the real root future right away.
-struct RootWaker {
-    should_wake: Mutex<bool>,
+struct Task {
+    id: u128,
+    label: String,
+
+    operation: Operation,
 }
 
-impl ArcWake for RootWaker {
+impl ArcWake for Task {
     fn wake_by_ref(arc_self: &Arc<Self>) {
-        *arc_self.should_wake.lock().unwrap() = true;
+        match &arc_self.operation {
+            Operation::Root { tasks } => {
+                tasks.enqueue(arc_self.clone());
+            }
+            Operation::Work {
+                tasks,
+                future: _,
+                completed: _,
+            } => {
+                tasks.enqueue(arc_self.clone());
+            }
+        }
+    }
+}
+
+struct Tasks {
+    counter: Mutex<u128>,
+    queue: Mutex<Vec<Arc<Task>>>,
+
+    root_registered: Mutex<bool>,
+}
+
+impl Tasks {
+    fn new() -> Self {
+        Self {
+            counter: Mutex::new(0),
+            queue: Mutex::new(Vec::new()),
+            root_registered: Mutex::new(false),
+        }
+    }
+
+    fn increment(&self) -> u128 {
+        let mut counter = self.counter.lock().unwrap();
+        let old = *counter;
+        *counter = counter.checked_add(1).expect("task counter overflow");
+        old
+    }
+
+    fn register_root(arc_self: &Arc<Self>) {
+        {
+            let mut registered = arc_self.root_registered.lock().unwrap();
+            assert!(!*registered, "root already registered");
+            *registered = true;
+        }
+        let id = arc_self.increment();
+        let mut queue = arc_self.queue.lock().unwrap();
+        queue.push(Arc::new(Task {
+            id,
+            label: String::new(),
+            operation: Operation::Root {
+                tasks: arc_self.clone(),
+            },
+        }));
+    }
+
+    fn register_work(
+        arc_self: &Arc<Self>,
+        label: &str,
+        future: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
+    ) {
+        let id = arc_self.increment();
+        let mut queue = arc_self.queue.lock().unwrap();
+        queue.push(Arc::new(Task {
+            id,
+            label: label.to_string(),
+            operation: Operation::Work {
+                tasks: arc_self.clone(),
+                future: Mutex::new(future),
+                completed: Mutex::new(false),
+            },
+        }));
+    }
+
+    fn enqueue(&self, task: Arc<Task>) {
+        let mut queue = self.queue.lock().unwrap();
+        queue.push(task);
+    }
+
+    fn drain(&self) -> Vec<Arc<Task>> {
+        let mut queue = self.queue.lock().unwrap();
+        let len = queue.len();
+        replace(&mut *queue, Vec::with_capacity(len))
+    }
+
+    fn len(&self) -> usize {
+        self.queue.lock().unwrap().len()
     }
 }
 
@@ -568,10 +592,8 @@ impl crate::Runner for Runner {
         // Pin root task to the heap
         let mut root = Box::pin(f);
 
-        // A waker for the root future
-        let root_waker = Arc::new(RootWaker {
-            should_wake: Mutex::new(false),
-        });
+        // Register the root task
+        Tasks::register_root(&self.executor.tasks);
 
         // Process tasks until root task completes or progress stalls
         let mut iter = 0;
@@ -587,16 +609,7 @@ impl crate::Runner for Runner {
             }
 
             // Snapshot available tasks
-            let mut tasks: Vec<WorkItem> = self
-                .executor
-                .tasks
-                .drain()
-                .into_iter()
-                .map(WorkItem::Task)
-                .collect();
-
-            // Add root task to available tasks
-            tasks.push(WorkItem::Root);
+            let mut tasks = self.executor.tasks.drain();
 
             // Shuffle tasks
             {
@@ -611,71 +624,54 @@ impl crate::Runner for Runner {
             // processing a different task required for other tasks to make progress).
             trace!(iter, tasks = tasks.len(), "starting loop");
             for task in tasks {
-                match task {
-                    WorkItem::Root => {
-                        // Record task for auditing
-                        self.executor.auditor.process_task(0, ""); // 0 is reserved for the root task
-                        trace!(id = 0, "processing task");
+                // Record task for auditing
+                self.executor.auditor.process_task(task.id, &task.label);
+                trace!(id = task.id, "processing task");
 
-                        // Prepare task for polling
-                        *root_waker.should_wake.lock().unwrap() = false;
-                        let waker = waker_ref(&root_waker);
-                        let mut cx = task::Context::from_waker(&waker);
+                // Record task poll
+                self.executor
+                    .metrics
+                    .task_polls
+                    .get_or_create(&Work {
+                        label: task.label.clone(),
+                    })
+                    .inc();
 
-                        // Record task poll
-                        self.executor
-                            .metrics
-                            .task_polls
-                            .get_or_create(&Work {
-                                label: String::new(),
-                            })
-                            .inc();
+                // Prepare task for polling
+                let waker = waker_ref(&task);
+                let mut cx = task::Context::from_waker(&waker);
 
-                        // Task is re-queued in its `wake_by_ref` implementation as soon as we poll here (regardless
-                        // of whether it is Pending/Ready).
-                        if let Poll::Ready(v) = root.as_mut().poll(&mut cx) {
-                            trace!(id = 0, "task is complete");
+                match &task.operation {
+                    Operation::Root { tasks: _ } => {
+                        // Poll the root task
+                        if let Poll::Ready(output) = root.as_mut().poll(&mut cx) {
+                            trace!(id = task.id, "task is complete");
                             *self.executor.finished.lock().unwrap() = true;
-                            return v;
+                            return output;
                         }
-                        trace!(id = 0, "task is still pending");
                     }
-                    WorkItem::Task(task) => {
+                    Operation::Work {
+                        tasks: _,
+                        future,
+                        completed,
+                    } => {
                         // If task is completed, skip it
-                        if *task.completed.lock().unwrap() {
+                        if *completed.lock().unwrap() {
                             continue;
                         }
 
-                        // Record task for auditing
-                        self.executor.auditor.process_task(task.id, &task.label);
-                        trace!(id = task.id, "processing task");
-
-                        // Prepare task for polling
-                        let waker = waker_ref(&task);
-                        let mut cx = task::Context::from_waker(&waker);
-                        let mut fut = task.future.lock().unwrap();
-
-                        // Record task poll
-                        self.executor
-                            .metrics
-                            .task_polls
-                            .get_or_create(&Work {
-                                label: task.label.clone(),
-                            })
-                            .inc();
-
-                        // Task is re-queued in its `wake_by_ref` implementation as soon as we poll here (regardless
-                        // of whether it is Pending/Ready).
-                        if fut.as_mut().poll(&mut cx).is_pending() {
-                            trace!(id = task.id, "task is still pending");
+                        // Poll the task
+                        let mut fut = future.lock().unwrap();
+                        if fut.as_mut().poll(&mut cx).is_ready() {
+                            trace!(id = task.id, "task is complete");
+                            *completed.lock().unwrap() = true;
                             continue;
                         }
-
-                        // Mark task as completed
-                        *task.completed.lock().unwrap() = true;
-                        trace!(id = task.id, "task is complete");
                     }
                 }
+
+                // Try again later if task is still pending
+                trace!(id = task.id, "task is still pending");
             }
 
             // Advance time by cycle
@@ -693,7 +689,7 @@ impl crate::Runner for Runner {
             trace!(now = current.epoch_millis(), "time advanced",);
 
             // Skip time if there is nothing to do
-            if self.executor.tasks.len() == 0 && !*root_waker.should_wake.lock().unwrap() {
+            if self.executor.tasks.len() == 0 {
                 let mut skip = None;
                 {
                     let sleeping = self.executor.sleeping.lock().unwrap();
@@ -733,7 +729,7 @@ impl crate::Runner for Runner {
             }
 
             // Account for remaining tasks
-            remaining += self.executor.tasks.len() + 1; // +1 for the root task
+            remaining += self.executor.tasks.len();
 
             // If there are no tasks to run and no tasks sleeping, the executor is stalled
             // and will never finish.
@@ -803,10 +799,7 @@ impl Context {
             // New state for the new runtime
             registry: Mutex::new(registry),
             metrics: metrics.clone(),
-            tasks: Arc::new(Tasks {
-                queue: Mutex::new(Vec::new()),
-                counter: Mutex::new(1), // Reserve 0 for the root task
-            }),
+            tasks: Arc::new(Tasks::new()),
             sleeping: Mutex::new(BinaryHeap::new()),
             signaler: Mutex::new(signaler),
             signal,
@@ -874,7 +867,7 @@ impl crate::Spawner for Context {
         let (f, handle) = Handle::init(future, gauge, false);
 
         // Spawn the task
-        Tasks::register(&executor.tasks, &label, Box::pin(f));
+        Tasks::register_work(&executor.tasks, &label, Box::pin(f));
         handle
     }
 
@@ -910,7 +903,7 @@ impl crate::Spawner for Context {
             let (f, handle) = Handle::init(f, gauge, false);
 
             // Spawn the task
-            Tasks::register(&executor.tasks, &label, Box::pin(f));
+            Tasks::register_work(&executor.tasks, &label, Box::pin(f));
             handle
         }
     }
@@ -944,7 +937,7 @@ impl crate::Spawner for Context {
 
         // Spawn the task
         let f = async move { f() };
-        Tasks::register(&self.executor.tasks, &self.label, Box::pin(f));
+        Tasks::register_work(&self.executor.tasks, &self.label, Box::pin(f));
         handle
     }
 
