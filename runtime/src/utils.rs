@@ -245,10 +245,10 @@ pub type Signal = Shared<oneshot::Receiver<i32>>;
 /// ## Basic Usage
 ///
 /// ```rust
-/// use commonware_runtime::{Spawner, Runner, Signaler, deterministic::Executor};
+/// use commonware_runtime::{Spawner, Runner, Signaler, deterministic};
 ///
-/// let (executor, _, _) = Executor::default();
-/// executor.start(async move {
+/// let executor = deterministic::Runner::default();
+/// executor.start(|context| async move {
 ///     // Setup signaler and get future
 ///     let (mut signaler, signal) = Signaler::new();
 ///
@@ -270,12 +270,12 @@ pub type Signal = Shared<oneshot::Receiver<i32>>;
 ///
 /// ```rust
 /// use commonware_macros::select;
-/// use commonware_runtime::{Clock, Spawner, Runner, Signaler, deterministic::Executor, Metrics};
+/// use commonware_runtime::{Clock, Spawner, Runner, Signaler, deterministic, Metrics};
 /// use futures::channel::oneshot;
 /// use std::time::Duration;
 ///
-/// let (executor, context, _) = Executor::default();
-/// executor.start(async move {
+/// let executor = deterministic::Runner::default();
+/// executor.start(|context| async move {
 ///     // Setup signaler and get future
 ///     let (mut signaler, mut signal) = Signaler::new();
 ///

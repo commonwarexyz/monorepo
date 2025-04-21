@@ -9,12 +9,12 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_runtime::{Spawner, Runner, tokio::Executor, Metrics};
+//! use commonware_runtime::{Spawner, Runner, tokio, Metrics};
 //!
-//! let (executor, runtime) = Executor::default();
-//! executor.start(async move {
+//! let executor = tokio::Runner::default();
+//! executor.start(|context| async move {
 //!     println!("Parent started");
-//!     let result = runtime.with_label("child").spawn(|_| async move {
+//!     let result = context.with_label("child").spawn(|_| async move {
 //!         println!("Child started");
 //!         "hello"
 //!     });
