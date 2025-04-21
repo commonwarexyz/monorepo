@@ -446,64 +446,17 @@ pub struct Executor {
     recovered: Mutex<bool>,
 }
 
-/// Implementation of [`crate::Runner`] for the `deterministic` runtime.
-pub struct Runner {
-    cfg: Config,
-    auditor: Arc<Auditor>,
+struct RunnerWithContext {
+    context: Context,
 }
 
-impl Runner {
-    /// Initialize a new `deterministic` runtime with the given seed and cycle duration.
-    pub fn new(cfg: Config) -> Self {
-        // Ensure config is valid
-        if cfg.timeout.is_some() && cfg.cycle == Duration::default() {
-            panic!("cycle duration must be non-zero when timeout is set");
-        }
-
-        Runner {
-            cfg,
-            auditor: Arc::new(Auditor::default()),
-        }
-    }
-
-    /// Initialize a new `deterministic` runtime with the default configuration
-    /// and the provided seed.
-    pub fn seeded(seed: u64) -> Self {
-        let cfg = Config {
-            seed,
-            ..Config::default()
-        };
-        Self::new(cfg)
-    }
-
-    /// Initialize a new `deterministic` runtime with the default configuration
-    /// but exit after the given timeout.
-    pub fn timed(timeout: Duration) -> Self {
-        let cfg = Config {
-            timeout: Some(timeout),
-            ..Config::default()
-        };
-        Self::new(cfg)
-    }
-
-    pub fn auditor(&self) -> Arc<Auditor> {
-        self.auditor.clone()
+impl From<Context> for RunnerWithContext {
+    fn from(context: Context) -> Self {
+        RunnerWithContext { context }
     }
 }
 
-impl Default for Runner {
-    fn default() -> Self {
-        Self::new(Config::default())
-    }
-}
-
-/// A work item in the ready‑queue – either a spawned task or the root future.
-enum WorkItem {
-    Root,
-    Task(Arc<Task>),
-}
-
-impl crate::Runner for Runner {
+impl crate::Runner for RunnerWithContext {
     type Context = Context;
 
     fn start<F, Fut>(self, f: F) -> Fut::Output
@@ -511,11 +464,10 @@ impl crate::Runner for Runner {
         F: FnOnce(Self::Context) -> Fut,
         Fut: Future,
     {
-        let context = Context::new(self.cfg.clone(), self.auditor.clone());
-        let executor = context.executor.clone();
+        let executor = self.context.executor.clone();
 
         // Call f with the context to get the future, then pin it
-        let mut root = Box::pin(f(context));
+        let mut root = Box::pin(f(self.context));
 
         // Process tasks until root task completes or progress stalls
         let mut iter = 0;
@@ -684,6 +636,78 @@ impl crate::Runner for Runner {
             }
             iter += 1;
         }
+    }
+}
+
+/// Implementation of [`crate::Runner`] for the `deterministic` runtime.
+pub struct Runner {
+    cfg: Config,
+    auditor: Arc<Auditor>,
+}
+
+impl Runner {
+    /// Initialize a new `deterministic` runtime with the given seed and cycle duration.
+    pub fn new(cfg: Config) -> Self {
+        // Ensure config is valid
+        if cfg.timeout.is_some() && cfg.cycle == Duration::default() {
+            panic!("cycle duration must be non-zero when timeout is set");
+        }
+
+        Runner {
+            cfg,
+            auditor: Arc::new(Auditor::default()),
+        }
+    }
+
+    /// Initialize a new `deterministic` runtime with the default configuration
+    /// and the provided seed.
+    pub fn seeded(seed: u64) -> Self {
+        let cfg = Config {
+            seed,
+            ..Config::default()
+        };
+        Self::new(cfg)
+    }
+
+    /// Initialize a new `deterministic` runtime with the default configuration
+    /// but exit after the given timeout.
+    pub fn timed(timeout: Duration) -> Self {
+        let cfg = Config {
+            timeout: Some(timeout),
+            ..Config::default()
+        };
+        Self::new(cfg)
+    }
+
+    pub fn auditor(&self) -> Arc<Auditor> {
+        self.auditor.clone()
+    }
+}
+
+impl Default for Runner {
+    fn default() -> Self {
+        Self::new(Config::default())
+    }
+}
+
+/// A work item in the ready‑queue – either a spawned task or the root future.
+enum WorkItem {
+    Root,
+    Task(Arc<Task>),
+}
+
+impl crate::Runner for Runner {
+    type Context = Context;
+
+    fn start<F, Fut>(self, f: F) -> Fut::Output
+    where
+        F: FnOnce(Self::Context) -> Fut,
+        Fut: Future,
+    {
+        RunnerWithContext {
+            context: Context::new(self.cfg, self.auditor.clone()),
+        }
+        .start(f)
     }
 }
 
