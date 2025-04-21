@@ -1443,14 +1443,14 @@ mod tests {
     #[test]
     fn test_recover_unsynced_storage_does_not_persist() {
         // Initialize the first runtime
-        let (executor1, context1, _) = deterministic::Runner::default();
+        let executor1 = deterministic::Runner::default();
         let partition = "test_partition";
         let name = b"test_blob";
         let data = b"Hello, world!".to_vec();
 
         // Run some tasks without syncing storage
         executor1.start(|context| async move {
-            let context = context1.clone();
+            let context = context.clone();
             async move {
                 let blob = context.open(partition, name).await.unwrap();
                 blob.write_at(&data, 0).await.unwrap();

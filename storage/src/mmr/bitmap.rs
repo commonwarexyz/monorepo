@@ -303,7 +303,7 @@ impl<H: CHasher> Bitmap<H> {
 mod tests {
     use super::*;
     use commonware_cryptography::{hash, Sha256};
-    use commonware_runtime::{deterministic::Executor, Runner};
+    use commonware_runtime::{deterministic, Runner};
 
     #[test]
     fn test_bitmap_empty_then_one() {
@@ -485,8 +485,8 @@ mod tests {
 
     #[test]
     fn test_bitmap_mmr_proof_verification() {
-        let (executor, _, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
             // Build a bitmap with 10 chunks worth of bits.
             let mut hasher = Sha256::new();
             let mut bitmap = Bitmap::new();

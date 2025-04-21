@@ -347,14 +347,14 @@ pub(crate) mod tests {
     use super::*;
     use crate::mmr::iterator::leaf_num_to_pos;
     use commonware_cryptography::{Hasher as CHasher, Sha256};
-    use commonware_runtime::{deterministic::Executor, Runner};
+    use commonware_runtime::{deterministic, Runner};
     use commonware_utils::hex;
 
     /// Test empty MMR behavior.
     #[test]
     fn test_mem_mmr_empty() {
-        let (executor, _, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
             let mut mmr: Mmr<Sha256> = Mmr::<Sha256>::new();
             assert_eq!(
                 mmr.peak_iterator().next(),
@@ -385,8 +385,8 @@ pub(crate) mod tests {
     /// and 3 peaks.
     #[test]
     fn test_mem_mmr_add_eleven_values() {
-        let (executor, _, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
             let mut mmr: Mmr<Sha256> = Mmr::<Sha256>::new();
             let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
             let mut leaves: Vec<u64> = Vec::new();
@@ -529,8 +529,8 @@ pub(crate) mod tests {
     /// Test that the MMR validity check works as expected.
     #[test]
     fn test_mem_mmr_validity() {
-        let (executor, _, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
             let mut mmr: Mmr<Sha256> = Mmr::<Sha256>::new();
             let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
             let mut hasher = Sha256::default();
