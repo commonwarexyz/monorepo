@@ -1,4 +1,5 @@
 /// Criterion benchmark executor implementations.
+use crate::Runner;
 use criterion::async_executor::AsyncExecutor;
 use futures::Future;
 use std::any::Any;
@@ -39,108 +40,43 @@ fn clear_context() {
     });
 }
 
-/// Convenience module for tokio-specific executor
-pub mod tokio {
-    use crate::Runner;
-
-    use super::*;
-
-    /// Executor for the tokio runtime
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use criterion::{criterion_group, criterion_main, Criterion};
-    /// use commonware_runtime::criterion::{context, tokio::Executor};
-    /// use std::time::Duration;
-    ///
-    /// fn my_benchmark(c: &mut Criterion) {
-    ///     c.bench_function("sleep_benchmark", |b| {
-    ///         b.to_async(Executor).run(|| async {
-    ///             // Get the context
-    ///             let ctx = context::<commonware_runtime::tokio::Context>();
-    ///             // Use context features
-    ///             ctx.sleep(Duration::from_micros(10)).await;
-    ///         });
-    ///     });
-    /// }
-    /// ```
-    #[derive(Clone, Debug)]
-    pub struct Executor;
-
-    impl AsyncExecutor for Executor {
-        fn block_on<T>(&self, future: impl Future<Output = T>) -> T {
-            // Create and store our context
-            let (executor, context) = crate::tokio::Executor::default();
-            set_context(context);
-
-            // Run the future
-            let result = executor.start(future);
-
-            // Clean up
-            clear_context();
-
-            result
-        }
-    }
+/// Executor for the tokio runtime
+///
+/// # Example
+///
+/// ```rust
+/// use criterion::{criterion_group, criterion_main, Criterion};
+/// use commonware_runtime::criterion::{context, tokio::Executor};
+/// use std::time::Duration;
+///
+/// fn my_benchmark(c: &mut Criterion) {
+///     c.bench_function("sleep_benchmark", |b| {
+///         b.to_async(Executor).run(|| async {
+///             // Get the context
+///             let ctx = context::<commonware_runtime::tokio::Context>();
+///             // Use context features
+///             ctx.sleep(Duration::from_micros(10)).await;
+///         });
+///     });
+/// }
+/// ```
+#[derive(Clone)]
+pub struct Executor {
+    cfg: crate::tokio::Config,
 }
 
-/// Convenience module for deterministic-specific executor
-pub mod deterministic {
-    use crate::Runner;
+impl AsyncExecutor for Executor {
+    fn block_on<T>(&self, future: impl Future<Output = T>) -> T {
+        // Create and store our context
+        let (executor, context) = crate::tokio::Executor::init(self.cfg.clone());
+        set_context(context);
 
-    use super::*;
+        // Run the future
+        let result = executor.start(future);
 
-    /// Executor for the deterministic runtime
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use criterion::{criterion_group, criterion_main, Criterion};
-    /// use commonware_runtime::criterion::{context, deterministic::Executor};
-    /// use std::time::Duration;
-    ///
-    /// fn my_benchmark(c: &mut Criterion) {
-    ///     c.bench_function("sleep_benchmark", |b| {
-    ///         b.to_async(Executor::default()).run(|| async {
-    ///             // Get the context
-    ///             let ctx = context::<commonware_runtime::deterministic::Context>();
-    ///             // Use context features
-    ///             ctx.sleep(Duration::from_micros(10)).await;
-    ///         });
-    ///     });
-    /// }
-    /// ```
-    #[derive(Clone, Debug)]
-    pub struct Executor(pub u64);
+        // Clean up
+        clear_context();
 
-    impl Executor {
-        /// Create a new Executor with the specified seed
-        pub fn new(seed: u64) -> Self {
-            Self(seed)
-        }
-    }
-
-    impl Default for Executor {
-        fn default() -> Self {
-            Self(42)
-        }
-    }
-
-    impl AsyncExecutor for Executor {
-        fn block_on<T>(&self, future: impl Future<Output = T>) -> T {
-            // Create and store our context
-            let seed = self.0;
-            let (executor, context, _) = crate::deterministic::Executor::seeded(seed);
-            set_context(context);
-
-            // Run the future
-            let result = executor.start(future);
-
-            // Clean up
-            clear_context();
-
-            result
-        }
+        result
     }
 }
