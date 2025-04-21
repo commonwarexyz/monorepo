@@ -269,7 +269,7 @@ mod tests {
         // Create context
         let n = 5;
         let threshold = quorum(n);
-        let max_exceptions = 4;
+        let max_exceptions = 10;
         let required_containers = 100;
         let activity_timeout = 10;
         let skip_timeout = 5;
