@@ -546,20 +546,12 @@ enum WorkItem {
 /// task into the ready‑queue; that guarantees the executor spins a new
 /// iteration and polls the real root future right away.
 struct RootWaker {
-    tasks: Arc<Tasks>,
+    should_wake: Mutex<bool>,
 }
 
 impl ArcWake for RootWaker {
     fn wake_by_ref(arc_self: &Arc<Self>) {
-        // Dummy task – already `completed`, so it’s ignored as soon as it’s seen.
-        let dummy = Arc::new(Task {
-            id: u128::MAX, // sentinel
-            label: String::new(),
-            tasks: arc_self.tasks.clone(),
-            future: Mutex::new(Box::pin(async {})),
-            completed: Mutex::new(true),
-        });
-        arc_self.tasks.enqueue(dummy);
+        *arc_self.should_wake.lock().unwrap() = true;
     }
 }
 
@@ -577,8 +569,8 @@ impl crate::Runner for Runner {
         let mut root = Box::pin(f);
 
         // A waker for the root future
-        let root_waker_src = Arc::new(RootWaker {
-            tasks: self.executor.tasks.clone(),
+        let root_waker = Arc::new(RootWaker {
+            should_wake: Mutex::new(false),
         });
 
         // Process tasks until root task completes or progress stalls
@@ -626,7 +618,8 @@ impl crate::Runner for Runner {
                         trace!(id = 0, "processing task");
 
                         // Prepare task for polling
-                        let waker = waker_ref(&root_waker_src);
+                        *root_waker.should_wake.lock().unwrap() = false;
+                        let waker = waker_ref(&root_waker);
                         let mut cx = task::Context::from_waker(&waker);
 
                         // Record task poll
@@ -700,7 +693,7 @@ impl crate::Runner for Runner {
             trace!(now = current.epoch_millis(), "time advanced",);
 
             // Skip time if there is nothing to do
-            if self.executor.tasks.len() == 0 {
+            if self.executor.tasks.len() == 0 && !*root_waker.should_wake.lock().unwrap() {
                 let mut skip = None;
                 {
                     let sleeping = self.executor.sleeping.lock().unwrap();
