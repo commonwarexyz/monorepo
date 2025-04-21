@@ -170,16 +170,9 @@ impl Default for Config {
     }
 }
 
-/// Runtime based on [Tokio](https://tokio.rs).
-pub struct Executor {
-    cfg: Config,
-    registry: Mutex<Registry>,
-    metrics: Arc<Metrics>,
-}
-
-impl Executor {
+impl Context {
     /// Initialize a new `tokio` runtime with the given number of threads.
-    pub fn init(cfg: Config) -> (Runner, Context) {
+    pub fn new(cfg: Config) -> (Runner, Context) {
         // Create a new registry
         let mut registry = Registry::default();
         let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
@@ -211,17 +204,14 @@ impl Executor {
             runtime_registry,
         );
 
-        let executor = Arc::new(Self {
-            cfg,
-            registry: Mutex::new(registry),
-            metrics,
-        });
         (
             Runner { runtime },
             Context {
+                cfg,
+                registry: Arc::new(Mutex::new(registry)),
+                metrics,
                 storage,
                 spawner,
-                executor,
             },
         )
     }
@@ -230,7 +220,7 @@ impl Executor {
     // We'd love to implement the trait but we can't because of the return type.
     #[allow(clippy::should_implement_trait)]
     pub fn default() -> (Runner, Context) {
-        Self::init(Config::default())
+        Self::new(Config::default())
     }
 }
 
@@ -254,9 +244,11 @@ impl crate::Runner for Runner {
 /// runtime.
 #[derive(Clone)]
 pub struct Context {
+    cfg: Config,
     spawner: Spawner,
-    executor: Arc<Executor>,
     storage: Storage<TokioStorage>,
+    registry: Arc<Mutex<Registry>>,
+    metrics: Arc<Metrics>,
 }
 
 #[derive(Clone)]
@@ -495,7 +487,9 @@ impl crate::Metrics for Context {
         );
         Self {
             spawner: self.spawner.with_label(label),
-            executor: self.executor.clone(),
+            cfg: self.cfg.clone(),
+            registry: self.registry.clone(),
+            metrics: self.metrics.clone(),
             storage: self.storage.clone(),
         }
     }
@@ -514,8 +508,7 @@ impl crate::Metrics for Context {
                 format!("{}_{}", *prefix, name)
             }
         };
-        self.executor
-            .registry
+        self.registry
             .lock()
             .unwrap()
             .register(prefixed_name, help, metric)
@@ -523,7 +516,7 @@ impl crate::Metrics for Context {
 
     fn encode(&self) -> String {
         let mut buffer = String::new();
-        encode(&mut buffer, &self.executor.registry.lock().unwrap()).expect("encoding failed");
+        encode(&mut buffer, &self.registry.lock().unwrap()).expect("encoding failed");
         buffer
     }
 }
@@ -574,10 +567,10 @@ impl crate::Network<Listener, Sink, Stream> for Context {
         let stream = TcpStream::connect(socket)
             .await
             .map_err(|_| Error::ConnectionFailed)?;
-        self.executor.metrics.outbound_connections.inc();
+        self.metrics.outbound_connections.inc();
 
         // Set TCP_NODELAY if configured
-        if let Some(tcp_nodelay) = self.executor.cfg.tcp_nodelay {
+        if let Some(tcp_nodelay) = self.cfg.tcp_nodelay {
             if let Err(err) = stream.set_nodelay(tcp_nodelay) {
                 warn!(?err, "failed to set TCP_NODELAY");
             }
@@ -606,10 +599,10 @@ impl crate::Listener<Sink, Stream> for Listener {
     async fn accept(&mut self) -> Result<(SocketAddr, Sink, Stream), Error> {
         // Accept a new TCP stream
         let (stream, addr) = self.listener.accept().await.map_err(|_| Error::Closed)?;
-        self.context.executor.metrics.inbound_connections.inc();
+        self.context.metrics.inbound_connections.inc();
 
         // Set TCP_NODELAY if configured
-        if let Some(tcp_nodelay) = self.context.executor.cfg.tcp_nodelay {
+        if let Some(tcp_nodelay) = self.context.cfg.tcp_nodelay {
             if let Err(err) = stream.set_nodelay(tcp_nodelay) {
                 warn!(?err, "failed to set TCP_NODELAY");
             }
@@ -652,18 +645,11 @@ pub struct Sink {
 impl crate::Sink for Sink {
     async fn send(&mut self, msg: &[u8]) -> Result<(), Error> {
         let len = msg.len();
-        timeout(
-            self.context.executor.cfg.write_timeout,
-            self.sink.write_all(msg),
-        )
-        .await
-        .map_err(|_| Error::Timeout)?
-        .map_err(|_| Error::SendFailed)?;
-        self.context
-            .executor
-            .metrics
-            .outbound_bandwidth
-            .inc_by(len as u64);
+        timeout(self.context.cfg.write_timeout, self.sink.write_all(msg))
+            .await
+            .map_err(|_| Error::Timeout)?
+            .map_err(|_| Error::SendFailed)?;
+        self.context.metrics.outbound_bandwidth.inc_by(len as u64);
         Ok(())
     }
 }
@@ -677,17 +663,13 @@ pub struct Stream {
 impl crate::Stream for Stream {
     async fn recv(&mut self, buf: &mut [u8]) -> Result<(), Error> {
         // Wait for the stream to be readable
-        timeout(
-            self.context.executor.cfg.read_timeout,
-            self.stream.read_exact(buf),
-        )
-        .await
-        .map_err(|_| Error::Timeout)?
-        .map_err(|_| Error::RecvFailed)?;
+        timeout(self.context.cfg.read_timeout, self.stream.read_exact(buf))
+            .await
+            .map_err(|_| Error::Timeout)?
+            .map_err(|_| Error::RecvFailed)?;
 
         // Record metrics
         self.context
-            .executor
             .metrics
             .inbound_bandwidth
             .inc_by(buf.len() as u64);

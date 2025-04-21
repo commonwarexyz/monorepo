@@ -62,10 +62,10 @@ fn main() {
         worker_threads: config.worker_threads,
         ..Default::default()
     };
-    let (executor, context) = tokio::Executor::init(cfg);
+    let (runner, context) = tokio::Context::new(cfg);
 
     // Start runtime
-    executor.start(async move {
+    runner.start(async move {
         // Configure telemetry
         tokio::telemetry::init(
             context.with_label("telemetry"),
