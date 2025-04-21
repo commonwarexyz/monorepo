@@ -803,7 +803,7 @@ impl Context {
         )
     }
 
-    fn auditor(&self) -> &Auditor {
+    pub fn auditor(&self) -> &Auditor {
         &self.executor.auditor
     }
 }
@@ -1415,16 +1415,14 @@ mod tests {
         let data = b"Hello, world!".to_vec();
 
         // Run some tasks and sync storage
-        executor1.start(|context| async move {
+        let state1 = executor1.start(|context| async move {
             let context = context.clone();
             let data = data.clone();
-            async move {
-                let blob = context.open(partition, name).await.unwrap();
-                blob.write_at(&data, 0).await.unwrap();
-                blob.sync().await.unwrap();
-            }
+            let blob = context.open(partition, name).await.unwrap();
+            blob.write_at(&data, 0).await.unwrap();
+            blob.sync().await.unwrap();
+            context.auditor().state()
         });
-        let state1 = auditor1.state();
 
         // Recover the runtime
         let (executor2, context2, auditor2) = context1.recover();

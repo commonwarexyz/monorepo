@@ -226,7 +226,7 @@ mod tests {
             for _ in 0..size {
                 results.push(seen_receiver.next().await.unwrap());
             }
-            (auditor.state(), results)
+            (context.auditor().state(), results)
         })
     }
 
