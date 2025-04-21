@@ -32,11 +32,11 @@ cfg_if::cfg_if! {
         pub mod tokio;
     }
 }
-pub mod benchmarking;
+pub mod benchmarks;
 mod storage;
 pub mod telemetry;
 mod utils;
-pub use utils::{create_rayon_pool, reschedule, Handle, Signal, Signaler};
+pub use utils::{create_pool, reschedule, Handle, Signal, Signaler};
 
 /// Prefix for runtime metrics.
 const METRICS_PREFIX: &str = "runtime";
