@@ -100,7 +100,7 @@ const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_VRF_";
 fn main() {
     // Initialize context
     let runtime_cfg = tokio::Config::default();
-    let (executor, context) = Executor::init(runtime_cfg.clone());
+    let executor = Executor::new(runtime_cfg.clone());
 
     // Parse arguments
     let matches = Command::new("commonware-vrf")
@@ -220,7 +220,7 @@ fn main() {
     );
 
     // Start context
-    executor.start(async move {
+    executor.start(|context| async move {
         let (mut network, mut oracle) = Network::new(context.with_label("network"), p2p_cfg);
 
         // Provide authorized peers

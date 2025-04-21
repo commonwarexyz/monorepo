@@ -125,8 +125,8 @@ fn main() {
     }
 
     // Create context
-    let (executor, context) = Executor::default();
-    executor.start(async move {
+    let executor = Executor::default();
+    executor.start(|context| async move {
         // Create message handler
         let (handler, mut receiver) = mpsc::unbounded();
 

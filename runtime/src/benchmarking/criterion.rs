@@ -68,11 +68,11 @@ pub struct Executor {
 impl AsyncExecutor for Executor {
     fn block_on<T>(&self, future: impl Future<Output = T>) -> T {
         // Create and store our context
-        let (executor, context) = crate::tokio::Executor::init(self.cfg.clone());
-        set_context(context);
+        let executor = crate::tokio::Executor::new(self.cfg.clone());
+        // set_context(context); TODO danlaine: fix this
 
         // Run the future
-        let result = executor.start(future);
+        let result = executor.start(|_| future); // TODO danlaine: double check this
 
         // Clean up
         clear_context();

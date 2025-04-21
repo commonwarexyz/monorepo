@@ -31,7 +31,7 @@ use commonware_utils::{hex, SystemTimeExt};
 use futures::{
     channel::mpsc,
     task::{waker_ref, ArcWake},
-    SinkExt, StreamExt,
+    Future, SinkExt, StreamExt,
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
@@ -43,7 +43,6 @@ use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BinaryHeap, HashMap},
-    future::Future,
     mem::replace,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     ops::Range,
@@ -456,50 +455,6 @@ impl Runner {
         }
 
         Runner { cfg }
-
-        // // Create a new registry
-        // let mut registry = Registry::default();
-        // let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
-
-        // Initialize runtime
-        // let metrics = Arc::new(Metrics::init(runtime_registry));
-        // let auditor = Arc::new(Auditor::default());
-        // let start_time = UNIX_EPOCH;
-        // let deadline = cfg
-        //     .timeout
-        //     .map(|timeout| start_time.checked_add(timeout).expect("timeout overflowed"));
-        // let (signaler, signal) = Signaler::new();
-        // let storage = MeteredStorage::new(
-        //     AuditedStorage::new(MemStorage::default(), auditor.clone()),
-        //     runtime_registry,
-        // );
-        // let executor = Arc::new(Self {
-        //     registry: Mutex::new(registry),
-        //     cycle: cfg.cycle,
-        //     deadline,
-        //     metrics: metrics.clone(),
-        //     auditor: auditor.clone(),
-        //     rng: Mutex::new(StdRng::seed_from_u64(cfg.seed)),
-        //     time: Mutex::new(start_time),
-        //     tasks: Arc::new(Tasks {
-        //         queue: Mutex::new(Vec::new()),
-        //         counter: Mutex::new(1), // Reserve 0 for the root task
-        //     }),
-        //     sleeping: Mutex::new(BinaryHeap::new()),
-        //     partitions: Mutex::new(HashMap::new()),
-        //     signaler: Mutex::new(signaler),
-        //     signal,
-        //     finished: Mutex::new(false),
-        //     recovered: Mutex::new(false),
-        // });
-        // TODO danlaine: remove
-        // Context {
-        //     label: String::new(),
-        //     spawned: false,
-        //     executor,
-        //     networking: Arc::new(Networking::new(metrics, auditor.clone())),
-        //     storage,
-        // },
     }
 
     /// Initialize a new `deterministic` runtime with the default configuration
@@ -587,13 +542,13 @@ impl crate::Runner for Runner {
         let context = Context {
             label: String::new(),
             spawned: false,
-            executor,
+            executor: executor.clone(),
             networking: Arc::new(Networking::new(metrics, auditor.clone())),
             storage,
         };
 
-        // Pin root task to the heap
-        let mut root = Box::pin(f);
+        // Call f with the context to get the future, then pin it
+        let mut root = Box::pin(f(context));
 
         // Process tasks until root task completes or progress stalls
         let mut iter = 0;

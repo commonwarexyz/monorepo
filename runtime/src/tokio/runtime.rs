@@ -182,53 +182,52 @@ pub struct Executor {
 
 impl Executor {
     /// Initialize a new `tokio` runtime with the given number of threads.
-    pub fn init(cfg: Config) -> (Runner, Context) {
+    pub fn new(cfg: Config) -> Runner {
+        Runner { cfg }
+
         // Create a new registry
-        let mut registry = Registry::default();
-        let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
+        // let mut registry = Registry::default();
+        // let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
 
-        // Initialize runtime
-        let metrics = Arc::new(Metrics::init(runtime_registry));
-        let runtime = Builder::new_multi_thread()
-            .worker_threads(cfg.worker_threads)
-            .max_blocking_threads(cfg.max_blocking_threads)
-            .enable_all()
-            .build()
-            .expect("failed to create Tokio runtime");
-        let (signaler, signal) = Signaler::new();
+        // // Initialize runtime
+        // let metrics = Arc::new(Metrics::init(runtime_registry));
+        // let runtime = Builder::new_multi_thread()
+        //     .worker_threads(cfg.worker_threads)
+        //     .max_blocking_threads(cfg.max_blocking_threads)
+        //     .enable_all()
+        //     .build()
+        //     .expect("failed to create Tokio runtime");
+        // let (signaler, signal) = Signaler::new();
 
-        let storage = Storage::new(
-            TokioStorage::new(TokioStorageConfig::new(
-                cfg.storage_directory.clone(),
-                cfg.maximum_buffer_size,
-            )),
-            runtime_registry,
-        );
+        // let storage = Storage::new(
+        //     TokioStorage::new(TokioStorageConfig::new(
+        //         cfg.storage_directory.clone(),
+        //         cfg.maximum_buffer_size,
+        //     )),
+        //     runtime_registry,
+        // );
 
-        let executor = Arc::new(Self {
-            cfg: cfg.clone(),
-            registry: Mutex::new(registry),
-            metrics,
-            runtime,
-            signaler: Mutex::new(signaler),
-            signal,
-        });
-        (
-            Runner { cfg },
-            Context {
-                storage,
-                label: String::new(),
-                spawned: false,
-                executor,
-            },
-        )
+        // let executor = Arc::new(Self {
+        //     cfg: cfg.clone(),
+        //     registry: Mutex::new(registry),
+        //     metrics,
+        //     runtime,
+        //     signaler: Mutex::new(signaler),
+        //     signal,
+        // });
+        // Context {
+        //     storage,
+        //     label: String::new(),
+        //     spawned: false,
+        //     executor,
+        // },
     }
 
     /// Initialize a new `tokio` runtime with default configuration.
     // We'd love to implement the trait but we can't because of the return type.
     #[allow(clippy::should_implement_trait)]
-    pub fn default() -> (Runner, Context) {
-        Self::init(Config::default())
+    pub fn default() -> Runner {
+        Self::new(Config::default())
     }
 }
 

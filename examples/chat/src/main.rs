@@ -73,7 +73,7 @@ const APPLICATION_NAMESPACE: &[u8] = b"commonware-chat";
 #[doc(hidden)]
 fn main() {
     // Initialize context
-    let (executor, context) = Executor::default();
+    let executor = Executor::default();
 
     // Parse arguments
     let matches = Command::new("commonware-chat")
@@ -160,7 +160,7 @@ fn main() {
     );
 
     // Start context
-    executor.start(async move {
+    executor.start(|context| async move {
         // Initialize network
         let (mut network, mut oracle) = Network::new(context.with_label("network"), p2p_cfg);
 
