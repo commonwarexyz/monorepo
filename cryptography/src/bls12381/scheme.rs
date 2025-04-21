@@ -23,9 +23,11 @@ use super::primitives::{
     group::{self, Element, Scalar},
     ops,
 };
-use crate::{Array, Error, Signer, Specification, Verifier};
+use crate::{Array, Signer, Specification, Verifier};
 use bytes::{Buf, BufMut};
-use commonware_codec::{DecodeExt, EncodeFixed, Error as CodecError, FixedSize, Read, Write};
+use commonware_codec::{
+    DecodeExt, EncodeFixed, Error as CodecError, FixedSize, Read, ReadExt, Write,
+};
 use commonware_utils::hex;
 use rand::{CryptoRng, Rng};
 use std::{
@@ -108,7 +110,10 @@ impl Write for PrivateKey {
 
 impl Read for PrivateKey {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
+        let raw = <[u8; Self::SIZE]>::read(buf)?;
+        let key = group::Private::decode(raw.as_ref())
+            .map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
+        Ok(Self { raw, key })
     }
 }
 
@@ -116,9 +121,7 @@ impl FixedSize for PrivateKey {
     const SIZE: usize = group::PRIVATE_KEY_LENGTH;
 }
 
-impl Array for PrivateKey {
-    type Error = Error;
-}
+impl Array for PrivateKey {}
 
 impl Hash for PrivateKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
@@ -158,31 +161,6 @@ impl From<Scalar> for PrivateKey {
     }
 }
 
-impl TryFrom<&[u8]> for PrivateKey {
-    type Error = Error;
-    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        let raw: [u8; group::PRIVATE_KEY_LENGTH] = value
-            .try_into()
-            .map_err(|_| Error::InvalidPrivateKeyLength)?;
-        let key = Scalar::decode(value).map_err(|_| Error::InvalidPrivateKey)?;
-        Ok(Self { raw, key })
-    }
-}
-
-impl TryFrom<&Vec<u8>> for PrivateKey {
-    type Error = Error;
-    fn try_from(value: &Vec<u8>) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_slice())
-    }
-}
-
-impl TryFrom<Vec<u8>> for PrivateKey {
-    type Error = Error;
-    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_slice())
-    }
-}
-
 impl Debug for PrivateKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", hex(&self.raw))
@@ -210,7 +188,10 @@ impl Write for PublicKey {
 
 impl Read for PublicKey {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
+        let raw = <[u8; Self::SIZE]>::read(buf)?;
+        let key = group::Public::decode(raw.as_ref())
+            .map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
+        Ok(Self { raw, key })
     }
 }
 
@@ -218,9 +199,7 @@ impl FixedSize for PublicKey {
     const SIZE: usize = group::PUBLIC_KEY_LENGTH;
 }
 
-impl Array for PublicKey {
-    type Error = Error;
-}
+impl Array for PublicKey {}
 
 impl Hash for PublicKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
@@ -260,31 +239,6 @@ impl From<group::Public> for PublicKey {
     }
 }
 
-impl TryFrom<&[u8]> for PublicKey {
-    type Error = Error;
-    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        let raw: [u8; group::PUBLIC_KEY_LENGTH] = value
-            .try_into()
-            .map_err(|_| Error::InvalidPublicKeyLength)?;
-        let key = group::Public::decode(value).map_err(|_| Error::InvalidPublicKey)?;
-        Ok(Self { raw, key })
-    }
-}
-
-impl TryFrom<&Vec<u8>> for PublicKey {
-    type Error = Error;
-    fn try_from(value: &Vec<u8>) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_slice())
-    }
-}
-
-impl TryFrom<Vec<u8>> for PublicKey {
-    type Error = Error;
-    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_slice())
-    }
-}
-
 impl Debug for PublicKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", hex(&self.raw))
@@ -312,7 +266,10 @@ impl Write for Signature {
 
 impl Read for Signature {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
+        let raw = <[u8; Self::SIZE]>::read(buf)?;
+        let signature = group::Signature::decode(raw.as_ref())
+            .map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
+        Ok(Self { raw, signature })
     }
 }
 
@@ -320,9 +277,7 @@ impl FixedSize for Signature {
     const SIZE: usize = group::SIGNATURE_LENGTH;
 }
 
-impl Array for Signature {
-    type Error = Error;
-}
+impl Array for Signature {}
 
 impl Hash for Signature {
     fn hash<H: Hasher>(&self, state: &mut H) {
@@ -359,31 +314,6 @@ impl From<group::Signature> for Signature {
     fn from(signature: group::Signature) -> Self {
         let raw = signature.encode_fixed();
         Self { raw, signature }
-    }
-}
-
-impl TryFrom<&[u8]> for Signature {
-    type Error = Error;
-    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        let raw: [u8; group::SIGNATURE_LENGTH] = value
-            .try_into()
-            .map_err(|_| Error::InvalidSignatureLength)?;
-        let signature = group::Signature::decode(value).map_err(|_| Error::InvalidSignature)?;
-        Ok(Self { raw, signature })
-    }
-}
-
-impl TryFrom<&Vec<u8>> for Signature {
-    type Error = Error;
-    fn try_from(value: &Vec<u8>) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_slice())
-    }
-}
-
-impl TryFrom<Vec<u8>> for Signature {
-    type Error = Error;
-    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_slice())
     }
 }
 
@@ -527,14 +457,26 @@ mod tests {
         )
     }
 
-    fn parse_private_key(private_key: &str) -> Result<PrivateKey, Error> {
-        PrivateKey::try_from(commonware_utils::from_hex_formatted(private_key).unwrap())
+    fn parse_private_key(private_key: &str) -> Result<PrivateKey, CodecError> {
+        PrivateKey::decode(
+            commonware_utils::from_hex_formatted(private_key)
+                .unwrap()
+                .as_ref(),
+        )
     }
-    fn parse_public_key(public_key: &str) -> Result<PublicKey, Error> {
-        PublicKey::try_from(commonware_utils::from_hex_formatted(public_key).unwrap())
+    fn parse_public_key(public_key: &str) -> Result<PublicKey, CodecError> {
+        PublicKey::decode(
+            commonware_utils::from_hex_formatted(public_key)
+                .unwrap()
+                .as_ref(),
+        )
     }
-    fn parse_signature(signature: &str) -> Result<Signature, Error> {
-        Signature::try_from(commonware_utils::from_hex_formatted(signature).unwrap())
+    fn parse_signature(signature: &str) -> Result<Signature, CodecError> {
+        Signature::decode(
+            commonware_utils::from_hex_formatted(signature)
+                .unwrap()
+                .as_ref(),
+        )
     }
 
     // sign_case_8cd3d4d0d9a5b265
@@ -623,7 +565,11 @@ mod tests {
         public_key: &str,
         msg: &str,
         signature: &str,
-    ) -> (Result<PublicKey, Error>, Vec<u8>, Result<Signature, Error>) {
+    ) -> (
+        Result<PublicKey, CodecError>,
+        Vec<u8>,
+        Result<Signature, CodecError>,
+    ) {
         (
             parse_public_key(public_key),
             commonware_utils::from_hex_formatted(msg).unwrap(),
@@ -633,9 +579,9 @@ mod tests {
 
     // verify_infinity_pubkey_and_infinity_signature
     fn vector_verify_1() -> (
-        Result<PublicKey, Error>,
+        Result<PublicKey, CodecError>,
         Vec<u8>,
-        Result<Signature, Error>,
+        Result<Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -648,9 +594,9 @@ mod tests {
 
     // verify_tampered_signature_case_2ea479adf8c40300
     fn vector_verify_2() -> (
-        Result<PublicKey, Error>,
+        Result<PublicKey, CodecError>,
         Vec<u8>,
-        Result<Signature, Error>,
+        Result<Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -663,9 +609,9 @@ mod tests {
 
     // verify_tampered_signature_case_2f09d443ab8a3ac2
     fn vector_verify_3() -> (
-        Result<PublicKey, Error>,
+        Result<PublicKey, CodecError>,
         Vec<u8>,
-        Result<Signature, Error>,
+        Result<Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -678,9 +624,9 @@ mod tests {
 
     // verify_tampered_signature_case_6b3b17f6962a490c
     fn vector_verify_4() -> (
-        Result<PublicKey, Error>,
+        Result<PublicKey, CodecError>,
         Vec<u8>,
-        Result<Signature, Error>,
+        Result<Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -693,9 +639,9 @@ mod tests {
 
     // verify_tampered_signature_case_6eeb7c52dfd9baf0
     fn vector_verify_5() -> (
-        Result<PublicKey, Error>,
+        Result<PublicKey, CodecError>,
         Vec<u8>,
-        Result<Signature, Error>,
+        Result<Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -708,9 +654,9 @@ mod tests {
 
     // verify_tampered_signature_case_8761a0b7e920c323
     fn vector_verify_6() -> (
-        Result<PublicKey, Error>,
+        Result<PublicKey, CodecError>,
         Vec<u8>,
-        Result<Signature, Error>,
+        Result<Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -723,9 +669,9 @@ mod tests {
 
     // verify_tampered_signature_case_195246ee3bd3b6ec
     fn vector_verify_7() -> (
-        Result<PublicKey, Error>,
+        Result<PublicKey, CodecError>,
         Vec<u8>,
-        Result<Signature, Error>,
+        Result<Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -738,9 +684,9 @@ mod tests {
 
     // verify_tampered_signature_case_3208262581c8fc09
     fn vector_verify_8() -> (
-        Result<PublicKey, Error>,
+        Result<PublicKey, CodecError>,
         Vec<u8>,
-        Result<Signature, Error>,
+        Result<Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -753,9 +699,9 @@ mod tests {
 
     // verify_tampered_signature_case_d34885d766d5f705
     fn vector_verify_9() -> (
-        Result<PublicKey, Error>,
+        Result<PublicKey, CodecError>,
         Vec<u8>,
-        Result<Signature, Error>,
+        Result<Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -768,9 +714,9 @@ mod tests {
 
     // verify_tampered_signature_case_e8a50c445c855360
     fn vector_verify_10() -> (
-        Result<PublicKey, Error>,
+        Result<PublicKey, CodecError>,
         Vec<u8>,
-        Result<Signature, Error>,
+        Result<Signature, CodecError>,
         bool,
     ) {
         let v= parse_verify_vector(
@@ -783,9 +729,9 @@ mod tests {
 
     // verify_valid_case_2ea479adf8c40300
     fn vector_verify_11() -> (
-        Result<PublicKey, Error>,
+        Result<PublicKey, CodecError>,
         Vec<u8>,
-        Result<Signature, Error>,
+        Result<Signature, CodecError>,
         bool,
     ) {
         let v= parse_verify_vector(
@@ -798,9 +744,9 @@ mod tests {
 
     // verify_valid_case_2f09d443ab8a3ac2
     fn vector_verify_12() -> (
-        Result<PublicKey, Error>,
+        Result<PublicKey, CodecError>,
         Vec<u8>,
-        Result<Signature, Error>,
+        Result<Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -813,9 +759,9 @@ mod tests {
 
     // verify_valid_case_6b3b17f6962a490c
     fn vector_verify_13() -> (
-        Result<PublicKey, Error>,
+        Result<PublicKey, CodecError>,
         Vec<u8>,
-        Result<Signature, Error>,
+        Result<Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -828,9 +774,9 @@ mod tests {
 
     // verify_valid_case_6eeb7c52dfd9baf0
     fn vector_verify_14() -> (
-        Result<PublicKey, Error>,
+        Result<PublicKey, CodecError>,
         Vec<u8>,
-        Result<Signature, Error>,
+        Result<Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -843,9 +789,9 @@ mod tests {
 
     // verify_valid_case_8761a0b7e920c323
     fn vector_verify_15() -> (
-        Result<PublicKey, Error>,
+        Result<PublicKey, CodecError>,
         Vec<u8>,
-        Result<Signature, Error>,
+        Result<Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -858,9 +804,9 @@ mod tests {
 
     // verify_valid_case_195246ee3bd3b6ec
     fn vector_verify_16() -> (
-        Result<PublicKey, Error>,
+        Result<PublicKey, CodecError>,
         Vec<u8>,
-        Result<Signature, Error>,
+        Result<Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -873,9 +819,9 @@ mod tests {
 
     // verify_valid_case_3208262581c8fc09
     fn vector_verify_17() -> (
-        Result<PublicKey, Error>,
+        Result<PublicKey, CodecError>,
         Vec<u8>,
-        Result<Signature, Error>,
+        Result<Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -888,9 +834,9 @@ mod tests {
 
     // verify_valid_case_d34885d766d5f705
     fn vector_verify_18() -> (
-        Result<PublicKey, Error>,
+        Result<PublicKey, CodecError>,
         Vec<u8>,
-        Result<Signature, Error>,
+        Result<Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -903,9 +849,9 @@ mod tests {
 
     // verify_valid_case_e8a50c445c855360
     fn vector_verify_19() -> (
-        Result<PublicKey, Error>,
+        Result<PublicKey, CodecError>,
         Vec<u8>,
-        Result<Signature, Error>,
+        Result<Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -918,9 +864,9 @@ mod tests {
 
     // verify_wrong_pubkey_case_2ea479adf8c40300
     fn vector_verify_20() -> (
-        Result<PublicKey, Error>,
+        Result<PublicKey, CodecError>,
         Vec<u8>,
-        Result<Signature, Error>,
+        Result<Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -933,9 +879,9 @@ mod tests {
 
     // verify_wrong_pubkey_case_2f09d443ab8a3ac2
     fn vector_verify_21() -> (
-        Result<PublicKey, Error>,
+        Result<PublicKey, CodecError>,
         Vec<u8>,
-        Result<Signature, Error>,
+        Result<Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -948,9 +894,9 @@ mod tests {
 
     // verify_wrong_pubkey_case_6b3b17f6962a490c
     fn vector_verify_22() -> (
-        Result<PublicKey, Error>,
+        Result<PublicKey, CodecError>,
         Vec<u8>,
-        Result<Signature, Error>,
+        Result<Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -963,9 +909,9 @@ mod tests {
 
     // verify_wrong_pubkey_case_6eeb7c52dfd9baf0
     fn vector_verify_23() -> (
-        Result<PublicKey, Error>,
+        Result<PublicKey, CodecError>,
         Vec<u8>,
-        Result<Signature, Error>,
+        Result<Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -978,9 +924,9 @@ mod tests {
 
     // verify_wrong_pubkey_case_8761a0b7e920c323
     fn vector_verify_24() -> (
-        Result<PublicKey, Error>,
+        Result<PublicKey, CodecError>,
         Vec<u8>,
-        Result<Signature, Error>,
+        Result<Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -993,9 +939,9 @@ mod tests {
 
     // verify_wrong_pubkey_case_195246ee3bd3b6ec
     fn vector_verify_25() -> (
-        Result<PublicKey, Error>,
+        Result<PublicKey, CodecError>,
         Vec<u8>,
-        Result<Signature, Error>,
+        Result<Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -1008,9 +954,9 @@ mod tests {
 
     // verify_wrong_pubkey_case_3208262581c8fc09
     fn vector_verify_26() -> (
-        Result<PublicKey, Error>,
+        Result<PublicKey, CodecError>,
         Vec<u8>,
-        Result<Signature, Error>,
+        Result<Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -1023,9 +969,9 @@ mod tests {
 
     // verify_wrong_pubkey_case_d34885d766d5f705
     fn vector_verify_27() -> (
-        Result<PublicKey, Error>,
+        Result<PublicKey, CodecError>,
         Vec<u8>,
-        Result<Signature, Error>,
+        Result<Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -1038,9 +984,9 @@ mod tests {
 
     // verify_wrong_pubkey_case_e8a50c445c855360
     fn vector_verify_28() -> (
-        Result<PublicKey, Error>,
+        Result<PublicKey, CodecError>,
         Vec<u8>,
-        Result<Signature, Error>,
+        Result<Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -1053,9 +999,9 @@ mod tests {
 
     // verifycase_one_privkey_47117849458281be
     fn vector_verify_29() -> (
-        Result<PublicKey, Error>,
+        Result<PublicKey, CodecError>,
         Vec<u8>,
-        Result<Signature, Error>,
+        Result<Signature, CodecError>,
         bool,
     ) {
         let v= parse_verify_vector(

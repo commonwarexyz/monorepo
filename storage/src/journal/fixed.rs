@@ -50,7 +50,7 @@
 
 use super::Error;
 use bytes::BufMut;
-use commonware_codec::FixedSize;
+use commonware_codec::{DecodeExt, FixedSize};
 use commonware_runtime::{Blob, Error as RError, Metrics, Storage};
 use commonware_utils::{hex, Array};
 use futures::stream::{self, Stream, StreamExt};
@@ -322,7 +322,7 @@ impl<E: Storage + Metrics, A: Array> Journal<E, A> {
         if checksum != stored_checksum {
             return Err(Error::ChecksumMismatch(stored_checksum, checksum));
         }
-        Ok(buf[..A::SIZE].try_into().unwrap())
+        Ok(A::decode(&buf[..A::SIZE]).unwrap())
     }
 
     /// Returns an unordered stream of all items in the journal.

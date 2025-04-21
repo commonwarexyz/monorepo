@@ -1046,6 +1046,7 @@ name = "commonware-flood"
 version = "0.0.44"
 dependencies = [
  "clap",
+ "commonware-codec",
  "commonware-cryptography",
  "commonware-deployer",
  "commonware-p2p",

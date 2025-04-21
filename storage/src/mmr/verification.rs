@@ -8,9 +8,8 @@ use crate::mmr::{
     Error::*,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::FixedSize;
+use commonware_codec::{FixedSize, ReadExt};
 use commonware_cryptography::{Digest, Hasher as CHasher};
-use commonware_utils::Array;
 use futures::future::try_join_all;
 use std::future::Future;
 use tracing::debug;
@@ -197,7 +196,7 @@ impl<H: CHasher> Proof<H> {
         }
         let mut hashes = Vec::with_capacity(hashes_len);
         for _ in 0..hashes_len {
-            let digest = H::Digest::read_from(&mut buf).ok()?;
+            let digest = H::Digest::read(&mut buf).ok()?;
             hashes.push(digest);
         }
         Some(Self { size, hashes })

@@ -16,6 +16,7 @@ use crate::mmr::{
     Error,
 };
 use bytes::Bytes;
+use commonware_codec::DecodeExt;
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::array::prefixed_u64::U64;
@@ -212,7 +213,7 @@ impl<E: RStorage + Clock + Metrics, H: Hasher> Mmr<E, H> {
     ) -> Result<H::Digest, Error> {
         if let Some(bytes) = metadata.get(&U64::new(0, pos)) {
             debug!(pos, "read node from metadata");
-            let digest = H::Digest::try_from(bytes.as_ref());
+            let digest = H::Digest::decode(bytes.as_ref());
             let Ok(digest) = digest else {
                 error!(
                     pos,
