@@ -802,6 +802,10 @@ impl Context {
             auditor,
         )
     }
+
+    fn auditor(&self) -> &Auditor {
+        &self.executor.auditor
+    }
 }
 
 impl Clone for Context {
@@ -1309,7 +1313,7 @@ mod tests {
     use futures::task::noop_waker;
 
     fn run_with_seed(seed: u64) -> (String, Vec<usize>) {
-        let executor = Runner::seeded(seed);
+        let executor = deterministic::Runner::seeded(seed);
         let messages = run_tasks(5, executor);
         (auditor.state(), messages)
     }

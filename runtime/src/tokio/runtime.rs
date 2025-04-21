@@ -195,43 +195,6 @@ impl Runner {
     /// Initialize a new `tokio` runtime with the given number of threads.
     pub fn new(cfg: Config) -> Self {
         Self { cfg }
-
-        // Create a new registry
-        // let mut registry = Registry::default();
-        // let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
-
-        // // Initialize runtime
-        // let metrics = Arc::new(Metrics::init(runtime_registry));
-        // let runtime = Builder::new_multi_thread()
-        //     .worker_threads(cfg.worker_threads)
-        //     .max_blocking_threads(cfg.max_blocking_threads)
-        //     .enable_all()
-        //     .build()
-        //     .expect("failed to create Tokio runtime");
-        // let (signaler, signal) = Signaler::new();
-
-        // let storage = Storage::new(
-        //     TokioStorage::new(TokioStorageConfig::new(
-        //         cfg.storage_directory.clone(),
-        //         cfg.maximum_buffer_size,
-        //     )),
-        //     runtime_registry,
-        // );
-
-        // let executor = Arc::new(Self {
-        //     cfg: cfg.clone(),
-        //     registry: Mutex::new(registry),
-        //     metrics,
-        //     runtime,
-        //     signaler: Mutex::new(signaler),
-        //     signal,
-        // });
-        // Context {
-        //     storage,
-        //     label: String::new(),
-        //     spawned: false,
-        //     executor,
-        // },
     }
 }
 
