@@ -160,8 +160,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher> Any<E, K, V,
         let mut snapshot: Index<EightCap, u64> =
             Index::init(context.with_label("snapshot"), EightCap);
         let mut inactivity_floor_loc = 0;
-        let oldest_retained_pos = mmr.oldest_retained_pos().unwrap_or(mmr.size());
-        let start_leaf_num = leaf_pos_to_num(oldest_retained_pos).unwrap();
+        let pruned_to_pos = mmr.pruned_to_pos();
+        let start_leaf_num = leaf_pos_to_num(pruned_to_pos).unwrap();
 
         for i in start_leaf_num..log_size {
             let op: Operation<K, V> = log.read(i).await?;
@@ -811,7 +811,7 @@ mod test {
             // retained op to tip.
             let max_ops = 4;
             let end_loc = db.op_count();
-            let start_pos = db.ops.oldest_retained_pos().unwrap_or(db.ops.size());
+            let start_pos = db.ops.pruned_to_pos();
             let start_loc = leaf_pos_to_num(start_pos).unwrap();
             // Raise the inactivity floor and make sure historical inactive operations are still provable.
             db.raise_inactivity_floor(&mut hasher, 100).await.unwrap();
