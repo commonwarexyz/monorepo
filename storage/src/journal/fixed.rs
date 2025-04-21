@@ -823,7 +823,7 @@ mod tests {
             journal.close().await.expect("Failed to close journal");
 
             // Delete the last blob to simulate a sync() that wrote the last blob at the point it
-            // was entirely full, but a crash happened before the next epty blob could be created.
+            // was entirely full, but a crash happened before the next empty blob could be created.
             context
                 .remove(&cfg.partition, Some(&1u64.to_be_bytes()))
                 .await
