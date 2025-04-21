@@ -321,6 +321,7 @@ mod tests {
     use super::*;
     use crate::{Receiver as _, Sender as _};
     use commonware_cryptography::{Ed25519, Signer};
+    use commonware_macros::test_traced;
     use commonware_runtime::{deterministic::Executor, mocks, Metrics, Runner};
     use std::time::Duration;
 
@@ -455,7 +456,8 @@ mod tests {
             }
         });
     }
-    #[test]
+
+    #[test_traced("TRACE")]
     fn test_full_connection_establishment_and_exchange() {
         let (executor, context, _) = Executor::default();
         executor.start(async move {

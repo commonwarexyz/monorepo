@@ -588,7 +588,7 @@ impl crate::Runner for Runner {
             // This approach is more efficient than randomly selecting a task one-at-a-time
             // because it ensures we don't pull the same pending task multiple times in a row (without
             // processing a different task required for other tasks to make progress).
-            trace!(iter, tasks = tasks.len(), "starting loop");
+            trace!(iter, tasks = tasks.len() + 1, "starting loop");
             for task in tasks {
                 match task {
                     WorkItem::Root => {
@@ -671,6 +671,7 @@ impl crate::Runner for Runner {
             trace!(now = current.epoch_millis(), "time advanced",);
 
             // Skip time if there is nothing to do
+            // TODO: need to fix?
             if self.executor.tasks.len() == 0 {
                 let mut skip = None;
                 {
@@ -687,7 +688,7 @@ impl crate::Runner for Runner {
                         *time = skip.unwrap();
                         current = *time;
                     }
-                    trace!(now = current.epoch_millis(), "time skipped",);
+                    trace!(now = current.epoch_millis(), "time skipped");
                 }
             }
 

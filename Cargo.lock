@@ -1212,6 +1212,8 @@ dependencies = [
  "futures",
  "rand",
  "thiserror 2.0.12",
+ "tracing",
+ "tracing-subscriber",
  "x25519-dalek",
 ]
 
