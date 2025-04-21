@@ -81,10 +81,7 @@ mod handlers;
 use clap::{value_parser, Arg, Command};
 use commonware_cryptography::{Ed25519, Signer};
 use commonware_p2p::authenticated::{self, Network};
-use commonware_runtime::{
-    tokio::{self, Executor},
-    Metrics, Runner,
-};
+use commonware_runtime::{tokio, Metrics, Runner};
 use commonware_utils::quorum;
 use governor::Quota;
 use std::{
@@ -100,7 +97,7 @@ const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_VRF_";
 fn main() {
     // Initialize context
     let runtime_cfg = tokio::Config::default();
-    let executor = Executor::new(runtime_cfg.clone());
+    let executor = tokio::Runner::new(runtime_cfg.clone());
 
     // Parse arguments
     let matches = Command::new("commonware-vrf")

@@ -58,8 +58,9 @@ mod logger;
 use clap::{value_parser, Arg, Command};
 use commonware_cryptography::{Ed25519, Signer};
 use commonware_p2p::authenticated::{self, Network};
+use commonware_runtime::tokio;
 use commonware_runtime::Metrics;
-use commonware_runtime::{tokio::Executor, Runner};
+use commonware_runtime::Runner as _;
 use governor::Quota;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::num::NonZeroU32;
@@ -73,7 +74,7 @@ const APPLICATION_NAMESPACE: &[u8] = b"commonware-chat";
 #[doc(hidden)]
 fn main() {
     // Initialize context
-    let executor = Executor::default();
+    let executor = tokio::Runner::default();
 
     // Parse arguments
     let matches = Command::new("commonware-chat")

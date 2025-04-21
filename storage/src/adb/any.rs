@@ -572,7 +572,7 @@ mod test {
 
     #[test_traced]
     pub fn test_any_db_empty() {
-        let (executor, context, _) = Executor::default();
+        let (executor, context, _) = Runner::default();
         executor.start(async move {
             let mut hasher = Sha256::new();
             let mut db = open_db(context.clone(), &mut hasher).await;

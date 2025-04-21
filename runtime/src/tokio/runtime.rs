@@ -180,10 +180,21 @@ pub struct Executor {
     signal: Signal,
 }
 
-impl Executor {
+/// Implementation of [`crate::Runner`] for the `tokio` runtime.
+pub struct Runner {
+    cfg: Config,
+}
+
+impl Default for Runner {
+    fn default() -> Self {
+        Self::new(Config::default())
+    }
+}
+
+impl Runner {
     /// Initialize a new `tokio` runtime with the given number of threads.
-    pub fn new(cfg: Config) -> Runner {
-        Runner { cfg }
+    pub fn new(cfg: Config) -> Self {
+        Self { cfg }
 
         // Create a new registry
         // let mut registry = Registry::default();
@@ -222,18 +233,6 @@ impl Executor {
         //     executor,
         // },
     }
-
-    /// Initialize a new `tokio` runtime with default configuration.
-    // We'd love to implement the trait but we can't because of the return type.
-    #[allow(clippy::should_implement_trait)]
-    pub fn default() -> Runner {
-        Self::new(Config::default())
-    }
-}
-
-/// Implementation of [`crate::Runner`] for the `tokio` runtime.
-pub struct Runner {
-    cfg: Config,
 }
 
 impl crate::Runner for Runner {

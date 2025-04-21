@@ -68,7 +68,7 @@ pub struct Executor {
 impl AsyncExecutor for Executor {
     fn block_on<T>(&self, future: impl Future<Output = T>) -> T {
         // Create and store our context
-        let executor = crate::tokio::Executor::new(self.cfg.clone());
+        let executor = crate::tokio::Runner::new(self.cfg.clone());
         // set_context(context); TODO danlaine: fix this
 
         // Run the future
