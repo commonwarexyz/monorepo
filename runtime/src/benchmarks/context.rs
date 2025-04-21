@@ -1,3 +1,5 @@
+//! Helper for storing and retrieving context in thread-local storage.
+
 use std::{any::Any, cell::RefCell};
 
 thread_local! {
