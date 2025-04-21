@@ -471,11 +471,8 @@ impl Executor {
 }
 
 enum Operation {
-    Root {
-        tasks: Arc<Tasks>,
-    },
+    Root,
     Work {
-        tasks: Arc<Tasks>,
         future: Mutex<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>,
         completed: Mutex<bool>,
     },
@@ -484,24 +481,14 @@ enum Operation {
 struct Task {
     id: u128,
     label: String,
+    tasks: Arc<Tasks>,
 
     operation: Operation,
 }
 
 impl ArcWake for Task {
     fn wake_by_ref(arc_self: &Arc<Self>) {
-        match &arc_self.operation {
-            Operation::Root { tasks } => {
-                tasks.enqueue(arc_self.clone());
-            }
-            Operation::Work {
-                tasks,
-                future: _,
-                completed: _,
-            } => {
-                tasks.enqueue(arc_self.clone());
-            }
-        }
+        arc_self.tasks.enqueue(arc_self.clone());
     }
 }
 
@@ -539,9 +526,8 @@ impl Tasks {
         queue.push(Arc::new(Task {
             id,
             label: String::new(),
-            operation: Operation::Root {
-                tasks: arc_self.clone(),
-            },
+            tasks: arc_self.clone(),
+            operation: Operation::Root,
         }));
     }
 
@@ -555,8 +541,8 @@ impl Tasks {
         queue.push(Arc::new(Task {
             id,
             label: label.to_string(),
+            tasks: arc_self.clone(),
             operation: Operation::Work {
-                tasks: arc_self.clone(),
                 future: Mutex::new(future),
                 completed: Mutex::new(false),
             },
@@ -642,7 +628,7 @@ impl crate::Runner for Runner {
                 let mut cx = task::Context::from_waker(&waker);
 
                 match &task.operation {
-                    Operation::Root { tasks: _ } => {
+                    Operation::Root => {
                         // Poll the root task
                         if let Poll::Ready(output) = root.as_mut().poll(&mut cx) {
                             trace!(id = task.id, "task is complete");
@@ -650,11 +636,7 @@ impl crate::Runner for Runner {
                             return output;
                         }
                     }
-                    Operation::Work {
-                        tasks: _,
-                        future,
-                        completed,
-                    } => {
+                    Operation::Work { future, completed } => {
                         // If task is completed, skip it
                         if *completed.lock().unwrap() {
                             continue;
