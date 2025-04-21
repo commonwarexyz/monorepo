@@ -1319,9 +1319,7 @@ mod tests {
 
     fn run_with_seed(seed: u64) -> (String, Vec<usize>) {
         let executor = deterministic::Runner::seeded(seed);
-        let auditor = executor.auditor.clone();
-        let messages = run_tasks(5, executor);
-        (auditor.state(), messages)
+        run_tasks(5, executor)
     }
 
     #[test]

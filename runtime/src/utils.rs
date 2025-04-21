@@ -355,11 +355,7 @@ async fn task(i: usize) -> usize {
 }
 
 #[cfg(test)]
-pub fn run_tasks<R>(tasks: usize, runner: R) -> Vec<usize>
-where
-    R: Runner,
-    R::Context: Spawner,
-{
+pub fn run_tasks(tasks: usize, runner: crate::deterministic::Runner) -> (String, Vec<usize>) {
     runner.start(|context| async move {
         // Randomly schedule tasks
         let mut handles = FuturesUnordered::new();
@@ -373,7 +369,7 @@ where
             outputs.push(result.unwrap());
         }
         assert_eq!(outputs.len(), tasks);
-        outputs
+        (context.auditor().state(), outputs)
     })
 }
 
