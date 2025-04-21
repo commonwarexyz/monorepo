@@ -1165,6 +1165,7 @@ dependencies = [
  "opentelemetry_sdk",
  "prometheus-client",
  "rand",
+ "rayon",
  "sha2 0.10.8",
  "thiserror 2.0.12",
  "tokio",
