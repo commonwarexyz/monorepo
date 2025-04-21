@@ -1082,16 +1082,11 @@ impl Clock for Context {
     }
 
     fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
-        let time = self
+        let deadline = self
             .current()
             .checked_add(duration)
             .expect("overflow when setting wake time");
-        Sleeper {
-            executor: self.executor.clone(),
-
-            time,
-            registered: false,
-        }
+        self.sleep_until(deadline)
     }
 
     fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static {
