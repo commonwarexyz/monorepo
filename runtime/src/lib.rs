@@ -87,13 +87,13 @@ pub enum Error {
 /// Interface that any task scheduler must implement to start
 /// running tasks.
 pub trait Runner {
+    type Context;
+
     /// Start running a root task.
-    ///
-    /// The root task does not create the initial context because it can be useful to have a reference
-    /// to context before starting task execution.
-    fn start<F>(self, f: F) -> F::Output
+    fn start<F, Fut>(self, f: F) -> Fut::Output
     where
-        F: Future;
+        F: FnOnce(Self::Context) -> Fut,
+        Fut: Future;
 }
 
 /// Interface that any task scheduler must implement to spawn tasks.

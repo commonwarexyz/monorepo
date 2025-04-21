@@ -545,6 +545,8 @@ pub struct Runner {
 }
 
 impl crate::Runner for Runner {
+    type Context = Context;
+
     fn start<F>(self, f: F) -> F::Output
     where
         F: Future,

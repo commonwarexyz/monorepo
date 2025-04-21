@@ -206,7 +206,7 @@ impl Executor {
         );
 
         let executor = Arc::new(Self {
-            cfg,
+            cfg: cfg.clone(),
             registry: Mutex::new(registry),
             metrics,
             runtime,
@@ -214,9 +214,7 @@ impl Executor {
             signal,
         });
         (
-            Runner {
-                executor: executor.clone(),
-            },
+            Runner { cfg },
             Context {
                 storage,
                 label: String::new(),
@@ -236,15 +234,56 @@ impl Executor {
 
 /// Implementation of [`crate::Runner`] for the `tokio` runtime.
 pub struct Runner {
-    executor: Arc<Executor>,
+    cfg: Config,
 }
 
 impl crate::Runner for Runner {
-    fn start<F>(self, f: F) -> F::Output
+    type Context = Context;
+
+    fn start<F, Fut>(self, f: F) -> Fut::Output
     where
-        F: Future,
+        F: FnOnce(Self::Context) -> Fut,
+        Fut: Future,
     {
-        self.executor.runtime.block_on(f)
+        // Create a new registry
+        let mut registry = Registry::default();
+        let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
+
+        // Initialize runtime
+        let metrics = Arc::new(Metrics::init(runtime_registry));
+        let runtime = Builder::new_multi_thread()
+            .worker_threads(self.cfg.worker_threads)
+            .max_blocking_threads(self.cfg.max_blocking_threads)
+            .enable_all()
+            .build()
+            .expect("failed to create Tokio runtime");
+        let (signaler, signal) = Signaler::new();
+
+        let storage = Storage::new(
+            TokioStorage::new(TokioStorageConfig::new(
+                self.cfg.storage_directory.clone(),
+                self.cfg.maximum_buffer_size,
+            )),
+            runtime_registry,
+        );
+
+        let executor = Arc::new(Executor {
+            cfg: self.cfg,
+            registry: Mutex::new(registry),
+            metrics,
+            runtime,
+            signaler: Mutex::new(signaler),
+            signal,
+        });
+
+        let context = Context {
+            storage,
+            label: String::new(),
+            spawned: false,
+            executor: executor.clone(),
+        };
+
+        executor.runtime.block_on(f(context))
     }
 }
 
