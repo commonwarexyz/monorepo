@@ -511,48 +511,8 @@ impl crate::Runner for Runner {
         F: FnOnce(Self::Context) -> Fut,
         Fut: Future,
     {
-        // Create a new registry
-        let mut registry = Registry::default();
-        let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
-
-        // Initialize runtime
-        let metrics = Arc::new(Metrics::init(runtime_registry));
-        let start_time = UNIX_EPOCH;
-        let deadline = self
-            .cfg
-            .timeout
-            .map(|timeout| start_time.checked_add(timeout).expect("timeout overflowed"));
-        let (signaler, signal) = Signaler::new();
-        let storage = MeteredStorage::new(
-            AuditedStorage::new(MemStorage::default(), self.auditor.clone()),
-            runtime_registry,
-        );
-        let executor = Arc::new(Executor {
-            registry: Mutex::new(registry),
-            cycle: self.cfg.cycle,
-            deadline,
-            metrics: metrics.clone(),
-            auditor: self.auditor.clone(),
-            rng: Mutex::new(StdRng::seed_from_u64(self.cfg.seed)),
-            time: Mutex::new(start_time),
-            tasks: Arc::new(Tasks {
-                queue: Mutex::new(Vec::new()),
-                counter: Mutex::new(1), // Reserve 0 for the root task
-            }),
-            sleeping: Mutex::new(BinaryHeap::new()),
-            partitions: Mutex::new(HashMap::new()),
-            signaler: Mutex::new(signaler),
-            signal,
-            finished: Mutex::new(false),
-            recovered: Mutex::new(false),
-        });
-        let context = Context {
-            label: String::new(),
-            spawned: false,
-            executor: executor.clone(),
-            networking: Arc::new(Networking::new(metrics, self.auditor.clone())),
-            storage,
-        };
+        let context = Context::new(self.cfg.clone(), self.auditor.clone());
+        let executor = context.executor.clone();
 
         // Call f with the context to get the future, then pin it
         let mut root = Box::pin(f(context));
@@ -739,6 +699,51 @@ pub struct Context {
 }
 
 impl Context {
+    fn new(cfg: Config, auditor: Arc<Auditor>) -> Self {
+        // Create a new registry
+        let mut registry = Registry::default();
+        let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
+
+        // Initialize runtime
+        let metrics = Arc::new(Metrics::init(runtime_registry));
+        let start_time = UNIX_EPOCH;
+        let deadline = cfg
+            .timeout
+            .map(|timeout| start_time.checked_add(timeout).expect("timeout overflowed"));
+        let (signaler, signal) = Signaler::new();
+        let storage = MeteredStorage::new(
+            AuditedStorage::new(MemStorage::default(), auditor.clone()),
+            runtime_registry,
+        );
+        let executor = Arc::new(Executor {
+            registry: Mutex::new(registry),
+            cycle: cfg.cycle,
+            deadline,
+            metrics: metrics.clone(),
+            auditor: auditor.clone(),
+            rng: Mutex::new(StdRng::seed_from_u64(cfg.seed)),
+            time: Mutex::new(start_time),
+            tasks: Arc::new(Tasks {
+                queue: Mutex::new(Vec::new()),
+                counter: Mutex::new(1), // Reserve 0 for the root task
+            }),
+            sleeping: Mutex::new(BinaryHeap::new()),
+            partitions: Mutex::new(HashMap::new()),
+            signaler: Mutex::new(signaler),
+            signal,
+            finished: Mutex::new(false),
+            recovered: Mutex::new(false),
+        });
+        let context = Context {
+            label: String::new(),
+            spawned: false,
+            executor: executor.clone(),
+            networking: Arc::new(Networking::new(metrics, auditor.clone())),
+            storage,
+        };
+        context
+    }
+
     /// Recover the inner state (deadline, metrics, auditor, rng, synced storage, etc.) from the
     /// current runtime and use it to initialize a new instance of the runtime. A recovered runtime
     /// does not inherit the current runtime's pending tasks, unsynced storage, network connections, nor
@@ -750,7 +755,7 @@ impl Context {
     /// It is only permitted to call this method after the runtime has finished (i.e. once `start` returns)
     /// and only permitted to do once (otherwise multiple recovered runtimes will share the same inner state).
     /// If either one of these conditions is violated, this method will panic.
-    pub fn recover(self) -> (Runner, Self, Arc<Auditor>) {
+    pub fn recover(self) -> Self {
         // Ensure we are finished
         if !*self.executor.finished.lock().unwrap() {
             panic!("execution is not finished");
@@ -795,20 +800,13 @@ impl Context {
             finished: Mutex::new(false),
             recovered: Mutex::new(false),
         });
-        (
-            Runner {
-                cfg: Config::default(), // TODO danlaine: replace this
-                auditor: auditor.clone(),
-            },
-            Self {
-                label: String::new(),
-                spawned: false,
-                executor,
-                networking: Arc::new(Networking::new(metrics, auditor.clone())),
-                storage: self.storage,
-            },
-            auditor,
-        )
+        Self {
+            label: String::new(),
+            spawned: false,
+            executor,
+            networking: Arc::new(Networking::new(metrics, auditor.clone())),
+            storage: self.storage,
+        }
     }
 
     pub fn auditor(&self) -> &Auditor {
@@ -1423,18 +1421,15 @@ mod tests {
         let name = b"test_blob";
         let data = b"Hello, world!".to_vec();
 
-        // Run some tasks and sync storage
-        let state1 = executor1.start(|context| async move {
+        // Run some tasks, sync storage, and recover the runtime
+        let (state1, context1) = executor1.start(|context| async move {
             let context = context.clone();
             let data = data.clone();
             let blob = context.open(partition, name).await.unwrap();
             blob.write_at(&data, 0).await.unwrap();
             blob.sync().await.unwrap();
-            context.auditor().state()
+            (context.auditor().state(), context.recover())
         });
-
-        // Recover the runtime
-        let (executor2, context2, auditor2) = context1.recover();
 
         // Verify auditor state is the same
         let state2 = auditor2.state();
@@ -1462,11 +1457,9 @@ mod tests {
         // Run some tasks without syncing storage
         executor1.start(|context| async move {
             let context = context.clone();
-            async move {
-                let blob = context.open(partition, name).await.unwrap();
-                blob.write_at(&data, 0).await.unwrap();
-                // Intentionally do not call sync() here
-            }
+            let blob = context.open(partition, name).await.unwrap();
+            blob.write_at(&data, 0).await.unwrap();
+            // Intentionally do not call sync() here
         });
 
         // Recover the runtime
