@@ -390,7 +390,6 @@ mod tests {
 
             // Use the thread pool to sum the numbers
             pool.install(|| {
-                // Use the thread pool to sum the numbers
                 assert_eq!(v.par_iter().sum::<i32>(), 10000 * 9999 / 2);
             });
         });
