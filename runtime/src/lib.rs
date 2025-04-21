@@ -30,13 +30,13 @@ pub mod mocks;
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
         pub mod tokio;
+        pub mod benchmarks;
     }
 }
-pub mod benchmarking;
 mod storage;
 pub mod telemetry;
 mod utils;
-pub use utils::{create_rayon_pool, reschedule, Handle, Signal, Signaler};
+pub use utils::{create_pool, reschedule, Handle, Signal, Signaler};
 
 /// Prefix for runtime metrics.
 const METRICS_PREFIX: &str = "runtime";
