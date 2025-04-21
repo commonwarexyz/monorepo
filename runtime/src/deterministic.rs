@@ -9,8 +9,8 @@
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, deterministic::Executor, Metrics};
 //!
-//! let (executor, context, auditor) = Executor::default();
-//! executor.start(async move {
+//! let (executor, context, auditor) =  deterministic::Runner::default();
+//! executor.start(|context| async move {
 //!     println!("Parent started");
 //!     let result = context.with_label("child").spawn(|_| async move {
 //!         println!("Child started");
@@ -1304,13 +1304,13 @@ impl crate::Storage for Context {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{utils::run_tasks, Blob, Runner, Storage};
+    use crate::{deterministic, utils::run_tasks, Blob, Runner as _, Storage};
     use commonware_macros::test_traced;
     use futures::task::noop_waker;
 
     fn run_with_seed(seed: u64) -> (String, Vec<usize>) {
-        let (executor, context, auditor) = Executor::seeded(seed);
-        let messages = run_tasks(5, executor, context);
+        let executor = Runner::seeded(seed);
+        let messages = run_tasks(5, executor);
         (auditor.state(), messages)
     }
 
@@ -1383,8 +1383,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "runtime timeout")]
     fn test_timeout() {
-        let (executor, context, _) = Executor::timed(Duration::from_secs(10));
-        executor.start(async move {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
             loop {
                 context.sleep(Duration::from_secs(1)).await;
             }
@@ -1399,20 +1399,20 @@ mod tests {
             cycle: Duration::default(),
             ..Config::default()
         };
-        Executor::new(cfg);
+        deterministic::Runner::new(cfg);
     }
 
     #[test]
     fn test_recover_synced_storage_persists() {
         // Initialize the first runtime
-        let (executor1, context1, auditor1) = Executor::default();
+        let executor1 = deterministic::Runner::default();
         let partition = "test_partition";
         let name = b"test_blob";
         let data = b"Hello, world!".to_vec();
 
         // Run some tasks and sync storage
-        executor1.start({
-            let context = context1.clone();
+        executor1.start(|context| async move {
+            let context = context.clone();
             let data = data.clone();
             async move {
                 let blob = context.open(partition, name).await.unwrap();
@@ -1430,7 +1430,7 @@ mod tests {
         assert_eq!(state1, state2);
 
         // Check that synced storage persists after recovery
-        executor2.start(async move {
+        executor2.start(|context| async move {
             let blob = context2.open(partition, name).await.unwrap();
             let len = blob.len().await.unwrap();
             assert_eq!(len, data.len() as u64);
@@ -1443,13 +1443,13 @@ mod tests {
     #[test]
     fn test_recover_unsynced_storage_does_not_persist() {
         // Initialize the first runtime
-        let (executor1, context1, _) = Executor::default();
+        let (executor1, context1, _) = deterministic::Runner::default();
         let partition = "test_partition";
         let name = b"test_blob";
         let data = b"Hello, world!".to_vec();
 
         // Run some tasks without syncing storage
-        executor1.start({
+        executor1.start(|context| async move {
             let context = context1.clone();
             async move {
                 let blob = context.open(partition, name).await.unwrap();
@@ -1462,7 +1462,7 @@ mod tests {
         let (executor2, context2, _) = context1.recover();
 
         // Check that unsynced storage does not persist after recovery
-        executor2.start(async move {
+        executor2.start(|context| async move {
             let blob = context2.open(partition, name).await.unwrap();
             let len = blob.len().await.unwrap();
             assert_eq!(len, 0);
@@ -1473,7 +1473,7 @@ mod tests {
     #[should_panic(expected = "execution is not finished")]
     fn test_recover_before_finish_panics() {
         // Initialize runtime
-        let (_, context, _) = Executor::default();
+        let (_, context, _) = deterministic::Runner::default();
 
         // Attempt to recover before the runtime has finished
         context.recover();
@@ -1483,10 +1483,10 @@ mod tests {
     #[should_panic(expected = "runtime has already been recovered")]
     fn test_recover_twice_panics() {
         // Initialize runtime
-        let (executor, context, _) = Executor::default();
+        let executor = deterministic::Runner::default();
 
         // Finish runtime
-        executor.start(async move {});
+        executor.start(|context| async move {});
 
         // Recover for the first time
         let cloned_context = context.clone();

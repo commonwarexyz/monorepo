@@ -353,8 +353,12 @@ async fn task(i: usize) -> usize {
 }
 
 #[cfg(test)]
-pub fn run_tasks(tasks: usize, runner: impl Runner, context: impl Spawner) -> Vec<usize> {
-    runner.start(async move {
+pub fn run_tasks<R>(tasks: usize, runner: R) -> Vec<usize>
+where
+    R: Runner,
+    R::Context: Spawner,
+{
+    runner.start(|context| async move {
         // Randomly schedule tasks
         let mut handles = FuturesUnordered::new();
         for i in 0..=tasks - 1 {
@@ -374,14 +378,14 @@ pub fn run_tasks(tasks: usize, runner: impl Runner, context: impl Spawner) -> Ve
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{tokio::Executor, Metrics};
+    use crate::{tokio, Metrics};
     use commonware_macros::test_traced;
     use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
     #[test_traced]
     fn test_rayon() {
-        let (executor, context) = Executor::default();
-        executor.start(async move {
+        let executor = tokio::Runner::default();
+        executor.start(|context| async move {
             // Create a thread pool with 4 threads
             let pool = create_rayon_pool(context.with_label("pool"), 4).unwrap();
 

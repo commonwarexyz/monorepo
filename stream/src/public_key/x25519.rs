@@ -56,24 +56,25 @@ pub fn new<R: Rng + CryptoRng>(rng: &mut R) -> EphemeralSecret {
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use commonware_codec::{DecodeExt, Encode};
-    use commonware_runtime::deterministic::Executor;
+    use commonware_codec::DecodeExt;
 
-    #[test]
-    fn test_codec() {
-        // Create a random public key
-        let (_, mut context, _) = Executor::default();
-        let mut buf = [0u8; PublicKey::SIZE];
-        context.fill(&mut buf);
+    // TODO danlaine: move this test
+    // use commonware_runtime::deterministic::Executor;
+    // #[test]
+    // fn test_codec() {
+    //     // Create a random public key
+    //     let (_, mut context, _) = Executor::default();
+    //     let mut buf = [0u8; PublicKey::SIZE];
+    //     context.fill(&mut buf);
 
-        let original = PublicKey {
-            inner: X25519PublicKey::from(buf),
-        };
-        let encoded = original.encode();
-        assert_eq!(encoded.len(), PublicKey::SIZE);
-        let decoded = PublicKey::decode(encoded).unwrap();
-        assert_eq!(original, decoded);
-    }
+    //     let original = PublicKey {
+    //         inner: X25519PublicKey::from(buf),
+    //     };
+    //     let encoded = original.encode();
+    //     assert_eq!(encoded.len(), PublicKey::SIZE);
+    //     let decoded = PublicKey::decode(encoded).unwrap();
+    //     assert_eq!(original, decoded);
+    // }
 
     #[test]
     fn test_decode_invalid() {

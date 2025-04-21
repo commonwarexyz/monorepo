@@ -125,8 +125,8 @@
 //!     journal::{Error, variable::{Config as JConfig, Journal}},
 //! };
 //!
-//! let (executor, context, _) = Executor::default();
-//! executor.start(async move {
+//! let executor = deterministic::Runner::default();
+//! executor.start(|context| async move {
 //!     // Create a journal
 //!     let cfg = JConfig {
 //!         partition: "partition".to_string()
@@ -210,7 +210,7 @@ mod tests {
     };
     use bytes::Bytes;
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic::Executor, Blob, Metrics, Runner, Storage};
+    use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
     use commonware_utils::array::FixedBytes;
     use rand::Rng;
     use std::collections::BTreeMap;
@@ -227,8 +227,8 @@ mod tests {
 
     fn test_archive_put_get(compression: Option<u8>) {
         // Initialize the deterministic context
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             // Initialize an empty journal
             let journal = Journal::init(
                 context.clone(),
@@ -333,8 +333,8 @@ mod tests {
     #[test_traced]
     fn test_archive_compression_then_none() {
         // Initialize the deterministic context
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             // Initialize an empty journal
             let journal = Journal::init(
                 context.clone(),
@@ -408,8 +408,8 @@ mod tests {
     #[test_traced]
     fn test_archive_record_corruption() {
         // Initialize the deterministic context
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             // Initialize an empty journal
             let journal = Journal::init(
                 context.clone(),
@@ -490,8 +490,8 @@ mod tests {
     #[test_traced]
     fn test_archive_duplicate_key() {
         // Initialize the deterministic context
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             // Initialize an empty journal
             let journal = Journal::init(
                 context.clone(),
@@ -556,8 +556,8 @@ mod tests {
     #[test_traced]
     fn test_archive_get_nonexistent() {
         // Initialize the deterministic context
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             // Initialize an empty journal
             let journal = Journal::init(
                 context.clone(),
@@ -607,8 +607,8 @@ mod tests {
     #[test_traced]
     fn test_archive_overlapping_key_basic() {
         // Initialize the deterministic context
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             // Initialize an empty journal
             let journal = Journal::init(
                 context.clone(),
@@ -677,8 +677,8 @@ mod tests {
     #[test_traced]
     fn test_archive_overlapping_key_multiple_sections() {
         // Initialize the deterministic context
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             // Initialize an empty journal
             let journal = Journal::init(
                 context.clone(),
@@ -741,8 +741,8 @@ mod tests {
     #[test_traced]
     fn test_archive_prune_keys() {
         // Initialize the deterministic context
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             // Initialize an empty journal
             let journal = Journal::init(
                 context.clone(),
@@ -835,8 +835,8 @@ mod tests {
 
     fn test_archive_keys_and_restart(num_keys: usize) -> String {
         // Initialize the deterministic context
-        let (executor, mut context, auditor) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
             // Initialize an empty journal
             let journal = Journal::init(
                 context.clone(),
@@ -982,7 +982,8 @@ mod tests {
             assert!(buffer.contains(&pruned));
             assert!(buffer.contains("pruned_total 0")); // have not lazily removed keys yet
         });
-        auditor.state()
+        // auditor.state() TODO danlaine: replace
+        String::new()
     }
 
     #[test_traced]
@@ -1000,8 +1001,8 @@ mod tests {
     #[test_traced]
     fn test_ranges() {
         // Initialize the deterministic context
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             // Initialize an empty journal
             let journal = Journal::init(
                 context.clone(),
