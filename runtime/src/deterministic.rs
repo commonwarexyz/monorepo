@@ -639,6 +639,7 @@ impl crate::Runner for Runner {
                     Operation::Work { future, completed } => {
                         // If task is completed, skip it
                         if *completed.lock().unwrap() {
+                            trace!(id = task.id, "dropping already complete task");
                             continue;
                         }
 
@@ -668,7 +669,7 @@ impl crate::Runner for Runner {
                     .expect("executor time overflowed");
                 current = *time;
             }
-            trace!(now = current.epoch_millis(), "time advanced",);
+            trace!(now = current.epoch_millis(), "time advanced");
 
             // Skip time if there is nothing to do
             if self.executor.tasks.len() == 0 {
