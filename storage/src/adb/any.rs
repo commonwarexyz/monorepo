@@ -550,7 +550,10 @@ mod test {
     use crate::mmr::mem::Mmr as MemMmr;
     use commonware_cryptography::{hash, sha256::Digest, Hasher as CHasher, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic::Context, deterministic::Executor, Runner};
+    use commonware_runtime::{
+        deterministic::{Context, Runner},
+        Runner as _,
+    };
     use std::collections::HashMap;
 
     /// Return an `Any` database initialized with a fixed config.
@@ -572,8 +575,8 @@ mod test {
 
     #[test_traced]
     pub fn test_any_db_empty() {
-        let (executor, context, _) = Runner::default();
-        executor.start(async move {
+        let executor = Runner::default();
+        executor.start(|context| async move {
             let mut hasher = Sha256::new();
             let mut db = open_db(context.clone(), &mut hasher).await;
             assert_eq!(db.op_count(), 0);
