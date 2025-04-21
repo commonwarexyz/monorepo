@@ -1446,7 +1446,7 @@ mod tests {
         let (state, context) = executor1.start(|context| async move {
             let context = context.clone();
             let blob = context.open(partition, name).await.unwrap();
-            blob.write_at(&data.to_vec(), 0).await.unwrap();
+            blob.write_at(&data, 0).await.unwrap();
             blob.sync().await.unwrap();
             (context.auditor().state(), context)
         });
