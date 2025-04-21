@@ -25,7 +25,6 @@ prometheus-client = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["fmt", "json", "env-filter"] }
 opentelemetry = { workspace = true }
 tracing-opentelemetry = { workspace = true }
-criterion = { workspace = true, features = ["async"] }
 rayon = { workspace = true }
 
 # Enable "js" feature when WASM is target
@@ -34,6 +33,7 @@ version = "0.2.15"
 features = ["js"]
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+criterion = { workspace = true, features = ["async"] }
 tokio = { workspace = true, features = ["full"] }
 axum = { workspace = true }
 opentelemetry_sdk = { workspace = true, features = ["rt-tokio"] }

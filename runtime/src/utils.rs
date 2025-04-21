@@ -2,7 +2,7 @@
 
 #[cfg(test)]
 use crate::Runner;
-use crate::{Error, Spawner};
+use crate::{Error, Metrics, Spawner};
 #[cfg(test)]
 use futures::stream::{FuturesUnordered, StreamExt};
 use futures::{
@@ -323,22 +323,25 @@ impl Signaler {
     }
 }
 
-/// Creates a Rayon thread pool that uses the runtime's `spawn_blocking` to spawn threads.
+/// Creates a [rayon] thread pool with [Spawner::spawn_blocking] to perform work
+/// up to the configured `concurrency`.
 ///
 /// # Arguments
-/// - `context`: The runtime context implementing the `Spawner` trait.
-/// - `concurrency`: The number of tasks to spawn in the pool.
+/// - `context`: The runtime context implementing the [Spawner] trait.
+/// - `concurrency`: The number of tasks to execute concurrently in the pool.
 ///
 /// # Returns
-/// A `Result` containing the configured `ThreadPool` or an error if the pool cannot be built.
-pub fn create_rayon_pool<S: Spawner>(
+/// A `Result` containing the configured [rayon::ThreadPool] or a [rayon::ThreadPoolBuildError] if the pool cannot be built.
+pub fn create_pool<S: Spawner + Metrics>(
     context: S,
     concurrency: usize,
 ) -> Result<ThreadPool, ThreadPoolBuildError> {
     ThreadPoolBuilder::new()
         .num_threads(concurrency)
         .spawn_handler(move |thread| {
-            context.clone().spawn_blocking(move || thread.run());
+            context
+                .with_label("rayon-thread")
+                .spawn_blocking(move || thread.run());
             Ok(())
         })
         .build()
@@ -379,11 +382,11 @@ mod tests {
     use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
     #[test_traced]
-    fn test_rayon() {
+    fn test_create_pool() {
         let (executor, context) = Executor::default();
         executor.start(async move {
             // Create a thread pool with 4 threads
-            let pool = create_rayon_pool(context.with_label("pool"), 4).unwrap();
+            let pool = create_pool(context.with_label("pool"), 4).unwrap();
 
             // Create a vector of numbers
             let v: Vec<_> = (0..10000).collect();
