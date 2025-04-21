@@ -323,8 +323,7 @@ impl Signaler {
     }
 }
 
-/// Creates a [rayon] thread pool with [Spawner::spawn_blocking] to perform work
-/// up to the configured `concurrency`.
+/// Creates a [rayon]-compatible thread pool with [Spawner::spawn_blocking].
 ///
 /// # Arguments
 /// - `context`: The runtime context implementing the [Spawner] trait.
