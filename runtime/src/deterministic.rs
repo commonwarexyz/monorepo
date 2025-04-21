@@ -468,7 +468,7 @@ impl Runner {
 
     /// Initialize a new `deterministic` runtime with the default configuration
     /// and the provided seed.
-    pub fn seeded(seed: u64) -> Runner {
+    pub fn seeded(seed: u64) -> Self {
         let cfg = Config {
             seed,
             ..Config::default()
@@ -478,7 +478,7 @@ impl Runner {
 
     /// Initialize a new `deterministic` runtime with the default configuration
     /// but exit after the given timeout.
-    pub fn timed(timeout: Duration) -> Runner {
+    pub fn timed(timeout: Duration) -> Self {
         let cfg = Config {
             timeout: Some(timeout),
             ..Config::default()

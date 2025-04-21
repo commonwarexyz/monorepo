@@ -154,7 +154,6 @@ mod tests {
     use super::*;
     use crate::ordered_broadcast::types::Chunk;
     use commonware_cryptography::{bls12381::dkg::ops::generate_shares, ed25519, sha256};
-    use commonware_runtime::deterministic::Executor;
 
     /// Aggregated helper functions to reduce duplication in tests.
     mod helpers {
@@ -162,13 +161,14 @@ mod tests {
         use crate::ordered_broadcast::types::Chunk;
         use commonware_codec::FixedSize;
         use commonware_cryptography::bls12381::primitives::group::Share;
+        use rand::{rngs::StdRng, SeedableRng as _};
 
         const NAMESPACE: &[u8] = b"1234";
 
-        /// Generate shares using the default executor.
+        /// Generate shares using a seeded RNG.
         pub fn setup_shares(num_validators: u32, quorum: u32) -> Vec<Share> {
-            let (_, mut context, _) = Executor::default();
-            let (_identity, shares) = generate_shares(&mut context, None, num_validators, quorum);
+            let mut rng = StdRng::seed_from_u64(0);
+            let (_identity, shares) = generate_shares(&mut rng, None, num_validators, quorum);
             shares
         }
 
