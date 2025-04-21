@@ -699,7 +699,7 @@ pub struct Context {
 }
 
 impl Context {
-    fn new(cfg: Config, auditor: Arc<Auditor>) -> Self {
+    pub fn new(cfg: Config, auditor: Arc<Auditor>) -> Self {
         // Create a new registry
         let mut registry = Registry::default();
         let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
@@ -734,14 +734,13 @@ impl Context {
             finished: Mutex::new(false),
             recovered: Mutex::new(false),
         });
-        let context = Context {
+        Context {
             label: String::new(),
             spawned: false,
             executor: executor.clone(),
-            networking: Arc::new(Networking::new(metrics, auditor.clone())),
+            networking: Arc::new(Networking::new(metrics, auditor)),
             storage,
-        };
-        context
+        }
     }
 
     /// Recover the inner state (deadline, metrics, auditor, rng, synced storage, etc.) from the
