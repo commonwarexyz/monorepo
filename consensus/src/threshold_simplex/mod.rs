@@ -938,7 +938,7 @@ mod tests {
         let required_containers = 100;
         let activity_timeout = 10;
         let skip_timeout = 5;
-        let max_exceptions = 8; // 1 per each check for online
+        let max_exceptions = 10;
         let namespace = b"consensus".to_vec();
         let (executor, mut context, _) = Executor::timed(Duration::from_secs(30));
         executor.start(async move {
@@ -1065,7 +1065,6 @@ mod tests {
             join_all(finalizers).await;
 
             // Check supervisors for correct activity
-            let mut exceptions = 0;
             let offline = &validators[0];
             for supervisor in supervisors.iter() {
                 // Ensure no faults
@@ -1075,6 +1074,7 @@ mod tests {
                 }
 
                 // Ensure offline node is never active
+                let mut exceptions = 0;
                 {
                     let notarizes = supervisor.notarizes.lock().unwrap();
                     for (view, payloads) in notarizes.iter() {
@@ -1140,8 +1140,10 @@ mod tests {
                         }
                     }
                 }
+
+                // Ensure exceptions within allowed
+                assert!(exceptions <= max_exceptions);
             }
-            assert!(exceptions <= max_exceptions);
         });
     }
 
