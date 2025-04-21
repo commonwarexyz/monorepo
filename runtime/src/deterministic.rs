@@ -1434,91 +1434,95 @@ mod tests {
         deterministic::Runner::new(cfg);
     }
 
-    // TODO danlaine: uncomment tests
-    // #[test]
-    // fn test_recover_synced_storage_persists() {
-    //     // Initialize the first runtime
-    //     let executor1 = deterministic::Runner::default();
-    //     let partition = "test_partition";
-    //     let name = b"test_blob";
-    //     let data = b"Hello, world!".to_vec();
+    #[test]
+    fn test_recover_synced_storage_persists() {
+        // Initialize the first runtime
+        let executor1 = deterministic::Runner::default();
+        let partition = "test_partition";
+        let name = b"test_blob";
+        let data = b"Hello, world!";
 
-    //     // Run some tasks, sync storage, and recover the runtime
-    //     let (state1, context1) = executor1.start(|context| async move {
-    //         let context = context.clone();
-    //         let data = data.clone();
-    //         let blob = context.open(partition, name).await.unwrap();
-    //         blob.write_at(&data, 0).await.unwrap();
-    //         blob.sync().await.unwrap();
-    //         (context.auditor().state(), context.recover())
-    //     });
+        // Run some tasks, sync storage, and recover the runtime
+        let (state, context) = executor1.start(|context| async move {
+            let context = context.clone();
+            let blob = context.open(partition, name).await.unwrap();
+            blob.write_at(&data.to_vec(), 0).await.unwrap();
+            blob.sync().await.unwrap();
+            (context.auditor().state(), context)
+        });
+        let recovered_context = context.recover();
 
-    //     // Verify auditor state is the same
-    //     let state2 = auditor2.state();
-    //     assert_eq!(state1, state2);
+        // Verify auditor state is the same
+        assert_eq!(state, recovered_context.auditor().state());
 
-    //     // Check that synced storage persists after recovery
-    //     executor2.start(|context| async move {
-    //         let blob = context2.open(partition, name).await.unwrap();
-    //         let len = blob.len().await.unwrap();
-    //         assert_eq!(len, data.len() as u64);
-    //         let mut buf = vec![0; len as usize];
-    //         blob.read_at(&mut buf, 0).await.unwrap();
-    //         assert_eq!(buf, data);
-    //     });
-    // }
+        // Check that synced storage persists after recovery
+        let executor = RunnerWithContext::from(recovered_context);
+        executor.start(|context| async move {
+            let blob = context.open(partition, name).await.unwrap();
+            let len = blob.len().await.unwrap();
+            assert_eq!(len, data.len() as u64);
+            let mut buf = vec![0; len as usize];
+            blob.read_at(&mut buf, 0).await.unwrap();
+            assert_eq!(buf, data);
+        });
+    }
 
-    // #[test]
-    // fn test_recover_unsynced_storage_does_not_persist() {
-    //     // Initialize the first runtime
-    //     let executor1 = deterministic::Runner::default();
-    //     let partition = "test_partition";
-    //     let name = b"test_blob";
-    //     let data = b"Hello, world!".to_vec();
+    #[test]
+    fn test_recover_unsynced_storage_does_not_persist() {
+        // Initialize the first runtime
+        let executor = deterministic::Runner::default();
+        let partition = "test_partition";
+        let name = b"test_blob";
+        let data = b"Hello, world!".to_vec();
 
-    //     // Run some tasks without syncing storage
-    //     executor1.start(|context| async move {
-    //         let context = context.clone();
-    //         let blob = context.open(partition, name).await.unwrap();
-    //         blob.write_at(&data, 0).await.unwrap();
-    //         // Intentionally do not call sync() here
-    //     });
+        // Run some tasks without syncing storage
+        let context = executor.start(|context| async move {
+            let context = context.clone();
+            let blob = context.open(partition, name).await.unwrap();
+            blob.write_at(&data, 0).await.unwrap();
+            // Intentionally do not call sync() here
+            context
+        });
 
-    //     // Recover the runtime
-    //     let (executor2, context2, _) = context1.recover();
+        // Recover the runtime
+        let context = context.recover();
+        let executor = RunnerWithContext::from(context);
 
-    //     // Check that unsynced storage does not persist after recovery
-    //     executor2.start(|context| async move {
-    //         let blob = context2.open(partition, name).await.unwrap();
-    //         let len = blob.len().await.unwrap();
-    //         assert_eq!(len, 0);
-    //     });
-    // }
+        // Check that unsynced storage does not persist after recovery
+        executor.start(|context| async move {
+            let blob = context.open(partition, name).await.unwrap();
+            let len = blob.len().await.unwrap();
+            assert_eq!(len, 0);
+        });
+    }
 
-    // #[test]
-    // #[should_panic(expected = "execution is not finished")]
-    // fn test_recover_before_finish_panics() {
-    //     // Initialize runtime
-    //     let (_, context, _) = deterministic::Runner::default();
+    #[test]
+    #[should_panic(expected = "execution is not finished")]
+    fn test_recover_before_finish_panics() {
+        // Initialize runtime
+        let executor = deterministic::Runner::default();
 
-    //     // Attempt to recover before the runtime has finished
-    //     context.recover();
-    // }
+        // Start runtime
+        executor.start(|context| async move {
+            // Attempt to recover before the runtime has finished
+            context.recover();
+        });
+    }
 
-    // #[test]
-    // #[should_panic(expected = "runtime has already been recovered")]
-    // fn test_recover_twice_panics() {
-    //     // Initialize runtime
-    //     let executor = deterministic::Runner::default();
+    #[test]
+    #[should_panic(expected = "runtime has already been recovered")]
+    fn test_recover_twice_panics() {
+        // Initialize runtime
+        let executor = deterministic::Runner::default();
 
-    //     // Finish runtime
-    //     executor.start(|context| async move {});
+        // Finish runtime
+        let context = executor.start(|context| async move { context });
 
-    //     // Recover for the first time
-    //     let cloned_context = context.clone();
-    //     context.recover();
+        // Recover for the first time
+        let cloned_context = context.clone();
+        context.recover();
 
-    //     // Attempt to recover again using the same context
-    //     cloned_context.recover();
-    // }
+        // Attempt to recover again using the same context
+        cloned_context.recover();
+    }
 }
