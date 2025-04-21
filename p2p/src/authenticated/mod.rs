@@ -408,17 +408,19 @@ mod tests {
 
         // Run first instance
         let executor = deterministic::Runner::seeded(seed);
-        let state = executor.start(|context| async move {
+        let auditor = executor.auditor();
+        executor.start(|context| async move {
             run_network(context, MAX_MESSAGE_SIZE, BASE_PORT, NUM_PEERS, mode).await;
-            context.auditor().state()
         });
+        let state = auditor.state();
 
         // Compare result to second instance
         let executor = deterministic::Runner::seeded(seed);
-        let state2 = executor.start(|context| async move {
+        let auditor = executor.auditor();
+        executor.start(|context| async move {
             run_network(context, MAX_MESSAGE_SIZE, BASE_PORT, NUM_PEERS, mode).await;
-            context.auditor().state()
         });
+        let state2 = auditor.state();
         assert_eq!(state, state2);
     }
 

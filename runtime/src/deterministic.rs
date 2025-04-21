@@ -446,6 +446,12 @@ pub struct Executor {
     recovered: Mutex<bool>,
 }
 
+/// Implementation of [`crate::Runner`] for the `deterministic` runtime.
+pub struct Runner {
+    cfg: Config,
+    auditor: Arc<Auditor>,
+}
+
 impl Runner {
     /// Initialize a new `deterministic` runtime with the given seed and cycle duration.
     pub fn new(cfg: Config) -> Self {
@@ -454,7 +460,10 @@ impl Runner {
             panic!("cycle duration must be non-zero when timeout is set");
         }
 
-        Runner { cfg }
+        Runner {
+            cfg,
+            auditor: Arc::new(Auditor::default()),
+        }
     }
 
     /// Initialize a new `deterministic` runtime with the default configuration
@@ -476,6 +485,10 @@ impl Runner {
         };
         Self::new(cfg)
     }
+
+    pub fn auditor(&self) -> Arc<Auditor> {
+        self.auditor.clone()
+    }
 }
 
 impl Default for Runner {
@@ -488,11 +501,6 @@ impl Default for Runner {
 enum WorkItem {
     Root,
     Task(Arc<Task>),
-}
-
-/// Implementation of [`crate::Runner`] for the `deterministic` runtime.
-pub struct Runner {
-    cfg: Config,
 }
 
 impl crate::Runner for Runner {
@@ -509,7 +517,6 @@ impl crate::Runner for Runner {
 
         // Initialize runtime
         let metrics = Arc::new(Metrics::init(runtime_registry));
-        let auditor = Arc::new(Auditor::default());
         let start_time = UNIX_EPOCH;
         let deadline = self
             .cfg
@@ -517,7 +524,7 @@ impl crate::Runner for Runner {
             .map(|timeout| start_time.checked_add(timeout).expect("timeout overflowed"));
         let (signaler, signal) = Signaler::new();
         let storage = MeteredStorage::new(
-            AuditedStorage::new(MemStorage::default(), auditor.clone()),
+            AuditedStorage::new(MemStorage::default(), self.auditor.clone()),
             runtime_registry,
         );
         let executor = Arc::new(Executor {
@@ -525,7 +532,7 @@ impl crate::Runner for Runner {
             cycle: self.cfg.cycle,
             deadline,
             metrics: metrics.clone(),
-            auditor: auditor.clone(),
+            auditor: self.auditor.clone(),
             rng: Mutex::new(StdRng::seed_from_u64(self.cfg.seed)),
             time: Mutex::new(start_time),
             tasks: Arc::new(Tasks {
@@ -543,7 +550,7 @@ impl crate::Runner for Runner {
             label: String::new(),
             spawned: false,
             executor: executor.clone(),
-            networking: Arc::new(Networking::new(metrics, auditor.clone())),
+            networking: Arc::new(Networking::new(metrics, self.auditor.clone())),
             storage,
         };
 
@@ -791,6 +798,7 @@ impl Context {
         (
             Runner {
                 cfg: Config::default(), // TODO danlaine: replace this
+                auditor: auditor.clone(),
             },
             Self {
                 label: String::new(),
@@ -1314,6 +1322,7 @@ mod tests {
 
     fn run_with_seed(seed: u64) -> (String, Vec<usize>) {
         let executor = deterministic::Runner::seeded(seed);
+        let auditor = executor.auditor.clone();
         let messages = run_tasks(5, executor);
         (auditor.state(), messages)
     }
