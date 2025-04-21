@@ -1120,12 +1120,8 @@ mod tests {
                 {
                     let nullifies = supervisor.nullifies.lock().unwrap();
                     for view in offline_views.iter() {
-                        let Some(nullifies) = nullifies.get(view) else {
-                            warn!("missing expected view nullifies: {}", view);
-                            exceptions += 1;
-                            continue;
-                        };
-                        if nullifies.len() < threshold as usize {
+                        let nullifies = nullifies.get(view).map_or(0, |n| n.len());
+                        if nullifies < threshold as usize {
                             warn!("missing expected view nullifies: {}", view);
                             exceptions += 1;
                         }
