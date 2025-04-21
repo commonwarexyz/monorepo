@@ -1707,7 +1707,7 @@ mod tests {
                 }
             }
 
-            auditor.state()
+            context.auditor().state()
         })
     }
 

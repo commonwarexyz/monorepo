@@ -84,8 +84,7 @@ mod tests {
     use commonware_cryptography::{ed25519::PublicKey, Ed25519, Signer};
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
-    use commonware_runtime::deterministic::{Context, Executor};
-    use commonware_runtime::{Clock, Metrics, Runner};
+    use commonware_runtime::{deterministic, Clock, Metrics, Runner};
     use futures::{SinkExt, StreamExt};
     use std::time::Duration;
 
@@ -106,7 +105,7 @@ mod tests {
     };
 
     async fn setup_network_and_peers(
-        context: &Context,
+        context: &deterministic::Context,
         peer_seeds: &[u64],
     ) -> (
         Oracle<PublicKey>,
@@ -155,7 +154,7 @@ mod tests {
     }
 
     async fn setup_and_spawn_actor(
-        context: &Context,
+        context: &deterministic::Context,
         coordinator: &Coordinator<PublicKey>,
         scheme: Ed25519,
         connection: (Sender<PublicKey>, Receiver<PublicKey>),
@@ -192,8 +191,8 @@ mod tests {
     /// and verifies that the data is correctly delivered to Peer 1's consumer.
     #[test_traced]
     fn test_fetch_success() {
-        let (executor, context, _) = Executor::timed(Duration::from_secs(10));
-        executor.start(async move {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
             let (mut oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2]).await;
 
@@ -244,8 +243,8 @@ mod tests {
     /// verifying that the consumer receives a failure notification instead of data.
     #[test_traced]
     fn test_cancel_fetch() {
-        let (executor, context, _) = Executor::timed(Duration::from_secs(10));
-        executor.start(async move {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
             let (_oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1]).await;
 
@@ -283,8 +282,8 @@ mod tests {
     /// delivers the data to Peer 1's consumer.
     #[test_traced]
     fn test_peer_no_data() {
-        let (executor, context, _) = Executor::timed(Duration::from_secs(10));
-        executor.start(async move {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
             let (mut oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2, 3]).await;
 
@@ -349,8 +348,8 @@ mod tests {
     /// and verifies that the consumer receives a failure notification.
     #[test_traced]
     fn test_no_peers_available() {
-        let (executor, context, _) = Executor::timed(Duration::from_secs(10));
-        executor.start(async move {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
             let (_oracle, mut schemes, _peers, mut connections) =
                 setup_network_and_peers(&context, &[1]).await;
 
@@ -390,8 +389,8 @@ mod tests {
     /// Also tests that the peer can get data from multiple peers that have different sets of data.
     #[test_traced]
     fn test_concurrent_fetch_requests() {
-        let (executor, context, _) = Executor::timed(Duration::from_secs(60));
-        executor.start(async move {
+        let executor = deterministic::Runner::timed(Duration::from_secs(60));
+        executor.start(|context| async move {
             let (mut oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2, 3]).await;
 
@@ -478,8 +477,8 @@ mod tests {
     /// Cancels a request before, after, and during the fetch process,
     #[test_traced]
     fn test_cancel() {
-        let (executor, context, _) = Executor::timed(Duration::from_secs(10));
-        executor.start(async move {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
             let (mut oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2]).await;
 
@@ -557,8 +556,8 @@ mod tests {
     /// preventing further fetches from that peer.
     #[test_traced]
     fn test_blocking_peer() {
-        let (executor, context, _) = Executor::timed(Duration::from_secs(10));
-        executor.start(async move {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
             let (mut oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2, 3]).await;
 
@@ -662,8 +661,8 @@ mod tests {
     /// the data is correctly delivered once without errors.
     #[test_traced]
     fn test_duplicate_fetch_request() {
-        let (executor, context, _) = Executor::timed(Duration::from_secs(10));
-        executor.start(async move {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
             let (mut oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2]).await;
 
@@ -727,8 +726,8 @@ mod tests {
     /// the resolver correctly adapts and fetches from the new peer.
     #[test_traced]
     fn test_changing_peer_sets() {
-        let (executor, context, _) = Executor::timed(Duration::from_secs(10));
-        executor.start(async move {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
             let (mut oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2, 3]).await;
 
