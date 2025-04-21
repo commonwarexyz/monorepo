@@ -1,4 +1,4 @@
-use commonware_codec::{Decode, Encode, EncodeFixed, FixedSize};
+use commonware_codec::{Decode, EncodeFixed};
 use std::{
     cmp::{Ord, PartialOrd},
     error::Error as StdError,
@@ -45,8 +45,6 @@ pub trait Array:
     + AsRef<[u8]>
     + Deref<Target = [u8]>
     + Decode
-    + Encode
-    + FixedSize
     + EncodeFixed
 {
 }
