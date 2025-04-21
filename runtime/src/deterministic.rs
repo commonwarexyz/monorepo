@@ -539,6 +539,30 @@ enum WorkItem {
     Task(Arc<Task>),
 }
 
+/// Waker for the *root* future.
+///
+/// Because the root future isn’t stored inside `Tasks`, normal `ArcWake`
+/// machinery doesn’t apply.  When it’s woken we push a **completed**, dummy
+/// task into the ready‑queue; that guarantees the executor spins a new
+/// iteration and polls the real root future right away.
+struct RootWaker {
+    tasks: Arc<Tasks>,
+}
+
+impl ArcWake for RootWaker {
+    fn wake_by_ref(arc_self: &Arc<Self>) {
+        // Dummy task – already `completed`, so it’s ignored as soon as it’s seen.
+        let dummy = Arc::new(Task {
+            id: u128::MAX, // sentinel
+            label: String::new(),
+            tasks: arc_self.tasks.clone(),
+            future: Mutex::new(Box::pin(async {})),
+            completed: Mutex::new(true),
+        });
+        arc_self.tasks.enqueue(dummy);
+    }
+}
+
 /// Implementation of [`crate::Runner`] for the `deterministic` runtime.
 pub struct Runner {
     executor: Arc<Executor>,
@@ -551,6 +575,11 @@ impl crate::Runner for Runner {
     {
         // Pin root task to the heap
         let mut root = Box::pin(f);
+
+        // A waker for the root future
+        let root_waker_src = Arc::new(RootWaker {
+            tasks: self.executor.tasks.clone(),
+        });
 
         // Process tasks until root task completes or progress stalls
         let mut iter = 0;
@@ -597,8 +626,8 @@ impl crate::Runner for Runner {
                         trace!(id = 0, "processing task");
 
                         // Prepare task for polling
-                        let waker = futures::task::noop_waker_ref();
-                        let mut cx = task::Context::from_waker(waker);
+                        let waker = waker_ref(&root_waker_src);
+                        let mut cx = task::Context::from_waker(&waker);
 
                         // Record task poll
                         self.executor
@@ -687,7 +716,7 @@ impl crate::Runner for Runner {
                         *time = skip.unwrap();
                         current = *time;
                     }
-                    trace!(now = current.epoch_millis(), "time skipped",);
+                    trace!(now = current.epoch_millis(), "time skipped");
                 }
             }
 
