@@ -982,9 +982,9 @@ mod tests {
             let pruned = format!("indices_pruned_total {}", removed);
             assert!(buffer.contains(&pruned));
             assert!(buffer.contains("pruned_total 0")); // have not lazily removed keys yet
-        });
-        // auditor.state() TODO danlaine: replace
-        String::new()
+
+            context.auditor().state()
+        })
     }
 
     #[test_traced]
