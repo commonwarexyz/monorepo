@@ -493,7 +493,6 @@ impl From<Context> for RunnerWithContext {
 /// Runs `f` with the given context.
 /// This can be useful for testing purposes when we want to
 /// re-use the same context for multiple executions.
-#[cfg(test)]
 pub fn run_from_context<F, Fut>(context: Context, f: F) -> Fut::Output
 where
     F: FnOnce(Context) -> Fut,
