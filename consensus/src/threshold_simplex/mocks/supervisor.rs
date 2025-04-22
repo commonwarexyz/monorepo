@@ -165,22 +165,6 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
         // but in production this isn't necessary (as signatures are already verified in
         // consensus).
         match activity {
-            Activity::Seed(seed) => {
-                let view = seed.view();
-                let (identity, _) = match self.participants.range(..=view).next_back() {
-                    Some((_, (p, _, v, _))) => (p, v),
-                    None => {
-                        panic!("no participants in required range");
-                    }
-                };
-                let public = public(identity);
-                if !seed.verify(&self.namespace, public) {
-                    panic!("signature verification failed");
-                }
-                let encoded = seed.encode();
-                Seed::decode(encoded).unwrap();
-                self.seeds.lock().unwrap().insert(view, seed);
-            }
             Activity::Notarize(notarize) => {
                 let view = notarize.view();
                 let (identity, validators) = match self.participants.range(..=view).next_back() {
@@ -213,6 +197,9 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                     }
                 };
                 let public = public(identity);
+
+                // Verify notarization
+                let seed = notarization.seed();
                 if !notarization.verify(&self.namespace, public) {
                     panic!("signature verification failed");
                 }
@@ -222,6 +209,14 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                     .lock()
                     .unwrap()
                     .insert(view, notarization);
+
+                // Verify seed
+                if !seed.verify(&self.namespace, public) {
+                    panic!("signature verification failed");
+                }
+                let encoded = seed.encode();
+                Seed::decode(encoded).unwrap();
+                self.seeds.lock().unwrap().insert(view, seed);
             }
             Activity::Nullify(nullify) => {
                 let view = nullify.view();
@@ -253,6 +248,9 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                     }
                 };
                 let public = public(identity);
+
+                // Verify nullification
+                let seed = nullification.seed();
                 if !nullification.verify(&self.namespace, public) {
                     panic!("signature verification failed");
                 }
@@ -262,6 +260,14 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                     .lock()
                     .unwrap()
                     .insert(view, nullification);
+
+                // Verify seed
+                if !seed.verify(&self.namespace, public) {
+                    panic!("signature verification failed");
+                }
+                let encoded = seed.encode();
+                Seed::decode(encoded).unwrap();
+                self.seeds.lock().unwrap().insert(view, seed);
             }
             Activity::Finalize(finalize) => {
                 let view = finalize.view();
@@ -295,6 +301,9 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                     }
                 };
                 let public = public(identity);
+
+                // Verify finalization
+                let seed = finalization.seed();
                 if !finalization.verify(&self.namespace, public) {
                     panic!("signature verification failed");
                 }
@@ -304,6 +313,14 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                     .lock()
                     .unwrap()
                     .insert(view, finalization.clone());
+
+                // Verify seed
+                if !seed.verify(&self.namespace, public) {
+                    panic!("signature verification failed");
+                }
+                let encoded = seed.encode();
+                Seed::decode(encoded).unwrap();
+                self.seeds.lock().unwrap().insert(view, seed);
 
                 // Send message to subscribers
                 *self.latest.lock().unwrap() = finalization.view();

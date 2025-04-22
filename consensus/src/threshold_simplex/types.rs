@@ -410,6 +410,11 @@ impl<D: Digest> Notarization<D> {
         )
         .is_ok()
     }
+
+    /// Returns a [Seed] object for the notarization.
+    pub fn seed(&self) -> Seed {
+        Seed::new(self.view(), self.seed_signature)
+    }
 }
 
 impl<D: Digest> Viewable for Notarization<D> {
@@ -590,6 +595,11 @@ impl Nullification {
         )
         .is_ok()
     }
+
+    /// Returns a [Seed] object for the nullification.
+    pub fn seed(&self) -> Seed {
+        Seed::new(self.view(), self.seed_signature)
+    }
 }
 
 impl Viewable for Nullification {
@@ -749,6 +759,11 @@ impl<D: Digest> Finalization<D> {
             1,
         )
         .is_ok()
+    }
+
+    /// Returns a [Seed] object for the finalization.
+    pub fn seed(&self) -> Seed {
+        Seed::new(self.view(), self.seed_signature)
     }
 }
 
@@ -947,11 +962,6 @@ impl<D: Digest> Read<usize> for Response<D> {
 /// This includes both regular consensus messages and fault evidence.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub enum Activity<D: Digest> {
-    /// A threshold signature over the latest view.
-    ///
-    /// This is constructed during notarization/nullification
-    /// and extracted for convenience.
-    Seed(Seed),
     /// A single validator notarize over a proposal
     Notarize(Notarize<D>),
     /// A threshold signature for a notarization
@@ -975,44 +985,40 @@ pub enum Activity<D: Digest> {
 impl<D: Digest> Write for Activity<D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
-            Activity::Seed(v) => {
+            Activity::Notarize(v) => {
                 0u8.write(writer);
                 v.write(writer);
             }
-            Activity::Notarize(v) => {
+            Activity::Notarization(v) => {
                 1u8.write(writer);
                 v.write(writer);
             }
-            Activity::Notarization(v) => {
+            Activity::Nullify(v) => {
                 2u8.write(writer);
                 v.write(writer);
             }
-            Activity::Nullify(v) => {
+            Activity::Nullification(v) => {
                 3u8.write(writer);
                 v.write(writer);
             }
-            Activity::Nullification(v) => {
+            Activity::Finalize(v) => {
                 4u8.write(writer);
                 v.write(writer);
             }
-            Activity::Finalize(v) => {
+            Activity::Finalization(v) => {
                 5u8.write(writer);
                 v.write(writer);
             }
-            Activity::Finalization(v) => {
+            Activity::ConflictingNotarize(v) => {
                 6u8.write(writer);
                 v.write(writer);
             }
-            Activity::ConflictingNotarize(v) => {
+            Activity::ConflictingFinalize(v) => {
                 7u8.write(writer);
                 v.write(writer);
             }
-            Activity::ConflictingFinalize(v) => {
-                8u8.write(writer);
-                v.write(writer);
-            }
             Activity::NullifyFinalize(v) => {
-                9u8.write(writer);
+                8u8.write(writer);
                 v.write(writer);
             }
         }
@@ -1022,7 +1028,6 @@ impl<D: Digest> Write for Activity<D> {
 impl<D: Digest> EncodeSize for Activity<D> {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Activity::Seed(v) => v.encode_size(),
             Activity::Notarize(v) => v.encode_size(),
             Activity::Notarization(v) => v.encode_size(),
             Activity::Nullify(v) => v.encode_size(),
@@ -1041,42 +1046,38 @@ impl<D: Digest> Read for Activity<D> {
         let tag = <u8>::read(reader)?;
         match tag {
             0 => {
-                let v = Seed::read(reader)?;
-                Ok(Activity::Seed(v))
-            }
-            1 => {
                 let v = Notarize::read(reader)?;
                 Ok(Activity::Notarize(v))
             }
-            2 => {
+            1 => {
                 let v = Notarization::read(reader)?;
                 Ok(Activity::Notarization(v))
             }
-            3 => {
+            2 => {
                 let v = Nullify::read(reader)?;
                 Ok(Activity::Nullify(v))
             }
-            4 => {
+            3 => {
                 let v = Nullification::read(reader)?;
                 Ok(Activity::Nullification(v))
             }
-            5 => {
+            4 => {
                 let v = Finalize::read(reader)?;
                 Ok(Activity::Finalize(v))
             }
-            6 => {
+            5 => {
                 let v = Finalization::read(reader)?;
                 Ok(Activity::Finalization(v))
             }
-            7 => {
+            6 => {
                 let v = ConflictingNotarize::read(reader)?;
                 Ok(Activity::ConflictingNotarize(v))
             }
-            8 => {
+            7 => {
                 let v = ConflictingFinalize::read(reader)?;
                 Ok(Activity::ConflictingFinalize(v))
             }
-            9 => {
+            8 => {
                 let v = NullifyFinalize::read(reader)?;
                 Ok(Activity::NullifyFinalize(v))
             }
@@ -1091,7 +1092,6 @@ impl<D: Digest> Read for Activity<D> {
 impl<D: Digest> Viewable for Activity<D> {
     fn view(&self) -> View {
         match self {
-            Activity::Seed(v) => v.view(),
             Activity::Notarize(v) => v.view(),
             Activity::Notarization(v) => v.view(),
             Activity::Nullify(v) => v.view(),
@@ -1587,7 +1587,7 @@ mod tests {
         assert!(decoded.verify(NAMESPACE, public_key));
 
         // Create seed
-        let seed = Seed::new(notarization.view(), notarization.seed_signature);
+        let seed = notarization.seed();
         let encoded = seed.encode();
         let decoded = Seed::decode(encoded).unwrap();
         assert_eq!(seed, decoded);
@@ -1631,14 +1631,21 @@ mod tests {
 
         // Create nullification
         let nullification = Nullification::new(10, view_signature, seed_signature);
-
         let encoded = nullification.encode();
         let decoded = Nullification::decode(encoded).unwrap();
-
         assert_eq!(nullification, decoded);
 
         // Verify the nullification
         let public_key = poly::public(&commitment);
+        assert!(decoded.verify(NAMESPACE, public_key));
+
+        // Create seed
+        let seed = nullification.seed();
+        let encoded = seed.encode();
+        let decoded = Seed::decode(encoded).unwrap();
+        assert_eq!(seed, decoded);
+
+        // Verify the seed
         assert!(decoded.verify(NAMESPACE, public_key));
     }
 
@@ -1684,14 +1691,21 @@ mod tests {
 
         // Create finalization
         let finalization = Finalization::new(proposal, proposal_signature, seed_signature);
-
         let encoded = finalization.encode();
         let decoded = Finalization::<Sha256>::decode(encoded).unwrap();
-
         assert_eq!(finalization, decoded);
 
         // Verify the finalization
         let public_key = poly::public(&commitment);
+        assert!(decoded.verify(NAMESPACE, public_key));
+
+        // Create seed
+        let seed = finalization.seed();
+        let encoded = seed.encode();
+        let decoded = Seed::decode(encoded).unwrap();
+        assert_eq!(seed, decoded);
+
+        // Verify the seed
         assert!(decoded.verify(NAMESPACE, public_key));
     }
 
