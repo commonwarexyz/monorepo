@@ -390,6 +390,30 @@ pub struct Executor {
     recovered: Mutex<bool>,
 }
 
+/// The operation that a task is performing.
+enum Operation {
+    Root,
+    Work {
+        future: Mutex<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>,
+        completed: Mutex<bool>,
+    },
+}
+
+/// A task that is being executed by the runtime.
+struct Task {
+    id: u128,
+    label: String,
+    tasks: Arc<Tasks>,
+
+    operation: Operation,
+}
+
+impl ArcWake for Task {
+    fn wake_by_ref(arc_self: &Arc<Self>) {
+        arc_self.tasks.enqueue(arc_self.clone());
+    }
+}
+
 struct RunnerWithContext {
     context: Context,
 }
@@ -654,30 +678,6 @@ impl crate::Runner for RunnerWithContext {
             }
             iter += 1;
         }
-    }
-}
-
-/// The operation that a task is performing.
-enum Operation {
-    Root,
-    Work {
-        future: Mutex<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>,
-        completed: Mutex<bool>,
-    },
-}
-
-/// A task that is being executed by the runtime.
-struct Task {
-    id: u128,
-    label: String,
-    tasks: Arc<Tasks>,
-
-    operation: Operation,
-}
-
-impl ArcWake for Task {
-    fn wake_by_ref(arc_self: &Arc<Self>) {
-        arc_self.tasks.enqueue(arc_self.clone());
     }
 }
 
