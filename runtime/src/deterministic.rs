@@ -466,7 +466,7 @@ impl crate::Runner for Runner {
             RunnerState::NoContext(config) => {
                 let auditor = Arc::new(Auditor::default());
                 let context = Context::new(config, auditor.clone());
-                self.state = RunnerState::Context(context.clone());
+                self.state = RunnerState::Context(context);
                 self.start(f)
             }
             RunnerState::Context(context) => {
