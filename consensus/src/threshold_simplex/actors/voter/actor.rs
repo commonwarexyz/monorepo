@@ -6,7 +6,7 @@ use crate::{
         types::{
             Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Context,
             Finalization, Finalize, Notarization, Notarize, Nullification, Nullify,
-            NullifyFinalize, Proposal, View, Viewable, Voter,
+            NullifyFinalize, Proposal, Seed, View, Viewable, Voter,
         },
     },
     Automaton, Relay, Reporter, ThresholdSupervisor, LATENCY,
@@ -142,9 +142,17 @@ impl<
         }
     }
 
-    pub fn set_leader(&mut self, seed: group::Signature) {
+    pub async fn set_leader(&mut self, seed: group::Signature) {
         let leader = ThresholdSupervisor::leader(&self.supervisor, self.view, seed).unwrap();
         self.leader = Some(leader);
+
+        // Report the seed (if not genesis)
+        let seed_view = self.view.checked_sub(1).expect("view underflow");
+        if seed_view == GENESIS_VIEW {
+            return;
+        }
+        let seed = Seed::new(seed_view, seed);
+        self.reporter.report(Activity::Seed(seed)).await;
     }
 
     fn add_verified_proposal(&mut self, proposal: Proposal<D>) {
@@ -1082,7 +1090,7 @@ impl<
         Some((*leader == self.crypto.public_key(), elapsed.as_secs_f64()))
     }
 
-    fn enter_view(&mut self, view: u64, seed: group::Signature) {
+    async fn enter_view(&mut self, view: u64, seed: group::Signature) {
         // Ensure view is valid
         if view <= self.view {
             trace!(
@@ -1104,7 +1112,7 @@ impl<
         });
         round.leader_deadline = Some(self.context.current() + self.leader_timeout);
         round.advance_deadline = Some(self.context.current() + self.notarization_timeout);
-        round.set_leader(seed);
+        round.set_leader(seed).await;
         self.view = view;
 
         // Update metrics
@@ -1309,7 +1317,7 @@ impl<
         }
 
         // Enter next view
-        self.enter_view(view + 1, seed);
+        self.enter_view(view + 1, seed).await;
     }
 
     async fn nullification(&mut self, nullification: Nullification) -> bool {
@@ -1367,7 +1375,7 @@ impl<
         }
 
         // Enter next view
-        self.enter_view(view + 1, seed);
+        self.enter_view(view + 1, seed).await;
     }
 
     async fn finalize(&mut self, sender: &C::PublicKey, finalize: Finalize<D>) -> bool {
@@ -1485,7 +1493,7 @@ impl<
         }
 
         // Enter next view
-        self.enter_view(view + 1, seed);
+        self.enter_view(view + 1, seed).await;
     }
 
     fn construct_notarize(&mut self, view: u64) -> Option<Notarize<D>> {
@@ -1795,7 +1803,7 @@ impl<
         // Add initial view
         //
         // We start on view 1 because the genesis container occupies view 0/height 0.
-        self.enter_view(1, group::Signature::zero());
+        self.enter_view(1, group::Signature::zero()).await;
 
         // Rebuild from journal
         let mut journal = self.journal.take().expect("missing journal");

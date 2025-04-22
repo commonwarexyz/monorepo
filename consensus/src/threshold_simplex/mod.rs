@@ -393,6 +393,17 @@ mod tests {
                     assert!(faults.is_empty());
                 }
 
+                // Ensure seeds for all views
+                {
+                    let seeds = supervisor.seeds.lock().unwrap();
+                    for view in 1..latest_complete {
+                        // Ensure seed for every view
+                        if !seeds.contains_key(&view) {
+                            panic!("view: {}", view);
+                        }
+                    }
+                }
+
                 // Ensure no forks
                 let mut exceptions = 0;
                 let mut notarized = HashMap::new();
