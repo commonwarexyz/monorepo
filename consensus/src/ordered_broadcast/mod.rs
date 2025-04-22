@@ -73,14 +73,10 @@ mod tests {
     use commonware_runtime::{Clock, Runner, Spawner};
     use futures::channel::oneshot;
     use futures::future::join_all;
-    use rand::{rngs::StdRng, SeedableRng};
+    use std::{collections::BTreeMap, time::Duration};
     use std::{
         collections::HashMap,
         sync::{Arc, Mutex},
-    };
-    use std::{
-        collections::{BTreeMap, HashSet},
-        time::Duration,
     };
     use tracing::debug;
 

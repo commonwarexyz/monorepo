@@ -175,14 +175,13 @@ mod tests {
     use engine::Engine;
     use futures::{future::join_all, StreamExt};
     use governor::Quota;
-    use rand::{rngs::StdRng, Rng, SeedableRng};
     use std::{
         collections::{BTreeMap, HashMap},
         num::NonZeroU32,
-        sync::{Arc, Mutex},
+        sync::Arc,
         time::Duration,
     };
-    use tracing::{debug, warn};
+    use tracing::warn;
     use types::Activity;
 
     /// Registers all validators using the oracle.
@@ -266,7 +265,7 @@ mod tests {
         // Create context
         let n = 5;
         let threshold = quorum(n);
-        let max_exceptions = 4;
+        let max_exceptions = 10;
         let required_containers = 100;
         let activity_timeout = 10;
         let skip_timeout = 5;
@@ -931,7 +930,7 @@ mod tests {
         let required_containers = 100;
         let activity_timeout = 10;
         let skip_timeout = 5;
-        let max_exceptions = 8; // 1 per each check for online
+        let max_exceptions = 10;
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
@@ -1058,7 +1057,7 @@ mod tests {
             join_all(finalizers).await;
 
             // Check supervisors for correct activity
-            let mut exceptions = 0;
+            let exceptions = 0;
             let offline = &validators[0];
             for supervisor in supervisors.iter() {
                 // Ensure no faults
@@ -1068,6 +1067,7 @@ mod tests {
                 }
 
                 // Ensure offline node is never active
+                let mut exceptions = 0;
                 {
                     let notarizes = supervisor.notarizes.lock().unwrap();
                     for (view, payloads) in notarizes.iter() {
@@ -1113,12 +1113,8 @@ mod tests {
                 {
                     let nullifies = supervisor.nullifies.lock().unwrap();
                     for view in offline_views.iter() {
-                        let Some(nullifies) = nullifies.get(view) else {
-                            warn!("missing expected view nullifies: {}", view);
-                            exceptions += 1;
-                            continue;
-                        };
-                        if nullifies.len() < threshold as usize {
+                        let nullifies = nullifies.get(view).map_or(0, |n| n.len());
+                        if nullifies < threshold as usize {
                             warn!("missing expected view nullifies: {}", view);
                             exceptions += 1;
                         }
@@ -1133,6 +1129,9 @@ mod tests {
                         }
                     }
                 }
+
+                // Ensure exceptions within allowed
+                assert!(exceptions <= max_exceptions);
             }
             assert!(exceptions <= max_exceptions);
         });

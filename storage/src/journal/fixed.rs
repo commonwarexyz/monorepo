@@ -50,7 +50,7 @@
 
 use super::Error;
 use bytes::BufMut;
-use commonware_codec::FixedSize;
+use commonware_codec::{DecodeExt, FixedSize};
 use commonware_runtime::{Blob, Error as RError, Metrics, Storage};
 use commonware_utils::{hex, Array};
 use futures::stream::{self, Stream, StreamExt};
@@ -322,7 +322,7 @@ impl<E: Storage + Metrics, A: Array> Journal<E, A> {
         if checksum != stored_checksum {
             return Err(Error::ChecksumMismatch(stored_checksum, checksum));
         }
-        Ok(buf[..A::SIZE].try_into().unwrap())
+        Ok(A::decode(&buf[..A::SIZE]).unwrap())
     }
 
     /// Returns an unordered stream of all items in the journal.
@@ -823,7 +823,7 @@ mod tests {
             journal.close().await.expect("Failed to close journal");
 
             // Delete the last blob to simulate a sync() that wrote the last blob at the point it
-            // was entirely full, but a crash happened before the next epty blob could be created.
+            // was entirely full, but a crash happened before the next empty blob could be created.
             context
                 .remove(&cfg.partition, Some(&1u64.to_be_bytes()))
                 .await

@@ -144,14 +144,12 @@ mod tests {
     use engine::Engine;
     use futures::{future::join_all, StreamExt};
     use governor::Quota;
-    use rand::Rng;
     use std::{
         collections::{BTreeMap, HashMap},
         num::NonZeroU32,
-        sync::{Arc, Mutex},
+        sync::Arc,
         time::Duration,
     };
-    use tracing::debug;
     use types::Activity;
 
     /// Registers all validators using the oracle.

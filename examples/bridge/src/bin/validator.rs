@@ -2,12 +2,10 @@ use clap::{value_parser, Arg, Command};
 use commonware_bridge::{
     application, APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE, P2P_SUFFIX,
 };
+use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::threshold_simplex::{self, Engine};
 use commonware_cryptography::{
-    bls12381::primitives::{
-        group::{self, Element},
-        poly::Poly,
-    },
+    bls12381::primitives::{group, poly::Poly},
     Ed25519, Sha256, Signer,
 };
 use commonware_p2p::authenticated;
@@ -107,18 +105,18 @@ fn main() {
         .expect("Please provide storage directory");
 
     // Configure threshold
-    let threshold = quorum(validators.len() as u32);
+    let threshold = quorum(validators.len() as u32) as usize;
     let identity = matches
         .get_one::<String>("identity")
         .expect("Please provide identity");
     let identity = from_hex(identity).expect("Identity not well-formed");
     let identity: Poly<group::Public> =
-        Poly::deserialize(&identity, threshold).expect("Identity not well-formed");
+        Poly::decode_cfg(identity.as_ref(), &threshold).expect("Identity not well-formed");
     let share = matches
         .get_one::<String>("share")
         .expect("Please provide share");
     let share = from_hex(share).expect("Share not well-formed");
-    let share = group::Share::deserialize(&share).expect("Share not well-formed");
+    let share = group::Share::decode(share.as_ref()).expect("Share not well-formed");
 
     // Configure indexer
     let indexer = matches
@@ -137,7 +135,7 @@ fn main() {
         .expect("Please provide other public");
     let other_public = from_hex(other_public).expect("Other identity not well-formed");
     let other_public =
-        group::Public::deserialize(&other_public).expect("Other identity not well-formed");
+        group::Public::decode(other_public.as_ref()).expect("Other identity not well-formed");
 
     // Initialize context
     let runtime_cfg = tokio::Config {

@@ -8,7 +8,7 @@ use crate::{
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{
     bls12381::primitives::{
-        group::{self, Element},
+        group,
         poly::{self, public},
     },
     Digest,
@@ -123,7 +123,7 @@ impl<P: Array, D: Digest> TSu for Supervisor<P, D> {
                 panic!("no participants in required range");
             }
         };
-        let seed = seed.serialize();
+        let seed = seed.encode();
         let leader_index = modulo(&seed, closest.len() as u64);
         let leader = closest[leader_index as usize].clone();
         self.leaders

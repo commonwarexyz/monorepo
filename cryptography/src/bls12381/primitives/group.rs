@@ -22,7 +22,6 @@ use blst::{
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
-    DecodeExt, Encode,
     Error::{self, Invalid},
     FixedSize, Read, ReadExt, Write,
 };
@@ -53,18 +52,6 @@ pub trait Element: Read + Write + FixedSize + Copy + Clone + Eq + PartialEq + Se
 
     /// Multiplies self in-place.
     fn mul(&mut self, rhs: &Scalar);
-
-    /// Canonically serializes the element.
-    fn serialize(&self) -> Vec<u8>;
-
-    /// Serialized size of the element.
-    fn size() -> usize;
-
-    /// Deserializes an untrusted, canonically-encoded element.
-    ///
-    /// This function performs any validation necessary to ensure the decoded
-    /// element is valid (like an infinity or group check).
-    fn deserialize(bytes: &[u8]) -> Option<Self>;
 }
 
 /// An element of a group that supports message hashing.
@@ -267,18 +254,6 @@ impl Element for Scalar {
             blst_fr_mul(&mut self.0, &self.0, &rhs.0);
         }
     }
-
-    fn serialize(&self) -> Vec<u8> {
-        self.encode().into()
-    }
-
-    fn deserialize(bytes: &[u8]) -> Option<Self> {
-        Self::decode(bytes).ok()
-    }
-
-    fn size() -> usize {
-        Self::SIZE
-    }
 }
 
 impl Write for Scalar {
@@ -354,16 +329,6 @@ impl Share {
         public.mul(&self.private);
         public
     }
-
-    /// Canonically serializes the share.
-    pub fn serialize(&self) -> Vec<u8> {
-        self.encode().into()
-    }
-
-    /// Deserializes a canonically encoded share.
-    pub fn deserialize(bytes: &[u8]) -> Option<Self> {
-        Self::decode(bytes).ok()
-    }
 }
 
 impl Write for Share {
@@ -433,18 +398,6 @@ impl Element for G1 {
             blst_scalar_from_fr(&mut scalar, &rhs.0);
             blst_p1_mult(&mut self.0, &self.0, scalar.b.as_ptr(), bits(&scalar));
         }
-    }
-
-    fn serialize(&self) -> Vec<u8> {
-        self.encode().into()
-    }
-
-    fn deserialize(bytes: &[u8]) -> Option<Self> {
-        Self::decode(bytes).ok()
-    }
-
-    fn size() -> usize {
-        Self::SIZE
     }
 }
 
@@ -563,18 +516,6 @@ impl Element for G2 {
             blst_p2_mult(&mut self.0, &self.0, scalar.b.as_ptr(), bits(&scalar));
         }
     }
-
-    fn serialize(&self) -> Vec<u8> {
-        self.encode().into()
-    }
-
-    fn deserialize(bytes: &[u8]) -> Option<Self> {
-        Self::decode(bytes).ok()
-    }
-
-    fn size() -> usize {
-        Self::SIZE
-    }
 }
 
 impl Write for G2 {
@@ -692,6 +633,7 @@ pub(super) fn equal(pk: &G1, sig: &G2, hm: &G2) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_codec::{DecodeExt, Encode};
     use rand::prelude::*;
 
     #[test]

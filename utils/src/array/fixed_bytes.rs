@@ -44,39 +44,7 @@ impl<const N: usize> FixedSize for FixedBytes<N> {
     const SIZE: usize = N;
 }
 
-impl<const N: usize> Array for FixedBytes<N> {
-    type Error = Error;
-}
-
-impl<const N: usize> TryFrom<&[u8]> for FixedBytes<N> {
-    type Error = Error;
-
-    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        let array: [u8; N] = value.try_into().map_err(|_| Error::InvalidLength)?;
-        Ok(Self(array))
-    }
-}
-
-impl<const N: usize> TryFrom<&Vec<u8>> for FixedBytes<N> {
-    type Error = Error;
-
-    fn try_from(value: &Vec<u8>) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_slice())
-    }
-}
-
-impl<const N: usize> TryFrom<Vec<u8>> for FixedBytes<N> {
-    type Error = Error;
-
-    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
-        if value.len() != N {
-            return Err(Error::InvalidLength);
-        }
-        let boxed_slice = value.into_boxed_slice();
-        let boxed_array: Box<[u8; N]> = boxed_slice.try_into().map_err(|_| Error::InvalidLength)?;
-        Ok(Self(*boxed_array))
-    }
-}
+impl<const N: usize> Array for FixedBytes<N> {}
 
 impl<const N: usize> AsRef<[u8]> for FixedBytes<N> {
     fn as_ref(&self) -> &[u8] {
@@ -100,7 +68,6 @@ impl<const N: usize> Display for FixedBytes<N> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::array::Error as ArrayError;
     use bytes::{Buf, BytesMut};
     use commonware_codec::{DecodeExt, Encode};
 
@@ -120,47 +87,40 @@ mod tests {
         assert_eq!(bytes.as_ref(), &value);
 
         let slice = [1, 2, 3, 4];
-        let bytes_from_slice = FixedBytes::try_from(slice.as_ref()).unwrap();
+        let bytes_from_slice = FixedBytes::decode(slice.as_ref()).unwrap();
         assert_eq!(bytes_from_slice, bytes);
 
         let vec = vec![1, 2, 3, 4];
-        let bytes_from_vec_ref = FixedBytes::try_from(&vec).unwrap();
-        assert_eq!(bytes_from_vec_ref, bytes);
-
-        let bytes_from_vec = FixedBytes::try_from(vec).unwrap();
+        let bytes_from_vec = FixedBytes::decode(vec.as_ref()).unwrap();
         assert_eq!(bytes_from_vec, bytes);
 
         // Test with incorrect length
         let slice_too_short = [1, 2, 3];
-        assert_eq!(
-            FixedBytes::<4>::try_from(slice_too_short.as_ref()),
-            Err(Error::InvalidLength)
-        );
+        assert!(matches!(
+            FixedBytes::<4>::decode(slice_too_short.as_ref()),
+            Err(CodecError::EndOfBuffer)
+        ));
 
         let vec_too_long = vec![1, 2, 3, 4, 5];
-        assert_eq!(
-            FixedBytes::<4>::try_from(&vec_too_long),
-            Err(Error::InvalidLength)
-        );
-        assert_eq!(
-            FixedBytes::<4>::try_from(vec_too_long),
-            Err(Error::InvalidLength)
-        );
+        assert!(matches!(
+            FixedBytes::<4>::decode(vec_too_long.as_ref()),
+            Err(CodecError::ExtraData(1))
+        ));
     }
 
     #[test]
-    fn test_read_from() {
+    fn test_read() {
         let mut buf = BytesMut::from(&[1, 2, 3, 4][..]);
-        let bytes = FixedBytes::<4>::read_from(&mut buf).unwrap();
+        let bytes = FixedBytes::<4>::read(&mut buf).unwrap();
         assert_eq!(bytes.as_ref(), &[1, 2, 3, 4]);
         assert_eq!(buf.remaining(), 0);
 
         let mut buf = BytesMut::from(&[1, 2, 3][..]);
-        let result = FixedBytes::<4>::read_from(&mut buf);
-        assert_eq!(result, Err(ArrayError::InsufficientBytes));
+        let result = FixedBytes::<4>::read(&mut buf);
+        assert!(matches!(result, Err(CodecError::EndOfBuffer)));
 
         let mut buf = BytesMut::from(&[1, 2, 3, 4, 5][..]);
-        let bytes = FixedBytes::<4>::read_from(&mut buf).unwrap();
+        let bytes = FixedBytes::<4>::read(&mut buf).unwrap();
         assert_eq!(bytes.as_ref(), &[1, 2, 3, 4]);
         assert_eq!(buf.remaining(), 1);
         assert_eq!(buf[0], 5);

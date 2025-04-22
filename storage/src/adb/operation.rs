@@ -4,7 +4,9 @@
 //! based on a `crate::Journal`.
 
 use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedSize, Read, Write};
+use commonware_codec::{
+    util::at_least, DecodeExt, Error as CodecError, FixedSize, Read, ReadExt, Write,
+};
 use commonware_utils::Array;
 use std::{
     cmp::{Ord, PartialOrd},
@@ -16,13 +18,13 @@ use thiserror::Error;
 
 /// Errors returned by `Operation` functions.
 #[derive(Error, Debug)]
-pub enum Error<K: Array, V: Array> {
+pub enum Error {
     #[error("invalid length")]
     InvalidLength,
     #[error("invalid key: {0}")]
-    InvalidKey(<K as Array>::Error),
+    InvalidKey(CodecError),
     #[error("invalid value: {0}")]
-    InvalidValue(<V as Array>::Error),
+    InvalidValue(CodecError),
     #[error("invalid context byte")]
     InvalidContextByte,
     #[error("delete operation has non-zero value")]
@@ -116,15 +118,15 @@ impl<K: Array, V: Array> Operation<K, V> {
     }
 
     pub fn to_key(&self) -> K {
-        K::try_from(&self.data[1..K::SIZE + 1]).unwrap()
+        K::decode(&self.data[1..K::SIZE + 1]).unwrap()
     }
 
     pub fn to_type(&self) -> Type<K, V> {
-        let key = K::try_from(&self.data[1..K::SIZE + 1]).unwrap();
+        let key = K::decode(&self.data[1..K::SIZE + 1]).unwrap();
         match self.data[0] {
             Self::DELETE_CONTEXT => Type::Deleted(key),
             Self::UPDATE_CONTEXT => {
-                let value = V::try_from(&self.data[K::SIZE + 1..]).unwrap();
+                let value = V::decode(&self.data[K::SIZE + 1..]).unwrap();
                 Type::Update(key, value)
             }
             Self::COMMIT_CONTEXT => {
@@ -138,7 +140,7 @@ impl<K: Array, V: Array> Operation<K, V> {
     pub fn to_value(&self) -> Option<V> {
         match self.data[0] {
             Self::DELETE_CONTEXT => None,
-            Self::UPDATE_CONTEXT => Some(V::try_from(&self.data[K::SIZE + 1..]).unwrap()),
+            Self::UPDATE_CONTEXT => Some(V::decode(&self.data[K::SIZE + 1..]).unwrap()),
             Self::COMMIT_CONTEXT => None,
             _ => unreachable!(),
         }
@@ -154,73 +156,51 @@ impl<K: Array, V: Array> Write for Operation<K, V> {
 
 impl<K: Array, V: Array> Read for Operation<K, V> {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let mut value = vec![0u8; Self::SIZE];
-        buf.copy_to_slice(&mut value);
-        Self::try_from(&value).map_err(|e: Error<K, V>| CodecError::Wrapped("Operation", e.into()))
-    }
-}
+        // Create a vector of the required size and copy the data into it.
+        at_least(buf, Self::SIZE)?;
+        let mut data = vec![0; Self::SIZE];
+        buf.copy_to_slice(&mut data);
 
-impl<K: Array, V: Array> FixedSize for Operation<K, V> {
-    const SIZE: usize = K::SIZE + 1 + V::SIZE;
-}
-
-impl<K: Array, V: Array> Array for Operation<K, V> {
-    type Error = Error<K, V>;
-}
-
-impl<K: Array, V: Array> TryFrom<&[u8]> for Operation<K, V> {
-    type Error = Error<K, V>;
-
-    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        if value.len() != Self::SIZE {
-            return Err(Error::InvalidLength);
-        }
-
-        let _ = K::try_from(&value[1..K::SIZE + 1]).map_err(|e| Error::InvalidKey(e))?;
-
-        match value[0] {
+        // Now, read-over and verify the data.
+        let mut buf: &[u8] = data.as_ref();
+        match u8::read(&mut buf)? {
             Self::UPDATE_CONTEXT => {
-                let _ = V::try_from(&value[K::SIZE + 1..]).map_err(|e| Error::InvalidValue(e))?;
+                K::read(&mut buf)?;
+                V::read(&mut buf)?;
             }
             Self::DELETE_CONTEXT => {
-                // Check if the remaining bytes are all zeros
-                if !value[K::SIZE + 1..].iter().all(|&b| b == 0) {
-                    return Err(Error::InvalidDeleteOp);
+                K::read(&mut buf)?;
+                for _ in 0..V::SIZE {
+                    if buf.get_u8() != 0 {
+                        return Err(CodecError::Invalid("Operation", "Delete value non-zero"));
+                    }
                 }
             }
             Self::COMMIT_CONTEXT => {
-                // Check if the remaining bytes are all zeros
-                if !value[9..].iter().all(|&b| b == 0) {
-                    return Err(Error::InvalidCommitOp);
+                u64::read(&mut buf)?;
+                for _ in 0..(V::SIZE + K::SIZE - u64::SIZE) {
+                    if buf.get_u8() != 0 {
+                        return Err(CodecError::Invalid("Operation", "Commit value non-zero"));
+                    }
                 }
             }
-            _ => {
-                return Err(Error::InvalidContextByte);
+            e => {
+                return Err(CodecError::InvalidEnum(e));
             }
         }
 
         Ok(Self {
-            data: value.to_vec(),
+            data,
             _phantom: std::marker::PhantomData,
         })
     }
 }
 
-impl<K: Array, V: Array> TryFrom<&Vec<u8>> for Operation<K, V> {
-    type Error = Error<K, V>;
-
-    fn try_from(value: &Vec<u8>) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_slice())
-    }
+impl<K: Array, V: Array> FixedSize for Operation<K, V> {
+    const SIZE: usize = u8::SIZE + K::SIZE + V::SIZE;
 }
 
-impl<K: Array, V: Array> TryFrom<Vec<u8>> for Operation<K, V> {
-    type Error = Error<K, V>;
-
-    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_slice())
-    }
-}
+impl<K: Array, V: Array> Array for Operation<K, V> {}
 
 impl<K: Array, V: Array> AsRef<[u8]> for Operation<K, V> {
     fn as_ref(&self) -> &[u8] {
@@ -257,32 +237,32 @@ mod tests {
         let value = U64::new(56789);
         let update_op = Operation::update(key.clone(), value.clone());
 
-        let from = Operation::try_from(update_op.as_ref()).unwrap();
+        let from = Operation::decode(update_op.as_ref()).unwrap();
         assert_eq!(key, from.to_key());
         assert_eq!(value, from.to_value().unwrap());
         assert_eq!(update_op, from);
 
         let vec = update_op.to_vec();
 
-        let from = Operation::<U64, U64>::try_from(&vec).unwrap();
+        let from = Operation::<U64, U64>::decode(vec.as_ref()).unwrap();
         assert_eq!(key, from.to_key());
         assert_eq!(value, from.to_value().unwrap());
         assert_eq!(update_op, from);
 
-        let from = Operation::<U64, U64>::try_from(vec).unwrap();
+        let from = Operation::<U64, U64>::decode(vec.as_ref()).unwrap();
         assert_eq!(key, from.to_key());
         assert_eq!(value, from.to_value().unwrap());
         assert_eq!(update_op, from);
 
         let key2 = U64::new(42);
         let delete_op = Operation::<U64, U64>::delete(key2.clone());
-        let from = Operation::<U64, U64>::try_from(delete_op.as_ref()).unwrap();
+        let from = Operation::<U64, U64>::decode(delete_op.as_ref()).unwrap();
         assert_eq!(key2, from.to_key());
         assert_eq!(None, from.to_value());
         assert_eq!(delete_op, from);
 
         let commit_op = Operation::<U64, U64>::new(Type::Commit(42));
-        let from = Operation::<U64, U64>::try_from(commit_op.as_ref()).unwrap();
+        let from = Operation::<U64, U64>::decode(commit_op.as_ref()).unwrap();
         assert_eq!(None, from.to_value());
         assert!(matches!(from.to_type(), Type::Commit(42)));
         assert_eq!(commit_op, from);
@@ -290,20 +270,23 @@ mod tests {
         // test non-zero byte detection in delete operation
         let mut invalid = delete_op.to_vec();
         invalid[U64::SIZE + 4] = 0xFF;
-        let try_from = Operation::<U64, U64>::try_from(&invalid);
-        assert!(matches!(try_from.unwrap_err(), Error::InvalidDeleteOp));
+        let decoded = Operation::<U64, U64>::decode(invalid.as_ref());
+        assert!(matches!(decoded.unwrap_err(), CodecError::Invalid(_, _)));
 
         // test invalid context byte detection
         let mut invalid = delete_op.to_vec();
         invalid[0] = 0xFF;
-        let try_from = Operation::<U64, U64>::try_from(&invalid);
-        assert!(matches!(try_from.unwrap_err(), Error::InvalidContextByte));
+        let decoded = Operation::<U64, U64>::decode(invalid.as_ref());
+        assert!(matches!(
+            decoded.unwrap_err(),
+            CodecError::InvalidEnum(0xFF)
+        ));
 
         // test invalid length detection
         let mut invalid = update_op.to_vec();
         invalid.pop();
-        let try_from = Operation::<U64, U64>::try_from(&invalid);
-        assert!(matches!(try_from.unwrap_err(), Error::InvalidLength));
+        let decoded = Operation::<U64, U64>::decode(invalid.as_ref());
+        assert!(matches!(decoded.unwrap_err(), CodecError::EndOfBuffer));
     }
 
     #[test]
