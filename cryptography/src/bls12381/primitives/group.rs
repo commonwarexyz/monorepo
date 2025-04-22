@@ -68,6 +68,9 @@ pub struct Scalar(blst_fr);
 /// Length of a scalar in bytes.
 const SCALAR_LENGTH: usize = 32;
 
+/// Length of a scalar in bits.
+const SCALAR_BITS: usize = 255;
+
 /// This constant serves as the multiplicative identity (i.e., "one") in the
 /// BLS12-381 finite field, ensuring that arithmetic is carried out within the
 /// correct modulo.
@@ -157,19 +160,6 @@ pub const PROOF_OF_POSSESSION: DST = G2_PROOF_OF_POSSESSION;
 
 /// The DST for hashing a message to the default signature type (G2).
 pub const MESSAGE: DST = G2_MESSAGE;
-
-/// Returns the size in bits of a given blst_scalar (represented in little-endian).
-fn bits(scalar: &blst_scalar) -> usize {
-    let mut bits: usize = SCALAR_LENGTH * 8;
-    for i in scalar.b.iter().rev() {
-        let leading = i.leading_zeros();
-        bits -= leading as usize;
-        if leading < 8 {
-            break;
-        }
-    }
-    bits
-}
 
 impl Scalar {
     /// Generates a random scalar using the provided RNG.
@@ -396,7 +386,9 @@ impl Element for G1 {
         let mut scalar: blst_scalar = blst_scalar::default();
         unsafe {
             blst_scalar_from_fr(&mut scalar, &rhs.0);
-            blst_p1_mult(&mut self.0, &self.0, scalar.b.as_ptr(), bits(&scalar));
+            // To avoid a timing attack during signing, we always perform the same
+            // number of iterations during scalar multiplication.
+            blst_p1_mult(&mut self.0, &self.0, scalar.b.as_ptr(), SCALAR_BITS);
         }
     }
 }
@@ -513,7 +505,9 @@ impl Element for G2 {
         let mut scalar = blst_scalar::default();
         unsafe {
             blst_scalar_from_fr(&mut scalar, &rhs.0);
-            blst_p2_mult(&mut self.0, &self.0, scalar.b.as_ptr(), bits(&scalar));
+            // To avoid a timing attack during signing, we always perform the same
+            // number of iterations during scalar multiplication.
+            blst_p2_mult(&mut self.0, &self.0, scalar.b.as_ptr(), SCALAR_BITS);
         }
     }
 }
