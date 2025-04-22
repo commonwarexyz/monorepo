@@ -11,9 +11,7 @@ use crate::bls12381::primitives::{
     Error,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{
-    Decode, DecodeExt, Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write,
-};
+use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
 use rand::{rngs::OsRng, RngCore};
 use std::hash::Hash;
 
@@ -38,18 +36,6 @@ pub const PARTIAL_SIGNATURE_LENGTH: usize = u32::SIZE + group::SIGNATURE_LENGTH;
 pub struct Eval<C: Element> {
     pub index: u32,
     pub value: C,
-}
-
-impl<C: Element> Eval<C> {
-    /// Canonically serializes the evaluation.
-    pub fn serialize(&self) -> Vec<u8> {
-        self.encode().into()
-    }
-
-    /// Deserializes a canonically encoded evaluation.
-    pub fn deserialize(bytes: &[u8]) -> Option<Self> {
-        Self::decode(bytes).ok()
-    }
 }
 
 impl<C: Element> Write for Eval<C> {
@@ -153,7 +139,7 @@ impl<C: Element> Poly<C> {
     ///
     /// It panics if the index is out of range.
     pub fn get(&self, i: u32) -> C {
-        self.0[i as usize]
+        self.0[i as usize].clone()
     }
 
     /// Set the given element at the specified index.
@@ -173,16 +159,6 @@ impl<C: Element> Poly<C> {
         }
 
         self.0.iter_mut().zip(&other.0).for_each(|(a, b)| a.add(b))
-    }
-
-    /// Canonically serializes the polynomial.
-    pub fn serialize(&self) -> Vec<u8> {
-        self.encode().into()
-    }
-
-    /// Deserializes a canonically encoded polynomial.
-    pub fn deserialize(bytes: &[u8], expected: u32) -> Option<Self> {
-        Self::decode_cfg(bytes, &(expected as usize)).ok()
     }
 
     /// Evaluates the polynomial at the specified value.
@@ -262,7 +238,7 @@ impl<C: Element> Poly<C> {
                         num.mul(xj);
 
                         // Compute `xj - xi` and include it in the denominator product
-                        let mut tmp = *xj;
+                        let mut tmp = xj.clone();
                         tmp.sub(xi);
                         den.mul(&tmp);
                     }
@@ -277,7 +253,7 @@ impl<C: Element> Poly<C> {
             num.mul(&inv);
 
             // Scale `yi` by `l_i(0)` to contribute to the constant term
-            let mut yi_scaled = **yi;
+            let mut yi_scaled = (*yi).clone();
             yi_scaled.mul(&num);
 
             // Add `yi * l_i(0)` to the running sum
@@ -322,6 +298,8 @@ pub fn public(public: &Public) -> &group::Public {
 
 #[cfg(test)]
 pub mod tests {
+    use commonware_codec::{Decode, Encode};
+
     // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/b0ef82ff79769d085a5a7d3f4fe690b1c8fe6dc9/crates/threshold-bls/src/poly.rs#L355-L604
     use super::*;
     use crate::bls12381::primitives::group::{Scalar, G2};
@@ -401,7 +379,7 @@ pub mod tests {
                 for i in 0..larger.degree() + 1 {
                     let i = i as usize;
                     if i < (smaller.degree() + 1) as usize {
-                        let mut coeff_sum = p1.0[i];
+                        let mut coeff_sum = p1.0[i].clone();
                         coeff_sum.add(&p2.0[i]);
                         assert_eq!(res.0[i], coeff_sum);
                     } else {
@@ -424,7 +402,7 @@ pub mod tests {
         for degree in 0..100u32 {
             for num_evals in 0..100u32 {
                 let poly = new(degree);
-                let expected = poly.0[0];
+                let expected = poly.0[0].clone();
 
                 let shares = (0..num_evals).map(|i| poly.evaluate(i)).collect::<Vec<_>>();
                 let recovered_constant = Poly::recover(num_evals, &shares).unwrap();
@@ -457,14 +435,14 @@ pub mod tests {
                 let evaluation = p1.evaluate(idx).value;
 
                 let coeffs = p1.0;
-                let mut sum = coeffs[0];
+                let mut sum = coeffs[0].clone();
                 for (i, coeff) in coeffs
                     .into_iter()
                     .enumerate()
                     .take((d + 1) as usize)
                     .skip(1)
                 {
-                    let xi = pow(x, i);
+                    let xi = pow(x.clone(), i);
                     let mut var = coeff;
                     var.mul(&xi);
                     sum.add(&var);
@@ -478,8 +456,8 @@ pub mod tests {
     #[test]
     fn test_codec() {
         let original = new(5);
-        let encoded = original.serialize();
-        let decoded = Poly::<Scalar>::deserialize(&encoded, original.required()).unwrap();
+        let encoded = original.encode();
+        let decoded = Poly::<Scalar>::decode_cfg(encoded, &(original.required() as usize)).unwrap();
         assert_eq!(original, decoded);
     }
 }

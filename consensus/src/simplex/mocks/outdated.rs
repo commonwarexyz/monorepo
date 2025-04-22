@@ -101,7 +101,7 @@ impl<
                     // Store proposal
                     self.history.insert(view, finalize.proposal.clone());
 
-                    // Finalize provided digest
+                    // Finalize old digest
                     let view = view.saturating_sub(self.view_delta);
                     let public_key_index = self
                         .supervisor

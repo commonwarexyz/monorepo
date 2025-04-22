@@ -178,7 +178,7 @@ impl<P: Array> Arbiter<P> {
             }
 
             // Ensure index not already active
-            if active.contains(&share.index) {
+            if !active.insert(&share.index) {
                 self.disqualified.insert(dealer);
                 return Err(Error::AlreadyActive);
             }
@@ -192,9 +192,6 @@ impl<P: Array> Arbiter<P> {
                 share.index,
                 share,
             )?;
-
-            // Record active
-            active.insert(&share.index);
         }
 
         // Active must be equal to number of players

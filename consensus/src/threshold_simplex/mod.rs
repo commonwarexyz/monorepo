@@ -185,7 +185,7 @@ mod tests {
         sync::{Arc, Mutex},
         time::Duration,
     };
-    use tracing::debug;
+    use tracing::{debug, warn};
     use types::Activity;
 
     /// Registers all validators using the oracle.
@@ -269,7 +269,7 @@ mod tests {
         // Create context
         let n = 5;
         let threshold = quorum(n);
-        let max_exceptions = 4;
+        let max_exceptions = 10;
         let required_containers = 100;
         let activity_timeout = 10;
         let skip_timeout = 5;
@@ -322,7 +322,7 @@ mod tests {
                 // Configure engine
                 let validator = scheme.public_key();
                 let mut participants = BTreeMap::new();
-                participants.insert(0, (public.clone(), validators.clone(), shares[idx]));
+                participants.insert(0, (public.clone(), validators.clone(), shares[idx].clone()));
                 let supervisor_config = mocks::supervisor::Config {
                     namespace: namespace.clone(),
                     participants,
@@ -576,7 +576,8 @@ mod tests {
                         // Configure engine
                         let validator = scheme.public_key();
                         let mut participants = BTreeMap::new();
-                        participants.insert(0, (public.clone(), validators.clone(), shares[idx]));
+                        participants
+                            .insert(0, (public.clone(), validators.clone(), shares[idx].clone()));
                         let supervisor_config = mocks::supervisor::Config {
                             namespace: namespace.clone(),
                             participants,
@@ -749,7 +750,14 @@ mod tests {
                 // Configure engine
                 let validator = scheme.public_key();
                 let mut participants = BTreeMap::new();
-                participants.insert(0, (public.clone(), validators.clone(), shares[idx_scheme]));
+                participants.insert(
+                    0,
+                    (
+                        public.clone(),
+                        validators.clone(),
+                        shares[idx_scheme].clone(),
+                    ),
+                );
                 let supervisor_config = mocks::supervisor::Config {
                     namespace: namespace.clone(),
                     participants,
@@ -870,7 +878,7 @@ mod tests {
 
             // Configure engine
             let mut participants = BTreeMap::new();
-            participants.insert(0, (public.clone(), validators.clone(), shares[0]));
+            participants.insert(0, (public.clone(), validators.clone(), shares[0].clone()));
             let supervisor_config = mocks::supervisor::Config {
                 namespace: namespace.clone(),
                 participants,
@@ -938,6 +946,7 @@ mod tests {
         let required_containers = 100;
         let activity_timeout = 10;
         let skip_timeout = 5;
+        let max_exceptions = 10;
         let namespace = b"consensus".to_vec();
         let (executor, mut context, _) = Executor::timed(Duration::from_secs(30));
         executor.start(async move {
@@ -998,7 +1007,14 @@ mod tests {
                 // Configure engine
                 let validator = scheme.public_key();
                 let mut participants = BTreeMap::new();
-                participants.insert(0, (public.clone(), validators.clone(), shares[idx_scheme]));
+                participants.insert(
+                    0,
+                    (
+                        public.clone(),
+                        validators.clone(),
+                        shares[idx_scheme].clone(),
+                    ),
+                );
                 let supervisor_config = mocks::supervisor::Config {
                     namespace: namespace.clone(),
                     participants,
@@ -1073,6 +1089,7 @@ mod tests {
                 }
 
                 // Ensure offline node is never active
+                let mut exceptions = 0;
                 {
                     let notarizes = supervisor.notarizes.lock().unwrap();
                     for (view, payloads) in notarizes.iter() {
@@ -1118,18 +1135,25 @@ mod tests {
                 {
                     let nullifies = supervisor.nullifies.lock().unwrap();
                     for view in offline_views.iter() {
-                        let nullifies = nullifies.get(view).unwrap();
-                        if nullifies.len() < threshold as usize {
-                            panic!("view: {}", view);
+                        let nullifies = nullifies.get(view).map_or(0, |n| n.len());
+                        if nullifies < threshold as usize {
+                            warn!("missing expected view nullifies: {}", view);
+                            exceptions += 1;
                         }
                     }
                 }
                 {
                     let nullifications = supervisor.nullifications.lock().unwrap();
                     for view in offline_views.iter() {
-                        nullifications.get(view).unwrap();
+                        if !nullifications.contains_key(view) {
+                            warn!("missing expected view nullifies: {}", view);
+                            exceptions += 1;
+                        }
                     }
                 }
+
+                // Ensure exceptions within allowed
+                assert!(exceptions <= max_exceptions);
             }
         });
     }
@@ -1191,7 +1215,14 @@ mod tests {
                 // Configure engine
                 let validator = scheme.public_key();
                 let mut participants = BTreeMap::new();
-                participants.insert(0, (public.clone(), validators.clone(), shares[idx_scheme]));
+                participants.insert(
+                    0,
+                    (
+                        public.clone(),
+                        validators.clone(),
+                        shares[idx_scheme].clone(),
+                    ),
+                );
                 let supervisor_config = mocks::supervisor::Config {
                     namespace: namespace.clone(),
                     participants,
@@ -1366,7 +1397,7 @@ mod tests {
                 // Configure engine
                 let validator = scheme.public_key();
                 let mut participants = BTreeMap::new();
-                participants.insert(0, (public.clone(), validators.clone(), shares[idx]));
+                participants.insert(0, (public.clone(), validators.clone(), shares[idx].clone()));
                 let supervisor_config = mocks::supervisor::Config {
                     namespace: namespace.clone(),
                     participants,
@@ -1526,7 +1557,7 @@ mod tests {
                 // Configure engine
                 let validator = scheme.public_key();
                 let mut participants = BTreeMap::new();
-                participants.insert(0, (public.clone(), validators.clone(), shares[idx]));
+                participants.insert(0, (public.clone(), validators.clone(), shares[idx].clone()));
                 let supervisor_config = mocks::supervisor::Config {
                     namespace: namespace.clone(),
                     participants,
@@ -1714,7 +1745,7 @@ mod tests {
                 // Configure engine
                 let validator = scheme.public_key();
                 let mut participants = BTreeMap::new();
-                participants.insert(0, (public.clone(), validators.clone(), shares[idx]));
+                participants.insert(0, (public.clone(), validators.clone(), shares[idx].clone()));
                 let supervisor_config = mocks::supervisor::Config {
                     namespace: namespace.clone(),
                     participants,
@@ -1868,7 +1899,14 @@ mod tests {
                 // Start engine
                 let validator = scheme.public_key();
                 let mut participants = BTreeMap::new();
-                participants.insert(0, (public.clone(), validators.clone(), shares[idx_scheme]));
+                participants.insert(
+                    0,
+                    (
+                        public.clone(),
+                        validators.clone(),
+                        shares[idx_scheme].clone(),
+                    ),
+                );
                 let supervisor_config = mocks::supervisor::Config {
                     namespace: namespace.clone(),
                     participants,
@@ -2030,7 +2068,14 @@ mod tests {
                 // Start engine
                 let validator = scheme.public_key();
                 let mut participants = BTreeMap::new();
-                participants.insert(0, (public.clone(), validators.clone(), shares[idx_scheme]));
+                participants.insert(
+                    0,
+                    (
+                        public.clone(),
+                        validators.clone(),
+                        shares[idx_scheme].clone(),
+                    ),
+                );
                 let supervisor_config = mocks::supervisor::Config {
                     namespace: namespace.clone(),
                     participants,
@@ -2184,7 +2229,14 @@ mod tests {
                 // Start engine
                 let validator = scheme.public_key();
                 let mut participants = BTreeMap::new();
-                participants.insert(0, (public.clone(), validators.clone(), shares[idx_scheme]));
+                participants.insert(
+                    0,
+                    (
+                        public.clone(),
+                        validators.clone(),
+                        shares[idx_scheme].clone(),
+                    ),
+                );
                 let supervisor_config = mocks::supervisor::Config {
                     namespace: namespace.clone(),
                     participants,

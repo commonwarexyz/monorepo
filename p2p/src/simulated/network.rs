@@ -6,7 +6,7 @@ use super::{
 };
 use crate::{Channel, Message, Recipients};
 use bytes::Bytes;
-use commonware_codec::FixedSize;
+use commonware_codec::{DecodeExt, FixedSize};
 use commonware_macros::select;
 use commonware_runtime::{
     deterministic::{Listener, Sink, Stream},
@@ -584,7 +584,7 @@ impl<P: Array> Peer<P> {
                                     return;
                                 }
                             };
-                            let Ok(dialer) = P::try_from(dialer.as_ref()) else {
+                            let Ok(dialer) = P::decode(dialer.as_ref()) else {
                                 error!("received public key is invalid");
                                 return;
                             };

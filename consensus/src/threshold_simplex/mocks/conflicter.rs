@@ -68,36 +68,32 @@ impl<
             // Process message
             match msg {
                 Voter::Notarize(notarize) => {
-                    // Notarize received digest
+                    // Notarize random digest
                     let view = notarize.view();
                     let share = self.supervisor.share(view).unwrap();
-                    let proposal = notarize.proposal;
-                    let parent = proposal.parent;
+                    let payload = H::random(&mut self.context);
+                    let proposal = Proposal::new(view, notarize.proposal.parent, payload);
                     let n = Notarize::sign(&self.namespace, share, proposal);
                     let msg = Voter::Notarize(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
 
-                    // Notarize random digest
-                    let payload = H::random(&mut self.context);
-                    let proposal = Proposal::new(view, parent, payload);
-                    let n = Notarize::sign(&self.namespace, share, proposal);
+                    // Notarize received digest
+                    let n = Notarize::sign(&self.namespace, share, notarize.proposal);
                     let msg = Voter::Notarize(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
                 Voter::Finalize(finalize) => {
-                    // Finalize provided digest
+                    // Finalize random digest
                     let view = finalize.view();
                     let share = self.supervisor.share(view).unwrap();
-                    let proposal = finalize.proposal;
-                    let parent = proposal.parent;
+                    let payload = H::random(&mut self.context);
+                    let proposal = Proposal::new(view, finalize.proposal.parent, payload);
                     let f = Finalize::sign(&self.namespace, share, proposal);
                     let msg = Voter::Finalize(f).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
 
-                    // Finalize random digest
-                    let payload = H::random(&mut self.context);
-                    let proposal = Proposal::new(view, parent, payload);
-                    let f = Finalize::sign(&self.namespace, share, proposal);
+                    // Finalize provided digest
+                    let f = Finalize::sign(&self.namespace, share, finalize.proposal);
                     let msg = Voter::Finalize(f).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }

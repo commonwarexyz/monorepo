@@ -1,22 +1,15 @@
 use crate::handlers::{
-    utils::{payload, public_hex, ACK_NAMESPACE},
+    utils::{payload, ACK_NAMESPACE},
     wire,
 };
+use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{
-    bls12381::{
-        dkg,
-        primitives::{
-            group::{self, Element},
-            poly,
-        },
-    },
+    bls12381::{dkg, primitives::poly},
     Scheme,
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};
-use commonware_utils::hex;
-use prost::Message;
 use std::{
     collections::{HashMap, HashSet},
     time::Duration,
@@ -25,12 +18,9 @@ use tracing::{debug, info, warn};
 
 pub struct Arbiter<E: Clock + Spawner, C: Scheme> {
     context: E,
-
     dkg_frequency: Duration,
     dkg_phase_timeout: Duration,
-
     contributors: Vec<C::PublicKey>,
-    t: u32,
 }
 
 /// Implementation of a "trusted arbiter" that tracks commitments,
@@ -41,17 +31,13 @@ impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
         dkg_frequency: Duration,
         dkg_phase_timeout: Duration,
         mut contributors: Vec<C::PublicKey>,
-        t: u32,
     ) -> Self {
         contributors.sort();
         Self {
             context,
-
             dkg_frequency,
             dkg_phase_timeout,
-
             contributors,
-            t,
         }
     }
 
@@ -67,22 +53,21 @@ impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
         let timeout = start + 4 * self.dkg_phase_timeout; // start -> commitment/share -> ack -> arbiter
 
         // Send round start message to contributors
-        let mut group = None;
         if let Some(previous) = &previous {
-            group = Some(previous.serialize());
-            let public = poly::public(previous).serialize();
-            info!(round, public = hex(&public), "starting reshare");
+            info!(round, public=?previous, "starting reshare");
         } else {
             info!(round, "starting key generation");
         }
         sender
             .send(
                 Recipients::All,
-                wire::Dkg {
+                wire::Dkg::<C::Signature> {
                     round,
-                    payload: Some(wire::dkg::Payload::Start(wire::Start { group })),
+                    payload: wire::Payload::Start {
+                        group: previous.clone(),
+                    },
                 }
-                .encode_to_vec()
+                .encode()
                 .into(),
                 true,
             )
@@ -106,7 +91,7 @@ impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
                     match result {
                         Ok((sender, msg)) =>{
                             // Parse msg
-                            let msg = match wire::Dkg::decode(msg) {
+                            let msg = match wire::Dkg::decode_cfg(msg, &self.contributors.len()) {
                                 Ok(msg) => msg,
                                 Err(_) => {
                                     arbiter.disqualify(sender);
@@ -116,60 +101,18 @@ impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
                             if msg.round != round {
                                 continue;
                             }
-                            let msg = match msg.payload {
-                                Some(wire::dkg::Payload::Commitment(msg)) => msg,
-                                _ => {
-                                    // Useless message from previous step
-                                    continue;
-                                }
-                            };
-
-                            // Parse commitment
-                            let commitment = match poly::Public::deserialize(&msg.commitment, self.t) {
-                                Some(commitment) => commitment,
-                                None => {
-                                    arbiter.disqualify(sender);
-                                    continue;
-                                }
-                            };
-
-                            // Parse acks
-                            let mut disqualify = false;
-                            let mut acks = Vec::new();
-                            for ack in &msg.acks {
-                                let Some(public_key) = self.contributors.get(ack.public_key as usize) else {
-                                    disqualify = true;
-                                    break;
-                                };
-                                let payload = payload(round, &sender, &msg.commitment);
-                                let Ok(sig) = C::Signature::try_from(&ack.signature) else {
-                                    disqualify = true;
-                                    break;
-                                };
-                                if !C::verify(Some(ACK_NAMESPACE), &payload, public_key, &sig) {
-                                    disqualify = true;
-                                    break;
-                                }
-                                acks.push(ack.public_key);
-                            }
-                            if disqualify {
-                                arbiter.disqualify(sender);
+                            let wire::Payload::Commitment{commitment, acks, reveals} = msg.payload else {
+                                // Useless message from previous step
                                 continue;
-                            }
+                            };
 
-                            // Parse reveals
-                            let mut reveals = Vec::new();
-                            for reveal in &msg.reveals {
-                                let share = match group::Share::deserialize(reveal) {
-                                    Some(share) => share,
-                                    None => {
-                                        disqualify = true;
-                                        break;
-                                    }
-                                };
-                                reveals.push(share);
-                            }
-                            if disqualify {
+                            // Validate the signature of each ack
+                            let payload = payload(round, &sender, &commitment);
+                            if !acks.iter().all(|(i, sig)| {
+                                self.contributors.get(*i as usize).map(|signer| {
+                                    C::verify(Some(ACK_NAMESPACE), &payload, signer, sig)
+                                }).unwrap_or(false)
+                            }) {
                                 arbiter.disqualify(sender);
                                 continue;
                             }
@@ -177,7 +120,8 @@ impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
                             // Check dealer commitment
                             //
                             // Any faults here will be considered as a disqualification.
-                            if let Err(e) = arbiter.commitment(sender.clone(), commitment, acks, reveals) {
+                            let ack_indices: Vec<u32> = acks.keys().copied().collect();
+                            if let Err(e) = arbiter.commitment(sender.clone(), commitment, ack_indices, reveals) {
                                 warn!(round, error = ?e, ?sender, "failed to process commitment");
                                 break;
                             }
@@ -208,9 +152,9 @@ impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
                         Recipients::All,
                         wire::Dkg {
                             round,
-                            payload: Some(wire::dkg::Payload::Abort(wire::Abort {})),
+                            payload: wire::Payload::<C::Signature>::Abort,
                         }
-                        .encode_to_vec()
+                        .encode()
                         .into(),
                         true,
                     )
@@ -234,7 +178,7 @@ impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
         // Broadcast commitments
         let mut commitments = HashMap::new();
         for (dealer_idx, commitment) in output.commitments {
-            commitments.insert(dealer_idx, commitment.serialize());
+            commitments.insert(dealer_idx, commitment);
         }
         let mut reveals = HashMap::new();
         for (dealer_idx, shares) in output.reveals {
@@ -242,7 +186,7 @@ impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
                 reveals
                     .entry(share.index)
                     .or_insert_with(HashMap::new)
-                    .insert(dealer_idx, share.serialize());
+                    .insert(dealer_idx, share);
             }
         }
         for (player_idx, player) in self.contributors.iter().enumerate() {
@@ -252,12 +196,12 @@ impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
                     Recipients::One(player.clone()),
                     wire::Dkg {
                         round,
-                        payload: Some(wire::dkg::Payload::Success(wire::Success {
+                        payload: wire::Payload::<C::Signature>::Success {
                             commitments: commitments.clone(),
-                            reveals: reveals.clone(),
-                        })),
+                            reveals,
+                        },
                     }
-                    .encode_to_vec()
+                    .encode()
                     .into(),
                     true,
                 )
@@ -292,7 +236,7 @@ impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
                 Some(public) => {
                     info!(
                         round,
-                        public = public_hex(&public),
+                        ?public,
                         disqualified = ?disqualified.into_iter().map(|pk| pk.to_string()).collect::<Vec<_>>(),
                         "round complete"
                     );

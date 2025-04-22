@@ -30,7 +30,7 @@
 //!
 //! # Usage (3 of 4 Threshold)
 //!
-//! _To run this example, you must first install [Rust](https://www.rust-lang.org/tools/install) and [protoc](https://grpc.io/docs/protoc-installation)._
+//! _To run this example, you must first install [Rust](https://www.rust-lang.org/tools/install)._
 //!
 //! ## Arbiter
 //! ```bash
@@ -304,7 +304,6 @@ fn main() {
                 DKG_FREQUENCY,
                 DKG_PHASE_TIMEOUT,
                 contributors,
-                threshold,
             );
             arbiter.start(arbiter_sender, arbiter_receiver);
         }

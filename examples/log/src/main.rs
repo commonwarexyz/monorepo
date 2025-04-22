@@ -18,7 +18,7 @@
 //!
 //! # Usage (Run at Least 3 to Make Progress)
 //!
-//! _To run this example, you must first install [Rust](https://www.rust-lang.org/tools/install) and [protoc](https://grpc.io/docs/protoc-installation)._
+//! _To run this example, you must first install [Rust](https://www.rust-lang.org/tools/install)._
 //!
 //! ## Participant 0 (Bootstrapper)
 //!

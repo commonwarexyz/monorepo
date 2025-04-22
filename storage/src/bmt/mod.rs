@@ -41,9 +41,8 @@
 //! ```
 
 use bytes::Buf;
-use commonware_codec::FixedSize;
+use commonware_codec::{FixedSize, ReadExt};
 use commonware_cryptography::Hasher;
-use commonware_utils::Array;
 use thiserror::Error;
 
 /// Errors that can occur when working with a Binary Merkle Tree (BMT).
@@ -285,7 +284,7 @@ impl<H: Hasher> Proof<H> {
         // Deserialize the siblings
         let mut siblings = Vec::with_capacity(num_siblings);
         for _ in 0..num_siblings {
-            let hash = H::Digest::read_from(&mut buf).map_err(|_| Error::InvalidDigest)?;
+            let hash = H::Digest::read(&mut buf).map_err(|_| Error::InvalidDigest)?;
             siblings.push(hash);
         }
         Ok(Self { siblings })

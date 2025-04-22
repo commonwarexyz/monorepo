@@ -5,7 +5,6 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     libssl-dev \
     curl \
-    protobuf-compiler \
     git \
     pkg-config
 

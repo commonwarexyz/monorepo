@@ -2,7 +2,7 @@
 name = "commonware-bridge"
 edition = "2021"
 publish = true
-version = "0.0.44"
+version = "0.0.45"
 license = "MIT OR Apache-2.0"
 description = "Send succinct consensus certificates between two networks."
 readme = "README.md"
@@ -28,10 +28,6 @@ clap = { workspace = true }
 prometheus-client = { workspace = true }
 governor = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["fmt", "json"] }
-prost = { workspace = true }
-
-[build-dependencies]
-prost-build = { workspace = true }
 
 [[bin]]
 name = "validator"
