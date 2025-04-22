@@ -45,6 +45,7 @@
 pub mod group;
 pub mod ops;
 pub mod poly;
+pub mod lagrange;
 
 use thiserror::Error;
 
@@ -61,4 +62,10 @@ pub enum Error {
     NoInverse,
     #[error("duplicate polynomial evaluation point")]
     DuplicateEval,
+    #[error("Invalid Index")]
+    InvalidIndex,
+    #[error("reshared commitment does not match original constant term")]
+    ReshareMismatch,
+    #[error("failed to interpolate public key")]
+    PublicKeyInterpolationFailed,
 }

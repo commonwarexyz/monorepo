@@ -2,7 +2,7 @@
 
 use crate::bls12381::{
     dkg::Error,
-    primitives::{group::Share, poly},
+    primitives::{group::Share, lagrange::{compute_lagrange_weights, PolyOps}, poly},
 };
 use rand::RngCore;
 use rayon::{prelude::*, ThreadPoolBuilder};
@@ -96,8 +96,10 @@ pub fn construct_public(
     Ok(public)
 }
 
+
+
 /// Recover public polynomial by interpolating coefficient-wise all
-/// polynomials.
+/// polynomials using precomputed Lagrange weights.
 ///
 /// It is assumed that the required number of commitments are provided.
 pub fn recover_public(
@@ -112,17 +114,25 @@ pub fn recover_public(
         return Err(Error::InsufficientDealings);
     }
 
+    // Extract dealer indices 
+    let dealer_indices: Vec<u32> = commitments.keys().cloned().collect();
+    
+    // Precompute Lagrange weights once for all coefficients
+    let weights = compute_lagrange_weights(&dealer_indices, required)
+        .map_err(|_| Error::PublicKeyInterpolationFailed)?;
+
     // Construct pool to perform interpolation
     let pool = ThreadPoolBuilder::new()
         .num_threads(concurrency)
         .build()
         .expect("unable to build thread pool");
 
-    // Perform interpolation over each coefficient
+    // Perform interpolation over each coefficient using the precomputed weights
     let new = match pool.install(|| {
         (0..threshold)
             .into_par_iter()
             .map(|coeff| {
+                // Extract evaluations for this coefficient from all commitments
                 let evals = commitments
                     .iter()
                     .map(|(dealer, commitment)| poly::Eval {
@@ -130,7 +140,9 @@ pub fn recover_public(
                         value: commitment.get(coeff),
                     })
                     .collect::<Vec<_>>();
-                match poly::Public::recover(required, &evals) {
+                
+                // Use precomputed weights for interpolation
+                match poly::Public::recover_with_weights(&evals, &weights) {
                     Ok(point) => Ok(point),
                     Err(_) => Err(Error::PublicKeyInterpolationFailed),
                 }
