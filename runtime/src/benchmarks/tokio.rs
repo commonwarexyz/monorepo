@@ -47,12 +47,13 @@ impl Default for Executor {
 
 impl AsyncExecutor for &Executor {
     fn block_on<T>(&self, future: impl Future<Output = T>) -> T {
-        // Create and store our context
         let executor = tokio::Runner::new(self.cfg.clone());
 
-        // Run the future
         let result = executor.start(|ctx| {
+            // Create and store our context
             context::set(ctx);
+
+            // Run the future
             future
         });
 

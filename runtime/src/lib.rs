@@ -87,6 +87,11 @@ pub enum Error {
 /// Interface that any task scheduler must implement to start
 /// running tasks.
 pub trait Runner {
+    /// Context defines the environment available to tasks.
+    /// Example of possible services provided by the context include:
+    /// - `Clock` for time-based operations
+    /// - `Network` for network operations
+    /// - `Storage` for storage operations
     type Context;
 
     /// Start running a root task.
