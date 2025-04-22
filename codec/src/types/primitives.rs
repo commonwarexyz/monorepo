@@ -51,8 +51,7 @@ impl Write for bool {
 impl Read for bool {
     #[inline]
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        at_least(buf, 1)?;
-        match buf.get_u8() {
+        match u8::read(buf)? {
             0 => Ok(false),
             1 => Ok(true),
             _ => Err(Error::InvalidBool),

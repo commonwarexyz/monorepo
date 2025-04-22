@@ -8,15 +8,14 @@
 //! - Notifying other actors of new chunks and threshold signatures
 
 use super::{
-    metrics, namespace, parsed, serializer, AckManager, Config, Context, Epoch, Prover, TipManager,
+    metrics,
+    types::{Ack, Activity, Chunk, Context, Epoch, Error, Lock, Node, Parent, Proposal},
+    AckManager, Config, TipManager,
 };
-use crate::{Automaton, Committer, Monitor, Relay, Supervisor, ThresholdSupervisor};
+use crate::{Automaton, Monitor, Relay, Reporter, Supervisor, ThresholdSupervisor};
+use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{
-    bls12381::primitives::{
-        group::{self},
-        ops,
-        poly::{self},
-    },
+    bls12381::primitives::{group, poly},
     Digest, Scheme,
 };
 use commonware_macros::select;
@@ -40,7 +39,6 @@ use std::{
     marker::PhantomData,
     time::{Duration, SystemTime},
 };
-use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
 /// Represents a pending verification request to the automaton.
@@ -58,7 +56,7 @@ pub struct Engine<
     D: Digest,
     A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
     R: Relay<Digest = D>,
-    Z: Committer<Digest = D>,
+    Z: Reporter<Activity = Activity<C, D>>,
     M: Monitor<Index = Epoch>,
     Su: Supervisor<Index = Epoch, PublicKey = C::PublicKey>,
     TSu: ThresholdSupervisor<
@@ -80,17 +78,14 @@ pub struct Engine<
     monitor: M,
     sequencers: Su,
     validators: TSu,
-    committer: Z,
+    reporter: Z,
 
     ////////////////////////////////////////
     // Namespace Constants
     ////////////////////////////////////////
 
-    // The namespace for chunk signatures.
-    chunk_namespace: Vec<u8>,
-
-    // The namespace for ack signatures.
-    ack_namespace: Vec<u8>,
+    // The namespace signatures.
+    namespace: Vec<u8>,
 
     ////////////////////////////////////////
     // Timeouts
@@ -162,7 +157,7 @@ pub struct Engine<
 
     // Tracks the acknowledgements for chunks.
     // This is comprised of partial signatures or threshold signatures.
-    ack_manager: AckManager<D, C::PublicKey>,
+    ack_manager: AckManager<C::PublicKey, D>,
 
     // The current epoch.
     epoch: Epoch,
@@ -197,7 +192,7 @@ impl<
         D: Digest,
         A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
         R: Relay<Digest = D>,
-        Z: Committer<Digest = D>,
+        Z: Reporter<Activity = Activity<C, D>>,
         M: Monitor<Index = Epoch>,
         Su: Supervisor<Index = Epoch, PublicKey = C::PublicKey>,
         TSu: ThresholdSupervisor<
@@ -219,12 +214,11 @@ impl<
             crypto: cfg.crypto,
             automaton: cfg.automaton,
             relay: cfg.relay,
-            committer: cfg.committer,
+            reporter: cfg.reporter,
             monitor: cfg.monitor,
             sequencers: cfg.sequencers,
             validators: cfg.validators,
-            chunk_namespace: namespace::chunk(&cfg.namespace),
-            ack_namespace: namespace::ack(&cfg.namespace),
+            namespace: cfg.namespace,
             rebroadcast_timeout: cfg.rebroadcast_timeout,
             rebroadcast_deadline: None,
             epoch_bounds: cfg.epoch_bounds,
@@ -235,7 +229,7 @@ impl<
             journal_name_prefix: cfg.journal_name_prefix,
             journals: BTreeMap::new(),
             tip_manager: TipManager::<C, D>::new(),
-            ack_manager: AckManager::<D, C::PublicKey>::new(),
+            ack_manager: AckManager::<C::PublicKey, D>::new(),
             epoch: 0,
             priority_proposals: cfg.priority_proposals,
             priority_acks: cfg.priority_acks,
@@ -363,7 +357,7 @@ impl<
                         }
                     };
                     let mut guard = self.metrics.nodes.guard(Status::Invalid);
-                    let node = match parsed::Node::<C, D>::decode(&msg) {
+                    let node = match Node::decode(msg) {
                         Ok(node) => node,
                         Err(err) => {
                             warn!(?err, ?sender, "node decode failed");
@@ -384,7 +378,7 @@ impl<
                     // Handle the parent threshold signature
                     if let Some(parent_chunk) = result {
                         let parent = node.parent.as_ref().unwrap();
-                        self.handle_threshold(&parent_chunk, parent.epoch, parent.threshold).await;
+                        self.handle_threshold(&parent_chunk, parent.epoch, parent.signature).await;
                     }
 
                     // Process the node
@@ -407,7 +401,7 @@ impl<
                         }
                     };
                     let mut guard = self.metrics.acks.guard(Status::Invalid);
-                    let ack = match parsed::Ack::decode(&msg) {
+                    let ack = match Ack::decode(msg) {
                         Ok(ack) => ack,
                         Err(err) => {
                             warn!(?err, ?sender, "ack decode failed");
@@ -492,11 +486,7 @@ impl<
         let Some(share) = self.validators.share(self.epoch) else {
             return Err(Error::UnknownShare(self.epoch));
         };
-        let partial = ops::partial_sign_message(
-            share,
-            Some(&self.ack_namespace),
-            &serializer::ack(&tip.chunk, self.epoch),
-        );
+        let ack = Ack::sign(&self.namespace, share, tip.chunk.clone(), self.epoch);
 
         // Sync the journal to prevent ever acking two conflicting chunks at
         // the same height, even if the node crashes and restarts.
@@ -520,11 +510,6 @@ impl<
         };
 
         // Send the ack to the network
-        let ack = parsed::Ack {
-            chunk: tip.chunk,
-            epoch: self.epoch,
-            partial,
-        };
         ack_sender
             .send(
                 Recipients::Some(recipients),
@@ -537,6 +522,14 @@ impl<
         // Handle the ack internally
         self.handle_ack(&ack).await?;
 
+        // Emit the activity
+        self.reporter
+            .report(Activity::Proposal(Proposal::new(
+                tip.chunk,
+                tip.signature.clone(),
+            )))
+            .await;
+
         Ok(())
     }
 
@@ -547,7 +540,7 @@ impl<
     /// If the threshold is already known, it is ignored.
     async fn handle_threshold(
         &mut self,
-        chunk: &parsed::Chunk<D, C::PublicKey>,
+        chunk: &Chunk<C::PublicKey, D>,
         epoch: Epoch,
         threshold: group::Signature,
     ) {
@@ -564,21 +557,17 @@ impl<
             self.propose_timer.take();
         }
 
-        // Emit the proof
-        let context = Context {
-            sequencer: chunk.sequencer.clone(),
-            height: chunk.height,
-        };
-        let proof =
-            Prover::<C, D>::serialize_threshold(&context, &chunk.payload, epoch, &threshold);
-        self.committer.finalized(proof, chunk.payload).await;
+        // Emit the activity
+        self.reporter
+            .report(Activity::Lock(Lock::new(chunk.clone(), epoch, threshold)))
+            .await;
     }
 
     /// Handles an ack
     ///
     /// Returns an error if the ack is invalid, or can be ignored
     /// (e.g. already exists, threshold already exists, is outside the epoch bounds, etc.).
-    async fn handle_ack(&mut self, ack: &parsed::Ack<D, C::PublicKey>) -> Result<(), Error> {
+    async fn handle_ack(&mut self, ack: &Ack<C::PublicKey, D>) -> Result<(), Error> {
         // Get the quorum
         let Some(identity) = self.validators.identity(ack.epoch) else {
             return Err(Error::UnknownIdentity(ack.epoch));
@@ -599,7 +588,7 @@ impl<
     /// Handles a valid `Node` message, storing it as the tip.
     /// Alerts the automaton of the new node.
     /// Also appends the `Node` to the journal if it's new.
-    async fn handle_node(&mut self, node: &parsed::Node<C, D>) {
+    async fn handle_node(&mut self, node: &Node<C, D>) {
         // Store the tip
         let is_new = self.tip_manager.put(node);
 
@@ -703,11 +692,7 @@ impl<
 
             // Update height and parent
             height = tip.chunk.height + 1;
-            parent = Some(parsed::Parent {
-                payload: tip.chunk.payload,
-                threshold,
-                epoch,
-            });
+            parent = Some(Parent::new(tip.chunk.payload, epoch, threshold));
         }
 
         // Error-check context height
@@ -716,19 +701,7 @@ impl<
         }
 
         // Construct new node
-        let chunk = parsed::Chunk {
-            sequencer: me.clone(),
-            height,
-            payload,
-        };
-        let signature = self
-            .crypto
-            .sign(Some(&self.chunk_namespace), &serializer::chunk(&chunk));
-        let node = parsed::Node::<C, D> {
-            chunk,
-            signature,
-            parent,
-        };
+        let node = Node::sign(&self.namespace, &mut self.crypto, height, payload, parent);
 
         // Deal with the chunk as if it were received over the network
         self.handle_node(&node).await;
@@ -793,7 +766,7 @@ impl<
     /// Send a  `Node` message to all validators in the given epoch.
     async fn broadcast(
         &mut self,
-        node: &parsed::Node<C, D>,
+        node: &Node<C, D>,
         node_sender: &mut NetS,
         epoch: Epoch,
     ) -> Result<(), Error> {
@@ -832,9 +805,9 @@ impl<
     /// Else returns an error if the `Node` is invalid.
     fn validate_node(
         &mut self,
-        node: &parsed::Node<C, D>,
+        node: &Node<C, D>,
         sender: &C::PublicKey,
-    ) -> Result<Option<parsed::Chunk<D, C::PublicKey>>, Error> {
+    ) -> Result<Option<Chunk<C::PublicKey, D>>, Error> {
         // Verify the sender
         if node.chunk.sequencer != *sender {
             return Err(Error::PeerMismatch);
@@ -851,58 +824,26 @@ impl<
         // Validate chunk
         self.validate_chunk(&node.chunk, self.epoch)?;
 
+        // Get parent identity
+        let public = if let Some(parent) = &node.parent {
+            let Some(identity) = self.validators.identity(parent.epoch) else {
+                return Err(Error::UnknownIdentity(parent.epoch));
+            };
+            Some(poly::public(identity))
+        } else {
+            None
+        };
+
         // Verify the signature
-        if !C::verify(
-            Some(&self.chunk_namespace),
-            &serializer::chunk(&node.chunk),
-            sender,
-            &node.signature,
-        ) {
-            return Err(Error::InvalidNodeSignature);
-        }
-
-        // Verify no parent
-        if node.chunk.height == 0 {
-            if node.parent.is_some() {
-                return Err(Error::GenesisChunkMustNotHaveParent);
-            }
-            return Ok(None);
-        }
-
-        // Verify parent
-        let Some(parent) = &node.parent else {
-            return Err(Error::NodeMissingParent);
-        };
-        let parent_chunk = parsed::Chunk {
-            sequencer: sender.clone(),
-            height: node.chunk.height.checked_sub(1).unwrap(),
-            payload: parent.payload,
-        };
-
-        // Verify parent threshold signature
-        let Some(identity) = self.validators.identity(parent.epoch) else {
-            return Err(Error::UnknownIdentity(parent.epoch));
-        };
-        let public_key = poly::public(identity);
-        ops::verify_message(
-            public_key,
-            Some(&self.ack_namespace),
-            &serializer::ack(&parent_chunk, parent.epoch),
-            &parent.threshold,
-        )
-        .map_err(|_| Error::InvalidThresholdSignature)?;
-        Ok(Some(parent_chunk))
+        node.verify(&self.namespace, public)
+            .map_err(|_| Error::InvalidNodeSignature)
     }
 
     /// Takes a raw ack (from sender) from the p2p network and validates it.
     ///
     /// Returns the chunk, epoch, and partial signature if the ack is valid.
     /// Returns an error if the ack is invalid.
-    fn validate_ack(
-        &self,
-        ack: &parsed::Ack<D, C::PublicKey>,
-        sender: &C::PublicKey,
-    ) -> Result<(), Error> {
+    fn validate_ack(&self, ack: &Ack<C::PublicKey, D>, sender: &C::PublicKey) -> Result<(), Error> {
         // Validate chunk
         self.validate_chunk(&ack.chunk, ack.epoch)?;
 
@@ -910,7 +851,7 @@ impl<
         let Some(index) = self.validators.is_participant(ack.epoch, sender) else {
             return Err(Error::UnknownValidator(ack.epoch, sender.to_string()));
         };
-        if index != ack.partial.index {
+        if index != ack.signature.index {
             return Err(Error::PeerMismatch);
         }
 
@@ -946,13 +887,9 @@ impl<
         let Some(identity) = self.validators.identity(ack.epoch) else {
             return Err(Error::UnknownIdentity(ack.epoch));
         };
-        ops::partial_verify_message(
-            identity,
-            Some(&self.ack_namespace),
-            &serializer::ack(&ack.chunk, ack.epoch),
-            &ack.partial,
-        )
-        .map_err(|_| Error::InvalidPartialSignature)?;
+        if !ack.verify(&self.namespace, identity) {
+            return Err(Error::InvalidAckSignature);
+        }
 
         Ok(())
     }
@@ -961,11 +898,7 @@ impl<
     ///
     /// Returns the chunk if the chunk is valid.
     /// Returns an error if the chunk is invalid.
-    fn validate_chunk(
-        &self,
-        chunk: &parsed::Chunk<D, C::PublicKey>,
-        epoch: Epoch,
-    ) -> Result<(), Error> {
+    fn validate_chunk(&self, chunk: &Chunk<C::PublicKey, D>, epoch: Epoch) -> Result<(), Error> {
         // Verify sequencer
         if self
             .sequencers
@@ -1037,13 +970,12 @@ impl<
 
             // Read from the stream, which may be in arbitrary order.
             // Remember the highest node height
-            let mut tip: Option<parsed::Node<C, D>> = None;
+            let mut tip: Option<Node<C, D>> = None;
             let mut num_items = 0;
             while let Some(msg) = stream.next().await {
                 num_items += 1;
                 let (_, _, _, msg) = msg.expect("unable to decode journal message");
-                let node = parsed::Node::<C, D>::decode(&msg)
-                    .expect("journal message is unexpected format");
+                let node = Node::decode(msg).expect("journal message is unexpected format");
                 let height = node.chunk.height;
                 match tip {
                     None => {
@@ -1075,7 +1007,7 @@ impl<
     ///
     /// To prevent ever writing two conflicting `Chunk`s at the same height,
     /// the journal must already be open and replayed.
-    async fn journal_append(&mut self, node: &parsed::Node<C, D>) {
+    async fn journal_append(&mut self, node: &Node<C, D>) {
         let section = self.get_journal_section(node.chunk.height);
         self.journals
             .get_mut(&node.chunk.sequencer)
@@ -1101,80 +1033,4 @@ impl<
         // Prune journal, ignoring errors
         let _ = journal.prune(section).await;
     }
-}
-
-/// Errors that can occur when running the engine.
-#[derive(Error, Debug)]
-enum Error {
-    // Application Verification Errors
-    #[error("Application verify error: {0}")]
-    AppVerifyCanceled(oneshot::Canceled),
-    #[error("Application verified no tip")]
-    AppVerifiedNoTip,
-    #[error("Application verified height mismatch")]
-    AppVerifiedHeightMismatch,
-    #[error("Application verified payload mismatch")]
-    AppVerifiedPayloadMismatch,
-
-    // P2P Errors
-    #[error("Unable to send message")]
-    UnableToSendMessage,
-
-    // Broadcast errors
-    #[error("Already thresholded")]
-    AlreadyThresholded,
-    #[error("I am not a sequencer in epoch {0}")]
-    IAmNotASequencer(u64),
-    #[error("Nothing to rebroadcast")]
-    NothingToRebroadcast,
-    #[error("Broadcast failed")]
-    BroadcastFailed,
-    #[error("Missing threshold")]
-    MissingThreshold,
-    #[error("Invalid context sequencer")]
-    ContextSequencer,
-    #[error("Invalid context height")]
-    ContextHeight,
-
-    // Proto Malformed Errors
-    #[error("Genesis chunk must not have a parent")]
-    GenesisChunkMustNotHaveParent,
-    #[error("Node missing parent")]
-    NodeMissingParent,
-
-    // Epoch Errors
-    #[error("Unknown identity at epoch {0}")]
-    UnknownIdentity(u64),
-    #[error("Unknown validators at epoch {0}")]
-    UnknownValidators(u64),
-    #[error("Epoch {0} has no sequencer {1}")]
-    UnknownSequencer(u64, String),
-    #[error("Epoch {0} has no validator {1}")]
-    UnknownValidator(u64, String),
-    #[error("Unknown share at epoch {0}")]
-    UnknownShare(u64),
-
-    // Peer Errors
-    #[error("Peer mismatch")]
-    PeerMismatch,
-
-    // Signature Errors
-    #[error("Invalid threshold signature")]
-    InvalidThresholdSignature,
-    #[error("Invalid partial signature")]
-    InvalidPartialSignature,
-    #[error("Invalid node signature")]
-    InvalidNodeSignature,
-
-    // Ignorable Message Errors
-    #[error("Invalid ack epoch {0} outside bounds {1} - {2}")]
-    AckEpochOutsideBounds(u64, u64, u64),
-    #[error("Invalid ack height {0} outside bounds {1} - {2}")]
-    AckHeightOutsideBounds(u64, u64, u64),
-    #[error("Chunk height {0} lower than tip height {1}")]
-    ChunkHeightTooLow(u64, u64),
-
-    // Slashable Errors
-    #[error("Chunk mismatch from sender {0} with height {1}")]
-    ChunkMismatch(String, u64),
 }

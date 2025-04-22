@@ -1,5 +1,4 @@
-use super::super::Context;
-use crate::{Automaton as A, Relay as R};
+use crate::{ordered_broadcast::types::Context, Automaton as A, Relay as R};
 use bytes::Bytes;
 use commonware_cryptography::{sha256, Hasher, Sha256};
 use commonware_utils::Array;

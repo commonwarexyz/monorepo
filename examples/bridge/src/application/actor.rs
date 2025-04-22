@@ -1,22 +1,23 @@
-use crate::wire;
-
 use super::{
     ingress::{Mailbox, Message},
     supervisor::Supervisor,
     Config,
 };
-use bytes::BufMut;
-use commonware_codec::FixedSize;
-use commonware_consensus::threshold_simplex::Prover;
+use crate::types::{
+    block::BlockFormat,
+    inbound::{self, Inbound},
+    outbound::Outbound,
+};
+use commonware_codec::{DecodeExt, Encode};
+use commonware_consensus::threshold_simplex::types::{Activity, Viewable};
 use commonware_cryptography::{
-    bls12381::primitives::{group::Element, poly},
+    bls12381::primitives::{group, poly},
     Hasher,
 };
 use commonware_runtime::{Sink, Spawner, Stream};
 use commonware_stream::{public_key::Connection, Receiver, Sender};
-use commonware_utils::{hex, Array};
+use commonware_utils::Array;
 use futures::{channel::mpsc, StreamExt};
-use prost::Message as _;
 use rand::Rng;
 use tracing::{debug, info};
 
@@ -27,10 +28,9 @@ const GENESIS: &[u8] = b"commonware is neat";
 pub struct Application<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> {
     context: R,
     indexer: Connection<Si, St>,
-    prover: Prover<H::Digest>,
-    other_prover: Prover<H::Digest>,
-    public: Vec<u8>,
-    other_public: Vec<u8>,
+    namespace: Vec<u8>,
+    public: group::Public,
+    other_public: group::Public,
     hasher: H,
     mailbox: mpsc::Receiver<Message<H::Digest>>,
 }
@@ -46,10 +46,9 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
             Self {
                 context,
                 indexer: config.indexer,
-                prover: config.prover,
-                other_prover: config.other_prover,
-                public: poly::public(&config.identity).serialize(),
-                other_public: config.other_network.serialize(),
+                namespace: config.namespace,
+                public: *poly::public(&config.identity),
+                other_public: config.other_public,
                 hasher: config.hasher,
                 mailbox,
             },
@@ -72,22 +71,18 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                 }
                 Message::Propose { index, response } => {
                     // Either propose a random message (prefix=0) or include a consensus certificate (prefix=1)
-                    let msg = match self.context.gen_bool(0.5) {
+                    let block = match self.context.gen_bool(0.5) {
                         true => {
                             // Generate a random message
-                            let mut msg = vec![0; 17];
-                            self.context.fill(&mut msg[1..]);
-                            msg
+                            BlockFormat::<H::Digest>::Random(self.context.gen())
                         }
                         false => {
                             // Fetch a certificate from the indexer for the other network
-                            let msg = wire::GetFinalization {
-                                network: self.other_public.clone(),
-                            };
-                            let msg = wire::Inbound {
-                                payload: Some(wire::inbound::Payload::GetFinalization(msg)),
-                            }
-                            .encode_to_vec();
+                            let msg =
+                                Inbound::GetFinalization::<H::Digest>(inbound::GetFinalization {
+                                    network: self.other_public,
+                                })
+                                .encode();
                             indexer_sender
                                 .send(&msg)
                                 .await
@@ -96,45 +91,39 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                                 .receive()
                                 .await
                                 .expect("failed to receive from indexer");
-                            let msg =
-                                wire::Outbound::decode(result).expect("failed to decode result");
-                            let payload = msg.payload.expect("missing payload");
-                            let proof = match payload {
-                                wire::outbound::Payload::Success(_) => {
+                            let msg = Outbound::<H::Digest>::decode(result)
+                                .expect("failed to decode result");
+                            let finalization = match msg {
+                                Outbound::Success(_) => {
                                     debug!("no finalization found");
                                     continue;
                                 }
-                                wire::outbound::Payload::Finalization(f) => f,
+                                Outbound::Finalization(f) => f,
                                 _ => panic!("unexpected response"),
                             };
 
                             // Verify certificate
-                            self.other_prover
-                                .deserialize_finalization(proof.clone().into())
-                                .expect("indexer is corrupt");
+                            assert!(
+                                finalization.verify(&self.namespace, &self.other_public),
+                                "indexer is corrupt"
+                            );
 
                             // Use certificate as message
-                            let mut msg = Vec::with_capacity(u8::SIZE + proof.len());
-                            msg.put_u8(1);
-                            msg.extend(proof);
-                            msg
+                            BlockFormat::Bridge(finalization)
                         }
                     };
 
                     // Hash the message
-                    self.hasher.update(&msg);
+                    self.hasher.update(&block.encode());
                     let digest = self.hasher.finalize();
-                    info!(msg = hex(&msg), payload = ?digest, "proposed");
+                    info!(?block, payload = ?digest, "proposed");
 
                     // Publish to indexer
-                    let msg = wire::PutBlock {
-                        network: self.public.clone(),
-                        data: msg.into(),
-                    };
-                    let msg = wire::Inbound {
-                        payload: Some(wire::inbound::Payload::PutBlock(msg)),
-                    }
-                    .encode_to_vec();
+                    let msg = Inbound::PutBlock::<H::Digest>(inbound::PutBlock {
+                        network: self.public,
+                        block,
+                    })
+                    .encode();
                     indexer_sender
                         .send(&msg)
                         .await
@@ -143,11 +132,10 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                         .receive()
                         .await
                         .expect("failed to receive from indexer");
-                    let msg = wire::Outbound::decode(result).expect("failed to decode result");
-                    let payload = msg.payload.expect("missing payload");
-                    let success = match payload {
-                        wire::outbound::Payload::Success(s) => s,
-                        _ => panic!("unexpected response"),
+                    let msg =
+                        Outbound::<H::Digest>::decode(result).expect("failed to decode result");
+                    let Outbound::Success(success) = msg else {
+                        panic!("unexpected response");
                     };
                     debug!(view = index, success, "block published");
                     if !success {
@@ -159,14 +147,11 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                 }
                 Message::Verify { payload, response } => {
                     // Fetch payload from indexer
-                    let msg = wire::GetBlock {
-                        network: self.public.clone(),
-                        digest: payload.to_vec(),
-                    };
-                    let msg = wire::Inbound {
-                        payload: Some(wire::inbound::Payload::GetBlock(msg)),
-                    }
-                    .encode_to_vec();
+                    let msg = Inbound::GetBlock(inbound::GetBlock {
+                        network: self.public,
+                        digest: payload,
+                    })
+                    .encode();
                     indexer_sender
                         .send(&msg)
                         .await
@@ -175,75 +160,64 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                         .receive()
                         .await
                         .expect("failed to receive from indexer");
-                    let msg = wire::Outbound::decode(result).expect("failed to decode result");
-                    let payload = msg.payload.expect("missing payload");
-                    let block = match payload {
-                        wire::outbound::Payload::Success(b) => {
-                            if b {
-                                panic!("unexpected success");
-                            }
+                    let msg =
+                        Outbound::<H::Digest>::decode(result).expect("failed to decode result");
+                    let block = match msg {
+                        Outbound::Block(b) => b,
+                        Outbound::Success(false) => {
                             let _ = response.send(false);
                             debug!("block not found");
                             continue;
                         }
-                        wire::outbound::Payload::Block(b) => b,
                         _ => panic!("unexpected response"),
                     };
 
-                    // If first byte is 0, then its just a hash
-                    if block[0] == 0 {
-                        let _ = response.send(block.len() == 17);
-                        continue;
+                    match block {
+                        BlockFormat::Random(_) => {
+                            let _ = response.send(true);
+                        }
+                        BlockFormat::Bridge(finalization) => {
+                            let result = finalization.verify(&self.namespace, &self.other_public);
+                            let _ = response.send(result);
+                        }
                     }
-
-                    // Verify consensus certificate
-                    let proof = block[1..].to_vec();
-                    let result = self
-                        .other_prover
-                        .deserialize_finalization(proof.into())
-                        .is_some();
-
-                    // If payload exists and is valid, return
-                    let _ = response.send(result);
                 }
-                Message::Prepared { proof, payload } => {
-                    let (view, _, _, signature, seed) =
-                        self.prover.deserialize_notarization(proof).unwrap();
-                    let signature = hex(&signature.serialize());
-                    let seed = hex(&seed.serialize());
-                    info!(view, ?payload, ?signature, ?seed, "prepared")
-                }
-                Message::Finalized { proof, payload } => {
-                    let (view, _, _, signature, seed) =
-                        self.prover.deserialize_finalization(proof.clone()).unwrap();
-                    let signature = hex(&signature.serialize());
-                    let seed = hex(&seed.serialize());
-                    info!(view, ?payload, ?signature, ?seed, "finalized");
+                Message::Report { activity } => {
+                    let view = activity.view();
+                    match activity {
+                        Activity::Notarization(notarization) => {
+                            info!(view, payload = ?notarization.proposal.payload, signature=?notarization.proposal_signature, seed=?notarization.seed_signature, "notarized");
+                        }
+                        Activity::Finalization(finalization) => {
+                            info!(view, payload = ?finalization.proposal.payload, signature=?finalization.proposal_signature, seed=?finalization.seed_signature, "finalized");
 
-                    // Post finalization
-                    let msg = wire::PutFinalization {
-                        network: self.public.clone(),
-                        data: proof,
-                    };
-                    let msg = wire::Inbound {
-                        payload: Some(wire::inbound::Payload::PutFinalization(msg)),
+                            // Post finalization
+                            let msg =
+                                Inbound::PutFinalization::<H::Digest>(inbound::PutFinalization {
+                                    network: self.public,
+                                    finalization,
+                                })
+                                .encode();
+                            indexer_sender
+                                .send(&msg)
+                                .await
+                                .expect("failed to send finalization to indexer");
+                            let result = indexer_receiver
+                                .receive()
+                                .await
+                                .expect("failed to receive from indexer");
+                            let message = Outbound::<H::Digest>::decode(result)
+                                .expect("failed to decode result");
+                            let Outbound::Success(success) = message else {
+                                panic!("unexpected response");
+                            };
+                            debug!(view, success, "finalization posted");
+                        }
+                        Activity::Nullification(nullification) => {
+                            info!(view, signature=?nullification.view_signature, seed=?nullification.seed_signature, "nullified");
+                        }
+                        _ => {}
                     }
-                    .encode_to_vec();
-                    indexer_sender
-                        .send(&msg)
-                        .await
-                        .expect("failed to send finalization to indexer");
-                    let result = indexer_receiver
-                        .receive()
-                        .await
-                        .expect("failed to receive from indexer");
-                    let msg = wire::Outbound::decode(result).expect("failed to decode result");
-                    let payload = msg.payload.expect("missing payload");
-                    let success = match payload {
-                        wire::outbound::Payload::Success(s) => s,
-                        _ => panic!("unexpected response"),
-                    };
-                    debug!(view, success, "finalization posted");
                 }
             }
         }

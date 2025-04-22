@@ -1,23 +1,29 @@
-use bytes::Bytes;
 use clap::{value_parser, Arg, Command};
-use commonware_bridge::{wire, APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE};
-use commonware_consensus::threshold_simplex::Prover;
+use commonware_bridge::{
+    types::{
+        block::BlockFormat,
+        inbound::{self, Inbound},
+        outbound::Outbound,
+    },
+    APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE,
+};
+use commonware_codec::{DecodeExt, Encode};
+use commonware_consensus::threshold_simplex::types::{Finalization, Viewable};
 use commonware_cryptography::{
-    bls12381::primitives::group::{self, Element},
+    bls12381::primitives::group::{self, G1},
     sha256::Digest as Sha256Digest,
-    Ed25519, Hasher, Sha256, Signer,
+    Digest, Ed25519, Hasher, Sha256, Signer,
 };
 use commonware_runtime::{tokio::Executor, Listener, Metrics, Network, Runner, Spawner};
 use commonware_stream::{
     public_key::{Config, Connection, IncomingConnection},
     Receiver, Sender,
 };
-use commonware_utils::{from_hex, hex, union};
+use commonware_utils::{from_hex, union};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
 };
-use prost::Message as _;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -25,22 +31,23 @@ use std::{
 };
 use tracing::{debug, info};
 
-enum Message {
+#[allow(clippy::large_enum_variant)]
+enum Message<D: Digest> {
     PutBlock {
-        incoming: wire::PutBlock,
+        incoming: inbound::PutBlock<D>,
         response: oneshot::Sender<bool>, // wait to broadcast consensus message
     },
     GetBlock {
-        incoming: wire::GetBlock,
-        response: oneshot::Sender<Option<Bytes>>,
+        incoming: inbound::GetBlock<D>,
+        response: oneshot::Sender<Option<BlockFormat<D>>>,
     },
     PutFinalization {
-        incoming: wire::PutFinalization,
+        incoming: inbound::PutFinalization<D>,
         response: oneshot::Sender<bool>, // wait to delete from validator storage
     },
     GetFinalization {
-        incoming: wire::GetFinalization,
-        response: oneshot::Sender<Option<Bytes>>,
+        incoming: inbound::GetFinalization,
+        response: oneshot::Sender<Option<Finalization<D>>>,
     },
 }
 
@@ -105,9 +112,9 @@ fn main() {
     }
 
     // Configure networks
-    let mut provers = HashMap::new();
-    let mut blocks = HashMap::new();
-    let mut finalizations = HashMap::new();
+    let mut namespaces: HashMap<G1, (G1, Vec<u8>)> = HashMap::new();
+    let mut blocks: HashMap<G1, HashMap<Sha256Digest, BlockFormat<Sha256Digest>>> = HashMap::new();
+    let mut finalizations: HashMap<G1, BTreeMap<u64, Finalization<Sha256Digest>>> = HashMap::new();
     let networks = matches
         .get_many::<String>("networks")
         .expect("Please provide networks");
@@ -116,12 +123,11 @@ fn main() {
     }
     for network in networks {
         let network = from_hex(network).expect("Network not well-formed");
-        let public = group::Public::deserialize(&network).expect("Network not well-formed");
+        let public = group::Public::decode(network.as_ref()).expect("Network not well-formed");
         let namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
-        let prover = Prover::<Sha256Digest>::new(public, &namespace);
-        provers.insert(network.clone(), prover);
-        blocks.insert(network.clone(), HashMap::new());
-        finalizations.insert(network, BTreeMap::new());
+        namespaces.insert(public, (public, namespace));
+        blocks.insert(public, HashMap::new());
+        finalizations.insert(public, BTreeMap::new());
     }
 
     // Create context
@@ -143,14 +149,14 @@ fn main() {
                         };
 
                         // Compute digest
-                        hasher.update(&incoming.data);
+                        hasher.update(&incoming.block.encode());
                         let digest = hasher.finalize();
 
                         // Store block
-                        network.insert(digest, incoming.data);
+                        network.insert(digest, incoming.block);
                         let _ = response.send(true);
                         info!(
-                            network = hex(&incoming.network),
+                            network = ?incoming.network,
                             block = ?digest,
                             "stored block"
                         );
@@ -160,11 +166,7 @@ fn main() {
                             let _ = response.send(None);
                             continue;
                         };
-                        let Ok(digest) = Sha256Digest::try_from(&incoming.digest) else {
-                            let _ = response.send(None);
-                            continue;
-                        };
-                        let data = network.get(&digest);
+                        let data = network.get(&incoming.digest);
                         let _ = response.send(data.cloned());
                     }
                     Message::PutFinalization { incoming, response } => {
@@ -175,19 +177,21 @@ fn main() {
                         };
 
                         // Verify signature
-                        let prover = provers.get(&incoming.network).expect("missing prover");
-                        let Some((view, _, _, _, _)) =
-                            prover.deserialize_finalization(incoming.data.clone())
-                        else {
+                        let Some((public, namespace)) = namespaces.get(&incoming.network) else {
                             let _ = response.send(false);
                             continue;
                         };
+                        if !incoming.finalization.verify(namespace, public) {
+                            let _ = response.send(false);
+                            continue;
+                        }
 
                         // Store finalization
-                        network.insert(view, incoming.data);
+                        let view = incoming.finalization.view();
+                        network.insert(view, incoming.finalization);
                         let _ = response.send(true);
                         info!(
-                            network = hex(&incoming.network),
+                            network = ?incoming.network,
                             view = view,
                             "stored finalization"
                         );
@@ -261,18 +265,17 @@ fn main() {
                     // Handle messages
                     while let Ok(msg) = receiver.receive().await {
                         // Decode message
-                        let Ok(msg) = wire::Inbound::decode(msg) else {
-                            debug!(?peer, "failed to decode message");
-                            return;
-                        };
-                        let Some(payload) = msg.payload else {
-                            debug!(?peer, "failed to decode payload");
-                            return;
+                        let msg = match Inbound::decode(msg) {
+                            Ok(msg) => msg,
+                            Err(err) => {
+                                debug!(?err, ?peer, "failed to decode message");
+                                return;
+                            }
                         };
 
                         // Handle message
-                        match payload {
-                            wire::inbound::Payload::PutBlock(msg) => {
+                        match msg {
+                            Inbound::PutBlock(msg) => {
                                 let (response, receiver) = oneshot::channel();
                                 handler
                                     .send(Message::PutBlock {
@@ -282,16 +285,13 @@ fn main() {
                                     .await
                                     .expect("failed to send message");
                                 let success = receiver.await.expect("failed to receive response");
-                                let msg = wire::Outbound {
-                                    payload: Some(wire::outbound::Payload::Success(success)),
-                                }
-                                .encode_to_vec();
+                                let msg = Outbound::<Sha256Digest>::Success(success).encode();
                                 if sender.send(&msg).await.is_err() {
                                     debug!(?peer, "failed to send message");
                                     return;
                                 }
                             }
-                            wire::inbound::Payload::GetBlock(msg) => {
+                            Inbound::GetBlock(msg) => {
                                 let (response, receiver) = oneshot::channel();
                                 handler
                                     .send(Message::GetBlock {
@@ -302,23 +302,15 @@ fn main() {
                                     .expect("failed to send message");
                                 let response = receiver.await.expect("failed to receive response");
                                 match response {
-                                    Some(data) => {
-                                        let msg = wire::Outbound {
-                                            payload: Some(wire::outbound::Payload::Block(
-                                                data.into(),
-                                            )),
-                                        }
-                                        .encode_to_vec();
+                                    Some(block) => {
+                                        let msg = Outbound::Block(block).encode();
                                         if sender.send(&msg).await.is_err() {
                                             debug!(?peer, "failed to send message");
                                             return;
                                         }
                                     }
                                     None => {
-                                        let msg = wire::Outbound {
-                                            payload: Some(wire::outbound::Payload::Success(false)),
-                                        }
-                                        .encode_to_vec();
+                                        let msg = Outbound::<Sha256Digest>::Success(false).encode();
                                         if sender.send(&msg).await.is_err() {
                                             debug!(?peer, "failed to send message");
                                             return;
@@ -326,7 +318,7 @@ fn main() {
                                     }
                                 }
                             }
-                            wire::inbound::Payload::PutFinalization(msg) => {
+                            Inbound::PutFinalization(msg) => {
                                 let (response, receiver) = oneshot::channel();
                                 handler
                                     .send(Message::PutFinalization {
@@ -336,16 +328,13 @@ fn main() {
                                     .await
                                     .expect("failed to send message");
                                 let success = receiver.await.expect("failed to receive response");
-                                let msg = wire::Outbound {
-                                    payload: Some(wire::outbound::Payload::Success(success)),
-                                }
-                                .encode_to_vec();
+                                let msg = Outbound::<Sha256Digest>::Success(success).encode();
                                 if sender.send(&msg).await.is_err() {
                                     debug!(?peer, "failed to send message");
                                     return;
                                 }
                             }
-                            wire::inbound::Payload::GetFinalization(msg) => {
+                            Inbound::GetFinalization(msg) => {
                                 let (response, receiver) = oneshot::channel();
                                 handler
                                     .send(Message::GetFinalization {
@@ -357,22 +346,14 @@ fn main() {
                                 let response = receiver.await.expect("failed to receive response");
                                 match response {
                                     Some(data) => {
-                                        let msg = wire::Outbound {
-                                            payload: Some(wire::outbound::Payload::Finalization(
-                                                data.into(),
-                                            )),
-                                        }
-                                        .encode_to_vec();
+                                        let msg = Outbound::Finalization(data).encode();
                                         if sender.send(&msg).await.is_err() {
                                             debug!(?peer, "failed to send message");
                                             return;
                                         }
                                     }
                                     None => {
-                                        let msg = wire::Outbound {
-                                            payload: Some(wire::outbound::Payload::Success(false)),
-                                        }
-                                        .encode_to_vec();
+                                        let msg = Outbound::<Sha256Digest>::Success(false).encode();
                                         if sender.send(&msg).await.is_err() {
                                             debug!(?peer, "failed to send message");
                                             return;

@@ -2,7 +2,7 @@
 name = "commonware-flood"
 edition = "2021"
 publish = true
-version = "0.0.44"
+version = "0.0.45"
 license = "MIT OR Apache-2.0"
 description = "Spam peers deployed to AWS EC2 with random messages."
 readme = "README.md"
@@ -11,6 +11,7 @@ repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/flood
 documentation = "https://docs.rs/commonware-flood"
 
 [dependencies]
+commonware-codec = { workspace = true }
 commonware-cryptography = { workspace = true }
 commonware-runtime = { workspace = true }
 commonware-p2p = { workspace = true }

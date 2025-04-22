@@ -1,8 +1,9 @@
+use commonware_codec::Encode;
 use commonware_consensus::{
-    threshold_simplex::View, Activity, Proof, Supervisor as Su, ThresholdSupervisor as TSu,
+    threshold_simplex::types::View, Supervisor as Su, ThresholdSupervisor as TSu,
 };
 use commonware_cryptography::bls12381::primitives::{
-    group::{self, Element},
+    group,
     poly::{self, Poly},
 };
 use commonware_utils::{modulo, Array};
@@ -56,11 +57,6 @@ impl<P: Array> Su for Supervisor<P> {
     fn is_participant(&self, _: Self::Index, candidate: &Self::PublicKey) -> Option<u32> {
         self.participants_map.get(candidate).cloned()
     }
-
-    async fn report(&self, _: Activity, _: Proof) {
-        // We don't report activity in this example but you would otherwise use
-        // this to collect uptime and fraud proofs.
-    }
 }
 
 impl<P: Array> TSu for Supervisor<P> {
@@ -69,7 +65,7 @@ impl<P: Array> TSu for Supervisor<P> {
     type Share = group::Share;
 
     fn leader(&self, _: Self::Index, seed: Self::Seed) -> Option<Self::PublicKey> {
-        let seed = seed.serialize();
+        let seed = seed.encode();
         let index = modulo(&seed, self.participants.len() as u64);
         Some(self.participants[index as usize].clone())
     }

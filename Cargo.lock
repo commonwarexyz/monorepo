@@ -911,7 +911,7 @@ checksum = "d3fd119d74b830634cea2a0f58bbd0d54540518a14397557951e79340abc28c0"
 
 [[package]]
 name = "commonware-bridge"
-version = "0.0.44"
+version = "0.0.45"
 dependencies = [
  "bytes",
  "clap",
@@ -927,8 +927,6 @@ dependencies = [
  "futures",
  "governor",
  "prometheus-client",
- "prost",
- "prost-build",
  "rand",
  "tracing",
  "tracing-subscriber",
@@ -936,7 +934,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-broadcast"
-version = "0.0.44"
+version = "0.0.45"
 dependencies = [
  "bytes",
  "commonware-codec",
@@ -954,7 +952,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-chat"
-version = "0.0.44"
+version = "0.0.45"
 dependencies = [
  "chrono",
  "clap",
@@ -975,7 +973,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-codec"
-version = "0.0.44"
+version = "0.0.45"
 dependencies = [
  "bytes",
  "paste",
@@ -984,7 +982,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-consensus"
-version = "0.0.44"
+version = "0.0.45"
 dependencies = [
  "bytes",
  "cfg-if",
@@ -998,8 +996,6 @@ dependencies = [
  "futures",
  "governor",
  "prometheus-client",
- "prost",
- "prost-build",
  "rand",
  "rand_distr",
  "thiserror 2.0.12",
@@ -1009,7 +1005,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-cryptography"
-version = "0.0.44"
+version = "0.0.45"
 dependencies = [
  "blst",
  "bytes",
@@ -1028,7 +1024,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-deployer"
-version = "0.0.44"
+version = "0.0.45"
 dependencies = [
  "aws-config",
  "aws-sdk-ec2",
@@ -1047,9 +1043,10 @@ dependencies = [
 
 [[package]]
 name = "commonware-flood"
-version = "0.0.44"
+version = "0.0.45"
 dependencies = [
  "clap",
+ "commonware-codec",
  "commonware-cryptography",
  "commonware-deployer",
  "commonware-p2p",
@@ -1068,7 +1065,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-log"
-version = "0.0.44"
+version = "0.0.45"
 dependencies = [
  "bytes",
  "chrono",
@@ -1093,7 +1090,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-macros"
-version = "0.0.44"
+version = "0.0.45"
 dependencies = [
  "futures",
  "futures-timer",
@@ -1106,7 +1103,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-p2p"
-version = "0.0.44"
+version = "0.0.45"
 dependencies = [
  "bytes",
  "commonware-codec",
@@ -1129,7 +1126,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-resolver"
-version = "0.0.44"
+version = "0.0.45"
 dependencies = [
  "bimap",
  "bytes",
@@ -1151,13 +1148,14 @@ dependencies = [
 
 [[package]]
 name = "commonware-runtime"
-version = "0.0.44"
+version = "0.0.45"
 dependencies = [
  "axum",
  "bytes",
  "cfg-if",
  "commonware-macros",
  "commonware-utils",
+ "criterion",
  "futures",
  "getrandom 0.2.15",
  "governor",
@@ -1167,6 +1165,7 @@ dependencies = [
  "opentelemetry_sdk",
  "prometheus-client",
  "rand",
+ "rayon",
  "sha2 0.10.8",
  "thiserror 2.0.12",
  "tokio",
@@ -1177,7 +1176,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-storage"
-version = "0.0.44"
+version = "0.0.45"
 dependencies = [
  "bytes",
  "commonware-codec",
@@ -1200,7 +1199,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-stream"
-version = "0.0.44"
+version = "0.0.45"
 dependencies = [
  "bytes",
  "chacha20poly1305",
@@ -1218,7 +1217,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-utils"
-version = "0.0.44"
+version = "0.0.45"
 dependencies = [
  "bytes",
  "commonware-codec",
@@ -1230,7 +1229,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-vrf"
-version = "0.0.44"
+version = "0.0.45"
 dependencies = [
  "bytes",
  "clap",
@@ -1243,8 +1242,6 @@ dependencies = [
  "futures",
  "governor",
  "prometheus-client",
- "prost",
- "prost-build",
  "rand",
  "tracing",
  "tracing-subscriber",
@@ -1324,6 +1321,7 @@ dependencies = [
  "ciborium",
  "clap",
  "criterion-plot",
+ "futures",
  "is-terminal",
  "itertools 0.10.5",
  "num-traits",
@@ -1661,12 +1659,6 @@ name = "fiat-crypto"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
-
-[[package]]
-name = "fixedbitset"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ce7134b9999ecaf8bcd65542e436736ef32ddca1b3e06094cb6ec5755203b80"
 
 [[package]]
 name = "fnv"
@@ -2557,12 +2549,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "multimap"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "defc4c55412d89136f966bbb339008b474350e5e6e78d2714439c386b3137a03"
-
-[[package]]
 name = "native-tls"
 version = "0.2.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2876,16 +2862,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3148f5046208a5d56bcfc03053e3ca6334e51da8dfb19b6cdc8b306fae3283e"
 
 [[package]]
-name = "petgraph"
-version = "0.6.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4c5cc86750666a3ed20bdaf5ca2a0344f9c67674cae0515bec2da16fbaa47db"
-dependencies = [
- "fixedbitset",
- "indexmap",
-]
-
-[[package]]
 name = "pin-project"
 version = "1.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3055,26 +3031,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "prost-build"
-version = "0.13.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
-dependencies = [
- "heck",
- "itertools 0.13.0",
- "log",
- "multimap",
- "once_cell",
- "petgraph",
- "prettyplease",
- "prost",
- "prost-types",
- "regex",
- "syn 2.0.98",
- "tempfile",
-]
-
-[[package]]
 name = "prost-derive"
 version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3085,15 +3041,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.98",
-]
-
-[[package]]
-name = "prost-types"
-version = "0.13.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52c2c1bf36ddb1a1c396b3601a3cec27c2462e45f07c386894ec3ccf5332bd16"
-dependencies = [
- "prost",
 ]
 
 [[package]]

@@ -2,24 +2,21 @@
 //! This includes things like how to produce/verify blocks and how to identify which
 //! participants are active at a given view.
 
-use commonware_consensus::simplex::Prover;
-use commonware_cryptography::{Hasher, Scheme};
+use commonware_cryptography::Hasher;
 
 mod actor;
 pub use actor::Application;
+use commonware_utils::Array;
 mod ingress;
 mod supervisor;
 
 /// Configuration for the application.
-pub struct Config<C: Scheme, H: Hasher> {
+pub struct Config<P: Array, H: Hasher> {
     /// Hashing scheme to use.
     pub hasher: H,
 
-    /// Prover used to decode opaque proofs from consensus.
-    pub prover: Prover<C, H::Digest>,
-
     /// Participants active in consensus.
-    pub participants: Vec<C::PublicKey>,
+    pub participants: Vec<P>,
 
     /// Number of messages from consensus to hold in our backlog
     /// before blocking.

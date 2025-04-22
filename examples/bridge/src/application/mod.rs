@@ -2,7 +2,6 @@
 //! This includes things like how to produce/verify blocks and how to identify which
 //! participants are active at a given view.
 
-use commonware_consensus::threshold_simplex::Prover;
 use commonware_cryptography::{
     bls12381::primitives::{group, poly},
     Hasher,
@@ -23,14 +22,9 @@ pub struct Config<H: Hasher, Si: Sink, St: Stream, P: Array> {
     /// Hashing scheme to use.
     pub hasher: H,
 
-    /// Prover used to decode opaque proofs from consensus.
-    pub prover: Prover<H::Digest>,
-
-    pub other_prover: Prover<H::Digest>,
-
+    pub namespace: Vec<u8>,
     pub identity: poly::Public,
-
-    pub other_network: group::Public,
+    pub other_public: group::Public,
 
     /// Participants active in consensus.
     pub participants: Vec<P>,
