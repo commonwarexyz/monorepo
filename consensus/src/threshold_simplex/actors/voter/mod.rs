@@ -95,7 +95,7 @@ mod tests {
             let scheme = schemes[0].clone();
             let validator = scheme.public_key();
             let mut participants = BTreeMap::new();
-            participants.insert(0, (public.clone(), validators.clone(), shares[0]));
+            participants.insert(0, (public.clone(), validators.clone(), shares[0].clone()));
             let supervisor_config = mocks::supervisor::Config {
                 namespace: namespace.clone(),
                 participants,

@@ -8,6 +8,7 @@ use std::borrow::Cow;
 use std::fmt::{Debug, Display};
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const CURVE_NAME: &str = "ed25519";
 const PRIVATE_KEY_LENGTH: usize = 32;
@@ -56,7 +57,7 @@ impl Signer for Ed25519 {
     }
 
     fn from(private_key: PrivateKey) -> Option<Self> {
-        let signer = private_key.key;
+        let signer = private_key.key.clone();
         let verifier = signer.verification_key();
         Some(Self { signer, verifier })
     }
@@ -121,7 +122,7 @@ impl BatchScheme for Ed25519Batch {
 }
 
 /// Ed25519 Private Key.
-#[derive(Clone)]
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct PrivateKey {
     raw: [u8; PRIVATE_KEY_LENGTH],
     key: ed25519_consensus::SigningKey,

@@ -35,6 +35,7 @@ use std::{
     hash::{Hash, Hasher},
     ops::Deref,
 };
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const CURVE_NAME: &str = "bls12381";
 
@@ -75,14 +76,14 @@ impl Signer for Bls12381 {
     }
 
     fn from(private_key: PrivateKey) -> Option<Self> {
-        let private = private_key.key;
+        let private = private_key.key.clone();
         let mut public = group::Public::one();
         public.mul(&private);
         Some(Self { private, public })
     }
 
     fn private_key(&self) -> PrivateKey {
-        PrivateKey::from(self.private)
+        PrivateKey::from(self.private.clone())
     }
 
     fn public_key(&self) -> PublicKey {
@@ -96,7 +97,7 @@ impl Signer for Bls12381 {
 }
 
 /// BLS12-381 private key.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq, Zeroize, ZeroizeOnDrop)]
 pub struct PrivateKey {
     raw: [u8; group::PRIVATE_KEY_LENGTH],
     key: group::Private,

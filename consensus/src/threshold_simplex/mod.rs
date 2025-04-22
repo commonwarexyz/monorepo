@@ -322,7 +322,7 @@ mod tests {
                 // Configure engine
                 let validator = scheme.public_key();
                 let mut participants = BTreeMap::new();
-                participants.insert(0, (public.clone(), validators.clone(), shares[idx]));
+                participants.insert(0, (public.clone(), validators.clone(), shares[idx].clone()));
                 let supervisor_config = mocks::supervisor::Config {
                     namespace: namespace.clone(),
                     participants,
@@ -522,6 +522,7 @@ mod tests {
         let shutdowns: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
         let supervised = Arc::new(Mutex::new(Vec::new()));
         let mut prev_ctx = None;
+
         loop {
             let namespace = namespace.clone();
             let shutdowns = shutdowns.clone();
@@ -575,7 +576,8 @@ mod tests {
                     // Configure engine
                     let validator = scheme.public_key();
                     let mut participants = BTreeMap::new();
-                    participants.insert(0, (public.clone(), validators.clone(), shares[idx]));
+                    participants
+                        .insert(0, (public.clone(), validators.clone(), shares[idx].clone()));
                     let supervisor_config = mocks::supervisor::Config {
                         namespace: namespace.clone(),
                         participants,
@@ -668,14 +670,15 @@ mod tests {
             };
 
             let (complete, context) = if let Some(prev_ctx) = prev_ctx {
+                // Recover context
                 run_from_context(prev_ctx, f)
             } else {
                 // Create new context
-                let executor = deterministic::Runner::timed(Duration::from_secs(300));
+                let executor = deterministic::Runner::timed(Duration::from_secs(30));
                 executor.start(f)
             };
 
-            // If we are done, break
+            // Check if we should exit
             if complete {
                 break;
             }
@@ -752,7 +755,14 @@ mod tests {
                 // Configure engine
                 let validator = scheme.public_key();
                 let mut participants = BTreeMap::new();
-                participants.insert(0, (public.clone(), validators.clone(), shares[idx_scheme]));
+                participants.insert(
+                    0,
+                    (
+                        public.clone(),
+                        validators.clone(),
+                        shares[idx_scheme].clone(),
+                    ),
+                );
                 let supervisor_config = mocks::supervisor::Config {
                     namespace: namespace.clone(),
                     participants,
@@ -873,7 +883,7 @@ mod tests {
 
             // Configure engine
             let mut participants = BTreeMap::new();
-            participants.insert(0, (public.clone(), validators.clone(), shares[0]));
+            participants.insert(0, (public.clone(), validators.clone(), shares[0].clone()));
             let supervisor_config = mocks::supervisor::Config {
                 namespace: namespace.clone(),
                 participants,
@@ -1002,7 +1012,14 @@ mod tests {
                 // Configure engine
                 let validator = scheme.public_key();
                 let mut participants = BTreeMap::new();
-                participants.insert(0, (public.clone(), validators.clone(), shares[idx_scheme]));
+                participants.insert(
+                    0,
+                    (
+                        public.clone(),
+                        validators.clone(),
+                        shares[idx_scheme].clone(),
+                    ),
+                );
                 let supervisor_config = mocks::supervisor::Config {
                     namespace: namespace.clone(),
                     participants,
@@ -1205,7 +1222,14 @@ mod tests {
                 // Configure engine
                 let validator = scheme.public_key();
                 let mut participants = BTreeMap::new();
-                participants.insert(0, (public.clone(), validators.clone(), shares[idx_scheme]));
+                participants.insert(
+                    0,
+                    (
+                        public.clone(),
+                        validators.clone(),
+                        shares[idx_scheme].clone(),
+                    ),
+                );
                 let supervisor_config = mocks::supervisor::Config {
                     namespace: namespace.clone(),
                     participants,
@@ -1380,7 +1404,7 @@ mod tests {
                 // Configure engine
                 let validator = scheme.public_key();
                 let mut participants = BTreeMap::new();
-                participants.insert(0, (public.clone(), validators.clone(), shares[idx]));
+                participants.insert(0, (public.clone(), validators.clone(), shares[idx].clone()));
                 let supervisor_config = mocks::supervisor::Config {
                     namespace: namespace.clone(),
                     participants,
@@ -1540,7 +1564,7 @@ mod tests {
                 // Configure engine
                 let validator = scheme.public_key();
                 let mut participants = BTreeMap::new();
-                participants.insert(0, (public.clone(), validators.clone(), shares[idx]));
+                participants.insert(0, (public.clone(), validators.clone(), shares[idx].clone()));
                 let supervisor_config = mocks::supervisor::Config {
                     namespace: namespace.clone(),
                     participants,
@@ -1728,7 +1752,7 @@ mod tests {
                 // Configure engine
                 let validator = scheme.public_key();
                 let mut participants = BTreeMap::new();
-                participants.insert(0, (public.clone(), validators.clone(), shares[idx]));
+                participants.insert(0, (public.clone(), validators.clone(), shares[idx].clone()));
                 let supervisor_config = mocks::supervisor::Config {
                     namespace: namespace.clone(),
                     participants,
@@ -1882,7 +1906,14 @@ mod tests {
                 // Start engine
                 let validator = scheme.public_key();
                 let mut participants = BTreeMap::new();
-                participants.insert(0, (public.clone(), validators.clone(), shares[idx_scheme]));
+                participants.insert(
+                    0,
+                    (
+                        public.clone(),
+                        validators.clone(),
+                        shares[idx_scheme].clone(),
+                    ),
+                );
                 let supervisor_config = mocks::supervisor::Config {
                     namespace: namespace.clone(),
                     participants,
@@ -2044,7 +2075,14 @@ mod tests {
                 // Start engine
                 let validator = scheme.public_key();
                 let mut participants = BTreeMap::new();
-                participants.insert(0, (public.clone(), validators.clone(), shares[idx_scheme]));
+                participants.insert(
+                    0,
+                    (
+                        public.clone(),
+                        validators.clone(),
+                        shares[idx_scheme].clone(),
+                    ),
+                );
                 let supervisor_config = mocks::supervisor::Config {
                     namespace: namespace.clone(),
                     participants,
@@ -2198,7 +2236,14 @@ mod tests {
                 // Start engine
                 let validator = scheme.public_key();
                 let mut participants = BTreeMap::new();
-                participants.insert(0, (public.clone(), validators.clone(), shares[idx_scheme]));
+                participants.insert(
+                    0,
+                    (
+                        public.clone(),
+                        validators.clone(),
+                        shares[idx_scheme].clone(),
+                    ),
+                );
                 let supervisor_config = mocks::supervisor::Config {
                     namespace: namespace.clone(),
                     participants,

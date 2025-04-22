@@ -160,7 +160,7 @@ mod tests {
         let validators: Vec<(PublicKey, Ed25519, Share)> = schemes
             .iter()
             .enumerate()
-            .map(|(i, scheme)| (scheme.public_key(), scheme.clone(), shares_vec[i]))
+            .map(|(i, scheme)| (scheme.public_key(), scheme.clone(), shares_vec[i].clone()))
             .collect();
         let pks = validators
             .iter()
@@ -198,7 +198,7 @@ mod tests {
             monitors.insert(validator.clone(), monitor.clone());
             let sequencers = mocks::Sequencers::<PublicKey>::new(pks.to_vec());
             let validators =
-                mocks::Validators::<PublicKey>::new(identity.clone(), pks.to_vec(), *share);
+                mocks::Validators::<PublicKey>::new(identity.clone(), pks.to_vec(), share.clone());
 
             let automaton = mocks::Automaton::<PublicKey>::new(invalid_when);
             automatons.insert(validator.clone(), automaton.clone());
@@ -359,7 +359,7 @@ mod tests {
                 let validators: Vec<(PublicKey, Ed25519, Share)> = schemes
                     .iter()
                     .enumerate()
-                    .map(|(i, scheme)| (scheme.public_key(), scheme.clone(), shares_vec[i]))
+                    .map(|(i, scheme)| (scheme.public_key(), scheme.clone(), shares_vec[i].clone()))
                     .collect();
                 let pks = validators
                     .iter()

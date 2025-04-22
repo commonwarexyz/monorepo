@@ -139,7 +139,7 @@ impl<C: Element> Poly<C> {
     ///
     /// It panics if the index is out of range.
     pub fn get(&self, i: u32) -> C {
-        self.0[i as usize]
+        self.0[i as usize].clone()
     }
 
     /// Set the given element at the specified index.
@@ -238,7 +238,7 @@ impl<C: Element> Poly<C> {
                         num.mul(xj);
 
                         // Compute `xj - xi` and include it in the denominator product
-                        let mut tmp = *xj;
+                        let mut tmp = xj.clone();
                         tmp.sub(xi);
                         den.mul(&tmp);
                     }
@@ -253,7 +253,7 @@ impl<C: Element> Poly<C> {
             num.mul(&inv);
 
             // Scale `yi` by `l_i(0)` to contribute to the constant term
-            let mut yi_scaled = **yi;
+            let mut yi_scaled = (*yi).clone();
             yi_scaled.mul(&num);
 
             // Add `yi * l_i(0)` to the running sum
@@ -379,7 +379,7 @@ pub mod tests {
                 for i in 0..larger.degree() + 1 {
                     let i = i as usize;
                     if i < (smaller.degree() + 1) as usize {
-                        let mut coeff_sum = p1.0[i];
+                        let mut coeff_sum = p1.0[i].clone();
                         coeff_sum.add(&p2.0[i]);
                         assert_eq!(res.0[i], coeff_sum);
                     } else {
@@ -402,7 +402,7 @@ pub mod tests {
         for degree in 0..100u32 {
             for num_evals in 0..100u32 {
                 let poly = new(degree);
-                let expected = poly.0[0];
+                let expected = poly.0[0].clone();
 
                 let shares = (0..num_evals).map(|i| poly.evaluate(i)).collect::<Vec<_>>();
                 let recovered_constant = Poly::recover(num_evals, &shares).unwrap();
@@ -435,14 +435,14 @@ pub mod tests {
                 let evaluation = p1.evaluate(idx).value;
 
                 let coeffs = p1.0;
-                let mut sum = coeffs[0];
+                let mut sum = coeffs[0].clone();
                 for (i, coeff) in coeffs
                     .into_iter()
                     .enumerate()
                     .take((d + 1) as usize)
                     .skip(1)
                 {
-                    let xi = pow(x, i);
+                    let xi = pow(x.clone(), i);
                     let mut var = coeff;
                     var.mul(&xi);
                     sum.add(&var);

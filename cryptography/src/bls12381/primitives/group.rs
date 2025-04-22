@@ -32,7 +32,7 @@ use std::{
     hash::{Hash, Hasher},
     ptr,
 };
-use zeroize::Zeroize;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Domain separation tag used when hashing a message to a curve (G1 or G2).
 ///
@@ -40,7 +40,7 @@ use zeroize::Zeroize;
 pub type DST = &'static [u8];
 
 /// An element of a group.
-pub trait Element: Read + Write + FixedSize + Copy + Clone + Eq + PartialEq + Send + Sync {
+pub trait Element: Read + Write + FixedSize + Clone + Eq + PartialEq + Send + Sync {
     /// Returns the additive identity.
     fn zero() -> Self;
 
@@ -60,13 +60,32 @@ pub trait Point: Element {
     fn map(&mut self, dst: DST, message: &[u8]);
 }
 
-/// A scalar representing an element of the BLS12-381 finite field.
-#[derive(Clone, Copy, Eq, PartialEq)]
+/// Wrapper around [`blst_fr`] that represents an element of the BLS12‑381
+/// scalar field `F_r`.
+///
+/// The new‑type is marked `#[repr(transparent)]`, so it has exactly the same
+/// memory layout as the underlying `blst_fr`, allowing safe passage across
+/// the C FFI boundary without additional transmutation.
+///
+/// All arithmetic is performed modulo the prime
+/// `r = 0x73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001`,
+/// the order of the BLS12‑381 G1/G2 groups.
+#[derive(Clone, Eq, PartialEq)]
 #[repr(transparent)]
 pub struct Scalar(blst_fr);
 
-/// Length of a scalar in bytes.
+/// Number of bytes required to encode a scalar in its canonical
+/// little‑endian form (`32 × 8 = 256 bits`).
+///
+/// Because `r` is only 255 bits wide, the most‑significant byte is always in
+/// the range `0x00‥=0x7f`, leaving the top bit clear.
 const SCALAR_LENGTH: usize = 32;
+
+/// Effective bit‑length of the field modulus `r` (`⌈log_2 r⌉ = 255`).
+///
+/// Useful for constant‑time exponentiation loops and for validating that a
+/// decoded integer lies in the range `0 ≤ x < r`.
+const SCALAR_BITS: usize = 255;
 
 /// This constant serves as the multiplicative identity (i.e., "one") in the
 /// BLS12-381 finite field, ensuring that arithmetic is carried out within the
@@ -158,19 +177,6 @@ pub const PROOF_OF_POSSESSION: DST = G2_PROOF_OF_POSSESSION;
 /// The DST for hashing a message to the default signature type (G2).
 pub const MESSAGE: DST = G2_MESSAGE;
 
-/// Returns the size in bits of a given blst_scalar (represented in little-endian).
-fn bits(scalar: &blst_scalar) -> usize {
-    let mut bits: usize = SCALAR_LENGTH * 8;
-    for i in scalar.b.iter().rev() {
-        let leading = i.leading_zeros();
-        bits -= leading as usize;
-        if leading < 8 {
-            break;
-        }
-    }
-    bits
-}
-
 impl Scalar {
     /// Generates a random scalar using the provided RNG.
     pub fn rand<R: RngCore>(rng: &mut R) -> Self {
@@ -225,12 +231,6 @@ impl Scalar {
             blst_bendian_from_scalar(slice.as_mut_ptr(), &scalar);
         }
         slice
-    }
-}
-
-impl Zeroize for Scalar {
-    fn zeroize(&mut self) {
-        self.0.l.zeroize();
     }
 }
 
@@ -311,8 +311,22 @@ impl Display for Scalar {
     }
 }
 
+impl Zeroize for Scalar {
+    fn zeroize(&mut self) {
+        self.0.l.zeroize();
+    }
+}
+
+impl Drop for Scalar {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for Scalar {}
+
 /// A share of a threshold signing key.
-#[derive(Clone, PartialEq, Copy, Hash)]
+#[derive(Clone, PartialEq, Hash)]
 pub struct Share {
     /// The share's index in the polynomial.
     pub index: u32,
@@ -396,7 +410,9 @@ impl Element for G1 {
         let mut scalar: blst_scalar = blst_scalar::default();
         unsafe {
             blst_scalar_from_fr(&mut scalar, &rhs.0);
-            blst_p1_mult(&mut self.0, &self.0, scalar.b.as_ptr(), bits(&scalar));
+            // To avoid a timing attack during signing, we always perform the same
+            // number of iterations during scalar multiplication.
+            blst_p1_mult(&mut self.0, &self.0, scalar.b.as_ptr(), SCALAR_BITS);
         }
     }
 }
@@ -513,7 +529,9 @@ impl Element for G2 {
         let mut scalar = blst_scalar::default();
         unsafe {
             blst_scalar_from_fr(&mut scalar, &rhs.0);
-            blst_p2_mult(&mut self.0, &self.0, scalar.b.as_ptr(), bits(&scalar));
+            // To avoid a timing attack during signing, we always perform the same
+            // number of iterations during scalar multiplication.
+            blst_p2_mult(&mut self.0, &self.0, scalar.b.as_ptr(), SCALAR_BITS);
         }
     }
 }
@@ -640,9 +658,9 @@ mod tests {
     fn basic_group() {
         // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/b0ef82ff79769d085a5a7d3f4fe690b1c8fe6dc9/crates/threshold-bls/src/curve/bls12381.rs#L200-L220
         let s = Scalar::rand(&mut thread_rng());
-        let mut e1 = s;
-        let e2 = s;
-        let mut s2 = s;
+        let mut e1 = s.clone();
+        let e2 = s.clone();
+        let mut s2 = s.clone();
         s2.add(&s);
         s2.mul(&s);
         e1.add(&e2);
