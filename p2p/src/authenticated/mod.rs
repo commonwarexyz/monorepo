@@ -25,38 +25,17 @@
 //! of the set is smaller/larger than expected). It is up to the application to ensure sets are synchronized._
 //!
 //! Because this representation is so efficient/small, peers send bit vectors to each other periodically as a "ping" to keep
-//! the connection alive. Because it may be useful to be connected to multiple indexes of peers at a given time (i.e. to
-//! perform a DKG with a new set of peers), it is possible to configure this crate to maintain connections to multiple
-//! indexes (and pings are a random index we are trying to connect to).
-//!
-//! ```protobuf
-//! message BitVec {
-//!     uint64 index = 1;
-//!     bytes bits = 2;
-//! }
-//! ```
+//! the connection alive. It may be useful to be connected to multiple indexes of peers at a given time; for example to
+//! perform a DKG with a new set of peers while still be connected to an old set of peers. Thus, we allow maintaining connections
+//! to multiple indexes. The index is included in the message as a `u64`.
 //!
 //! Upon receiving a bit vector, a peer will select a random collection of peers (under a configured max) that it knows about that the
 //! sender does not. If the sender knows about all peers that we know about, the receiver does nothing (and relies on its bit vector
 //! to serve as a pong to keep the connection alive).
 //!
-//! ```protobuf
-//! message Peers {
-//!     repeated Peer peers = 1;
-//! }
-//! ```
-//!
 //! If a peer learns about an updated address for a peer, it will update the record it has stored (for itself and for future gossip).
 //! This record is created during instantiation and is sent immediately after a connection is established (right after the handshake).
 //! This means that a peer that learned about an outdated record for a peer will update it immediately upon being dialed.
-//!
-//! ```protobuf
-//! message Peer {
-//!     bytes socket = 1;
-//!     uint64 timestamp = 2;
-//!     Signature signature = 3;
-//! }
-//! ```
 //!
 //! To get all of this started, a peer must first be bootstrapped with a list of known peers/addresses. The peer will dial these
 //! other peers, send its own record, send a bit vector (with all 0's except its own position in the sorted list), and then
@@ -70,16 +49,9 @@
 //!
 //! ## Messages
 //!
-//! Messages are sent using the Data message type. This message type is used to send arbitrary bytes to a given channel.
+//! Messages are sent using the `Data` message type. This message type is used to send arbitrary bytes to a given channel, which is a `u32`.
 //! The message must be smaller (in bytes) than the configured maximum message size. If the message is larger, an error will be returned.
 //! It is possible for a sender to prioritize messages over others.
-//!
-//! ```protobuf
-//! message Data {
-//!     uint32 channel = 1;
-//!     bytes message = 2;
-//! }
-//! ```
 //!
 //! # Example
 //!
