@@ -60,15 +60,31 @@ pub trait Point: Element {
     fn map(&mut self, dst: DST, message: &[u8]);
 }
 
-/// A scalar representing an element of the BLS12-381 finite field.
+/// Wrapper around [`blst_fr`] that represents an element of the BLS12‑381
+/// scalar field `F_r`.
+///
+/// The new‑type is marked `#[repr(transparent)]`, so it has exactly the same
+/// memory layout as the underlying `blst_fr`, allowing safe passage across
+/// the C FFI boundary without additional transmutation.
+///
+/// All arithmetic is performed modulo the prime
+/// `r = 0x73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001`,
+/// the order of the BLS12‑381 G1/G2 groups.
 #[derive(Clone, Copy, Eq, PartialEq)]
 #[repr(transparent)]
 pub struct Scalar(blst_fr);
 
-/// Length of a scalar in bytes.
+/// Number of bytes required to encode a scalar in its canonical
+/// little‑endian form (`32 × 8 = 256 bits`).
+///
+/// Because `r` is only 255 bits wide, the most‑significant byte is always in
+/// the range `0x00‥=0x7f`, leaving the top bit clear.
 const SCALAR_LENGTH: usize = 32;
 
-/// Length of a scalar in bits.
+/// Effective bit‑length of the field modulus `r` (`⌈log_2 r⌉ = 255`).
+///
+/// Useful for constant‑time exponentiation loops and for validating that a
+/// decoded integer lies in the range `0 ≤ x < r`.
 const SCALAR_BITS: usize = 255;
 
 /// This constant serves as the multiplicative identity (i.e., "one") in the
