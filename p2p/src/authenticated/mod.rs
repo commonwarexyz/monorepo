@@ -7,84 +7,93 @@
 //!
 //! # Features
 //!
-//! * Configurable Cryptography Scheme for Peer Identities (BLS, ed25519, etc.)
-//! * Automatic Peer Discovery Using Bit Vectors (Used as Ping/Pongs)
-//! * Multiplexing With Configurable Rate Limiting Per Channel and Send Prioritization
-//! * Optional Message Compression (using `zstd`)
+//! - Configurable Cryptography Scheme for Peer Identities (BLS, ed25519, etc.)
+//! - Automatic Peer Discovery Using Bit Vectors (Also Used as Ping Messages)
+//! - Multiplexing With Configurable Rate Limiting Per Channel and Send Prioritization
+//! - Optional Message Compression (using `zstd`)
 //!
 //! # Design
 //!
 //! ## Discovery
 //!
-//! Peer discovery relies heavily on the assumption that all peers are known and synchronized at each index (a user-provided tuple of
-//! `(u64, Vec<PublicKey>)`). Using this assumption, we can construct a sorted bit vector that represents our knowledge
-//! of peer IPs (where 1 == we know, 0 == we don't know). This means we can represent our knowledge of 1000 peers in only 125 bytes!
+//! Peer discovery operates under the assumption that all peers are aware of and synchronized on
+//! the composition of peer sets at specific, user-provided indices (`u64`). Each index maps to a
+//! list of authorized `PublicKey`s (`(u64, Vec<PublicKey>)`). Based on this shared knowledge, each
+//! peer can construct a sorted bit vector message (`BitVec`) representing its knowledge of the
+//! dialable addresses [`SocketAddr`](std::net::SocketAddr) for the peers in that set.
+//! The `BitVec` message contains:
+//! - `index`: The `u64` index the bit vector applies to.
+//! - `bits`: The bit vector itself, where a '1' signifies knowledge of the corresponding
+//!   peer's address in the sorted list for that index.
 //!
-//! _If peers at a given index are not synchronized, peers may signal their knowledge of peer IPs that another peer may
-//! incorrectly respond to (associating a given index with a different peer) or fail to respond to (if the bit vector representation
-//! of the set is smaller/larger than expected). It is up to the application to ensure sets are synchronized._
+//! _Warning: If peers are not synchronized on the peer set composition at a given index,
+//! discovery messages can be misinterpreted. A peer might associate a bit vector index with the
+//! wrong peer or fail to parse the vector if its length doesn't match the expected set size. The
+//! application layer is responsible for ensuring peer set synchronization._
 //!
-//! Because this representation is so efficient/small, peers send bit vectors to each other periodically as a "ping" to keep
-//! the connection alive. Because it may be useful to be connected to multiple indexes of peers at a given time (i.e. to
-//! perform a DKG with a new set of peers), it is possible to configure this crate to maintain connections to multiple
-//! indexes (and pings are a random index we are trying to connect to).
+//! Due to their small size, these `BitVec` messages are exchanged periodically (configured by
+//! `gossip_bit_vec_frequency` in the [`Config`]) between connected peers. This serves as both a
+//! peer discovery mechanism and a keep-alive "ping" message to maintain the underlying
+//! connection, especially during periods of low application-level traffic. The protocol supports
+//! tracking multiple peer sets concurrently (up to `tracked_peer_sets`), each identified by its
+//! `index`. This is useful, for instance, during transitions like distributed key generation
+//! (DKG) where connections to both old and new peer sets are needed simultaneously.
 //!
-//! ```protobuf
-//! message BitVec {
-//!     uint64 index = 1;
-//!     bytes bits = 2;
-//! }
-//! ```
+//! Upon receiving a `BitVec` message, a peer compares it against its own knowledge for the same
+//! index. If the receiving peer knows addresses that the sender marked as '0' (unknown), it
+//! selects a random subset of these known `PeerInfo` structures (up to `peer_gossip_max_count`)
+//! and sends them back in a `Payload::Peers` message. Each `PeerInfo` structure verifies a peer's
+//! address claim and contains:
+//! - `socket`: The [`SocketAddr`](std::net::SocketAddr) of the peer.
+//! - `timestamp`: A `u64` timestamp indicating when the address was attested.
+//! - `public_key`: The peer's public key.
+//! - `signature`: The peer's cryptographic signature over the `socket` and `timestamp`.
 //!
-//! Upon receiving a bit vector, a peer will select a random collection of peers (under a configured max) that it knows about that the
-//! sender does not. If the sender knows about all peers that we know about, the receiver does nothing (and relies on its bit vector
-//! to serve as a pong to keep the connection alive).
+//! If the receiver doesn't know any addresses the sender is unaware of, it sends no
+//! `Payload::Peers` response; the received `BitVec` implicitly acts as a "pong".
 //!
-//! ```protobuf
-//! message Peers {
-//!     repeated Peer peers = 1;
-//! }
-//! ```
+//! If a peer receives a `PeerInfo` message (either directly or through gossip) containing a more
+//! recent timestamp for a known peer's address, it updates its local `Record`. This updated
+//! `PeerInfo` is also used in future gossip messages. Each peer generates its own signed
+//! `PeerInfo` upon startup and sends it immediately after establishing a connection (following
+//! the cryptographic handshake). This ensures that if a peer connects using an outdated address
+//! record, it will be corrected promptly by the peer being dialed.
 //!
-//! If a peer learns about an updated address for a peer, it will update the record it has stored (for itself and for future gossip).
-//! This record is created during instantiation and is sent immediately after a connection is established (right after the handshake).
-//! This means that a peer that learned about an outdated record for a peer will update it immediately upon being dialed.
+//! To initiate the discovery process, a peer needs a list of `bootstrappers` (defined in
+//! [`Config`]) - known peer public keys and their corresponding socket addresses. The peer
+//! attempts to dial these bootstrappers, performs the handshake, sends its own `PeerInfo`, and
+//! then sends a `BitVec` for the relevant peer set(s) (initially only knowing its own address,
+//! marked as '1'). It then waits for responses, learning about other peers through the
+//! `Payload::Peers` messages received. Bootstrapper information is persisted, and connections to
+//! them are maintained even if they aren't part of any currently tracked peer sets. Different
+//! peers can have different bootstrapper lists.
 //!
-//! ```protobuf
-//! message Peer {
-//!     bytes socket = 1;
-//!     uint64 timestamp = 2;
-//!     Signature signature = 3;
-//! }
-//! ```
-//!
-//! To get all of this started, a peer must first be bootstrapped with a list of known peers/addresses. The peer will dial these
-//! other peers, send its own record, send a bit vector (with all 0's except its own position in the sorted list), and then
-//! wait for the other peer to respond with some set of unknown peers. Different peers do not need to agree on who this list of
-//! bootstrapping peers is (this list is configurable). Knowledge of bootstrappers and connections to them are never dropped,
-//! even if the bootstrapper is not in any known peer set.
-//!
-//! _If a peer is not in any registered peer set (to its knowledge) but is dialed by a peer that is, it will accept the connection.
-//! This allows peers that have a more up-to-date version of the peer set to connect, exchange application-level information, and for
-//! the said peer to potentially learn of an updated peer set (of which it is part)._
+//! _Note: If a peer (listener) receives a connection request from another peer (dialer) that
+//! belongs to a registered peer set, the listener will accept the connection, even if the
+//! listener itself hasn't yet learned about that specific peer set (or has an older version). The
+//! core requirement is that the listener recognizes the *dialer's public key* as belonging to
+//! *some* authorized set it tracks (see `actors::tracker::Actor`). This mechanism allows peers
+//! with more up-to-date peer set information to connect and propagate that information, enabling
+//! the listener to potentially learn about newer sets it is part of._
 //!
 //! ## Messages
 //!
-//! Messages are sent using the Data message type. This message type is used to send arbitrary bytes to a given channel.
-//! The message must be smaller (in bytes) than the configured maximum message size. If the message is larger, an error will be returned.
-//! It is possible for a sender to prioritize messages over others.
+//! Application-level data is exchanged using the `Payload::Data` message type, which wraps an
+//! internal `Data` structure. This structure contains:
+//! - `channel`: A `u32` identifier used to route the message to the correct application handler.
+//! - `message`: The arbitrary application payload as `Bytes`.
 //!
-//! ```protobuf
-//! message Data {
-//!     uint32 channel = 1;
-//!     bytes message = 2;
-//! }
-//! ```
+//! The size of the `message` bytes (after potential compression) must not exceed the configured
+//! `max_message_size`. If it does, the sending operation will fail with
+//! [`Error::MessageTooLarge`]. Messages can be sent with `priority`, allowing certain
+//! communications to potentially bypass lower-priority messages waiting in send queues across all
+//! channels. Each registered channel ([`Sender`], [`Receiver`]) handles its own message queuing,
+//! rate limiting, and optional `zstd` compression/decompression.
 //!
 //! # Example
 //!
 //! ```rust
-//! use commonware_p2p::authenticated::{self, Network};
+//! use commonware_p2p::{authenticated::{self, Network}, Sender, Recipients};
 //! use commonware_cryptography::{Ed25519, Signer, Verifier};
 //! use commonware_runtime::{tokio, Spawner, Runner, Metrics};
 //! use governor::Quota;
@@ -126,7 +135,7 @@
 //!     signer.clone(),
 //!     application_namespace,
 //!     SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 3000),
-//!     SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 3000),
+//!     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3000), // Use a specific dialable addr
 //!     bootstrappers,
 //!     MAX_MESSAGE_SIZE,
 //! );
@@ -140,12 +149,12 @@
 //!     //
 //!     // In production, this would be updated as new peer sets are created (like when
 //!     // the composition of a validator set changes).
-//!     oracle.register(0, vec![signer.public_key(), peer1, peer2, peer3]);
+//!     oracle.register(0, vec![signer.public_key(), peer1, peer2, peer3]).await;
 //!
 //!     // Register some channel
 //!     const MAX_MESSAGE_BACKLOG: usize = 128;
 //!     const COMPRESSION_LEVEL: Option<i32> = Some(3);
-//!     let (sender, receiver) = network.register(
+//!     let (mut sender, receiver) = network.register(
 //!         0,
 //!         Quota::per_second(NonZeroU32::new(1).unwrap()),
 //!         MAX_MESSAGE_BACKLOG,
@@ -155,7 +164,8 @@
 //!     // Run network
 //!     let network_handler = network.start();
 //!
-//!     // ... Use sender and receiver ...
+//!     // Example: Use sender
+//!     let _ = sender.send(Recipients::All, bytes::Bytes::from_static(b"hello"), false).await;
 //!
 //!     // Shutdown network
 //!     network_handler.abort();
