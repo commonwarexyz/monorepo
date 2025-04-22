@@ -21,10 +21,10 @@ use tracing::{debug, info, warn};
 /// The maximum overhead of encoding a `message: Bytes` into a full
 /// [Payload](super::types::Payload), in bytes.
 ///
-// The byte overhead is calculated as the sum of the following:
-// - 1: Payload enum value
-// - 5: Channel varint
-// - 5: Message length varint (assumes length is no more than 4GB)
+/// The byte overhead is calculated as the sum of the following:
+/// - 1: Payload enum value
+/// - 5: Channel varint
+/// - 5: Message length varint (assumes length is no more than 4GB)
 const MAX_PAYLOAD_OVERHEAD: usize = 11;
 
 /// Unique suffix for all messages signed by the tracker.
