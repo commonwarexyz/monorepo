@@ -3,18 +3,19 @@
 use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error, FixedSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{
-    bls12381::primitives::{
-        group::{Public, Share, Signature},
-        ops::{
-            aggregate_signatures, aggregate_verify_multiple_messages, partial_sign_message,
-            partial_verify_message, partial_verify_multiple_messages, verify_message,
+    bls12381::{
+        primitives::{
+            group::{Public, Share, Signature},
+            ops::{
+                aggregate_signatures, aggregate_verify_multiple_messages, partial_sign_message,
+                partial_verify_message, partial_verify_multiple_messages, verify_message,
+            },
+            poly::{PartialSignature, Poly},
         },
-        poly::{PartialSignature, Poly},
+        Bls12381,
     },
-    Digest,
+    Digest, Signer,
 };
-#[cfg(test)]
-use commonware_cryptography::{bls12381::Bls12381, Signer};
 use commonware_utils::union;
 
 /// View is a monotonically increasing counter that represents the current focus of consensus.
@@ -419,8 +420,12 @@ impl<D: Digest> Notarization<D> {
         .is_ok()
     }
 
-    /// Test function to create a notarization from a [Bls12381] signer and a proposal.
-    #[cfg(test)]
+    /// Create a notarization from a [Bls12381] signer and a proposal.
+    ///
+    /// # Note
+    ///
+    /// It should only be possible to create a [Notarization] this way in tests (as the
+    /// shared secret for a consensus set should never be known to a single party).
     pub fn sign(namespace: &[u8], signer: &mut Bls12381, proposal: Proposal<D>) -> Self {
         let notarize_namespace = notarize_namespace(namespace);
         let notarize_message = proposal.encode();
@@ -620,6 +625,22 @@ impl Nullification {
         )
         .is_ok()
     }
+
+    /// Create a nullification from a [Bls12381] signer and a view.
+    ///
+    /// # Note
+    ///
+    /// It should only be possible to create a [Nullification] this way in tests (as the
+    /// shared secret for a consensus set should never be known to a single party).
+    pub fn sign(namespace: &[u8], signer: &mut Bls12381, view: View) -> Self {
+        let nullify_namespace = nullify_namespace(namespace);
+        let view_message = view_message(view);
+        let view_signature = signer.sign(Some(&nullify_namespace), &view_message);
+        let seed_namespace = seed_namespace(namespace);
+        let seed_message = view_message;
+        let seed_signature = signer.sign(Some(&seed_namespace), &seed_message);
+        Nullification::new(view, *view_signature.as_ref(), *seed_signature.as_ref())
+    }
 }
 
 impl Viewable for Nullification {
@@ -785,6 +806,26 @@ impl<D: Digest> Finalization<D> {
             1,
         )
         .is_ok()
+    }
+
+    /// Create a finalization from a [Bls12381] signer and a proposal.
+    ///
+    /// # Note
+    ///
+    /// It should only be possible to create a [Finalization] this way in tests (as the
+    /// shared secret for a consensus set should never be known to a single party).
+    pub fn sign(namespace: &[u8], signer: &mut Bls12381, proposal: Proposal<D>) -> Self {
+        let finalize_namespace = finalize_namespace(namespace);
+        let finalize_message = proposal.encode();
+        let proposal_signature = signer.sign(Some(&finalize_namespace), &finalize_message);
+        let seed_namespace = seed_namespace(namespace);
+        let seed_message = view_message(proposal.view);
+        let seed_signature = signer.sign(Some(&seed_namespace), &seed_message);
+        Finalization::new(
+            proposal,
+            *proposal_signature.as_ref(),
+            *seed_signature.as_ref(),
+        )
     }
 }
 
@@ -1695,6 +1736,23 @@ mod tests {
     }
 
     #[test]
+    fn test_nullification_sign() {
+        // Create mock network key
+        let mut rng = StdRng::seed_from_u64(0);
+        let mut signer = Bls12381::new(&mut rng);
+
+        // Create nullification
+        let nullification = Nullification::sign(NAMESPACE, &mut signer, 10);
+        let encoded = nullification.encode();
+        let decoded = Nullification::decode(encoded).unwrap();
+        assert_eq!(nullification, decoded);
+
+        // Verify the nullification
+        let public_key = signer.public_key();
+        assert!(decoded.verify(NAMESPACE, public_key.as_ref()));
+    }
+
+    #[test]
     fn test_finalize_encode_decode() {
         let n = 5;
         let t = quorum(n as u32);
@@ -1752,6 +1810,24 @@ mod tests {
 
         // Verify the seed
         assert!(decoded.verify(NAMESPACE, public_key));
+    }
+
+    #[test]
+    fn test_finalization_sign() {
+        // Create mock network key
+        let mut rng = StdRng::seed_from_u64(0);
+        let mut signer = Bls12381::new(&mut rng);
+
+        // Create finalization
+        let proposal = Proposal::new(10, 5, sample_digest(1));
+        let finalization = Finalization::sign(NAMESPACE, &mut signer, proposal);
+        let encoded = finalization.encode();
+        let decoded = Finalization::decode(encoded).unwrap();
+        assert_eq!(finalization, decoded);
+
+        // Verify the finalization
+        let public_key = signer.public_key();
+        assert!(decoded.verify(NAMESPACE, public_key.as_ref()));
     }
 
     #[test]
