@@ -455,7 +455,7 @@ mod tests {
     use super::*;
     use commonware_cryptography::{hash, sha256::Digest};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic::Executor, Blob, Runner, Storage};
+    use commonware_runtime::{deterministic, Blob, Runner, Storage};
     use futures::{pin_mut, StreamExt};
 
     /// Generate a SHA-256 digest for the given value.
@@ -466,10 +466,10 @@ mod tests {
     #[test_traced]
     fn test_fixed_journal_append_and_prune() {
         // Initialize the deterministic context
-        let (executor, context, _) = Executor::default();
+        let executor = deterministic::Runner::default();
 
         // Start the test within the executor
-        executor.start(async move {
+        executor.start(|context| async move {
             // Initialize the journal, allowing a max of 2 items per blob.
             let cfg = Config {
                 partition: "test_partition".into(),
@@ -617,10 +617,10 @@ mod tests {
     fn test_fixed_journal_replay() {
         const ITEMS_PER_BLOB: u64 = 7;
         // Initialize the deterministic context
-        let (executor, context, _) = Executor::default();
+        let executor = deterministic::Runner::default();
 
         // Start the test within the executor
-        executor.start(async move {
+        executor.start(|context| async move {
             // Initialize the journal, allowing a max of 7 items per blob.
             let cfg = Config {
                 partition: "test_partition".into(),
@@ -777,10 +777,10 @@ mod tests {
     #[test_traced]
     fn test_fixed_journal_recover_from_partial_write() {
         // Initialize the deterministic context
-        let (executor, context, _) = Executor::default();
+        let executor = deterministic::Runner::default();
 
         // Start the test within the executor
-        executor.start(async move {
+        executor.start(|context| async move {
             // Initialize the journal, allowing a max of 2 items per blob.
             let cfg = Config {
                 partition: "test_partition".into(),
@@ -839,8 +839,8 @@ mod tests {
 
     #[test_traced]
     fn test_fixed_journal_recover_to_empty_from_partial_write() {
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             // Initialize the journal, allowing a max of 10 items per blob.
             let cfg = Config {
                 partition: "test_partition".into(),
@@ -889,8 +889,8 @@ mod tests {
 
     #[test_traced]
     fn test_fixed_journal_rewinding() {
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             // Initialize the journal, allowing a max of 2 items per blob.
             let cfg = Config {
                 partition: "test_partition".into(),

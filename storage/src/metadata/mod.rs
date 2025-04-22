@@ -39,12 +39,12 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_runtime::{Spawner, Runner, deterministic::Executor};
+//! use commonware_runtime::{Spawner, Runner, deterministic};
 //! use commonware_storage::metadata::{Metadata, Config};
 //! use commonware_utils::array::U64;
 //!
-//! let (executor, context, _) = Executor::default();
-//! executor.start(async move {
+//! let executor = deterministic::Runner::default();
+//! executor.start(|context| async move {
 //!     // Create a store
 //!     let mut metadata = Metadata::init(context, Config{
 //!         partition: "partition".to_string()
@@ -95,15 +95,15 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic::Executor, Blob, Metrics, Runner, Storage};
+    use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
     use commonware_utils::array::U64;
     use std::time::UNIX_EPOCH;
 
     #[test_traced]
     fn test_put_get_clear() {
         // Initialize the deterministic context
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             // Create a metadata store
             let cfg = Config {
                 partition: "test".to_string(),
@@ -182,8 +182,8 @@ mod tests {
     #[test_traced]
     fn test_multi_sync() {
         // Initialize the deterministic context
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             // Create a metadata store
             let cfg = Config {
                 partition: "test".to_string(),
@@ -281,8 +281,8 @@ mod tests {
     #[test_traced]
     fn test_recover_corrupted_one() {
         // Initialize the deterministic context
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             // Create a metadata store
             let cfg = Config {
                 partition: "test".to_string(),
@@ -327,8 +327,8 @@ mod tests {
     #[test_traced]
     fn test_recover_corrupted_both() {
         // Initialize the deterministic context
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             // Create a metadata store
             let cfg = Config {
                 partition: "test".to_string(),
@@ -381,8 +381,8 @@ mod tests {
     #[test_traced]
     fn test_recover_corrupted_truncate() {
         // Initialize the deterministic context
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             // Create a metadata store
             let cfg = Config {
                 partition: "test".to_string(),
@@ -428,8 +428,8 @@ mod tests {
     #[test_traced]
     fn test_recover_corrupted_short() {
         // Initialize the deterministic context
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             // Create a metadata store
             let cfg = Config {
                 partition: "test".to_string(),
@@ -474,8 +474,8 @@ mod tests {
     #[test_traced]
     fn test_unclean_shutdown() {
         // Initialize the deterministic context
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             let key = U64::new(42);
             let hello = Bytes::from("hello");
             {
@@ -511,8 +511,8 @@ mod tests {
     #[test_traced]
     fn test_value_too_big_error() {
         // Initialize the deterministic context
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             // Create a metadata store
             let cfg = Config {
                 partition: "test".to_string(),

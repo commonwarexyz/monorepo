@@ -169,16 +169,13 @@ mod tests {
     use commonware_cryptography::{bls12381::dkg::ops, Ed25519, Sha256, Signer};
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};
-    use commonware_runtime::{
-        deterministic::{self, Executor},
-        Clock, Metrics, Runner, Spawner,
-    };
+    use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
     use commonware_storage::journal::variable::{Config as JConfig, Journal};
     use commonware_utils::{quorum, Array};
     use engine::Engine;
     use futures::{future::join_all, StreamExt};
     use governor::Quota;
-    use rand::{rngs::StdRng, Rng, SeedableRng};
+    use rand::{rngs::StdRng, Rng as _, SeedableRng as _};
     use std::{
         collections::{BTreeMap, HashMap},
         num::NonZeroU32,
@@ -274,8 +271,8 @@ mod tests {
         let activity_timeout = 10;
         let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
-        let (executor, mut context, _) = Executor::timed(Duration::from_secs(30));
-        executor.start(async move {
+        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
                 context.with_label("network"),
@@ -521,164 +518,167 @@ mod tests {
         // Random restarts every x seconds
         let shutdowns: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
         let supervised = Arc::new(Mutex::new(Vec::new()));
-        let (mut executor, mut context, _) = Executor::timed(Duration::from_secs(300));
+        let mut prev_ctx = None;
+
         loop {
             let namespace = namespace.clone();
             let shutdowns = shutdowns.clone();
             let supervised = supervised.clone();
-            let complete = executor.start({
-                let mut context = context.clone();
-                let public = public.clone();
-                let shares = shares.clone();
-                async move {
-                    // Create simulated network
-                    let (network, mut oracle) = Network::new(
-                        context.with_label("network"),
-                        Config {
-                            max_size: 1024 * 1024,
-                        },
-                    );
+            let public = public.clone();
+            let shares = shares.clone();
 
-                    // Start network
-                    network.start();
+            let f = |mut context: deterministic::Context| async move {
+                // Create simulated network
+                let (network, mut oracle) = Network::new(
+                    context.with_label("network"),
+                    Config {
+                        max_size: 1024 * 1024,
+                    },
+                );
 
-                    // Register participants
-                    let mut schemes = Vec::new();
-                    let mut validators = Vec::new();
-                    for i in 0..n {
-                        let scheme = Ed25519::from_seed(i as u64);
-                        let pk = scheme.public_key();
-                        schemes.push(scheme);
-                        validators.push(pk);
-                    }
-                    validators.sort();
-                    schemes.sort_by_key(|s| s.public_key());
-                    let mut registrations = register_validators(&mut oracle, &validators).await;
+                // Start network
+                network.start();
 
-                    // Link all validators
-                    let link = Link {
-                        latency: 50.0,
-                        jitter: 50.0,
-                        success_rate: 1.0,
+                // Register participants
+                let mut schemes = Vec::new();
+                let mut validators = Vec::new();
+                for i in 0..n {
+                    let scheme = Ed25519::from_seed(i as u64);
+                    let pk = scheme.public_key();
+                    schemes.push(scheme);
+                    validators.push(pk);
+                }
+                validators.sort();
+                schemes.sort_by_key(|s| s.public_key());
+                let mut registrations = register_validators(&mut oracle, &validators).await;
+
+                // Link all validators
+                let link = Link {
+                    latency: 50.0,
+                    jitter: 50.0,
+                    success_rate: 1.0,
+                };
+                link_validators(&mut oracle, &validators, Action::Link(link), None).await;
+
+                // Create engines
+                let relay = Arc::new(mocks::relay::Relay::new());
+                let mut supervisors = HashMap::new();
+                let mut engine_handlers = Vec::new();
+                for (idx, scheme) in schemes.into_iter().enumerate() {
+                    // Create scheme context
+                    let context = context
+                        .clone()
+                        .with_label(&format!("validator-{}", scheme.public_key()));
+
+                    // Configure engine
+                    let validator = scheme.public_key();
+                    let mut participants = BTreeMap::new();
+                    participants
+                        .insert(0, (public.clone(), validators.clone(), shares[idx].clone()));
+                    let supervisor_config = mocks::supervisor::Config {
+                        namespace: namespace.clone(),
+                        participants,
                     };
-                    link_validators(&mut oracle, &validators, Action::Link(link), None).await;
+                    let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
+                    supervisors.insert(validator.clone(), supervisor.clone());
+                    let application_cfg = mocks::application::Config {
+                        hasher: Sha256::default(),
+                        relay: relay.clone(),
+                        participant: validator.clone(),
+                        propose_latency: (10.0, 5.0),
+                        verify_latency: (10.0, 5.0),
+                    };
+                    let (actor, application) = mocks::application::Application::new(
+                        context.with_label("application"),
+                        application_cfg,
+                    );
+                    actor.start();
+                    let cfg = JConfig {
+                        partition: validator.to_string(),
+                    };
+                    let journal = Journal::init(context.with_label("journal"), cfg)
+                        .await
+                        .expect("unable to create journal");
+                    let cfg = config::Config {
+                        crypto: scheme,
+                        automaton: application.clone(),
+                        relay: application.clone(),
+                        reporter: supervisor.clone(),
+                        supervisor,
+                        mailbox_size: 1024,
+                        namespace: namespace.clone(),
+                        leader_timeout: Duration::from_secs(1),
+                        notarization_timeout: Duration::from_secs(2),
+                        nullify_retry: Duration::from_secs(10),
+                        fetch_timeout: Duration::from_secs(1),
+                        activity_timeout,
+                        skip_timeout,
+                        max_fetch_count: 1,
+                        fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                        fetch_concurrent: 1,
+                        replay_concurrency: 1,
+                    };
+                    let engine = Engine::new(context.with_label("engine"), journal, cfg);
 
-                    // Create engines
-                    let relay = Arc::new(mocks::relay::Relay::new());
-                    let mut supervisors = HashMap::new();
-                    let mut engine_handlers = Vec::new();
-                    for (idx, scheme) in schemes.into_iter().enumerate() {
-                        // Create scheme context
-                        let context = context
-                            .clone()
-                            .with_label(&format!("validator-{}", scheme.public_key()));
+                    // Start engine
+                    let (voter, resolver) = registrations
+                        .remove(&validator)
+                        .expect("validator should be registered");
+                    engine_handlers.push(engine.start(voter, resolver));
+                }
 
-                        // Configure engine
-                        let validator = scheme.public_key();
-                        let mut participants = BTreeMap::new();
-                        participants
-                            .insert(0, (public.clone(), validators.clone(), shares[idx].clone()));
-                        let supervisor_config = mocks::supervisor::Config {
-                            namespace: namespace.clone(),
-                            participants,
-                        };
-                        let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
-                        supervisors.insert(validator.clone(), supervisor.clone());
-                        let application_cfg = mocks::application::Config {
-                            hasher: Sha256::default(),
-                            relay: relay.clone(),
-                            participant: validator.clone(),
-                            propose_latency: (10.0, 5.0),
-                            verify_latency: (10.0, 5.0),
-                        };
-                        let (actor, application) = mocks::application::Application::new(
-                            context.with_label("application"),
-                            application_cfg,
-                        );
-                        actor.start();
-                        let cfg = JConfig {
-                            partition: validator.to_string(),
-                        };
-                        let journal = Journal::init(context.with_label("journal"), cfg)
-                            .await
-                            .expect("unable to create journal");
-                        let cfg = config::Config {
-                            crypto: scheme,
-                            automaton: application.clone(),
-                            relay: application.clone(),
-                            reporter: supervisor.clone(),
-                            supervisor,
-                            mailbox_size: 1024,
-                            namespace: namespace.clone(),
-                            leader_timeout: Duration::from_secs(1),
-                            notarization_timeout: Duration::from_secs(2),
-                            nullify_retry: Duration::from_secs(10),
-                            fetch_timeout: Duration::from_secs(1),
-                            activity_timeout,
-                            skip_timeout,
-                            max_fetch_count: 1,
-                            fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
-                            fetch_concurrent: 1,
-                            replay_concurrency: 1,
-                        };
-                        let engine = Engine::new(context.with_label("engine"), journal, cfg);
-
-                        // Start engine
-                        let (voter, resolver) = registrations
-                            .remove(&validator)
-                            .expect("validator should be registered");
-                        engine_handlers.push(engine.start(voter, resolver));
-                    }
-
-                    // Store all finalizer handles
-                    let mut finalizers = Vec::new();
-                    for (_, supervisor) in supervisors.iter_mut() {
-                        let (mut latest, mut monitor) = supervisor.subscribe().await;
-                        finalizers.push(context.with_label("finalizer").spawn(
-                            move |_| async move {
-                                while latest < required_containers {
-                                    latest = monitor.next().await.expect("event missing");
-                                }
-                            },
-                        ));
-                    }
-
-                    // Exit at random points for unclean shutdown of entire set
-                    let wait =
-                        context.gen_range(Duration::from_millis(10)..Duration::from_millis(2_000));
-                    select! {
-                        _ = context.sleep(wait) => {
-                            // Collect supervisors to check faults
-                            {
-                                let mut shutdowns = shutdowns.lock().unwrap();
-                                debug!(shutdowns = *shutdowns, elapsed = ?wait, "restarting");
-                                *shutdowns += 1;
-                            }
-                            supervised.lock().unwrap().push(supervisors);
-                            false
-                        },
-                        _ = join_all(finalizers) => {
-                            // Check supervisors for faults activity
-                            let supervised = supervised.lock().unwrap();
-                            for supervisors in supervised.iter() {
-                                for (_, supervisor) in supervisors.iter() {
-                                    let faults = supervisor.faults.lock().unwrap();
-                                    assert!(faults.is_empty());
-                                }
-                            }
-                            true
+                // Store all finalizer handles
+                let mut finalizers = Vec::new();
+                for (_, supervisor) in supervisors.iter_mut() {
+                    let (mut latest, mut monitor) = supervisor.subscribe().await;
+                    finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                        while latest < required_containers {
+                            latest = monitor.next().await.expect("event missing");
                         }
+                    }));
+                }
+
+                // Exit at random points for unclean shutdown of entire set
+                let wait =
+                    context.gen_range(Duration::from_millis(10)..Duration::from_millis(2_000));
+                select! {
+                    _ = context.sleep(wait) => {
+                        // Collect supervisors to check faults
+                        {
+                            let mut shutdowns = shutdowns.lock().unwrap();
+                            debug!(shutdowns = *shutdowns, elapsed = ?wait, "restarting");
+                            *shutdowns += 1;
+                        }
+                        supervised.lock().unwrap().push(supervisors);
+                        (false,context)
+                    },
+                    _ = join_all(finalizers) => {
+                        // Check supervisors for faults activity
+                        let supervised = supervised.lock().unwrap();
+                        for supervisors in supervised.iter() {
+                            for (_, supervisor) in supervisors.iter() {
+                                let faults = supervisor.faults.lock().unwrap();
+                                assert!(faults.is_empty());
+                            }
+                        }
+                        (true,context)
                     }
                 }
-            });
+            };
 
-            // If we are done, break
+            let (complete, context) = if let Some(prev_ctx) = prev_ctx {
+                deterministic::Runner::from(prev_ctx)
+            } else {
+                deterministic::Runner::timed(Duration::from_secs(30))
+            }
+            .start(f);
+
+            // Check if we should exit
             if complete {
                 break;
             }
 
-            // Recover context
-            (executor, context, _) = context.recover();
+            prev_ctx = Some(context.recover());
         }
     }
 
@@ -691,8 +691,8 @@ mod tests {
         let activity_timeout = 10;
         let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
-        let (executor, mut context, _) = Executor::timed(Duration::from_secs(360));
-        executor.start(async move {
+        let executor = deterministic::Runner::timed(Duration::from_secs(360));
+        executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
                 context.with_label("network"),
@@ -948,8 +948,8 @@ mod tests {
         let skip_timeout = 5;
         let max_exceptions = 10;
         let namespace = b"consensus".to_vec();
-        let (executor, mut context, _) = Executor::timed(Duration::from_secs(30));
-        executor.start(async move {
+        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
                 context.with_label("network"),
@@ -1080,6 +1080,7 @@ mod tests {
             join_all(finalizers).await;
 
             // Check supervisors for correct activity
+            let exceptions = 0;
             let offline = &validators[0];
             for supervisor in supervisors.iter() {
                 // Ensure no faults
@@ -1155,6 +1156,7 @@ mod tests {
                 // Ensure exceptions within allowed
                 assert!(exceptions <= max_exceptions);
             }
+            assert!(exceptions <= max_exceptions);
         });
     }
 
@@ -1167,8 +1169,8 @@ mod tests {
         let activity_timeout = 10;
         let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
-        let (executor, mut context, _) = Executor::timed(Duration::from_secs(30));
-        executor.start(async move {
+        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
                 context.with_label("network"),
@@ -1349,8 +1351,8 @@ mod tests {
         let activity_timeout = 10;
         let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
-        let (executor, mut context, _) = Executor::timed(Duration::from_secs(120));
-        executor.start(async move {
+        let executor = deterministic::Runner::timed(Duration::from_secs(120));
+        executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
                 context.with_label("network"),
@@ -1509,8 +1511,8 @@ mod tests {
         let activity_timeout = 10;
         let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
-        let (executor, mut context, _) = Executor::timed(Duration::from_secs(900));
-        executor.start(async move {
+        let executor = deterministic::Runner::timed(Duration::from_secs(900));
+        executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
                 context.with_label("network"),
@@ -1697,8 +1699,8 @@ mod tests {
             timeout: Some(Duration::from_secs(5_000)),
             ..deterministic::Config::default()
         };
-        let (executor, mut context, auditor) = Executor::init(cfg);
-        executor.start(async move {
+        let executor = deterministic::Runner::new(cfg);
+        executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
                 context.with_label("network"),
@@ -1818,8 +1820,8 @@ mod tests {
                     assert!(faults.is_empty());
                 }
             }
-        });
-        auditor.state()
+            context.auditor().state()
+        })
     }
 
     #[test_traced]
@@ -1852,8 +1854,8 @@ mod tests {
         let activity_timeout = 10;
         let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
-        let (executor, mut context, _) = Executor::timed(Duration::from_secs(30));
-        executor.start(async move {
+        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
                 context.with_label("network"),
@@ -2021,8 +2023,8 @@ mod tests {
         let activity_timeout = 10;
         let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
-        let (executor, mut context, _) = Executor::timed(Duration::from_secs(30));
-        executor.start(async move {
+        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
                 context.with_label("network"),
@@ -2182,8 +2184,8 @@ mod tests {
         let activity_timeout = 10;
         let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
-        let (executor, mut context, _) = Executor::timed(Duration::from_secs(30));
-        executor.start(async move {
+        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
                 context.with_label("network"),

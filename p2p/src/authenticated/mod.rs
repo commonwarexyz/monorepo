@@ -86,14 +86,14 @@
 //! ```rust
 //! use commonware_p2p::authenticated::{self, Network};
 //! use commonware_cryptography::{Ed25519, Signer, Verifier};
-//! use commonware_runtime::{tokio::{self, Executor}, Spawner, Runner, Metrics};
+//! use commonware_runtime::{tokio, Spawner, Runner, Metrics};
 //! use governor::Quota;
 //! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 //! use std::num::NonZeroU32;
 //!
 //! // Configure context
 //! let runtime_cfg = tokio::Config::default();
-//! let (executor, context) = Executor::init(runtime_cfg.clone());
+//! let runner = tokio::Runner::new(runtime_cfg.clone());
 //!
 //! // Generate identity
 //! //
@@ -132,7 +132,7 @@
 //! );
 //!
 //! // Start context
-//! executor.start(async move {
+//! runner.start(|context| async move {
 //!     // Initialize network
 //!     let (mut network, mut oracle) = Network::new(context.with_label("network"), p2p_cfg);
 //!
@@ -407,18 +407,33 @@ mod tests {
         const BASE_PORT: u16 = 3000;
 
         // Run first instance
-        let (executor, context, auditor) = deterministic::Executor::seeded(seed);
-        executor.start(async move {
-            run_network(context, MAX_MESSAGE_SIZE, BASE_PORT, NUM_PEERS, mode).await;
+        let executor = deterministic::Runner::seeded(seed);
+        let state = executor.start(|context| async move {
+            run_network(
+                context.clone(),
+                MAX_MESSAGE_SIZE,
+                BASE_PORT,
+                NUM_PEERS,
+                mode,
+            )
+            .await;
+            context.auditor().state()
         });
-        let state = auditor.state();
 
         // Compare result to second instance
-        let (executor, context, auditor) = deterministic::Executor::seeded(seed);
-        executor.start(async move {
-            run_network(context, MAX_MESSAGE_SIZE, BASE_PORT, NUM_PEERS, mode).await;
+        let executor = deterministic::Runner::seeded(seed);
+        let state2 = executor.start(|context| async move {
+            run_network(
+                context.clone(),
+                MAX_MESSAGE_SIZE,
+                BASE_PORT,
+                NUM_PEERS,
+                mode,
+            )
+            .await;
+            context.auditor().state()
         });
-        assert_eq!(state, auditor.state());
+        assert_eq!(state, state2);
     }
 
     #[test_traced]
@@ -445,8 +460,8 @@ mod tests {
     #[test_traced]
     fn test_tokio_connectivity() {
         let cfg = tokio::Config::default();
-        let (executor, context) = tokio::Executor::init(cfg.clone());
-        executor.start(async move {
+        let executor = tokio::Runner::new(cfg.clone());
+        executor.start(|context| async move {
             const MAX_MESSAGE_SIZE: usize = 1_024 * 1_024; // 1MB
             let base_port = 3000;
             let n = 10;
@@ -461,8 +476,8 @@ mod tests {
         let n: usize = 100;
 
         // Initialize context
-        let (executor, context, _) = deterministic::Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             // Create peers
             let mut peers = Vec::new();
             for i in 0..n {
@@ -563,8 +578,8 @@ mod tests {
         let n: usize = 2;
 
         // Initialize context
-        let (executor, mut context, _) = deterministic::Executor::seeded(0);
-        executor.start(async move {
+        let executor = deterministic::Runner::seeded(0);
+        executor.start(|mut context| async move {
             // Create peers
             let mut peers = Vec::new();
             for i in 0..n {
