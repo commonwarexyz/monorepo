@@ -157,7 +157,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
 
         // Create dealer
         let mut dealer_obj = if should_deal {
-            let previous = previous.map(|previous| previous.share);
+            let previous = previous.map(|previous| previous.share.clone());
             let (dealer, commitment, shares) =
                 Dealer::new(&mut self.context, previous, self.contributors.clone());
             Some((dealer, commitment, shares, HashMap::new()))
@@ -179,7 +179,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
             let mut sent = 0;
             for (idx, player) in self.contributors.iter().enumerate() {
                 // Send to self
-                let mut share = shares[idx];
+                let mut share = shares[idx].clone();
                 if idx == me_idx as usize {
                     player_obj
                         .share(me.clone(), commitment.clone(), share)
@@ -347,7 +347,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
             let mut reveals = Vec::new();
             for idx in 0..self.contributors.len() as u32 {
                 if !acks.contains_key(&idx) {
-                    reveals.push(shares[idx as usize]);
+                    reveals.push(shares[idx as usize].clone());
                 }
             }
             debug!(

@@ -32,7 +32,7 @@ use std::{
     hash::{Hash, Hasher},
     ptr,
 };
-use zeroize::Zeroize;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Domain separation tag used when hashing a message to a curve (G1 or G2).
 ///
@@ -40,7 +40,7 @@ use zeroize::Zeroize;
 pub type DST = &'static [u8];
 
 /// An element of a group.
-pub trait Element: Read + Write + FixedSize + Copy + Clone + Eq + PartialEq + Send + Sync {
+pub trait Element: Read + Write + FixedSize + Clone + Eq + PartialEq + Send + Sync {
     /// Returns the additive identity.
     fn zero() -> Self;
 
@@ -70,7 +70,9 @@ pub trait Point: Element {
 /// All arithmetic is performed modulo the prime
 /// `r = 0x73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001`,
 /// the order of the BLS12‑381 G1/G2 groups.
-#[derive(Clone, Copy, Eq, PartialEq)]
+//
+// `bl`
+#[derive(Clone, Eq, PartialEq)]
 #[repr(transparent)]
 pub struct Scalar(blst_fr);
 
@@ -234,12 +236,6 @@ impl Scalar {
     }
 }
 
-impl Zeroize for Scalar {
-    fn zeroize(&mut self) {
-        self.0.l.zeroize();
-    }
-}
-
 impl Element for Scalar {
     fn zero() -> Self {
         Self(blst_fr::default())
@@ -317,8 +313,22 @@ impl Display for Scalar {
     }
 }
 
+impl Zeroize for Scalar {
+    fn zeroize(&mut self) {
+        self.0.l.zeroize();
+    }
+}
+
+impl Drop for Scalar {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for Scalar {}
+
 /// A share of a threshold signing key.
-#[derive(Clone, PartialEq, Copy, Hash)]
+#[derive(Clone, PartialEq, Hash)]
 pub struct Share {
     /// The share's index in the polynomial.
     pub index: u32,
@@ -365,12 +375,6 @@ impl Display for Share {
 impl Debug for Share {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Share(index={}, private={})", self.index, self.private)
-    }
-}
-
-impl Zeroize for Share {
-    fn zeroize(&mut self) {
-        self.private.zeroize();
     }
 }
 
@@ -656,9 +660,9 @@ mod tests {
     fn basic_group() {
         // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/b0ef82ff79769d085a5a7d3f4fe690b1c8fe6dc9/crates/threshold-bls/src/curve/bls12381.rs#L200-L220
         let s = Scalar::rand(&mut thread_rng());
-        let mut e1 = s;
-        let e2 = s;
-        let mut s2 = s;
+        let mut e1 = s.clone();
+        let e2 = s.clone();
+        let mut s2 = s.clone();
         s2.add(&s);
         s2.mul(&s);
         e1.add(&e2);

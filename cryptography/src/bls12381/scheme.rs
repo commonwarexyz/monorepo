@@ -76,14 +76,14 @@ impl Signer for Bls12381 {
     }
 
     fn from(private_key: PrivateKey) -> Option<Self> {
-        let private = private_key.key;
+        let private = private_key.key.clone();
         let mut public = group::Public::one();
         public.mul(&private);
         Some(Self { private, public })
     }
 
     fn private_key(&self) -> PrivateKey {
-        PrivateKey::from(self.private)
+        PrivateKey::from(self.private.clone())
     }
 
     fn public_key(&self) -> PublicKey {
