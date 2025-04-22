@@ -13,6 +13,8 @@ use commonware_cryptography::{
     },
     Digest,
 };
+#[cfg(test)]
+use commonware_cryptography::{bls12381::Bls12381, Signer};
 use commonware_utils::union;
 
 /// View is a monotonically increasing counter that represents the current focus of consensus.
@@ -415,6 +417,22 @@ impl<D: Digest> Notarization<D> {
             1,
         )
         .is_ok()
+    }
+
+    /// Test function to create a notarization from a [Bls12381] signer and a proposal.
+    #[cfg(test)]
+    pub fn sign(namespace: &[u8], signer: &mut Bls12381, proposal: Proposal<D>) -> Self {
+        let notarize_namespace = notarize_namespace(namespace);
+        let notarize_message = proposal.encode();
+        let notarize_signature = signer.sign(Some(&notarize_namespace), &notarize_message);
+        let seed_namespace = seed_namespace(namespace);
+        let seed_message = view_message(proposal.view);
+        let seed_signature = signer.sign(Some(&seed_namespace), &seed_message);
+        Notarization::new(
+            proposal,
+            *notarize_signature.as_ref(),
+            *seed_signature.as_ref(),
+        )
     }
 }
 
@@ -1603,6 +1621,24 @@ mod tests {
 
         // Verify the seed
         assert!(decoded.verify(NAMESPACE, public_key));
+    }
+
+    #[test]
+    fn test_notarization_sign() {
+        // Create mock network key
+        let mut rng = StdRng::seed_from_u64(0);
+        let mut signer = Bls12381::new(&mut rng);
+
+        // Create notarization
+        let proposal = Proposal::new(10, 5, sample_digest(1));
+        let notarization = Notarization::sign(NAMESPACE, &mut signer, proposal);
+        let encoded = notarization.encode();
+        let decoded = Notarization::<Sha256>::decode(encoded).unwrap();
+        assert_eq!(notarization, decoded);
+
+        // Verify the notarization
+        let public_key = signer.public_key();
+        assert!(decoded.verify(NAMESPACE, public_key.as_ref()));
     }
 
     #[test]
