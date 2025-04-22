@@ -89,13 +89,18 @@ pub enum Error {
 /// Interface that any task scheduler must implement to start
 /// running tasks.
 pub trait Runner {
+    /// Context defines the environment available to tasks.
+    /// Example of possible services provided by the context include:
+    /// - `Clock` for time-based operations
+    /// - `Network` for network operations
+    /// - `Storage` for storage operations
+    type Context;
+
     /// Start running a root task.
-    ///
-    /// The root task does not create the initial context because it can be useful to have a reference
-    /// to context before starting task execution.
-    fn start<F>(self, f: F) -> F::Output
+    fn start<F, Fut>(self, f: F) -> Fut::Output
     where
-        F: Future;
+        F: FnOnce(Self::Context) -> Fut,
+        Fut: Future;
 }
 
 /// Interface that any task scheduler must implement to spawn tasks.
@@ -342,16 +347,19 @@ mod tests {
     use tracing::error;
     use utils::reschedule;
 
-    fn test_error_future(runner: impl Runner) {
+    fn test_error_future<R: Runner>(runner: R) {
         async fn error_future() -> Result<&'static str, &'static str> {
             Err("An error occurred")
         }
-        let result = runner.start(error_future());
+        let result = runner.start(|_| error_future());
         assert_eq!(result, Err("An error occurred"));
     }
 
-    fn test_clock_sleep(runner: impl Runner, context: impl Spawner + Clock) {
-        runner.start(async move {
+    fn test_clock_sleep<R: Runner>(runner: R)
+    where
+        R::Context: Spawner + Clock,
+    {
+        runner.start(|context| async move {
             // Capture initial time
             let start = context.current();
             let sleep_duration = Duration::from_millis(10);
@@ -363,8 +371,11 @@ mod tests {
         });
     }
 
-    fn test_clock_sleep_until(runner: impl Runner, context: impl Spawner + Clock) {
-        runner.start(async move {
+    fn test_clock_sleep_until<R: Runner>(runner: R)
+    where
+        R::Context: Spawner + Clock,
+    {
+        runner.start(|context| async move {
             // Trigger sleep
             let now = context.current();
             context.sleep_until(now + Duration::from_millis(100)).await;
@@ -375,8 +386,11 @@ mod tests {
         });
     }
 
-    fn test_root_finishes(runner: impl Runner, context: impl Spawner) {
-        runner.start(async move {
+    fn test_root_finishes<R: Runner>(runner: R)
+    where
+        R::Context: Spawner,
+    {
+        runner.start(|context| async move {
             context.spawn(|_| async move {
                 loop {
                     reschedule().await;
@@ -385,8 +399,11 @@ mod tests {
         });
     }
 
-    fn test_spawn_abort(runner: impl Runner, context: impl Spawner) {
-        runner.start(async move {
+    fn test_spawn_abort<R: Runner>(runner: R)
+    where
+        R::Context: Spawner,
+    {
+        runner.start(|context| async move {
             let handle = context.spawn(|_| async move {
                 loop {
                     reschedule().await;
@@ -397,17 +414,20 @@ mod tests {
         });
     }
 
-    fn test_panic_aborts_root(runner: impl Runner) {
+    fn test_panic_aborts_root<R: Runner>(runner: R) {
         let result = catch_unwind(AssertUnwindSafe(|| {
-            runner.start(async move {
+            runner.start(|_| async move {
                 panic!("blah");
             });
         }));
         result.unwrap_err();
     }
 
-    fn test_panic_aborts_spawn(runner: impl Runner, context: impl Spawner) {
-        let result = runner.start(async move {
+    fn test_panic_aborts_spawn<R: Runner>(runner: R)
+    where
+        R::Context: Spawner,
+    {
+        let result = runner.start(|context| async move {
             let result = context.spawn(|_| async move {
                 panic!("blah");
             });
@@ -419,8 +439,8 @@ mod tests {
         result.unwrap();
     }
 
-    fn test_select(runner: impl Runner) {
-        runner.start(async move {
+    fn test_select<R: Runner>(runner: R) {
+        runner.start(|_| async move {
             // Test first branch
             let output = Mutex::new(0);
             select! {
@@ -447,8 +467,11 @@ mod tests {
     }
 
     /// Ensure future fusing works as expected.
-    fn test_select_loop(runner: impl Runner, context: impl Clock) {
-        runner.start(async move {
+    fn test_select_loop<R: Runner>(runner: R)
+    where
+        R::Context: Clock,
+    {
+        runner.start(|context| async move {
             // Should hit timeout
             let (mut sender, mut receiver) = mpsc::unbounded();
             for _ in 0..2 {
@@ -490,8 +513,11 @@ mod tests {
         });
     }
 
-    fn test_storage_operations(runner: impl Runner, context: impl Spawner + Storage) {
-        runner.start(async move {
+    fn test_storage_operations<R: Runner>(runner: R)
+    where
+        R::Context: Storage,
+    {
+        runner.start(|context| async move {
             let partition = "test_partition";
             let name = b"test_blob";
 
@@ -572,8 +598,11 @@ mod tests {
         });
     }
 
-    fn test_blob_read_write(runner: impl Runner, context: impl Spawner + Storage) {
-        runner.start(async move {
+    fn test_blob_read_write<R: Runner>(runner: R)
+    where
+        R::Context: Storage,
+    {
+        runner.start(|context| async move {
             let partition = "test_partition";
             let name = b"test_blob_rw";
 
@@ -633,8 +662,11 @@ mod tests {
         });
     }
 
-    fn test_many_partition_read_write(runner: impl Runner, context: impl Spawner + Storage) {
-        runner.start(async move {
+    fn test_many_partition_read_write<R: Runner>(runner: R)
+    where
+        R::Context: Storage,
+    {
+        runner.start(|context| async move {
             let partitions = ["partition1", "partition2", "partition3"];
             let name = b"test_blob_rw";
 
@@ -680,8 +712,11 @@ mod tests {
         });
     }
 
-    fn test_blob_read_past_length(runner: impl Runner, context: impl Spawner + Storage) {
-        runner.start(async move {
+    fn test_blob_read_past_length<R: Runner>(runner: R)
+    where
+        R::Context: Storage,
+    {
+        runner.start(|context| async move {
             let partition = "test_partition";
             let name = b"test_blob_rw";
 
@@ -709,11 +744,11 @@ mod tests {
         })
     }
 
-    fn test_blob_clone_and_concurrent_read(
-        runner: impl Runner,
-        context: impl Spawner + Storage + Metrics,
-    ) {
-        runner.start(async move {
+    fn test_blob_clone_and_concurrent_read<R: Runner>(runner: R)
+    where
+        R::Context: Spawner + Storage + Metrics,
+    {
+        runner.start(|context| async move {
             let partition = "test_partition";
             let name = b"test_blob_rw";
 
@@ -772,12 +807,19 @@ mod tests {
 
             // Close the blob
             blob.close().await.expect("Failed to close blob");
+
+            // Ensure no blobs still open
+            let buffer = context.encode();
+            assert!(buffer.contains("open_blobs 0"));
         });
     }
 
-    fn test_shutdown(runner: impl Runner, context: impl Spawner + Clock + Metrics) {
+    fn test_shutdown<R: Runner>(runner: R)
+    where
+        R::Context: Spawner + Metrics + Clock,
+    {
         let kill = 9;
-        runner.start(async move {
+        runner.start(|context| async move {
             // Spawn a task that waits for signal
             let before = context
                 .with_label("before")
@@ -819,16 +861,22 @@ mod tests {
         });
     }
 
-    fn test_spawn_ref(runner: impl Runner, mut context: impl Spawner) {
-        runner.start(async move {
+    fn test_spawn_ref<R: Runner>(runner: R)
+    where
+        R::Context: Spawner,
+    {
+        runner.start(|mut context| async move {
             let handle = context.spawn_ref();
             let result = handle(async move { 42 }).await;
             assert_eq!(result, Ok(42));
         });
     }
 
-    fn test_spawn_ref_duplicate(runner: impl Runner, mut context: impl Spawner) {
-        runner.start(async move {
+    fn test_spawn_ref_duplicate<R: Runner>(runner: R)
+    where
+        R::Context: Spawner,
+    {
+        runner.start(|mut context| async move {
             let handle = context.spawn_ref();
             let result = handle(async move { 42 }).await;
             assert_eq!(result, Ok(42));
@@ -840,8 +888,11 @@ mod tests {
         });
     }
 
-    fn test_spawn_duplicate(runner: impl Runner, mut context: impl Spawner) {
-        runner.start(async move {
+    fn test_spawn_duplicate<R: Runner>(runner: R)
+    where
+        R::Context: Spawner,
+    {
+        runner.start(|mut context| async move {
             let handle = context.spawn_ref();
             let result = handle(async move { 42 }).await;
             assert_eq!(result, Ok(42));
@@ -851,16 +902,22 @@ mod tests {
         });
     }
 
-    fn test_spawn_blocking(runner: impl Runner, context: impl Spawner) {
-        runner.start(async move {
+    fn test_spawn_blocking<R: Runner>(runner: R)
+    where
+        R::Context: Spawner,
+    {
+        runner.start(|context| async move {
             let handle = context.spawn_blocking(|| 42);
             let result = handle.await;
             assert_eq!(result, Ok(42));
         });
     }
 
-    fn test_spawn_blocking_abort(runner: impl Runner, context: impl Spawner) {
-        runner.start(async move {
+    fn test_spawn_blocking_abort<R: Runner>(runner: R)
+    where
+        R::Context: Spawner,
+    {
+        runner.start(|context| async move {
             // Create task
             let (sender, mut receiver) = oneshot::channel();
             let handle = context.spawn_blocking(move || {
@@ -895,8 +952,11 @@ mod tests {
         });
     }
 
-    fn test_metrics(runner: impl Runner, context: impl Spawner + Metrics) {
-        runner.start(async move {
+    fn test_metrics<R: Runner>(runner: R)
+    where
+        R::Context: Metrics,
+    {
+        runner.start(|context| async move {
             // Assert label
             assert_eq!(context.label(), "");
 
@@ -926,21 +986,24 @@ mod tests {
         });
     }
 
-    fn test_metrics_label(runner: impl Runner, context: impl Spawner + Metrics) {
-        runner.start(async move {
+    fn test_metrics_label<R: Runner>(runner: R)
+    where
+        R::Context: Metrics,
+    {
+        runner.start(|context| async move {
             context.with_label(METRICS_PREFIX);
         })
     }
 
-    fn test_metrics_serve<L, Si, St>(
-        runner: impl Runner,
-        context: impl Clock + Spawner + Metrics + Network<L, Si, St>,
-    ) where
+    fn test_metrics_serve<R, L, Si, St>(runner: R)
+    where
+        R: Runner,
+        R::Context: Spawner + Metrics + Network<L, Si, St> + Clock,
         L: Listener<Si, St>,
         Si: Sink,
         St: Stream,
     {
-        runner.start(async move {
+        runner.start(|context| async move {
             // Register a test metric
             let counter: Counter<u64> = Counter::default();
             context.register("test_counter", "Test counter", counter.clone());
@@ -1038,132 +1101,127 @@ mod tests {
 
     #[test]
     fn test_deterministic_future() {
-        let (runner, _, _) = deterministic::Executor::default();
+        let runner = deterministic::Runner::default();
         test_error_future(runner);
     }
 
     #[test]
     fn test_deterministic_clock_sleep() {
-        let (executor, context, _) = deterministic::Executor::default();
-        assert_eq!(context.current(), SystemTime::UNIX_EPOCH);
-        test_clock_sleep(executor, context);
+        let executor = deterministic::Runner::default();
+        test_clock_sleep(executor);
     }
 
     #[test]
     fn test_deterministic_clock_sleep_until() {
-        let (executor, context, _) = deterministic::Executor::default();
-        test_clock_sleep_until(executor, context);
+        let executor = deterministic::Runner::default();
+        test_clock_sleep_until(executor);
     }
 
     #[test]
     fn test_deterministic_root_finishes() {
-        let (executor, context, _) = deterministic::Executor::default();
-        test_root_finishes(executor, context);
+        let executor = deterministic::Runner::default();
+        test_root_finishes(executor);
     }
 
     #[test]
     fn test_deterministic_spawn_abort() {
-        let (executor, context, _) = deterministic::Executor::default();
-        test_spawn_abort(executor, context);
+        let executor = deterministic::Runner::default();
+        test_spawn_abort(executor);
     }
 
     #[test]
     fn test_deterministic_panic_aborts_root() {
-        let (runner, _, _) = deterministic::Executor::default();
+        let runner = deterministic::Runner::default();
         test_panic_aborts_root(runner);
     }
 
     #[test]
     #[should_panic(expected = "blah")]
     fn test_deterministic_panic_aborts_spawn() {
-        let (executor, context, _) = deterministic::Executor::default();
-        test_panic_aborts_spawn(executor, context);
+        let executor = deterministic::Runner::default();
+        test_panic_aborts_spawn(executor);
     }
 
     #[test]
     fn test_deterministic_select() {
-        let (executor, _, _) = deterministic::Executor::default();
+        let executor = deterministic::Runner::default();
         test_select(executor);
     }
 
     #[test]
     fn test_deterministic_select_loop() {
-        let (executor, context, _) = deterministic::Executor::default();
-        test_select_loop(executor, context);
+        let executor = deterministic::Runner::default();
+        test_select_loop(executor);
     }
 
     #[test]
     fn test_deterministic_storage_operations() {
-        let (executor, context, _) = deterministic::Executor::default();
-        test_storage_operations(executor, context);
+        let executor = deterministic::Runner::default();
+        test_storage_operations(executor);
     }
 
     #[test]
     fn test_deterministic_blob_read_write() {
-        let (executor, context, _) = deterministic::Executor::default();
-        test_blob_read_write(executor, context);
+        let executor = deterministic::Runner::default();
+        test_blob_read_write(executor);
     }
 
     #[test]
     fn test_deterministic_many_partition_read_write() {
-        let (executor, context, _) = deterministic::Executor::default();
-        test_many_partition_read_write(executor, context);
+        let executor = deterministic::Runner::default();
+        test_many_partition_read_write(executor);
     }
 
     #[test]
     fn test_deterministic_blob_read_past_length() {
-        let (executor, context, _) = deterministic::Executor::default();
-        test_blob_read_past_length(executor, context);
+        let executor = deterministic::Runner::default();
+        test_blob_read_past_length(executor);
     }
 
     #[test]
     fn test_deterministic_blob_clone_and_concurrent_read() {
         // Run test
-        let (executor, context, _) = deterministic::Executor::default();
-        test_blob_clone_and_concurrent_read(executor, context.clone());
-
-        // Ensure no blobs still open
-        let buffer = context.encode();
-        assert!(buffer.contains("open_blobs 0"));
+        let executor = deterministic::Runner::default();
+        test_blob_clone_and_concurrent_read(executor);
     }
 
     #[test]
     fn test_deterministic_shutdown() {
-        let (executor, context, _) = deterministic::Executor::default();
-        test_shutdown(executor, context);
+        let executor = deterministic::Runner::default();
+        test_shutdown(executor);
     }
 
     #[test]
     fn test_deterministic_spawn_ref() {
-        let (executor, context, _) = deterministic::Executor::default();
-        test_spawn_ref(executor, context);
+        let executor = deterministic::Runner::default();
+        test_spawn_ref(executor);
     }
 
     #[test]
     #[should_panic]
     fn test_deterministic_spawn_ref_duplicate() {
-        let (executor, context, _) = deterministic::Executor::default();
-        test_spawn_ref_duplicate(executor, context);
+        let executor = deterministic::Runner::default();
+        test_spawn_ref_duplicate(executor);
     }
 
     #[test]
     #[should_panic]
     fn test_deterministic_spawn_duplicate() {
-        let (executor, context, _) = deterministic::Executor::default();
-        test_spawn_duplicate(executor, context);
+        let executor = deterministic::Runner::default();
+        test_spawn_duplicate(executor);
     }
 
     #[test]
     fn test_deterministic_spawn_blocking() {
-        let (executor, context, _) = deterministic::Executor::default();
-        test_spawn_blocking(executor, context);
+        let executor = deterministic::Runner::default();
+        test_spawn_blocking(executor);
     }
 
     #[test]
     #[should_panic(expected = "blocking task panicked")]
     fn test_deterministic_spawn_blocking_panic() {
-        let (executor, context, _) = deterministic::Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             let handle = context.spawn_blocking(|| {
                 panic!("blocking task panicked");
             });
@@ -1173,154 +1231,150 @@ mod tests {
 
     #[test]
     fn test_deterministic_spawn_blocking_abort() {
-        let (executor, context, _) = deterministic::Executor::default();
-        test_spawn_blocking_abort(executor, context);
+        let executor = deterministic::Runner::default();
+        test_spawn_blocking_abort(executor);
     }
 
     #[test]
     fn test_deterministic_metrics() {
-        let (executor, context, _) = deterministic::Executor::default();
-        test_metrics(executor, context);
+        let executor = deterministic::Runner::default();
+        test_metrics(executor);
     }
 
     #[test]
     #[should_panic]
     fn test_deterministic_metrics_label() {
-        let (executor, context, _) = deterministic::Executor::default();
-        test_metrics_label(executor, context);
+        let executor = deterministic::Runner::default();
+        test_metrics_label(executor);
     }
 
     #[test]
     fn test_deterministic_metrics_serve() {
-        let (executor, context, _) = deterministic::Executor::default();
-        test_metrics_serve(executor, context);
+        let executor = deterministic::Runner::default();
+        test_metrics_serve(executor);
     }
 
     #[test]
     fn test_tokio_error_future() {
-        let (runner, _) = tokio::Executor::default();
+        let runner = tokio::Runner::default();
         test_error_future(runner);
     }
 
     #[test]
     fn test_tokio_clock_sleep() {
-        let (executor, context) = tokio::Executor::default();
-        test_clock_sleep(executor, context);
+        let executor = tokio::Runner::default();
+        test_clock_sleep(executor);
     }
 
     #[test]
     fn test_tokio_clock_sleep_until() {
-        let (executor, context) = tokio::Executor::default();
-        test_clock_sleep_until(executor, context);
+        let executor = tokio::Runner::default();
+        test_clock_sleep_until(executor);
     }
 
     #[test]
     fn test_tokio_root_finishes() {
-        let (executor, context) = tokio::Executor::default();
-        test_root_finishes(executor, context);
+        let executor = tokio::Runner::default();
+        test_root_finishes(executor);
     }
 
     #[test]
     fn test_tokio_spawn_abort() {
-        let (executor, context) = tokio::Executor::default();
-        test_spawn_abort(executor, context);
+        let executor = tokio::Runner::default();
+        test_spawn_abort(executor);
     }
 
     #[test]
     fn test_tokio_panic_aborts_root() {
-        let (runner, _) = tokio::Executor::default();
-        test_panic_aborts_root(runner);
+        let executor = tokio::Runner::default();
+        test_panic_aborts_root(executor);
     }
 
     #[test]
     fn test_tokio_panic_aborts_spawn() {
-        let (executor, context) = tokio::Executor::default();
-        test_panic_aborts_spawn(executor, context);
+        let executor = tokio::Runner::default();
+        test_panic_aborts_spawn(executor);
     }
 
     #[test]
     fn test_tokio_select() {
-        let (executor, _) = tokio::Executor::default();
+        let executor = tokio::Runner::default();
         test_select(executor);
     }
 
     #[test]
     fn test_tokio_select_loop() {
-        let (executor, context) = tokio::Executor::default();
-        test_select_loop(executor, context);
+        let executor = tokio::Runner::default();
+        test_select_loop(executor);
     }
 
     #[test]
     fn test_tokio_storage_operations() {
-        let (executor, context) = tokio::Executor::default();
-        test_storage_operations(executor, context);
+        let executor = tokio::Runner::default();
+        test_storage_operations(executor);
     }
 
     #[test]
     fn test_tokio_blob_read_write() {
-        let (executor, context) = tokio::Executor::default();
-        test_blob_read_write(executor, context);
+        let executor = tokio::Runner::default();
+        test_blob_read_write(executor);
     }
 
     #[test]
     fn test_tokio_many_partition_read_write() {
-        let (executor, context) = tokio::Executor::default();
-        test_many_partition_read_write(executor, context);
+        let executor = tokio::Runner::default();
+        test_many_partition_read_write(executor);
     }
 
     #[test]
     fn test_tokio_blob_read_past_length() {
-        let (executor, context) = tokio::Executor::default();
-        test_blob_read_past_length(executor, context);
+        let executor = tokio::Runner::default();
+        test_blob_read_past_length(executor);
     }
 
     #[test]
     fn test_tokio_blob_clone_and_concurrent_read() {
         // Run test
-        let (executor, context) = tokio::Executor::default();
-        test_blob_clone_and_concurrent_read(executor, context.clone());
-
-        // Ensure no blobs still open
-        let buffer = context.encode();
-        assert!(buffer.contains("open_blobs 0"));
+        let executor = tokio::Runner::default();
+        test_blob_clone_and_concurrent_read(executor);
     }
 
     #[test]
     fn test_tokio_shutdown() {
-        let (executor, context) = tokio::Executor::default();
-        test_shutdown(executor, context);
+        let executor = tokio::Runner::default();
+        test_shutdown(executor);
     }
 
     #[test]
     fn test_tokio_spawn_ref() {
-        let (executor, context) = tokio::Executor::default();
-        test_spawn_ref(executor, context);
+        let executor = tokio::Runner::default();
+        test_spawn_ref(executor);
     }
 
     #[test]
     #[should_panic]
     fn test_tokio_spawn_ref_duplicate() {
-        let (executor, context) = tokio::Executor::default();
-        test_spawn_ref_duplicate(executor, context);
+        let executor = tokio::Runner::default();
+        test_spawn_ref_duplicate(executor);
     }
 
     #[test]
     #[should_panic]
     fn test_tokio_spawn_duplicate() {
-        let (executor, context) = tokio::Executor::default();
-        test_spawn_duplicate(executor, context);
+        let executor = tokio::Runner::default();
+        test_spawn_duplicate(executor);
     }
 
     #[test]
     fn test_tokio_spawn_blocking() {
-        let (executor, context) = tokio::Executor::default();
-        test_spawn_blocking(executor, context);
+        let executor = tokio::Runner::default();
+        test_spawn_blocking(executor);
     }
 
     #[test]
     fn test_tokio_spawn_blocking_panic() {
-        let (executor, context) = tokio::Executor::default();
-        executor.start(async move {
+        let executor = tokio::Runner::default();
+        executor.start(|context| async move {
             let handle = context.spawn_blocking(|| {
                 panic!("blocking task panicked");
             });
@@ -1331,26 +1385,26 @@ mod tests {
 
     #[test]
     fn test_tokio_spawn_blocking_abort() {
-        let (executor, context) = tokio::Executor::default();
-        test_spawn_blocking_abort(executor, context);
+        let executor = tokio::Runner::default();
+        test_spawn_blocking_abort(executor);
     }
 
     #[test]
     fn test_tokio_metrics() {
-        let (executor, context) = tokio::Executor::default();
-        test_metrics(executor, context);
+        let executor = tokio::Runner::default();
+        test_metrics(executor);
     }
 
     #[test]
     #[should_panic]
     fn test_tokio_metrics_label() {
-        let (executor, context) = tokio::Executor::default();
-        test_metrics_label(executor, context);
+        let executor = tokio::Runner::default();
+        test_metrics_label(executor);
     }
 
     #[test]
     fn test_tokio_metrics_serve() {
-        let (executor, context) = tokio::Executor::default();
-        test_metrics_serve(executor, context);
+        let executor = tokio::Runner::default();
+        test_metrics_serve(executor);
     }
 }

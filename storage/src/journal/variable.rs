@@ -79,11 +79,11 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_runtime::{Spawner, Runner, deterministic::Executor};
+//! use commonware_runtime::{Spawner, Runner, deterministic};
 //! use commonware_storage::journal::variable::{Journal, Config};
 //!
-//! let (executor, context, _) = Executor::default();
-//! executor.start(async move {
+//! let executor = deterministic::Runner::default();
+//! executor.start(|context| async move {
 //!     // Create a journal
 //!     let mut journal = Journal::init(context, Config{
 //!         partition: "partition".to_string()
@@ -579,17 +579,17 @@ mod tests {
     use super::*;
     use bytes::{BufMut, Bytes};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic::Executor, Blob, Error as RError, Runner, Storage};
+    use commonware_runtime::{deterministic, Blob, Error as RError, Runner, Storage};
     use futures::{pin_mut, StreamExt};
     use prometheus_client::registry::Metric;
 
     #[test_traced]
     fn test_journal_append_and_read() {
         // Initialize the deterministic context
-        let (executor, context, _) = Executor::default();
+        let executor = deterministic::Runner::default();
 
         // Start the test within the executor
-        executor.start(async move {
+        executor.start(|context| async move {
             // Initialize the journal
             let cfg = Config {
                 partition: "test_partition".into(),
@@ -652,10 +652,10 @@ mod tests {
     #[test_traced]
     fn test_journal_multiple_appends_and_reads() {
         // Initialize the deterministic context
-        let (executor, context, _) = Executor::default();
+        let executor = deterministic::Runner::default();
 
         // Start the test within the executor
-        executor.start(async move {
+        executor.start(|context| async move {
             // Create a journal configuration
             let cfg = Config {
                 partition: "test_partition".into(),
@@ -745,10 +745,10 @@ mod tests {
     #[test_traced]
     fn test_journal_prune_blobs() {
         // Initialize the deterministic context
-        let (executor, context, _) = Executor::default();
+        let executor = deterministic::Runner::default();
 
         // Start the test within the executor
-        executor.start(async move {
+        executor.start(|context| async move {
             // Create a journal configuration
             let cfg = Config {
                 partition: "test_partition".into(),
@@ -844,10 +844,10 @@ mod tests {
     #[test_traced]
     fn test_journal_with_invalid_blob_name() {
         // Initialize the deterministic context
-        let (executor, context, _) = Executor::default();
+        let executor = deterministic::Runner::default();
 
         // Start the test within the executor
-        executor.start(async move {
+        executor.start(|context| async move {
             // Create a journal configuration
             let cfg = Config {
                 partition: "test_partition".into(),
@@ -871,10 +871,10 @@ mod tests {
 
     fn journal_read_size_missing(exact: Option<u32>) {
         // Initialize the deterministic context
-        let (executor, context, _) = Executor::default();
+        let executor = deterministic::Runner::default();
 
         // Start the test within the executor
-        executor.start(async move {
+        executor.start(|context| async move {
             // Create a journal configuration
             let cfg = Config {
                 partition: "test_partition".into(),
@@ -929,10 +929,10 @@ mod tests {
 
     fn journal_read_item_missing(exact: Option<u32>) {
         // Initialize the deterministic context
-        let (executor, context, _) = Executor::default();
+        let executor = deterministic::Runner::default();
 
         // Start the test within the executor
-        executor.start(async move {
+        executor.start(|context| async move {
             // Create a journal configuration
             let cfg = Config {
                 partition: "test_partition".into(),
@@ -993,10 +993,10 @@ mod tests {
     #[test_traced]
     fn test_journal_read_checksum_missing() {
         // Initialize the deterministic context
-        let (executor, context, _) = Executor::default();
+        let executor = deterministic::Runner::default();
 
         // Start the test within the executor
-        executor.start(async move {
+        executor.start(|context| async move {
             // Create a journal configuration
             let cfg = Config {
                 partition: "test_partition".into(),
@@ -1056,10 +1056,10 @@ mod tests {
     #[test_traced]
     fn test_journal_read_checksum_mismatch() {
         // Initialize the deterministic context
-        let (executor, context, _) = Executor::default();
+        let executor = deterministic::Runner::default();
 
         // Start the test within the executor
-        executor.start(async move {
+        executor.start(|context| async move {
             // Create a journal configuration
             let cfg = Config {
                 partition: "test_partition".into(),
@@ -1129,10 +1129,10 @@ mod tests {
     #[test_traced]
     fn test_journal_handling_truncated_data() {
         // Initialize the deterministic context
-        let (executor, context, _) = Executor::default();
+        let executor = deterministic::Runner::default();
 
         // Start the test within the executor
-        executor.start(async move {
+        executor.start(|context| async move {
             // Create a journal configuration
             let cfg = Config {
                 partition: "test_partition".into(),
@@ -1285,8 +1285,8 @@ mod tests {
     #[test_traced]
     fn test_journal_large_offset() {
         // Initialize the deterministic context
-        let (executor, _, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
             // Create journal
             let cfg = Config {
                 partition: "partition".to_string(),
@@ -1309,8 +1309,8 @@ mod tests {
     #[test_traced]
     fn test_journal_offset_overflow() {
         // Initialize the deterministic context
-        let (executor, _, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
             // Create journal
             let cfg = Config {
                 partition: "partition".to_string(),

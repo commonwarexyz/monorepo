@@ -525,7 +525,7 @@ mod tests {
     use super::*;
     use crate::authenticated::{actors::peer, config::Bootstrapper};
     use commonware_cryptography::{Ed25519, Signer};
-    use commonware_runtime::{deterministic::Executor, Clock, Runner};
+    use commonware_runtime::{deterministic, Clock, Runner};
     use governor::Quota;
     use std::net::{IpAddr, Ipv4Addr};
     use std::num::NonZeroU32;
@@ -553,9 +553,9 @@ mod tests {
     #[test]
     fn test_reserve_peer() {
         // Create actor
-        let (executor, context, _) = Executor::default();
+        let executor = deterministic::Runner::default();
         let cfg = test_config(Ed25519::from_seed(0), Vec::new());
-        executor.start(async move {
+        executor.start(|context| async move {
             // Run actor in background
             let actor_context = context.with_label("actor");
             let (actor, mut mailbox, mut oracle) = Actor::new(actor_context.clone(), cfg);
@@ -596,10 +596,10 @@ mod tests {
     #[test]
     fn test_bit_vec() {
         // Create actor
-        let (executor, context, _) = Executor::default();
+        let executor = deterministic::Runner::default();
         let peer0 = Ed25519::from_seed(0);
         let cfg = test_config(peer0.clone(), Vec::new());
-        executor.start(async move {
+        executor.start(|context| async move {
             // Run actor in background
             let actor_context = context.with_label("actor");
             let (actor, mut mailbox, mut oracle) = Actor::new(actor_context.clone(), cfg);

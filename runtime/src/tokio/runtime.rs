@@ -184,9 +184,32 @@ pub struct Executor {
     signal: Signal,
 }
 
-impl Executor {
+/// Implementation of [`crate::Runner`] for the `tokio` runtime.
+pub struct Runner {
+    cfg: Config,
+}
+
+impl Default for Runner {
+    fn default() -> Self {
+        Self::new(Config::default())
+    }
+}
+
+impl Runner {
     /// Initialize a new `tokio` runtime with the given number of threads.
-    pub fn init(cfg: Config) -> (Runner, Context) {
+    pub fn new(cfg: Config) -> Self {
+        Self { cfg }
+    }
+}
+
+impl crate::Runner for Runner {
+    type Context = Context;
+
+    fn start<F, Fut>(self, f: F) -> Fut::Output
+    where
+        F: FnOnce(Self::Context) -> Fut,
+        Fut: Future,
+    {
         // Create a new registry
         let mut registry = Registry::default();
         let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
@@ -194,8 +217,8 @@ impl Executor {
         // Initialize runtime
         let metrics = Arc::new(Metrics::init(runtime_registry));
         let runtime = Builder::new_multi_thread()
-            .worker_threads(cfg.worker_threads)
-            .max_blocking_threads(cfg.max_blocking_threads)
+            .worker_threads(self.cfg.worker_threads)
+            .max_blocking_threads(self.cfg.max_blocking_threads)
             .enable_all()
             .build()
             .expect("failed to create Tokio runtime");
@@ -215,52 +238,29 @@ impl Executor {
         #[cfg(not(all(feature = "iouring", target_os = "linux")))]
         let storage = MeteredStorage::new(
             TokioStorage::new(TokioStorageConfig::new(
-                cfg.storage_directory.clone(),
-                cfg.maximum_buffer_size,
+                self.cfg.storage_directory.clone(),
+                self.cfg.maximum_buffer_size,
             )),
             runtime_registry,
         );
 
-        let executor = Arc::new(Self {
-            cfg,
+        let executor = Arc::new(Executor {
+            cfg: self.cfg,
             registry: Mutex::new(registry),
             metrics,
             runtime,
             signaler: Mutex::new(signaler),
             signal,
         });
-        (
-            Runner {
-                executor: executor.clone(),
-            },
-            Context {
-                storage,
-                label: String::new(),
-                spawned: false,
-                executor,
-            },
-        )
-    }
 
-    /// Initialize a new `tokio` runtime with default configuration.
-    // We'd love to implement the trait but we can't because of the return type.
-    #[allow(clippy::should_implement_trait)]
-    pub fn default() -> (Runner, Context) {
-        Self::init(Config::default())
-    }
-}
+        let context = Context {
+            storage,
+            label: String::new(),
+            spawned: false,
+            executor: executor.clone(),
+        };
 
-/// Implementation of [`crate::Runner`] for the `tokio` runtime.
-pub struct Runner {
-    executor: Arc<Executor>,
-}
-
-impl crate::Runner for Runner {
-    fn start<F>(self, f: F) -> F::Output
-    where
-        F: Future,
-    {
-        self.executor.runtime.block_on(f)
+        executor.runtime.block_on(f(context))
     }
 }
 

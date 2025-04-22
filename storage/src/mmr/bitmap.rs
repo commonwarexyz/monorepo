@@ -319,7 +319,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
 mod tests {
     use super::*;
     use commonware_cryptography::{hash, Sha256};
-    use commonware_runtime::{deterministic::Executor, Runner};
+    use commonware_runtime::{deterministic, Runner as _};
 
     fn test_chunk<const N: usize>(s: &[u8]) -> [u8; N] {
         assert_eq!(N % 32, 0);
@@ -333,8 +333,8 @@ mod tests {
 
     #[test]
     fn test_bitmap_empty_then_one() {
-        let (executor, _, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
             let mut bitmap = Bitmap::<Sha256, 32>::new();
             assert_eq!(bitmap.bit_count(), 0);
             assert_eq!(bitmap.pruned_chunks(), 0);
@@ -549,8 +549,8 @@ mod tests {
     }
 
     fn test_bitmap_mmr_proof_verification_n<const N: usize>() {
-        let (executor, _, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
             // Build a bitmap with 10 chunks worth of bits.
             let mut hasher = Sha256::new();
             let mut bitmap = Bitmap::<_, N>::new();
