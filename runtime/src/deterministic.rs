@@ -390,6 +390,72 @@ pub struct Executor {
     recovered: Mutex<bool>,
 }
 
+/// Implementation of [`crate::Runner`] for the `deterministic` runtime.
+pub struct Runner {
+    cfg: Config,
+    auditor: Arc<Auditor>,
+}
+
+impl Runner {
+    /// Initialize a new `deterministic` runtime with the given seed and cycle duration.
+    pub fn new(cfg: Config) -> Self {
+        // Ensure config is valid
+        if cfg.timeout.is_some() && cfg.cycle == Duration::default() {
+            panic!("cycle duration must be non-zero when timeout is set");
+        }
+
+        Runner {
+            cfg,
+            auditor: Arc::new(Auditor::default()),
+        }
+    }
+
+    /// Initialize a new `deterministic` runtime with the default configuration
+    /// and the provided seed.
+    pub fn seeded(seed: u64) -> Self {
+        let cfg = Config {
+            seed,
+            ..Config::default()
+        };
+        Self::new(cfg)
+    }
+
+    /// Initialize a new `deterministic` runtime with the default configuration
+    /// but exit after the given timeout.
+    pub fn timed(timeout: Duration) -> Self {
+        let cfg = Config {
+            timeout: Some(timeout),
+            ..Config::default()
+        };
+        Self::new(cfg)
+    }
+
+    pub fn auditor(&self) -> Arc<Auditor> {
+        self.auditor.clone()
+    }
+}
+
+impl Default for Runner {
+    fn default() -> Self {
+        Self::new(Config::default())
+    }
+}
+
+impl crate::Runner for Runner {
+    type Context = Context;
+
+    fn start<F, Fut>(self, f: F) -> Fut::Output
+    where
+        F: FnOnce(Self::Context) -> Fut,
+        Fut: Future,
+    {
+        RunnerWithContext {
+            context: Context::new(self.cfg, self.auditor.clone()),
+        }
+        .start(f)
+    }
+}
+
 /// The operation that a task is performing.
 enum Operation {
     Root,
@@ -678,72 +744,6 @@ impl crate::Runner for RunnerWithContext {
             }
             iter += 1;
         }
-    }
-}
-
-/// Implementation of [`crate::Runner`] for the `deterministic` runtime.
-pub struct Runner {
-    cfg: Config,
-    auditor: Arc<Auditor>,
-}
-
-impl Runner {
-    /// Initialize a new `deterministic` runtime with the given seed and cycle duration.
-    pub fn new(cfg: Config) -> Self {
-        // Ensure config is valid
-        if cfg.timeout.is_some() && cfg.cycle == Duration::default() {
-            panic!("cycle duration must be non-zero when timeout is set");
-        }
-
-        Runner {
-            cfg,
-            auditor: Arc::new(Auditor::default()),
-        }
-    }
-
-    /// Initialize a new `deterministic` runtime with the default configuration
-    /// and the provided seed.
-    pub fn seeded(seed: u64) -> Self {
-        let cfg = Config {
-            seed,
-            ..Config::default()
-        };
-        Self::new(cfg)
-    }
-
-    /// Initialize a new `deterministic` runtime with the default configuration
-    /// but exit after the given timeout.
-    pub fn timed(timeout: Duration) -> Self {
-        let cfg = Config {
-            timeout: Some(timeout),
-            ..Config::default()
-        };
-        Self::new(cfg)
-    }
-
-    pub fn auditor(&self) -> Arc<Auditor> {
-        self.auditor.clone()
-    }
-}
-
-impl Default for Runner {
-    fn default() -> Self {
-        Self::new(Config::default())
-    }
-}
-
-impl crate::Runner for Runner {
-    type Context = Context;
-
-    fn start<F, Fut>(self, f: F) -> Fut::Output
-    where
-        F: FnOnce(Self::Context) -> Fut,
-        Fut: Future,
-    {
-        RunnerWithContext {
-            context: Context::new(self.cfg, self.auditor.clone()),
-        }
-        .start(f)
     }
 }
 
