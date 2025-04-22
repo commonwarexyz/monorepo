@@ -5,12 +5,48 @@
 
 use crate::error::Error;
 use bytes::{Buf, BufMut};
+use std::ops::{BitOrAssign, Shl, ShrAssign};
 
-fn must_u64<T: TryInto<u64>>(value: T) -> u64 {
-    value
-        .try_into()
-        .unwrap_or_else(|_| panic!("Failed to convert to u64"))
+const BITS_PER_BYTE: usize = 8;
+const DATA_BITS_PER_BYTE: usize = 7;
+const DATA_BITS_MASK: u8 = 0x7F;
+const CONTINUATION_BIT_MASK: u8 = 0x80;
+
+pub trait UnsignedVarint:
+    Copy
+    + TryFrom<u64>
+    + From<u8>
+    + Sized
+    + ShrAssign<usize>
+    + Shl<usize, Output = Self>
+    + BitOrAssign<Self>
+    + PartialOrd
+{
+    fn leading_zeros(self) -> u32;
+    fn as_u8(self) -> u8;
 }
+
+macro_rules! impl_unsigned_varint {
+    ($type:ty) => {
+        impl UnsignedVarint for $type {
+            #[inline]
+            fn leading_zeros(self) -> u32 {
+                self.leading_zeros()
+            }
+
+            #[inline]
+            fn as_u8(self) -> u8 {
+                self as u8
+            }
+        }
+    };
+}
+impl_unsigned_varint!(usize);
+impl_unsigned_varint!(u8);
+impl_unsigned_varint!(u16);
+impl_unsigned_varint!(u32);
+impl_unsigned_varint!(u64);
+impl_unsigned_varint!(u128);
 
 fn must_i64<T: TryInto<i64>>(value: T) -> i64 {
     value
@@ -19,26 +55,26 @@ fn must_i64<T: TryInto<i64>>(value: T) -> i64 {
 }
 
 /// Encodes a unsigned 64-bit integer as a varint
-pub fn write<T: TryInto<u64>>(value: T, buf: &mut impl BufMut) {
-    let value = must_u64(value);
-
-    if value < 0x80 {
+pub fn write<T: UnsignedVarint>(value: T, buf: &mut impl BufMut) {
+    let bm = T::from(CONTINUATION_BIT_MASK);
+    if value < bm {
         // Fast path for small values (common case for lengths)
-        buf.put_u8(value as u8);
+        buf.put_u8(value.as_u8());
         return;
     }
 
     let mut val = value;
-    while val >= 0x80 {
-        buf.put_u8((val as u8) | 0x80);
+    while val >= bm {
+        buf.put_u8((val.as_u8()) | 0x80);
         val >>= 7;
     }
-    buf.put_u8(val as u8);
+    buf.put_u8(val.as_u8());
 }
 
 /// Decodes a unsigned 64-bit integer from a varint
-pub fn read<T: TryFrom<u64>>(buf: &mut impl Buf) -> Result<T, Error> {
-    let mut result = 0u64;
+pub fn read<T: UnsignedVarint>(buf: &mut impl Buf) -> Result<T, Error> {
+    let max_bits = std::mem::size_of::<T>() * 8;
+    let mut result: T = T::from(0);
     let mut shift = 0;
 
     // Loop over all the bytes.
@@ -49,39 +85,35 @@ pub fn read<T: TryFrom<u64>>(buf: &mut impl Buf) -> Result<T, Error> {
         }
         let byte = buf.get_u8();
 
-        // If we have read more than 9 bytes, the next byte must be 0 or 1.
-        if shift >= (9 * 7) && byte > 1 {
-            return Err(Error::InvalidVarint);
+        // If this must be the last byte, check for overflow.
+        // This overflow check also checks for an invalid continuation bit.
+        let remaining_bits = max_bits.checked_sub(shift).unwrap();
+        if remaining_bits <= DATA_BITS_PER_BYTE {
+            let relevant_bits = BITS_PER_BYTE - byte.leading_zeros() as usize;
+            if relevant_bits > remaining_bits {
+                return Err(Error::InvalidVarint);
+            }
         }
 
         // Write the 7 bits of data to the result.
-        result |= ((byte & 0x7F) as u64) << shift;
+        result |= T::from(byte & DATA_BITS_MASK) << shift;
 
         // If the continuation bit is not set, return.
-        if byte & 0x80 == 0 {
-            return result.try_into().map_err(|_| Error::InvalidVarint);
+        if byte & CONTINUATION_BIT_MASK == 0 {
+            return Ok(result);
         }
 
         // Each byte has 7 bits of data.
-        shift += 7;
+        shift += DATA_BITS_PER_BYTE;
     }
 }
 
 /// Calculates the number of bytes needed to encode a value as a varint
-pub fn size<T: TryInto<u64>>(value: T) -> usize {
-    let value = must_u64(value);
-    match value {
-        0..=0x7F => 1,
-        0x80..=0x3FFF => 2,
-        0x4000..=0x1FFFFF => 3,
-        0x200000..=0xFFFFFFF => 4,
-        0x10000000..=0x7FFFFFFFF => 5,
-        0x800000000..=0x3FFFFFFFFFF => 6,
-        0x40000000000..=0x1FFFFFFFFFFFF => 7,
-        0x2000000000000..=0xFFFFFFFFFFFFFF => 8,
-        0x100000000000000..=0x7FFFFFFFFFFFFFFF => 9,
-        _ => 10,
-    }
+pub fn size<T: UnsignedVarint>(value: T) -> usize {
+    let total_bits = std::mem::size_of::<T>() * 8;
+    let leading_zeros = value.leading_zeros() as usize;
+    let data_bits = total_bits - leading_zeros;
+    usize::max(1, data_bits / DATA_BITS_PER_BYTE)
 }
 
 /// Converts a signed integer to an unsigned integer using ZigZag encoding

@@ -193,4 +193,4 @@ pub mod varint;
 pub use codec::*;
 pub use error::Error;
 pub use extensions::*;
-pub use types::{net, primitives};
+pub use types::{net, primitives, wrappers};
