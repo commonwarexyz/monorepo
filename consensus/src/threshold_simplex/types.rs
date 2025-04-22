@@ -1578,14 +1578,21 @@ mod tests {
 
         // Create notarization
         let notarization = Notarization::new(proposal, proposal_signature, seed_signature);
-
         let encoded = notarization.encode();
         let decoded = Notarization::<Sha256>::decode(encoded).unwrap();
-
         assert_eq!(notarization, decoded);
 
         // Verify the notarization
         let public_key = poly::public(&commitment);
+        assert!(decoded.verify(NAMESPACE, public_key));
+
+        // Create seed
+        let seed = Seed::new(notarization.view(), notarization.seed_signature);
+        let encoded = seed.encode();
+        let decoded = Seed::decode(encoded).unwrap();
+        assert_eq!(seed, decoded);
+
+        // Verify the seed
         assert!(decoded.verify(NAMESPACE, public_key));
     }
 
