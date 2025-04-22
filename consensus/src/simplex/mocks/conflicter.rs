@@ -76,25 +76,24 @@ impl<
                         .is_participant(view, &self.crypto.public_key())
                         .unwrap();
 
-                    // Notarize received digest
-                    let parent = notarize.proposal.parent;
-                    let msg = Notarize::sign(
-                        &self.namespace,
-                        &mut self.crypto,
-                        public_key_index,
-                        notarize.proposal,
-                    );
-                    let msg = Voter::Notarize(msg).encode().into();
-                    sender.send(Recipients::All, msg, true).await.unwrap();
-
                     // Notarize random digest
                     let payload = H::random(&mut self.context);
-                    let proposal = Proposal::new(view, parent, payload);
+                    let proposal = Proposal::new(view, notarize.proposal.parent, payload);
                     let msg = Notarize::sign(
                         &self.namespace,
                         &mut self.crypto,
                         public_key_index,
                         proposal,
+                    );
+                    let msg = Voter::Notarize(msg).encode().into();
+                    sender.send(Recipients::All, msg, true).await.unwrap();
+
+                    // Notarize received digest
+                    let msg = Notarize::sign(
+                        &self.namespace,
+                        &mut self.crypto,
+                        public_key_index,
+                        notarize.proposal,
                     );
                     let msg = Voter::Notarize(msg).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
@@ -106,25 +105,24 @@ impl<
                         .is_participant(view, &self.crypto.public_key())
                         .unwrap();
 
-                    // Finalize provided digest
-                    let parent = finalize.proposal.parent;
-                    let msg = Finalize::sign(
-                        &self.namespace,
-                        &mut self.crypto,
-                        public_key_index,
-                        finalize.proposal,
-                    );
-                    let msg = Voter::Finalize(msg).encode().into();
-                    sender.send(Recipients::All, msg, true).await.unwrap();
-
                     // Finalize random digest
                     let payload = H::random(&mut self.context);
-                    let proposal = Proposal::new(view, parent, payload);
+                    let proposal = Proposal::new(view, finalize.proposal.parent, payload);
                     let msg = Finalize::sign(
                         &self.namespace,
                         &mut self.crypto,
                         public_key_index,
                         proposal,
+                    );
+                    let msg = Voter::Finalize(msg).encode().into();
+                    sender.send(Recipients::All, msg, true).await.unwrap();
+
+                    // Finalize provided digest
+                    let msg = Finalize::sign(
+                        &self.namespace,
+                        &mut self.crypto,
+                        public_key_index,
+                        finalize.proposal,
                     );
                     let msg = Voter::Finalize(msg).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
