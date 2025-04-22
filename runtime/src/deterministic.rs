@@ -414,6 +414,91 @@ where
     RunnerWithContext { context }.start(f)
 }
 
+/// A task queue that is used to manage the tasks that are being executed by the runtime.
+struct Tasks {
+    /// The current task counter.
+    counter: Mutex<u128>,
+    /// The queue of tasks that are waiting to be executed.
+    queue: Mutex<Vec<Arc<Task>>>,
+    /// Indicates whether the root task has been registered.
+    root_registered: Mutex<bool>,
+}
+
+impl Tasks {
+    /// Create a new task queue.
+    fn new() -> Self {
+        Self {
+            counter: Mutex::new(0),
+            queue: Mutex::new(Vec::new()),
+            root_registered: Mutex::new(false),
+        }
+    }
+
+    /// Increment the task counter and return the old value.
+    fn increment(&self) -> u128 {
+        let mut counter = self.counter.lock().unwrap();
+        let old = *counter;
+        *counter = counter.checked_add(1).expect("task counter overflow");
+        old
+    }
+
+    /// Register the root task.
+    ///
+    /// If the root task has already been registered, this function will panic.
+    fn register_root(arc_self: &Arc<Self>) {
+        {
+            let mut registered = arc_self.root_registered.lock().unwrap();
+            assert!(!*registered, "root already registered");
+            *registered = true;
+        }
+        let id = arc_self.increment();
+        let mut queue = arc_self.queue.lock().unwrap();
+        queue.push(Arc::new(Task {
+            id,
+            label: String::new(),
+            tasks: arc_self.clone(),
+            operation: Operation::Root,
+        }));
+    }
+
+    /// Register a new task to be executed.
+    fn register_work(
+        arc_self: &Arc<Self>,
+        label: &str,
+        future: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
+    ) {
+        let id = arc_self.increment();
+        let mut queue = arc_self.queue.lock().unwrap();
+        queue.push(Arc::new(Task {
+            id,
+            label: label.to_string(),
+            tasks: arc_self.clone(),
+            operation: Operation::Work {
+                future: Mutex::new(future),
+                completed: Mutex::new(false),
+            },
+        }));
+    }
+
+    /// Enqueue an already registered task to be executed.
+    fn enqueue(&self, task: Arc<Task>) {
+        let mut queue = self.queue.lock().unwrap();
+        queue.push(task);
+    }
+
+    /// Dequeue all tasks that are ready to execute.
+    fn drain(&self) -> Vec<Arc<Task>> {
+        let mut queue = self.queue.lock().unwrap();
+        let len = queue.len();
+        replace(&mut *queue, Vec::with_capacity(len))
+    }
+
+    /// Get the number of tasks in the queue.
+    fn len(&self) -> usize {
+        self.queue.lock().unwrap().len()
+    }
+}
+
 impl crate::Runner for RunnerWithContext {
     type Context = Context;
 
@@ -593,91 +678,6 @@ struct Task {
 impl ArcWake for Task {
     fn wake_by_ref(arc_self: &Arc<Self>) {
         arc_self.tasks.enqueue(arc_self.clone());
-    }
-}
-
-/// A task queue that is used to manage the tasks that are being executed by the runtime.
-struct Tasks {
-    /// The current task counter.
-    counter: Mutex<u128>,
-    /// The queue of tasks that are waiting to be executed.
-    queue: Mutex<Vec<Arc<Task>>>,
-    /// Indicates whether the root task has been registered.
-    root_registered: Mutex<bool>,
-}
-
-impl Tasks {
-    /// Create a new task queue.
-    fn new() -> Self {
-        Self {
-            counter: Mutex::new(0),
-            queue: Mutex::new(Vec::new()),
-            root_registered: Mutex::new(false),
-        }
-    }
-
-    /// Increment the task counter and return the old value.
-    fn increment(&self) -> u128 {
-        let mut counter = self.counter.lock().unwrap();
-        let old = *counter;
-        *counter = counter.checked_add(1).expect("task counter overflow");
-        old
-    }
-
-    /// Register the root task.
-    ///
-    /// If the root task has already been registered, this function will panic.
-    fn register_root(arc_self: &Arc<Self>) {
-        {
-            let mut registered = arc_self.root_registered.lock().unwrap();
-            assert!(!*registered, "root already registered");
-            *registered = true;
-        }
-        let id = arc_self.increment();
-        let mut queue = arc_self.queue.lock().unwrap();
-        queue.push(Arc::new(Task {
-            id,
-            label: String::new(),
-            tasks: arc_self.clone(),
-            operation: Operation::Root,
-        }));
-    }
-
-    /// Register a new task to be executed.
-    fn register_work(
-        arc_self: &Arc<Self>,
-        label: &str,
-        future: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
-    ) {
-        let id = arc_self.increment();
-        let mut queue = arc_self.queue.lock().unwrap();
-        queue.push(Arc::new(Task {
-            id,
-            label: label.to_string(),
-            tasks: arc_self.clone(),
-            operation: Operation::Work {
-                future: Mutex::new(future),
-                completed: Mutex::new(false),
-            },
-        }));
-    }
-
-    /// Enqueue an already registered task to be executed.
-    fn enqueue(&self, task: Arc<Task>) {
-        let mut queue = self.queue.lock().unwrap();
-        queue.push(task);
-    }
-
-    /// Dequeue all tasks that are ready to execute.
-    fn drain(&self) -> Vec<Arc<Task>> {
-        let mut queue = self.queue.lock().unwrap();
-        let len = queue.len();
-        replace(&mut *queue, Vec::with_capacity(len))
-    }
-
-    /// Get the number of tasks in the queue.
-    fn len(&self) -> usize {
-        self.queue.lock().unwrap().len()
     }
 }
 
