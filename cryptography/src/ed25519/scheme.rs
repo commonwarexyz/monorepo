@@ -122,7 +122,7 @@ impl BatchScheme for Ed25519Batch {
 }
 
 /// Ed25519 Private Key.
-#[derive(Clone)]
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct PrivateKey {
     raw: [u8; PRIVATE_KEY_LENGTH],
     key: ed25519_consensus::SigningKey,
@@ -205,21 +205,6 @@ impl Display for PrivateKey {
         write!(f, "{}", hex(&self.raw))
     }
 }
-
-impl Zeroize for PrivateKey {
-    fn zeroize(&mut self) {
-        self.raw.zeroize();
-        self.key.zeroize();
-    }
-}
-
-impl Drop for PrivateKey {
-    fn drop(&mut self) {
-        self.zeroize();
-    }
-}
-
-impl ZeroizeOnDrop for PrivateKey {}
 
 /// Ed25519 Public Key.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]

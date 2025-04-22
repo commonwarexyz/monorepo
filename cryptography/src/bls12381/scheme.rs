@@ -97,7 +97,7 @@ impl Signer for Bls12381 {
 }
 
 /// BLS12-381 private key.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq, Zeroize, ZeroizeOnDrop)]
 pub struct PrivateKey {
     raw: [u8; group::PRIVATE_KEY_LENGTH],
     key: group::Private,
@@ -173,21 +173,6 @@ impl Display for PrivateKey {
         write!(f, "{}", hex(&self.raw))
     }
 }
-
-impl Zeroize for PrivateKey {
-    fn zeroize(&mut self) {
-        self.raw.zeroize();
-        self.key.zeroize();
-    }
-}
-
-impl Drop for PrivateKey {
-    fn drop(&mut self) {
-        self.zeroize();
-    }
-}
-
-impl ZeroizeOnDrop for PrivateKey {}
 
 /// BLS12-381 public key.
 #[derive(Clone, Eq, PartialEq)]

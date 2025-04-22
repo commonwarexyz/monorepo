@@ -90,9 +90,13 @@ impl CommonwareSigner for Secp256r1 {
 }
 
 /// Secp256r1 Private Key.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq, Zeroize, ZeroizeOnDrop)]
 pub struct PrivateKey {
     raw: [u8; PRIVATE_KEY_LENGTH],
+    // `ZeroizeOnDrop` is implemented for `SigningKey` and can't be called directly.
+    //
+    // Reference: https://github.com/RustCrypto/signatures/blob/a83c494216b6f3dacba5d4e4376785e2ea142044/ecdsa/src/signing.rs#L487-L493
+    #[zeroize(skip)]
     key: SigningKey,
 }
 
@@ -167,22 +171,10 @@ impl Display for PrivateKey {
     }
 }
 
-impl Zeroize for PrivateKey {
-    fn zeroize(&mut self) {
-        self.raw.zeroize();
-        // `ZeroizeOnDrop` is implemented for `SigningKey` and can't be called directly.
-        //
-        // Reference: https://github.com/RustCrypto/signatures/blob/a83c494216b6f3dacba5d4e4376785e2ea142044/ecdsa/src/signing.rs#L487-L493
-    }
-}
-
-impl Drop for PrivateKey {
-    fn drop(&mut self) {
-        self.zeroize();
-    }
-}
-
-impl ZeroizeOnDrop for PrivateKey {}
+// impl Zeroize for PrivateKey {
+//     fn zeroize(&mut self) {
+//         self.raw.zeroize();
+// }
 
 /// Secp256r1 Public Key.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd)]
