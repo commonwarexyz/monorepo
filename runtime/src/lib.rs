@@ -89,9 +89,9 @@ pub enum Error {
 pub trait Runner {
     /// Context defines the environment available to tasks.
     /// Example of possible services provided by the context include:
-    /// - `Clock` for time-based operations
-    /// - `Network` for network operations
-    /// - `Storage` for storage operations
+    /// - [Clock] for time-based operations
+    /// - [Network] for network operations
+    /// - [Storage] for storage operations
     type Context;
 
     /// Start running a root task.

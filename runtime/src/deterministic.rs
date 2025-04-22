@@ -468,14 +468,14 @@ impl crate::Runner for Runner {
         F: FnOnce(Self::Context) -> Fut,
         Fut: Future,
     {
+        // Setup context (depending on how the runtime was initialized)
         let context = match self.state {
             State::Config(config) => Context::new(config),
             State::Context(context) => context,
         };
 
-        let executor = context.executor.clone();
-
         // Pin root task to the heap
+        let executor = context.executor.clone();
         let mut root = Box::pin(f(context));
 
         // Register the root task
@@ -1460,17 +1460,17 @@ mod tests {
         let data = b"Hello, world!";
 
         // Run some tasks, sync storage, and recover the runtime
-        let (context, auditor_hash) = executor1.start(|context| async move {
+        let (context, state) = executor1.start(|context| async move {
             let blob = context.open(partition, name).await.unwrap();
             blob.write_at(data, 0).await.unwrap();
             blob.sync().await.unwrap();
-            let auditor_hash = context.auditor().state();
-            (context, auditor_hash)
+            let state = context.auditor().state();
+            (context, state)
         });
         let recovered_context = context.recover();
 
         // Verify auditor state is the same
-        assert_eq!(auditor_hash, recovered_context.auditor().state());
+        assert_eq!(state, recovered_context.auditor().state());
 
         // Check that synced storage persists after recovery
         let executor = Runner::from(recovered_context);
