@@ -7,7 +7,7 @@ use commonware_cryptography::{
         group::{Public, Share, Signature},
         ops::{
             aggregate_signatures, aggregate_verify_multiple_messages, partial_sign_message,
-            partial_verify_message, partial_verify_multiple_messages,
+            partial_verify_message, partial_verify_multiple_messages, verify_message,
         },
         poly::{PartialSignature, Poly},
     },
@@ -97,15 +97,15 @@ fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
 pub enum Voter<D: Digest> {
     /// A single validator notarize over a proposal
     Notarize(Notarize<D>),
-    /// An aggregated threshold signature for a notarization
+    /// An recovered threshold signature for a notarization
     Notarization(Notarization<D>),
     /// A single validator nullify to skip the current view (usually when leader is unresponsive)
     Nullify(Nullify),
-    /// An aggregated threshold signature for a nullification
+    /// An recovered threshold signature for a nullification
     Nullification(Nullification),
     /// A single validator finalize over a proposal
     Finalize(Finalize<D>),
-    /// An aggregated threshold signature for a finalization
+    /// An recovered threshold signature for a finalization
     Finalization(Finalization<D>),
 }
 
@@ -362,16 +362,16 @@ impl<D: Digest> FixedSize for Notarize<D> {
     const SIZE: usize = Proposal::<D>::SIZE + PartialSignature::SIZE + PartialSignature::SIZE;
 }
 
-/// Notarization represents an aggregated threshold signature certifying a proposal.
+/// Notarization represents an recovered threshold signature certifying a proposal.
 /// When a proposal is notarized, it means at least 2f+1 validators have voted for it.
 /// The threshold signatures provide compact verification compared to collecting individual signatures.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub struct Notarization<D: Digest> {
     /// The proposal that has been notarized
     pub proposal: Proposal<D>,
-    /// The aggregated threshold signature on the proposal
+    /// The recovered threshold signature on the proposal
     pub proposal_signature: Signature,
-    /// The aggregated threshold signature on the seed (for leader election/randomness)
+    /// The recovered threshold signature on the seed (for leader election/randomness)
     pub seed_signature: Signature,
 }
 
@@ -547,16 +547,16 @@ impl FixedSize for Nullify {
     const SIZE: usize = View::SIZE + PartialSignature::SIZE + PartialSignature::SIZE;
 }
 
-/// Nullification represents an aggregated threshold signature to skip a view.
+/// Nullification represents an recovered threshold signature to skip a view.
 /// When a view is nullified, the consensus moves to the next view without finalizing a block.
 /// The threshold signatures provide compact verification compared to collecting individual signatures.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub struct Nullification {
     /// The view that has been nullified
     pub view: View,
-    /// The aggregated threshold signature on the view
+    /// The recovered threshold signature on the view
     pub view_signature: Signature,
-    /// The aggregated threshold signature on the seed (for leader election/randomness)
+    /// The recovered threshold signature on the seed (for leader election/randomness)
     pub seed_signature: Signature,
 }
 
@@ -702,16 +702,16 @@ impl<D: Digest> FixedSize for Finalize<D> {
     const SIZE: usize = Proposal::<D>::SIZE + PartialSignature::SIZE;
 }
 
-/// Finalization represents an aggregated threshold signature to finalize a proposal.
+/// Finalization represents an recovered threshold signature to finalize a proposal.
 /// When a proposal is finalized, it becomes the canonical block for its view.
 /// The threshold signatures provide compact verification compared to collecting individual signatures.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub struct Finalization<D: Digest> {
     /// The proposal that has been finalized
     pub proposal: Proposal<D>,
-    /// The aggregated threshold signature on the proposal
+    /// The recovered threshold signature on the proposal
     pub proposal_signature: Signature,
-    /// The aggregated threshold signature on the seed (for leader election/randomness)
+    /// The recovered threshold signature on the seed (for leader election/randomness)
     pub seed_signature: Signature,
 }
 
@@ -947,17 +947,22 @@ impl<D: Digest> Read<usize> for Response<D> {
 /// This includes both regular consensus messages and fault evidence.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub enum Activity<D: Digest> {
+    /// A threshold signature over the latest view.
+    ///
+    /// This is constructed during notarization/nullification
+    /// and extracted for convenience.
+    Seed(Seed),
     /// A single validator notarize over a proposal
     Notarize(Notarize<D>),
-    /// An aggregated threshold signature for a notarization
+    /// A threshold signature for a notarization
     Notarization(Notarization<D>),
     /// A single validator nullify to skip the current view
     Nullify(Nullify),
-    /// An aggregated threshold signature for a nullification
+    /// A threshold signature for a nullification
     Nullification(Nullification),
     /// A single validator finalize over a proposal
     Finalize(Finalize<D>),
-    /// An aggregated threshold signature for a finalization
+    /// A threshold signature for a finalization
     Finalization(Finalization<D>),
     /// Evidence of a validator sending conflicting notarizes (Byzantine behavior)
     ConflictingNotarize(ConflictingNotarize<D>),
@@ -970,40 +975,44 @@ pub enum Activity<D: Digest> {
 impl<D: Digest> Write for Activity<D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
-            Activity::Notarize(v) => {
+            Activity::Seed(v) => {
                 0u8.write(writer);
                 v.write(writer);
             }
-            Activity::Notarization(v) => {
+            Activity::Notarize(v) => {
                 1u8.write(writer);
                 v.write(writer);
             }
-            Activity::Nullify(v) => {
+            Activity::Notarization(v) => {
                 2u8.write(writer);
                 v.write(writer);
             }
-            Activity::Nullification(v) => {
+            Activity::Nullify(v) => {
                 3u8.write(writer);
                 v.write(writer);
             }
-            Activity::Finalize(v) => {
+            Activity::Nullification(v) => {
                 4u8.write(writer);
                 v.write(writer);
             }
-            Activity::Finalization(v) => {
+            Activity::Finalize(v) => {
                 5u8.write(writer);
                 v.write(writer);
             }
-            Activity::ConflictingNotarize(v) => {
+            Activity::Finalization(v) => {
                 6u8.write(writer);
                 v.write(writer);
             }
-            Activity::ConflictingFinalize(v) => {
+            Activity::ConflictingNotarize(v) => {
                 7u8.write(writer);
                 v.write(writer);
             }
-            Activity::NullifyFinalize(v) => {
+            Activity::ConflictingFinalize(v) => {
                 8u8.write(writer);
+                v.write(writer);
+            }
+            Activity::NullifyFinalize(v) => {
+                9u8.write(writer);
                 v.write(writer);
             }
         }
@@ -1013,6 +1022,7 @@ impl<D: Digest> Write for Activity<D> {
 impl<D: Digest> EncodeSize for Activity<D> {
     fn encode_size(&self) -> usize {
         1 + match self {
+            Activity::Seed(v) => v.encode_size(),
             Activity::Notarize(v) => v.encode_size(),
             Activity::Notarization(v) => v.encode_size(),
             Activity::Nullify(v) => v.encode_size(),
@@ -1031,38 +1041,42 @@ impl<D: Digest> Read for Activity<D> {
         let tag = <u8>::read(reader)?;
         match tag {
             0 => {
+                let v = Seed::read(reader)?;
+                Ok(Activity::Seed(v))
+            }
+            1 => {
                 let v = Notarize::read(reader)?;
                 Ok(Activity::Notarize(v))
             }
-            1 => {
+            2 => {
                 let v = Notarization::read(reader)?;
                 Ok(Activity::Notarization(v))
             }
-            2 => {
+            3 => {
                 let v = Nullify::read(reader)?;
                 Ok(Activity::Nullify(v))
             }
-            3 => {
+            4 => {
                 let v = Nullification::read(reader)?;
                 Ok(Activity::Nullification(v))
             }
-            4 => {
+            5 => {
                 let v = Finalize::read(reader)?;
                 Ok(Activity::Finalize(v))
             }
-            5 => {
+            6 => {
                 let v = Finalization::read(reader)?;
                 Ok(Activity::Finalization(v))
             }
-            6 => {
+            7 => {
                 let v = ConflictingNotarize::read(reader)?;
                 Ok(Activity::ConflictingNotarize(v))
             }
-            7 => {
+            8 => {
                 let v = ConflictingFinalize::read(reader)?;
                 Ok(Activity::ConflictingFinalize(v))
             }
-            8 => {
+            9 => {
                 let v = NullifyFinalize::read(reader)?;
                 Ok(Activity::NullifyFinalize(v))
             }
@@ -1077,6 +1091,7 @@ impl<D: Digest> Read for Activity<D> {
 impl<D: Digest> Viewable for Activity<D> {
     fn view(&self) -> View {
         match self {
+            Activity::Seed(v) => v.view(),
             Activity::Notarize(v) => v.view(),
             Activity::Notarization(v) => v.view(),
             Activity::Nullify(v) => v.view(),
@@ -1088,6 +1103,54 @@ impl<D: Digest> Viewable for Activity<D> {
             Activity::NullifyFinalize(v) => v.view(),
         }
     }
+}
+
+/// Seed represents a threshold signature over the current view.
+#[derive(Clone, Debug, PartialEq, Hash, Eq)]
+pub struct Seed {
+    /// The view for which this seed is generated
+    pub view: View,
+    /// The partial signature on the seed
+    pub signature: Signature,
+}
+
+impl Seed {
+    /// Creates a new seed with the given view and signature.
+    pub fn new(view: View, signature: Signature) -> Self {
+        Seed { view, signature }
+    }
+
+    /// Verifies the threshold signature on this seed.
+    pub fn verify(&self, namespace: &[u8], public_key: &Public) -> bool {
+        let seed_namespace = seed_namespace(namespace);
+        let message = view_message(self.view);
+        verify_message(public_key, Some(&seed_namespace), &message, &self.signature).is_ok()
+    }
+}
+
+impl Viewable for Seed {
+    fn view(&self) -> View {
+        self.view
+    }
+}
+
+impl Write for Seed {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.view.write(writer);
+        self.signature.write(writer);
+    }
+}
+
+impl Read for Seed {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        let view = View::read(reader)?;
+        let signature = Signature::read(reader)?;
+        Ok(Seed { view, signature })
+    }
+}
+
+impl FixedSize for Seed {
+    const SIZE: usize = View::SIZE + Signature::SIZE;
 }
 
 /// ConflictingNotarize represents evidence of a Byzantine validator sending conflicting notarizes.
