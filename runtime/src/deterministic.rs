@@ -23,9 +23,13 @@
 //! ```
 
 use crate::{
-    mocks, storage::audited::Storage as AuditedStorage, storage::memory::Storage as MemStorage,
-    storage::metered::Storage as MeteredStorage, utils::Signaler, Clock, Error, Handle, Signal,
-    METRICS_PREFIX,
+    mocks,
+    storage::{
+        audited::Storage as AuditedStorage, memory::Storage as MemStorage,
+        metered::Storage as MeteredStorage,
+    },
+    utils::Signaler,
+    Clock, Error, Handle, Signal, METRICS_PREFIX,
 };
 use commonware_utils::{hex, SystemTimeExt};
 use futures::{
@@ -386,7 +390,7 @@ pub struct Executor {
     recovered: Mutex<bool>,
 }
 
-pub struct RunnerWithContext {
+struct RunnerWithContext {
     context: Context,
 }
 
@@ -394,6 +398,20 @@ impl From<Context> for RunnerWithContext {
     fn from(context: Context) -> Self {
         RunnerWithContext { context }
     }
+}
+
+/// Runs `f` with the given context.
+/// This can be useful for testing purposes when we want to
+/// re-use the same context for multiple executions.
+#[cfg(test)]
+pub fn run_from_context<F, Fut>(context: Context, f: F) -> Fut::Output
+where
+    F: FnOnce(Context) -> Fut,
+    Fut: Future,
+{
+    use crate::Runner as _;
+
+    RunnerWithContext { context }.start(f)
 }
 
 impl crate::Runner for RunnerWithContext {
