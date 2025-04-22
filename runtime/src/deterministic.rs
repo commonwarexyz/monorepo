@@ -669,7 +669,7 @@ impl crate::Runner for RunnerWithContext {
             }
 
             // Account for remaining tasks
-            remaining += executor.tasks.len() + 1; // +1 for the root task
+            remaining += executor.tasks.len();
 
             // If there are no tasks to run and no tasks sleeping, the executor is stalled
             // and will never finish.
