@@ -18,6 +18,15 @@ use rand::{CryptoRng, Rng};
 use std::marker::PhantomData;
 use tracing::{debug, info, warn};
 
+/// The maximum overhead of encoding a `message: Bytes` into a full
+/// [Payload](super::types::Payload), in bytes.
+///
+// The byte overhead is calculated as the sum of the following:
+// - 1: Payload enum value
+// - 5: Channel varint
+// - 5: Message length varint (assumes length is no more than 4GB)
+const MAX_PAYLOAD_OVERHEAD: usize = 11;
+
 /// Unique suffix for all messages signed by the tracker.
 const TRACKER_SUFFIX: &[u8] = b"_TRACKER";
 
@@ -168,7 +177,7 @@ impl<
         let stream_cfg = public_key::Config {
             crypto: self.cfg.crypto,
             namespace: union(&self.cfg.namespace, STREAM_SUFFIX),
-            max_message_size: self.cfg.max_message_size,
+            max_message_size: self.cfg.max_message_size + MAX_PAYLOAD_OVERHEAD,
             synchrony_bound: self.cfg.synchrony_bound,
             max_handshake_age: self.cfg.max_handshake_age,
             handshake_timeout: self.cfg.handshake_timeout,
