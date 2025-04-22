@@ -211,7 +211,7 @@ impl<E: RStorage + Clock + Metrics, H: Hasher> Mmr<E, H> {
         journal: &Journal<E, H::Digest>,
         pos: u64,
     ) -> Result<H::Digest, Error> {
-        if let Some(bytes) = metadata.get(&U64::new(0, pos)) {
+        if let Some(bytes) = metadata.get(&U64::new(Self::NODE_PREFIX, pos)) {
             debug!(pos, "read node from metadata");
             let digest = H::Digest::decode(bytes.as_ref());
             let Ok(digest) = digest else {
