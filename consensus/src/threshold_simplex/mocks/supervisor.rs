@@ -1,7 +1,7 @@
 use crate::{
     threshold_simplex::types::{
         Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization, Finalize,
-        Notarization, Notarize, Nullification, Nullify, NullifyFinalize, View, Viewable,
+        Notarization, Notarize, Nullification, Nullify, NullifyFinalize, Seed, View, Viewable,
     },
     Monitor, Reporter, Supervisor as Su, ThresholdSupervisor as TSu,
 };
@@ -42,6 +42,7 @@ pub struct Supervisor<P: Array, D: Digest> {
     namespace: Vec<u8>,
 
     pub leaders: Arc<Mutex<HashMap<View, P>>>,
+    pub seeds: Arc<Mutex<HashMap<View, Seed>>>,
     pub notarizes: Arc<Mutex<Participation<D, P>>>,
     pub notarizations: Arc<Mutex<HashMap<View, Notarization<D>>>>,
     pub nullifies: Arc<Mutex<HashMap<View, HashSet<P>>>>,
@@ -69,6 +70,7 @@ impl<P: Array, D: Digest> Supervisor<P, D> {
             participants: parsed_participants,
             namespace: cfg.namespace,
             leaders: Arc::new(Mutex::new(HashMap::new())),
+            seeds: Arc::new(Mutex::new(HashMap::new())),
             notarizes: Arc::new(Mutex::new(HashMap::new())),
             notarizations: Arc::new(Mutex::new(HashMap::new())),
             nullifies: Arc::new(Mutex::new(HashMap::new())),
@@ -163,6 +165,22 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
         // but in production this isn't necessary (as signatures are already verified in
         // consensus).
         match activity {
+            Activity::Seed(seed) => {
+                let view = seed.view();
+                let (identity, _) = match self.participants.range(..=view).next_back() {
+                    Some((_, (p, _, v, _))) => (p, v),
+                    None => {
+                        panic!("no participants in required range");
+                    }
+                };
+                let public = public(identity);
+                if !seed.verify(&self.namespace, public) {
+                    panic!("signature verification failed");
+                }
+                let encoded = seed.encode();
+                Seed::decode(encoded).unwrap();
+                self.seeds.lock().unwrap().insert(view, seed);
+            }
             Activity::Notarize(notarize) => {
                 let view = notarize.view();
                 let (identity, validators) = match self.participants.range(..=view).next_back() {
@@ -203,7 +221,7 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                 self.notarizations
                     .lock()
                     .unwrap()
-                    .insert(view, notarization.clone());
+                    .insert(view, notarization);
             }
             Activity::Nullify(nullify) => {
                 let view = nullify.view();
