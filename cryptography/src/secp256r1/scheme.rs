@@ -171,11 +171,6 @@ impl Display for PrivateKey {
     }
 }
 
-// impl Zeroize for PrivateKey {
-//     fn zeroize(&mut self) {
-//         self.raw.zeroize();
-// }
-
 /// Secp256r1 Public Key.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct PublicKey {
