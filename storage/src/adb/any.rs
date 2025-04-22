@@ -160,8 +160,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher> Any<E, K, V,
         let mut snapshot: Index<EightCap, u64> =
             Index::init(context.with_label("snapshot"), EightCap);
         let mut inactivity_floor_loc = 0;
-        let oldest_retained_pos = mmr.oldest_retained_pos().unwrap_or(mmr.size());
-        let start_leaf_num = leaf_pos_to_num(oldest_retained_pos).unwrap();
+        let pruned_to_pos = mmr.pruned_to_pos();
+        let start_leaf_num = leaf_pos_to_num(pruned_to_pos).unwrap();
 
         for i in start_leaf_num..log_size {
             let op: Operation<K, V> = log.read(i).await?;
@@ -387,7 +387,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher> Any<E, K, V,
             .map(|op| Any::<E, _, _, _>::op_digest(hasher, op))
             .collect::<Vec<_>>();
 
-        proof.verify_range_inclusion(hasher, &digests, start_pos, end_pos, root_hash)
+        proof.verify_range_inclusion(hasher, digests, start_pos, end_pos, root_hash)
     }
 
     /// Commit any pending operations to the db, ensuring they are persisted to disk &
@@ -548,6 +548,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher> Any<E, K, V,
 mod test {
     use super::*;
     use crate::mmr::mem::Mmr as MemMmr;
+    use commonware_codec::DecodeExt;
     use commonware_cryptography::{hash, sha256::Digest, Hasher as CHasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic::Context, deterministic::Executor, Runner};
@@ -582,8 +583,8 @@ mod test {
             assert_eq!(db.root(&mut hasher), MemMmr::default().root(&mut hasher));
 
             // Make sure closing/reopening gets us back to the same state, even after adding an uncommitted op.
-            let d1 = <Sha256 as CHasher>::Digest::try_from(&vec![1u8; 32]).unwrap();
-            let d2 = <Sha256 as CHasher>::Digest::try_from(&vec![2u8; 32]).unwrap();
+            let d1 = <Sha256 as CHasher>::Digest::decode(vec![1u8; 32].as_ref()).unwrap();
+            let d2 = <Sha256 as CHasher>::Digest::decode(vec![2u8; 32].as_ref()).unwrap();
             let root = db.root(&mut hasher);
             db.update(&mut hasher, d1, d2).await.unwrap();
             db.close().await.unwrap();
@@ -616,8 +617,8 @@ mod test {
             let mut hasher = Sha256::new();
             let mut db = open_db(context.clone(), &mut hasher).await;
 
-            let d1 = <Sha256 as CHasher>::Digest::try_from(&vec![1u8; 32]).unwrap();
-            let d2 = <Sha256 as CHasher>::Digest::try_from(&vec![2u8; 32]).unwrap();
+            let d1 = <Sha256 as CHasher>::Digest::decode(vec![1u8; 32].as_ref()).unwrap();
+            let d2 = <Sha256 as CHasher>::Digest::decode(vec![2u8; 32].as_ref()).unwrap();
 
             assert!(db.get(&d1).await.unwrap().is_none());
             assert!(db.get(&d2).await.unwrap().is_none());
@@ -675,7 +676,7 @@ mod test {
             assert_eq!(db.root(&mut hasher), root);
 
             // Deletions of non-existent keys should be a no-op.
-            let d3 = <Sha256 as CHasher>::Digest::try_from(&vec![2u8; 32]).unwrap();
+            let d3 = <Sha256 as CHasher>::Digest::decode(vec![2u8; 32].as_ref()).unwrap();
             db.delete(&mut hasher, d3).await.unwrap();
             assert_eq!(db.log.size().await.unwrap(), 8);
             assert_eq!(db.root(&mut hasher), root);
@@ -810,7 +811,7 @@ mod test {
             // retained op to tip.
             let max_ops = 4;
             let end_loc = db.op_count();
-            let start_pos = db.ops.oldest_retained_pos().unwrap_or(db.ops.size());
+            let start_pos = db.ops.pruned_to_pos();
             let start_loc = leaf_pos_to_num(start_pos).unwrap();
             // Raise the inactivity floor and make sure historical inactive operations are still provable.
             db.raise_inactivity_floor(&mut hasher, 100).await.unwrap();

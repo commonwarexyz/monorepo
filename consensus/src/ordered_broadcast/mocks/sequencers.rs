@@ -1,5 +1,4 @@
-use super::super::Epoch;
-use crate::Supervisor;
+use crate::{ordered_broadcast::types::Epoch, Supervisor};
 use commonware_utils::Array;
 use std::collections::HashMap;
 
@@ -30,10 +29,6 @@ impl<P: Array> Supervisor for Sequencers<P> {
     type PublicKey = P;
 
     fn leader(&self, _: Self::Index) -> Option<Self::PublicKey> {
-        unimplemented!()
-    }
-
-    async fn report(&self, _: crate::Activity, _: crate::Proof) {
         unimplemented!()
     }
 

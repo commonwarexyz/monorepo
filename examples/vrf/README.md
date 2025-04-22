@@ -7,7 +7,7 @@ Generate bias-resistant randomness with untrusted contributors using [commonware
 
 # Usage (3 of 4 Threshold)
 
-_To run this example, you must first install [Rust](https://www.rust-lang.org/tools/install) and [protoc](https://grpc.io/docs/protoc-installation)._
+_To run this example, you must first install [Rust](https://www.rust-lang.org/tools/install)._
 
 ## Arbiter
 ```bash

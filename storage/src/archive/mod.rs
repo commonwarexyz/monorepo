@@ -209,6 +209,7 @@ mod tests {
         Error as JournalError,
     };
     use bytes::Bytes;
+    use commonware_codec::DecodeExt;
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic::Executor, Blob, Metrics, Runner, Storage};
     use commonware_utils::array::FixedBytes;
@@ -222,7 +223,7 @@ mod tests {
         let key = key.as_bytes();
         assert!(key.len() <= buf.len());
         buf[..key.len()].copy_from_slice(key);
-        FixedBytes::try_from(&buf[..]).unwrap()
+        FixedBytes::decode(buf.as_ref()).unwrap()
     }
 
     fn test_archive_put_get(compression: Option<u8>) {
@@ -866,7 +867,7 @@ mod tests {
                 let index = keys.len() as u64;
                 let mut key = [0u8; 64];
                 context.fill(&mut key);
-                let key = FixedBytes::<64>::try_from(&key[..]).unwrap();
+                let key = FixedBytes::<64>::decode(key.as_ref()).unwrap();
                 let mut data = [0u8; 1024];
                 context.fill(&mut data);
                 let data = Bytes::from(data.to_vec());

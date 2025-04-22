@@ -1,8 +1,6 @@
-use crate::{
-    Array, Error, Signer as CommonwareSigner, Specification, Verifier as CommonwareVerifier,
-};
+use crate::{Array, Signer as CommonwareSigner, Specification, Verifier as CommonwareVerifier};
 use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedSize, Read, Write};
+use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_utils::{hex, union_unique};
 use p256::{
     ecdsa::{
@@ -18,6 +16,7 @@ use std::{
     hash::{Hash, Hasher},
     ops::Deref,
 };
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const CURVE_NAME: &str = "secp256r1";
 const PRIVATE_KEY_LENGTH: usize = 32;
@@ -64,7 +63,7 @@ impl CommonwareSigner for Secp256r1 {
     }
 
     fn from(private_key: PrivateKey) -> Option<Self> {
-        let signer = private_key.key;
+        let signer = private_key.key.clone();
         let verifier = signer.verifying_key().to_owned();
         Some(Self { signer, verifier })
     }
@@ -91,9 +90,13 @@ impl CommonwareSigner for Secp256r1 {
 }
 
 /// Secp256r1 Private Key.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq, Zeroize, ZeroizeOnDrop)]
 pub struct PrivateKey {
     raw: [u8; PRIVATE_KEY_LENGTH],
+    // `ZeroizeOnDrop` is implemented for `SigningKey` and can't be called directly.
+    //
+    // Reference: https://github.com/RustCrypto/signatures/blob/a83c494216b6f3dacba5d4e4376785e2ea142044/ecdsa/src/signing.rs#L487-L493
+    #[zeroize(skip)]
     key: SigningKey,
 }
 
@@ -105,7 +108,10 @@ impl Write for PrivateKey {
 
 impl Read for PrivateKey {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
+        let raw = <[u8; Self::SIZE]>::read(buf)?;
+        let key =
+            SigningKey::from_slice(&raw).map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
+        Ok(Self { raw, key })
     }
 }
 
@@ -113,9 +119,7 @@ impl FixedSize for PrivateKey {
     const SIZE: usize = PRIVATE_KEY_LENGTH;
 }
 
-impl Array for PrivateKey {
-    type Error = Error;
-}
+impl Array for PrivateKey {}
 
 impl Hash for PrivateKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
@@ -155,31 +159,6 @@ impl From<SigningKey> for PrivateKey {
     }
 }
 
-impl TryFrom<&[u8]> for PrivateKey {
-    type Error = Error;
-    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        let raw: [u8; PRIVATE_KEY_LENGTH] = value
-            .try_into()
-            .map_err(|_| Error::InvalidPrivateKeyLength)?;
-        let key = SigningKey::from_slice(&raw).map_err(|_| Error::InvalidPrivateKey)?;
-        Ok(Self { raw, key })
-    }
-}
-
-impl TryFrom<&Vec<u8>> for PrivateKey {
-    type Error = Error;
-    fn try_from(value: &Vec<u8>) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_slice())
-    }
-}
-
-impl TryFrom<Vec<u8>> for PrivateKey {
-    type Error = Error;
-    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_slice())
-    }
-}
-
 impl Debug for PrivateKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", hex(&self.raw))
@@ -207,7 +186,10 @@ impl Write for PublicKey {
 
 impl Read for PublicKey {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
+        let raw = <[u8; PUBLIC_KEY_LENGTH]>::read(buf)?;
+        let key = VerifyingKey::from_sec1_bytes(&raw)
+            .map_err(|_| CodecError::Invalid(CURVE_NAME, "Invalid PublicKey"))?;
+        Ok(Self { raw, key })
     }
 }
 
@@ -215,9 +197,7 @@ impl FixedSize for PublicKey {
     const SIZE: usize = PUBLIC_KEY_LENGTH;
 }
 
-impl Array for PublicKey {
-    type Error = Error;
-}
+impl Array for PublicKey {}
 
 impl Hash for PublicKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
@@ -243,31 +223,6 @@ impl From<VerifyingKey> for PublicKey {
         let encoded = verifier.to_encoded_point(true);
         let raw: [u8; PUBLIC_KEY_LENGTH] = encoded.as_bytes().try_into().unwrap();
         Self { raw, key: verifier }
-    }
-}
-
-impl TryFrom<&[u8]> for PublicKey {
-    type Error = Error;
-    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        let raw: [u8; PUBLIC_KEY_LENGTH] = value
-            .try_into()
-            .map_err(|_| Error::InvalidPublicKeyLength)?;
-        let key = VerifyingKey::from_sec1_bytes(&raw).map_err(|_| Error::InvalidPublicKey)?;
-        Ok(Self { raw, key })
-    }
-}
-
-impl TryFrom<&Vec<u8>> for PublicKey {
-    type Error = Error;
-    fn try_from(value: &Vec<u8>) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_slice())
-    }
-}
-
-impl TryFrom<Vec<u8>> for PublicKey {
-    type Error = Error;
-    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_slice())
     }
 }
 
@@ -298,7 +253,14 @@ impl Write for Signature {
 
 impl Read for Signature {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        Self::read_from(buf).map_err(|err| CodecError::Wrapped(CURVE_NAME, err.into()))
+        let raw = <[u8; Self::SIZE]>::read(buf)?;
+        let signature = p256::ecdsa::Signature::from_slice(&raw)
+            .map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
+        if signature.s().is_high().into() {
+            // Reject any signatures with a `s` value in the upper half of the curve order.
+            return Err(CodecError::Invalid(CURVE_NAME, "Signature S is high"));
+        }
+        Ok(Self { raw, signature })
     }
 }
 
@@ -306,9 +268,7 @@ impl FixedSize for Signature {
     const SIZE: usize = SIGNATURE_LENGTH;
 }
 
-impl Array for Signature {
-    type Error = Error;
-}
+impl Array for Signature {}
 
 impl Hash for Signature {
     fn hash<H: Hasher>(&self, state: &mut H) {
@@ -348,36 +308,6 @@ impl From<p256::ecdsa::Signature> for Signature {
     }
 }
 
-impl TryFrom<&[u8]> for Signature {
-    type Error = Error;
-    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        let raw: [u8; SIGNATURE_LENGTH] = value
-            .try_into()
-            .map_err(|_| Error::InvalidSignatureLength)?;
-        let signature =
-            p256::ecdsa::Signature::from_slice(&raw).map_err(|_| Error::InvalidSignature)?;
-        if signature.s().is_high().into() {
-            // Reject any signatures with a `s` value in the upper half of the curve order.
-            return Err(Error::InvalidSignature);
-        }
-        Ok(Self { raw, signature })
-    }
-}
-
-impl TryFrom<&Vec<u8>> for Signature {
-    type Error = Error;
-    fn try_from(value: &Vec<u8>) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_slice())
-    }
-}
-
-impl TryFrom<Vec<u8>> for Signature {
-    type Error = Error;
-    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_slice())
-    }
-}
-
 impl Debug for Signature {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", hex(&self.raw))
@@ -400,19 +330,18 @@ mod tests {
 
     fn create_private_key() -> PrivateKey {
         const HEX: &str = "519b423d715f8b581f4fa8ee59f4771a5b44c8130b4e3eacca54a56dda72b464";
-        commonware_utils::from_hex_formatted(HEX)
-            .unwrap()
-            .try_into()
-            .unwrap()
+        PrivateKey::decode(commonware_utils::from_hex_formatted(HEX).unwrap().as_ref()).unwrap()
     }
 
     fn parse_vector_keypair(private_key: &str, qx: &str, qy: &str) -> (PrivateKey, PublicKey) {
         let public_key = parse_public_key_as_compressed(qx, qy);
         (
-            commonware_utils::from_hex_formatted(private_key)
-                .unwrap()
-                .try_into()
-                .unwrap(),
+            PrivateKey::decode(
+                commonware_utils::from_hex_formatted(private_key)
+                    .unwrap()
+                    .as_ref(),
+            )
+            .unwrap(),
             public_key,
         )
     }
@@ -440,9 +369,7 @@ mod tests {
     }
 
     fn parse_public_key_as_compressed(qx: &str, qy: &str) -> PublicKey {
-        parse_public_key_as_compressed_vector(qx, qy)
-            .try_into()
-            .unwrap()
+        PublicKey::decode(parse_public_key_as_compressed_vector(qx, qy).as_ref()).unwrap()
     }
 
     fn parse_public_key_as_compressed_vector(qx: &str, qy: &str) -> Vec<u8> {
@@ -520,11 +447,13 @@ mod tests {
 
     #[test]
     fn test_scheme_sign() {
-        let private_key: PrivateKey = commonware_utils::from_hex_formatted(
-            "519b423d715f8b581f4fa8ee59f4771a5b44c8130b4e3eacca54a56dda72b464",
+        let private_key: PrivateKey = PrivateKey::decode(
+            commonware_utils::from_hex_formatted(
+                "519b423d715f8b581f4fa8ee59f4771a5b44c8130b4e3eacca54a56dda72b464",
+            )
+            .unwrap()
+            .as_ref(),
         )
-        .unwrap()
-        .try_into()
         .unwrap();
         let message = commonware_utils::from_hex_formatted(
             "5905238877c77421f73e43ee3da6f2d9e2ccad5fc942dcec0cbd25482935faaf416983fe165b1a045e
@@ -546,10 +475,12 @@ mod tests {
     #[test]
     fn test_scheme_private_key() {
         let private_key_hex = "519b423d715f8b581f4fa8ee59f4771a5b44c8130b4e3eacca54a56dda72b464";
-        let private_key: PrivateKey = commonware_utils::from_hex_formatted(private_key_hex)
-            .unwrap()
-            .try_into()
-            .unwrap();
+        let private_key: PrivateKey = PrivateKey::decode(
+            commonware_utils::from_hex_formatted(private_key_hex)
+                .unwrap()
+                .as_ref(),
+        )
+        .unwrap();
         let signer = <Secp256r1 as CommonwareSigner>::from(private_key).unwrap();
         let exported_private_key = signer.private_key();
         assert_eq!(
@@ -561,11 +492,13 @@ mod tests {
     // Ensure RFC6979 compliance (should also be tested by underlying library)
     #[test]
     fn test_rfc6979() {
-        let private_key: PrivateKey = commonware_utils::from_hex_formatted(
-            "c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721",
+        let private_key: PrivateKey = PrivateKey::decode(
+            commonware_utils::from_hex_formatted(
+                "c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721",
+            )
+            .unwrap()
+            .as_ref(),
         )
-        .unwrap()
-        .try_into()
         .unwrap();
 
         let (message, exp_sig) = (
@@ -604,24 +537,36 @@ mod tests {
         let qx_hex = "d0720dc691aa80096ba32fed1cb97c2b620690d06de0317b8618d5ce65eb728f";
         let qy_hex = "d0720dc691aa80096ba32fed1cb97c2b620690d06de0317b8618d5ce65eb728f";
 
+        // Invalid
         let uncompressed_public_key = parse_public_key_as_uncompressed_vector(qx_hex, qy_hex);
         let public_key =
-            <Secp256r1 as Specification>::PublicKey::try_from(&uncompressed_public_key);
-        assert_eq!(public_key, Err(Error::InvalidPublicKeyLength));
+            <Secp256r1 as Specification>::PublicKey::decode(uncompressed_public_key.as_ref());
+        assert!(matches!(public_key, Err(CodecError::Invalid(_, _))));
 
+        // Too long
+        let mut compressed_public_key = parse_public_key_as_compressed_vector(qx_hex, qy_hex);
+        compressed_public_key.push(0u8);
+        let public_key =
+            <Secp256r1 as Specification>::PublicKey::decode(compressed_public_key.as_ref());
+        assert!(matches!(public_key, Err(CodecError::ExtraData(1))));
+
+        // Valid
         let compressed_public_key = parse_public_key_as_compressed_vector(qx_hex, qy_hex);
-        let public_key = <Secp256r1 as Specification>::PublicKey::try_from(&compressed_public_key);
+        let public_key =
+            <Secp256r1 as Specification>::PublicKey::decode(compressed_public_key.as_ref());
         assert!(public_key.is_ok());
     }
 
     #[test]
     fn test_scheme_verify_signature_r0() {
         // Generate bad signature
-        let private_key: PrivateKey = commonware_utils::from_hex_formatted(
-            "c9806898a0334916c860748880a541f093b579a9b1f32934d86c363c39800357",
+        let private_key: PrivateKey = PrivateKey::decode(
+            commonware_utils::from_hex_formatted(
+                "c9806898a0334916c860748880a541f093b579a9b1f32934d86c363c39800357",
+            )
+            .unwrap()
+            .as_ref(),
         )
-        .unwrap()
-        .try_into()
         .unwrap();
         let message = b"sample";
         let mut signer = <Secp256r1 as CommonwareSigner>::from(private_key).unwrap();
@@ -631,17 +576,19 @@ mod tests {
         signature.extend_from_slice(s);
 
         // Try to parse signature
-        assert!(Signature::try_from(&signature).is_err());
+        assert!(Signature::decode(signature.as_ref()).is_err());
     }
 
     #[test]
     fn test_scheme_verify_signature_s0() {
         // Generate bad signature
-        let private_key: PrivateKey = commonware_utils::from_hex_formatted(
-            "c9806898a0334916c860748880a541f093b579a9b1f32934d86c363c39800357",
+        let private_key: PrivateKey = PrivateKey::decode(
+            commonware_utils::from_hex_formatted(
+                "c9806898a0334916c860748880a541f093b579a9b1f32934d86c363c39800357",
+            )
+            .unwrap()
+            .as_ref(),
         )
-        .unwrap()
-        .try_into()
         .unwrap();
         let message = b"sample";
         let mut signer = <Secp256r1 as CommonwareSigner>::from(private_key).unwrap();
@@ -652,7 +599,7 @@ mod tests {
         signature.extend(s);
 
         // Try to parse signature
-        assert!(Signature::try_from(&signature).is_err());
+        assert!(Signature::decode(signature.as_ref()).is_err());
     }
 
     #[test]
@@ -704,7 +651,7 @@ mod tests {
 
         for (n, test) in cases.iter() {
             let (public_key, exp_valid) = test;
-            let res = <Secp256r1 as Specification>::PublicKey::try_from(public_key);
+            let res = <Secp256r1 as Specification>::PublicKey::decode(public_key.as_ref());
             assert_eq!(
                 *exp_valid,
                 res.is_ok(),
@@ -740,7 +687,7 @@ mod tests {
                 let mut ecdsa_signature = p256::ecdsa::Signature::from_slice(&sig).unwrap();
                 if ecdsa_signature.s().is_high().into() {
                     // Valid signatures not normalized must be considered invalid.
-                    assert!(Signature::try_from(sig.clone()).is_err());
+                    assert!(Signature::decode(sig.as_ref()).is_err());
                     assert!(Signature::decode(Bytes::from(sig)).is_err());
 
                     // Normalizing sig to test its validity.
@@ -751,7 +698,7 @@ mod tests {
                 let signature = Signature::from(ecdsa_signature);
                 Secp256r1::verify(None, &message, &public_key, &signature)
             } else {
-                let tf_res = Signature::try_from(sig.clone());
+                let tf_res = Signature::decode(sig.as_ref());
                 let dc_res = Signature::decode(Bytes::from(sig));
                 if tf_res.is_err() && dc_res.is_err() {
                     // The parsing should fail

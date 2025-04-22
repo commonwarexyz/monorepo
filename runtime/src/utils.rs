@@ -1,8 +1,8 @@
 //! Utility functions for interacting with any runtime.
 
-use crate::Error;
 #[cfg(test)]
-use crate::{Runner, Spawner};
+use crate::Runner;
+use crate::{Error, Metrics, Spawner};
 #[cfg(test)]
 use futures::stream::{FuturesUnordered, StreamExt};
 use futures::{
@@ -12,6 +12,7 @@ use futures::{
     FutureExt,
 };
 use prometheus_client::metrics::gauge::Gauge;
+use rayon::{ThreadPool, ThreadPoolBuildError, ThreadPoolBuilder};
 use std::{
     any::Any,
     future::Future,
@@ -322,6 +323,29 @@ impl Signaler {
     }
 }
 
+/// Creates a [rayon]-compatible thread pool with [Spawner::spawn_blocking].
+///
+/// # Arguments
+/// - `context`: The runtime context implementing the [Spawner] trait.
+/// - `concurrency`: The number of tasks to execute concurrently in the pool.
+///
+/// # Returns
+/// A `Result` containing the configured [rayon::ThreadPool] or a [rayon::ThreadPoolBuildError] if the pool cannot be built.
+pub fn create_pool<S: Spawner + Metrics>(
+    context: S,
+    concurrency: usize,
+) -> Result<ThreadPool, ThreadPoolBuildError> {
+    ThreadPoolBuilder::new()
+        .num_threads(concurrency)
+        .spawn_handler(move |thread| {
+            context
+                .with_label("rayon-thread")
+                .spawn_blocking(move || thread.run());
+            Ok(())
+        })
+        .build()
+}
+
 #[cfg(test)]
 async fn task(i: usize) -> usize {
     for _ in 0..5 {
@@ -347,4 +371,29 @@ pub fn run_tasks(tasks: usize, runner: impl Runner, context: impl Spawner) -> Ve
         assert_eq!(outputs.len(), tasks);
         outputs
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{tokio::Executor, Metrics};
+    use commonware_macros::test_traced;
+    use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+
+    #[test_traced]
+    fn test_create_pool() {
+        let (executor, context) = Executor::default();
+        executor.start(async move {
+            // Create a thread pool with 4 threads
+            let pool = create_pool(context.with_label("pool"), 4).unwrap();
+
+            // Create a vector of numbers
+            let v: Vec<_> = (0..10000).collect();
+
+            // Use the thread pool to sum the numbers
+            pool.install(|| {
+                assert_eq!(v.par_iter().sum::<i32>(), 10000 * 9999 / 2);
+            });
+        });
+    }
 }

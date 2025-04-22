@@ -1,5 +1,4 @@
-use crate::ordered_broadcast::Epoch;
-use crate::Monitor as M;
+use crate::{ordered_broadcast::types::Epoch, Monitor as M};
 use futures::channel::mpsc;
 use std::sync::{Arc, Mutex};
 

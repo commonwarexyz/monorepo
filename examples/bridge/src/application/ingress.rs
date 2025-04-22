@@ -1,15 +1,15 @@
 use commonware_consensus::{
-    threshold_simplex::{Context, View},
-    Automaton as Au, Committer as Co, Proof, Relay as Re,
+    threshold_simplex::types::{Activity, Context, View},
+    Automaton as Au, Relay as Re, Reporter,
 };
 use commonware_cryptography::Digest;
-use commonware_utils::Array;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
 };
 
-pub enum Message<D: Array> {
+#[allow(clippy::large_enum_variant)]
+pub enum Message<D: Digest> {
     Genesis {
         response: oneshot::Sender<D>,
     },
@@ -21,13 +21,8 @@ pub enum Message<D: Array> {
         payload: D,
         response: oneshot::Sender<bool>,
     },
-    Prepared {
-        proof: Proof,
-        payload: D,
-    },
-    Finalized {
-        proof: Proof,
-        payload: D,
+    Report {
+        activity: Activity<D>,
     },
 }
 
@@ -97,20 +92,13 @@ impl<D: Digest> Re for Mailbox<D> {
     }
 }
 
-impl<D: Digest> Co for Mailbox<D> {
-    type Digest = D;
+impl<D: Digest> Reporter for Mailbox<D> {
+    type Activity = Activity<D>;
 
-    async fn prepared(&mut self, proof: Proof, payload: Self::Digest) {
+    async fn report(&mut self, activity: Self::Activity) {
         self.sender
-            .send(Message::Prepared { proof, payload })
+            .send(Message::Report { activity })
             .await
-            .expect("Failed to send notarized");
-    }
-
-    async fn finalized(&mut self, proof: Proof, payload: Self::Digest) {
-        self.sender
-            .send(Message::Finalized { proof, payload })
-            .await
-            .expect("Failed to send finalized");
+            .expect("Failed to send report");
     }
 }

@@ -30,12 +30,13 @@ pub mod mocks;
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
         pub mod tokio;
+        pub mod benchmarks;
     }
 }
 mod storage;
 pub mod telemetry;
 mod utils;
-pub use utils::{reschedule, Handle, Signal, Signaler};
+pub use utils::{create_pool, reschedule, Handle, Signal, Signaler};
 
 /// Prefix for runtime metrics.
 const METRICS_PREFIX: &str = "runtime";
@@ -94,8 +95,7 @@ pub trait Runner {
     /// to context before starting task execution.
     fn start<F>(self, f: F) -> F::Output
     where
-        F: Future + Send + 'static,
-        F::Output: Send + 'static;
+        F: Future;
 }
 
 /// Interface that any task scheduler must implement to spawn tasks.

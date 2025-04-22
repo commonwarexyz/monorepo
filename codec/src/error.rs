@@ -34,6 +34,11 @@ pub enum Error {
     #[error("Invalid Bool: Expected 0 or 1, found different value")]
     InvalidBool,
 
+    /// An enum variant was expected, but the decoded value did not match any
+    /// of the expected variants.
+    #[error("Invalid Enum: Expected a valid enum variant, found {0}")]
+    InvalidEnum(u8),
+
     /// A length prefix (e.g., for `Vec<T>`, `Bytes`, `HashMap<K, V>`) was decoded,
     /// but its value fell outside the permitted range.
     ///

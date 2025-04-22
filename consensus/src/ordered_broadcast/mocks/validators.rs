@@ -1,5 +1,4 @@
-use super::super::Epoch;
-use crate::{Supervisor, ThresholdSupervisor};
+use crate::{ordered_broadcast::types::Epoch, Supervisor, ThresholdSupervisor};
 use commonware_cryptography::bls12381::primitives::{
     group::{self, Public, Share},
     poly::Poly,
@@ -38,10 +37,6 @@ impl<P: Array> Supervisor for Validators<P> {
     type PublicKey = P;
 
     fn leader(&self, _: Self::Index) -> Option<Self::PublicKey> {
-        unimplemented!()
-    }
-
-    async fn report(&self, _: crate::Activity, _: crate::Proof) {
         unimplemented!()
     }
 

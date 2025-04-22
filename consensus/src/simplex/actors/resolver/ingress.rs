@@ -1,16 +1,18 @@
-use crate::simplex::{wire, View};
+use crate::simplex::types::{Notarization, Nullification, View};
+use commonware_cryptography::Digest;
+use commonware_utils::Array;
 use futures::{channel::mpsc, SinkExt};
 
-pub enum Message {
+pub enum Message<S: Array, D: Digest> {
     Fetch {
         notarizations: Vec<View>,
         nullifications: Vec<View>,
     },
     Notarized {
-        notarization: wire::Notarization,
+        notarization: Notarization<S, D>,
     },
     Nullified {
-        nullification: wire::Nullification,
+        nullification: Nullification<S>,
     },
     Finalized {
         // Used to indicate when to prune old notarizations/nullifications.
@@ -19,12 +21,12 @@ pub enum Message {
 }
 
 #[derive(Clone)]
-pub struct Mailbox {
-    sender: mpsc::Sender<Message>,
+pub struct Mailbox<S: Array, D: Digest> {
+    sender: mpsc::Sender<Message<S, D>>,
 }
 
-impl Mailbox {
-    pub(super) fn new(sender: mpsc::Sender<Message>) -> Self {
+impl<S: Array, D: Digest> Mailbox<S, D> {
+    pub fn new(sender: mpsc::Sender<Message<S, D>>) -> Self {
         Self { sender }
     }
 
@@ -38,14 +40,14 @@ impl Mailbox {
             .expect("Failed to send notarizations");
     }
 
-    pub async fn notarized(&mut self, notarization: wire::Notarization) {
+    pub async fn notarized(&mut self, notarization: Notarization<S, D>) {
         self.sender
             .send(Message::Notarized { notarization })
             .await
             .expect("Failed to send notarization");
     }
 
-    pub async fn nullified(&mut self, nullification: wire::Nullification) {
+    pub async fn nullified(&mut self, nullification: Nullification<S>) {
         self.sender
             .send(Message::Nullified { nullification })
             .await

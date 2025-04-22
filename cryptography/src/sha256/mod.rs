@@ -20,10 +20,10 @@
 //! println!("digest: {:?}", digest);
 //! ```
 
-use crate::{Array, Error, Hasher};
+use crate::Hasher;
 use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedSize, Read, Write};
-use commonware_utils::hex;
+use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_utils::{hex, Array};
 use rand::{CryptoRng, Rng};
 use sha2::{Digest as _, Sha256 as ISha256};
 use std::{
@@ -101,7 +101,8 @@ impl Write for Digest {
 
 impl Read for Digest {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        Self::read_from(buf).map_err(|err| CodecError::Wrapped("Digest", err.into()))
+        let array = <[u8; DIGEST_LENGTH]>::read(buf)?;
+        Ok(Self(array))
     }
 }
 
@@ -109,49 +110,11 @@ impl FixedSize for Digest {
     const SIZE: usize = DIGEST_LENGTH;
 }
 
-impl Array for Digest {
-    type Error = Error;
-}
+impl Array for Digest {}
 
 impl From<[u8; DIGEST_LENGTH]> for Digest {
     fn from(value: [u8; DIGEST_LENGTH]) -> Self {
         Self(value)
-    }
-}
-
-impl TryFrom<&[u8]> for Digest {
-    type Error = Error;
-    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        if value.len() != DIGEST_LENGTH {
-            return Err(Error::InvalidDigestLength);
-        }
-        let array: [u8; DIGEST_LENGTH] =
-            value.try_into().map_err(|_| Error::InvalidDigestLength)?;
-        Ok(Self(array))
-    }
-}
-
-impl TryFrom<&Vec<u8>> for Digest {
-    type Error = Error;
-    fn try_from(value: &Vec<u8>) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_slice())
-    }
-}
-
-impl TryFrom<Vec<u8>> for Digest {
-    type Error = Error;
-    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
-        if value.len() != DIGEST_LENGTH {
-            return Err(Error::InvalidDigestLength);
-        }
-
-        // If the length is correct, we can safely convert the vector into a boxed slice without
-        // any copies.
-        let boxed_slice = value.into_boxed_slice();
-        let boxed_array: Box<[u8; DIGEST_LENGTH]> = boxed_slice
-            .try_into()
-            .map_err(|_| Error::InvalidDigestLength)?;
-        Ok(Self(*boxed_array))
     }
 }
 
@@ -198,13 +161,13 @@ mod tests {
         let mut hasher = Sha256::new();
         hasher.update(msg);
         let digest = hasher.finalize();
-        assert!(Digest::try_from(digest.as_ref()).is_ok());
+        assert!(Digest::decode(digest.as_ref()).is_ok());
         assert_eq!(hex(digest.as_ref()), HELLO_DIGEST);
 
         // Reuse hasher
         hasher.update(msg);
         let digest = hasher.finalize();
-        assert!(Digest::try_from(digest.as_ref()).is_ok());
+        assert!(Digest::decode(digest.as_ref()).is_ok());
         assert_eq!(hex(digest.as_ref()), HELLO_DIGEST);
 
         // Test simple hasher
