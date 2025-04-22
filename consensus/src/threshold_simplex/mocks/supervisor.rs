@@ -1,7 +1,8 @@
 use crate::{
     threshold_simplex::types::{
         Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization, Finalize,
-        Notarization, Notarize, Nullification, Nullify, NullifyFinalize, Seed, View, Viewable,
+        Notarization, Notarize, Nullification, Nullify, NullifyFinalize, Seed, Seedable, View,
+        Viewable,
     },
     Monitor, Reporter, Supervisor as Su, ThresholdSupervisor as TSu,
 };

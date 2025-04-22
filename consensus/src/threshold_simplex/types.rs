@@ -50,6 +50,12 @@ pub trait Attributable {
     fn signer(&self) -> u32;
 }
 
+/// Seedable is a trait that provides access to the seed associated with a message.
+pub trait Seedable {
+    /// Returns the seed associated with this object.
+    fn seed(&self) -> Seed;
+}
+
 // Constants for domain separation in signature verification
 // These are used to prevent cross-protocol attacks and message-type confusion
 const SEED_SUFFIX: &[u8] = b"_SEED";
@@ -410,11 +416,6 @@ impl<D: Digest> Notarization<D> {
         )
         .is_ok()
     }
-
-    /// Returns a [Seed] object for the notarization.
-    pub fn seed(&self) -> Seed {
-        Seed::new(self.view(), self.seed_signature)
-    }
 }
 
 impl<D: Digest> Viewable for Notarization<D> {
@@ -446,6 +447,12 @@ impl<D: Digest> Read for Notarization<D> {
 
 impl<D: Digest> FixedSize for Notarization<D> {
     const SIZE: usize = Proposal::<D>::SIZE + Signature::SIZE + Signature::SIZE;
+}
+
+impl<D: Digest> Seedable for Notarization<D> {
+    fn seed(&self) -> Seed {
+        Seed::new(self.view(), self.seed_signature)
+    }
 }
 
 /// Nullify represents a validator's vote to skip the current view.
@@ -595,11 +602,6 @@ impl Nullification {
         )
         .is_ok()
     }
-
-    /// Returns a [Seed] object for the nullification.
-    pub fn seed(&self) -> Seed {
-        Seed::new(self.view(), self.seed_signature)
-    }
 }
 
 impl Viewable for Nullification {
@@ -631,6 +633,12 @@ impl Read for Nullification {
 
 impl FixedSize for Nullification {
     const SIZE: usize = View::SIZE + Signature::SIZE + Signature::SIZE;
+}
+
+impl Seedable for Nullification {
+    fn seed(&self) -> Seed {
+        Seed::new(self.view(), self.seed_signature)
+    }
 }
 
 /// Finalize represents a validator's vote to finalize a proposal.
@@ -760,11 +768,6 @@ impl<D: Digest> Finalization<D> {
         )
         .is_ok()
     }
-
-    /// Returns a [Seed] object for the finalization.
-    pub fn seed(&self) -> Seed {
-        Seed::new(self.view(), self.seed_signature)
-    }
 }
 
 impl<D: Digest> Viewable for Finalization<D> {
@@ -796,6 +799,12 @@ impl<D: Digest> Read for Finalization<D> {
 
 impl<D: Digest> FixedSize for Finalization<D> {
     const SIZE: usize = Proposal::<D>::SIZE + Signature::SIZE + Signature::SIZE;
+}
+
+impl<D: Digest> Seedable for Finalization<D> {
+    fn seed(&self) -> Seed {
+        Seed::new(self.view(), self.seed_signature)
+    }
 }
 
 /// Backfiller is a message type for requesting and receiving missing consensus artifacts.
