@@ -464,8 +464,7 @@ impl crate::Runner for Runner {
     {
         match self.state {
             RunnerState::NoContext(config) => {
-                let auditor = Arc::new(Auditor::default());
-                let context = Context::new(config, auditor.clone());
+                let context = Context::new(config);
                 self.state = RunnerState::Context(context);
                 self.start(f)
             }
@@ -742,8 +741,14 @@ pub struct Context {
     storage: MeteredStorage<AuditedStorage<MemStorage>>,
 }
 
+impl Default for Context {
+    fn default() -> Self {
+        Self::new(Config::default())
+    }
+}
+
 impl Context {
-    pub fn new(cfg: Config, auditor: Arc<Auditor>) -> Self {
+    pub fn new(cfg: Config) -> Self {
         // Create a new registry
         let mut registry = Registry::default();
         let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
@@ -755,6 +760,7 @@ impl Context {
             .timeout
             .map(|timeout| start_time.checked_add(timeout).expect("timeout overflowed"));
         let (signaler, signal) = Signaler::new();
+        let auditor = Arc::new(Auditor::default());
         let storage = MeteredStorage::new(
             AuditedStorage::new(MemStorage::default(), auditor.clone()),
             runtime_registry,
