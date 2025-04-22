@@ -67,7 +67,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{
-        deterministic::{self, Context},
+        deterministic::{self, run_from_context, Context},
         Metrics,
     };
     use commonware_runtime::{Clock, Runner, Spawner};
@@ -338,19 +338,12 @@ mod tests {
         let mut prev_ctx = None;
 
         while completed.lock().unwrap().len() != num_validators as usize {
-            let runner = deterministic::Runner::timed(Duration::from_secs(45));
             let completed = completed.clone();
             let shares_vec = shares_vec.clone();
             let shutdowns = shutdowns.clone();
             let identity = identity.clone();
-            let context = runner.start(|mut context| async move {
-                // Print the time on the context's clock:
-                println!("time: {:?}", context.current());
 
-                if let Some(prev_ctx) = prev_ctx {
-                    context = prev_ctx;
-                }
-
+            let f = |context: deterministic::Context| async move {
                 let (network, mut oracle) = Network::new(
                     context.with_label("network"),
                     commonware_p2p::simulated::Config {
@@ -427,11 +420,15 @@ mod tests {
                 *shutdowns.lock().unwrap() += 1;
 
                 context
-            });
+            };
+
+            let context = if let Some(prev_ctx) = prev_ctx {
+                run_from_context(prev_ctx, f)
+            } else {
+                deterministic::Runner::timed(Duration::from_secs(45)).start(f)
+            };
+
             prev_ctx = Some(context.recover());
-            // let recovered = context.recover();
-            // runner = recovered.0;
-            // context = recovered.1;
         }
     }
 
