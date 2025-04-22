@@ -126,6 +126,12 @@ pub struct SignatureWeights {
     weights_cache: HashMap<Vec<u32>, BTreeMap<u32, LagrangeWeight>>,
 }
 
+impl Default for SignatureWeights {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SignatureWeights {
     /// Creates a new empty signature weights cache
     pub fn new() -> Self {
