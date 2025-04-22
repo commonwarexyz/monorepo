@@ -88,7 +88,7 @@ impl crate::Storage for Storage {
             .truncate(false)
             .open(&path)
             .await
-            .map_err(|_| Error::BlobOpenFailed(partition.into(), hex(name)))?;
+            .map_err(|e| Error::BlobOpenFailed(partition.into(), hex(name), e))?;
 
         // Set the maximum buffer size
         file.set_max_buf_size(self.cfg.maximum_buffer_size);
@@ -194,7 +194,7 @@ impl crate::Blob for Blob {
         file.0
             .set_len(len)
             .await
-            .map_err(|_| Error::BlobTruncateFailed(self.partition.clone(), hex(&self.name)))?;
+            .map_err(|e| Error::BlobTruncateFailed(self.partition.clone(), hex(&self.name), e))?;
 
         // Update the virtual file size
         file.1 = len;
@@ -206,7 +206,7 @@ impl crate::Blob for Blob {
         file.0
             .sync_all()
             .await
-            .map_err(|_| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name)))
+            .map_err(|e| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e))
     }
 
     async fn close(self) -> Result<(), Error> {
@@ -214,11 +214,11 @@ impl crate::Blob for Blob {
         file.0
             .sync_all()
             .await
-            .map_err(|_| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name)))?;
+            .map_err(|e| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e))?;
         file.0
             .shutdown()
             .await
-            .map_err(|_| Error::BlobCloseFailed(self.partition.clone(), hex(&self.name)))
+            .map_err(|e| Error::BlobCloseFailed(self.partition.clone(), hex(&self.name), e))
     }
 }
 
