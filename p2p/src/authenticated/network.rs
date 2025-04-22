@@ -18,20 +18,6 @@ use rand::{CryptoRng, Rng};
 use std::marker::PhantomData;
 use tracing::{debug, info, warn};
 
-// The maximum overhead of encoding a `message: Bytes` into a protobuf `message Message`
-// Should be at most 18 bytes for messages under 4GB, but we add a bit of padding.
-//
-// The byte overhead is calculated as follows:
-// - 1  Data field number
-// - 5* Data length varint
-// - 1  Channel field number
-// - 5  Channel value varint
-// - 1  Message field number
-// - 5* Message length varint
-//
-// (*) assumes that the length is no more than 4GB
-const PROTOBUF_OVERHEAD: usize = 64;
-
 /// Unique suffix for all messages signed by the tracker.
 const TRACKER_SUFFIX: &[u8] = b"_TRACKER";
 
@@ -182,7 +168,7 @@ impl<
         let stream_cfg = public_key::Config {
             crypto: self.cfg.crypto,
             namespace: union(&self.cfg.namespace, STREAM_SUFFIX),
-            max_message_size: self.cfg.max_message_size + PROTOBUF_OVERHEAD,
+            max_message_size: self.cfg.max_message_size,
             synchrony_bound: self.cfg.synchrony_bound,
             max_handshake_age: self.cfg.max_handshake_age,
             handshake_timeout: self.cfg.handshake_timeout,
