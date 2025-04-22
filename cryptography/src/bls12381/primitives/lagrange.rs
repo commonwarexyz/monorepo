@@ -1,4 +1,5 @@
 //!Polynomial reconstruction using precomputed Lagrange weights.
+//! https://scicomp.stackexchange.com/questions/24667/efficient-way-to-compute-lagrange-polynomials: only computes at 0
 
 use crate::bls12381::primitives::{
     group::{self, Element, Scalar},
