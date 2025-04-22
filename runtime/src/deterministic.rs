@@ -462,19 +462,6 @@ impl crate::Runner for Runner {
         F: FnOnce(Self::Context) -> Fut,
         Fut: Future,
     {
-        // RunnerWithContext {
-        //     // context: Context::new(self.cfg, self.auditor.clone()),
-        //     context: match self.state {
-        //         RunnerState::NoContext(cfg) => {
-        //             let auditor = Arc::new(Auditor::default());
-        //             let context = Context::new(cfg, auditor.clone());
-        //             self.state = RunnerState::Context(context.clone());
-        //             context
-        //         }
-        //         RunnerState::Context(context) => context,
-        //     },
-        // }
-        // .start(f)
         match self.state {
             RunnerState::NoContext(config) => {
                 let auditor = Arc::new(Auditor::default());
