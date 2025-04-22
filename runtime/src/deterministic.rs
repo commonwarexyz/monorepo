@@ -386,7 +386,7 @@ pub struct Executor {
     recovered: Mutex<bool>,
 }
 
-struct RunnerWithContext {
+pub struct RunnerWithContext {
     context: Context,
 }
 
@@ -1531,5 +1531,19 @@ mod tests {
 
         // Attempt to recover again using the same context
         cloned_context.recover();
+    }
+
+    #[test]
+    fn test_default_time_zero() {
+        // Initialize runtime
+        let executor = deterministic::Runner::default();
+
+        executor.start(|context| async move {
+            // Check that the time is zero
+            assert_eq!(
+                context.current().duration_since(UNIX_EPOCH).unwrap(),
+                Duration::ZERO
+            );
+        });
     }
 }

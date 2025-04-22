@@ -1101,8 +1101,6 @@ mod tests {
     #[test]
     fn test_deterministic_clock_sleep() {
         let executor = deterministic::Runner::default();
-        // TODO danlaine: replace?
-        // assert_eq!(context.current(), SystemTime::UNIX_EPOCH);
         test_clock_sleep(executor);
     }
 
