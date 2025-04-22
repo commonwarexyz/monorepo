@@ -111,8 +111,9 @@ mod tests {
     fn spawn_peer_engines(
         context: Context,
         registrations: &mut Registrations,
-    ) -> BTreeMap<PublicKey, Mailbox<Sha256Digest, TestMessage>> {
-        let mut mailboxes = BTreeMap::<PublicKey, Mailbox<Sha256Digest, TestMessage>>::new();
+    ) -> BTreeMap<PublicKey, Mailbox<PublicKey, Sha256Digest, TestMessage>> {
+        let mut mailboxes =
+            BTreeMap::<PublicKey, Mailbox<PublicKey, Sha256Digest, TestMessage>>::new();
         while let Some((peer, network)) = registrations.pop_first() {
             let context = context.with_label(&peer.to_string());
             let config = Config {
@@ -144,7 +145,7 @@ mod tests {
             // Send a single broadcast message from the first peer
             let message = TestMessage::new(b"hello world test message");
             let mut first_mailbox = mailboxes.get(peers.first().unwrap()).unwrap().clone();
-            first_mailbox.broadcast(message.clone()).await;
+            let result = first_mailbox.broadcast(message.clone()).await;
 
             // Allow time for propagation
             context.sleep(Duration::from_secs(1)).await;
@@ -157,6 +158,7 @@ mod tests {
                 let received_message = receiver.await.ok();
                 assert_eq!(received_message.unwrap(), message);
             }
+            assert_eq!(result.await.unwrap().len(), peers.len() - 1);
         });
     }
 
@@ -180,7 +182,8 @@ mod tests {
             let receiver_before = mailbox_a.get(digest_m1).await;
 
             // Broadcast the message
-            mailbox_a.broadcast(m1.clone()).await;
+            let result = mailbox_a.broadcast(m1.clone()).await;
+            assert_eq!(result.await.unwrap().len(), peers.len() - 1);
 
             // Wait for the pre-broadcast retrieval to complete
             let msg_before = receiver_before
@@ -222,7 +225,7 @@ mod tests {
             let digest = message.digest();
             for i in 0..100 {
                 // Broadcast the message
-                first_mailbox.broadcast(message.clone()).await;
+                let result = first_mailbox.broadcast(message.clone()).await;
                 context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
                 // Check if all peers received the message
@@ -236,6 +239,7 @@ mod tests {
                     };
                     all_received &= has;
                 }
+                assert_eq!(result.await.unwrap().len(), peers.len() - 1);
 
                 // If all received, we're done
                 if all_received {
@@ -258,7 +262,8 @@ mod tests {
             // Broadcast a message
             let message = TestMessage::new(b"cached message");
             let mut first_mailbox = mailboxes.get(peers.first().unwrap()).unwrap().clone();
-            first_mailbox.broadcast(message.clone()).await;
+            let result = first_mailbox.broadcast(message.clone()).await;
+            assert_eq!(result.await.unwrap().len(), peers.len() - 1);
 
             // Wait for propagation
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
@@ -297,7 +302,8 @@ mod tests {
             drop(dummy2);
 
             // Broadcast the message
-            mailbox1.broadcast(message.clone()).await;
+            let result = mailbox1.broadcast(message.clone()).await;
+            assert_eq!(result.await.unwrap().len(), peers.len() - 1);
 
             // Wait for propagation
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
@@ -323,7 +329,8 @@ mod tests {
                 messages.push(TestMessage::new(format!("message {}", i).as_bytes()));
             }
             for message in messages.iter() {
-                mailbox.broadcast(message.clone()).await;
+                let result = mailbox.broadcast(message.clone()).await;
+                assert_eq!(result.await.unwrap().len(), peers.len() - 1);
             }
 
             // Wait for propagation
@@ -362,11 +369,13 @@ mod tests {
             // Create and broadcast message M1 from A
             let m1 = TestMessage::new(b"message M1");
             let digest_m1 = m1.digest();
-            mailbox_a.broadcast(m1.clone()).await;
+            let result = mailbox_a.broadcast(m1.clone()).await;
+            assert_eq!(result.await.unwrap().len(), peers.len() - 1);
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
             // Broadcast M1 from C
-            mailbox_c.broadcast(m1.clone()).await;
+            let result = mailbox_c.broadcast(m1.clone()).await;
+            assert_eq!(result.await.unwrap().len(), peers.len() - 1);
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
             // M1 is now in A's and C's deques in B's engine
@@ -377,7 +386,8 @@ mod tests {
                 new_messages_a.push(TestMessage::new(format!("A{}", i).as_bytes()));
             }
             for msg in &new_messages_a {
-                mailbox_a.broadcast(msg.clone()).await;
+                let result = mailbox_a.broadcast(msg.clone()).await;
+                assert_eq!(result.await.unwrap().len(), peers.len() - 1);
             }
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
@@ -392,7 +402,8 @@ mod tests {
                 new_messages_c.push(TestMessage::new(format!("C{}", i).as_bytes()));
             }
             for msg in &new_messages_c {
-                mailbox_c.broadcast(msg.clone()).await;
+                let result = mailbox_c.broadcast(msg.clone()).await;
+                assert_eq!(result.await.unwrap().len(), peers.len() - 1);
             }
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 

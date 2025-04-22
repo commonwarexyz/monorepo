@@ -1,6 +1,7 @@
 //! Disseminate data over a wide-area network.
 
 use commonware_codec::{Codec, Config};
+use futures::channel::oneshot;
 use std::future::Future;
 
 pub mod buffered;
@@ -14,6 +15,14 @@ pub trait Broadcaster<Cfg: Config>: Clone + Send + 'static {
     /// - deserialized upon reception
     type Message: Codec<Cfg> + Clone + Send + 'static;
 
+    /// Response is the type of data that is returned once the message is broadcasted.
+    ///
+    /// It may also indicate the success or failure of the broadcast attempt.
+    type Response: Send + 'static;
+
     /// Attempt to broadcast a message to the network.
-    fn broadcast(&mut self, message: Self::Message) -> impl Future<Output = ()> + Send;
+    fn broadcast(
+        &mut self,
+        message: Self::Message,
+    ) -> impl Future<Output = oneshot::Receiver<Self::Response>> + Send;
 }
