@@ -86,14 +86,14 @@
 //! ```rust
 //! use commonware_p2p::authenticated::{self, Network};
 //! use commonware_cryptography::{Ed25519, Signer, Verifier};
-//! use commonware_runtime::{tokio::{self, Executor}, Spawner, Runner, Metrics};
+//! use commonware_runtime::{tokio, Spawner, Runner, Metrics};
 //! use governor::Quota;
 //! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 //! use std::num::NonZeroU32;
 //!
 //! // Configure context
 //! let runtime_cfg = tokio::Config::default();
-//! let (executor, context) = Executor::init(runtime_cfg.clone());
+//! let runner = tokio::Runner::new(runtime_cfg.clone());
 //!
 //! // Generate identity
 //! //
@@ -132,7 +132,7 @@
 //! );
 //!
 //! // Start context
-//! executor.start(async move {
+//! runner.start(|context| async move {
 //!     // Initialize network
 //!     let (mut network, mut oracle) = Network::new(context.with_label("network"), p2p_cfg);
 //!

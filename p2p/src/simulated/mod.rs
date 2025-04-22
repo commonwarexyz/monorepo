@@ -14,7 +14,7 @@
 //! ```rust
 //! use commonware_p2p::simulated::{Config, Link, Network};
 //! use commonware_cryptography::{Ed25519, Signer, Verifier};
-//! use commonware_runtime::{deterministic::Executor, Spawner, Runner, Metrics};
+//! use commonware_runtime::{deterministic, Spawner, Runner, Metrics};
 //!
 //! // Generate peers
 //! let peers = vec![
@@ -30,7 +30,7 @@
 //! };
 //!
 //! // Start context
-//! let (executor, context, _) = Executor::seeded(0);
+//! let executor = deterministic::Runner::seeded(0);
 //! executor.start(|context| async move {
 //!     // Initialize network
 //!     let (network, mut oracle) = Network::new(context.with_label("network"), p2p_cfg);

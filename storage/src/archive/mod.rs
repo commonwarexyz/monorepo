@@ -117,7 +117,7 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_runtime::{Spawner, Runner, deterministic::Executor};
+//! use commonware_runtime::{Spawner, Runner, deterministic};
 //! use commonware_cryptography::hash;
 //! use commonware_storage::{
 //!     index::translator::FourCap,
