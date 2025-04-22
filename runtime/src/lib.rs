@@ -18,6 +18,7 @@
 //! expect breaking changes and occasional instability.
 
 use prometheus_client::registry::Metric;
+use std::io::Error as IoError;
 use std::{
     future::Future,
     net::SocketAddr,
@@ -42,7 +43,7 @@ pub use utils::{create_pool, reschedule, Handle, Signal, Signaler};
 const METRICS_PREFIX: &str = "runtime";
 
 /// Errors that can occur when interacting with the runtime.
-#[derive(Error, Debug, PartialEq)]
+#[derive(Error, Debug)]
 pub enum Error {
     #[error("exited")]
     Exited,
@@ -68,16 +69,16 @@ pub enum Error {
     PartitionMissing(String),
     #[error("partition corrupt: {0}")]
     PartitionCorrupt(String),
-    #[error("blob open failed: {0}/{1}")]
-    BlobOpenFailed(String, String),
+    #[error("blob open failed: {0}/{1} error: {2}")]
+    BlobOpenFailed(String, String, IoError),
     #[error("blob missing: {0}/{1}")]
     BlobMissing(String, String),
-    #[error("blob truncate failed: {0}/{1}")]
-    BlobTruncateFailed(String, String),
-    #[error("blob sync failed: {0}/{1}")]
-    BlobSyncFailed(String, String),
-    #[error("blob close failed: {0}/{1}")]
-    BlobCloseFailed(String, String),
+    #[error("blob truncate failed: {0}/{1} error: {2}")]
+    BlobTruncateFailed(String, String, IoError),
+    #[error("blob sync failed: {0}/{1} error: {2}")]
+    BlobSyncFailed(String, String, IoError),
+    #[error("blob close failed: {0}/{1} error: {2}")]
+    BlobCloseFailed(String, String, IoError),
     #[error("blob insufficient length")]
     BlobInsufficientLength,
     #[error("offset overflow")]
@@ -391,7 +392,7 @@ mod tests {
                 }
             });
             handle.abort();
-            assert_eq!(handle.await, Err(Error::Closed));
+            assert!(matches!(handle.await, Err(Error::Closed)));
         });
     }
 
@@ -409,7 +410,7 @@ mod tests {
             let result = context.spawn(|_| async move {
                 panic!("blah");
             });
-            assert_eq!(result.await, Err(Error::Exited));
+            assert!(matches!(result.await, Err(Error::Exited)));
             Result::<(), Error>::Ok(())
         });
 
@@ -821,7 +822,7 @@ mod tests {
         runner.start(async move {
             let handle = context.spawn_ref();
             let result = handle(async move { 42 }).await;
-            assert_eq!(result, Ok(42));
+            assert!(matches!(result, Ok(42)));
         });
     }
 
@@ -829,12 +830,12 @@ mod tests {
         runner.start(async move {
             let handle = context.spawn_ref();
             let result = handle(async move { 42 }).await;
-            assert_eq!(result, Ok(42));
+            assert!(matches!(result, Ok(42)));
 
             // Ensure context is consumed
             let handle = context.spawn_ref();
             let result = handle(async move { 42 }).await;
-            assert_eq!(result, Ok(42));
+            assert!(matches!(result, Ok(42)));
         });
     }
 
@@ -842,7 +843,7 @@ mod tests {
         runner.start(async move {
             let handle = context.spawn_ref();
             let result = handle(async move { 42 }).await;
-            assert_eq!(result, Ok(42));
+            assert!(matches!(result, Ok(42)));
 
             // Ensure context is consumed
             context.spawn(|_| async move { 42 });
@@ -853,7 +854,7 @@ mod tests {
         runner.start(async move {
             let handle = context.spawn_blocking(|| 42);
             let result = handle.await;
-            assert_eq!(result, Ok(42));
+            assert!(matches!(result, Ok(42)));
         });
     }
 
@@ -889,7 +890,7 @@ mod tests {
             sender.send(()).unwrap();
 
             // Wait for the task to complete
-            assert_eq!(handle.await, Ok(100_000_000));
+            assert!(matches!(handle.await, Ok(100_000_000)));
         });
     }
 
@@ -1323,7 +1324,7 @@ mod tests {
                 panic!("blocking task panicked");
             });
             let result = handle.await;
-            assert_eq!(result, Err(Error::Exited));
+            assert!(matches!(result, Err(Error::Exited)));
         });
     }
 
