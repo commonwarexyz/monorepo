@@ -138,10 +138,7 @@ mod tests {
     use commonware_cryptography::{sha256::Digest as Sha256Digest, Ed25519, Sha256, Signer};
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};
-    use commonware_runtime::{
-        deterministic::{self, run_from_context},
-        Clock, Metrics, Runner, Spawner,
-    };
+    use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
     use commonware_storage::journal::variable::{Config as JConfig, Journal};
     use commonware_utils::{quorum, Array};
     use engine::Engine;
@@ -627,13 +624,11 @@ mod tests {
             };
 
             let (complete, context) = if let Some(prev_ctx) = prev_ctx {
-                // Recover context
-                run_from_context(prev_ctx, f)
+                deterministic::Runner::from(prev_ctx)
             } else {
-                // Create new context
-                let executor = deterministic::Runner::timed(Duration::from_secs(30));
-                executor.start(f)
-            };
+                deterministic::Runner::timed(Duration::from_secs(30))
+            }
+            .start(f);
 
             // If we are done, break
             if complete {

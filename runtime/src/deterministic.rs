@@ -390,10 +390,28 @@ pub struct Executor {
     recovered: Mutex<bool>,
 }
 
+enum RunnerState {
+    NoContext(Config),
+    Context(Context),
+}
+
 /// Implementation of [`crate::Runner`] for the `deterministic` runtime.
 pub struct Runner {
-    cfg: Config,
-    auditor: Arc<Auditor>,
+    state: RunnerState,
+}
+
+impl From<Config> for Runner {
+    fn from(cfg: Config) -> Self {
+        Self::new(cfg)
+    }
+}
+
+impl From<Context> for Runner {
+    fn from(context: Context) -> Self {
+        Self {
+            state: RunnerState::Context(context),
+        }
+    }
 }
 
 impl Runner {
@@ -405,8 +423,7 @@ impl Runner {
         }
 
         Runner {
-            cfg,
-            auditor: Arc::new(Auditor::default()),
+            state: RunnerState::NoContext(cfg),
         }
     }
 
@@ -429,10 +446,6 @@ impl Runner {
         };
         Self::new(cfg)
     }
-
-    pub fn auditor(&self) -> Arc<Auditor> {
-        self.auditor.clone()
-    }
 }
 
 impl Default for Runner {
@@ -444,15 +457,181 @@ impl Default for Runner {
 impl crate::Runner for Runner {
     type Context = Context;
 
-    fn start<F, Fut>(self, f: F) -> Fut::Output
+    fn start<F, Fut>(mut self, f: F) -> Fut::Output
     where
         F: FnOnce(Self::Context) -> Fut,
         Fut: Future,
     {
-        RunnerWithContext {
-            context: Context::new(self.cfg, self.auditor.clone()),
+        // RunnerWithContext {
+        //     // context: Context::new(self.cfg, self.auditor.clone()),
+        //     context: match self.state {
+        //         RunnerState::NoContext(cfg) => {
+        //             let auditor = Arc::new(Auditor::default());
+        //             let context = Context::new(cfg, auditor.clone());
+        //             self.state = RunnerState::Context(context.clone());
+        //             context
+        //         }
+        //         RunnerState::Context(context) => context,
+        //     },
+        // }
+        // .start(f)
+        match self.state {
+            RunnerState::NoContext(config) => {
+                let auditor = Arc::new(Auditor::default());
+                let context = Context::new(config, auditor.clone());
+                self.state = RunnerState::Context(context.clone());
+                self.start(f)
+            }
+            RunnerState::Context(context) => {
+                let executor = context.executor.clone();
+
+                // Pin root task to the heap
+                let mut root = Box::pin(f(context));
+
+                // Register the root task
+                Tasks::register_root(&executor.tasks);
+
+                // Process tasks until root task completes or progress stalls
+                let mut iter = 0;
+                loop {
+                    // Ensure we have not exceeded our deadline
+                    {
+                        let current = executor.time.lock().unwrap();
+                        if let Some(deadline) = executor.deadline {
+                            if *current >= deadline {
+                                panic!("runtime timeout");
+                            }
+                        }
+                    }
+
+                    // Snapshot available tasks
+                    let mut tasks = executor.tasks.drain();
+
+                    // Shuffle tasks
+                    {
+                        let mut rng = executor.rng.lock().unwrap();
+                        tasks.shuffle(&mut *rng);
+                    }
+
+                    // Run all snapshotted tasks
+                    //
+                    // This approach is more efficient than randomly selecting a task one-at-a-time
+                    // because it ensures we don't pull the same pending task multiple times in a row (without
+                    // processing a different task required for other tasks to make progress).
+                    trace!(iter, tasks = tasks.len(), "starting loop");
+                    for task in tasks {
+                        // Record task for auditing
+                        executor.auditor.process_task(task.id, &task.label);
+                        trace!(id = task.id, "processing task");
+
+                        // Record task poll
+                        executor
+                            .metrics
+                            .task_polls
+                            .get_or_create(&Work {
+                                label: task.label.clone(),
+                            })
+                            .inc();
+
+                        // Prepare task for polling
+                        let waker = waker_ref(&task);
+                        let mut cx = task::Context::from_waker(&waker);
+                        match &task.operation {
+                            Operation::Root => {
+                                // Poll the root task
+                                if let Poll::Ready(output) = root.as_mut().poll(&mut cx) {
+                                    trace!(id = task.id, "task is complete");
+                                    *executor.finished.lock().unwrap() = true;
+                                    return output;
+                                }
+                            }
+                            Operation::Work { future, completed } => {
+                                // If task is completed, skip it
+                                if *completed.lock().unwrap() {
+                                    trace!(id = task.id, "dropping already complete task");
+                                    continue;
+                                }
+
+                                // Poll the task
+                                let mut fut = future.lock().unwrap();
+                                if fut.as_mut().poll(&mut cx).is_ready() {
+                                    trace!(id = task.id, "task is complete");
+                                    *completed.lock().unwrap() = true;
+                                    continue;
+                                }
+                            }
+                        }
+
+                        // Try again later if task is still pending
+                        trace!(id = task.id, "task is still pending");
+                    }
+
+                    // Advance time by cycle
+                    //
+                    // This approach prevents starvation if some task never yields (to approximate this,
+                    // duration can be set to 1ns).
+                    let mut current;
+                    {
+                        let mut time = executor.time.lock().unwrap();
+                        *time = time
+                            .checked_add(executor.cycle)
+                            .expect("executor time overflowed");
+                        current = *time;
+                    }
+                    trace!(now = current.epoch_millis(), "time advanced");
+
+                    // Skip time if there is nothing to do
+                    if executor.tasks.len() == 0 {
+                        let mut skip = None;
+                        {
+                            let sleeping = executor.sleeping.lock().unwrap();
+                            if let Some(next) = sleeping.peek() {
+                                if next.time > current {
+                                    skip = Some(next.time);
+                                }
+                            }
+                        }
+                        if skip.is_some() {
+                            {
+                                let mut time = executor.time.lock().unwrap();
+                                *time = skip.unwrap();
+                                current = *time;
+                            }
+                            trace!(now = current.epoch_millis(), "time skipped");
+                        }
+                    }
+
+                    // Wake all sleeping tasks that are ready
+                    let mut to_wake = Vec::new();
+                    let mut remaining;
+                    {
+                        let mut sleeping = executor.sleeping.lock().unwrap();
+                        while let Some(next) = sleeping.peek() {
+                            if next.time <= current {
+                                let sleeper = sleeping.pop().unwrap();
+                                to_wake.push(sleeper.waker);
+                            } else {
+                                break;
+                            }
+                        }
+                        remaining = sleeping.len();
+                    }
+                    for waker in to_wake {
+                        waker.wake();
+                    }
+
+                    // Account for remaining tasks
+                    remaining += executor.tasks.len();
+
+                    // If there are no tasks to run and no tasks sleeping, the executor is stalled
+                    // and will never finish.
+                    if remaining == 0 {
+                        panic!("runtime stalled");
+                    }
+                    iter += 1;
+                }
+            }
         }
-        .start(f)
     }
 }
 
@@ -478,29 +657,6 @@ impl ArcWake for Task {
     fn wake_by_ref(arc_self: &Arc<Self>) {
         arc_self.tasks.enqueue(arc_self.clone());
     }
-}
-
-struct RunnerWithContext {
-    context: Context,
-}
-
-impl From<Context> for RunnerWithContext {
-    fn from(context: Context) -> Self {
-        RunnerWithContext { context }
-    }
-}
-
-/// Runs `f` with the given context.
-/// This can be useful for testing purposes when we want to
-/// re-use the same context for multiple executions.
-pub fn run_from_context<F, Fut>(context: Context, f: F) -> Fut::Output
-where
-    F: FnOnce(Context) -> Fut,
-    Fut: Future,
-{
-    use crate::Runner as _;
-
-    RunnerWithContext { context }.start(f)
 }
 
 /// A task queue that is used to manage the tasks that are being executed by the runtime.
@@ -585,164 +741,6 @@ impl Tasks {
     /// Get the number of tasks in the queue.
     fn len(&self) -> usize {
         self.queue.lock().unwrap().len()
-    }
-}
-
-impl crate::Runner for RunnerWithContext {
-    type Context = Context;
-
-    fn start<F, Fut>(self, f: F) -> Fut::Output
-    where
-        F: FnOnce(Self::Context) -> Fut,
-        Fut: Future,
-    {
-        let executor = self.context.executor.clone();
-
-        // Pin root task to the heap
-        let mut root = Box::pin(f(self.context));
-
-        // Register the root task
-        Tasks::register_root(&executor.tasks);
-
-        // Process tasks until root task completes or progress stalls
-        let mut iter = 0;
-        loop {
-            // Ensure we have not exceeded our deadline
-            {
-                let current = executor.time.lock().unwrap();
-                if let Some(deadline) = executor.deadline {
-                    if *current >= deadline {
-                        panic!("runtime timeout");
-                    }
-                }
-            }
-
-            // Snapshot available tasks
-            let mut tasks = executor.tasks.drain();
-
-            // Shuffle tasks
-            {
-                let mut rng = executor.rng.lock().unwrap();
-                tasks.shuffle(&mut *rng);
-            }
-
-            // Run all snapshotted tasks
-            //
-            // This approach is more efficient than randomly selecting a task one-at-a-time
-            // because it ensures we don't pull the same pending task multiple times in a row (without
-            // processing a different task required for other tasks to make progress).
-            trace!(iter, tasks = tasks.len(), "starting loop");
-            for task in tasks {
-                // Record task for auditing
-                executor.auditor.process_task(task.id, &task.label);
-                trace!(id = task.id, "processing task");
-
-                // Record task poll
-                executor
-                    .metrics
-                    .task_polls
-                    .get_or_create(&Work {
-                        label: task.label.clone(),
-                    })
-                    .inc();
-
-                // Prepare task for polling
-                let waker = waker_ref(&task);
-                let mut cx = task::Context::from_waker(&waker);
-                match &task.operation {
-                    Operation::Root => {
-                        // Poll the root task
-                        if let Poll::Ready(output) = root.as_mut().poll(&mut cx) {
-                            trace!(id = task.id, "task is complete");
-                            *executor.finished.lock().unwrap() = true;
-                            return output;
-                        }
-                    }
-                    Operation::Work { future, completed } => {
-                        // If task is completed, skip it
-                        if *completed.lock().unwrap() {
-                            trace!(id = task.id, "dropping already complete task");
-                            continue;
-                        }
-
-                        // Poll the task
-                        let mut fut = future.lock().unwrap();
-                        if fut.as_mut().poll(&mut cx).is_ready() {
-                            trace!(id = task.id, "task is complete");
-                            *completed.lock().unwrap() = true;
-                            continue;
-                        }
-                    }
-                }
-
-                // Try again later if task is still pending
-                trace!(id = task.id, "task is still pending");
-            }
-
-            // Advance time by cycle
-            //
-            // This approach prevents starvation if some task never yields (to approximate this,
-            // duration can be set to 1ns).
-            let mut current;
-            {
-                let mut time = executor.time.lock().unwrap();
-                *time = time
-                    .checked_add(executor.cycle)
-                    .expect("executor time overflowed");
-                current = *time;
-            }
-            trace!(now = current.epoch_millis(), "time advanced");
-
-            // Skip time if there is nothing to do
-            if executor.tasks.len() == 0 {
-                let mut skip = None;
-                {
-                    let sleeping = executor.sleeping.lock().unwrap();
-                    if let Some(next) = sleeping.peek() {
-                        if next.time > current {
-                            skip = Some(next.time);
-                        }
-                    }
-                }
-                if skip.is_some() {
-                    {
-                        let mut time = executor.time.lock().unwrap();
-                        *time = skip.unwrap();
-                        current = *time;
-                    }
-                    trace!(now = current.epoch_millis(), "time skipped");
-                }
-            }
-
-            // Wake all sleeping tasks that are ready
-            let mut to_wake = Vec::new();
-            let mut remaining;
-            {
-                let mut sleeping = executor.sleeping.lock().unwrap();
-                while let Some(next) = sleeping.peek() {
-                    if next.time <= current {
-                        let sleeper = sleeping.pop().unwrap();
-                        to_wake.push(sleeper.waker);
-                    } else {
-                        break;
-                    }
-                }
-                remaining = sleeping.len();
-            }
-            for waker in to_wake {
-                waker.wake();
-            }
-
-            // Account for remaining tasks
-            remaining += executor.tasks.len();
-
-            // If there are no tasks to run and no tasks sleeping, the executor is stalled
-            // and will never finish.
-            if remaining == 0 {
-                panic!("runtime stalled");
-            }
-            iter += 1;
-        }
     }
 }
 
@@ -1480,7 +1478,7 @@ mod tests {
         assert_eq!(state, recovered_context.auditor().state());
 
         // Check that synced storage persists after recovery
-        let executor = RunnerWithContext::from(recovered_context);
+        let executor = Runner::from(recovered_context);
         executor.start(|context| async move {
             let blob = context.open(partition, name).await.unwrap();
             let len = blob.len().await.unwrap();
@@ -1510,7 +1508,7 @@ mod tests {
 
         // Recover the runtime
         let context = context.recover();
-        let executor = RunnerWithContext::from(context);
+        let executor = Runner::from(context);
 
         // Check that unsynced storage does not persist after recovery
         executor.start(|context| async move {

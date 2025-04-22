@@ -67,7 +67,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{
-        deterministic::{self, run_from_context, Context},
+        deterministic::{self, Context},
         Metrics,
     };
     use commonware_runtime::{Clock, Runner, Spawner};
@@ -423,10 +423,11 @@ mod tests {
             };
 
             let context = if let Some(prev_ctx) = prev_ctx {
-                run_from_context(prev_ctx, f)
+                deterministic::Runner::from(prev_ctx)
             } else {
-                deterministic::Runner::timed(Duration::from_secs(45)).start(f)
-            };
+                deterministic::Runner::timed(Duration::from_secs(45))
+            }
+            .start(f);
 
             prev_ctx = Some(context.recover());
         }
