@@ -16,6 +16,7 @@ use std::{
     hash::{Hash, Hasher},
     ops::Deref,
 };
+use zeroize::Zeroize;
 
 const CURVE_NAME: &str = "secp256r1";
 const PRIVATE_KEY_LENGTH: usize = 32;
@@ -163,6 +164,13 @@ impl Debug for PrivateKey {
 impl Display for PrivateKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", hex(&self.raw))
+    }
+}
+
+impl Zeroize for PrivateKey {
+    fn zeroize(&mut self) {
+        self.raw.zeroize();
+        // `ZeroizeOnDrop` is implemented for `SigningKey` and can't be called directly.
     }
 }
 

@@ -8,6 +8,7 @@ use std::borrow::Cow;
 use std::fmt::{Debug, Display};
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
+use zeroize::Zeroize;
 
 const CURVE_NAME: &str = "ed25519";
 const PRIVATE_KEY_LENGTH: usize = 32;
@@ -202,6 +203,13 @@ impl Debug for PrivateKey {
 impl Display for PrivateKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", hex(&self.raw))
+    }
+}
+
+impl Zeroize for PrivateKey {
+    fn zeroize(&mut self) {
+        self.raw.zeroize();
+        self.key.zeroize();
     }
 }
 
