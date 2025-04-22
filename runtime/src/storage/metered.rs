@@ -13,7 +13,7 @@ pub struct Metrics {
 
 impl Metrics {
     /// Initialize the `Metrics` struct and register the metrics in the provided registry.
-    fn new(registry: &mut Registry) -> Self {
+    pub(crate) fn new(registry: &mut Registry) -> Self {
         let metrics = Self {
             open_blobs: Gauge::default(),
             storage_reads: Counter::default(),

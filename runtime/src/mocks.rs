@@ -175,7 +175,7 @@ mod tests {
                 // Take the waiter and drop it.
                 sink.channel.lock().unwrap().waiter.take();
             },);
-            assert_eq!(v, Err(Error::RecvFailed));
+            assert!(matches!(v, Err(Error::RecvFailed)));
         });
     }
 
@@ -203,7 +203,7 @@ mod tests {
 
             // Try to send a message (longer than the requested amount), but the receiver is dropped.
             let result = sink.send(b"hello world").await;
-            assert_eq!(result, Err(Error::SendFailed));
+            assert!(matches!(result, Err(Error::SendFailed)));
         });
     }
 

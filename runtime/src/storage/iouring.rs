@@ -2,6 +2,7 @@ use std::{
     collections::HashMap,
     fs::{self, File},
     future::Future,
+    io::{Error as IoError, ErrorKind},
     os::fd::{AsRawFd as _, OwnedFd},
     path::PathBuf,
     pin::Pin,
@@ -122,11 +123,11 @@ pub struct Storage {
 }
 
 impl Storage {
-    pub fn start<S: Spawner>(&self, spawner: S) -> Self {
+    pub fn start<S: Spawner>(cfg: &Config, spawner: S) -> Self {
         let (sender, receiver) =
             mpsc::channel::<(io_uring::squeue::Entry, oneshot::Sender<i32>)>(IOURING_SIZE as usize);
         let storage = Storage {
-            storage_directory: self.storage_directory.clone(),
+            storage_directory: cfg.storage_directory.clone(),
             io_sender: sender.clone(),
         };
         spawner.spawn(|_| do_work(receiver));
@@ -142,7 +143,7 @@ impl crate::Storage for Storage {
         let path = self.storage_directory.join(partition).join(hex(name));
         let parent = path
             .parent()
-            .ok_or_else(|| Error::BlobOpenFailed(partition.into(), hex(name)))?;
+            .ok_or_else(|| Error::PartitionMissing(partition.into()))?;
 
         // Create the partition directory if it does not exist
         fs::create_dir_all(parent).map_err(|_| Error::PartitionCreationFailed(partition.into()))?;
@@ -154,7 +155,7 @@ impl crate::Storage for Storage {
             .create(true)
             .truncate(false)
             .open(&path)
-            .map_err(|_| Error::BlobOpenFailed(partition.into(), hex(name)))?;
+            .map_err(|e| Error::BlobOpenFailed(partition.into(), hex(name), e))?;
 
         // Get the file length
         let len = file.metadata().map_err(|_| Error::ReadFailed)?.len();
@@ -335,17 +336,28 @@ impl crate::Blob for Blob {
             .clone()
             .send((op, sender))
             .await
-            .map_err(|_| Error::BlobTruncateFailed(self.partition.clone(), hex(&self.name)))?;
+            .map_err(|_| {
+                Error::BlobTruncateFailed(
+                    self.partition.clone(),
+                    hex(&self.name),
+                    IoError::new(ErrorKind::Other, "channel send failed"),
+                )
+            })?;
         // Wait for the operation to complete
-        let result = receiver
-            .await
-            .map_err(|_| Error::BlobTruncateFailed(self.partition.clone(), hex(&self.name)))?;
+        let result = receiver.await.map_err(|_| {
+            Error::BlobTruncateFailed(
+                self.partition.clone(),
+                hex(&self.name),
+                IoError::new(ErrorKind::Other, "TODO"),
+            )
+        })?;
 
         // If the return value is non-positive, it indicates an error.
         if result <= 0 {
             return Err(Error::BlobTruncateFailed(
                 self.partition.clone(),
                 hex(&self.name),
+                IoError::new(ErrorKind::Other, "TODO"),
             ));
         }
         // Update length
@@ -362,16 +374,27 @@ impl crate::Blob for Blob {
             .clone()
             .send((op, sender))
             .await
-            .map_err(|_| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name)))?;
+            .map_err(|_| {
+                Error::BlobSyncFailed(
+                    self.partition.clone(),
+                    hex(&self.name),
+                    IoError::new(ErrorKind::Other, "TODO"),
+                )
+            })?;
         // Wait for the operation to complete
-        let result = receiver
-            .await
-            .map_err(|_| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name)))?;
+        let result = receiver.await.map_err(|_| {
+            Error::BlobSyncFailed(
+                self.partition.clone(),
+                hex(&self.name),
+                IoError::new(ErrorKind::Other, "TODO"),
+            )
+        })?;
         // If the return value is non-positive, it indicates an error.
         if result <= 0 {
             return Err(Error::BlobSyncFailed(
                 self.partition.clone(),
                 hex(&self.name),
+                IoError::new(ErrorKind::Other, "TODO"),
             ));
         }
 
@@ -387,7 +410,11 @@ impl crate::Blob for Blob {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::tests::run_storage_tests;
+    use crate::{
+        storage::{metered::Metrics, tests::run_storage_tests},
+        tokio::{Spawner, SpawnerConfig},
+    };
+    use prometheus_client::registry::Registry;
     use rand::{Rng as _, SeedableRng as _};
     use std::env;
 
@@ -396,8 +423,18 @@ mod tests {
         let mut rng = rand::rngs::StdRng::from_entropy();
         let storage_directory =
             env::temp_dir().join(format!("commonware_iouring_storage_{}", rng.gen::<u64>()));
-        let config = Config::new(storage_directory.clone());
-        let storage = Storage::new(config);
+
+        // Initialize runtime
+        let runtime = Arc::new(tokio::runtime::Runtime::new().unwrap());
+
+        let spawner = Spawner::new(
+            String::new(),
+            SpawnerConfig { catch_panics: true },
+            &mut Registry::default(),
+            runtime.clone(),
+        );
+
+        let storage = Storage::start(&Config::new(storage_directory.clone()), spawner);
         run_storage_tests(storage).await;
     }
 }
