@@ -70,8 +70,6 @@ pub trait Point: Element {
 /// All arithmetic is performed modulo the prime
 /// `r = 0x73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001`,
 /// the order of the BLS12‑381 G1/G2 groups.
-//
-// `bl`
 #[derive(Clone, Eq, PartialEq)]
 #[repr(transparent)]
 pub struct Scalar(blst_fr);
