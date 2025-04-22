@@ -8,7 +8,7 @@ use std::borrow::Cow;
 use std::fmt::{Debug, Display};
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const CURVE_NAME: &str = "ed25519";
 const PRIVATE_KEY_LENGTH: usize = 32;
@@ -57,7 +57,7 @@ impl Signer for Ed25519 {
     }
 
     fn from(private_key: PrivateKey) -> Option<Self> {
-        let signer = private_key.key;
+        let signer = private_key.key.clone();
         let verifier = signer.verification_key();
         Some(Self { signer, verifier })
     }
@@ -212,6 +212,14 @@ impl Zeroize for PrivateKey {
         self.key.zeroize();
     }
 }
+
+impl Drop for PrivateKey {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for PrivateKey {}
 
 /// Ed25519 Public Key.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]

@@ -16,7 +16,7 @@ use std::{
     hash::{Hash, Hasher},
     ops::Deref,
 };
-use zeroize::Zeroize;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const CURVE_NAME: &str = "secp256r1";
 const PRIVATE_KEY_LENGTH: usize = 32;
@@ -63,7 +63,7 @@ impl CommonwareSigner for Secp256r1 {
     }
 
     fn from(private_key: PrivateKey) -> Option<Self> {
-        let signer = private_key.key;
+        let signer = private_key.key.clone();
         let verifier = signer.verifying_key().to_owned();
         Some(Self { signer, verifier })
     }
@@ -171,8 +171,18 @@ impl Zeroize for PrivateKey {
     fn zeroize(&mut self) {
         self.raw.zeroize();
         // `ZeroizeOnDrop` is implemented for `SigningKey` and can't be called directly.
+        //
+        // Reference: https://github.com/RustCrypto/signatures/blob/a83c494216b6f3dacba5d4e4376785e2ea142044/ecdsa/src/signing.rs#L487-L493
     }
 }
+
+impl Drop for PrivateKey {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for PrivateKey {}
 
 /// Secp256r1 Public Key.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd)]

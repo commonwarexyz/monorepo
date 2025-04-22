@@ -35,7 +35,7 @@ use std::{
     hash::{Hash, Hasher},
     ops::Deref,
 };
-use zeroize::Zeroize;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const CURVE_NAME: &str = "bls12381";
 
@@ -180,6 +180,14 @@ impl Zeroize for PrivateKey {
         self.key.zeroize();
     }
 }
+
+impl Drop for PrivateKey {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for PrivateKey {}
 
 /// BLS12-381 public key.
 #[derive(Clone, Eq, PartialEq)]

@@ -368,6 +368,12 @@ impl Debug for Share {
     }
 }
 
+impl Zeroize for Share {
+    fn zeroize(&mut self) {
+        self.private.zeroize();
+    }
+}
+
 impl G1 {
     /// Encodes the G1 element into a slice.
     fn as_slice(&self) -> [u8; Self::SIZE] {
