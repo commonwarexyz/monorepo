@@ -14,7 +14,7 @@ use engine::{config::Config, engine::Engine, ingress::Ingress};
 /// Represents data that has a linear order.
 pub trait OrderedData: Encode + Decode + Clone + Debug + Send + Sync + 'static {
     /// The type used for indexing or sequencing the data (e.g., block number, MMR index).
-    type Index: Copy + Ord + Hash + Debug + Display + Send + Sync + 'static;
+    type Index: Copy + Ord + Hash + Debug+ Send + Sync + 'static;
 
     /// Returns the index of this data item.
     fn index(&self) -> Self::Index;
@@ -25,7 +25,7 @@ pub trait Proof: Encode + Decode + Clone + Debug + Send + Sync + 'static {
     /// The type of index this proof applies to.
     ///
     /// Must match the `OrderedData::Index`.
-    type Index: Copy + Ord + Hash + Debug + Display + Send + Sync + 'static;
+    type Index: Copy + Ord + Hash + Debug+ Send + Sync + 'static;
 
     /// Indicates the range of indices this proof covers or is relevant for.
     ///
@@ -63,7 +63,7 @@ pub trait DataSource<D: OrderedData, P: Proof<Index = D::Index>>:
     type Error: StdError + Send + Sync + 'static;
 
     /// Fetches a single data item by its index.
-    fn fetch_item(
+    fn fetch_index(
         &self,
         index: D::Index,
     ) -> impl Future<Output = Result<Option<D>, Self::Error>> + Send;
@@ -76,9 +76,9 @@ pub trait DataSource<D: OrderedData, P: Proof<Index = D::Index>>:
         range: RangeInclusive<D::Index>,
     ) -> impl Future<Output = Result<Vec<D>, Self::Error>> + Send;
 
-    /// Fetches the latest available proof relevant to the given index range hint.
+    /// Fetches the latest available proof.
+    /// 
     /// This could be a proof for the latest item, a root hash, etc.
-    /// The source should aim to return the proof covering the highest possible index.
     fn fetch_latest_proof(
         &self,
         hint_range: Option<RangeInclusive<D::Index>>,
@@ -127,7 +127,7 @@ pub trait PersistentStore<D: OrderedData>: Debug + Send + Sync + 'static {
 }
 
 /// Trait for observing (and possibly persisting) data as it becomes contiguous and verified.
-pub trait Indexer<D: OrderedData>: Send + Sync + 'static {
+pub trait Indexer<: OrderedData>: Send + Sync + 'static {
     type Error: StdError + Send + Sync + 'static;
 
     /// Persist the item.

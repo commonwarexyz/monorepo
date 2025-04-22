@@ -1215,6 +1215,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-sync"
+version = "0.0.44"
+dependencies = [
+ "bimap",
+ "bytes",
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-p2p",
+ "commonware-runtime",
+ "commonware-stream",
+ "commonware-utils",
+ "futures",
+ "governor",
+ "prometheus-client",
+ "rand",
+ "thiserror 2.0.12",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "commonware-utils"
 version = "0.0.44"
 dependencies = [
