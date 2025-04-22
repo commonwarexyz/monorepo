@@ -97,15 +97,15 @@ fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
 pub enum Voter<D: Digest> {
     /// A single validator notarize over a proposal
     Notarize(Notarize<D>),
-    /// An recovered threshold signature for a notarization
+    /// A recovered threshold signature for a notarization
     Notarization(Notarization<D>),
     /// A single validator nullify to skip the current view (usually when leader is unresponsive)
     Nullify(Nullify),
-    /// An recovered threshold signature for a nullification
+    /// A recovered threshold signature for a nullification
     Nullification(Nullification),
     /// A single validator finalize over a proposal
     Finalize(Finalize<D>),
-    /// An recovered threshold signature for a finalization
+    /// A recovered threshold signature for a finalization
     Finalization(Finalization<D>),
 }
 
@@ -362,7 +362,7 @@ impl<D: Digest> FixedSize for Notarize<D> {
     const SIZE: usize = Proposal::<D>::SIZE + PartialSignature::SIZE + PartialSignature::SIZE;
 }
 
-/// Notarization represents an recovered threshold signature certifying a proposal.
+/// Notarization represents a recovered threshold signature certifying a proposal.
 /// When a proposal is notarized, it means at least 2f+1 validators have voted for it.
 /// The threshold signatures provide compact verification compared to collecting individual signatures.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
@@ -547,7 +547,7 @@ impl FixedSize for Nullify {
     const SIZE: usize = View::SIZE + PartialSignature::SIZE + PartialSignature::SIZE;
 }
 
-/// Nullification represents an recovered threshold signature to skip a view.
+/// Nullification represents a recovered threshold signature to skip a view.
 /// When a view is nullified, the consensus moves to the next view without finalizing a block.
 /// The threshold signatures provide compact verification compared to collecting individual signatures.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
@@ -702,7 +702,7 @@ impl<D: Digest> FixedSize for Finalize<D> {
     const SIZE: usize = Proposal::<D>::SIZE + PartialSignature::SIZE;
 }
 
-/// Finalization represents an recovered threshold signature to finalize a proposal.
+/// Finalization represents a recovered threshold signature to finalize a proposal.
 /// When a proposal is finalized, it becomes the canonical block for its view.
 /// The threshold signatures provide compact verification compared to collecting individual signatures.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
