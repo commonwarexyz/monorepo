@@ -1,7 +1,7 @@
 use super::{Config, Error, Translator};
 use crate::{index::Index, journal::variable::Journal};
 use bytes::{Buf, BufMut, Bytes};
-use commonware_codec::FixedSize;
+use commonware_codec::{Codec, FixedSize};
 use commonware_runtime::{Metrics, Storage};
 use commonware_utils::Array;
 use futures::{pin_mut, StreamExt};
@@ -24,8 +24,8 @@ struct Location {
 }
 
 /// Implementation of `Archive` storage.
-pub struct Archive<T: Translator, K: Array, E: Storage + Metrics> {
-    cfg: Config<T>,
+pub struct Archive<T: Translator, E: Storage + Metrics, K: Array, V: Codec> {
+    cfg: Config<T, V::Config>,
     journal: Journal<E>,
 
     // Oldest allowed section to read from. This is updated when `prune` is called.
@@ -48,10 +48,11 @@ pub struct Archive<T: Translator, K: Array, E: Storage + Metrics> {
     has: Counter,
     syncs: Counter,
 
-    _phantom: std::marker::PhantomData<K>,
+    _phantom_k: std::marker::PhantomData<K>,
+    _phantom_v: std::marker::PhantomData<V>,
 }
 
-impl<T: Translator, K: Array, E: Storage + Metrics> Archive<T, K, E> {
+impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V> {
     const PREFIX_LEN: u32 = (u64::SIZE + K::SIZE + u32::SIZE) as u32;
 
     /// Initialize a new `Archive` instance.

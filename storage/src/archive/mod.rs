@@ -152,6 +152,7 @@
 //! ```
 
 mod storage;
+use commonware_codec::Config as CodecConfig;
 pub use storage::{Archive, Identifier};
 
 use crate::index::Translator;
@@ -176,12 +177,14 @@ pub enum Error {
 
 /// Configuration for `Archive` storage.
 #[derive(Clone)]
-pub struct Config<T: Translator> {
+pub struct Config<T: Translator, C: CodecConfig> {
     /// Logic to transform keys into their index representation.
     ///
     /// `Archive` assumes that all internal keys are spread uniformly across the key space.
     /// If that is not the case, lookups may be O(n) instead of O(1).
     pub translator: T,
+
+    pub codec_config: C,
 
     /// Mask to apply to indices to determine section.
     ///
