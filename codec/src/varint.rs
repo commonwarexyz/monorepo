@@ -1,7 +1,11 @@
 //! Variable-length integer encoding and decoding
 //!
 //! This module implements Google's Protocol Buffers variable-length integer encoding.
-//! Each byte uses 7 bits for the value and 1 bit to indicate if more bytes follow.
+//! Each byte uses:
+//! - 7 bits for the value
+//! - 1 "continuation" bit to indicate if more bytes follow
+//! 
+//! `usize` and `isize` are omitted to prevent behavior from depending on the target architecture.
 
 use crate::{EncodeSize, Error, Read, Write};
 use bytes::{Buf, BufMut};
@@ -12,9 +16,9 @@ const DATA_BITS_PER_BYTE: usize = 7;
 const DATA_BITS_MASK: u8 = 0x7F;
 const CONTINUATION_BIT_MASK: u8 = 0x80;
 
+/// A trait for unsigned integers that can be varint encoded.
 pub trait UInt:
     Copy
-    + TryFrom<u64>
     + From<u8>
     + Sized
     + ShrAssign<usize>
@@ -22,10 +26,14 @@ pub trait UInt:
     + BitOrAssign<Self>
     + PartialOrd
 {
+    /// Returns the number of leading zeros in the integer.
     fn leading_zeros(self) -> u32;
+
+    /// Returns the least significant byte of the integer.
     fn as_u8(self) -> u8;
 }
 
+// Implements the `UInt` trait for all unsigned integer types.
 macro_rules! impl_uint {
     ($type:ty) => {
         impl UInt for $type {
@@ -41,57 +49,61 @@ macro_rules! impl_uint {
         }
     };
 }
-impl_uint!(usize);
 impl_uint!(u8);
 impl_uint!(u16);
 impl_uint!(u32);
 impl_uint!(u64);
 impl_uint!(u128);
 
+/// A trait for signed integers that can be converted to and from unsigned integers of the
+/// equivalent size.
+///
+/// When converted to unsigned integers, the encoding is done using ZigZag encoding, which moves the
+/// sign bit to the least significant bit (shifting all other bits to the left by one). This allows
+/// for more efficient encoding of numbers that are close to zero, even if they are negative.
 pub trait SInt<UEq: UInt> {
-    fn to_u(self) -> UEq;
-    fn from_u(value: UEq) -> Self;
+    /// Converts the signed integer to an unsigned integer using ZigZag encoding.
+    fn as_zigzag(&self) -> UEq;
+
+    /// Converts a (ZigZag'ed) unsigned integer back to a signed integer.
+    fn un_zigzag(value: UEq) -> Self;
 }
 
+// Implements the `SInt` trait for all signed integer types.
 macro_rules! impl_sint {
-    ($type:ty, $u:ty) => {
-        impl SInt<$u> for $type {
+    ($type:ty, $utype:ty) => {
+        impl SInt<$utype> for $type {
             #[inline]
-            fn to_u(self) -> $u {
-                self as $u
+            fn as_zigzag(&self) -> $utype {
+                let shr = std::mem::size_of::<$utype>() * 8 - 1;
+                ((self << 1) ^ (self >> shr)) as $utype
             }
             #[inline]
-            fn from_u(value: $u) -> Self {
-                value as $type
+            fn un_zigzag(value: $utype) -> Self {
+                ((value >> 1) as $type) ^ (-((value & 1) as $type))
             }
         }
     };
 }
-impl_sint!(isize, usize);
 impl_sint!(i8, u8);
 impl_sint!(i16, u16);
 impl_sint!(i32, u32);
 impl_sint!(i64, u64);
 impl_sint!(i128, u128);
 
-fn must_i64<T: TryInto<i64>>(value: T) -> i64 {
-    value
-        .try_into()
-        .unwrap_or_else(|_| panic!("Failed to convert to i64"))
-}
-
 /// Encodes a unsigned 64-bit integer as a varint
 pub fn write<T: UInt>(value: T, buf: &mut impl BufMut) {
-    let bm = T::from(CONTINUATION_BIT_MASK);
-    if value < bm {
-        // Fast path for small values (common case for lengths)
+    let continuation_threshold = T::from(CONTINUATION_BIT_MASK);
+    if value < continuation_threshold {
+        // Fast path for small values (common case for lengths).
+        // `as_u8()` does not truncate the value or leave a continuation bit.
         buf.put_u8(value.as_u8());
         return;
     }
 
     let mut val = value;
-    while val >= bm {
-        buf.put_u8((val.as_u8()) | 0x80);
+    while val >= continuation_threshold {
+        buf.put_u8((val.as_u8()) | CONTINUATION_BIT_MASK);
         val >>= 7;
     }
     buf.put_u8(val.as_u8());
@@ -111,8 +123,13 @@ pub fn read<T: UInt>(buf: &mut impl Buf) -> Result<T, Error> {
         }
         let byte = buf.get_u8();
 
-        // If this must be the last byte, check for overflow.
-        // This overflow check also checks for an invalid continuation bit.
+        // If this must be the last byte, check for overflow (i.e. set bits beyond the size of T).
+        // Because the continuation bit is the most-significant bit, this check also happens to
+        // check for an invalid continuation bit.
+        // 
+        // If we have reached what must be the last byte, this check prevents continuing to read
+        // from the buffer by ensuring that the conditional (`if byte & CONTINUATION_BIT_MASK == 0`)
+        // always evaluates to true.
         let remaining_bits = max_bits.checked_sub(shift).unwrap();
         if remaining_bits <= DATA_BITS_PER_BYTE {
             let relevant_bits = BITS_PER_BYTE - byte.leading_zeros() as usize;
@@ -134,39 +151,27 @@ pub fn read<T: UInt>(buf: &mut impl Buf) -> Result<T, Error> {
     }
 }
 
-/// Calculates the number of bytes needed to encode a value as a varint
+/// Calculates the number of bytes needed to encode an unsigned integer as a varint.
 pub fn size<T: UInt>(value: T) -> usize {
     let total_bits = std::mem::size_of::<T>() * 8;
     let leading_zeros = value.leading_zeros() as usize;
     let data_bits = total_bits - leading_zeros;
-    usize::max(1, data_bits / DATA_BITS_PER_BYTE)
+    usize::max(1, data_bits.div_ceil(DATA_BITS_PER_BYTE))
 }
 
-/// Converts a signed integer to an unsigned integer using ZigZag encoding
-fn to_u64(value: i64) -> u64 {
-    ((value << 1) ^ (value >> 63)) as u64
+/// Encodes a signed integer as a varint using ZigZag encoding.
+pub fn write_signed<U: UInt, S: SInt<U>>(value: S, buf: &mut impl BufMut) {
+    write(value.as_zigzag(), buf);
 }
 
-/// Converts an unsigned integer to a signed integer using ZigZag encoding
-fn to_i64(value: u64) -> i64 {
-    ((value >> 1) as i64) ^ (-((value & 1) as i64))
+/// Decodes a signed integer from ZigZag encoding
+pub fn read_signed<U: UInt, S: SInt<U>>(buf: &mut impl Buf) -> Result<S, Error> {
+    Ok(S::un_zigzag(read(buf)?))
 }
 
-/// Encodes a signed 64-bit integer as a varint using ZigZag encoding
-pub fn write_i64<T: TryInto<i64>>(value: T, buf: &mut impl BufMut) {
-    let value = must_i64(value);
-    write(to_u64(value), buf);
-}
-
-/// Decodes a signed 64-bit integer from a varint using ZigZag encoding
-pub fn read_i64<T: TryFrom<i64>>(buf: &mut impl Buf) -> Result<T, Error> {
-    let zigzag = read(buf)?;
-    to_i64(zigzag).try_into().map_err(|_| Error::InvalidVarint)
-}
-
-/// Calculates the number of bytes needed to encode a signed integer as a varint
-pub fn size_i64(value: i64) -> usize {
-    size(to_u64(value))
+/// Calculates the number of bytes needed to encode a signed integer as a varint.
+pub fn size_signed<U: UInt, S: SInt<U>>(value: S) -> usize {
+    size(value.as_zigzag())
 }
 
 /// An ergonomic wrapper to allow for encoding and decoding of primitive unsigned integers as
@@ -204,6 +209,32 @@ mod tests {
     use super::*;
     use crate::error::Error;
     use bytes::Bytes;
+
+    #[test]
+    fn test_temp() {
+        let val1 = read::<u8>(&mut &[0x81, 0x01][..]);
+        assert_eq!(val1.unwrap(), 0x81);
+
+        let val2 = read::<u8>(&mut &[0x01][..]);
+        assert_eq!(val2.unwrap(), 0x01);
+
+        let val1 = read::<u8>(&mut &[0xAC, 0x02][..]);
+        assert_eq!(val1.unwrap(), 0xAC);
+    }
+
+    /// A 6-byte varint whose continuation bit never terminates:
+    /// 0xFF 0xFF 0xFF 0xFF 0xFF 0x01
+    const OVERLONG_U32: [u8; 6] = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01];
+
+    #[test]
+    #[should_panic(expected = "called `Option::unwrap()` on a `None` value")]
+    fn overlong_varint_panics() {
+        // Wrap the test data in a `Bytes` buffer (implements `Buf`)
+        let mut buf: Bytes = Bytes::from_static(&OVERLONG_U32);
+
+        // This line panics inside `read::<u32>` due to the `unwrap()`
+        let _ = read::<u32>(&mut buf);
+    }
 
     #[test]
     fn test_varint_encoding() {
@@ -262,12 +293,12 @@ mod tests {
 
         for &value in &test_cases {
             let mut buf = Vec::new();
-            write_i64(value, &mut buf);
+            write_signed(value, &mut buf);
 
-            assert_eq!(buf.len(), size_i64(value));
+            assert_eq!(buf.len(), size_signed(value));
 
             let mut read_buf = &buf[..];
-            let decoded = read_i64::<i64>(&mut read_buf).unwrap();
+            let decoded = read_signed::<u64, i64>(&mut read_buf).unwrap();
 
             assert_eq!(decoded, value);
             assert_eq!(read_buf.len(), 0,);
