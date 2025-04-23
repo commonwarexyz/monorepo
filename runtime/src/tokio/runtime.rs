@@ -181,7 +181,7 @@ pub struct Executor {
     metrics: Arc<Metrics>,
 }
 
-/// Implementation of [`crate::Runner`] for the `tokio` runtime.
+/// Implementation of [crate::Runner] for the `tokio` runtime.
 pub struct Runner {
     cfg: Config,
 }
@@ -268,20 +268,6 @@ type Storage = MeteredStorage<IoUringStorage>;
 
 #[cfg(not(all(feature = "iouring", target_os = "linux")))]
 type Storage = MeteredStorage<TokioStorage>;
-
-// /// Implementation of [`crate::Runner`] for the `tokio` runtime.
-// pub struct Runner {
-//     runtime: Arc<Runtime>,
-// }
-
-// impl crate::Runner for Runner {
-//     fn start<F>(self, f: F) -> F::Output
-//     where
-//         F: Future,
-//     {
-//         self.runtime.block_on(f)
-//     }
-// }
 
 /// Implementation of [`crate::Spawner`], [`crate::Clock`],
 /// [`crate::Network`], and [`crate::Storage`] for the `tokio`
