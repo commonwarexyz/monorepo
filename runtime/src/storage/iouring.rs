@@ -442,13 +442,10 @@ mod tests {
     use crate::{
         storage::tests::run_storage_tests,
         tokio::{Spawner, SpawnerConfig},
-        Blob as _, Storage as _,
     };
-    use futures::future::join_all;
     use prometheus_client::registry::Registry;
     use rand::{Rng as _, SeedableRng as _};
-    use std::{env, sync::atomic::AtomicUsize, time::Duration};
-    use tokio::time;
+    use std::env;
 
     // Helper for creating test storage
     fn create_test_storage() -> (Storage, PathBuf) {
