@@ -28,7 +28,7 @@ async fn bench_run(journal: &Journal<Context, FixedBytes<ITEM_SIZE>>, items_to_r
 /// items from a journal containing exactly that number of items.
 fn bench_fixed_read_sequential(c: &mut Criterion) {
     let executor = tokio::Executor::default();
-    for items in [1_000, 10_000, 100_000, 1_000_000] {
+    for items in [1_000, 10_000, 100_000, 1_000_000, 5_000_000, 10_000_000] {
         c.bench_function(
             &format!("{}/items={} size={}", module_path!(), items, ITEM_SIZE),
             |b| {
