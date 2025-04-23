@@ -27,11 +27,11 @@ jobs:
     - name: Fmt
       run: cargo fmt --all -- --check
     - name: Check docs
-      run: cargo doc --no-deps --document-private-items
+      run: cargo doc --all-features --no-deps --document-private-items
       env:
         RUSTDOCFLAGS: "-D warnings"
     - name: Run tests
-      run: cargo test --verbose
+      run: cargo test --all-features --verbose
 
   Dependencies:
     runs-on: ubuntu-latest
