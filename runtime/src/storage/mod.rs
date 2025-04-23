@@ -4,7 +4,7 @@ pub mod audited;
 pub mod iouring;
 pub mod memory;
 pub mod metered;
-#[cfg(all(not(target_arch = "wasm32"), not(feature = "iouring"),))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "iouring")))]
 pub mod tokio;
 
 #[cfg(test)]
