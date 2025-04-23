@@ -4,12 +4,15 @@
 //! Each byte uses:
 //! - 7 bits for the value
 //! - 1 "continuation" bit to indicate if more bytes follow
-//! 
+//!
 //! `usize` and `isize` are omitted to prevent behavior from depending on the target architecture.
 
-use crate::{EncodeSize, Error, Read, Write};
+use crate::{EncodeSize, Error, FixedSize, Read, Write};
 use bytes::{Buf, BufMut};
-use std::ops::{BitOrAssign, Shl, ShrAssign};
+use std::{
+    marker::PhantomData,
+    ops::{BitOrAssign, Shl, ShrAssign},
+};
 
 const BITS_PER_BYTE: usize = 8;
 const DATA_BITS_PER_BYTE: usize = 7;
@@ -21,6 +24,7 @@ pub trait UInt:
     Copy
     + From<u8>
     + Sized
+    + FixedSize
     + ShrAssign<usize>
     + Shl<usize, Output = Self>
     + BitOrAssign<Self>
@@ -61,7 +65,7 @@ impl_uint!(u128);
 /// When converted to unsigned integers, the encoding is done using ZigZag encoding, which moves the
 /// sign bit to the least significant bit (shifting all other bits to the left by one). This allows
 /// for more efficient encoding of numbers that are close to zero, even if they are negative.
-pub trait SInt<UEq: UInt> {
+pub trait SInt<UEq: UInt>: Copy {
     /// Converts the signed integer to an unsigned integer using ZigZag encoding.
     fn as_zigzag(&self) -> UEq;
 
@@ -111,7 +115,7 @@ pub fn write<T: UInt>(value: T, buf: &mut impl BufMut) {
 
 /// Decodes a unsigned 64-bit integer from a varint
 pub fn read<T: UInt>(buf: &mut impl Buf) -> Result<T, Error> {
-    let max_bits = std::mem::size_of::<T>() * 8;
+    let max_bits = T::SIZE * BITS_PER_BYTE;
     let mut result: T = T::from(0);
     let mut shift = 0;
 
@@ -126,7 +130,7 @@ pub fn read<T: UInt>(buf: &mut impl Buf) -> Result<T, Error> {
         // If this must be the last byte, check for overflow (i.e. set bits beyond the size of T).
         // Because the continuation bit is the most-significant bit, this check also happens to
         // check for an invalid continuation bit.
-        // 
+        //
         // If we have reached what must be the last byte, this check prevents continuing to read
         // from the buffer by ensuring that the conditional (`if byte & CONTINUATION_BIT_MASK == 0`)
         // always evaluates to true.
@@ -134,7 +138,7 @@ pub fn read<T: UInt>(buf: &mut impl Buf) -> Result<T, Error> {
         if remaining_bits <= DATA_BITS_PER_BYTE {
             let relevant_bits = BITS_PER_BYTE - byte.leading_zeros() as usize;
             if relevant_bits > remaining_bits {
-                return Err(Error::InvalidVarint);
+                return Err(Error::InvalidVarint(T::SIZE));
             }
         }
 
@@ -177,30 +181,65 @@ pub fn size_signed<U: UInt, S: SInt<U>>(value: S) -> usize {
 /// An ergonomic wrapper to allow for encoding and decoding of primitive unsigned integers as
 /// varints rather than the default fixed-width integers.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct UVar<T: UInt>(pub T);
+pub struct VarUInt<U: UInt>(pub U);
 
-impl<T: UInt> UVar<T> {
-    /// Reads a varint from the buffer and returns it as its original (primitive) type.
-    pub fn read_into(buf: &mut impl Buf) -> Result<T, Error> {
-        read::<T>(buf)
-    }
+// Implements `Into<U>` for `VarUInt<U>` for all unsigned integer types.
+// This allows for easy conversion from `VarUInt<U>` to `U` using `.into()`.
+macro_rules! impl_varuint_into {
+    ($($type:ty),+) => {
+        $(
+            impl From<VarUInt<$type>> for $type {
+                fn from(val: VarUInt<$type>) -> Self {
+                    val.0
+                }
+            }
+        )+
+    };
 }
+impl_varuint_into!(u8, u16, u32, u64, u128);
 
-impl<T: UInt> Write for UVar<T> {
+impl<U: UInt> Write for VarUInt<U> {
     fn write(&self, buf: &mut impl BufMut) {
         write(self.0, buf);
     }
 }
 
-impl<T: UInt> Read for UVar<T> {
+impl<U: UInt> Read for VarUInt<U> {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        read(buf).map(UVar)
+        read(buf).map(VarUInt)
     }
 }
 
-impl<T: UInt> EncodeSize for UVar<T> {
+impl<U: UInt> EncodeSize for VarUInt<U> {
     fn encode_size(&self) -> usize {
         size(self.0)
+    }
+}
+
+pub struct VarSInt<S: SInt<U>, U: UInt>(pub S, PhantomData<U>);
+
+impl<S: SInt<U>, U: UInt> VarSInt<S, U> {
+    /// Reads a varint from the buffer and returns it as its original (primitive) type.
+    pub fn read_into(buf: &mut impl Buf) -> Result<S, Error> {
+        read_signed::<U, S>(buf)
+    }
+}
+
+impl<S: SInt<U>, U: UInt> Write for VarSInt<S, U> {
+    fn write(&self, buf: &mut impl BufMut) {
+        write_signed::<U, S>(self.0, buf);
+    }
+}
+
+impl<S: SInt<U>, U: UInt> Read for VarSInt<S, U> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        read_signed::<U, S>(buf).map(|v| VarSInt(v, PhantomData))
+    }
+}
+
+impl<S: SInt<U>, U: UInt> EncodeSize for VarSInt<S, U> {
+    fn encode_size(&self) -> usize {
+        size_signed::<U, S>(self.0)
     }
 }
 
@@ -315,6 +354,9 @@ mod tests {
     fn test_varint_invalid() {
         let mut buf =
             Bytes::from_static(&[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x02]);
-        assert!(matches!(read::<u64>(&mut buf), Err(Error::InvalidVarint)));
+        assert!(matches!(
+            read::<u64>(&mut buf),
+            Err(Error::InvalidVarint(8))
+        ));
     }
 }

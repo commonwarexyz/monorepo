@@ -6,7 +6,7 @@
 use crate::{
     codec::{EncodeSize, Read, Write},
     error::Error,
-    varint, Config, RangeConfig,
+    Config, RangeConfig,
 };
 use bytes::{Buf, BufMut};
 use std::{collections::HashMap, hash::Hash};
@@ -14,8 +14,7 @@ use std::{collections::HashMap, hash::Hash};
 // Write implementation for HashMap
 impl<K: Ord + Hash + Eq + Write, V: Write> Write for HashMap<K, V> {
     fn write(&self, buf: &mut impl BufMut) {
-        let len = u32::try_from(self.len()).expect("HashMap length exceeds u32::MAX");
-        varint::write(len, buf);
+        self.len().write(buf);
 
         // Sort the keys to ensure deterministic encoding
         let mut keys: Vec<_> = self.keys().collect();
@@ -30,9 +29,8 @@ impl<K: Ord + Hash + Eq + Write, V: Write> Write for HashMap<K, V> {
 // EncodeSize implementation for HashMap
 impl<K: Ord + Hash + Eq + EncodeSize, V: EncodeSize> EncodeSize for HashMap<K, V> {
     fn encode_size(&self) -> usize {
-        // Start with the varint size of the length
-        let len = u32::try_from(self.len()).expect("HashMap length exceeds u32::MAX");
-        let mut size = varint::size(len);
+        // Start with the size of the length prefix
+        let mut size = self.len().encode_size();
 
         // Add the encoded size of each key and value
         // Note: Iteration order doesn't matter for size calculation.
@@ -58,11 +56,7 @@ impl<
         (range, (k_cfg, v_cfg)): &(R, (KCfg, VCfg)),
     ) -> Result<Self, Error> {
         // Read and validate the length prefix
-        let len32 = varint::read::<u32>(buf)?;
-        let len = usize::try_from(len32).map_err(|_| Error::InvalidVarint)?;
-        if !range.contains(&len) {
-            return Err(Error::InvalidLength(len));
-        }
+        let len = usize::read_cfg(buf, range)?;
         let mut map = HashMap::with_capacity(len);
 
         // Keep track of the last key read
@@ -96,7 +90,7 @@ mod tests {
     use crate::{
         codec::{Decode, Encode, EncodeSize, FixedSize, Read, Write},
         error::Error,
-        varint, Config, RangeConfig,
+        Config, RangeConfig,
     };
     use bytes::{BufMut, Bytes, BytesMut};
     use std::collections::HashMap;
@@ -136,7 +130,7 @@ mod tests {
         round_trip(&map, allow_any_len(), (), ());
         assert_eq!(map.encode_size(), 1);
         let encoded = map.encode();
-        assert_eq!(encoded, Bytes::from_static(&[0])); // varint 0
+        assert_eq!(encoded, 0usize.encode());
     }
 
     #[test]
@@ -205,7 +199,7 @@ mod tests {
     #[test]
     fn test_decode_invalid_key_order() {
         let mut encoded = BytesMut::new();
-        varint::write(2u32, &mut encoded); // Map length = 2
+        2usize.write(&mut encoded); // Map length = 2
         5u32.write(&mut encoded); // Key 5
         500u64.write(&mut encoded); // Value 500
         2u32.write(&mut encoded); // Key 2 (out of order)
@@ -224,7 +218,7 @@ mod tests {
     #[test]
     fn test_decode_duplicate_key() {
         let mut encoded = BytesMut::new();
-        varint::write(2u32, &mut encoded); // Map length = 2
+        2usize.write(&mut encoded); // Map length = 2
         1u32.write(&mut encoded); // Key 1
         100u64.write(&mut encoded); // Value 100
         1u32.write(&mut encoded); // Duplicate Key 1

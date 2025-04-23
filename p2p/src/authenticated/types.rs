@@ -1,6 +1,6 @@
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{
-    varint, Encode, EncodeSize, Error, RangeConfig, Read, ReadExt, ReadRangeExt, Write,
+    varint::VarUInt, Encode, EncodeSize, Error, RangeConfig, Read, ReadExt, ReadRangeExt, Write,
 };
 use commonware_cryptography::Verifier;
 use commonware_utils::BitVec as UtilsBitVec;
@@ -196,20 +196,20 @@ pub struct Data {
 
 impl EncodeSize for Data {
     fn encode_size(&self) -> usize {
-        varint::size(self.channel) + self.message.encode_size()
+        VarUInt(self.channel).encode_size() + self.message.encode_size()
     }
 }
 
 impl Write for Data {
     fn write(&self, buf: &mut impl BufMut) {
-        varint::write(self.channel, buf);
+        VarUInt(self.channel).write(buf);
         self.message.write(buf);
     }
 }
 
 impl<R: RangeConfig> Read<R> for Data {
     fn read_cfg(buf: &mut impl Buf, range: &R) -> Result<Self, Error> {
-        let channel = varint::read::<u32>(buf)?;
+        let channel = VarUInt::read(buf)?.into();
         let message = Bytes::read_cfg(buf, range)?;
         Ok(Data { channel, message })
     }

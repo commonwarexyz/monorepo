@@ -1,6 +1,9 @@
 //! Implementations of Codec for primitive types.
 
-use crate::{util::at_least, Config, EncodeSize, Error, FixedSize, Read, ReadExt, Write};
+use crate::{
+    util::at_least, varint::VarUInt, Config, EncodeSize, Error, FixedSize, RangeConfig, Read,
+    ReadExt, Write,
+};
 use bytes::{Buf, BufMut};
 
 // Numeric types implementation
@@ -39,6 +42,39 @@ impl_numeric!(i64, get_i64, put_i64);
 impl_numeric!(i128, get_i128, put_i128);
 impl_numeric!(f32, get_f32, put_f32);
 impl_numeric!(f64, get_f64, put_f64);
+
+// Usize implementation
+// Since most values refer to a length or size, the type is encoded as a varint.
+// We force the maximum size to be 4 bytes for consistency across platforms. In addition, we require
+// a range check so that unbounded values are explicitly allowed by the caller.
+impl Write for usize {
+    #[inline]
+    fn write(&self, buf: &mut impl BufMut) {
+        let self_as_u32 = u32::try_from(*self).expect("write: usize value is larger than u32");
+        VarUInt(self_as_u32).write(buf);
+    }
+}
+
+impl<R: RangeConfig> Read<R> for usize {
+    #[inline]
+    fn read_cfg(buf: &mut impl Buf, range: &R) -> Result<Self, Error> {
+        let self_as_u32: u32 = VarUInt::read(buf)?.into();
+        let result = usize::try_from(self_as_u32).map_err(|_| Error::InvalidUsize)?;
+        if !range.contains(&result) {
+            return Err(Error::InvalidLength(result));
+        }
+        Ok(result)
+    }
+}
+
+impl EncodeSize for usize {
+    #[inline]
+    fn encode_size(&self) -> usize {
+        let self_as_u32 =
+            u32::try_from(*self).expect("encode_size: usize value is larger than u32");
+        VarUInt(self_as_u32).encode_size()
+    }
+}
 
 // Bool implementation
 impl Write for bool {
