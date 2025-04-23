@@ -18,7 +18,7 @@ pub trait Broadcaster<Cfg: Config>: Clone + Send + 'static {
     /// Response is the type of data that is returned once the message is broadcasted.
     ///
     /// It may also indicate the success or failure of the broadcast attempt.
-    type Response: Send + 'static;
+    type Response: Clone + Send + 'static;
 
     /// Attempt to broadcast a message to the network.
     fn broadcast(
