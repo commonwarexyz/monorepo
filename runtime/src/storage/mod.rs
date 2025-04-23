@@ -1,13 +1,14 @@
 //! Implementations of the `Storage` trait that can be used by the runtime.
+
+#[cfg(all(feature = "iouring", not(target_os = "linux")))]
+compile_error!("The 'iouring' feature is only supported on Linux platforms");
+
 pub mod audited;
-#[cfg(all(feature = "iouring", target_os = "linux"))]
+#[cfg(feature = "iouring")]
 pub mod iouring;
 pub mod memory;
 pub mod metered;
-#[cfg(all(
-    not(target_arch = "wasm32"),
-    not(all(feature = "iouring", target_os = "linux")),
-))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "iouring"),))]
 pub mod tokio;
 
 #[cfg(test)]

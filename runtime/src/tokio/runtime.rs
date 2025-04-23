@@ -1,6 +1,6 @@
-#[cfg(all(feature = "iouring", target_os = "linux"))]
+#[cfg(feature = "iouring")]
 use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage};
-#[cfg(not(all(feature = "iouring", target_os = "linux")))]
+#[cfg(not(feature = "iouring"))]
 use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
 
 use crate::storage::metered::Storage as MeteredStorage;
@@ -229,7 +229,7 @@ impl crate::Runner for Runner {
             Arc::new(runtime.handle().clone()),
         );
 
-        #[cfg(all(feature = "iouring", target_os = "linux"))]
+        #[cfg(feature = "iouring")]
         let storage = MeteredStorage::new(
             IoUringStorage::start(
                 &IoUringConfig {
@@ -240,7 +240,7 @@ impl crate::Runner for Runner {
             runtime_registry,
         );
 
-        #[cfg(not(all(feature = "iouring", target_os = "linux")))]
+        #[cfg(not(feature = "iouring"))]
         let storage = MeteredStorage::new(
             TokioStorage::new(TokioStorageConfig::new(
                 self.cfg.storage_directory.clone(),
@@ -263,10 +263,10 @@ impl crate::Runner for Runner {
     }
 }
 
-#[cfg(all(feature = "iouring", target_os = "linux"))]
+#[cfg(feature = "iouring")]
 type Storage = MeteredStorage<IoUringStorage>;
 
-#[cfg(not(all(feature = "iouring", target_os = "linux")))]
+#[cfg(not(feature = "iouring"))]
 type Storage = MeteredStorage<TokioStorage>;
 
 /// Implementation of [`crate::Spawner`], [`crate::Clock`],
