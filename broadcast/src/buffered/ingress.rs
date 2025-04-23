@@ -64,6 +64,16 @@ impl<D: Digest, M: Digestible<D>> Mailbox<D, M> {
             .expect("mailbox closed");
         receiver.await.expect("mailbox closed")
     }
+
+    pub async fn wait_prebuilt(&mut self, digest: D, sender: oneshot::Sender<M>) {
+        self.sender
+            .send(Message::Wait {
+                digest,
+                responder: sender,
+            })
+            .await
+            .expect("mailbox closed");
+    }
 }
 
 impl<Cfg: Config, D: Digest, M: Codec<Cfg> + Digestible<D>> Broadcaster<Cfg> for Mailbox<D, M> {
