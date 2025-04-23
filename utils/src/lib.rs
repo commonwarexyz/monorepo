@@ -5,7 +5,7 @@ use commonware_codec::varint;
 
 pub mod array;
 pub use array::Array;
-mod bitvec;
+mod bitvec; 
 pub use bitvec::{BitIterator, BitVec};
 mod time;
 pub use time::SystemTimeExt;
@@ -66,14 +66,15 @@ pub fn union(a: &[u8], b: &[u8]) -> Vec<u8> {
     union.extend_from_slice(a);
     union.extend_from_slice(b);
     union
-}
+} 
 
 /// Concatenate a namespace and a message, prepended by a varint encoding of the namespace length.
 ///
 /// This produces a unique byte sequence (i.e. no collisions) for each `(namespace, msg)` pair.
 pub fn union_unique(namespace: &[u8], msg: &[u8]) -> Vec<u8> {
-    let len = u32::try_from(namespace.len()).expect("namespace length too large");
-    let mut buf = BytesMut::with_capacity(varint::size(len) + namespace.len() + msg.len());
+    let namespace_len = namespace.len();
+    let len = u32::try_from(namespace_len).expect("namespace length too large");
+    let mut buf = BytesMut::with_capacity(varint::size(len) + namespace_len + msg.len());
     varint::write(len, &mut buf);
     buf.put_slice(namespace);
     buf.put_slice(msg);

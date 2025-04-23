@@ -19,7 +19,13 @@ thiserror = { workspace = true }
 [dev-dependencies]
 num-bigint = "0.4.6"
 rand = { workspace = true }
+criterion = { workspace = true }
 
 [lib]
 bench = false
 crate-type = ["rlib", "cdylib"]
+
+[[bench]]
+name = "union"
+harness = false
+path = "src/benches/bench.rs"
