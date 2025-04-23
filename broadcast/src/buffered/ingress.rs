@@ -11,13 +11,19 @@ pub enum Message<D, M> {
     /// Broadcast a [`Message`](crate::Broadcaster::Message) to the network.
     Broadcast { message: M },
 
-    /// Get a message by digest.
+    /// Wait for a message by digest.
     ///
     /// The responder will be sent the message when it is available; either instantly (if cached) or
     /// when it is received from the network. The request can be canceled by dropping the responder.
-    Get {
+    Wait {
         digest: D,
         responder: oneshot::Sender<M>,
+    },
+
+    /// Get a message by digest.
+    Get {
+        digest: D,
+        responder: oneshot::Sender<Option<M>>,
     },
 }
 
@@ -34,8 +40,20 @@ impl<D: Digest, M: Digestible<D>> Mailbox<D, M> {
 }
 
 impl<D: Digest, M: Digestible<D>> Mailbox<D, M> {
-    /// Get a message by digest.
-    pub async fn get(&mut self, digest: D) -> oneshot::Receiver<M> {
+    /// Wait for a message by digest.
+    pub async fn wait(&mut self, digest: D) -> oneshot::Receiver<M> {
+        let (sender, receiver) = oneshot::channel();
+        self.sender
+            .send(Message::Wait {
+                digest,
+                responder: sender,
+            })
+            .await
+            .expect("mailbox closed");
+        receiver
+    }
+
+    pub async fn get(&mut self, digest: D) -> Option<M> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Message::Get {
@@ -44,7 +62,7 @@ impl<D: Digest, M: Digestible<D>> Mailbox<D, M> {
             })
             .await
             .expect("mailbox closed");
-        receiver
+        receiver.await.expect("mailbox closed")
     }
 }
 
