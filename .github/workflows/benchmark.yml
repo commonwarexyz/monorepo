@@ -28,7 +28,7 @@ jobs:
     name: Publish
     needs: has-new-commit # Only run if there are new commits
     runs-on: ubuntu-latest-8
-    timeout-minutes: 360
+    timeout-minutes: 720
     strategy:
       max-parallel: 1 # Run one package at a time
       matrix:
