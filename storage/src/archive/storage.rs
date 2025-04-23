@@ -24,7 +24,7 @@ struct Location {
 }
 
 /// Implementation of `Archive` storage.
-pub struct Archive<T: Translator, K: Array, E: Storage + Metrics> {
+pub struct Archive<T: Translator, E: Storage + Metrics, K: Array> {
     cfg: Config<T>,
     journal: Journal<E>,
 
@@ -51,7 +51,7 @@ pub struct Archive<T: Translator, K: Array, E: Storage + Metrics> {
     _phantom: std::marker::PhantomData<K>,
 }
 
-impl<T: Translator, K: Array, E: Storage + Metrics> Archive<T, K, E> {
+impl<T: Translator, E: Storage + Metrics, K: Array> Archive<T, E, K> {
     const PREFIX_LEN: u32 = (u64::SIZE + K::SIZE + u32::SIZE) as u32;
 
     /// Initialize a new `Archive` instance.

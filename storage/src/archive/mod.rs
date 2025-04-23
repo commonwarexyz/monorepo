@@ -1076,7 +1076,7 @@ mod tests {
             )
             .await
             .expect("Failed to initialize journal");
-            let archive = Archive::<_, FixedBytes<64>, _>::init(context, journal, cfg.clone())
+            let archive = Archive::<_, _, FixedBytes<64>>::init(context, journal, cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
