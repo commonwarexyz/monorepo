@@ -1,4 +1,4 @@
-use super::append_random_journal;
+use super::append_random_data;
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::Context,
@@ -50,55 +50,41 @@ async fn bench_run_concurrent(
 
 fn bench_fixed_read_random(c: &mut Criterion) {
     let executor = tokio::Executor::default();
-
-    const ITEMS_TO_READ: usize = 100_000;
-    c.bench_function(
-        &format!("{}/serial/items={}", module_path!(), ITEMS_TO_READ),
-        |b| {
-            b.to_async(&executor).iter_custom(|iters| async move {
-                // Setup the journal with random data.
-                let ctx = context::get::<commonware_runtime::tokio::Context>();
-                let j =
-                    append_random_journal(ctx.clone(), PARTITION, ITEMS_PER_BLOB, ITEMS_TO_WRITE)
+    for mode in ["serial", "concurrent"] {
+        for items_to_read in [100, 1_000, 10_000, 100_000] {
+            c.bench_function(
+                &format!("{}/mode={} items={}", module_path!(), mode, items_to_read),
+                |b| {
+                    b.to_async(&executor).iter_custom(|iters| async move {
+                        // Append random data to the journal
+                        let ctx = context::get::<commonware_runtime::tokio::Context>();
+                        let j = append_random_data(
+                            ctx.clone(),
+                            PARTITION,
+                            ITEMS_PER_BLOB,
+                            ITEMS_TO_WRITE,
+                        )
                         .await;
-                let mut duration = Duration::ZERO;
 
-                // Run serial read benchmark.
-                for _ in 0..iters {
-                    let start = Instant::now();
-                    bench_run_serial(&j, ITEMS_TO_READ).await;
-                    duration += start.elapsed();
-                }
-                j.destroy().await.unwrap();
+                        // Run the benchmark
+                        let mut duration = Duration::ZERO;
+                        for _ in 0..iters {
+                            let start = Instant::now();
+                            match mode {
+                                "serial" => bench_run_serial(&j, items_to_read).await,
+                                "concurrent" => bench_run_concurrent(&j, items_to_read).await,
+                                _ => unreachable!(),
+                            }
+                            duration += start.elapsed();
+                        }
+                        j.destroy().await.unwrap();
 
-                duration
-            });
-        },
-    );
-
-    c.bench_function(
-        &format!("{}/concurrent/items={}", module_path!(), ITEMS_TO_READ),
-        |b| {
-            b.to_async(&executor).iter_custom(|iters| async move {
-                // Setup the journal with random data.
-                let ctx = context::get::<commonware_runtime::tokio::Context>();
-                let j =
-                    append_random_journal(ctx.clone(), PARTITION, ITEMS_PER_BLOB, ITEMS_TO_WRITE)
-                        .await;
-                let mut duration = Duration::ZERO;
-
-                // Run concurrent read benchmark.
-                for _ in 0..iters {
-                    let start = Instant::now();
-                    bench_run_concurrent(&j, ITEMS_TO_READ).await;
-                    duration += start.elapsed();
-                }
-                j.destroy().await.unwrap();
-
-                duration
-            });
-        },
-    );
+                        duration
+                    });
+                },
+            );
+        }
+    }
 }
 
 criterion_group! {
