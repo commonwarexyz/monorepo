@@ -638,6 +638,11 @@ mod tests {
                 .expect("Failed to read data");
             assert_eq!(&buffer[..5], data1);
 
+            // Full read after truncation
+            let mut buffer = vec![0u8; 10];
+            let result = blob.read_at(&mut buffer, 0).await;
+            assert!(result.is_err());
+
             // Close the blob
             blob.close().await.expect("Failed to close blob");
         });
@@ -693,6 +698,38 @@ mod tests {
                 blob.close().await.expect("Failed to close blob");
             }
         });
+    }
+
+    fn test_blob_read_past_length<R: Runner>(runner: R)
+    where
+        R::Context: Storage,
+    {
+        runner.start(|context| async move {
+            let partition = "test_partition";
+            let name = b"test_blob_rw";
+
+            // Open a new blob
+            let (blob, _) = context
+                .open(partition, name)
+                .await
+                .expect("Failed to open blob");
+
+            // Read data past file length (empty file)
+            let mut buffer = vec![0u8; 10];
+            let result = blob.read_at(&mut buffer, 0).await;
+            assert!(result.is_err());
+
+            // Write data to the blob
+            let data = b"Hello, Storage!";
+            blob.write_at(data, 0)
+                .await
+                .expect("Failed to write to blob");
+
+            // Read data past file length (non-empty file)
+            let mut buffer = vec![0u8; 20];
+            let result = blob.read_at(&mut buffer, 0).await;
+            assert!(result.is_err());
+        })
     }
 
     fn test_blob_clone_and_concurrent_read<R: Runner>(runner: R)
@@ -1120,6 +1157,12 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_blob_read_past_length() {
+        let executor = deterministic::Runner::default();
+        test_blob_read_past_length(executor);
+    }
+
+    #[test]
     fn test_deterministic_blob_clone_and_concurrent_read() {
         // Run test
         let executor = deterministic::Runner::default();
@@ -1265,6 +1308,12 @@ mod tests {
     fn test_tokio_many_partition_read_write() {
         let executor = tokio::Runner::default();
         test_many_partition_read_write(executor);
+    }
+
+    #[test]
+    fn test_tokio_blob_read_past_length() {
+        let executor = tokio::Runner::default();
+        test_blob_read_past_length(executor);
     }
 
     #[test]
