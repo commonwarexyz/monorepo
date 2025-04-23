@@ -211,7 +211,7 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
     }
 
     /// Reads an item from the blob at the given offset.
-    async fn read(cfg: &C, blob: &E::Blob, offset: u32) -> Result<(u32, u32, V), Error> {
+    async fn read(cfg: &C, blob: &E::Blob, offset: u32) -> Result<(u32, V), Error> {
         // Read item size
         let offset = offset as u64 * ITEM_ALIGNMENT;
         let mut size = [0u8; 4];
@@ -241,7 +241,7 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
 
         // Return item
         let item = V::decode_cfg(item.as_ref(), &cfg).map_err(Error::Codec)?;
-        Ok((aligned_offset, size, item))
+        Ok((aligned_offset, item))
     }
 
     /// Read `prefix` bytes from the blob at the given offset.
@@ -363,7 +363,7 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
     pub async fn replay(
         &mut self,
         concurrency: usize,
-    ) -> Result<impl Stream<Item = Result<(u64, u32, u32, V), Error>> + '_, Error> {
+    ) -> Result<impl Stream<Item = Result<(u64, u32, V), Error>> + '_, Error> {
         // Collect all blobs to replay
         let mut blobs = Vec::with_capacity(self.blobs.len());
         for (section, blob) in self.blobs.iter() {
@@ -389,7 +389,7 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
                         let mut read = Self::read(&codec_config, blob, offset).await;
 
                         // Ensure a full read wouldn't put us past the end of the blob
-                        if let Ok((next_offset, _, _)) = read {
+                        if let Ok((next_offset, _)) = read {
                             if next_offset > len {
                                 read = Err(Error::Runtime(RError::BlobInsufficientLength));
                             }
@@ -397,10 +397,10 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
 
                         // Handle read result
                         match read {
-                            Ok((next_offset, item_size, item)) => {
+                            Ok((next_offset, item)) => {
                                 trace!(blob = section, cursor = offset, len, "replayed item");
                                 Some((
-                                    Ok((section, offset, item_size, item)),
+                                    Ok((section, offset, item)),
                                     (codec_config, section, blob, next_offset),
                                 ))
                             }
@@ -613,7 +613,7 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
         }
 
         // Perform a multi-op read.
-        let (_, _, item) = Self::read(&self.cfg.codec_config, blob, offset).await?;
+        let (_, item) = Self::read(&self.cfg.codec_config, blob, offset).await?;
         Ok(Some(item))
     }
 
@@ -701,9 +701,10 @@ mod tests {
             // Initialize the journal
             let cfg = Config {
                 partition: "test_partition".into(),
+                codec_config: (),
             };
             let index = 1u64;
-            let data = Bytes::from("Test data");
+            let data = 10;
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("Failed to initialize journal");
@@ -724,24 +725,19 @@ mod tests {
             // Re-initialize the journal to simulate a restart
             let cfg = Config {
                 partition: "test_partition".into(),
+                codec_config: (),
             };
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::<_, _, i32>::init(context.clone(), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
 
             // Replay the journal and collect items
             let mut items = Vec::new();
-            let stream = journal
-                .replay(1, None)
-                .await
-                .expect("unable to setup replay");
+            let stream = journal.replay(1).await.expect("unable to setup replay");
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 match result {
-                    Ok((blob_index, _, full_len, item)) => {
-                        assert_eq!(full_len as usize, item.len());
-                        items.push((blob_index, item))
-                    }
+                    Ok((blob_index, _, item)) => items.push((blob_index, item)),
                     Err(err) => panic!("Failed to read item: {}", err),
                 }
             }
@@ -767,6 +763,7 @@ mod tests {
             // Create a journal configuration
             let cfg = Config {
                 partition: "test_partition".into(),
+                codec_config: (),
             };
 
             // Initialize the journal
@@ -775,12 +772,7 @@ mod tests {
                 .expect("Failed to initialize journal");
 
             // Append multiple items to different blobs
-            let data_items = vec![
-                (1u64, Bytes::from("Data for blob 1")),
-                (1u64, Bytes::from("Data for blob 1, second item")),
-                (2u64, Bytes::from("Data for blob 2")),
-                (3u64, Bytes::from("Data for blob 3")),
-            ];
+            let data_items = vec![(1u64, 1), (1u64, 2), (2u64, 3), (3u64, 4)];
             for (index, data) in &data_items {
                 journal
                     .append(*index, data.clone())
@@ -803,19 +795,13 @@ mod tests {
                 .expect("Failed to re-initialize journal");
 
             // Replay the journal and collect items
-            let mut items = Vec::new();
+            let mut items = Vec::<(u64, u32)>::new();
             {
-                let stream = journal
-                    .replay(2, None)
-                    .await
-                    .expect("unable to setup replay");
+                let stream = journal.replay(2).await.expect("unable to setup replay");
                 pin_mut!(stream);
                 while let Some(result) = stream.next().await {
                     match result {
-                        Ok((blob_index, _, full_len, item)) => {
-                            assert_eq!(full_len as usize, item.len());
-                            items.push((blob_index, item))
-                        }
+                        Ok((blob_index, _, item)) => items.push((blob_index, item)),
                         Err(err) => panic!("Failed to read item: {}", err),
                     }
                 }
@@ -833,14 +819,14 @@ mod tests {
             // Replay just first bytes
             {
                 let stream = journal
-                    .replay(2, Some(4))
+                    .replay_prefix(2, 1)
                     .await
                     .expect("unable to setup replay");
                 pin_mut!(stream);
                 while let Some(result) = stream.next().await {
                     match result {
                         Ok((_, _, full_len, item)) => {
-                            assert_eq!(item, Bytes::from("Data"));
+                            assert_eq!(item[0], 0u8);
                             assert!(full_len as usize > item.len());
                         }
                         Err(err) => panic!("Failed to read item: {}", err),
@@ -860,6 +846,7 @@ mod tests {
             // Create a journal configuration
             let cfg = Config {
                 partition: "test_partition".into(),
+                codec_config: (),
             };
 
             // Initialize the journal
@@ -869,16 +856,15 @@ mod tests {
 
             // Append items to multiple blobs
             for index in 1u64..=5u64 {
-                let data = Bytes::from(format!("Data for blob {}", index));
                 journal
-                    .append(index, data)
+                    .append(index, index)
                     .await
                     .expect("Failed to append data");
                 journal.sync(index).await.expect("Failed to sync blob");
             }
 
             // Add one item out-of-order
-            let data = Bytes::from("Data for blob 2, second item");
+            let data = 99;
             journal
                 .append(2u64, data)
                 .await
@@ -909,16 +895,13 @@ mod tests {
                 .expect("Failed to re-initialize journal");
 
             // Replay the journal and collect items
-            let mut items = Vec::new();
+            let mut items = Vec::<(u64, u64)>::new();
             {
-                let stream = journal
-                    .replay(1, None)
-                    .await
-                    .expect("unable to setup replay");
+                let stream = journal.replay(1).await.expect("unable to setup replay");
                 pin_mut!(stream);
                 while let Some(result) = stream.next().await {
                     match result {
-                        Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
+                        Ok((blob_index, _, item)) => items.push((blob_index, item)),
                         Err(err) => panic!("Failed to read item: {}", err),
                     }
                 }
@@ -959,6 +942,7 @@ mod tests {
             // Create a journal configuration
             let cfg = Config {
                 partition: "test_partition".into(),
+                codec_config: (),
             };
 
             // Manually create a blob with an invalid name (not 8 bytes)
@@ -970,7 +954,7 @@ mod tests {
             blob.close().await.expect("Failed to close blob");
 
             // Attempt to initialize the journal
-            let result = Journal::init(context, cfg).await;
+            let result = Journal::<_, _, u64>::init(context, cfg).await;
 
             // Expect an error
             assert!(matches!(result, Err(Error::InvalidBlobName(_))));
@@ -986,6 +970,7 @@ mod tests {
             // Create a journal configuration
             let cfg = Config {
                 partition: "test_partition".into(),
+                codec_config: (),
             };
 
             // Manually create a blob with incomplete size data
@@ -1009,19 +994,32 @@ mod tests {
                 .expect("Failed to initialize journal");
 
             // Attempt to replay the journal
-            let stream = journal
-                .replay(1, exact)
-                .await
-                .expect("unable to setup replay");
-            pin_mut!(stream);
-            let mut items = Vec::new();
-            while let Some(result) = stream.next().await {
-                match result {
-                    Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
-                    Err(err) => panic!("Failed to read item: {}", err),
+            if let Some(exact) = exact {
+                let stream = journal
+                    .replay_prefix(1, exact)
+                    .await
+                    .expect("unable to setup replay");
+                pin_mut!(stream);
+                let mut items = Vec::new();
+                while let Some(result) = stream.next().await {
+                    match result {
+                        Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
+                        Err(err) => panic!("Failed to read item: {}", err),
+                    }
                 }
+                assert!(items.is_empty());
+            } else {
+                let stream = journal.replay(1).await.expect("unable to setup replay");
+                pin_mut!(stream);
+                let mut items = Vec::<(u64, u64)>::new();
+                while let Some(result) = stream.next().await {
+                    match result {
+                        Ok((blob_index, _, item)) => items.push((blob_index, item)),
+                        Err(err) => panic!("Failed to read item: {}", err),
+                    }
+                }
+                assert!(items.is_empty());
             }
-            assert!(items.is_empty());
         });
     }
 
@@ -1044,6 +1042,7 @@ mod tests {
             // Create a journal configuration
             let cfg = Config {
                 partition: "test_partition".into(),
+                codec_config: (),
             };
 
             // Manually create a blob with missing item data
@@ -1071,20 +1070,32 @@ mod tests {
                 .expect("Failed to initialize journal");
 
             // Attempt to replay the journal
-            let stream = journal
-                .replay(1, exact)
-                .await
-                .expect("unable to setup replay");
-
-            pin_mut!(stream);
-            let mut items = Vec::new();
-            while let Some(result) = stream.next().await {
-                match result {
-                    Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
-                    Err(err) => panic!("Failed to read item: {}", err),
+            if let Some(exact) = exact {
+                let stream = journal
+                    .replay_prefix(1, exact)
+                    .await
+                    .expect("unable to setup replay");
+                pin_mut!(stream);
+                let mut items = Vec::new();
+                while let Some(result) = stream.next().await {
+                    match result {
+                        Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
+                        Err(err) => panic!("Failed to read item: {}", err),
+                    }
                 }
+                assert!(items.is_empty());
+            } else {
+                let stream = journal.replay(1).await.expect("unable to setup replay");
+                pin_mut!(stream);
+                let mut items = Vec::<(u64, u64)>::new();
+                while let Some(result) = stream.next().await {
+                    match result {
+                        Ok((blob_index, _, item)) => items.push((blob_index, item)),
+                        Err(err) => panic!("Failed to read item: {}", err),
+                    }
+                }
+                assert!(items.is_empty());
             }
-            assert!(items.is_empty());
         });
     }
 
