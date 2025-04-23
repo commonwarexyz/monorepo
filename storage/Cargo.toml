@@ -29,7 +29,6 @@ rangemap = "1.5.1"
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
 rand = { workspace = true }
-tokio = { workspace = true }
 criterion = { workspace = true }
 
 [lib]
