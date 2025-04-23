@@ -471,9 +471,8 @@ impl crate::Spawner for Context {
     {
         // Create a closure that adapts f to what Spawner::spawn expects
         let context = self.clone();
-        // Now we can pass the adapter to spawner.spawn
         self.spawner.spawn(|_| {
-            // Call the original function with our context
+            // Call the original function with ourself as context
             f(context)
         })
     }
@@ -491,7 +490,6 @@ impl crate::Spawner for Context {
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
     {
-        // Use the inner spawner
         self.spawner.spawn_blocking(f)
     }
 

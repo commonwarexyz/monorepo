@@ -48,7 +48,7 @@ impl<'a> NextCompletionFuture<'a> {
     }
 }
 
-impl<'a> Future for NextCompletionFuture<'a> {
+impl Future for NextCompletionFuture<'_> {
     type Output = io_uring::cqueue::Entry;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -125,11 +125,12 @@ pub struct Storage {
 
 impl Storage {
     pub fn start<S: Spawner>(cfg: &Config, spawner: S) -> Self {
-        let (sender, receiver) =
+        let (io_sender, receiver) =
             mpsc::channel::<(io_uring::squeue::Entry, oneshot::Sender<i32>)>(IOURING_SIZE as usize);
+
         let storage = Storage {
             storage_directory: cfg.storage_directory.clone(),
-            io_sender: sender.clone(),
+            io_sender,
         };
         spawner.spawn(|_| do_work(receiver));
         storage
@@ -269,7 +270,7 @@ impl crate::Blob for Blob {
                 .build();
 
             let (sender, receiver) = oneshot::channel();
-            let _ = io_sender
+            io_sender
                 .send((op, sender))
                 .await
                 .map_err(|_| Error::ReadFailed)?;
@@ -303,7 +304,7 @@ impl crate::Blob for Blob {
                 .offset(offset as _)
                 .build();
             let (sender, receiver) = oneshot::channel();
-            let _ = io_sender
+            io_sender
                 .send((op, sender))
                 .await
                 .map_err(|_| Error::WriteFailed)?;
@@ -332,8 +333,7 @@ impl crate::Blob for Blob {
             .build();
 
         let (sender, receiver) = oneshot::channel();
-        let _ = self
-            .io_sender
+        self.io_sender
             .clone()
             .send((op, sender))
             .await
@@ -341,7 +341,7 @@ impl crate::Blob for Blob {
                 Error::BlobTruncateFailed(
                     self.partition.clone(),
                     hex(&self.name),
-                    IoError::new(ErrorKind::Other, "channel send failed"),
+                    IoError::new(ErrorKind::Other, "failed to send work"),
                 )
             })?;
         // Wait for the operation to complete
@@ -349,7 +349,7 @@ impl crate::Blob for Blob {
             Error::BlobTruncateFailed(
                 self.partition.clone(),
                 hex(&self.name),
-                IoError::new(ErrorKind::Other, "TODO"),
+                IoError::new(ErrorKind::Other, "failed to read result"),
             )
         })?;
 
@@ -358,7 +358,7 @@ impl crate::Blob for Blob {
             return Err(Error::BlobTruncateFailed(
                 self.partition.clone(),
                 hex(&self.name),
-                IoError::new(ErrorKind::Other, "TODO"),
+                IoError::new(ErrorKind::Other, format!("got error code: {}", result)),
             ));
         }
         // Update length
@@ -370,8 +370,7 @@ impl crate::Blob for Blob {
         let op = opcode::Fsync::new(types::Fd(self.fd.as_raw_fd())).build();
 
         let (sender, receiver) = oneshot::channel();
-        let _ = self
-            .io_sender
+        self.io_sender
             .clone()
             .send((op, sender))
             .await
@@ -379,15 +378,16 @@ impl crate::Blob for Blob {
                 Error::BlobSyncFailed(
                     self.partition.clone(),
                     hex(&self.name),
-                    IoError::new(ErrorKind::Other, "TODO"),
+                    IoError::new(ErrorKind::Other, "failed to send work"),
                 )
             })?;
+
         // Wait for the operation to complete
         let result = receiver.await.map_err(|_| {
             Error::BlobSyncFailed(
                 self.partition.clone(),
                 hex(&self.name),
-                IoError::new(ErrorKind::Other, "TODO"),
+                IoError::new(ErrorKind::Other, "failed to read result"),
             )
         })?;
         // If the return value is non-positive, it indicates an error.
@@ -395,7 +395,7 @@ impl crate::Blob for Blob {
             return Err(Error::BlobSyncFailed(
                 self.partition.clone(),
                 hex(&self.name),
-                IoError::new(ErrorKind::Other, "TODO"),
+                IoError::new(ErrorKind::Other, format!("got error code: {}", result)),
             ));
         }
 
@@ -403,7 +403,6 @@ impl crate::Blob for Blob {
     }
 
     async fn close(self) -> Result<(), Error> {
-        // Just sync before dropping
         self.sync().await
     }
 }
