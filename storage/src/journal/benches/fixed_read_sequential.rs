@@ -20,14 +20,6 @@ const ITEMS_TO_WRITE: u64 = 1_000_000;
 /// Size of each journal item in bytes.
 const ITEM_SIZE: usize = 32;
 
-async fn bench_init(
-    context: Context,
-    items_to_write: u64,
-) -> Journal<Context, FixedBytes<ITEM_SIZE>> {
-    write_random_journal::<ITEM_SIZE>(context.clone(), PARTITION, ITEMS_PER_BLOB, items_to_write)
-        .await
-}
-
 /// Sequentially read `items_to_read` items in the given `journal` starting from item 0.
 async fn bench_run(journal: &Journal<Context, FixedBytes<ITEM_SIZE>>, items_to_read: u64) {
     for pos in 0..items_to_read {
@@ -45,17 +37,23 @@ fn bench_fixed_read_sequential(c: &mut Criterion) {
         |b| {
             b.to_async(&executor).iter_custom(|iters| async move {
                 let ctx = context::get::<commonware_runtime::tokio::Context>();
-                let journal = bench_init(ctx.clone(), ITEMS_TO_WRITE).await;
-                let sz = journal.size().await.unwrap();
+                let j = write_random_journal::<ITEM_SIZE>(
+                    ctx.clone(),
+                    PARTITION,
+                    ITEMS_PER_BLOB,
+                    ITEMS_TO_WRITE,
+                )
+                .await;
+                let sz = j.size().await.unwrap();
                 assert_eq!(sz, ITEMS_TO_WRITE);
 
                 let mut duration = Duration::ZERO;
                 for _ in 0..iters {
                     let start = Instant::now();
-                    bench_run(&journal, ITEMS_TO_WRITE).await;
+                    bench_run(&j, ITEMS_TO_WRITE).await;
                     duration += start.elapsed();
                 }
-                journal.destroy().await.unwrap();
+                j.destroy().await.unwrap();
 
                 duration
             });
@@ -67,17 +65,23 @@ fn bench_fixed_read_sequential(c: &mut Criterion) {
         |b| {
             b.to_async(&executor).iter_custom(|iters| async move {
                 let ctx = context::get::<commonware_runtime::tokio::Context>();
-                let journal = bench_init(ctx.clone(), ITEMS_TO_WRITE * 2).await;
-                let sz = journal.size().await.unwrap();
+                let j = write_random_journal::<ITEM_SIZE>(
+                    ctx.clone(),
+                    PARTITION,
+                    ITEMS_PER_BLOB,
+                    ITEMS_TO_WRITE * 2,
+                )
+                .await;
+                let sz = j.size().await.unwrap();
                 assert_eq!(sz, ITEMS_TO_WRITE * 2);
 
                 let mut duration = Duration::ZERO;
                 for _ in 0..iters {
                     let start = Instant::now();
-                    bench_run(&journal, ITEMS_TO_WRITE * 2).await;
+                    bench_run(&j, ITEMS_TO_WRITE * 2).await;
                     duration += start.elapsed();
                 }
-                journal.destroy().await.unwrap();
+                j.destroy().await.unwrap();
 
                 duration
             });

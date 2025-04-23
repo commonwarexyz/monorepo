@@ -21,14 +21,6 @@ const ITEMS_TO_WRITE: u64 = 1_000_000;
 /// Size of each journal item in bytes.
 const ITEM_SIZE: usize = 32;
 
-async fn bench_init(
-    context: Context,
-    items_to_write: u64,
-) -> Journal<Context, FixedBytes<ITEM_SIZE>> {
-    write_random_journal::<ITEM_SIZE>(context.clone(), PARTITION, ITEMS_PER_BLOB, items_to_write)
-        .await
-}
-
 /// Replay all items in the given `journal`.
 async fn bench_run(journal: &mut Journal<Context, FixedBytes<ITEM_SIZE>>) {
     let concurrency = (ITEMS_TO_WRITE / ITEMS_PER_BLOB) as usize;
@@ -57,7 +49,13 @@ fn bench_fixed_replay(c: &mut Criterion) {
         |b| {
             b.to_async(&executor).iter_custom(|iters| async move {
                 let ctx = context::get::<commonware_runtime::tokio::Context>();
-                let mut j = bench_init(ctx.clone(), ITEMS_TO_WRITE).await;
+                let mut j = write_random_journal::<ITEM_SIZE>(
+                    ctx.clone(),
+                    PARTITION,
+                    ITEMS_PER_BLOB,
+                    ITEMS_TO_WRITE,
+                )
+                .await;
 
                 let mut duration = Duration::ZERO;
                 for _ in 0..iters {
@@ -77,7 +75,13 @@ fn bench_fixed_replay(c: &mut Criterion) {
         |b| {
             b.to_async(&executor).iter_custom(|iters| async move {
                 let ctx = context::get::<commonware_runtime::tokio::Context>();
-                let mut j = bench_init(ctx.clone(), ITEMS_TO_WRITE * 2).await;
+                let mut j = write_random_journal::<ITEM_SIZE>(
+                    ctx.clone(),
+                    PARTITION,
+                    ITEMS_PER_BLOB,
+                    ITEMS_TO_WRITE * 2,
+                )
+                .await;
 
                 let mut duration = Duration::ZERO;
                 for _ in 0..iters {

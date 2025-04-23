@@ -8,6 +8,9 @@ use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 use std::time::{Duration, Instant};
 
+/// Partition name to use in the journal config.
+const PARTITION: &str = "test_partition";
+
 /// Value of items_per_blob to use in the journal config.
 const ITEMS_PER_BLOB: u64 = 10_000;
 
@@ -16,17 +19,6 @@ const ITEM_SIZE: usize = 32;
 
 /// Number of items to write to the journal in each benchmark iteration.
 const ITEMS_TO_WRITE: usize = 500_000;
-
-async fn bench_init(context: Context) -> Journal<Context, FixedBytes<ITEM_SIZE>> {
-    let partition = "test_partition";
-
-    let journal_config = JConfig {
-        partition: partition.to_string(),
-        items_per_blob: ITEMS_PER_BLOB,
-    };
-
-    Journal::init(context, journal_config).await.unwrap()
-}
 
 async fn bench_run(journal: &mut Journal<Context, FixedBytes<ITEM_SIZE>>) {
     let mut rng = StdRng::seed_from_u64(0);
@@ -49,10 +41,20 @@ fn bench_fixed_write(c: &mut Criterion) {
             let ctx = context::get::<commonware_runtime::tokio::Context>();
             let mut duration = Duration::ZERO;
             for _ in 0..iters {
-                let mut j = bench_init(ctx.clone()).await;
+                let mut j = Journal::init(
+                    ctx.clone(),
+                    JConfig {
+                        partition: PARTITION.to_string(),
+                        items_per_blob: ITEMS_PER_BLOB,
+                    },
+                )
+                .await
+                .unwrap();
+
                 let start = Instant::now();
                 bench_run(&mut j).await;
                 duration += start.elapsed();
+
                 j.destroy().await.unwrap();
             }
             duration

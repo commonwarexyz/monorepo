@@ -22,11 +22,6 @@ const ITEMS_TO_WRITE: u64 = 5_000_000;
 /// Size of each journal item in bytes.
 const ITEM_SIZE: usize = 32;
 
-async fn bench_init(context: Context) -> Journal<Context, FixedBytes<ITEM_SIZE>> {
-    write_random_journal::<ITEM_SIZE>(context.clone(), PARTITION, ITEMS_PER_BLOB, ITEMS_TO_WRITE)
-        .await
-}
-
 /// Read `items_to_read` random items from the given `journal`, awaiting each
 /// result before continuing.
 async fn bench_run_serial(journal: &Journal<Context, FixedBytes<ITEM_SIZE>>, items_to_read: usize) {
@@ -61,10 +56,14 @@ fn bench_fixed_read_random(c: &mut Criterion) {
         &format!("{}/serial/items={}", module_path!(), ITEMS_TO_READ),
         |b| {
             b.to_async(&executor).iter_custom(|iters| async move {
+                // Setup the journal with random data.
                 let ctx = context::get::<commonware_runtime::tokio::Context>();
-                let j = bench_init(ctx.clone()).await;
+                let j =
+                    write_random_journal(ctx.clone(), PARTITION, ITEMS_PER_BLOB, ITEMS_TO_WRITE)
+                        .await;
                 let mut duration = Duration::ZERO;
 
+                // Run serial read benchmark.
                 for _ in 0..iters {
                     let start = Instant::now();
                     bench_run_serial(&j, ITEMS_TO_READ).await;
@@ -81,10 +80,14 @@ fn bench_fixed_read_random(c: &mut Criterion) {
         &format!("{}/concurrent/items={}", module_path!(), ITEMS_TO_READ),
         |b| {
             b.to_async(&executor).iter_custom(|iters| async move {
+                // Setup the journal with random data.
                 let ctx = context::get::<commonware_runtime::tokio::Context>();
-                let j = bench_init(ctx.clone()).await;
+                let j =
+                    write_random_journal(ctx.clone(), PARTITION, ITEMS_PER_BLOB, ITEMS_TO_WRITE)
+                        .await;
                 let mut duration = Duration::ZERO;
 
+                // Run concurrent read benchmark.
                 for _ in 0..iters {
                     let start = Instant::now();
                     bench_run_concurrent(&j, ITEMS_TO_READ).await;

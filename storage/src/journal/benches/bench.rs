@@ -24,12 +24,11 @@ async fn write_random_journal<const ITEM_SIZE: usize>(
     items_per_blob: u64,
     items_to_write: u64,
 ) -> Journal<Context, FixedBytes<ITEM_SIZE>> {
+    // Initialize the journal at the given partition.
     let journal_config = JConfig {
         partition: partition_name.to_string(),
         items_per_blob,
     };
-
-    // Initialize the journal and prune it to its empty state if requested.
     let mut journal = Journal::init(context, journal_config).await.unwrap();
 
     // Append `items_to_write` random items to the journal.
@@ -42,6 +41,8 @@ async fn write_random_journal<const ITEM_SIZE: usize>(
             .await
             .expect("failed to append data");
     }
+
+    // Sync the journal to ensure all data is written to disk.
     journal.sync().await.unwrap();
 
     journal
