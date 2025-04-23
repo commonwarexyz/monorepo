@@ -24,8 +24,6 @@
 //! # }
 //! ```
 
-use std::ops::{Deref, DerefMut};
-
 /// Async reader–writer lock.
 pub struct RwLock<T>(async_lock::RwLock<T>);
 
@@ -75,43 +73,5 @@ impl<T> RwLock<T> {
     #[inline]
     pub fn into_inner(self) -> T {
         self.0.into_inner()
-    }
-}
-
-// Convenience conversions / debug impls ------------------------------------
-
-impl<T> From<T> for RwLock<T> {
-    #[inline]
-    fn from(value: T) -> Self {
-        Self::new(value)
-    }
-}
-
-impl<T: std::fmt::Debug> std::fmt::Debug for RwLock<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RwLock").finish_non_exhaustive()
-    }
-}
-
-impl<T> Deref for RwLockReadGuard<'_, T> {
-    type Target = T;
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        &**self
-    }
-}
-
-impl<T> Deref for RwLockWriteGuard<'_, T> {
-    type Target = T;
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        &**self
-    }
-}
-
-impl<T> DerefMut for RwLockWriteGuard<'_, T> {
-    #[inline]
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut **self
     }
 }
