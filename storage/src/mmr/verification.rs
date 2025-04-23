@@ -418,7 +418,7 @@ mod tests {
     use super::Proof;
     use crate::mmr::mem::Mmr;
     use commonware_cryptography::{hash, sha256::Digest, Sha256};
-    use commonware_runtime::{deterministic::Executor, Runner};
+    use commonware_runtime::{deterministic, Runner};
 
     fn test_digest(v: u8) -> Digest {
         hash(&[v])
@@ -426,8 +426,8 @@ mod tests {
 
     #[test]
     fn test_verification_verify_element() {
-        let (executor, _, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
             // create an 11 element MMR over which we'll test single-element inclusion proofs
             let mut mmr = Mmr::<Sha256>::new();
             let element = Digest::from(*b"01234567012345670123456701234567");
@@ -519,9 +519,9 @@ mod tests {
 
     #[test]
     fn test_verification_verify_range() {
-        let (executor, _, _) = Executor::default();
+        let executor = deterministic::Runner::default();
 
-        executor.start(async move {
+        executor.start(|_| async move {
             // create a new MMR and add a non-trivial amount (49) of elements
             let mut mmr: Mmr<Sha256> = Mmr::default();
             let mut elements = Vec::new();
@@ -690,8 +690,8 @@ mod tests {
 
     #[test]
     fn test_verification_retained_nodes_provable_after_pruning() {
-        let (executor, _, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
             // create a new MMR and add a non-trivial amount (49) of elements
             let mut mmr: Mmr<Sha256> = Mmr::default();
             let mut elements = Vec::<Digest>::new();
@@ -728,8 +728,8 @@ mod tests {
 
     #[test]
     fn test_verification_ranges_provable_after_pruning() {
-        let (executor, _, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
             // create a new MMR and add a non-trivial amount (49) of elements
             let mut mmr: Mmr<Sha256> = Mmr::default();
             let mut elements = Vec::<Digest>::new();
@@ -806,8 +806,8 @@ mod tests {
 
     #[test]
     fn test_verification_proof_serialization() {
-        let (executor, _, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
             assert_eq!(
                 Proof::<Sha256>::max_serialization_size(),
                 8168,

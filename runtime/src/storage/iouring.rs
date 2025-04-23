@@ -1,5 +1,6 @@
 use std::{
     fs::{self, File},
+    io::Error as IoError,
     os::fd::AsRawFd as _,
     path::PathBuf,
     sync::{Arc, Mutex},
@@ -40,13 +41,17 @@ impl crate::Storage for Storage {
     type Blob = Blob;
 
     async fn open(&self, partition: &str, name: &[u8]) -> Result<Blob, Error> {
-        let _guard = self.lock.lock().map_err(|_| Error::LockGrabFailed)?;
+        let _guard = self.lock.lock().unwrap();
 
         // Construct the full path
         let path = self.storage_directory.join(partition).join(hex(name));
-        let parent = path
-            .parent()
-            .ok_or_else(|| Error::BlobOpenFailed(partition.into(), hex(name)))?;
+        let parent = path.parent().ok_or_else(|| {
+            Error::BlobOpenFailed(
+                partition.into(),
+                hex(name),
+                IoError::new(std::io::ErrorKind::NotFound, "No parent directory"),
+            )
+        })?;
 
         // Create the partition directory if it does not exist
         fs::create_dir_all(parent).map_err(|_| Error::PartitionCreationFailed(partition.into()))?;
@@ -58,7 +63,7 @@ impl crate::Storage for Storage {
             .create(true)
             .truncate(false)
             .open(&path)
-            .map_err(|_| Error::BlobOpenFailed(partition.into(), hex(name)))?;
+            .map_err(|e| Error::BlobOpenFailed(partition.into(), hex(name), e))?;
 
         // Get the file length
         let len = file.metadata().map_err(|_| Error::ReadFailed)?.len();
@@ -67,7 +72,7 @@ impl crate::Storage for Storage {
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
-        let _guard = self.lock.lock().map_err(|_| Error::LockGrabFailed)?;
+        let _guard = self.lock.lock().unwrap();
 
         let path = self.storage_directory.join(partition);
         if let Some(name) = name {
@@ -81,7 +86,7 @@ impl crate::Storage for Storage {
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
-        let _guard = self.lock.lock().map_err(|_| Error::LockGrabFailed)?;
+        let _guard = self.lock.lock().unwrap();
 
         let path = self.storage_directory.join(partition);
 
@@ -128,13 +133,13 @@ impl Blob {
 
 impl crate::Blob for Blob {
     async fn len(&self) -> Result<u64, Error> {
-        let inner = self.file.lock().map_err(|_| Error::LockGrabFailed)?;
+        let inner = self.file.lock().unwrap();
         let (_, _, len) = &*inner;
         Ok(*len)
     }
 
     async fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
-        let mut inner = self.file.lock().map_err(|_| Error::LockGrabFailed)?;
+        let mut inner = self.file.lock().unwrap();
         let (file, ring, len) = &mut *inner;
 
         if offset + buf.len() as u64 > *len {
@@ -179,7 +184,7 @@ impl crate::Blob for Blob {
     }
 
     async fn write_at(&self, buf: &[u8], offset: u64) -> Result<(), Error> {
-        let mut inner = self.file.lock().map_err(|_| Error::LockGrabFailed)?;
+        let mut inner = self.file.lock().unwrap();
         let (file, ring, len) = &mut *inner;
 
         let fd = types::Fd(file.as_raw_fd());
@@ -225,10 +230,10 @@ impl crate::Blob for Blob {
     }
 
     async fn truncate(&self, len: u64) -> Result<(), Error> {
-        let mut file = self.file.lock().map_err(|_| Error::LockGrabFailed)?;
+        let mut file = self.file.lock().unwrap();
         file.0
             .set_len(len)
-            .map_err(|_| Error::BlobTruncateFailed(self.partition.clone(), hex(&self.name)))?;
+            .map_err(|e| Error::BlobTruncateFailed(self.partition.clone(), hex(&self.name), e))?;
 
         // Update the virtual file size
         file.2 = len;
@@ -236,11 +241,11 @@ impl crate::Blob for Blob {
     }
 
     async fn sync(&self) -> Result<(), Error> {
-        let inner = self.file.lock().map_err(|_| Error::LockGrabFailed)?;
+        let inner = self.file.lock().unwrap();
         inner
             .0
             .sync_all()
-            .map_err(|_| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name)))
+            .map_err(|e| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e))
     }
 
     async fn close(self) -> Result<(), Error> {

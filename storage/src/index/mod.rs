@@ -35,13 +35,13 @@ mod tests {
     use super::*;
     use crate::index::translator::TwoCap;
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic::Executor, Metrics};
+    use commonware_runtime::{deterministic, Metrics};
     use rand::Rng;
     use std::collections::HashMap;
 
     #[test_traced]
     fn test_index_basic() {
-        let (_, context, _) = Executor::default();
+        let context = deterministic::Context::default();
         let mut index = Index::init(context.clone(), TwoCap);
         assert_eq!(index.len(), 0);
 
@@ -75,7 +75,7 @@ mod tests {
 
     #[test_traced]
     fn test_index_many_keys() {
-        let (_, mut context, _) = Executor::default();
+        let mut context = deterministic::Context::default();
         let mut index = Index::init(context.clone(), TwoCap);
 
         // Insert enough keys to generate some collisions, then confirm each value we inserted
@@ -101,7 +101,7 @@ mod tests {
 
     #[test_traced]
     fn test_index_key_lengths_and_collisions() {
-        let (_, context, _) = Executor::default();
+        let context = deterministic::Context::default();
         let mut index = Index::init(context.clone(), TwoCap);
 
         // Insert keys of different lengths
@@ -151,7 +151,7 @@ mod tests {
 
     #[test_traced]
     fn test_index_value_order() {
-        let (_, context, _) = Executor::default();
+        let context = deterministic::Context::default();
         let mut index = Index::init(context.clone(), TwoCap);
 
         index.insert(b"key", 1);
@@ -167,7 +167,7 @@ mod tests {
 
     #[test_traced]
     fn test_index_remove_specific() {
-        let (_, context, _) = Executor::default();
+        let context = deterministic::Context::default();
         let mut index = Index::init(context.clone(), TwoCap);
 
         index.insert(b"key", 1);
@@ -188,7 +188,7 @@ mod tests {
 
     #[test_traced]
     fn test_index_empty_key() {
-        let (_, context, _) = Executor::default();
+        let context = deterministic::Context::default();
         let mut index = Index::init(context.clone(), TwoCap);
 
         index.insert(b"", 0); // Maps to [0, 0]
@@ -217,7 +217,7 @@ mod tests {
 
     #[test_traced]
     fn test_index_mutate_through_iterator() {
-        let (_, context, _) = Executor::default();
+        let context = deterministic::Context::default();
         let mut index = Index::init(context.clone(), TwoCap);
 
         index.insert(b"key", 1);
@@ -247,7 +247,7 @@ mod tests {
 
     #[test_traced]
     fn test_index_remove_through_iterator() {
-        let (_, context, _) = Executor::default();
+        let context = deterministic::Context::default();
         let mut index = Index::init(context.clone(), TwoCap);
 
         index.insert(b"key", 1);
@@ -336,7 +336,7 @@ mod tests {
 
     #[test_traced]
     fn test_index_insert_through_iterator() {
-        let (_, context, _) = Executor::default();
+        let context = deterministic::Context::default();
         let mut index = Index::init(context.clone(), TwoCap);
 
         {

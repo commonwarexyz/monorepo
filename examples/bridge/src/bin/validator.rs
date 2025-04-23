@@ -9,10 +9,7 @@ use commonware_cryptography::{
     Ed25519, Sha256, Signer,
 };
 use commonware_p2p::authenticated;
-use commonware_runtime::{
-    tokio::{self, Executor},
-    Metrics, Network, Runner,
-};
+use commonware_runtime::{tokio, Metrics, Network, Runner};
 use commonware_storage::journal::variable::{Config, Journal};
 use commonware_stream::public_key::{self, Connection};
 use commonware_utils::{from_hex, quorum, union};
@@ -145,7 +142,7 @@ fn main() {
         storage_directory: storage_directory.into(),
         ..Default::default()
     };
-    let (executor, context) = Executor::init(runtime_cfg.clone());
+    let executor = tokio::Runner::new(runtime_cfg.clone());
 
     // Configure indexer
     let indexer_cfg = public_key::Config {
@@ -168,7 +165,7 @@ fn main() {
     );
 
     // Start context
-    executor.start(async move {
+    executor.start(|context| async move {
         // Dial indexer
         let (sink, stream) = context
             .dial(indexer_address)

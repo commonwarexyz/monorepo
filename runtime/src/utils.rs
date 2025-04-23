@@ -245,10 +245,10 @@ pub type Signal = Shared<oneshot::Receiver<i32>>;
 /// ## Basic Usage
 ///
 /// ```rust
-/// use commonware_runtime::{Spawner, Runner, Signaler, deterministic::Executor};
+/// use commonware_runtime::{Spawner, Runner, Signaler, deterministic};
 ///
-/// let (executor, _, _) = Executor::default();
-/// executor.start(async move {
+/// let executor = deterministic::Runner::default();
+/// executor.start(|context| async move {
 ///     // Setup signaler and get future
 ///     let (mut signaler, signal) = Signaler::new();
 ///
@@ -270,12 +270,12 @@ pub type Signal = Shared<oneshot::Receiver<i32>>;
 ///
 /// ```rust
 /// use commonware_macros::select;
-/// use commonware_runtime::{Clock, Spawner, Runner, Signaler, deterministic::Executor, Metrics};
+/// use commonware_runtime::{Clock, Spawner, Runner, Signaler, deterministic, Metrics};
 /// use futures::channel::oneshot;
 /// use std::time::Duration;
 ///
-/// let (executor, context, _) = Executor::default();
-/// executor.start(async move {
+/// let executor = deterministic::Runner::default();
+/// executor.start(|context| async move {
 ///     // Setup signaler and get future
 ///     let (mut signaler, mut signal) = Signaler::new();
 ///
@@ -355,8 +355,8 @@ async fn task(i: usize) -> usize {
 }
 
 #[cfg(test)]
-pub fn run_tasks(tasks: usize, runner: impl Runner, context: impl Spawner) -> Vec<usize> {
-    runner.start(async move {
+pub fn run_tasks(tasks: usize, runner: crate::deterministic::Runner) -> (String, Vec<usize>) {
+    runner.start(|context| async move {
         // Randomly schedule tasks
         let mut handles = FuturesUnordered::new();
         for i in 0..=tasks - 1 {
@@ -369,21 +369,21 @@ pub fn run_tasks(tasks: usize, runner: impl Runner, context: impl Spawner) -> Ve
             outputs.push(result.unwrap());
         }
         assert_eq!(outputs.len(), tasks);
-        outputs
+        (context.auditor().state(), outputs)
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{tokio::Executor, Metrics};
+    use crate::{tokio, Metrics};
     use commonware_macros::test_traced;
     use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
     #[test_traced]
     fn test_create_pool() {
-        let (executor, context) = Executor::default();
-        executor.start(async move {
+        let executor = tokio::Runner::default();
+        executor.start(|context| async move {
             // Create a thread pool with 4 threads
             let pool = create_pool(context.with_label("pool"), 4).unwrap();
 

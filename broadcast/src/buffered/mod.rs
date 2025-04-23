@@ -41,10 +41,7 @@ mod tests {
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
-    use commonware_runtime::{
-        deterministic::{Context, Executor},
-        Clock, Metrics, Runner,
-    };
+    use commonware_runtime::{deterministic, Clock, Metrics, Runner};
     use std::{collections::BTreeMap, time::Duration};
 
     // Number of messages to cache per sender
@@ -63,11 +60,11 @@ mod tests {
     type Registrations = BTreeMap<PublicKey, (Sender<PublicKey>, Receiver<PublicKey>)>;
 
     async fn initialize_simulation(
-        context: Context,
+        context: deterministic::Context,
         num_peers: u32,
         success_rate: f64,
     ) -> (Vec<PublicKey>, Registrations, Oracle<PublicKey>) {
-        let (network, mut oracle) = Network::<Context, PublicKey>::new(
+        let (network, mut oracle) = Network::<deterministic::Context, PublicKey>::new(
             context.with_label("network"),
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
@@ -109,7 +106,7 @@ mod tests {
     }
 
     fn spawn_peer_engines(
-        context: Context,
+        context: deterministic::Context,
         registrations: &mut Registrations,
     ) -> BTreeMap<PublicKey, Mailbox<Sha256Digest, TestMessage>> {
         let mut mailboxes = BTreeMap::<PublicKey, Mailbox<Sha256Digest, TestMessage>>::new();
@@ -135,8 +132,8 @@ mod tests {
 
     #[test_traced]
     fn test_broadcast() {
-        let (runner, context, _) = Executor::timed(Duration::from_secs(5));
-        runner.start(async move {
+        let runner = deterministic::Runner::timed(Duration::from_secs(5));
+        runner.start(|context| async move {
             let (peers, mut registrations, _oracle) =
                 initialize_simulation(context.clone(), 4, 1.0).await;
             let mailboxes = spawn_peer_engines(context.clone(), &mut registrations);
@@ -162,8 +159,8 @@ mod tests {
 
     #[test_traced]
     fn test_self_retrieval() {
-        let (runner, context, _) = Executor::timed(Duration::from_secs(5));
-        runner.start(async move {
+        let runner = deterministic::Runner::timed(Duration::from_secs(5));
+        runner.start(|context| async move {
             // Initialize simulation with 1 peer
             let (peers, mut registrations, _oracle) =
                 initialize_simulation(context.clone(), 1, 1.0).await;
@@ -208,8 +205,8 @@ mod tests {
 
     #[test_traced]
     fn test_packet_loss() {
-        let (runner, context, _) = Executor::timed(Duration::from_secs(30));
-        runner.start(async move {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|context| async move {
             let (peers, mut registrations, _oracle) =
                 initialize_simulation(context.clone(), 10, 0.1).await;
             let mailboxes = spawn_peer_engines(context.clone(), &mut registrations);
@@ -249,8 +246,8 @@ mod tests {
 
     #[test_traced]
     fn test_get_cached() {
-        let (runner, context, _) = Executor::timed(Duration::from_secs(5));
-        runner.start(async move {
+        let runner = deterministic::Runner::timed(Duration::from_secs(5));
+        runner.start(|context| async move {
             let (peers, mut registrations, _oracle) =
                 initialize_simulation(context.clone(), 2, 1.0).await;
             let mailboxes = spawn_peer_engines(context.clone(), &mut registrations);
@@ -277,8 +274,8 @@ mod tests {
 
     #[test_traced]
     fn test_get_nonexistent() {
-        let (runner, context, _) = Executor::timed(Duration::from_secs(5));
-        runner.start(async move {
+        let runner = deterministic::Runner::timed(Duration::from_secs(5));
+        runner.start(|context| async move {
             let (peers, mut registrations, _oracle) =
                 initialize_simulation(context.clone(), 2, 1.0).await;
             let mailboxes = spawn_peer_engines(context.clone(), &mut registrations);
@@ -310,8 +307,8 @@ mod tests {
 
     #[test_traced]
     fn test_cache_eviction_single_peer() {
-        let (runner, context, _) = Executor::timed(Duration::from_secs(5));
-        runner.start(async move {
+        let runner = deterministic::Runner::timed(Duration::from_secs(5));
+        runner.start(|context| async move {
             let (peers, mut registrations, _oracle) =
                 initialize_simulation(context.clone(), 2, 1.0).await;
             let mailboxes = spawn_peer_engines(context.clone(), &mut registrations);
@@ -347,8 +344,8 @@ mod tests {
 
     #[test_traced]
     fn test_cache_eviction_multi_peer() {
-        let (runner, context, _) = Executor::timed(Duration::from_secs(10));
-        runner.start(async move {
+        let runner = deterministic::Runner::timed(Duration::from_secs(10));
+        runner.start(|context| async move {
             // Initialize simulation with 3 peers
             let (peers, mut registrations, _oracle) =
                 initialize_simulation(context.clone(), 3, 1.0).await;

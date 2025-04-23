@@ -53,7 +53,7 @@ mod tests {
         simulated::{Config as NConfig, Link, Network},
         Receiver, Recipients, Sender,
     };
-    use commonware_runtime::{deterministic::Executor, Metrics, Runner, Spawner};
+    use commonware_runtime::{deterministic, Metrics, Runner, Spawner};
     use commonware_storage::journal::variable::{Config as JConfig, Journal};
     use commonware_utils::quorum;
     use futures::{channel::mpsc, StreamExt};
@@ -65,8 +65,8 @@ mod tests {
         let n = 5;
         let threshold = quorum(n);
         let namespace = b"consensus".to_vec();
-        let (executor, mut context, _) = Executor::timed(Duration::from_secs(10));
-        executor.start(async move {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
                 context.with_label("network"),

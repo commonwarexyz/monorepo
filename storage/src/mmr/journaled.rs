@@ -484,7 +484,7 @@ mod tests {
     use crate::mmr::{iterator::leaf_num_to_pos, mem::tests::ROOTS};
     use commonware_cryptography::{hash, sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic::Executor, Blob as _, Runner};
+    use commonware_runtime::{deterministic, Blob as _, Runner};
     use commonware_utils::hex;
 
     fn test_digest(v: usize) -> Digest {
@@ -493,8 +493,8 @@ mod tests {
 
     #[test_traced]
     fn test_journaled_mmr_empty() {
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             let cfg = Config {
                 journal_partition: "journal_partition".into(),
                 metadata_partition: "metadata_partition".into(),
@@ -516,8 +516,8 @@ mod tests {
 
     #[test_traced]
     fn test_journaled_mmr_pop() {
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             let cfg = Config {
                 journal_partition: "journal_partition".into(),
                 metadata_partition: "metadata_partition".into(),
@@ -584,8 +584,8 @@ mod tests {
 
     #[test_traced]
     fn test_journaled_mmr_basic() {
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             let cfg = Config {
                 journal_partition: "journal_partition".into(),
                 metadata_partition: "metadata_partition".into(),
@@ -653,8 +653,8 @@ mod tests {
     /// Generates a stateful MMR, simulates various partial-write scenarios, and confirms we
     /// appropriately recover to a valid state.
     fn test_journaled_mmr_recovery() {
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             let cfg = Config {
                 journal_partition: "journal_partition".into(),
                 metadata_partition: "metadata_partition".into(),
@@ -744,8 +744,8 @@ mod tests {
 
     #[test_traced]
     fn test_journaled_mmr_pruning() {
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             let cfg = Config {
                 journal_partition: "journal_partition".into(),
                 metadata_partition: "metadata_partition".into(),
@@ -841,8 +841,8 @@ mod tests {
     #[test_traced("WARN")]
     /// Simulate partial writes after pruning, making sure we recover to a valid state.
     fn test_journaled_mmr_recovery_with_pruning() {
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             let cfg = Config {
                 journal_partition: "journal_partition".into(),
                 metadata_partition: "metadata_partition".into(),
