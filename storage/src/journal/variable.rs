@@ -135,7 +135,7 @@ fn compute_next_offset(mut offset: u64) -> Result<u32, Error> {
 }
 
 /// Implementation of `Journal` storage.
-pub struct Journal<E: Storage + Metrics, C: CodecConfig, V: Codec<C>> {
+pub struct Journal<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> {
     context: E,
     cfg: Config<C>,
 
@@ -150,7 +150,7 @@ pub struct Journal<E: Storage + Metrics, C: CodecConfig, V: Codec<C>> {
     _phantom: PhantomData<V>,
 }
 
-impl<E: Storage + Metrics, C: CodecConfig, V: Codec<C>> Journal<E, C, V> {
+impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> {
     /// Initialize a new `Journal` instance.
     ///
     /// All backing blobs are opened but not read during
@@ -211,7 +211,7 @@ impl<E: Storage + Metrics, C: CodecConfig, V: Codec<C>> Journal<E, C, V> {
     }
 
     /// Reads an item from the blob at the given offset.
-    async fn read(blob: &E::Blob, offset: u32) -> Result<(u32, u32, V), Error> {
+    async fn read(cfg: &C, blob: &E::Blob, offset: u32) -> Result<(u32, u32, V), Error> {
         // Read item size
         let offset = offset as u64 * ITEM_ALIGNMENT;
         let mut size = [0u8; 4];
@@ -240,7 +240,8 @@ impl<E: Storage + Metrics, C: CodecConfig, V: Codec<C>> Journal<E, C, V> {
         let aligned_offset = compute_next_offset(offset)?;
 
         // Return item
-        Ok((aligned_offset, size, Bytes::from(item)))
+        let item = V::decode_cfg(item.as_ref(), &cfg).map_err(Error::Codec)?;
+        Ok((aligned_offset, size, item))
     }
 
     /// Read `prefix` bytes from the blob at the given offset.
@@ -267,7 +268,7 @@ impl<E: Storage + Metrics, C: CodecConfig, V: Codec<C>> Journal<E, C, V> {
         //
         // We don't compute the checksum here nor do we verify that the bytes
         // requested is less than the item size.
-        let item_prefix = Bytes::from(buf[4..].to_vec());
+        let item_prefix = buf[4..].to_vec();
 
         // Compute next offset
         let offset = offset
@@ -291,7 +292,12 @@ impl<E: Storage + Metrics, C: CodecConfig, V: Codec<C>> Journal<E, C, V> {
     /// This method assumes the caller knows the exact size of the item (either because
     /// they store fixed-size items or they previously indexed the size). If an incorrect
     /// `exact` is provided, the method will likely return an error (as integrity is verified).
-    async fn read_exact(blob: &E::Blob, offset: u32, exact: u32) -> Result<(u32, Vec<u8>), Error> {
+    async fn read_exact(
+        cfg: &C,
+        blob: &E::Blob,
+        offset: u32,
+        exact: u32,
+    ) -> Result<(u32, V), Error> {
         // Read all of the item into one buffer
         let offset = offset as u64 * ITEM_ALIGNMENT;
         let mut buf = vec![0u8; 4 + exact as usize + 4];
@@ -304,7 +310,7 @@ impl<E: Storage + Metrics, C: CodecConfig, V: Codec<C>> Journal<E, C, V> {
         }
 
         // Get item
-        let item = Bytes::from(buf[4..4 + exact as usize].to_vec());
+        let item = buf[4..4 + exact as usize].to_vec();
 
         // Verify integrity
         let stored_checksum = u32::from_be_bytes(buf[4 + exact as usize..].try_into().unwrap());
@@ -324,6 +330,7 @@ impl<E: Storage + Metrics, C: CodecConfig, V: Codec<C>> Journal<E, C, V> {
         let aligned_offset = compute_next_offset(offset)?;
 
         // Return item
+        let item = V::decode_cfg(item.as_ref(), cfg).map_err(Error::Codec)?;
         Ok((aligned_offset, item))
     }
 
@@ -356,8 +363,89 @@ impl<E: Storage + Metrics, C: CodecConfig, V: Codec<C>> Journal<E, C, V> {
     pub async fn replay(
         &mut self,
         concurrency: usize,
-        prefix: Option<u32>,
     ) -> Result<impl Stream<Item = Result<(u64, u32, u32, V), Error>> + '_, Error> {
+        // Collect all blobs to replay
+        let mut blobs = Vec::with_capacity(self.blobs.len());
+        for (section, blob) in self.blobs.iter() {
+            let len = blob.len().await?;
+            let aligned_len = compute_next_offset(len)?;
+            blobs.push((*section, blob, aligned_len));
+        }
+
+        // Replay all blobs concurrently and stream items as they are read (to avoid
+        // occupying too much memory with buffered data)
+        let codec_config = self.cfg.codec_config;
+        Ok(stream::iter(blobs)
+            .map(move |(section, blob, len)| async move {
+                stream::unfold(
+                    (codec_config, section, blob, 0u32),
+                    move |(codec_config, section, blob, offset)| async move {
+                        // Check if we are at the end of the blob
+                        if offset == len {
+                            return None;
+                        }
+
+                        // Get next item
+                        let mut read = Self::read(&codec_config, blob, offset).await;
+
+                        // Ensure a full read wouldn't put us past the end of the blob
+                        if let Ok((next_offset, _, _)) = read {
+                            if next_offset > len {
+                                read = Err(Error::Runtime(RError::BlobInsufficientLength));
+                            }
+                        };
+
+                        // Handle read result
+                        match read {
+                            Ok((next_offset, item_size, item)) => {
+                                trace!(blob = section, cursor = offset, len, "replayed item");
+                                Some((
+                                    Ok((section, offset, item_size, item)),
+                                    (codec_config, section, blob, next_offset),
+                                ))
+                            }
+                            Err(Error::ChecksumMismatch(expected, found)) => {
+                                // If we encounter corruption, we don't try to fix it.
+                                warn!(
+                                    blob = section,
+                                    cursor = offset,
+                                    expected,
+                                    found,
+                                    "corruption detected"
+                                );
+                                Some((
+                                    Err(Error::ChecksumMismatch(expected, found)),
+                                    (codec_config, section, blob, len),
+                                ))
+                            }
+                            Err(Error::Runtime(RError::BlobInsufficientLength)) => {
+                                // If we encounter trailing bytes, we prune to the last
+                                // valid item. This can happen during an unclean file close (where
+                                // pending data is not fully synced to disk).
+                                warn!(
+                                    blob = section,
+                                    new_size = offset,
+                                    old_size = len,
+                                    "trailing bytes detected: truncating"
+                                );
+                                blob.truncate(offset as u64 * ITEM_ALIGNMENT).await.ok()?;
+                                blob.sync().await.ok()?;
+                                None
+                            }
+                            Err(err) => Some((Err(err), (codec_config, section, blob, len))),
+                        }
+                    },
+                )
+            })
+            .buffer_unordered(concurrency)
+            .flatten())
+    }
+
+    pub async fn replay_prefix(
+        &mut self,
+        concurrency: usize,
+        prefix: u32,
+    ) -> Result<impl Stream<Item = Result<(u64, u32, u32, Vec<u8>), Error>> + '_, Error> {
         // Collect all blobs to replay
         let mut blobs = Vec::with_capacity(self.blobs.len());
         for (section, blob) in self.blobs.iter() {
@@ -379,10 +467,7 @@ impl<E: Storage + Metrics, C: CodecConfig, V: Codec<C>> Journal<E, C, V> {
                         }
 
                         // Get next item
-                        let mut read = match prefix {
-                            Some(prefix) => Self::read_prefix(blob, offset, prefix).await,
-                            None => Self::read(blob, offset).await,
-                        };
+                        let mut read = Self::read_prefix(blob, offset, prefix).await;
 
                         // Ensure a full read wouldn't put us past the end of the blob
                         if let Ok((next_offset, _, _)) = read {
@@ -451,7 +536,7 @@ impl<E: Storage + Metrics, C: CodecConfig, V: Codec<C>> Journal<E, C, V> {
         self.prune_guard(section, false)?;
 
         // Ensure item is not too large
-        let item_len = item.len();
+        let item_len = item.encode_size();
         let len = 4 + item_len + 4;
         let item_len = match item_len.try_into() {
             Ok(len) => len,
@@ -470,10 +555,11 @@ impl<E: Storage + Metrics, C: CodecConfig, V: Codec<C>> Journal<E, C, V> {
         };
 
         // Populate buffer
+        let encoded = item.encode();
         let mut buf = Vec::with_capacity(len);
         buf.put_u32(item_len);
-        let checksum = crc32fast::hash(&item);
-        buf.put(item);
+        let checksum = crc32fast::hash(&encoded);
+        buf.put(encoded);
         buf.put_u32(checksum);
 
         // Append item to blob
@@ -522,12 +608,12 @@ impl<E: Storage + Metrics, C: CodecConfig, V: Codec<C>> Journal<E, C, V> {
 
         // If we have an exact size, we can read the item in one go.
         if let Some(exact) = exact {
-            let (_, item) = Self::read_exact(blob, offset, exact).await?;
+            let (_, item) = Self::read_exact(&self.cfg.codec_config, blob, offset, exact).await?;
             return Ok(Some(item));
         }
 
         // Perform a multi-op read.
-        let (_, _, item) = Self::read(blob, offset).await?;
+        let (_, _, item) = Self::read(&self.cfg.codec_config, blob, offset).await?;
         Ok(Some(item))
     }
 

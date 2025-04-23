@@ -15,6 +15,8 @@ pub mod variable;
 pub enum Error {
     #[error("runtime error: {0}")]
     Runtime(#[from] commonware_runtime::Error),
+    #[error("codec error: {0}")]
+    Codec(#[from] commonware_codec::Error),
     #[error("invalid blob name: {0}")]
     InvalidBlobName(String),
     #[error("checksum mismatch: expected={0} actual={1}")]
