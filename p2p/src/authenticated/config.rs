@@ -35,7 +35,7 @@ pub struct Config<C: Scheme> {
     /// Maximum size allowed for messages over any connection.
     ///
     /// The actual size of the network message will be higher due to overhead from the protocol;
-    /// this includes additional metadata, protobuf encoding of the bytes, and cryptographic signatures.
+    /// this may include additional metadata, data from the codec, and/or cryptographic signatures.
     pub max_message_size: usize,
 
     /// Message backlog allowed for internal actors.
