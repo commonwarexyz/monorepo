@@ -14,10 +14,7 @@ use futures::{
     channel::{mpsc, oneshot},
     StreamExt,
 };
-use std::{
-    collections::{HashMap, VecDeque},
-    marker::PhantomData,
-};
+use std::collections::{HashMap, VecDeque};
 use tracing::{debug, error, trace, warn};
 
 /// Instance of the main engine for the module.
@@ -33,14 +30,11 @@ pub struct Engine<
     D: Digest,
     Cfg: CodecCfg,
     M: Digestible<D> + Codec<Cfg>,
-    NetS: Sender<PublicKey = P>,
-    NetR: Receiver<PublicKey = P>,
 > {
     ////////////////////////////////////////
     // Interfaces
     ////////////////////////////////////////
     context: E,
-    _phantom: PhantomData<(NetS, NetR)>,
 
     ////////////////////////////////////////
     // Configuration
@@ -97,9 +91,7 @@ impl<
         D: Digest,
         Cfg: CodecCfg,
         M: Digestible<D> + Codec<Cfg>,
-        NetS: Sender<PublicKey = P>,
-        NetR: Receiver<PublicKey = P>,
-    > Engine<E, P, D, Cfg, M, NetS, NetR>
+    > Engine<E, P, D, Cfg, M>
 {
     /// Creates a new engine with the given context and configuration.
     /// Returns the engine and a mailbox for sending messages to the engine.
@@ -110,7 +102,6 @@ impl<
 
         let result = Self {
             context,
-            _phantom: PhantomData,
             public_key: cfg.public_key,
             priority: cfg.priority,
             deque_size: cfg.deque_size,
@@ -127,12 +118,15 @@ impl<
     }
 
     /// Starts the engine with the given network.
-    pub fn start(mut self, network: (NetS, NetR)) -> Handle<()> {
+    pub fn start(
+        mut self,
+        network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+    ) -> Handle<()> {
         self.context.spawn_ref()(self.run(network))
     }
 
     /// Inner run loop called by `start`.
-    async fn run(mut self, network: (NetS, NetR)) {
+    async fn run(mut self, network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>)) {
         let (mut net_sender, mut net_receiver) = network;
         let mut shutdown = self.context.stopped();
 
@@ -203,7 +197,7 @@ impl<
     ////////////////////////////////////////
 
     /// Handles a `broadcast` request from the application.
-    async fn handle_broadcast(&mut self, net_sender: &mut NetS, msg: M) {
+    async fn handle_broadcast(&mut self, net_sender: &mut impl Sender<PublicKey = P>, msg: M) {
         // Store the message, continue even if it was already stored
         let _ = self.insert_message(self.public_key.clone(), msg.clone());
 
