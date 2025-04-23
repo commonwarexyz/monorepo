@@ -55,13 +55,8 @@ impl Future for NextCompletionFuture<'_> {
             return Poll::Ready(cqe);
         }
 
-        // Submit any pending operations, which might generate completions
+        // Submit any pending operations
         self.ring.submit().expect("unable to submit to ring");
-
-        // Try again after submitting
-        if let Some(cqe) = self.ring.completion().next() {
-            return Poll::Ready(cqe);
-        }
 
         // No completions yet, register waker and return Pending
         cx.waker().wake_by_ref();
