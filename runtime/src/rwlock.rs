@@ -5,14 +5,8 @@
 //! * fair writer acquisition (writers don’t starve)
 //! * `try_read` / `try_write` without waiting
 //!
-//! Add to `Cargo.toml`:
-//! ```toml
-//! [dependencies]
-//! async-lock = "3"
-//! ```
-//!
 //! Usage:
-//! ```rust,ignore
+//! ```rust
 //! use commonware_runtime::rwlock::RwLock;
 //!
 //! # async fn demo() {
