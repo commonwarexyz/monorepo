@@ -3,7 +3,7 @@
 //! This module implements Google's Protocol Buffers variable-length integer encoding.
 //! Each byte uses 7 bits for the value and 1 bit to indicate if more bytes follow.
 
-use crate::error::Error;
+use crate::{EncodeSize, Error, Read, Write};
 use bytes::{Buf, BufMut};
 use std::ops::{BitOrAssign, Shl, ShrAssign};
 
@@ -12,7 +12,7 @@ const DATA_BITS_PER_BYTE: usize = 7;
 const DATA_BITS_MASK: u8 = 0x7F;
 const CONTINUATION_BIT_MASK: u8 = 0x80;
 
-pub trait UnsignedVarint:
+pub trait UInt:
     Copy
     + TryFrom<u64>
     + From<u8>
@@ -26,9 +26,9 @@ pub trait UnsignedVarint:
     fn as_u8(self) -> u8;
 }
 
-macro_rules! impl_unsigned_varint {
+macro_rules! impl_uint {
     ($type:ty) => {
-        impl UnsignedVarint for $type {
+        impl UInt for $type {
             #[inline]
             fn leading_zeros(self) -> u32 {
                 self.leading_zeros()
@@ -41,12 +41,38 @@ macro_rules! impl_unsigned_varint {
         }
     };
 }
-impl_unsigned_varint!(usize);
-impl_unsigned_varint!(u8);
-impl_unsigned_varint!(u16);
-impl_unsigned_varint!(u32);
-impl_unsigned_varint!(u64);
-impl_unsigned_varint!(u128);
+impl_uint!(usize);
+impl_uint!(u8);
+impl_uint!(u16);
+impl_uint!(u32);
+impl_uint!(u64);
+impl_uint!(u128);
+
+pub trait SInt<UEq: UInt> {
+    fn to_u(self) -> UEq;
+    fn from_u(value: UEq) -> Self;
+}
+
+macro_rules! impl_sint {
+    ($type:ty, $u:ty) => {
+        impl SInt<$u> for $type {
+            #[inline]
+            fn to_u(self) -> $u {
+                self as $u
+            }
+            #[inline]
+            fn from_u(value: $u) -> Self {
+                value as $type
+            }
+        }
+    };
+}
+impl_sint!(isize, usize);
+impl_sint!(i8, u8);
+impl_sint!(i16, u16);
+impl_sint!(i32, u32);
+impl_sint!(i64, u64);
+impl_sint!(i128, u128);
 
 fn must_i64<T: TryInto<i64>>(value: T) -> i64 {
     value
@@ -55,7 +81,7 @@ fn must_i64<T: TryInto<i64>>(value: T) -> i64 {
 }
 
 /// Encodes a unsigned 64-bit integer as a varint
-pub fn write<T: UnsignedVarint>(value: T, buf: &mut impl BufMut) {
+pub fn write<T: UInt>(value: T, buf: &mut impl BufMut) {
     let bm = T::from(CONTINUATION_BIT_MASK);
     if value < bm {
         // Fast path for small values (common case for lengths)
@@ -72,7 +98,7 @@ pub fn write<T: UnsignedVarint>(value: T, buf: &mut impl BufMut) {
 }
 
 /// Decodes a unsigned 64-bit integer from a varint
-pub fn read<T: UnsignedVarint>(buf: &mut impl Buf) -> Result<T, Error> {
+pub fn read<T: UInt>(buf: &mut impl Buf) -> Result<T, Error> {
     let max_bits = std::mem::size_of::<T>() * 8;
     let mut result: T = T::from(0);
     let mut shift = 0;
@@ -109,7 +135,7 @@ pub fn read<T: UnsignedVarint>(buf: &mut impl Buf) -> Result<T, Error> {
 }
 
 /// Calculates the number of bytes needed to encode a value as a varint
-pub fn size<T: UnsignedVarint>(value: T) -> usize {
+pub fn size<T: UInt>(value: T) -> usize {
     let total_bits = std::mem::size_of::<T>() * 8;
     let leading_zeros = value.leading_zeros() as usize;
     let data_bits = total_bits - leading_zeros;
@@ -141,6 +167,36 @@ pub fn read_i64<T: TryFrom<i64>>(buf: &mut impl Buf) -> Result<T, Error> {
 /// Calculates the number of bytes needed to encode a signed integer as a varint
 pub fn size_i64(value: i64) -> usize {
     size(to_u64(value))
+}
+
+/// An ergonomic wrapper to allow for encoding and decoding of primitive unsigned integers as
+/// varints rather than the default fixed-width integers.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct UVar<T: UInt>(pub T);
+
+impl<T: UInt> UVar<T> {
+    /// Reads a varint from the buffer and returns it as its original (primitive) type.
+    pub fn read_into(buf: &mut impl Buf) -> Result<T, Error> {
+        read::<T>(buf)
+    }
+}
+
+impl<T: UInt> Write for UVar<T> {
+    fn write(&self, buf: &mut impl BufMut) {
+        write(self.0, buf);
+    }
+}
+
+impl<T: UInt> Read for UVar<T> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        read(buf).map(UVar)
+    }
+}
+
+impl<T: UInt> EncodeSize for UVar<T> {
+    fn encode_size(&self) -> usize {
+        size(self.0)
+    }
 }
 
 #[cfg(test)]
