@@ -98,20 +98,26 @@
 //! ```
 
 use super::Error;
-use bytes::{BufMut, Bytes};
+use bytes::BufMut;
+use commonware_codec::{Codec, Config as CodecConfig};
 use commonware_runtime::{Blob, Error as RError, Metrics, Storage};
 use commonware_utils::hex;
 use futures::stream::{self, Stream, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
-use std::collections::{btree_map::Entry, BTreeMap};
+use std::{
+    collections::{btree_map::Entry, BTreeMap},
+    marker::PhantomData,
+};
 use tracing::{debug, trace, warn};
 
 /// Configuration for `Journal` storage.
 #[derive(Clone)]
-pub struct Config {
+pub struct Config<C: CodecConfig> {
     /// The `commonware-runtime::Storage` partition to use
     /// for storing journal blobs.
     pub partition: String,
+
+    pub codec_config: C,
 }
 
 const ITEM_ALIGNMENT: u64 = 16;
@@ -129,9 +135,9 @@ fn compute_next_offset(mut offset: u64) -> Result<u32, Error> {
 }
 
 /// Implementation of `Journal` storage.
-pub struct Journal<E: Storage + Metrics> {
+pub struct Journal<E: Storage + Metrics, C: CodecConfig, V: Codec<C>> {
     context: E,
-    cfg: Config,
+    cfg: Config<C>,
 
     oldest_allowed: Option<u64>,
 
@@ -140,15 +146,17 @@ pub struct Journal<E: Storage + Metrics> {
     tracked: Gauge,
     synced: Counter,
     pruned: Counter,
+
+    _phantom: PhantomData<V>,
 }
 
-impl<E: Storage + Metrics> Journal<E> {
+impl<E: Storage + Metrics, C: CodecConfig, V: Codec<C>> Journal<E, C, V> {
     /// Initialize a new `Journal` instance.
     ///
     /// All backing blobs are opened but not read during
     /// initialization. The `replay` method can be used
     /// to iterate over all items in the `Journal`.
-    pub async fn init(context: E, cfg: Config) -> Result<Self, Error> {
+    pub async fn init(context: E, cfg: Config<C>) -> Result<Self, Error> {
         // Iterate over blobs in partition
         let mut blobs = BTreeMap::new();
         let stored_blobs = match context.scan(&cfg.partition).await {
@@ -187,6 +195,8 @@ impl<E: Storage + Metrics> Journal<E> {
             tracked,
             synced,
             pruned,
+
+            _phantom: PhantomData,
         })
     }
 
@@ -201,7 +211,7 @@ impl<E: Storage + Metrics> Journal<E> {
     }
 
     /// Reads an item from the blob at the given offset.
-    async fn read(blob: &E::Blob, offset: u32) -> Result<(u32, u32, Bytes), Error> {
+    async fn read(blob: &E::Blob, offset: u32) -> Result<(u32, u32, V), Error> {
         // Read item size
         let offset = offset as u64 * ITEM_ALIGNMENT;
         let mut size = [0u8; 4];
@@ -244,7 +254,7 @@ impl<E: Storage + Metrics> Journal<E> {
         blob: &E::Blob,
         offset: u32,
         prefix: u32,
-    ) -> Result<(u32, u32, Bytes), Error> {
+    ) -> Result<(u32, u32, Vec<u8>), Error> {
         // Read item size and first `prefix` bytes
         let offset = offset as u64 * ITEM_ALIGNMENT;
         let mut buf = vec![0u8; 4 + prefix as usize];
@@ -281,7 +291,7 @@ impl<E: Storage + Metrics> Journal<E> {
     /// This method assumes the caller knows the exact size of the item (either because
     /// they store fixed-size items or they previously indexed the size). If an incorrect
     /// `exact` is provided, the method will likely return an error (as integrity is verified).
-    async fn read_exact(blob: &E::Blob, offset: u32, exact: u32) -> Result<(u32, Bytes), Error> {
+    async fn read_exact(blob: &E::Blob, offset: u32, exact: u32) -> Result<(u32, Vec<u8>), Error> {
         // Read all of the item into one buffer
         let offset = offset as u64 * ITEM_ALIGNMENT;
         let mut buf = vec![0u8; 4 + exact as usize + 4];
@@ -347,7 +357,7 @@ impl<E: Storage + Metrics> Journal<E> {
         &mut self,
         concurrency: usize,
         prefix: Option<u32>,
-    ) -> Result<impl Stream<Item = Result<(u64, u32, u32, Bytes), Error>> + '_, Error> {
+    ) -> Result<impl Stream<Item = Result<(u64, u32, u32, V), Error>> + '_, Error> {
         // Collect all blobs to replay
         let mut blobs = Vec::with_capacity(self.blobs.len());
         for (section, blob) in self.blobs.iter() {
@@ -436,7 +446,7 @@ impl<E: Storage + Metrics> Journal<E> {
     /// to the `Blob` will be considered corrupted (as the trailing bytes will fail
     /// the checksum verification). It is recommended to call `replay` before calling
     /// `append` to prevent this.
-    pub async fn append(&mut self, section: u64, item: Bytes) -> Result<u32, Error> {
+    pub async fn append(&mut self, section: u64, item: V) -> Result<u32, Error> {
         // Check last pruned
         self.prune_guard(section, false)?;
 
@@ -483,7 +493,7 @@ impl<E: Storage + Metrics> Journal<E> {
         section: u64,
         offset: u32,
         prefix: u32,
-    ) -> Result<Option<Bytes>, Error> {
+    ) -> Result<Option<Vec<u8>>, Error> {
         self.prune_guard(section, false)?;
         let blob = match self.blobs.get(&section) {
             Some(blob) => blob,
@@ -503,7 +513,7 @@ impl<E: Storage + Metrics> Journal<E> {
         section: u64,
         offset: u32,
         exact: Option<u32>,
-    ) -> Result<Option<Bytes>, Error> {
+    ) -> Result<Option<V>, Error> {
         self.prune_guard(section, false)?;
         let blob = match self.blobs.get(&section) {
             Some(blob) => blob,

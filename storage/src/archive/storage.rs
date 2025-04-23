@@ -1,7 +1,7 @@
 use super::{Config, Error, Translator};
 use crate::{index::Index, journal::variable::Journal};
-use bytes::{Buf, BufMut, Bytes};
-use commonware_codec::{Codec, FixedSize};
+use bytes::{Buf, BufMut};
+use commonware_codec::{Codec, Config as CodecConfig, FixedSize};
 use commonware_runtime::{Metrics, Storage};
 use commonware_utils::Array;
 use futures::{pin_mut, StreamExt};
@@ -24,8 +24,9 @@ struct Location {
 }
 
 /// Implementation of `Archive` storage.
-pub struct Archive<T: Translator, E: Storage + Metrics, K: Array, V: Codec> {
-    cfg: Config<T, V::Config>,
+pub struct Archive<T: Translator, E: Storage + Metrics, K: Array, VCfg: CodecConfig, V: Codec<VCfg>>
+{
+    cfg: Config<T, VCfg>,
     journal: Journal<E>,
 
     // Oldest allowed section to read from. This is updated when `prune` is called.
@@ -52,14 +53,20 @@ pub struct Archive<T: Translator, E: Storage + Metrics, K: Array, V: Codec> {
     _phantom_v: std::marker::PhantomData<V>,
 }
 
-impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V> {
+impl<T: Translator, E: Storage + Metrics, K: Array, VCfg: CodecConfig, V: Codec<VCfg>>
+    Archive<T, E, K, VCfg, V>
+{
     const PREFIX_LEN: u32 = (u64::SIZE + K::SIZE + u32::SIZE) as u32;
 
     /// Initialize a new `Archive` instance.
     ///
     /// The in-memory index for `Archive` is populated during this call
     /// by replaying the journal.
-    pub async fn init(context: E, mut journal: Journal<E>, cfg: Config<T>) -> Result<Self, Error> {
+    pub async fn init(
+        context: E,
+        mut journal: Journal<E>,
+        cfg: Config<T, VCfg>,
+    ) -> Result<Self, Error> {
         // Initialize keys and run corruption check
         let mut indices = BTreeMap::new();
         let mut keys = Index::init(context.with_label("index"), cfg.translator.clone());
@@ -129,11 +136,12 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
             gets,
             has,
             syncs,
-            _phantom: std::marker::PhantomData,
+            _phantom_k: std::marker::PhantomData,
+            _phantom_v: std::marker::PhantomData,
         })
     }
 
-    fn parse_prefix(mut data: Bytes) -> Result<(u64, Bytes), Error> {
+    fn parse_prefix(mut data: Vec<u8>) -> Result<(u64, K), Error> {
         if data.remaining() != Self::PREFIX_LEN as usize {
             return Err(Error::RecordCorrupted);
         }
@@ -170,7 +178,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
     ///
     /// If the index already exists, put does nothing and returns. If the same key is stored multiple times
     /// at different indices (not recommended), any value associated with the key may be returned.
-    pub async fn put(&mut self, index: u64, key: K, data: Bytes) -> Result<(), Error> {
+    pub async fn put(&mut self, index: u64, key: K, data: V) -> Result<(), Error> {
         // Check last pruned
         let oldest_allowed = self.oldest_allowed.unwrap_or(0);
         if index < oldest_allowed {
@@ -244,14 +252,14 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
     }
 
     /// Retrieve an item from `Archive`.
-    pub async fn get(&self, identifier: Identifier<'_, K>) -> Result<Option<Bytes>, Error> {
+    pub async fn get(&self, identifier: Identifier<'_, K>) -> Result<Option<V>, Error> {
         match identifier {
             Identifier::Index(index) => self.get_index(index).await,
             Identifier::Key(key) => self.get_key(key).await,
         }
     }
 
-    async fn get_index(&self, index: u64) -> Result<Option<Bytes>, Error> {
+    async fn get_index(&self, index: u64) -> Result<Option<V>, Error> {
         // Update metrics
         self.gets.inc();
 
@@ -283,7 +291,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
         Ok(Some(value))
     }
 
-    async fn get_key(&self, key: &K) -> Result<Option<Bytes>, Error> {
+    async fn get_key(&self, key: &K) -> Result<Option<V>, Error> {
         // Update metrics
         self.gets.inc();
 
