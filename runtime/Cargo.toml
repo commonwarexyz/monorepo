@@ -26,13 +26,11 @@ tracing-subscriber = { workspace = true, features = ["fmt", "json", "env-filter"
 opentelemetry = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 rayon = { workspace = true }
+io-uring = { workspace = true, optional = true }
 
 [features]
 default = []
-iouring = ["dep:io-uring"]
-
-[target.'cfg(target_os = "linux")'.dependencies]
-io-uring = { workspace = true, optional = true }
+iouring = ["io-uring"]
 
 # Enable "js" feature when WASM is target
 [target.'cfg(target_arch = "wasm32")'.dependencies.getrandom]
