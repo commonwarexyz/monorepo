@@ -243,7 +243,7 @@ impl<E: Clock + GClock + Rng + Metrics, P: Array> Requester<E, P> {
 mod tests {
     use super::*;
     use commonware_cryptography::{Ed25519, Signer};
-    use commonware_runtime::deterministic::Executor;
+    use commonware_runtime::deterministic;
     use commonware_runtime::Runner;
     use governor::Quota;
     use std::num::NonZeroU32;
@@ -252,8 +252,8 @@ mod tests {
     #[test]
     fn test_requester_basic() {
         // Instantiate context
-        let (executor, context, _auditor) = Executor::seeded(0);
-        executor.start(async move {
+        let executor = deterministic::Runner::seeded(0);
+        executor.start(|context| async move {
             // Create requester
             let scheme = Ed25519::from_seed(0);
             let me = scheme.public_key();
@@ -360,8 +360,8 @@ mod tests {
     #[test]
     fn test_requester_multiple() {
         // Instantiate context
-        let (executor, context, _auditor) = Executor::seeded(0);
-        executor.start(async move {
+        let executor = deterministic::Runner::seeded(0);
+        executor.start(|context| async move {
             // Create requester
             let scheme = Ed25519::from_seed(0);
             let me = scheme.public_key();

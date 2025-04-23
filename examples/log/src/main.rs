@@ -51,10 +51,7 @@ use clap::{value_parser, Arg, Command};
 use commonware_consensus::simplex;
 use commonware_cryptography::{Ed25519, Sha256, Signer};
 use commonware_p2p::authenticated::{self, Network};
-use commonware_runtime::{
-    tokio::{self, Executor},
-    Metrics, Runner,
-};
+use commonware_runtime::{tokio, Metrics, Runner};
 use commonware_storage::journal::variable::{Config, Journal};
 use commonware_utils::union;
 use governor::Quota;
@@ -148,7 +145,7 @@ fn main() {
         storage_directory: storage_directory.into(),
         ..Default::default()
     };
-    let (executor, context) = Executor::init(runtime_cfg.clone());
+    let executor = tokio::Runner::new(runtime_cfg.clone());
 
     // Configure network
     let p2p_cfg = authenticated::Config::aggressive(
@@ -161,7 +158,7 @@ fn main() {
     );
 
     // Start context
-    executor.start(async move {
+    executor.start(async |context| {
         // Initialize network
         let (mut network, mut oracle) = Network::new(context.with_label("network"), p2p_cfg);
 

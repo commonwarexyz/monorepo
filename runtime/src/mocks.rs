@@ -103,7 +103,7 @@ impl StreamTrait for Stream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{deterministic::Executor, Clock, Runner};
+    use crate::{deterministic, Clock, Runner};
     use commonware_macros::select;
     use futures::{executor::block_on, join};
     use std::{thread::sleep, time::Duration};
@@ -165,11 +165,11 @@ mod tests {
     #[test]
     fn test_recv_error() {
         let (sink, mut stream) = Channel::init();
-        let (executor, _, _) = Executor::default();
+        let executor = deterministic::Runner::default();
 
         // If the oneshot sender is dropped before the oneshot receiver is resolved,
         // the recv function should return an error.
-        executor.start(async move {
+        executor.start(|_| async move {
             let mut buf = vec![0; 5];
             let (v, _) = join!(stream.recv(&mut buf), async {
                 // Take the waiter and drop it.
@@ -182,11 +182,11 @@ mod tests {
     #[test]
     fn test_send_error() {
         let (mut sink, mut stream) = Channel::init();
-        let (executor, context, _) = Executor::default();
+        let executor = deterministic::Runner::default();
 
         // If the waiter value has a min, but the oneshot receiver is dropped,
         // the send function should return an error when attempting to send the data.
-        executor.start(async move {
+        executor.start(|context| async move {
             let mut buf = vec![0; 5];
 
             // Create a waiter using a recv call.
@@ -210,10 +210,10 @@ mod tests {
     #[test]
     fn test_recv_timeout() {
         let (_sink, mut stream) = Channel::init();
-        let (executor, context, _) = Executor::default();
+        let executor = deterministic::Runner::default();
 
         // If there is no data to read, test that the recv function just blocks. A timeout should return first.
-        executor.start(async move {
+        executor.start(|context| async move {
             let mut buf = vec![0; 5];
             select! {
                 v = stream.recv(&mut buf) => {

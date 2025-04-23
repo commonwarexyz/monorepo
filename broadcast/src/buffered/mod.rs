@@ -41,10 +41,7 @@ mod tests {
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
-    use commonware_runtime::{
-        deterministic::{Context, Executor},
-        Clock, Metrics, Runner,
-    };
+    use commonware_runtime::{deterministic, Clock, Metrics, Runner};
     use std::{collections::BTreeMap, time::Duration};
 
     // Number of messages to cache per sender
@@ -63,11 +60,11 @@ mod tests {
     type Registrations = BTreeMap<PublicKey, (Sender<PublicKey>, Receiver<PublicKey>)>;
 
     async fn initialize_simulation(
-        context: Context,
+        context: deterministic::Context,
         num_peers: u32,
         success_rate: f64,
     ) -> (Vec<PublicKey>, Registrations, Oracle<PublicKey>) {
-        let (network, mut oracle) = Network::<Context, PublicKey>::new(
+        let (network, mut oracle) = Network::<deterministic::Context, PublicKey>::new(
             context.with_label("network"),
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
@@ -109,10 +106,11 @@ mod tests {
     }
 
     fn spawn_peer_engines(
-        context: Context,
+        context: deterministic::Context,
         registrations: &mut Registrations,
-    ) -> BTreeMap<PublicKey, Mailbox<Sha256Digest, TestMessage>> {
-        let mut mailboxes = BTreeMap::<PublicKey, Mailbox<Sha256Digest, TestMessage>>::new();
+    ) -> BTreeMap<PublicKey, Mailbox<PublicKey, Sha256Digest, TestMessage>> {
+        let mut mailboxes =
+            BTreeMap::<PublicKey, Mailbox<PublicKey, Sha256Digest, TestMessage>>::new();
         while let Some((peer, network)) = registrations.pop_first() {
             let context = context.with_label(&peer.to_string());
             let config = Config {
@@ -135,8 +133,8 @@ mod tests {
 
     #[test_traced]
     fn test_broadcast() {
-        let (runner, context, _) = Executor::timed(Duration::from_secs(5));
-        runner.start(async move {
+        let runner = deterministic::Runner::timed(Duration::from_secs(5));
+        runner.start(|context| async move {
             let (peers, mut registrations, _oracle) =
                 initialize_simulation(context.clone(), 4, 1.0).await;
             let mailboxes = spawn_peer_engines(context.clone(), &mut registrations);
@@ -144,7 +142,7 @@ mod tests {
             // Send a single broadcast message from the first peer
             let message = TestMessage::new(b"hello world test message");
             let mut first_mailbox = mailboxes.get(peers.first().unwrap()).unwrap().clone();
-            first_mailbox.broadcast(message.clone()).await;
+            let result = first_mailbox.broadcast(message.clone()).await;
 
             // Allow time for propagation
             context.sleep(Duration::from_secs(1)).await;
@@ -157,13 +155,14 @@ mod tests {
                 let received_message = receiver.await.ok();
                 assert_eq!(received_message.unwrap(), message);
             }
+            assert_eq!(result.await.unwrap().len(), peers.len() - 1);
         });
     }
 
     #[test_traced]
     fn test_self_retrieval() {
-        let (runner, context, _) = Executor::timed(Duration::from_secs(5));
-        runner.start(async move {
+        let runner = deterministic::Runner::timed(Duration::from_secs(5));
+        runner.start(|context| async move {
             // Initialize simulation with 1 peer
             let (peers, mut registrations, _oracle) =
                 initialize_simulation(context.clone(), 1, 1.0).await;
@@ -180,7 +179,8 @@ mod tests {
             let receiver_before = mailbox_a.get(digest_m1).await;
 
             // Broadcast the message
-            mailbox_a.broadcast(m1.clone()).await;
+            let result = mailbox_a.broadcast(m1.clone()).await;
+            assert_eq!(result.await.unwrap().len(), peers.len() - 1);
 
             // Wait for the pre-broadcast retrieval to complete
             let msg_before = receiver_before
@@ -208,8 +208,8 @@ mod tests {
 
     #[test_traced]
     fn test_packet_loss() {
-        let (runner, context, _) = Executor::timed(Duration::from_secs(30));
-        runner.start(async move {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|context| async move {
             let (peers, mut registrations, _oracle) =
                 initialize_simulation(context.clone(), 10, 0.1).await;
             let mailboxes = spawn_peer_engines(context.clone(), &mut registrations);
@@ -222,7 +222,7 @@ mod tests {
             let digest = message.digest();
             for i in 0..100 {
                 // Broadcast the message
-                first_mailbox.broadcast(message.clone()).await;
+                let result = first_mailbox.broadcast(message.clone()).await;
                 context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
                 // Check if all peers received the message
@@ -236,6 +236,7 @@ mod tests {
                     };
                     all_received &= has;
                 }
+                assert_eq!(result.await.unwrap().len(), peers.len() - 1);
 
                 // If all received, we're done
                 if all_received {
@@ -249,8 +250,8 @@ mod tests {
 
     #[test_traced]
     fn test_get_cached() {
-        let (runner, context, _) = Executor::timed(Duration::from_secs(5));
-        runner.start(async move {
+        let runner = deterministic::Runner::timed(Duration::from_secs(5));
+        runner.start(|context| async move {
             let (peers, mut registrations, _oracle) =
                 initialize_simulation(context.clone(), 2, 1.0).await;
             let mailboxes = spawn_peer_engines(context.clone(), &mut registrations);
@@ -258,7 +259,8 @@ mod tests {
             // Broadcast a message
             let message = TestMessage::new(b"cached message");
             let mut first_mailbox = mailboxes.get(peers.first().unwrap()).unwrap().clone();
-            first_mailbox.broadcast(message.clone()).await;
+            let result = first_mailbox.broadcast(message.clone()).await;
+            assert_eq!(result.await.unwrap().len(), peers.len() - 1);
 
             // Wait for propagation
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
@@ -277,8 +279,8 @@ mod tests {
 
     #[test_traced]
     fn test_get_nonexistent() {
-        let (runner, context, _) = Executor::timed(Duration::from_secs(5));
-        runner.start(async move {
+        let runner = deterministic::Runner::timed(Duration::from_secs(5));
+        runner.start(|context| async move {
             let (peers, mut registrations, _oracle) =
                 initialize_simulation(context.clone(), 2, 1.0).await;
             let mailboxes = spawn_peer_engines(context.clone(), &mut registrations);
@@ -297,7 +299,8 @@ mod tests {
             drop(dummy2);
 
             // Broadcast the message
-            mailbox1.broadcast(message.clone()).await;
+            let result = mailbox1.broadcast(message.clone()).await;
+            assert_eq!(result.await.unwrap().len(), peers.len() - 1);
 
             // Wait for propagation
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
@@ -310,8 +313,8 @@ mod tests {
 
     #[test_traced]
     fn test_cache_eviction_single_peer() {
-        let (runner, context, _) = Executor::timed(Duration::from_secs(5));
-        runner.start(async move {
+        let runner = deterministic::Runner::timed(Duration::from_secs(5));
+        runner.start(|context| async move {
             let (peers, mut registrations, _oracle) =
                 initialize_simulation(context.clone(), 2, 1.0).await;
             let mailboxes = spawn_peer_engines(context.clone(), &mut registrations);
@@ -323,7 +326,8 @@ mod tests {
                 messages.push(TestMessage::new(format!("message {}", i).as_bytes()));
             }
             for message in messages.iter() {
-                mailbox.broadcast(message.clone()).await;
+                let result = mailbox.broadcast(message.clone()).await;
+                assert_eq!(result.await.unwrap().len(), peers.len() - 1);
             }
 
             // Wait for propagation
@@ -347,8 +351,8 @@ mod tests {
 
     #[test_traced]
     fn test_cache_eviction_multi_peer() {
-        let (runner, context, _) = Executor::timed(Duration::from_secs(10));
-        runner.start(async move {
+        let runner = deterministic::Runner::timed(Duration::from_secs(10));
+        runner.start(|context| async move {
             // Initialize simulation with 3 peers
             let (peers, mut registrations, _oracle) =
                 initialize_simulation(context.clone(), 3, 1.0).await;
@@ -362,11 +366,13 @@ mod tests {
             // Create and broadcast message M1 from A
             let m1 = TestMessage::new(b"message M1");
             let digest_m1 = m1.digest();
-            mailbox_a.broadcast(m1.clone()).await;
+            let result = mailbox_a.broadcast(m1.clone()).await;
+            assert_eq!(result.await.unwrap().len(), peers.len() - 1);
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
             // Broadcast M1 from C
-            mailbox_c.broadcast(m1.clone()).await;
+            let result = mailbox_c.broadcast(m1.clone()).await;
+            assert_eq!(result.await.unwrap().len(), peers.len() - 1);
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
             // M1 is now in A's and C's deques in B's engine
@@ -377,7 +383,8 @@ mod tests {
                 new_messages_a.push(TestMessage::new(format!("A{}", i).as_bytes()));
             }
             for msg in &new_messages_a {
-                mailbox_a.broadcast(msg.clone()).await;
+                let result = mailbox_a.broadcast(msg.clone()).await;
+                assert_eq!(result.await.unwrap().len(), peers.len() - 1);
             }
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
@@ -392,7 +399,8 @@ mod tests {
                 new_messages_c.push(TestMessage::new(format!("C{}", i).as_bytes()));
             }
             for msg in &new_messages_c {
-                mailbox_c.broadcast(msg.clone()).await;
+                let result = mailbox_c.broadcast(msg.clone()).await;
+                assert_eq!(result.await.unwrap().len(), peers.len() - 1);
             }
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 

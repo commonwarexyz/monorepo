@@ -6,6 +6,17 @@ use commonware_cryptography::Verifier;
 use commonware_utils::BitVec as UtilsBitVec;
 use std::net::SocketAddr;
 
+/// The maximum overhead (in bytes) when encoding a `message` into a [`Payload::Data`].
+///
+/// The byte overhead is calculated as the sum of the following:
+/// - 1: Payload enum value
+/// - 5: Channel varint
+/// - 5: Message length varint (lengths longer than 32 bits are forbidden by the codec)
+pub const MAX_PAYLOAD_DATA_OVERHEAD: usize = 1 + 5 + 5;
+
+/// Configuration when deserializing messages.
+///
+/// This is used to limit the size of the messages received from peers.
 #[derive(Clone)]
 pub struct Config {
     /// The maximum number of peers that can be sent in a `Peers` message.
@@ -15,7 +26,7 @@ pub struct Config {
     pub max_bitvec: usize,
 }
 
-// Payload is the only allowed message format that can be sent between peers.
+/// Payload is the only allowed message format that can be sent between peers.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Payload<C: Verifier> {
     /// Bit vector that represents the peers a peer knows about.
@@ -182,7 +193,7 @@ impl<C: Verifier> Read for PeerInfo<C> {
     }
 }
 
-// Data is an arbitrary message sent between peers.
+/// Data is an arbitrary message sent between peers.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Data {
     /// A unique identifier for the channel the message is sent on.
@@ -338,5 +349,19 @@ mod tests {
         let invalid_payload = [3, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
         let result = Payload::<Secp256r1>::decode_cfg(&invalid_payload[..], &cfg);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_max_payload_data_overhead() {
+        let message = Bytes::from(vec![0; 1 << 29]);
+        let message_len = message.len();
+        let payload = Payload::<Secp256r1>::Data(Data {
+            channel: u32::MAX,
+            message,
+        });
+        assert_eq!(
+            payload.encode_size(),
+            message_len + MAX_PAYLOAD_DATA_OVERHEAD
+        );
     }
 }

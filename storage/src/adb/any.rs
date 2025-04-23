@@ -551,7 +551,7 @@ mod test {
     use commonware_codec::DecodeExt;
     use commonware_cryptography::{hash, sha256::Digest, Hasher as CHasher, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic::Context, deterministic::Executor, Runner};
+    use commonware_runtime::{deterministic, Runner as _};
     use std::collections::HashMap;
 
     /// Return an `Any` database initialized with a fixed config.
@@ -573,8 +573,8 @@ mod test {
 
     #[test_traced]
     pub fn test_any_db_empty() {
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             let mut hasher = Sha256::new();
             let mut db = open_db(context.clone(), &mut hasher).await;
             assert_eq!(db.op_count(), 0);
@@ -610,8 +610,8 @@ mod test {
 
     #[test_traced("WARN")]
     pub fn test_any_db_build_basic() {
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             // Build a db with 2 keys and make sure updates and deletions of those keys work as
             // expected.
             let mut hasher = Sha256::new();
@@ -727,10 +727,10 @@ mod test {
 
     #[test_traced("WARN")]
     pub fn test_any_db_build_and_authenticate() {
-        let (executor, context, _) = Executor::default();
+        let executor = deterministic::Runner::default();
         // Build a db with 1000 keys, some of which we update and some of which we delete, and
         // confirm that the end state of the db matches that of an identically updated hashmap.
-        executor.start(async move {
+        executor.start(|context| async move {
             let mut hasher = Sha256::new();
             let mut db = open_db(context.clone(), &mut hasher).await;
 
@@ -819,7 +819,7 @@ mod test {
             assert!(start_loc < db.inactivity_floor_loc);
             for i in start_loc..end_loc {
                 let (proof, log) = db.proof(i, max_ops).await.unwrap();
-                assert!(Any::<Context, _, _, _>::verify_proof(
+                assert!(Any::<deterministic::Context, _, _, _>::verify_proof(
                     &mut hasher,
                     &proof,
                     i,
@@ -832,8 +832,8 @@ mod test {
 
     #[test_traced("WARN")]
     pub fn test_any_db_recovery() {
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             let mut hasher = Sha256::new();
             let mut db = open_db(context.clone(), &mut hasher).await;
 
@@ -881,8 +881,8 @@ mod test {
     // in the snapshot.
     #[test_traced("WARN")]
     pub fn test_any_db_log_replay() {
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             let mut hasher = Sha256::new();
             let mut db = open_db(context.clone(), &mut hasher).await;
 
@@ -907,8 +907,8 @@ mod test {
 
     #[test_traced("WARN")]
     pub fn test_any_multiple_commits_delete_gets_replayed() {
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             let mut hasher = Sha256::new();
             let mut db = open_db(context.clone(), &mut hasher).await;
 
