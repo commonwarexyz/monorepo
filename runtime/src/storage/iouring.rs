@@ -89,8 +89,8 @@ async fn do_work(mut receiver: mpsc::Receiver<(SqueueEntry, oneshot::Sender<i32>
         };
 
         select! {
-            next_work = new_work_fut => {
-                let Some((mut op,sender)) = next_work else {
+            new_work = new_work_fut => {
+                let Some((mut op,sender)) = new_work else {
                     // Channel closed, exit the loop
                     break;
                 };
@@ -98,6 +98,7 @@ async fn do_work(mut receiver: mpsc::Receiver<(SqueueEntry, oneshot::Sender<i32>
                 // Assign a unique id
                 let work_id = next_work_id;
                 op = op.user_data(work_id);
+                // Use wrapping add in case we overflow
                 next_work_id = next_work_id.wrapping_add(1);
 
                 // We'll send the result of this operation to `sender`.
@@ -296,7 +297,6 @@ impl crate::Blob for Blob {
                 // Got EOF before filling buffer.
                 return Err(Error::BlobInsufficientLength);
             }
-
             total_read += bytes_read;
         }
 
