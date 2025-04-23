@@ -4,21 +4,21 @@ use commonware_utils::array::FixedBytes;
 use criterion::criterion_main;
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 
+mod fixed_append;
 mod fixed_read_random;
 mod fixed_read_sequential;
 mod fixed_replay;
-mod fixed_write;
 
 criterion_main!(
-    fixed_write::benches,
+    fixed_append::benches,
     fixed_read_random::benches,
     fixed_read_sequential::benches,
     fixed_replay::benches,
 );
 
-/// Write `items_to_write` random items to a journal of items with ITEM_SIZE bytes each. The journal
+/// Append `items_to_write` random items to a journal of items with ITEM_SIZE bytes each. The journal
 /// is configured to use `items_per_blob` items per blob.
-async fn write_random_journal<const ITEM_SIZE: usize>(
+async fn append_random_journal<const ITEM_SIZE: usize>(
     context: Context,
     partition_name: &str,
     items_per_blob: u64,

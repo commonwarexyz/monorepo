@@ -33,37 +33,42 @@ async fn bench_run(journal: &mut Journal<Context, FixedBytes<ITEM_SIZE>>) {
     }
 }
 
-fn bench_fixed_write(c: &mut Criterion) {
+fn bench_fixed_append(c: &mut Criterion) {
+    // Create a new executor for the benchmark
     let executor = tokio::Executor::default();
 
-    c.bench_function(module_path!(), |b| {
-        b.to_async(&executor).iter_custom(|iters| async move {
-            let ctx = context::get::<commonware_runtime::tokio::Context>();
-            let mut duration = Duration::ZERO;
-            for _ in 0..iters {
-                let mut j = Journal::init(
-                    ctx.clone(),
-                    JConfig {
-                        partition: PARTITION.to_string(),
-                        items_per_blob: ITEMS_PER_BLOB,
-                    },
-                )
-                .await
-                .unwrap();
+    // Run the benchmark
+    c.bench_function(
+        &format!("{}/items={}", module_path!(), ITEMS_TO_WRITE),
+        |b| {
+            b.to_async(&executor).iter_custom(|iters| async move {
+                let ctx = context::get::<commonware_runtime::tokio::Context>();
+                let mut duration = Duration::ZERO;
+                for _ in 0..iters {
+                    let mut j = Journal::init(
+                        ctx.clone(),
+                        JConfig {
+                            partition: PARTITION.to_string(),
+                            items_per_blob: ITEMS_PER_BLOB,
+                        },
+                    )
+                    .await
+                    .unwrap();
 
-                let start = Instant::now();
-                bench_run(&mut j).await;
-                duration += start.elapsed();
+                    let start = Instant::now();
+                    bench_run(&mut j).await;
+                    duration += start.elapsed();
 
-                j.destroy().await.unwrap();
-            }
-            duration
-        });
-    });
+                    j.destroy().await.unwrap();
+                }
+                duration
+            });
+        },
+    );
 }
 
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_fixed_write
+    targets = bench_fixed_append
 }

@@ -1,4 +1,4 @@
-use super::write_random_journal;
+use super::append_random_journal;
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::Context,
@@ -59,7 +59,7 @@ fn bench_fixed_read_random(c: &mut Criterion) {
                 // Setup the journal with random data.
                 let ctx = context::get::<commonware_runtime::tokio::Context>();
                 let j =
-                    write_random_journal(ctx.clone(), PARTITION, ITEMS_PER_BLOB, ITEMS_TO_WRITE)
+                    append_random_journal(ctx.clone(), PARTITION, ITEMS_PER_BLOB, ITEMS_TO_WRITE)
                         .await;
                 let mut duration = Duration::ZERO;
 
@@ -83,7 +83,7 @@ fn bench_fixed_read_random(c: &mut Criterion) {
                 // Setup the journal with random data.
                 let ctx = context::get::<commonware_runtime::tokio::Context>();
                 let j =
-                    write_random_journal(ctx.clone(), PARTITION, ITEMS_PER_BLOB, ITEMS_TO_WRITE)
+                    append_random_journal(ctx.clone(), PARTITION, ITEMS_PER_BLOB, ITEMS_TO_WRITE)
                         .await;
                 let mut duration = Duration::ZERO;
 

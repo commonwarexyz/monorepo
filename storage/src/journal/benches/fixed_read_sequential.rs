@@ -1,4 +1,4 @@
-use super::write_random_journal;
+use super::append_random_journal;
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::Context,
@@ -37,7 +37,7 @@ fn bench_fixed_read_sequential(c: &mut Criterion) {
         |b| {
             b.to_async(&executor).iter_custom(|iters| async move {
                 let ctx = context::get::<commonware_runtime::tokio::Context>();
-                let j = write_random_journal::<ITEM_SIZE>(
+                let j = append_random_journal::<ITEM_SIZE>(
                     ctx.clone(),
                     PARTITION,
                     ITEMS_PER_BLOB,
@@ -65,7 +65,7 @@ fn bench_fixed_read_sequential(c: &mut Criterion) {
         |b| {
             b.to_async(&executor).iter_custom(|iters| async move {
                 let ctx = context::get::<commonware_runtime::tokio::Context>();
-                let j = write_random_journal::<ITEM_SIZE>(
+                let j = append_random_journal::<ITEM_SIZE>(
                     ctx.clone(),
                     PARTITION,
                     ITEMS_PER_BLOB,
