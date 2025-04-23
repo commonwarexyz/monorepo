@@ -40,7 +40,7 @@ async fn bench_run(journal: &mut Journal<Context, FixedBytes<ITEM_SIZE>>, items_
 /// number of items.
 fn bench_fixed_replay(c: &mut Criterion) {
     let executor = tokio::Executor::default();
-    for items in [1_000, 10_000, 100_000, 1_000_000, 5_000_000, 10_000_000] {
+    for items in [1_000, 10_000, 100_000, 500_000] {
         c.bench_function(
             &format!("{}/items={} size={}", module_path!(), items, ITEM_SIZE),
             |b| {
