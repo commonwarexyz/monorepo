@@ -6,7 +6,8 @@
 use crate::{
     codec::{EncodeSize, Read, Write},
     error::Error,
-    varint, Config, RangeConfig,
+    varint::UInt,
+    RangeCfg,
 };
 use bytes::{Buf, BufMut};
 use std::{
@@ -20,7 +21,7 @@ use std::{
 impl<K: Ord + Hash + Eq + Write> Write for BTreeSet<K> {
     fn write(&self, buf: &mut impl BufMut) {
         let len = u32::try_from(self.len()).expect("BTreeSet length exceeds u32::MAX");
-        varint::write(len, buf);
+        UInt(len).write(buf);
 
         // Items are already sorted in BTreeSet, so we can iterate directly
         for item in self {
@@ -32,7 +33,7 @@ impl<K: Ord + Hash + Eq + Write> Write for BTreeSet<K> {
 impl<K: Ord + Hash + Eq + EncodeSize> EncodeSize for BTreeSet<K> {
     fn encode_size(&self) -> usize {
         let len = u32::try_from(self.len()).expect("BTreeSet length exceeds u32::MAX");
-        let mut size = varint::size(len);
+        let mut size = UInt(len).encode_size();
         for item in self {
             size += item.encode_size();
         }
@@ -40,16 +41,12 @@ impl<K: Ord + Hash + Eq + EncodeSize> EncodeSize for BTreeSet<K> {
     }
 }
 
-impl<R: RangeConfig, Cfg: Config, K: Read<Cfg> + Clone + Ord + Hash + Eq> Read<(R, Cfg)>
-    for BTreeSet<K>
-{
-    fn read_cfg(buf: &mut impl Buf, (range, cfg): &(R, Cfg)) -> Result<Self, Error> {
+impl<K: Read + Clone + Ord + Hash + Eq> Read for BTreeSet<K> {
+    type Cfg = (RangeCfg, K::Cfg);
+
+    fn read_cfg(buf: &mut impl Buf, (range, cfg): &Self::Cfg) -> Result<Self, Error> {
         // Read and validate the length prefix
-        let len32 = varint::read::<u32>(buf)?;
-        let len = usize::try_from(len32).map_err(|_| Error::InvalidVarint)?;
-        if !range.contains(&len) {
-            return Err(Error::InvalidLength(len));
-        }
+        let len = usize::read_cfg(buf, range)?;
         let mut set = BTreeSet::new(); // BTreeSet does not have a capacity method
 
         // Keep track of the last item read
@@ -79,8 +76,7 @@ impl<R: RangeConfig, Cfg: Config, K: Read<Cfg> + Clone + Ord + Hash + Eq> Read<(
 
 impl<K: Ord + Hash + Eq + Write> Write for HashSet<K> {
     fn write(&self, buf: &mut impl BufMut) {
-        let len = u32::try_from(self.len()).expect("HashSet length exceeds u32::MAX");
-        varint::write(len, buf);
+        self.len().write(buf);
 
         // Sort the items to ensure deterministic encoding
         let mut items: Vec<_> = self.iter().collect();
@@ -93,8 +89,7 @@ impl<K: Ord + Hash + Eq + Write> Write for HashSet<K> {
 
 impl<K: Ord + Hash + Eq + EncodeSize> EncodeSize for HashSet<K> {
     fn encode_size(&self) -> usize {
-        let len = u32::try_from(self.len()).expect("HashSet length exceeds u32::MAX");
-        let mut size = varint::size(len);
+        let mut size = self.len().encode_size();
         // Note: Iteration order doesn't matter for size calculation.
         for item in self {
             size += item.encode_size();
@@ -103,16 +98,12 @@ impl<K: Ord + Hash + Eq + EncodeSize> EncodeSize for HashSet<K> {
     }
 }
 
-impl<R: RangeConfig, Cfg: Config, K: Read<Cfg> + Clone + Ord + Hash + Eq> Read<(R, Cfg)>
-    for HashSet<K>
-{
-    fn read_cfg(buf: &mut impl Buf, (range, cfg): &(R, Cfg)) -> Result<Self, Error> {
+impl<K: Read + Clone + Ord + Hash + Eq> Read for HashSet<K> {
+    type Cfg = (RangeCfg, K::Cfg);
+
+    fn read_cfg(buf: &mut impl Buf, (range, cfg): &Self::Cfg) -> Result<Self, Error> {
         // Read and validate the length prefix
-        let len32 = varint::read::<u32>(buf)?;
-        let len = usize::try_from(len32).map_err(|_| Error::InvalidVarint)?;
-        if !range.contains(&len) {
-            return Err(Error::InvalidLength(len));
-        }
+        let len = usize::read_cfg(buf, range)?;
         let mut set = HashSet::with_capacity(len);
 
         // Keep track of the last item read
@@ -135,5 +126,324 @@ impl<R: RangeConfig, Cfg: Config, K: Read<Cfg> + Clone + Ord + Hash + Eq> Read<(
         }
 
         Ok(set)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        codec::{Decode, Encode},
+        FixedSize,
+    };
+    use bytes::{Bytes, BytesMut};
+    use std::collections::{BTreeSet, HashSet};
+    use std::fmt::Debug;
+
+    // Generic round trip test function for BTreeSet
+    fn round_trip_btree<K>(set: &BTreeSet<K>, range_cfg: RangeCfg, item_cfg: K::Cfg)
+    where
+        K: Write + EncodeSize + Read + Clone + Ord + Hash + Eq + Debug + PartialEq,
+        BTreeSet<K>: Read<Cfg = (RangeCfg, K::Cfg)>
+            + Decode<Cfg = (RangeCfg, K::Cfg)>
+            + Debug
+            + PartialEq
+            + Write
+            + EncodeSize,
+    {
+        let encoded = set.encode();
+        let config_tuple = (range_cfg, item_cfg);
+        let decoded = BTreeSet::<K>::decode_cfg(encoded, &config_tuple).expect("decode_cfg failed");
+        assert_eq!(set, &decoded);
+    }
+
+    // Generic round trip test function for HashSet
+    fn round_trip_hash<K>(set: &HashSet<K>, range_cfg: RangeCfg, item_cfg: K::Cfg)
+    where
+        K: Write + EncodeSize + Read + Clone + Ord + Hash + Eq + Debug + PartialEq,
+        HashSet<K>: Read<Cfg = (RangeCfg, K::Cfg)>
+            + Decode<Cfg = (RangeCfg, K::Cfg)>
+            + Debug
+            + PartialEq
+            + Write
+            + EncodeSize,
+    {
+        let encoded = set.encode();
+        let config_tuple = (range_cfg, item_cfg);
+        let decoded = HashSet::<K>::decode_cfg(encoded, &config_tuple).expect("decode_cfg failed");
+        assert_eq!(set, &decoded);
+    }
+
+    // --- BTreeSet Tests ---
+
+    #[test]
+    fn test_empty_btree_set() {
+        let set = BTreeSet::<u32>::new();
+        round_trip_btree(&set, (..).into(), ());
+        assert_eq!(set.encode_size(), 1); // varint 0
+        let encoded = set.encode();
+        assert_eq!(encoded, Bytes::from_static(&[0]));
+    }
+
+    #[test]
+    fn test_simple_btree_set_u32() {
+        let mut set = BTreeSet::new();
+        set.insert(1u32);
+        set.insert(5u32);
+        set.insert(2u32);
+        round_trip_btree(&set, (..).into(), ());
+        assert_eq!(set.encode_size(), 1 + 3 * u32::SIZE);
+    }
+
+    #[test]
+    fn test_large_btree_set() {
+        let set: BTreeSet<_> = (0..1000u16).collect();
+        round_trip_btree(&set, (0..=1000).into(), ());
+    }
+
+    #[test]
+    fn test_btree_set_with_variable_items() {
+        let mut set = BTreeSet::new();
+        set.insert(Bytes::from_static(b"apple"));
+        set.insert(Bytes::from_static(b"banana"));
+        set.insert(Bytes::from_static(b"cherry"));
+
+        let set_range = 0..=10;
+        let item_range = ..=10; // Range for Bytes length
+
+        round_trip_btree(&set, set_range.into(), item_range.into());
+    }
+
+    #[test]
+    fn test_btree_decode_length_limit_exceeded() {
+        let mut set = BTreeSet::new();
+        set.insert(1u32);
+        set.insert(5u32);
+        let encoded = set.encode();
+
+        let config_tuple = ((0..=1).into(), ());
+        let result = BTreeSet::<u32>::decode_cfg(encoded, &config_tuple);
+        assert!(matches!(result, Err(Error::InvalidLength(2))));
+    }
+
+    #[test]
+    fn test_btree_decode_item_length_limit_exceeded() {
+        let mut set = BTreeSet::new();
+        set.insert(Bytes::from_static(b"longitem")); // 8 bytes
+        let encoded = set.encode();
+
+        let set_range = 0..=10;
+        let restrictive_item_range = ..=5; // Limit item length
+        let config_tuple = (set_range.into(), restrictive_item_range.into());
+        let result = BTreeSet::<Bytes>::decode_cfg(encoded, &config_tuple);
+
+        assert!(matches!(result, Err(Error::InvalidLength(8))));
+    }
+
+    #[test]
+    fn test_btree_decode_invalid_item_order() {
+        let mut encoded = BytesMut::new();
+        2usize.write(&mut encoded); // Set length = 2
+        5u32.write(&mut encoded); // Item 5
+        2u32.write(&mut encoded); // Item 2 (out of order)
+
+        let config_tuple = ((..).into(), ());
+        let result = BTreeSet::<u32>::decode_cfg(encoded, &config_tuple);
+        assert!(matches!(
+            result,
+            Err(Error::Invalid("HashSet", "Items must ascend")) // Note: Error message uses HashSet currently
+        ));
+    }
+
+    #[test]
+    fn test_btree_decode_duplicate_item() {
+        let mut encoded = BytesMut::new();
+        2usize.write(&mut encoded); // Set length = 2
+        1u32.write(&mut encoded); // Item 1
+        1u32.write(&mut encoded); // Duplicate Item 1
+
+        let config_tuple = ((..).into(), ());
+        let result = BTreeSet::<u32>::decode_cfg(encoded, &config_tuple);
+        assert!(matches!(
+            result,
+            Err(Error::Invalid("HashSet", "Duplicate item")) // Note: Error message uses HashSet currently
+        ));
+    }
+
+    #[test]
+    fn test_btree_decode_end_of_buffer() {
+        let mut set = BTreeSet::new();
+        set.insert(1u32);
+        set.insert(5u32);
+
+        let mut encoded = set.encode();
+        encoded.truncate(set.encode_size() - 2); // Truncate during last item
+
+        let config_tuple = ((..).into(), ());
+        let result = BTreeSet::<u32>::decode_cfg(encoded, &config_tuple);
+        assert!(matches!(result, Err(Error::EndOfBuffer)));
+    }
+
+    #[test]
+    fn test_btree_decode_extra_data() {
+        let mut set = BTreeSet::new();
+        set.insert(1u32);
+
+        let mut encoded = set.encode();
+        encoded.put_u8(0xFF); // Add extra byte
+
+        // Use decode_cfg which enforces buffer is fully consumed
+        let config_tuple = ((..).into(), ());
+        let result = BTreeSet::<u32>::decode_cfg(encoded.clone(), &config_tuple);
+        assert!(matches!(result, Err(Error::ExtraData(1))));
+
+        // Verify that read_cfg would succeed (doesn't check for extra data)
+        let read_result = BTreeSet::<u32>::read_cfg(&mut encoded.clone(), &config_tuple);
+        assert!(read_result.is_ok());
+        let decoded_set = read_result.unwrap();
+        assert_eq!(decoded_set.len(), 1);
+        assert!(decoded_set.contains(&1u32));
+    }
+
+    // --- HashSet Tests ---
+
+    #[test]
+    fn test_empty_hash_set() {
+        let set = HashSet::<u32>::new();
+        round_trip_hash(&set, (..).into(), ());
+        assert_eq!(set.encode_size(), 1); // varint 0
+        let encoded = set.encode();
+        assert_eq!(encoded, Bytes::from_static(&[0]));
+    }
+
+    #[test]
+    fn test_simple_hash_set_u32() {
+        let mut set = HashSet::new();
+        set.insert(1u32);
+        set.insert(5u32);
+        set.insert(2u32);
+        round_trip_hash(&set, (..).into(), ());
+        // Size calculation: varint len + size of each item (order doesn't matter for size)
+        assert_eq!(set.encode_size(), 1 + 3 * u32::SIZE);
+        // Encoding check: items must be sorted (1, 2, 5)
+        let mut expected = BytesMut::new();
+        3usize.write(&mut expected);
+        1u32.write(&mut expected);
+        2u32.write(&mut expected);
+        5u32.write(&mut expected);
+        assert_eq!(set.encode(), expected.freeze());
+    }
+
+    #[test]
+    fn test_large_hash_set() {
+        let set: HashSet<_> = (0..1000u16).collect();
+        round_trip_hash(&set, (0..=1000).into(), ());
+    }
+
+    #[test]
+    fn test_hash_set_with_variable_items() {
+        let mut set = HashSet::new();
+        set.insert(Bytes::from_static(b"apple"));
+        set.insert(Bytes::from_static(b"banana"));
+        set.insert(Bytes::from_static(b"cherry"));
+
+        let set_range = 0..=10;
+        let item_range = ..=10; // Range for Bytes length
+
+        round_trip_hash(&set, set_range.into(), item_range.into());
+    }
+
+    #[test]
+    fn test_hash_decode_length_limit_exceeded() {
+        let mut set = HashSet::new();
+        set.insert(1u32);
+        set.insert(5u32);
+
+        let encoded = set.encode();
+        let config_tuple = ((0..=1).into(), ());
+
+        let result = HashSet::<u32>::decode_cfg(encoded, &config_tuple);
+        assert!(matches!(result, Err(Error::InvalidLength(2))));
+    }
+
+    #[test]
+    fn test_hash_decode_item_length_limit_exceeded() {
+        let mut set = HashSet::new();
+        set.insert(Bytes::from_static(b"longitem")); // 8 bytes
+
+        let set_range = 0..=10;
+        let restrictive_item_range = ..=5; // Limit item length
+
+        let encoded = set.encode();
+        let config_tuple = (set_range.into(), restrictive_item_range.into());
+        let result = HashSet::<Bytes>::decode_cfg(encoded, &config_tuple);
+
+        assert!(matches!(result, Err(Error::InvalidLength(8))));
+    }
+
+    #[test]
+    fn test_hash_decode_invalid_item_order() {
+        let mut encoded = BytesMut::new();
+        2usize.write(&mut encoded); // Set length = 2
+        5u32.write(&mut encoded); // Item 5
+        2u32.write(&mut encoded); // Item 2 (out of order)
+
+        let config_tuple = ((..).into(), ());
+
+        let result = HashSet::<u32>::decode_cfg(encoded, &config_tuple);
+        assert!(matches!(
+            result,
+            Err(Error::Invalid("HashSet", "Items must ascend"))
+        ));
+    }
+
+    #[test]
+    fn test_hash_decode_duplicate_item() {
+        let mut encoded = BytesMut::new();
+        2usize.write(&mut encoded); // Set length = 2
+        1u32.write(&mut encoded); // Item 1
+        1u32.write(&mut encoded); // Duplicate Item 1
+
+        let config_tuple = ((..).into(), ());
+        let result = HashSet::<u32>::decode_cfg(encoded, &config_tuple);
+        assert!(matches!(
+            result,
+            Err(Error::Invalid("HashSet", "Duplicate item"))
+        ));
+    }
+
+    #[test]
+    fn test_hash_decode_end_of_buffer() {
+        let mut set = HashSet::new();
+        set.insert(1u32);
+        set.insert(5u32);
+
+        let mut encoded = set.encode(); // Will be sorted: [1, 5]
+        encoded.truncate(set.encode_size() - 2); // Truncate during last item (5)
+
+        let config_tuple = ((..).into(), ());
+        let result = HashSet::<u32>::decode_cfg(encoded, &config_tuple);
+        assert!(matches!(result, Err(Error::EndOfBuffer)));
+    }
+
+    #[test]
+    fn test_hash_decode_extra_data() {
+        let mut set = HashSet::new();
+        set.insert(1u32);
+
+        let mut encoded = set.encode();
+        encoded.put_u8(0xFF); // Add extra byte
+
+        // Use decode_cfg which enforces buffer is fully consumed
+        let config_tuple = ((..).into(), ()); // Clone range for read_cfg later
+        let result = HashSet::<u32>::decode_cfg(encoded.clone(), &config_tuple);
+        assert!(matches!(result, Err(Error::ExtraData(1))));
+
+        // Verify that read_cfg would succeed (doesn't check for extra data)
+        let read_result = HashSet::<u32>::read_cfg(&mut encoded.clone(), &config_tuple);
+        assert!(read_result.is_ok());
+        let decoded_set = read_result.unwrap();
+        assert_eq!(decoded_set.len(), 1);
+        assert!(decoded_set.contains(&1u32));
     }
 }
