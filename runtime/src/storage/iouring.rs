@@ -219,7 +219,7 @@ pub struct Blob {
     /// The underlying file descriptor
     fd: Arc<OwnedFd>,
     /// The length of the blob
-    len: AtomicU64,
+    len: Arc<AtomicU64>,
     /// Where to send IO operations to be executed
     io_sender: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>)>,
 }
@@ -230,7 +230,7 @@ impl Clone for Blob {
             partition: self.partition.clone(),
             name: self.name.clone(),
             fd: self.fd.clone(),
-            len: AtomicU64::new(self.len.load(Ordering::Relaxed)),
+            len: self.len.clone(),
             io_sender: self.io_sender.clone(),
         }
     }
@@ -248,7 +248,7 @@ impl Blob {
             partition,
             name: name.to_vec(),
             fd: Arc::new(OwnedFd::from(file)),
-            len: AtomicU64::new(len),
+            len: Arc::new(AtomicU64::new(len)),
             io_sender,
         }
     }
@@ -442,13 +442,16 @@ mod tests {
     use crate::{
         storage::tests::run_storage_tests,
         tokio::{Spawner, SpawnerConfig},
+        Blob as _, Storage as _,
     };
+    use futures::future::join_all;
     use prometheus_client::registry::Registry;
     use rand::{Rng as _, SeedableRng as _};
-    use std::env;
+    use std::{env, sync::atomic::AtomicUsize, time::Duration};
+    use tokio::time;
 
-    #[tokio::test]
-    async fn test_iouring_storage() {
+    // Helper for creating test storage
+    fn create_test_storage() -> (Storage, PathBuf) {
         let mut rng = rand::rngs::StdRng::from_entropy();
         let storage_directory =
             env::temp_dir().join(format!("commonware_iouring_storage_{}", rng.gen::<u64>()));
@@ -464,6 +467,13 @@ mod tests {
         );
 
         let storage = Storage::start(&Config::new(storage_directory.clone()), spawner);
+        (storage, storage_directory)
+    }
+
+    #[tokio::test]
+    async fn test_iouring_storage() {
+        let (storage, storage_directory) = create_test_storage();
         run_storage_tests(storage).await;
+        let _ = std::fs::remove_dir_all(storage_directory);
     }
 }
