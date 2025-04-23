@@ -24,7 +24,7 @@ use std::{
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{tcp::OwnedReadHalf, tcp::OwnedWriteHalf, TcpListener, TcpStream},
-    runtime::{Builder, Runtime},
+    runtime::{Builder, Handle as TokioHandle},
     time::timeout,
 };
 use tracing::warn;
@@ -219,7 +219,6 @@ impl crate::Runner for Runner {
             .enable_all()
             .build()
             .expect("failed to create Tokio runtime");
-        let runtime = Arc::new(runtime);
 
         let spawner = Spawner::new(
             String::new(),
@@ -227,7 +226,7 @@ impl crate::Runner for Runner {
                 catch_panics: self.cfg.catch_panics,
             },
             runtime_registry,
-            runtime.clone(),
+            Arc::new(runtime.handle().clone()),
         );
 
         #[cfg(all(feature = "iouring", target_os = "linux"))]
@@ -302,7 +301,7 @@ pub(crate) struct Spawner {
     metrics: Arc<SpawnerMetrics>,
     signaler: Arc<Mutex<Signaler>>,
     signal: Signal,
-    runtime: Arc<Runtime>,
+    runtime: Arc<TokioHandle>,
 }
 
 #[derive(Clone)]
@@ -315,7 +314,7 @@ impl Spawner {
         label: String,
         cfg: SpawnerConfig,
         reg: &mut Registry,
-        runtime: Arc<Runtime>,
+        runtime: Arc<TokioHandle>,
     ) -> Self {
         let (signaler, signal) = Signaler::new();
         Self {

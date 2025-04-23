@@ -8,7 +8,7 @@ use std::{
     pin::Pin,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, Mutex,
+        Arc,
     },
     task::{Context, Poll},
 };
@@ -89,13 +89,14 @@ async fn do_work(mut receiver: mpsc::Receiver<(io_uring::squeue::Entry, oneshot:
 
         select! {
             next_work = work => {
-                let Some((op,sender)) = next_work else {
+                let Some((mut op,sender)) = next_work else {
                     // Channel closed, exit the loop
                     break;
                 };
 
                 // Assign a unique id
                 let work_id = id;
+                op = op.user_data(work_id);
                 id = id.wrapping_add(1);
 
                 // Register the waiter
@@ -411,7 +412,7 @@ impl crate::Blob for Blob {
 mod tests {
     use super::*;
     use crate::{
-        storage::{metered::Metrics, tests::run_storage_tests},
+        storage::tests::run_storage_tests,
         tokio::{Spawner, SpawnerConfig},
     };
     use prometheus_client::registry::Registry;
@@ -425,13 +426,13 @@ mod tests {
             env::temp_dir().join(format!("commonware_iouring_storage_{}", rng.gen::<u64>()));
 
         // Initialize runtime
-        let runtime = Arc::new(tokio::runtime::Runtime::new().unwrap());
+        let runtime = Arc::new(tokio::runtime::Handle::current());
 
         let spawner = Spawner::new(
             String::new(),
             SpawnerConfig { catch_panics: true },
             &mut Registry::default(),
-            runtime.clone(),
+            runtime,
         );
 
         let storage = Storage::start(&Config::new(storage_directory.clone()), spawner);
