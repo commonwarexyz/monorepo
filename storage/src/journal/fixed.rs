@@ -440,7 +440,7 @@ impl<E: Storage + Metrics, A: Array> Journal<E, A> {
         Ok(new_oldest_blob * self.cfg.items_per_blob)
     }
 
-    /// Close the journal
+    /// Closes all open sections.
     pub async fn close(self) -> Result<(), Error> {
         for (i, blob) in self.blobs.into_iter() {
             blob.close().await?;
@@ -449,7 +449,7 @@ impl<E: Storage + Metrics, A: Array> Journal<E, A> {
         Ok(())
     }
 
-    /// Close and remove any remnants of the journal on disk.
+    /// Close and remove any underlying blobs created by the journal.
     pub async fn destroy(self) -> Result<(), Error> {
         for (i, blob) in self.blobs.into_iter() {
             blob.close().await?;
