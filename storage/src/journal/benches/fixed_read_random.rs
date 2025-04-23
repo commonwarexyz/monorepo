@@ -26,7 +26,6 @@ const ITEM_SIZE: usize = 32;
 /// result before continuing.
 async fn bench_run_serial(journal: &Journal<Context, FixedBytes<ITEM_SIZE>>, items_to_read: usize) {
     let mut rng = StdRng::seed_from_u64(0);
-
     for _ in 0..items_to_read {
         let pos = rng.gen_range(0..ITEMS_TO_WRITE);
         black_box(journal.read(pos).await.expect("failed to read data"));
@@ -39,7 +38,6 @@ async fn bench_run_concurrent(
     items_to_read: usize,
 ) {
     let mut rng = StdRng::seed_from_u64(0);
-
     let mut futures = Vec::with_capacity(items_to_read);
     for _ in 0..items_to_read {
         let pos = rng.gen_range(0..ITEMS_TO_WRITE);
@@ -83,6 +81,8 @@ fn bench_fixed_read_random(c: &mut Criterion) {
                             }
                             duration += start.elapsed();
                         }
+
+                        // Destroy the journal after reading to avoid polluting the next iteration
                         j.destroy().await.unwrap();
 
                         duration

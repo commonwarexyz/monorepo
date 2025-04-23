@@ -37,6 +37,7 @@ fn bench_fixed_append(c: &mut Criterion) {
                         .await;
                         duration += start.elapsed();
 
+                        // Destroy the journal after appending to avoid polluting the next iteration
                         j.destroy().await.unwrap();
                     }
                     duration
