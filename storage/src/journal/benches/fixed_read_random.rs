@@ -1,4 +1,4 @@
-use super::write_random_journal;
+use super::append_random_data;
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::Context,
@@ -22,16 +22,10 @@ const ITEMS_TO_WRITE: u64 = 5_000_000;
 /// Size of each journal item in bytes.
 const ITEM_SIZE: usize = 32;
 
-async fn bench_init(context: Context) -> Journal<Context, FixedBytes<ITEM_SIZE>> {
-    write_random_journal::<ITEM_SIZE>(context.clone(), PARTITION, ITEMS_PER_BLOB, ITEMS_TO_WRITE)
-        .await
-}
-
 /// Read `items_to_read` random items from the given `journal`, awaiting each
 /// result before continuing.
 async fn bench_run_serial(journal: &Journal<Context, FixedBytes<ITEM_SIZE>>, items_to_read: usize) {
     let mut rng = StdRng::seed_from_u64(0);
-
     for _ in 0..items_to_read {
         let pos = rng.gen_range(0..ITEMS_TO_WRITE);
         black_box(journal.read(pos).await.expect("failed to read data"));
@@ -44,7 +38,6 @@ async fn bench_run_concurrent(
     items_to_read: usize,
 ) {
     let mut rng = StdRng::seed_from_u64(0);
-
     let mut futures = Vec::with_capacity(items_to_read);
     for _ in 0..items_to_read {
         let pos = rng.gen_range(0..ITEMS_TO_WRITE);
@@ -55,47 +48,49 @@ async fn bench_run_concurrent(
 
 fn bench_fixed_read_random(c: &mut Criterion) {
     let executor = tokio::Executor::default();
+    for mode in ["serial", "concurrent"] {
+        for items_to_read in [100, 1_000, 10_000, 100_000] {
+            c.bench_function(
+                &format!(
+                    "{}/mode={} items={} size={}",
+                    module_path!(),
+                    mode,
+                    items_to_read,
+                    ITEM_SIZE
+                ),
+                |b| {
+                    b.to_async(&executor).iter_custom(|iters| async move {
+                        // Append random data to the journal
+                        let ctx = context::get::<commonware_runtime::tokio::Context>();
+                        let j = append_random_data(
+                            ctx.clone(),
+                            PARTITION,
+                            ITEMS_PER_BLOB,
+                            ITEMS_TO_WRITE,
+                        )
+                        .await;
 
-    const ITEMS_TO_READ: usize = 100_000;
-    c.bench_function(
-        &format!("{}/serial/items={}", module_path!(), ITEMS_TO_READ),
-        |b| {
-            b.to_async(&executor).iter_custom(|iters| async move {
-                let ctx = context::get::<commonware_runtime::tokio::Context>();
-                let j = bench_init(ctx.clone()).await;
-                let mut duration = Duration::ZERO;
+                        // Run the benchmark
+                        let mut duration = Duration::ZERO;
+                        for _ in 0..iters {
+                            let start = Instant::now();
+                            match mode {
+                                "serial" => bench_run_serial(&j, items_to_read).await,
+                                "concurrent" => bench_run_concurrent(&j, items_to_read).await,
+                                _ => unreachable!(),
+                            }
+                            duration += start.elapsed();
+                        }
 
-                for _ in 0..iters {
-                    let start = Instant::now();
-                    bench_run_serial(&j, ITEMS_TO_READ).await;
-                    duration += start.elapsed();
-                }
-                j.destroy().await.unwrap();
+                        // Destroy the journal after reading to avoid polluting the next iteration
+                        j.destroy().await.unwrap();
 
-                duration
-            });
-        },
-    );
-
-    c.bench_function(
-        &format!("{}/concurrent/items={}", module_path!(), ITEMS_TO_READ),
-        |b| {
-            b.to_async(&executor).iter_custom(|iters| async move {
-                let ctx = context::get::<commonware_runtime::tokio::Context>();
-                let j = bench_init(ctx.clone()).await;
-                let mut duration = Duration::ZERO;
-
-                for _ in 0..iters {
-                    let start = Instant::now();
-                    bench_run_concurrent(&j, ITEMS_TO_READ).await;
-                    duration += start.elapsed();
-                }
-                j.destroy().await.unwrap();
-
-                duration
-            });
-        },
-    );
+                        duration
+                    });
+                },
+            );
+        }
+    }
 }
 
 criterion_group! {

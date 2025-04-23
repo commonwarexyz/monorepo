@@ -1,4 +1,4 @@
-use super::write_random_journal;
+use super::append_random_data;
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::Context,
@@ -15,23 +15,12 @@ const PARTITION: &str = "test_partition";
 /// Value of items_per_blob to use in the journal config.
 const ITEMS_PER_BLOB: u64 = 100_000;
 
-/// Number of items to write to the journal we will be reading from.
-const ITEMS_TO_WRITE: u64 = 1_000_000;
-
 /// Size of each journal item in bytes.
 const ITEM_SIZE: usize = 32;
 
-async fn bench_init(
-    context: Context,
-    items_to_write: u64,
-) -> Journal<Context, FixedBytes<ITEM_SIZE>> {
-    write_random_journal::<ITEM_SIZE>(context.clone(), PARTITION, ITEMS_PER_BLOB, items_to_write)
-        .await
-}
-
 /// Replay all items in the given `journal`.
-async fn bench_run(journal: &mut Journal<Context, FixedBytes<ITEM_SIZE>>) {
-    let concurrency = (ITEMS_TO_WRITE / ITEMS_PER_BLOB) as usize;
+async fn bench_run(journal: &mut Journal<Context, FixedBytes<ITEM_SIZE>>, items_to_read: u64) {
+    let concurrency = (items_to_read / ITEMS_PER_BLOB) as usize;
     let stream = journal
         .replay(concurrency)
         .await
@@ -51,46 +40,39 @@ async fn bench_run(journal: &mut Journal<Context, FixedBytes<ITEM_SIZE>>) {
 /// items from a journal containing exactly that number of items.
 fn bench_fixed_replay(c: &mut Criterion) {
     let executor = tokio::Executor::default();
+    for items in [1_000_000, 5_000_000, 10_000_000] {
+        c.bench_function(
+            &format!("{}/items={} size={}", module_path!(), items, ITEM_SIZE),
+            |b| {
+                b.to_async(&executor).iter_custom(|iters| async move {
+                    // Append random data to the journal
+                    let ctx = context::get::<commonware_runtime::tokio::Context>();
+                    let mut j = append_random_data::<ITEM_SIZE>(
+                        ctx.clone(),
+                        PARTITION,
+                        ITEMS_PER_BLOB,
+                        items,
+                    )
+                    .await;
+                    let sz = j.size().await.unwrap();
+                    assert_eq!(sz, items);
 
-    c.bench_function(
-        &format!("{}/items={}", module_path!(), ITEMS_TO_WRITE),
-        |b| {
-            b.to_async(&executor).iter_custom(|iters| async move {
-                let ctx = context::get::<commonware_runtime::tokio::Context>();
-                let mut j = bench_init(ctx.clone(), ITEMS_TO_WRITE).await;
+                    // Run the benchmark
+                    let mut duration = Duration::ZERO;
+                    for _ in 0..iters {
+                        let start = Instant::now();
+                        bench_run(&mut j, items).await;
+                        duration += start.elapsed();
+                    }
 
-                let mut duration = Duration::ZERO;
-                for _ in 0..iters {
-                    let start = Instant::now();
-                    bench_run(&mut j).await;
-                    duration += start.elapsed();
-                }
-                j.destroy().await.unwrap();
+                    // Destroy the journal after appending to avoid polluting the next iteration
+                    j.destroy().await.unwrap();
 
-                duration
-            });
-        },
-    );
-
-    c.bench_function(
-        &format!("{}/items={}", module_path!(), ITEMS_TO_WRITE * 2),
-        |b| {
-            b.to_async(&executor).iter_custom(|iters| async move {
-                let ctx = context::get::<commonware_runtime::tokio::Context>();
-                let mut j = bench_init(ctx.clone(), ITEMS_TO_WRITE * 2).await;
-
-                let mut duration = Duration::ZERO;
-                for _ in 0..iters {
-                    let start = Instant::now();
-                    bench_run(&mut j).await;
-                    duration += start.elapsed();
-                }
-                j.destroy().await.unwrap();
-
-                duration
-            });
-        },
-    );
+                    duration
+                });
+            },
+        );
+    }
 }
 
 criterion_group! {
