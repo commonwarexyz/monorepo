@@ -1226,11 +1226,6 @@ mod tests {
     }
 
     impl Blob for MockBlob {
-        async fn len(&self) -> Result<u64, commonware_runtime::Error> {
-            // Return a length that will cause offset overflow
-            Ok(self.len)
-        }
-
         async fn read_at(&self, _buf: &mut [u8], _offset: u64) -> Result<(), RError> {
             Ok(())
         }

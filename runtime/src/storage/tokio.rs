@@ -45,18 +45,15 @@ pub struct Blob {
     // Files must be seeked prior to any read or write operation and are thus
     // not safe to concurrently interact with. If we switched to mapping files
     // we could remove this lock.
-    //
-    // We also track the virtual file size because metadata isn't updated until
-    // the file is synced (not to mention it is a lot less fs calls).
-    file: Arc<AsyncMutex<(fs::File, u64)>>,
+    file: Arc<AsyncMutex<fs::File>>,
 }
 
 impl Blob {
-    fn new(partition: String, name: &[u8], file: fs::File, len: u64) -> Self {
+    fn new(partition: String, name: &[u8], file: fs::File) -> Self {
         Self {
             partition,
             name: name.into(),
-            file: Arc::new(AsyncMutex::new((file, len))),
+            file: Arc::new(AsyncMutex::new(file)),
         }
     }
 }
@@ -64,7 +61,7 @@ impl Blob {
 impl crate::Storage for Storage {
     type Blob = Blob;
 
-    async fn open(&self, partition: &str, name: &[u8]) -> Result<Blob, Error> {
+    async fn open(&self, partition: &str, name: &[u8]) -> Result<(Blob, u64), Error> {
         // Acquire the filesystem lock
         let _guard = self.lock.lock().await;
 
@@ -97,7 +94,7 @@ impl crate::Storage for Storage {
         let len = file.metadata().await.map_err(|_| Error::ReadFailed)?.len();
 
         // Construct the blob
-        Ok(Blob::new(partition.into(), name, file, len))
+        Ok((Blob::new(partition.into(), name, file), len))
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
@@ -144,79 +141,50 @@ impl crate::Storage for Storage {
 }
 
 impl crate::Blob for Blob {
-    async fn len(&self) -> Result<u64, Error> {
-        let (_, len) = *self.file.lock().await;
-        Ok(len)
-    }
-
     async fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
         // Ensure the read is within bounds
         let mut file = self.file.lock().await;
-        if offset + buf.len() as u64 > file.1 {
-            return Err(Error::BlobInsufficientLength);
-        }
 
         // Perform the read
-        file.0
-            .seek(SeekFrom::Start(offset))
+        file.seek(SeekFrom::Start(offset))
             .await
             .map_err(|_| Error::ReadFailed)?;
-        file.0
-            .read_exact(buf)
-            .await
-            .map_err(|_| Error::ReadFailed)?;
+        file.read_exact(buf).await.map_err(|_| Error::ReadFailed)?;
         Ok(())
     }
 
     async fn write_at(&self, buf: &[u8], offset: u64) -> Result<(), Error> {
         // Perform the write
         let mut file = self.file.lock().await;
-        file.0
-            .seek(SeekFrom::Start(offset))
+        file.seek(SeekFrom::Start(offset))
             .await
             .map_err(|_| Error::WriteFailed)?;
-        file.0
-            .write_all(buf)
-            .await
-            .map_err(|_| Error::WriteFailed)?;
-
-        // Update the virtual file size
-        let max_len = offset + buf.len() as u64;
-        if max_len > file.1 {
-            file.1 = max_len;
-        }
+        file.write_all(buf).await.map_err(|_| Error::WriteFailed)?;
         Ok(())
     }
 
     async fn truncate(&self, len: u64) -> Result<(), Error> {
         // Perform the truncate
-        let mut file = self.file.lock().await;
-        file.0
-            .set_len(len)
+        let file = self.file.lock().await;
+        file.set_len(len)
             .await
             .map_err(|e| Error::BlobTruncateFailed(self.partition.clone(), hex(&self.name), e))?;
-
-        // Update the virtual file size
-        file.1 = len;
         Ok(())
     }
 
     async fn sync(&self) -> Result<(), Error> {
         let file = self.file.lock().await;
-        file.0
-            .sync_all()
+        file.sync_all()
             .await
             .map_err(|e| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e))
     }
 
     async fn close(self) -> Result<(), Error> {
         let mut file = self.file.lock().await;
-        file.0
-            .sync_all()
+        file.sync_all()
             .await
             .map_err(|e| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e))?;
-        file.0
-            .shutdown()
+        file.shutdown()
             .await
             .map_err(|e| Error::BlobCloseFailed(self.partition.clone(), hex(&self.name), e))
     }

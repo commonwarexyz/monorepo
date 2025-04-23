@@ -71,13 +71,16 @@ impl<S> Storage<S> {
 impl<S: crate::Storage> crate::Storage for Storage<S> {
     type Blob = Blob<S::Blob>;
 
-    async fn open(&self, partition: &str, name: &[u8]) -> Result<Self::Blob, Error> {
+    async fn open(&self, partition: &str, name: &[u8]) -> Result<(Self::Blob, u64), Error> {
         self.metrics.open_blobs.inc();
-        let inner = self.inner.open(partition, name).await?;
-        Ok(Blob {
-            inner,
-            metrics: self.metrics.clone(),
-        })
+        let (inner, len) = self.inner.open(partition, name).await?;
+        Ok((
+            Blob {
+                inner,
+                metrics: self.metrics.clone(),
+            },
+            len,
+        ))
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
@@ -97,10 +100,6 @@ pub struct Blob<B> {
 }
 
 impl<B: crate::Blob> crate::Blob for Blob<B> {
-    async fn len(&self) -> Result<u64, Error> {
-        self.inner.len().await
-    }
-
     async fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
         self.inner.read_at(buf, offset).await?;
         self.metrics.storage_reads.inc();
@@ -158,7 +157,7 @@ mod tests {
         let storage = Storage::new(inner, &mut registry);
 
         // Open a blob
-        let blob = storage.open("partition", b"test_blob").await.unwrap();
+        let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
 
         // Verify that the open_blobs metric is incremented
         let open_blobs = storage.metrics.open_blobs.get();
@@ -213,8 +212,8 @@ mod tests {
         let storage = Storage::new(inner, &mut registry);
 
         // Open multiple blobs
-        let blob1 = storage.open("partition", b"blob1").await.unwrap();
-        let blob2 = storage.open("partition", b"blob2").await.unwrap();
+        let (blob1, _) = storage.open("partition", b"blob1").await.unwrap();
+        let (blob2, _) = storage.open("partition", b"blob2").await.unwrap();
 
         // Verify that the open_blobs metric is incremented correctly
         let open_blobs = storage.metrics.open_blobs.get();

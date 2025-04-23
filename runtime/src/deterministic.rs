@@ -255,16 +255,6 @@ impl Auditor {
         *hash = hasher.finalize().to_vec();
     }
 
-    pub(crate) fn len(&self, partition: &str, name: &[u8]) {
-        let mut hash = self.hash.lock().unwrap();
-        let mut hasher = Sha256::new();
-        hasher.update(&*hash);
-        hasher.update(b"len");
-        hasher.update(partition.as_bytes());
-        hasher.update(name);
-        *hash = hasher.finalize().to_vec();
-    }
-
     pub(crate) fn read_at(&self, partition: &str, name: &[u8], buf: usize, offset: u64) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
@@ -1338,7 +1328,7 @@ impl CryptoRng for Context {}
 impl crate::Storage for Context {
     type Blob = <MeteredStorage<AuditedStorage<MemStorage>> as crate::Storage>::Blob;
 
-    async fn open(&self, partition: &str, name: &[u8]) -> Result<Self::Blob, Error> {
+    async fn open(&self, partition: &str, name: &[u8]) -> Result<(Self::Blob, u64), Error> {
         self.storage.open(partition, name).await
     }
 
@@ -1461,7 +1451,7 @@ mod tests {
 
         // Run some tasks, sync storage, and recover the runtime
         let (context, state) = executor1.start(|context| async move {
-            let blob = context.open(partition, name).await.unwrap();
+            let (blob, _) = context.open(partition, name).await.unwrap();
             blob.write_at(data, 0).await.unwrap();
             blob.sync().await.unwrap();
             let state = context.auditor().state();
@@ -1475,10 +1465,9 @@ mod tests {
         // Check that synced storage persists after recovery
         let executor = Runner::from(recovered_context);
         executor.start(|context| async move {
-            let blob = context.open(partition, name).await.unwrap();
-            let len = blob.len().await.unwrap();
+            let (blob, len) = context.open(partition, name).await.unwrap();
             assert_eq!(len, data.len() as u64);
-            let mut buf = vec![0; len as usize];
+            let mut buf = vec![0; data.len() as usize];
             blob.read_at(&mut buf, 0).await.unwrap();
             assert_eq!(buf, data);
         });
@@ -1495,7 +1484,7 @@ mod tests {
         // Run some tasks without syncing storage
         let context = executor.start(|context| async move {
             let context = context.clone();
-            let blob = context.open(partition, name).await.unwrap();
+            let (blob, _) = context.open(partition, name).await.unwrap();
             blob.write_at(&data, 0).await.unwrap();
             // Intentionally do not call sync() here
             context
@@ -1507,8 +1496,7 @@ mod tests {
 
         // Check that unsynced storage does not persist after recovery
         executor.start(|context| async move {
-            let blob = context.open(partition, name).await.unwrap();
-            let len = blob.len().await.unwrap();
+            let (_, len) = context.open(partition, name).await.unwrap();
             assert_eq!(len, 0);
         });
     }

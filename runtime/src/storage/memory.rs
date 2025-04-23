@@ -20,15 +20,18 @@ impl Default for Storage {
 impl crate::Storage for Storage {
     type Blob = Blob;
 
-    async fn open(&self, partition: &str, name: &[u8]) -> Result<Self::Blob, crate::Error> {
+    async fn open(&self, partition: &str, name: &[u8]) -> Result<(Self::Blob, u64), crate::Error> {
         let mut partitions = self.partitions.lock().unwrap();
         let partition_entry = partitions.entry(partition.into()).or_default();
         let content = partition_entry.entry(name.into()).or_default();
-        Ok(Blob::new(
-            self.partitions.clone(),
-            partition.into(),
-            name,
-            content.clone(),
+        Ok((
+            Blob::new(
+                self.partitions.clone(),
+                partition.into(),
+                name,
+                content.clone(),
+            ),
+            content.len() as u64,
         ))
     }
 
@@ -92,11 +95,6 @@ impl Blob {
 }
 
 impl crate::Blob for Blob {
-    async fn len(&self) -> Result<u64, crate::Error> {
-        let content = self.content.read().unwrap();
-        Ok(content.len() as u64)
-    }
-
     async fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<(), crate::Error> {
         let offset = offset
             .try_into()
