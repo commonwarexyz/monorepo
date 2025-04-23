@@ -17,14 +17,11 @@ const ITEMS_PER_BLOB: u64 = 10_000;
 /// Size of each journal item in bytes.
 const ITEM_SIZE: usize = 32;
 
-/// Number of items to write to the journal in each benchmark iteration.
-const ITEMS_TO_WRITE: usize = 500_000;
-
-async fn bench_run(journal: &mut Journal<Context, FixedBytes<ITEM_SIZE>>) {
+async fn bench_run(journal: &mut Journal<Context, FixedBytes<ITEM_SIZE>>, items_to_write: usize) {
     let mut rng = StdRng::seed_from_u64(0);
     // Append a ton of random items to the journal
     let mut arr = [0; ITEM_SIZE];
-    for _ in 0..ITEMS_TO_WRITE {
+    for _ in 0..items_to_write {
         rng.fill_bytes(&mut arr);
         journal
             .append(FixedBytes::new(arr))
@@ -34,17 +31,19 @@ async fn bench_run(journal: &mut Journal<Context, FixedBytes<ITEM_SIZE>>) {
 }
 
 fn bench_fixed_append(c: &mut Criterion) {
-    // Create a new executor for the benchmark
     let executor = tokio::Executor::default();
-
-    // Run the benchmark
-    c.bench_function(
-        &format!("{}/items={}", module_path!(), ITEMS_TO_WRITE),
-        |b| {
-            b.to_async(&executor).iter_custom(|iters| async move {
-                let ctx = context::get::<commonware_runtime::tokio::Context>();
-                let mut duration = Duration::ZERO;
-                for _ in 0..iters {
+    for items_to_write in [1_000, 10_000, 100_000, 1_000_000] {
+        c.bench_function(
+            &format!(
+                "{}/items={} size={}",
+                module_path!(),
+                items_to_write,
+                ITEM_SIZE
+            ),
+            |b| {
+                b.to_async(&executor).iter_custom(|iters| async move {
+                    // Configure the journal
+                    let ctx = context::get::<commonware_runtime::tokio::Context>();
                     let mut j = Journal::init(
                         ctx.clone(),
                         JConfig {
@@ -55,16 +54,19 @@ fn bench_fixed_append(c: &mut Criterion) {
                     .await
                     .unwrap();
 
-                    let start = Instant::now();
-                    bench_run(&mut j).await;
-                    duration += start.elapsed();
-
+                    // Run the benchmark
+                    let mut duration = Duration::ZERO;
+                    for _ in 0..iters {
+                        let start = Instant::now();
+                        bench_run(&mut j, items_to_write).await;
+                        duration += start.elapsed();
+                    }
                     j.destroy().await.unwrap();
-                }
-                duration
-            });
-        },
-    );
+                    duration
+                });
+            },
+        );
+    }
 }
 
 criterion_group! {

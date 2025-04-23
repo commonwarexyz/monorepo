@@ -53,7 +53,13 @@ fn bench_fixed_read_random(c: &mut Criterion) {
     for mode in ["serial", "concurrent"] {
         for items_to_read in [100, 1_000, 10_000, 100_000] {
             c.bench_function(
-                &format!("{}/mode={} items={}", module_path!(), mode, items_to_read),
+                &format!(
+                    "{}/mode={} items={} size={}",
+                    module_path!(),
+                    mode,
+                    items_to_read,
+                    ITEM_SIZE
+                ),
                 |b| {
                     b.to_async(&executor).iter_custom(|iters| async move {
                         // Append random data to the journal
