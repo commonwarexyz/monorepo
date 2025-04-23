@@ -1,3 +1,12 @@
+use crate::{Error, Spawner};
+use commonware_macros::select;
+use commonware_utils::{from_hex, hex};
+use futures::{
+    channel::{mpsc, oneshot},
+    future::Either,
+    SinkExt as _, StreamExt as _,
+};
+use io_uring::{opcode, squeue::Entry as SqueueEntry, types, IoUring};
 use std::{
     collections::HashMap,
     fs::{self, File},
@@ -12,18 +21,6 @@ use std::{
     },
     task::{Context, Poll},
 };
-
-use commonware_macros::select;
-use commonware_utils::{from_hex, hex};
-use futures::{
-    channel::{mpsc, oneshot},
-    future::Either,
-    SinkExt as _, StreamExt as _,
-};
-use io_uring::{opcode, types, IoUring};
-
-use crate::{Error, Spawner};
-
 const IOURING_SIZE: u32 = 128;
 
 #[derive(Clone)]
@@ -72,34 +69,37 @@ impl Future for NextCompletionFuture<'_> {
 }
 
 /// Background task that polls for completed work and notifies waiters on completion.
-async fn do_work(mut receiver: mpsc::Receiver<(io_uring::squeue::Entry, oneshot::Sender<i32>)>) {
-    // Create ring
-    let mut id: u64 = 0;
-    let mut ring = IoUring::new(IOURING_SIZE).expect("failed to create io_uring instance");
+/// The user data field of all operations received on `receiver` will be ignored.
+async fn do_work(mut receiver: mpsc::Receiver<(SqueueEntry, oneshot::Sender<i32>)>) {
+    let mut ring = IoUring::new(IOURING_SIZE).expect("failed to create io_uring");
+    let mut next_work_id: u64 = 0;
+    // Maps a work ID to the sender that we will send the result to.
     let mut waiters: HashMap<_, oneshot::Sender<i32>> =
         HashMap::with_capacity(IOURING_SIZE as usize);
 
     loop {
-        let completion = NextCompletionFuture::new(&mut ring);
-        let work = if waiters.len() < IOURING_SIZE as usize {
+        let completed_work_fut = NextCompletionFuture::new(&mut ring);
+        let new_work_fut = if waiters.len() < IOURING_SIZE as usize {
             Either::Left(receiver.next())
         } else {
+            // We're at the limit for maximum number of ongoing operations.
+            // Wait for a completion to free up space.
             Either::Right(futures::future::pending())
         };
 
         select! {
-            next_work = work => {
+            next_work = new_work_fut => {
                 let Some((mut op,sender)) = next_work else {
                     // Channel closed, exit the loop
                     break;
                 };
 
                 // Assign a unique id
-                let work_id = id;
+                let work_id = next_work_id;
                 op = op.user_data(work_id);
-                id = id.wrapping_add(1);
+                next_work_id = next_work_id.wrapping_add(1);
 
-                // Register the waiter
+                // We'll send the result of this operation to `sender`.
                 waiters.insert(work_id, sender);
 
                 // Submit the operation to the ring
@@ -107,10 +107,11 @@ async fn do_work(mut receiver: mpsc::Receiver<(io_uring::squeue::Entry, oneshot:
                     ring.submission().push(&op).expect("unable to push to queue");
                 }
             },
-            cqe = completion => {
-                let work_id = cqe.user_data();
-                let result = cqe.result();
+            completed_work = completed_work_fut => {
+                let work_id = completed_work.user_data();
+                let result = completed_work.result();
                 let sender = waiters.remove(&work_id).expect("work is missing");
+                // Notify with the result of this operation
                 let _ =  sender.send(result);
             },
         }
@@ -120,13 +121,15 @@ async fn do_work(mut receiver: mpsc::Receiver<(io_uring::squeue::Entry, oneshot:
 #[derive(Clone)]
 pub struct Storage {
     storage_directory: PathBuf,
-    io_sender: mpsc::Sender<(io_uring::squeue::Entry, oneshot::Sender<i32>)>,
+    io_sender: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>)>,
 }
 
 impl Storage {
+    /// Returns a new `Storage` instance.
+    /// The `Spawner` is used to spawn the background task that handles IO operations.
     pub fn start<S: Spawner>(cfg: &Config, spawner: S) -> Self {
         let (io_sender, receiver) =
-            mpsc::channel::<(io_uring::squeue::Entry, oneshot::Sender<i32>)>(IOURING_SIZE as usize);
+            mpsc::channel::<(SqueueEntry, oneshot::Sender<i32>)>(IOURING_SIZE as usize);
 
         let storage = Storage {
             storage_directory: cfg.storage_directory.clone(),
@@ -209,11 +212,16 @@ impl crate::Storage for Storage {
 }
 
 pub struct Blob {
+    /// The partition this blob lives in
     partition: String,
+    /// The name of the blob
     name: Vec<u8>,
+    /// The underlying file descriptor
     fd: Arc<OwnedFd>,
+    /// The length of the blob
     len: AtomicU64,
-    io_sender: mpsc::Sender<(io_uring::squeue::Entry, oneshot::Sender<i32>)>,
+    /// Where to send IO operations to be executed
+    io_sender: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>)>,
 }
 
 impl Clone for Blob {
@@ -234,7 +242,7 @@ impl Blob {
         name: &[u8],
         file: File,
         len: u64,
-        io_sender: mpsc::Sender<(io_uring::squeue::Entry, oneshot::Sender<i32>)>,
+        io_sender: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>)>,
     ) -> Self {
         Self {
             partition,
@@ -262,23 +270,27 @@ impl crate::Blob for Blob {
 
         let mut io_sender = self.io_sender.clone();
         while total_read < buf.len() {
+            // Figure out how much is left to read and where to read into
             let remaining = &mut buf[total_read..];
             let offset = offset + total_read as u64;
 
+            // Create an operation to do the read
             let op = opcode::Read::new(fd, remaining.as_mut_ptr(), remaining.len() as _)
                 .offset(offset as _)
                 .build();
 
+            // Submit the operation
             let (sender, receiver) = oneshot::channel();
             io_sender
                 .send((op, sender))
                 .await
                 .map_err(|_| Error::ReadFailed)?;
-            // Wait for the operation to complete
-            let result = receiver.await.map_err(|_| Error::ReadFailed)?;
+
+            // Wait for the result
+            let bytes_read = receiver.await.map_err(|_| Error::ReadFailed)?;
 
             // If the return value is non-positive, it indicates an error.
-            let bytes_read: usize = result.try_into().map_err(|_| Error::ReadFailed)?;
+            let bytes_read: usize = bytes_read.try_into().map_err(|_| Error::ReadFailed)?;
             if bytes_read == 0 {
                 // Got EOF before filling buffer.
                 return Err(Error::BlobInsufficientLength);
@@ -296,22 +308,27 @@ impl crate::Blob for Blob {
 
         let mut io_sender = self.io_sender.clone();
         while total_written < buf.len() {
+            // Figure out how much is left to write and where to write from
             let remaining = &buf[total_written..];
             let offset = offset + total_written as u64;
 
-            // Submit write operation using the shared adapter
+            // Create an operation to do the write
             let op = opcode::Write::new(fd, remaining.as_ptr(), remaining.len() as _)
                 .offset(offset as _)
                 .build();
+
+            // Submit the operation
             let (sender, receiver) = oneshot::channel();
             io_sender
                 .send((op, sender))
                 .await
                 .map_err(|_| Error::WriteFailed)?;
-            // Wait for the operation to complete
-            let result = receiver.await.map_err(|_| Error::WriteFailed)?;
 
-            let bytes_written: usize = result.try_into().map_err(|_| Error::WriteFailed)?;
+            // Wait for the result
+            let return_value = receiver.await.map_err(|_| Error::WriteFailed)?;
+
+            // If the return value is non-positive, it indicates an error.
+            let bytes_written: usize = return_value.try_into().map_err(|_| Error::WriteFailed)?;
             if bytes_written == 0 {
                 return Err(Error::WriteFailed);
             }
@@ -328,10 +345,12 @@ impl crate::Blob for Blob {
     }
 
     async fn truncate(&self, len: u64) -> Result<(), Error> {
+        // Create an operation to do the truncate
         let op = opcode::Fallocate::new(types::Fd(self.fd.as_raw_fd()), len)
             .mode(0) // 0 means truncate
             .build();
 
+        // Submit the operation
         let (sender, receiver) = oneshot::channel();
         self.io_sender
             .clone()
@@ -344,8 +363,9 @@ impl crate::Blob for Blob {
                     IoError::new(ErrorKind::Other, "failed to send work"),
                 )
             })?;
-        // Wait for the operation to complete
-        let result = receiver.await.map_err(|_| {
+
+        // Wait for the result
+        let return_value = receiver.await.map_err(|_| {
             Error::BlobTruncateFailed(
                 self.partition.clone(),
                 hex(&self.name),
@@ -353,12 +373,15 @@ impl crate::Blob for Blob {
             )
         })?;
 
-        // If the return value is non-positive, it indicates an error.
-        if result <= 0 {
+        // If the return value is negative, it indicates an error.
+        if return_value < 0 {
             return Err(Error::BlobTruncateFailed(
                 self.partition.clone(),
                 hex(&self.name),
-                IoError::new(ErrorKind::Other, format!("got error code: {}", result)),
+                IoError::new(
+                    ErrorKind::Other,
+                    format!("got error code: {}", return_value),
+                ),
             ));
         }
         // Update length
@@ -367,8 +390,10 @@ impl crate::Blob for Blob {
     }
 
     async fn sync(&self) -> Result<(), Error> {
+        // Create an operation to do the sync
         let op = opcode::Fsync::new(types::Fd(self.fd.as_raw_fd())).build();
 
+        // Submit the operation
         let (sender, receiver) = oneshot::channel();
         self.io_sender
             .clone()
@@ -382,26 +407,30 @@ impl crate::Blob for Blob {
                 )
             })?;
 
-        // Wait for the operation to complete
-        let result = receiver.await.map_err(|_| {
+        // Wait for the result
+        let return_value = receiver.await.map_err(|_| {
             Error::BlobSyncFailed(
                 self.partition.clone(),
                 hex(&self.name),
                 IoError::new(ErrorKind::Other, "failed to read result"),
             )
         })?;
-        // If the return value is non-positive, it indicates an error.
-        if result <= 0 {
+        // If the return value is negative, it indicates an error.
+        if return_value < 0 {
             return Err(Error::BlobSyncFailed(
                 self.partition.clone(),
                 hex(&self.name),
-                IoError::new(ErrorKind::Other, format!("got error code: {}", result)),
+                IoError::new(
+                    ErrorKind::Other,
+                    format!("got error code: {}", return_value),
+                ),
             ));
         }
 
         Ok(())
     }
 
+    /// Drop all references to self.fd to close that resource.
     async fn close(self) -> Result<(), Error> {
         self.sync().await
     }
