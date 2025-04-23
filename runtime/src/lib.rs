@@ -38,6 +38,8 @@ mod storage;
 pub mod telemetry;
 mod utils;
 pub use utils::{create_pool, reschedule, Handle, Signal, Signaler};
+mod rwlock;
+pub use rwlock::RwLock;
 
 /// Prefix for runtime metrics.
 const METRICS_PREFIX: &str = "runtime";
