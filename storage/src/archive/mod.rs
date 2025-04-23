@@ -154,7 +154,7 @@
 mod storage;
 pub use storage::{Archive, Identifier};
 
-use crate::index::Translator;
+pub use crate::index::Translator;
 use thiserror::Error;
 
 /// Errors that can occur when interacting with the archive.
