@@ -23,9 +23,9 @@ impl<K: Ord + Hash + Eq + Write, V: Write> Write for BTreeMap<K, V> {
         varint::write(len, buf);
 
         // Keys are already sorted in BTreeMap, so we can iterate directly
-        for (key, value) in self {
-            key.write(buf);
-            value.write(buf);
+        for (k, v) in self {
+            k.write(buf);
+            v.write(buf);
         }
     }
 }
@@ -37,9 +37,9 @@ impl<K: Ord + Hash + Eq + EncodeSize, V: EncodeSize> EncodeSize for BTreeMap<K, 
         let mut size = varint::size(len);
 
         // Add the encoded size of each key and value
-        for (key, value) in self {
-            size += key.encode_size();
-            size += value.encode_size();
+        for (k, v) in self {
+            size += k.encode_size();
+            size += v.encode_size();
         }
         size
     }
@@ -97,11 +97,11 @@ impl<K: Ord + Hash + Eq + Write, V: Write> Write for HashMap<K, V> {
         self.len().write(buf);
 
         // Sort the keys to ensure deterministic encoding
-        let mut keys: Vec<_> = self.keys().collect();
-        keys.sort();
-        for key in keys {
-            key.write(buf);
-            self.get(key).unwrap().write(buf);
+        let mut entries: Vec<_> = self.iter().collect();
+        entries.sort_by(|a, b| a.0.cmp(b.0));
+        for (k, v) in entries {
+            k.write(buf);
+            v.write(buf);
         }
     }
 }
@@ -113,9 +113,9 @@ impl<K: Ord + Hash + Eq + EncodeSize, V: EncodeSize> EncodeSize for HashMap<K, V
 
         // Add the encoded size of each key and value
         // Note: Iteration order doesn't matter for size calculation.
-        for (key, value) in self {
-            size += key.encode_size();
-            size += value.encode_size();
+        for (k, v) in self {
+            size += k.encode_size();
+            size += v.encode_size();
         }
         size
     }
