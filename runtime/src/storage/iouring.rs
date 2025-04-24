@@ -2,6 +2,7 @@ use crate::{Error, Spawner};
 use commonware_utils::{from_hex, hex};
 use futures::{
     channel::{mpsc, oneshot},
+    executor::block_on,
     SinkExt as _, StreamExt as _,
 };
 use io_uring::{opcode, squeue::Entry as SqueueEntry, types, IoUring};
@@ -121,7 +122,7 @@ impl Storage {
             storage_directory: cfg.storage_directory.clone(),
             io_sender,
         };
-        spawner.spawn_blocking(|| do_work(receiver));
+        spawner.spawn_blocking(|| block_on(do_work(receiver)));
         storage
     }
 }
