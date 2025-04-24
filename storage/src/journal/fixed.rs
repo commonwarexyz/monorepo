@@ -416,17 +416,18 @@ impl<E: Storage + Metrics, A: Array> Journal<E, A> {
     /// Note that this operation may NOT be atomic, however it's guaranteed not to leave gaps in the
     /// event of failure as items are always pruned in order from oldest to newest.
     pub async fn prune(&mut self, min_item_pos: u64) -> Result<u64, Error> {
-        let oldest_blob = self.oldest_blob().0;
+        let (oldest_blob_index, _) = self.oldest_blob();
         let mut new_oldest_blob = min_item_pos / self.cfg.items_per_blob;
-        if new_oldest_blob <= oldest_blob {
+        if new_oldest_blob <= *oldest_blob_index {
             // nothing to prune
             return Ok(new_oldest_blob * self.cfg.items_per_blob);
         }
         // Make sure we never prune the most recent blob
-        new_oldest_blob = std::cmp::min(new_oldest_blob, self.newest_blob().0);
+        let (newest_blob_index, _) = self.newest_blob();
+        new_oldest_blob = std::cmp::min(new_oldest_blob, *newest_blob_index);
 
-        for index in oldest_blob..new_oldest_blob {
-            let blob = self.blobs.remove(&index).unwrap();
+        for index in *oldest_blob_index..new_oldest_blob {
+            let (blob, _) = self.blobs.remove(&index).unwrap();
             // Close the blob and remove it from storage
             blob.close().await?;
             self.context
@@ -442,7 +443,7 @@ impl<E: Storage + Metrics, A: Array> Journal<E, A> {
 
     /// Closes all open sections.
     pub async fn close(self) -> Result<(), Error> {
-        for (i, blob) in self.blobs.into_iter() {
+        for (i, (blob, _)) in self.blobs.into_iter() {
             blob.close().await?;
             debug!(blob = i, "closed blob");
         }
@@ -451,7 +452,7 @@ impl<E: Storage + Metrics, A: Array> Journal<E, A> {
 
     /// Close and remove any underlying blobs created by the journal.
     pub async fn destroy(self) -> Result<(), Error> {
-        for (i, blob) in self.blobs.into_iter() {
+        for (i, (blob, _)) in self.blobs.into_iter() {
             blob.close().await?;
             debug!(blob = i, "destroyed blob");
             self.context
@@ -577,8 +578,8 @@ mod tests {
 
             // Check no-op pruning
             journal.prune(0).await.expect("no-op pruning failed");
-            assert_eq!(journal.oldest_blob().0, 1);
-            assert_eq!(journal.newest_blob().0, 5);
+            assert_eq!(*journal.oldest_blob().0, 1);
+            assert_eq!(*journal.newest_blob().0, 5);
             assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(2));
 
             // Prune first 3 blobs (6 items)
@@ -588,8 +589,8 @@ mod tests {
                 .expect("failed to prune journal 2");
             assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(6));
             let buffer = context.encode();
-            assert_eq!(journal.oldest_blob().0, 3);
-            assert_eq!(journal.newest_blob().0, 5);
+            assert_eq!(*journal.oldest_blob().0, 3);
+            assert_eq!(*journal.newest_blob().0, 5);
             assert!(buffer.contains("tracked 3"));
             assert!(buffer.contains("pruned_total 3"));
 
@@ -601,8 +602,8 @@ mod tests {
             let buffer = context.encode();
             let size = journal.size().await.unwrap();
             assert_eq!(size, 10);
-            assert_eq!(journal.oldest_blob().0, 5);
-            assert_eq!(journal.newest_blob().0, 5);
+            assert_eq!(*journal.oldest_blob().0, 5);
+            assert_eq!(*journal.newest_blob().0, 5);
             assert!(buffer.contains("tracked 1"));
             assert!(buffer.contains("pruned_total 5"));
             // Since the size of the journal is currently a multiple of items_per_blob, the newest blob
@@ -684,7 +685,7 @@ mod tests {
             // Corrupt one of the checksums and make sure it's detected.
             let checksum_offset =
                 Digest::SIZE as u64 + (ITEMS_PER_BLOB / 2) * (Digest::SIZE + u32::SIZE) as u64;
-            let blob = context
+            let (blob, _) = context
                 .open(&cfg.partition, &40u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
@@ -732,7 +733,7 @@ mod tests {
 
             // Manually truncate one blob to force a partial-read error and make sure it's handled
             // as expected.
-            let blob = context
+            let (blob, _) = context
                 .open(&cfg.partition, &40u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
@@ -813,11 +814,10 @@ mod tests {
             journal.close().await.expect("Failed to close journal");
 
             // Manually truncate most recent blob to simulate a partial write.
-            let blob = context
+            let (blob, blob_len) = context
                 .open(&cfg.partition, &1u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            let blob_len = blob.len().await.expect("Failed to get blob length");
             // truncate the most recent blob by 1 byte which corrupts the most recent item
             blob.truncate(blob_len - 1)
                 .await
@@ -870,11 +870,10 @@ mod tests {
             journal.close().await.expect("Failed to close journal");
 
             // Manually truncate most recent blob to simulate a partial write.
-            let blob = context
+            let (blob, blob_len) = context
                 .open(&cfg.partition, &0u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            let blob_len = blob.len().await.expect("Failed to get blob length");
             // truncate the most recent blob by 1 byte which corrupts the one appended item
             blob.truncate(blob_len - 1)
                 .await
