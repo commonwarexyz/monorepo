@@ -346,6 +346,7 @@ impl<E: Storage + Metrics, A: Array> Journal<E, A> {
         &mut self,
         concurrency: usize,
     ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + '_, Error> {
+        assert!(concurrency > 0);
         // Collect all blobs to replay
         let mut blobs = Vec::with_capacity(self.blobs.len());
         let (newest_blob_index, _) = self.newest_blob();
