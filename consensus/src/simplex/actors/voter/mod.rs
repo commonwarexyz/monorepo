@@ -53,8 +53,8 @@ mod tests {
     use commonware_storage::journal::variable::{Config as JConfig, Journal};
     use commonware_utils::quorum;
     use futures::{channel::mpsc, StreamExt};
-    use std::time::Duration;
     use std::{collections::BTreeMap, sync::Arc};
+    use std::{time::Duration, usize};
 
     #[test_traced]
     fn test_stale_backfill() {
@@ -108,6 +108,8 @@ mod tests {
             actor.start();
             let cfg = JConfig {
                 partition: "test".to_string(),
+                compression: Some(3),
+                codec_config: usize::MAX,
             };
             let journal = Journal::init(context.with_label("journal"), cfg)
                 .await

@@ -323,7 +323,7 @@ pub struct Actor<
     supervisor: S,
 
     replay_concurrency: usize,
-    journal: Option<Journal<E>>,
+    journal: Option<Journal<E, usize, Voter<C::Signature, D>>>,
 
     genesis: Option<D>,
 
@@ -363,7 +363,7 @@ impl<
 {
     pub fn new(
         context: E,
-        journal: Journal<E>,
+        journal: Journal<E, usize, Voter<C::Signature, D>>,
         cfg: Config<C, D, A, R, F, S>,
     ) -> (Self, Mailbox<C::Signature, D>) {
         // Assert correctness of timeouts
@@ -708,14 +708,12 @@ impl<
         });
 
         // Handle nullify
-        let msg = Voter::Nullify::<C::Signature, D>(nullify.clone())
-            .encode()
-            .into();
+        let nullify_log = Voter::Nullify(nullify.clone());
         if round.add_verified_nullify(nullify).await && self.journal.is_some() {
             self.journal
                 .as_mut()
                 .unwrap()
-                .append(view, msg)
+                .append(view, nullify_log)
                 .await
                 .expect("unable to append nullify");
         }
@@ -1690,7 +1688,7 @@ impl<
         let mut journal = self.journal.take().expect("missing journal");
         {
             let stream = journal
-                .replay(self.replay_concurrency, None)
+                .replay(self.replay_concurrency)
                 .await
                 .expect("unable to replay journal");
             pin_mut!(stream);
