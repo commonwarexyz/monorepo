@@ -44,9 +44,11 @@ impl_numeric!(f32, get_f32, put_f32);
 impl_numeric!(f64, get_f64, put_f64);
 
 // Usize implementation
-// Since most values refer to a length or size, the type is encoded as a varint.
-// We force the maximum size to be 4 bytes for consistency across platforms. In addition, we require
-// a range check so that unbounded values are explicitly allowed by the caller.
+// Since most values refer to a length or size of an object in memory, values are usually biased
+// towards smaller values. Therefore, we use a variable-length encoding for `usize` to save space.
+// For consistency across platforms, we expect all `usize` values to fit within a `u32`, and will
+// otherwise panic upon writing or return an error upon reading. In addition, for safety against DOS
+// attacks, we require a range as configuration when reading `usize` values.
 impl Write for usize {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {

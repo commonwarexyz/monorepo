@@ -95,7 +95,7 @@ impl_sint!(i32, u32);
 impl_sint!(i64, u64);
 impl_sint!(i128, u128);
 
-/// Encodes a unsigned 64-bit integer as a varint
+/// Encodes an unsigned integer as a varint
 pub fn write<T: UInt>(value: T, buf: &mut impl BufMut) {
     let continuation_threshold = T::from(CONTINUATION_BIT_MASK);
     if value < continuation_threshold {
@@ -113,11 +113,13 @@ pub fn write<T: UInt>(value: T, buf: &mut impl BufMut) {
     buf.put_u8(val.as_u8());
 }
 
-/// Decodes a unsigned 64-bit integer from a varint
+/// Decodes a unsigned integer from a varint.
+///
+/// Returns an error if the varint is invalid (too long) or if the buffer ends while reading.
 pub fn read<T: UInt>(buf: &mut impl Buf) -> Result<T, Error> {
     let max_bits = T::SIZE * BITS_PER_BYTE;
     let mut result: T = T::from(0);
-    let mut shift = 0;
+    let mut bits_read = 0;
 
     // Loop over all the bytes.
     loop {
@@ -134,7 +136,7 @@ pub fn read<T: UInt>(buf: &mut impl Buf) -> Result<T, Error> {
         // If we have reached what must be the last byte, this check prevents continuing to read
         // from the buffer by ensuring that the conditional (`if byte & CONTINUATION_BIT_MASK == 0`)
         // always evaluates to true.
-        let remaining_bits = max_bits.checked_sub(shift).unwrap();
+        let remaining_bits = max_bits.checked_sub(bits_read).unwrap();
         if remaining_bits <= DATA_BITS_PER_BYTE {
             let relevant_bits = BITS_PER_BYTE - byte.leading_zeros() as usize;
             if relevant_bits > remaining_bits {
@@ -143,15 +145,14 @@ pub fn read<T: UInt>(buf: &mut impl Buf) -> Result<T, Error> {
         }
 
         // Write the 7 bits of data to the result.
-        result |= T::from(byte & DATA_BITS_MASK) << shift;
+        result |= T::from(byte & DATA_BITS_MASK) << bits_read;
 
         // If the continuation bit is not set, return.
         if byte & CONTINUATION_BIT_MASK == 0 {
             return Ok(result);
         }
 
-        // Each byte has 7 bits of data.
-        shift += DATA_BITS_PER_BYTE;
+        bits_read += DATA_BITS_PER_BYTE;
     }
 }
 
@@ -168,7 +169,7 @@ pub fn write_signed<U: UInt, S: SInt<U>>(value: S, buf: &mut impl BufMut) {
     write(value.as_zigzag(), buf);
 }
 
-/// Decodes a signed integer from ZigZag encoding
+/// Decodes a signed integer from varint ZigZag encoding.
 pub fn read_signed<U: UInt, S: SInt<U>>(buf: &mut impl Buf) -> Result<S, Error> {
     Ok(S::un_zigzag(read(buf)?))
 }
