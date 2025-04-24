@@ -74,44 +74,51 @@ async fn do_work(mut receiver: mpsc::Receiver<(SqueueEntry, oneshot::Sender<i32>
         HashMap::with_capacity(IOURING_SIZE as usize);
 
     loop {
-        let completed_work_fut = NextCompletionFuture::new(&mut ring);
-        let new_work_fut = if waiters.len() < IOURING_SIZE as usize {
-            Either::Left(receiver.next())
+        // Try to get a completion
+        if let Some(cqe) = ring.completion().next() {
+            let work_id = cqe.user_data();
+            let result = cqe.result();
+            let sender = waiters.remove(&work_id).expect("work is missing");
+            // Notify with the result of this operation
+            let _ = sender.send(result);
+            continue;
+        }
+
+        if waiters.len() == IOURING_SIZE as usize {
+            ring.submit_and_wait(1).expect("unable to submit to ring");
+            continue;
+        }
+
+        let work = if waiters.is_empty() {
+            receiver.next().await
         } else {
-            // We're at the limit for maximum number of ongoing operations.
-            // Wait for a completion to free up space.
-            Either::Right(futures::future::pending())
+            // TODO: try_next returns immediately. This means we can enter
+            // a busy loop if there is incomplete work but no new work
+            // being submitted.
+            receiver.try_next().unwrap()
         };
 
-        select! {
-            new_work = new_work_fut => {
-                let Some((mut op,sender)) = new_work else {
-                    // Channel closed, exit the loop
-                    break;
-                };
+        let Some((mut work, sender)) = work else {
+            // Channel closed, exit the loop
+            continue;
+        };
 
-                // Assign a unique id
-                let work_id = next_work_id;
-                op = op.user_data(work_id);
-                // Use wrapping add in case we overflow
-                next_work_id = next_work_id.wrapping_add(1);
+        // Assign a unique id
+        let work_id = next_work_id;
+        work = work.user_data(work_id);
+        // Use wrapping add in case we overflow
+        next_work_id = next_work_id.wrapping_add(1);
 
-                // We'll send the result of this operation to `sender`.
-                waiters.insert(work_id, sender);
+        // We'll send the result of this operation to `sender`.
+        waiters.insert(work_id, sender);
 
-                // Submit the operation to the ring
-                unsafe {
-                    ring.submission().push(&op).expect("unable to push to queue");
-                }
-            },
-            completed_work = completed_work_fut => {
-                let work_id = completed_work.user_data();
-                let result = completed_work.result();
-                let sender = waiters.remove(&work_id).expect("work is missing");
-                // Notify with the result of this operation
-                let _ =  sender.send(result);
-            },
+        // Submit the operation to the ring
+        unsafe {
+            ring.submission()
+                .push(&work)
+                .expect("unable to push to queue");
         }
+        ring.submit().expect("unable to submit to ring");
     }
 }
 
