@@ -30,6 +30,7 @@ pub(crate) mod tests {
         test_sequential_chunk_read_write(&storage).await;
         test_read_empty_blob(&storage).await;
         test_overlapping_writes(&storage).await;
+        test_truncate_then_open(&storage).await;
     }
 
     /// Test opening a blob, writing to it, and reading back the data.
@@ -38,7 +39,8 @@ pub(crate) mod tests {
         S: Storage + Send + Sync,
         S::Blob: Send + Sync,
     {
-        let blob = storage.open("partition", b"test_blob").await.unwrap();
+        let (blob, len) = storage.open("partition", b"test_blob").await.unwrap();
+        assert_eq!(len, 0);
 
         blob.write_at(b"hello world", 0).await.unwrap();
         let mut buffer = vec![0; 11];
@@ -97,7 +99,7 @@ pub(crate) mod tests {
         S: Storage + Send + Sync,
         S::Blob: Send + Sync,
     {
-        let blob = storage.open("partition", b"test_blob").await.unwrap();
+        let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
 
         // Initialize blob with data of sufficient length first
         blob.write_at(b"concurrent write", 0).await.unwrap();
@@ -131,7 +133,7 @@ pub(crate) mod tests {
         S: Storage + Send + Sync,
         S::Blob: Send + Sync,
     {
-        let blob = storage.open("partition", b"large_blob").await.unwrap();
+        let (blob, _) = storage.open("partition", b"large_blob").await.unwrap();
 
         let large_data = vec![42u8; 10 * 1024 * 1024]; // 10 MB
         blob.write_at(&large_data, 0).await.unwrap();
@@ -148,7 +150,7 @@ pub(crate) mod tests {
         S: Storage + Send + Sync,
         S::Blob: Send + Sync,
     {
-        let blob = storage
+        let (blob, _) = storage
             .open("test_overwrite_data", b"test_blob")
             .await
             .unwrap();
@@ -175,7 +177,7 @@ pub(crate) mod tests {
         S: Storage + Send + Sync,
         S::Blob: Send + Sync,
     {
-        let blob = storage
+        let (blob, _) = storage
             .open("test_read_beyond_written_data", b"test_blob")
             .await
             .unwrap();
@@ -199,7 +201,7 @@ pub(crate) mod tests {
         S: Storage + Send + Sync,
         S::Blob: Send + Sync,
     {
-        let blob = storage
+        let (blob, _) = storage
             .open("test_write_at_large_offset", b"test_blob")
             .await
             .unwrap();
@@ -220,7 +222,7 @@ pub(crate) mod tests {
         S: Storage + Send + Sync,
         S::Blob: Send + Sync,
     {
-        let blob = storage
+        let (blob, _) = storage
             .open("test_append_data", b"test_blob")
             .await
             .unwrap();
@@ -244,7 +246,7 @@ pub(crate) mod tests {
         S: Storage + Send + Sync,
         S::Blob: Send + Sync,
     {
-        let blob = storage.open("partition", b"test_blob").await.unwrap();
+        let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
 
         // Write data at different offsets
         blob.write_at(b"first", 0).await.unwrap();
@@ -267,7 +269,7 @@ pub(crate) mod tests {
         S: Storage + Send + Sync,
         S::Blob: Send + Sync,
     {
-        let blob = storage
+        let (blob, _) = storage
             .open("test_large_data_in_chunks", b"large_blob")
             .await
             .unwrap();
@@ -297,7 +299,7 @@ pub(crate) mod tests {
         S: Storage + Send + Sync,
         S::Blob: Send + Sync,
     {
-        let blob = storage
+        let (blob, _) = storage
             .open("test_read_empty_blob", b"empty_blob")
             .await
             .unwrap();
@@ -317,7 +319,7 @@ pub(crate) mod tests {
         S: Storage + Send + Sync,
         S::Blob: Send + Sync,
     {
-        let blob = storage
+        let (blob, _) = storage
             .open("test_overlapping_writes", b"test_blob")
             .await
             .unwrap();
@@ -331,5 +333,39 @@ pub(crate) mod tests {
         blob.read_at(&mut buffer, 0).await.unwrap();
 
         assert_eq!(buffer, b"overmap", "Overlapping writes are incorrect");
+    }
+
+    async fn test_truncate_then_open<S>(storage: &S)
+    where
+        S: Storage + Send + Sync,
+        S::Blob: Send + Sync,
+    {
+        {
+            let (blob, _) = storage
+                .open("test_truncate_then_open", b"test_blob")
+                .await
+                .unwrap();
+
+            // Write some data
+            blob.write_at(b"hello world", 0).await.unwrap();
+
+            // Truncate the blob
+            blob.truncate(5).await.unwrap();
+
+            blob.close().await.unwrap();
+        }
+
+        // Reopen the blob
+        let (blob, len) = storage
+            .open("test_truncate_then_open", b"test_blob")
+            .await
+            .unwrap();
+        assert_eq!(len, 5, "Blob length after truncate is incorrect");
+
+        // Read back the data
+        let mut buffer = vec![0; 5];
+        blob.read_at(&mut buffer, 0).await.unwrap();
+
+        assert_eq!(buffer, b"hello", "Truncated data is incorrect");
     }
 }

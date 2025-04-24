@@ -16,21 +16,25 @@ criterion_main!(
     fixed_replay::benches,
 );
 
-/// Append `items_to_write` random items to a journal of items with ITEM_SIZE bytes each. The journal
-/// is configured to use `items_per_blob` items per blob.
-async fn append_random_data<const ITEM_SIZE: usize>(
+/// Open and return a temp journal with the given config parameters and items of size ITEM_SIZE.
+async fn get_journal<const ITEM_SIZE: usize>(
     context: Context,
     partition_name: &str,
     items_per_blob: u64,
-    items_to_write: u64,
 ) -> Journal<Context, FixedBytes<ITEM_SIZE>> {
     // Initialize the journal at the given partition.
     let journal_config = JConfig {
         partition: partition_name.to_string(),
         items_per_blob,
     };
-    let mut journal = Journal::init(context, journal_config).await.unwrap();
+    Journal::init(context, journal_config).await.unwrap()
+}
 
+/// Append `items_to_write` random items to the given journal, syncing the changes before returning.
+async fn append_random_data<const ITEM_SIZE: usize>(
+    journal: &mut Journal<Context, FixedBytes<ITEM_SIZE>>,
+    items_to_write: u64,
+) {
     // Append `items_to_write` random items to the journal.
     let mut rng = StdRng::seed_from_u64(0);
     let mut arr = [0; ITEM_SIZE];
@@ -44,6 +48,4 @@ async fn append_random_data<const ITEM_SIZE: usize>(
 
     // Sync the journal to ensure all data is written to disk.
     journal.sync().await.unwrap();
-
-    journal
 }
