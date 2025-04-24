@@ -157,14 +157,14 @@ impl<E: Storage + Metrics> Journal<E> {
             Err(err) => return Err(Error::Runtime(err)),
         };
         for name in stored_blobs {
-            let blob = context.open(&cfg.partition, &name).await?;
+            let (blob, len) = context.open(&cfg.partition, &name).await?;
             let hex_name = hex(&name);
             let section = match name.try_into() {
                 Ok(section) => u64::from_be_bytes(section),
                 Err(_) => return Err(Error::InvalidBlobName(hex_name)),
             };
-            debug!(section, blob = hex_name, len = blob.1, "loaded section");
-            blobs.insert(section, blob);
+            debug!(section, blob = hex_name, len, "loaded section");
+            blobs.insert(section, (blob, len));
         }
 
         // Initialize metrics
@@ -473,7 +473,6 @@ impl<E: Storage + Metrics> Journal<E> {
         blob.0.write_at(&buf, aligned_cursor).await?;
         blob.1 = aligned_cursor + len as u64;
         debug!(blob = section, offset, len, "appended item");
-
         Ok(offset)
     }
 

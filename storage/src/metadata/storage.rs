@@ -30,12 +30,12 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
     /// Initialize a new `Metadata` instance.
     pub async fn init(context: E, cfg: Config) -> Result<Self, Error<K>> {
         // Open dedicated blobs
-        let (left, left_len) = context.open(&cfg.partition, BLOB_NAMES[0]).await?;
-        let (right, right_len) = context.open(&cfg.partition, BLOB_NAMES[1]).await?;
+        let (left_blob, left_len) = context.open(&cfg.partition, BLOB_NAMES[0]).await?;
+        let (right_blob, right_len) = context.open(&cfg.partition, BLOB_NAMES[1]).await?;
 
         // Find latest blob (check which includes a hash of the other)
-        let left_result = Self::load(0, &left, left_len).await?;
-        let right_result = Self::load(1, &right, right_len).await?;
+        let left_result = Self::load(0, &left_blob, left_len).await?;
+        let right_result = Self::load(1, &right_blob, right_len).await?;
 
         // Set checksums
         let mut left_timestamp = 0;
@@ -73,8 +73,8 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
             data,
             cursor,
             blobs: [
-                (left, left_len, left_timestamp),
-                (right, right_len, right_timestamp),
+                (left_blob, left_len, left_timestamp),
+                (right_blob, right_len, right_timestamp),
             ],
 
             syncs,
