@@ -53,8 +53,8 @@ mod tests {
     use commonware_storage::journal::variable::{Config as JConfig, Journal};
     use commonware_utils::quorum;
     use futures::{channel::mpsc, StreamExt};
+    use std::time::Duration;
     use std::{collections::BTreeMap, sync::Arc};
-    use std::{time::Duration, usize};
 
     #[test_traced]
     fn test_stale_backfill() {

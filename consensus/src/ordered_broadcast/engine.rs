@@ -143,7 +143,7 @@ pub struct Engine<
     journal_name_prefix: String,
 
     // A map of sequencer public keys to their journals.
-    journals: BTreeMap<C::PublicKey, Journal<E>>,
+    journals: BTreeMap<C::PublicKey, Journal<E, (), Node<C, D>>>,
 
     ////////////////////////////////////////
     // State
@@ -603,7 +603,7 @@ impl<
             // Append to journal if the `Node` is new, making sure to sync the journal
             // to prevent sending two conflicting chunks to the automaton, even if
             // the node crashes and restarts.
-            self.journal_append(node).await;
+            self.journal_append(node.clone()).await;
             self.journal_sync(&node.chunk.sequencer, node.chunk.height)
                 .await;
         }
@@ -952,10 +952,13 @@ impl<
         // Initialize journal
         let cfg = journal::variable::Config {
             partition: format!("{}{}", &self.journal_name_prefix, sequencer),
+            compression: Some(3),
+            codec_config: (),
         };
-        let mut journal = Journal::init(self.context.clone(), cfg)
-            .await
-            .expect("unable to init journal");
+        let mut journal =
+            Journal::<_, _, Node<C, D>>::init(self.context.with_label("sequencer_journal"), cfg)
+                .await
+                .expect("unable to init journal");
 
         // Replay journal
         {
@@ -963,7 +966,7 @@ impl<
 
             // Prepare the stream
             let stream = journal
-                .replay(self.journal_replay_concurrency, None)
+                .replay(self.journal_replay_concurrency)
                 .await
                 .expect("unable to replay journal");
             pin_mut!(stream);
@@ -973,9 +976,8 @@ impl<
             let mut tip: Option<Node<C, D>> = None;
             let mut num_items = 0;
             while let Some(msg) = stream.next().await {
+                let (_, _, node) = msg.expect("unable to read from journal");
                 num_items += 1;
-                let (_, _, _, msg) = msg.expect("unable to decode journal message");
-                let node = Node::decode(msg).expect("journal message is unexpected format");
                 let height = node.chunk.height;
                 match tip {
                     None => {
@@ -1007,12 +1009,12 @@ impl<
     ///
     /// To prevent ever writing two conflicting `Chunk`s at the same height,
     /// the journal must already be open and replayed.
-    async fn journal_append(&mut self, node: &Node<C, D>) {
+    async fn journal_append(&mut self, node: Node<C, D>) {
         let section = self.get_journal_section(node.chunk.height);
         self.journals
             .get_mut(&node.chunk.sequencer)
             .expect("journal does not exist")
-            .append(section, node.encode().into())
+            .append(section, node)
             .await
             .expect("unable to append to journal");
     }
