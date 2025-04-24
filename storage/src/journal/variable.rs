@@ -250,7 +250,7 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
 
         // If compression is enabled, decompress the item
         let item = if compressed {
-            decompress(&item, usize::MAX).map_err(|_| Error::DecompressionFailed)?
+            decompress(&item, u32::MAX as usize).map_err(|_| Error::DecompressionFailed)?
         } else {
             item
         };
