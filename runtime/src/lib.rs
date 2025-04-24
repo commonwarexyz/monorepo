@@ -270,8 +270,8 @@ pub trait Storage: Clone + Send + Sync + 'static {
     /// The readable/writeable storage buffer that can be opened by this Storage.
     type Blob: Blob;
 
-    /// Open an existing blob in a given partition or create a new one.
-    /// Returns the Blob and its length.
+    /// Open an existing blob in a given partition or create a new one, returning
+    /// the blob and its length.
     ///
     /// Multiple instances of the same blob can be opened concurrently, however,
     /// writing to the same blob concurrently may lead to undefined behavior.
@@ -666,7 +666,6 @@ mod tests {
                     .expect("Failed to open blob");
 
                 // Write data at different offsets
-
                 blob.write_at(data1, 0)
                     .await
                     .expect("Failed to write data1");
