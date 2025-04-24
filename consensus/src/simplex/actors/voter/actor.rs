@@ -1140,9 +1140,7 @@ impl<
         });
         for signature in &nullification.signatures {
             let nullify = Nullify::new(view, signature.clone());
-            let msg = Voter::Nullify::<C::Signature, D>(nullify.clone())
-                .encode()
-                .into();
+            let msg = Voter::Nullify(nullify.clone());
             if round.add_verified_nullify(nullify).await && self.journal.is_some() {
                 self.journal
                     .as_mut()
@@ -1199,9 +1197,7 @@ impl<
         });
 
         // Handle finalize
-        let msg = Voter::Finalize::<C::Signature, D>(finalize.clone())
-            .encode()
-            .into();
+        let msg = Voter::Finalize(finalize.clone());
         if round.add_verified_finalize(finalize).await && self.journal.is_some() {
             self.journal
                 .as_mut()
@@ -1253,9 +1249,7 @@ impl<
         });
         for signature in &finalization.signatures {
             let finalize = Finalize::new(finalization.proposal.clone(), signature.clone());
-            let msg = Voter::Finalize::<C::Signature, D>(finalize.clone())
-                .encode()
-                .into();
+            let msg = Voter::Finalize(finalize.clone());
             if round.add_verified_finalize(finalize).await && self.journal.is_some() {
                 self.journal
                     .as_mut()
@@ -1689,11 +1683,7 @@ impl<
                 .expect("unable to replay journal");
             pin_mut!(stream);
             while let Some(msg) = stream.next().await {
-                let (_, _, _, msg) = msg.expect("unable to decode journal message");
-                // We must wrap the message in Voter so we decode the right type of message (otherwise,
-                // we can parse a finalize as a notarize)
-                let msg = Voter::decode_cfg(msg, &self.max_participants)
-                    .expect("journal message is unexpected format");
+                let (_, _, msg) = msg.expect("unable to decode journal message");
                 let view = msg.view();
                 let public_key_index = self
                     .supervisor
