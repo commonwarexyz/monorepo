@@ -5,7 +5,7 @@ use commonware_codec::varint;
 
 pub mod array;
 pub use array::Array;
-mod bitvec; 
+mod bitvec;
 pub use bitvec::{BitIterator, BitVec};
 mod time;
 pub use time::SystemTimeExt;
@@ -29,7 +29,7 @@ pub fn from_hex(hex: &str) -> Option<Vec<u8>> {
     }
 
     let mut bytes = Vec::with_capacity(hex.len() / 2);
-    
+
     for i in (0..hex.len()).step_by(2) {
         if let Ok(byte) = u8::from_str_radix(&hex[i..i + 2], 16) {
             bytes.push(byte);
@@ -37,7 +37,7 @@ pub fn from_hex(hex: &str) -> Option<Vec<u8>> {
             return None;
         }
     }
-    
+
     Some(bytes)
 }
 
@@ -73,7 +73,7 @@ pub fn union(a: &[u8], b: &[u8]) -> Vec<u8> {
     union.extend_from_slice(a);
     union.extend_from_slice(b);
     union
-} 
+}
 
 /// Concatenate a namespace and a message, prepended by a varint encoding of the namespace length.
 ///

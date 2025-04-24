@@ -246,7 +246,6 @@ impl BitVec {
     pub fn count_zeros(&self) -> usize {
         //No need for checked sub here since technically num_bits is always greater than or equal to self.count_ones
         self.num_bits - self.count_ones()
-            
     }
 
     /// Performs a bitwise AND with another BitVec.
