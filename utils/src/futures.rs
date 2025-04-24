@@ -33,8 +33,9 @@ impl<T: Send> Default for Pool<T> {
 impl<T: Send> Pool<T> {
     /// Returns the number of futures in the pool.
     pub fn len(&self) -> usize {
-        // Subtract the dummy future.
-        self.pool.len().checked_sub(1).unwrap()
+        // The pool always has at least the dummy future,
+        // so we can safely subtract 1 from the total length
+        self.pool.len() - 1
     }
 
     /// Returns `true` if the pool is empty.
