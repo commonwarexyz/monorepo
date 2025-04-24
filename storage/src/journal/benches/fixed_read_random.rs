@@ -2,7 +2,7 @@ use super::{append_random_data, get_journal};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Context, Runner},
-    Runner as RunnerTrait,
+    Runner as _,
 };
 use commonware_storage::journal::fixed::Journal;
 use commonware_utils::array::FixedBytes;
