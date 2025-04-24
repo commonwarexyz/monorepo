@@ -201,7 +201,7 @@ mod tests {
         variable::{Config as JConfig, Journal},
         Error as JournalError,
     };
-    use commonware_codec::DecodeExt;
+    use commonware_codec::{DecodeExt, Error as CodecError};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
     use commonware_utils::array::FixedBytes;
@@ -366,7 +366,7 @@ mod tests {
             archive.close().await.expect("Failed to close archive");
 
             // Initialize the archive again without compression
-            let journal = Journal::init(
+            let journal = Journal::<_, _, Record<FixedBytes<64>, _, i32>>::init(
                 context.clone(),
                 JConfig {
                     partition: "test_partition".into(),
@@ -382,23 +382,11 @@ mod tests {
                 replay_concurrency: 4,
                 section_mask: DEFAULT_SECTION_MASK,
             };
-            let archive = Archive::init(context, journal, cfg.clone())
-                .await
-                .expect("Failed to initialize archive");
-
-            // Get the data back
-            let retrieved: i32 = archive
-                .get(Identifier::Index(index))
-                .await
-                .expect("Failed to get data")
-                .expect("Data not found");
-            assert_ne!(retrieved, data);
-            let retrieved = archive
-                .get(Identifier::Key(&key))
-                .await
-                .expect("Failed to get data")
-                .expect("Data not found");
-            assert_ne!(retrieved, data);
+            let result = Archive::init(context, journal, cfg.clone()).await;
+            assert!(matches!(
+                result,
+                Err(Error::Journal(JournalError::Codec(CodecError::EndOfBuffer)))
+            ));
         });
     }
 
