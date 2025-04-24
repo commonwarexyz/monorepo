@@ -67,10 +67,6 @@ pub struct Bitmap<H: CHasher, const N: usize> {
 
     /// The number of bitmap chunks that have been pruned.
     pruned_chunks: usize,
-
-    /// The MMR nodes that must be pinned in order to restore the bitmap as fully pruned at its
-    /// pruning boundary.
-    pinned_nodes: Vec<H::Digest>,
 }
 
 impl<H: CHasher, const N: usize> Default for Bitmap<H, N> {
@@ -98,7 +94,6 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
             next_bit: 0,
             mmr: Mmr::new(),
             pruned_chunks: 0,
-            pinned_nodes: Vec::new(),
         }
     }
 
@@ -127,13 +122,10 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         let mmr_size = leaf_num_to_pos(pruned_chunks as u64);
 
         let mut pinned_nodes = Vec::new();
-        for (index, pos) in Proof::<H>::nodes_to_pin(mmr_size, mmr_size)
-            .iter()
-            .enumerate()
-        {
+        for (index, pos) in Proof::<H>::nodes_to_pin(mmr_size).enumerate() {
             let Some(bytes) = metadata.get(&U64::new(NODE_PREFIX, index as u64)) else {
                 error!(size = mmr_size, pos, "missing pinned node");
-                return Err(Error::MissingNode(*pos));
+                return Err(Error::MissingNode(pos));
             };
             let digest = H::Digest::decode(bytes.as_ref());
             let Ok(digest) = digest else {
@@ -141,21 +133,20 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
                     size = mmr_size,
                     pos, "could not convert node bytes to digest"
                 );
-                return Err(Error::MissingNode(*pos));
+                return Err(Error::MissingNode(pos));
             };
             pinned_nodes.push(digest);
         }
 
         metadata.close().await?;
 
-        let mmr = Mmr::<H>::init(Vec::new(), mmr_size, pinned_nodes.clone());
+        let mmr = Mmr::<H>::init(Vec::new(), mmr_size, pinned_nodes);
 
         Ok(Self {
             bitmap: VecDeque::from([[0u8; N]]),
             next_bit: 0,
             mmr,
             pruned_chunks,
-            pinned_nodes,
         })
     }
 
@@ -180,7 +171,9 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         );
 
         // Write the pinned nodes.
-        for (i, digest) in self.pinned_nodes.iter().enumerate() {
+        let mmr_size = leaf_num_to_pos(self.pruned_chunks as u64);
+        for (i, digest) in Proof::<H>::nodes_to_pin(mmr_size).enumerate() {
+            let digest = self.mmr.get_node_unchecked(digest);
             let key = U64::new(NODE_PREFIX, i as u64);
             metadata.put(key, Bytes::copy_from_slice(digest));
         }
@@ -208,14 +201,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         self.bitmap.drain(0..chunk_index);
         self.pruned_chunks = chunk_pos;
 
-        // Before we prune the MMR, we must retain the nodes that would be pinned if we were to
-        // restore this MMR as fully pruned at this pruning boundary to support `write_pruned`.
         let mmr_pos = leaf_num_to_pos(chunk_pos as u64);
-        self.pinned_nodes.clear();
-        for pos in Proof::<H>::nodes_to_pin(mmr_pos, mmr_pos) {
-            self.pinned_nodes.push(*self.mmr.get_node_unchecked(pos));
-        }
-
         self.mmr.prune_to_pos(mmr_pos);
     }
 
