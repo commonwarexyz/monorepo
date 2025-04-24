@@ -1467,7 +1467,7 @@ mod tests {
         executor.start(|context| async move {
             let (blob, len) = context.open(partition, name).await.unwrap();
             assert_eq!(len, data.len() as u64);
-            let mut buf = vec![0; data.len() as usize];
+            let mut buf = vec![0; data.len()];
             blob.read_at(&mut buf, 0).await.unwrap();
             assert_eq!(buf, data);
         });
