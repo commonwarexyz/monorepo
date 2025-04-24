@@ -152,6 +152,7 @@
 //! ```
 
 mod storage;
+use commonware_codec::Config as CodecConfig;
 pub use storage::{Archive, Identifier};
 
 use crate::index::Translator;
@@ -172,12 +173,18 @@ pub enum Error {
 
 /// Configuration for `Archive` storage.
 #[derive(Clone)]
-pub struct Config<T: Translator> {
+pub struct Config<T: Translator, C: CodecConfig> {
+    pub partition: String,
+
     /// Logic to transform keys into their index representation.
     ///
     /// `Archive` assumes that all internal keys are spread uniformly across the key space.
     /// If that is not the case, lookups may be O(n) instead of O(1).
     pub translator: T,
+
+    pub compression: Option<u8>,
+
+    pub codec_config: C,
 
     /// Mask to apply to indices to determine section.
     ///
@@ -197,17 +204,13 @@ pub struct Config<T: Translator> {
 mod tests {
     use super::*;
     use crate::index::translator::{FourCap, TwoCap};
-    use crate::journal::{
-        variable::{Config as JConfig, Journal},
-        Error as JournalError,
-    };
+    use crate::journal::Error as JournalError;
     use commonware_codec::{DecodeExt, Error as CodecError};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
     use commonware_utils::array::FixedBytes;
     use rand::Rng;
     use std::collections::BTreeMap;
-    use storage::Record;
 
     const DEFAULT_SECTION_MASK: u64 = 0xffff_ffff_ffff_0000u64;
 
@@ -223,26 +226,17 @@ mod tests {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Initialize an empty journal
-            let journal = Journal::init(
-                context.clone(),
-                JConfig {
-                    partition: "test_partition".into(),
-                    codec_config: (),
-                    compression,
-                },
-            )
-            .await
-            .expect("Failed to initialize journal");
-
             // Initialize the archive
             let cfg = Config {
+                partition: "test_partition".into(),
                 translator: FourCap,
+                compression,
+                codec_config: (),
                 pending_writes: 10,
                 replay_concurrency: 4,
                 section_mask: DEFAULT_SECTION_MASK,
             };
-            let mut archive = Archive::init(context.clone(), journal, cfg.clone())
+            let mut archive = Archive::init(context.clone(), cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
@@ -330,26 +324,17 @@ mod tests {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Initialize an empty journal
-            let journal = Journal::init(
-                context.clone(),
-                JConfig {
-                    partition: "test_partition".into(),
-                    codec_config: (),
-                    compression: Some(3),
-                },
-            )
-            .await
-            .expect("Failed to initialize journal");
-
             // Initialize the archive
             let cfg = Config {
+                partition: "test_partition".into(),
                 translator: FourCap,
+                codec_config: (),
+                compression: Some(3),
                 pending_writes: 10,
                 replay_concurrency: 4,
                 section_mask: DEFAULT_SECTION_MASK,
             };
-            let mut archive = Archive::init(context.clone(), journal, cfg.clone())
+            let mut archive = Archive::init(context.clone(), cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
@@ -366,23 +351,16 @@ mod tests {
             archive.close().await.expect("Failed to close archive");
 
             // Initialize the archive again without compression
-            let journal = Journal::<_, _, Record<FixedBytes<64>, _, i32>>::init(
-                context.clone(),
-                JConfig {
-                    partition: "test_partition".into(),
-                    codec_config: (),
-                    compression: None,
-                },
-            )
-            .await
-            .expect("Failed to initialize journal");
             let cfg = Config {
+                partition: "test_partition".into(),
                 translator: FourCap,
+                codec_config: (),
+                compression: None,
                 pending_writes: 10,
                 replay_concurrency: 4,
                 section_mask: DEFAULT_SECTION_MASK,
             };
-            let result = Archive::init(context, journal, cfg.clone()).await;
+            let result = Archive::<_, _, FixedBytes<64>, (), i32>::init(context, cfg.clone()).await;
             assert!(matches!(
                 result,
                 Err(Error::Journal(JournalError::Codec(CodecError::EndOfBuffer)))
@@ -395,26 +373,17 @@ mod tests {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Initialize an empty journal
-            let journal = Journal::init(
-                context.clone(),
-                JConfig {
-                    partition: "test_partition".into(),
-                    codec_config: (),
-                    compression: None,
-                },
-            )
-            .await
-            .expect("Failed to initialize journal");
-
             // Initialize the archive
             let cfg = Config {
+                partition: "test_partition".into(),
                 translator: FourCap,
+                codec_config: (),
+                compression: None,
                 pending_writes: 10,
                 replay_concurrency: 4,
                 section_mask: DEFAULT_SECTION_MASK,
             };
-            let mut archive = Archive::init(context.clone(), journal, cfg.clone())
+            let mut archive = Archive::init(context.clone(), cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
@@ -442,21 +411,13 @@ mod tests {
             blob.close().await.unwrap();
 
             // Initialize the archive again
-            let journal = Journal::<_, _, Record<FixedBytes<64>, _, i32>>::init(
-                context.clone(),
-                JConfig {
+            let result = Archive::<_, _, FixedBytes<64>, _, i32>::init(
+                context,
+                Config {
                     partition: "test_partition".into(),
+                    translator: FourCap,
                     codec_config: (),
                     compression: None,
-                },
-            )
-            .await
-            .expect("Failed to initialize journal");
-            let result = Archive::<_, _, _, _, i32>::init(
-                context,
-                journal,
-                Config {
-                    translator: FourCap,
                     pending_writes: 10,
                     replay_concurrency: 4,
                     section_mask: DEFAULT_SECTION_MASK,
@@ -475,26 +436,17 @@ mod tests {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Initialize an empty journal
-            let journal = Journal::init(
-                context.clone(),
-                JConfig {
-                    partition: "test_partition".into(),
-                    codec_config: (),
-                    compression: None,
-                },
-            )
-            .await
-            .expect("Failed to initialize journal");
-
             // Initialize the archive
             let cfg = Config {
+                partition: "test_partition".into(),
                 translator: FourCap,
+                codec_config: (),
+                compression: None,
                 pending_writes: 10,
                 replay_concurrency: 4,
                 section_mask: DEFAULT_SECTION_MASK,
             };
-            let mut archive = Archive::init(context.clone(), journal, cfg.clone())
+            let mut archive = Archive::init(context.clone(), cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
@@ -542,26 +494,17 @@ mod tests {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Initialize an empty journal
-            let journal = Journal::init(
-                context.clone(),
-                JConfig {
-                    partition: "test_partition".into(),
-                    codec_config: (),
-                    compression: None,
-                },
-            )
-            .await
-            .expect("Failed to initialize journal");
-
             // Initialize the archive
             let cfg = Config {
+                partition: "test_partition".into(),
                 translator: FourCap,
+                codec_config: (),
+                compression: None,
                 pending_writes: 10,
                 replay_concurrency: 4,
                 section_mask: DEFAULT_SECTION_MASK,
             };
-            let archive = Archive::init(context.clone(), journal, cfg.clone())
+            let archive = Archive::init(context.clone(), cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
@@ -594,26 +537,17 @@ mod tests {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Initialize an empty journal
-            let journal = Journal::init(
-                context.clone(),
-                JConfig {
-                    partition: "test_partition".into(),
-                    codec_config: (),
-                    compression: None,
-                },
-            )
-            .await
-            .expect("Failed to initialize journal");
-
             // Initialize the archive
             let cfg = Config {
+                partition: "test_partition".into(),
                 translator: FourCap,
+                codec_config: (),
+                compression: None,
                 pending_writes: 10,
                 replay_concurrency: 4,
                 section_mask: DEFAULT_SECTION_MASK,
             };
-            let mut archive = Archive::init(context.clone(), journal, cfg.clone())
+            let mut archive = Archive::init(context.clone(), cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
@@ -665,26 +599,17 @@ mod tests {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Initialize an empty journal
-            let journal = Journal::init(
-                context.clone(),
-                JConfig {
-                    partition: "test_partition".into(),
-                    codec_config: (),
-                    compression: None,
-                },
-            )
-            .await
-            .expect("Failed to initialize journal");
-
             // Initialize the archive
             let cfg = Config {
+                partition: "test_partition".into(),
                 translator: FourCap,
+                codec_config: (),
+                compression: None,
                 pending_writes: 10,
                 replay_concurrency: 4,
                 section_mask: DEFAULT_SECTION_MASK,
             };
-            let mut archive = Archive::init(context.clone(), journal, cfg.clone())
+            let mut archive = Archive::init(context.clone(), cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
@@ -730,26 +655,17 @@ mod tests {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Initialize an empty journal
-            let journal = Journal::init(
-                context.clone(),
-                JConfig {
-                    partition: "test_partition".into(),
-                    codec_config: (),
-                    compression: None,
-                },
-            )
-            .await
-            .expect("Failed to initialize journal");
-
             // Initialize the archive
             let cfg = Config {
+                partition: "test_partition".into(),
                 translator: FourCap,
+                codec_config: (),
+                compression: None,
                 pending_writes: 10,
                 replay_concurrency: 4,
                 section_mask: 0xffff_ffff_ffff_ffffu64, // no mask
             };
-            let mut archive = Archive::init(context.clone(), journal, cfg.clone())
+            let mut archive = Archive::init(context.clone(), cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
@@ -823,27 +739,18 @@ mod tests {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            // Initialize an empty journal
-            let journal = Journal::init(
-                context.clone(),
-                JConfig {
-                    partition: "test_partition".into(),
-                    codec_config: (),
-                    compression: None,
-                },
-            )
-            .await
-            .expect("Failed to initialize journal");
-
             // Initialize the archive
             let section_mask = 0xffff_ffff_ffff_ff00u64;
             let cfg = Config {
+                partition: "test_partition".into(),
                 translator: TwoCap,
+                codec_config: (),
+                compression: None,
                 pending_writes: 10,
                 replay_concurrency: 4,
                 section_mask,
             };
-            let mut archive = Archive::init(context.clone(), journal, cfg.clone())
+            let mut archive = Archive::init(context.clone(), cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
@@ -891,29 +798,19 @@ mod tests {
             archive.close().await.expect("Failed to close archive");
 
             // Reinitialize the archive
-            let journal = Journal::init(
-                context.clone(),
-                JConfig {
-                    partition: "test_partition".into(),
-                    codec_config: (),
-                    compression: None,
-                },
-            )
-            .await
-            .expect("Failed to initialize journal");
             let cfg = Config {
+                partition: "test_partition".into(),
                 translator: TwoCap,
+                codec_config: (),
+                compression: None,
                 pending_writes: 10,
                 replay_concurrency: 4,
                 section_mask,
             };
-            let mut archive = Archive::<_, _, _, _, FixedBytes<1024>>::init(
-                context.clone(),
-                journal,
-                cfg.clone(),
-            )
-            .await
-            .expect("Failed to initialize archive");
+            let mut archive =
+                Archive::<_, _, _, _, FixedBytes<1024>>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize archive");
 
             // Ensure all keys can be retrieved
             for (key, (index, data)) in &keys {
@@ -995,26 +892,17 @@ mod tests {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Initialize an empty journal
-            let journal = Journal::init(
-                context.clone(),
-                JConfig {
-                    partition: "test_partition".into(),
-                    codec_config: (),
-                    compression: None,
-                },
-            )
-            .await
-            .expect("Failed to initialize journal");
-
             // Initialize the archive
             let cfg = Config {
+                partition: "test_partition".into(),
                 translator: FourCap,
+                codec_config: (),
+                compression: None,
                 pending_writes: 10,
                 replay_concurrency: 4,
                 section_mask: DEFAULT_SECTION_MASK,
             };
-            let mut archive = Archive::init(context.clone(), journal, cfg.clone())
+            let mut archive = Archive::init(context.clone(), cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
@@ -1059,21 +947,9 @@ mod tests {
 
             // Close and check again
             archive.close().await.expect("Failed to close archive");
-
-            let journal = Journal::init(
-                context.clone(),
-                JConfig {
-                    partition: "test_partition".into(),
-                    codec_config: (),
-                    compression: None,
-                },
-            )
-            .await
-            .expect("Failed to initialize journal");
-            let archive =
-                Archive::<_, _, FixedBytes<64>, _, i32>::init(context, journal, cfg.clone())
-                    .await
-                    .expect("Failed to initialize archive");
+            let archive = Archive::<_, _, FixedBytes<64>, _, i32>::init(context, cfg.clone())
+                .await
+                .expect("Failed to initialize archive");
 
             // Check ranges again
             let (current_end, start_next) = archive.next_gap(0);

@@ -1,5 +1,8 @@
 use super::{Config, Error, Translator};
-use crate::{index::Index, journal::variable::Journal};
+use crate::{
+    index::Index,
+    journal::variable::{Config as JConfig, Journal},
+};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, Config as CodecConfig, EncodeSize, FixedSize, Read, ReadExt, Write};
 use commonware_runtime::{Metrics, Storage};
@@ -21,11 +24,12 @@ pub struct Archive<
     T: Translator,
     E: Storage + Metrics,
     K: Array,
-    VCfg: CodecConfig + Copy,
-    V: Codec<VCfg>,
+    VC: CodecConfig + Copy,
+    V: Codec<VC>,
 > {
-    cfg: Config<T>,
-    journal: Journal<E, VCfg, Record<K, VCfg, V>>,
+    section_mask: u64,
+    pending_writes: usize,
+    journal: Journal<E, VC, Record<K, VC, V>>,
 
     // Oldest allowed section to read from. This is updated when `prune` is called.
     oldest_allowed: Option<u64>,
@@ -38,7 +42,7 @@ pub struct Archive<
     intervals: RangeInclusiveSet<u64>,
 
     // Track the number of writes pending for a section to determine when to sync.
-    pending_writes: BTreeMap<u64, usize>,
+    pending: BTreeMap<u64, usize>,
 
     items_tracked: Gauge,
     indices_pruned: Counter,
@@ -98,18 +102,25 @@ impl<K: Array, VCfg: CodecConfig + Copy, V: Codec<VCfg>> EncodeSize for Record<K
     }
 }
 
-impl<T: Translator, E: Storage + Metrics, K: Array, VCfg: CodecConfig + Copy, V: Codec<VCfg>>
-    Archive<T, E, K, VCfg, V>
+impl<T: Translator, E: Storage + Metrics, K: Array, VC: CodecConfig + Copy, V: Codec<VC>>
+    Archive<T, E, K, VC, V>
 {
     /// Initialize a new `Archive` instance.
     ///
     /// The in-memory index for `Archive` is populated during this call
     /// by replaying the journal.
-    pub async fn init(
-        context: E,
-        mut journal: Journal<E, VCfg, Record<K, VCfg, V>>,
-        cfg: Config<T>,
-    ) -> Result<Self, Error> {
+    pub async fn init(context: E, cfg: Config<T, VC>) -> Result<Self, Error> {
+        // Initialize journal
+        let mut journal = Journal::<E, VC, Record<K, VC, V>>::init(
+            context.with_label("journal"),
+            JConfig {
+                partition: cfg.partition,
+                compression: cfg.compression,
+                codec_config: cfg.codec_config,
+            },
+        )
+        .await?;
+
         // Initialize keys and run corruption check
         let mut indices = BTreeMap::new();
         let mut keys = Index::init(context.with_label("index"), cfg.translator.clone());
@@ -164,13 +175,14 @@ impl<T: Translator, E: Storage + Metrics, K: Array, VCfg: CodecConfig + Copy, V:
 
         // Return populated archive
         Ok(Self {
-            cfg,
+            pending_writes: cfg.pending_writes,
+            section_mask: cfg.section_mask,
             journal,
             oldest_allowed: None,
             indices,
             intervals,
             keys,
-            pending_writes: BTreeMap::new(),
+            pending: BTreeMap::new(),
             items_tracked,
             indices_pruned,
             unnecessary_reads,
@@ -200,7 +212,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, VCfg: CodecConfig + Copy, V:
 
         // Store item in journal
         let record = Record::new(index, key.clone(), data);
-        let section = self.cfg.section_mask & index;
+        let section = self.section_mask & index;
         let offset = self.journal.append(section, record).await?;
 
         // Store index
@@ -219,9 +231,9 @@ impl<T: Translator, E: Storage + Metrics, K: Array, VCfg: CodecConfig + Copy, V:
         self.keys.remove(&key, |index| *index < oldest_allowed);
 
         // Update pending writes
-        let pending_writes = self.pending_writes.entry(section).or_default();
+        let pending_writes = self.pending.entry(section).or_default();
         *pending_writes += 1;
-        if *pending_writes > self.cfg.pending_writes {
+        if *pending_writes > self.pending_writes {
             self.journal.sync(section).await.map_err(Error::Journal)?;
             trace!(section, mode = "pending", "synced section");
             *pending_writes = 0;
@@ -252,7 +264,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, VCfg: CodecConfig + Copy, V:
         };
 
         // Fetch item from disk
-        let section = self.cfg.section_mask & index;
+        let section = self.section_mask & index;
         let record = self
             .journal
             .get(section, offset)
@@ -276,7 +288,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, VCfg: CodecConfig + Copy, V:
 
             // Fetch item from disk
             let offset = self.indices.get(index).ok_or(Error::RecordCorrupted)?;
-            let section = self.cfg.section_mask & index;
+            let section = self.section_mask & index;
             let record = self
                 .journal
                 .get(section, *offset)
@@ -314,7 +326,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, VCfg: CodecConfig + Copy, V:
     /// will happen.
     pub async fn prune(&mut self, min: u64) -> Result<(), Error> {
         // Update `min` to reflect section mask
-        let min = self.cfg.section_mask & min;
+        let min = self.section_mask & min;
 
         // Check if min is less than last pruned
         if let Some(oldest_allowed) = self.oldest_allowed {
@@ -331,11 +343,11 @@ impl<T: Translator, E: Storage + Metrics, K: Array, VCfg: CodecConfig + Copy, V:
 
         // Remove pending writes (no need to call `sync` as we are pruning)
         loop {
-            let next = match self.pending_writes.first_key_value() {
+            let next = match self.pending.first_key_value() {
                 Some((section, _)) if *section < min => *section,
                 _ => break,
             };
-            self.pending_writes.remove(&next);
+            self.pending.remove(&next);
         }
 
         // Remove all indices that are less than min
@@ -362,7 +374,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, VCfg: CodecConfig + Copy, V:
 
     /// Forcibly sync all pending writes across all `Journals`.
     pub async fn sync(&mut self) -> Result<(), Error> {
-        for (section, count) in self.pending_writes.iter_mut() {
+        for (section, count) in self.pending.iter_mut() {
             if *count == 0 {
                 continue;
             }
