@@ -11,8 +11,8 @@ use commonware_runtime::{Handle, Metrics, Spawner};
 use commonware_utils::Array;
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family};
-use tokio::select;
 use std::collections::BTreeMap;
+use tokio::select;
 use tracing::debug;
 
 pub struct Actor<E: Spawner + Metrics, P: Array> {

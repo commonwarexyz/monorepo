@@ -6,13 +6,13 @@ use crate::authenticated::{
     actors::{peer, router, tracker},
     metrics,
 };
+use ::tokio::select;
 use commonware_cryptography::Verifier;
 use commonware_runtime::{tokio, Clock, Handle, Metrics, Sink, Spawner, Stream};
 use futures::{channel::mpsc, StreamExt};
 use governor::{clock::ReasonablyRealtime, Quota};
 use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
 use rand::{CryptoRng, Rng};
-use ::tokio::select;
 use std::time::Duration;
 use tracing::{debug, info};
 

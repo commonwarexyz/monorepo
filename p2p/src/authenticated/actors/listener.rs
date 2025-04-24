@@ -14,8 +14,8 @@ use governor::{
 };
 use prometheus_client::metrics::counter::Counter;
 use rand::{CryptoRng, Rng};
-use tokio::select;
 use std::{marker::PhantomData, net::SocketAddr};
+use tokio::select;
 use tracing::{debug, debug_span, Instrument};
 
 /// Configuration for the listener actor.
