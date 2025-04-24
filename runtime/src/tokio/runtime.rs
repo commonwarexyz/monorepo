@@ -4,13 +4,12 @@ use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage
 use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
 
 use crate::storage::metered::Storage as MeteredStorage;
-use crate::tokio::metrics::{Metrics, Work};
+use crate::tokio::metrics::Metrics;
 use crate::tokio::spawner::Config as SpawnerConfig;
-use crate::{utils::Signaler, Clock, Error, Handle, Signal, METRICS_PREFIX};
+use crate::{Clock, Error, Handle, Signal, METRICS_PREFIX};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
     encoding::text::encode,
-    metrics::{counter::Counter, family::Family, gauge::Gauge},
     registry::{Metric, Registry},
 };
 use rand::{rngs::OsRng, CryptoRng, RngCore};
@@ -26,7 +25,7 @@ use std::{
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{tcp::OwnedReadHalf, tcp::OwnedWriteHalf, TcpListener, TcpStream},
-    runtime::{Builder, Handle as TokioHandle},
+    runtime::Builder,
     time::timeout,
 };
 use tracing::warn;
