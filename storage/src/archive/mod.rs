@@ -298,7 +298,7 @@ mod tests {
             let buffer = context.encode();
             assert!(buffer.contains("items_tracked 1"));
             assert!(buffer.contains("unnecessary_reads_total 0"));
-            assert!(buffer.contains("gets_total 2"));
+            assert!(buffer.contains("gets_total 4")); // has for a key is just a get
             assert!(buffer.contains("has_total 4"));
             assert!(buffer.contains("syncs_total 0"));
 
@@ -309,7 +309,7 @@ mod tests {
             let buffer = context.encode();
             assert!(buffer.contains("items_tracked 1"));
             assert!(buffer.contains("unnecessary_reads_total 0"));
-            assert!(buffer.contains("gets_total 2"));
+            assert!(buffer.contains("gets_total 4"));
             assert!(buffer.contains("has_total 4"));
             assert!(buffer.contains("syncs_total 1"));
         });
