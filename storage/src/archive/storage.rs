@@ -9,18 +9,11 @@ use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use rangemap::RangeInclusiveSet;
 use std::{collections::BTreeMap, marker::PhantomData};
 use tracing::{debug, trace};
-use zstd::bulk::{compress, decompress};
 
 /// Subject of a `get` or `has` operation.
 pub enum Identifier<'a, K: Array> {
     Index(u64),
     Key(&'a K),
-}
-
-/// Location of a record in `Journal`.
-struct Location {
-    offset: u32,
-    len: u32,
 }
 
 /// Implementation of `Archive` storage.
@@ -41,7 +34,7 @@ pub struct Archive<
     // to its corresponding index. To avoid iterating over this keys map during pruning, we map said
     // indexes to their locations in the journal.
     keys: Index<T, u64>,
-    indices: BTreeMap<u64, Location>,
+    indices: BTreeMap<u64, u32>,
     intervals: RangeInclusiveSet<u64>,
 
     // Track the number of writes pending for a section to determine when to sync.
@@ -58,12 +51,23 @@ pub struct Archive<
     _phantom_v: std::marker::PhantomData<V>,
 }
 
-struct Record<K: Array, VCfg: CodecConfig + Copy, V: Codec<VCfg>> {
+pub struct Record<K: Array, VCfg: CodecConfig + Copy, V: Codec<VCfg>> {
     index: u64,
     key: K,
     value: V,
 
     _phantom: PhantomData<VCfg>,
+}
+
+impl<K: Array, VCfg: CodecConfig + Copy, V: Codec<VCfg>> Record<K, VCfg, V> {
+    fn new(index: u64, key: K, value: V) -> Self {
+        Self {
+            index,
+            key,
+            value,
+            _phantom: PhantomData,
+        }
+    }
 }
 
 impl<K: Array, VCfg: CodecConfig + Copy, V: Codec<VCfg>> Write for Record<K, VCfg, V> {
@@ -117,13 +121,13 @@ impl<T: Translator, E: Storage + Metrics, K: Array, VCfg: CodecConfig + Copy, V:
             while let Some(result) = stream.next().await {
                 // Extract key from record
                 let (_, offset, data) = result?;
-                let (index, key) = Self::parse_prefix(data)?;
 
                 // Store index
-                indices.insert(index, Location { offset, len });
+                let index = data.index;
+                indices.insert(index, offset);
 
                 // Store index in keys
-                keys.insert(&key, index);
+                keys.insert(&data.key, index);
 
                 // Store index in intervals
                 intervals.insert(index..=index);
@@ -178,39 +182,6 @@ impl<T: Translator, E: Storage + Metrics, K: Array, VCfg: CodecConfig + Copy, V:
         })
     }
 
-    fn parse_prefix(mut data: Vec<u8>) -> Result<(u64, K), Error> {
-        if data.remaining() != Self::PREFIX_LEN as usize {
-            return Err(Error::RecordCorrupted);
-        }
-        let found = crc32fast::hash(&data[..K::SIZE + u64::SIZE]);
-        let index = data.get_u64();
-        let key = data.copy_to_bytes(K::SIZE);
-        let expected = data.get_u32();
-        if found != expected {
-            return Err(Error::RecordCorrupted);
-        }
-        Ok((index, key))
-    }
-
-    fn parse_item(mut data: Bytes) -> Result<(Bytes, Bytes), Error> {
-        if data.remaining() < Self::PREFIX_LEN as usize {
-            return Err(Error::RecordCorrupted);
-        }
-
-        // We don't need the index, so we just skip it
-        data.get_u64();
-
-        // Read key from data
-        let key = data.copy_to_bytes(K::SIZE);
-
-        // We don't need to compute checksum here as the underlying journal
-        // already performs this check for us.
-        data.get_u32();
-
-        // Return remaining data as value
-        Ok((key, data))
-    }
-
     /// Store an item in `Archive`. Both indices and keys are assumed to both be globally unique.
     ///
     /// If the index already exists, put does nothing and returns. If the same key is stored multiple times
@@ -227,39 +198,13 @@ impl<T: Translator, E: Storage + Metrics, K: Array, VCfg: CodecConfig + Copy, V:
             return Ok(());
         }
 
-        // If compression is enabled, compress the data before storing it.
-        let data = if let Some(level) = self.cfg.compression {
-            compress(&data, level as i32)
-                .map_err(|_| Error::CompressionFailed)?
-                .into()
-        } else {
-            data
-        };
-
         // Store item in journal
-        let buf_len = u64::SIZE
-            .checked_add(K::SIZE)
-            .and_then(|len| len.checked_add(u32::SIZE))
-            .and_then(|len| len.checked_add(data.len()))
-            .ok_or(Error::RecordTooLarge)?;
-        let mut buf = Vec::with_capacity(buf_len);
-        buf.put_u64(index);
-        buf.put(key.as_ref());
-        // We store the checksum of the key because we employ partial reads from
-        // the journal, which aren't verified before returning to `Archive`.
-        buf.put_u32(crc32fast::hash(&buf[..]));
-        buf.put(data); // we don't need to store data len because we already get this from the journal
+        let record = Record::new(index, key.clone(), data);
         let section = self.cfg.section_mask & index;
-        let offset = self.journal.append(section, buf.into()).await?;
+        let offset = self.journal.append(section, record).await?;
 
         // Store index
-        self.indices.insert(
-            index,
-            Location {
-                offset,
-                len: buf_len as u32,
-            },
-        );
+        self.indices.insert(index, offset);
 
         // Store interval
         self.intervals.insert(index..=index);
@@ -301,31 +246,19 @@ impl<T: Translator, E: Storage + Metrics, K: Array, VCfg: CodecConfig + Copy, V:
         self.gets.inc();
 
         // Get index location
-        let location = match self.indices.get(&index) {
-            Some(location) => location,
+        let offset = match self.indices.get(&index) {
+            Some(offset) => *offset,
             None => return Ok(None),
         };
 
         // Fetch item from disk
         let section = self.cfg.section_mask & index;
-        let item = self
+        let record = self
             .journal
-            .get(section, location.offset, Some(location.len))
+            .get(section, offset)
             .await?
             .ok_or(Error::RecordCorrupted)?;
-
-        // Get key from item
-        let (_, value) = Self::parse_item(item)?;
-
-        // If compression is enabled, decompress the data before returning.
-        if self.cfg.compression.is_some() {
-            return Ok(Some(
-                decompress(&value, u32::MAX as usize)
-                    .map_err(|_| Error::DecompressionFailed)?
-                    .into(),
-            ));
-        }
-        Ok(Some(value))
+        Ok(Some(record.value))
     }
 
     async fn get_key(&self, key: &K) -> Result<Option<V>, Error> {
@@ -342,26 +275,17 @@ impl<T: Translator, E: Storage + Metrics, K: Array, VCfg: CodecConfig + Copy, V:
             }
 
             // Fetch item from disk
-            let location = self.indices.get(index).ok_or(Error::RecordCorrupted)?;
+            let offset = self.indices.get(index).ok_or(Error::RecordCorrupted)?;
             let section = self.cfg.section_mask & index;
-            let item = self
+            let record = self
                 .journal
-                .get(section, location.offset, Some(location.len))
+                .get(section, *offset)
                 .await?
                 .ok_or(Error::RecordCorrupted)?;
 
             // Get key from item
-            let (disk_key, value) = Self::parse_item(item)?;
-            if disk_key.as_ref() == key.as_ref() {
-                // If compression is enabled, decompress the data before returning.
-                if self.cfg.compression.is_some() {
-                    return Ok(Some(
-                        decompress(&value, u32::MAX as usize)
-                            .map_err(|_| Error::DecompressionFailed)?
-                            .into(),
-                    ));
-                }
-                return Ok(Some(value));
+            if record.key.as_ref() == key.as_ref() {
+                return Ok(Some(record.value));
             }
             self.unnecessary_reads.inc();
         }
@@ -374,42 +298,13 @@ impl<T: Translator, E: Storage + Metrics, K: Array, VCfg: CodecConfig + Copy, V:
         self.has.inc();
         match identifier {
             Identifier::Index(index) => Ok(self.has_index(index)),
-            Identifier::Key(key) => self.has_key(key).await,
+            Identifier::Key(key) => self.get_key(key).await.map(|result| result.is_some()),
         }
     }
 
     fn has_index(&self, index: u64) -> bool {
         // Check if index exists
         self.indices.contains_key(&index)
-    }
-
-    async fn has_key(&self, key: &[u8]) -> Result<bool, Error> {
-        let iter = self.keys.get_iter(key);
-        let min_allowed = self.oldest_allowed.unwrap_or(0);
-        for index in iter {
-            // Continue if index is no longer allowed due to pruning.
-            if *index < min_allowed {
-                continue;
-            }
-
-            // Fetch item from disk
-            let section = self.cfg.section_mask & index;
-            let location = self.indices.get(index).ok_or(Error::RecordCorrupted)?;
-            let item = self
-                .journal
-                .get_prefix(section, location.offset, Self::PREFIX_LEN)
-                .await?
-                .ok_or(Error::RecordCorrupted)?;
-
-            // Get key from item
-            let (_, item_key) = Self::parse_prefix(item)?;
-            if key == item_key {
-                return Ok(true);
-            }
-            self.unnecessary_reads.inc();
-        }
-
-        Ok(false)
     }
 
     /// Prune `Archive` to the provided `min` (masked by the configured

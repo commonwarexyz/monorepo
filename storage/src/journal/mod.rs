@@ -39,4 +39,8 @@ pub enum Error {
     InvalidItem(u64),
     #[error("invalid rewind: {0}")]
     InvalidRewind(u64),
+    #[error("compression failed")]
+    CompressionFailed,
+    #[error("decompression failed")]
+    DecompressionFailed,
 }

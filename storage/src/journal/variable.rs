@@ -109,6 +109,7 @@ use std::{
     marker::PhantomData,
 };
 use tracing::{debug, trace, warn};
+use zstd::bulk::{compress, decompress};
 
 /// Configuration for `Journal` storage.
 #[derive(Clone)]
@@ -116,6 +117,9 @@ pub struct Config<C: CodecConfig> {
     /// The `commonware-runtime::Storage` partition to use
     /// for storing journal blobs.
     pub partition: String,
+
+    /// Optional compression level (using `zstd`) to apply to data before storing.
+    pub compression: Option<u8>,
 
     pub codec_config: C,
 }
@@ -211,7 +215,12 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
     }
 
     /// Reads an item from the blob at the given offset.
-    async fn read(cfg: &C, blob: &E::Blob, offset: u32) -> Result<(u32, V), Error> {
+    async fn read(
+        compressed: bool,
+        cfg: &C,
+        blob: &E::Blob,
+        offset: u32,
+    ) -> Result<(u32, V), Error> {
         // Read item size
         let offset = offset as u64 * ITEM_ALIGNMENT;
         let mut size = [0u8; 4];
@@ -239,95 +248,12 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
         // Compute next offset
         let aligned_offset = compute_next_offset(offset)?;
 
-        // Return item
-        let item = V::decode_cfg(item.as_ref(), &cfg).map_err(Error::Codec)?;
-        Ok((aligned_offset, item))
-    }
-
-    /// Read `prefix` bytes from the blob at the given offset.
-    ///
-    /// # Warning
-    ///
-    /// This method bypasses the checksum verification and the caller is responsible for ensuring
-    /// the integrity of any data read. If `prefix` exceeds the size of an item (and runs over the blob
-    /// length), it will lead to unintentional truncation of data.
-    async fn read_prefix(
-        blob: &E::Blob,
-        offset: u32,
-        prefix: u32,
-    ) -> Result<(u32, u32, Vec<u8>), Error> {
-        // Read item size and first `prefix` bytes
-        let offset = offset as u64 * ITEM_ALIGNMENT;
-        let mut buf = vec![0u8; 4 + prefix as usize];
-        blob.read_at(&mut buf, offset).await?;
-
-        // Get item size to compute next offset
-        let size = u32::from_be_bytes(buf[..4].try_into().unwrap());
-
-        // Get item prefix
-        //
-        // We don't compute the checksum here nor do we verify that the bytes
-        // requested is less than the item size.
-        let item_prefix = buf[4..].to_vec();
-
-        // Compute next offset
-        let offset = offset
-            .checked_add(4)
-            .ok_or(Error::OffsetOverflow)?
-            .checked_add(size as u64)
-            .ok_or(Error::OffsetOverflow)?
-            .checked_add(4)
-            .ok_or(Error::OffsetOverflow)?;
-        let aligned_offset = compute_next_offset(offset)?;
-
-        // Return item
-        Ok((aligned_offset, size, item_prefix))
-    }
-
-    /// Read an item from the blob assuming it is of `exact` length. This method verifies the
-    /// checksum of the item.
-    ///
-    /// # Warning
-    ///
-    /// This method assumes the caller knows the exact size of the item (either because
-    /// they store fixed-size items or they previously indexed the size). If an incorrect
-    /// `exact` is provided, the method will likely return an error (as integrity is verified).
-    async fn read_exact(
-        cfg: &C,
-        blob: &E::Blob,
-        offset: u32,
-        exact: u32,
-    ) -> Result<(u32, V), Error> {
-        // Read all of the item into one buffer
-        let offset = offset as u64 * ITEM_ALIGNMENT;
-        let mut buf = vec![0u8; 4 + exact as usize + 4];
-        blob.read_at(&mut buf, offset).await?;
-
-        // Check size
-        let size = u32::from_be_bytes(buf[..4].try_into().unwrap());
-        if size != exact {
-            return Err(Error::UnexpectedSize(size, exact));
-        }
-
-        // Get item
-        let item = buf[4..4 + exact as usize].to_vec();
-
-        // Verify integrity
-        let stored_checksum = u32::from_be_bytes(buf[4 + exact as usize..].try_into().unwrap());
-        let checksum = crc32fast::hash(&item);
-        if checksum != stored_checksum {
-            return Err(Error::ChecksumMismatch(stored_checksum, checksum));
-        }
-
-        // Compute next offset
-        let offset = offset
-            .checked_add(4)
-            .ok_or(Error::OffsetOverflow)?
-            .checked_add(exact as u64)
-            .ok_or(Error::OffsetOverflow)?
-            .checked_add(4)
-            .ok_or(Error::OffsetOverflow)?;
-        let aligned_offset = compute_next_offset(offset)?;
+        // If compression is enabled, decompress the item
+        let item = if compressed {
+            decompress(&item, usize::MAX).map_err(|_| Error::DecompressionFailed)?
+        } else {
+            item
+        };
 
         // Return item
         let item = V::decode_cfg(item.as_ref(), cfg).map_err(Error::Codec)?;
@@ -363,19 +289,20 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
 
         // Replay all blobs concurrently and stream items as they are read (to avoid
         // occupying too much memory with buffered data)
+        let compressed = self.cfg.compression.is_some();
         let codec_config = self.cfg.codec_config;
         Ok(stream::iter(blobs)
             .map(move |(section, blob, len)| async move {
                 stream::unfold(
-                    (codec_config, section, blob, 0u32),
-                    move |(codec_config, section, blob, offset)| async move {
+                    (section, blob, 0u32),
+                    move |(section, blob, offset)| async move {
                         // Check if we are at the end of the blob
                         if offset == len {
                             return None;
                         }
 
                         // Get next item
-                        let mut read = Self::read(&codec_config, blob, offset).await;
+                        let mut read = Self::read(compressed, &codec_config, blob, offset).await;
 
                         // Ensure a full read wouldn't put us past the end of the blob
                         if let Ok((next_offset, _)) = read {
@@ -388,10 +315,7 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
                         match read {
                             Ok((next_offset, item)) => {
                                 trace!(blob = section, cursor = offset, len, "replayed item");
-                                Some((
-                                    Ok((section, offset, item)),
-                                    (codec_config, section, blob, next_offset),
-                                ))
+                                Some((Ok((section, offset, item)), (section, blob, next_offset)))
                             }
                             Err(Error::ChecksumMismatch(expected, found)) => {
                                 // If we encounter corruption, we don't try to fix it.
@@ -404,7 +328,7 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
                                 );
                                 Some((
                                     Err(Error::ChecksumMismatch(expected, found)),
-                                    (codec_config, section, blob, len),
+                                    (section, blob, len),
                                 ))
                             }
                             Err(Error::Runtime(RError::BlobInsufficientLength)) => {
@@ -421,7 +345,7 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
                                 blob.sync().await.ok()?;
                                 None
                             }
-                            Err(err) => Some((Err(err), (codec_config, section, blob, len))),
+                            Err(err) => Some((Err(err), (section, blob, len))),
                         }
                     },
                 )
@@ -443,8 +367,16 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
         // Check last pruned
         self.prune_guard(section, false)?;
 
+        // Create item
+        let encoded = item.encode();
+        let encoded = if let Some(compression) = self.cfg.compression {
+            compress(&encoded, compression as i32).map_err(|_| Error::CompressionFailed)?
+        } else {
+            encoded.into()
+        };
+
         // Ensure item is not too large
-        let item_len = item.encode_size();
+        let item_len = encoded.len();
         let len = 4 + item_len + 4;
         let item_len = match item_len.try_into() {
             Ok(len) => len,
@@ -463,11 +395,10 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
         };
 
         // Populate buffer
-        let encoded = item.encode();
         let mut buf = Vec::with_capacity(len);
         buf.put_u32(item_len);
         let checksum = crc32fast::hash(&encoded);
-        buf.put(encoded);
+        buf.put_slice(&encoded);
         buf.put_u32(checksum);
 
         // Append item to blob
@@ -478,50 +409,22 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
         Ok(offset)
     }
 
-    /// Retrieves the first `prefix` bytes of an item from `Journal` at a given `section` and `offset`.
-    ///
-    /// This method bypasses the checksum verification and the caller is responsible for ensuring
-    /// the integrity of any data read.
-    pub async fn get_prefix(
-        &self,
-        section: u64,
-        offset: u32,
-        prefix: u32,
-    ) -> Result<Option<Vec<u8>>, Error> {
-        self.prune_guard(section, false)?;
-        let blob = match self.blobs.get(&section) {
-            Some(blob) => blob,
-            None => return Ok(None),
-        };
-        let (_, _, item) = Self::read_prefix(blob, offset, prefix).await?;
-        Ok(Some(item))
-    }
-
     /// Retrieves an item from `Journal` at a given `section` and `offset`.
-    ///
-    /// If `exact` is provided, it is assumed the item is of size `exact` (which allows
-    /// the item to be read in a single read). If `exact` is provided, the checksum of the
-    /// data is still verified.
-    pub async fn get(
-        &self,
-        section: u64,
-        offset: u32,
-        exact: Option<u32>,
-    ) -> Result<Option<V>, Error> {
+    pub async fn get(&self, section: u64, offset: u32) -> Result<Option<V>, Error> {
         self.prune_guard(section, false)?;
         let blob = match self.blobs.get(&section) {
             Some(blob) => blob,
             None => return Ok(None),
         };
-
-        // If we have an exact size, we can read the item in one go.
-        if let Some(exact) = exact {
-            let (_, item) = Self::read_exact(&self.cfg.codec_config, blob, offset, exact).await?;
-            return Ok(Some(item));
-        }
 
         // Perform a multi-op read.
-        let (_, item) = Self::read(&self.cfg.codec_config, blob, offset).await?;
+        let (_, item) = Self::read(
+            self.cfg.compression.is_some(),
+            &self.cfg.codec_config,
+            blob,
+            offset,
+        )
+        .await?;
         Ok(Some(item))
     }
 
@@ -609,6 +512,7 @@ mod tests {
             // Initialize the journal
             let cfg = Config {
                 partition: "test_partition".into(),
+                compression: None,
                 codec_config: (),
             };
             let index = 1u64;
@@ -633,6 +537,7 @@ mod tests {
             // Re-initialize the journal to simulate a restart
             let cfg = Config {
                 partition: "test_partition".into(),
+                compression: None,
                 codec_config: (),
             };
             let mut journal = Journal::<_, _, i32>::init(context.clone(), cfg.clone())
@@ -671,6 +576,7 @@ mod tests {
             // Create a journal configuration
             let cfg = Config {
                 partition: "test_partition".into(),
+                compression: None,
                 codec_config: (),
             };
 
@@ -736,6 +642,7 @@ mod tests {
             // Create a journal configuration
             let cfg = Config {
                 partition: "test_partition".into(),
+                compression: None,
                 codec_config: (),
             };
 
@@ -832,6 +739,7 @@ mod tests {
             // Create a journal configuration
             let cfg = Config {
                 partition: "test_partition".into(),
+                compression: None,
                 codec_config: (),
             };
 
@@ -861,6 +769,7 @@ mod tests {
             // Create a journal configuration
             let cfg = Config {
                 partition: "test_partition".into(),
+                compression: None,
                 codec_config: (),
             };
 
@@ -908,6 +817,7 @@ mod tests {
             // Create a journal configuration
             let cfg = Config {
                 partition: "test_partition".into(),
+                compression: None,
                 codec_config: (),
             };
 
@@ -959,6 +869,7 @@ mod tests {
             // Create a journal configuration
             let cfg = Config {
                 partition: "test_partition".into(),
+                compression: None,
                 codec_config: (),
             };
 
@@ -1020,6 +931,7 @@ mod tests {
             // Create a journal configuration
             let cfg = Config {
                 partition: "test_partition".into(),
+                compression: None,
                 codec_config: (),
             };
 
@@ -1091,6 +1003,7 @@ mod tests {
             // Create a journal configuration
             let cfg = Config {
                 partition: "test_partition".into(),
+                compression: None,
                 codec_config: (),
             };
 
@@ -1236,6 +1149,7 @@ mod tests {
             // Create journal
             let cfg = Config {
                 partition: "partition".to_string(),
+                compression: None,
                 codec_config: (),
             };
             let context = MockStorage {
@@ -1261,6 +1175,7 @@ mod tests {
             // Create journal
             let cfg = Config {
                 partition: "partition".to_string(),
+                compression: None,
                 codec_config: (),
             };
             let context = MockStorage {

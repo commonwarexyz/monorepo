@@ -169,10 +169,6 @@ pub enum Error {
     AlreadyPrunedTo(u64),
     #[error("record too large")]
     RecordTooLarge,
-    #[error("compression failed")]
-    CompressionFailed,
-    #[error("decompression failed")]
-    DecompressionFailed,
 }
 
 /// Configuration for `Archive` storage.
@@ -198,9 +194,6 @@ pub struct Config<T: Translator, C: CodecConfig> {
 
     /// The number of blobs to replay concurrently on initialization.
     pub replay_concurrency: usize,
-
-    /// Optional compression level (using `zstd`) to apply to data before storing.
-    pub compression: Option<u8>,
 }
 
 #[cfg(test)]
