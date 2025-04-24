@@ -523,7 +523,7 @@ mod tests {
 
             // Append an item to the journal
             journal
-                .append(index, data.clone())
+                .append(index, data)
                 .await
                 .expect("Failed to append data");
 
@@ -589,7 +589,7 @@ mod tests {
             let data_items = vec![(1u64, 1), (1u64, 2), (2u64, 3), (3u64, 4)];
             for (index, data) in &data_items {
                 journal
-                    .append(*index, data.clone())
+                    .append(*index, *data)
                     .await
                     .expect("Failed to append data");
                 journal.sync(*index).await.expect("Failed to sync blob");
@@ -1019,7 +1019,7 @@ mod tests {
             let data_items = vec![(2u64, 2), (2u64, 3), (2u64, 4)];
             for (index, data) in &data_items {
                 journal
-                    .append(*index, data.clone())
+                    .append(*index, *data)
                     .await
                     .expect("Failed to append data");
                 journal.sync(*index).await.expect("Failed to sync blob");

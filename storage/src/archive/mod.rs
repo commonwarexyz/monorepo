@@ -201,7 +201,6 @@ mod tests {
         variable::{Config as JConfig, Journal},
         Error as JournalError,
     };
-    use bytes::Bytes;
     use commonware_codec::DecodeExt;
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
@@ -264,7 +263,7 @@ mod tests {
 
             // Put the key-data pair
             archive
-                .put(index, key.clone(), data.clone())
+                .put(index, key.clone(), data)
                 .await
                 .expect("Failed to put data");
 
@@ -358,7 +357,7 @@ mod tests {
             let key = test_key("testkey");
             let data = 1;
             archive
-                .put(index, key.clone(), data.clone())
+                .put(index, key.clone(), data)
                 .await
                 .expect("Failed to put data");
 
@@ -436,7 +435,7 @@ mod tests {
 
             // Put the key-data pair
             archive
-                .put(index, key.clone(), data.clone())
+                .put(index, key.clone(), data)
                 .await
                 .expect("Failed to put data");
 
@@ -521,13 +520,13 @@ mod tests {
 
             // Put the key-data pair
             archive
-                .put(index, key.clone(), data1.clone())
+                .put(index, key.clone(), data1)
                 .await
                 .expect("Failed to put data");
 
             // Put the key-data pair again
             archive
-                .put(index, key.clone(), data2.clone())
+                .put(index, key.clone(), data2)
                 .await
                 .expect("Duplicate put should not fail");
 
@@ -642,13 +641,13 @@ mod tests {
 
             // Put the key-data pair
             archive
-                .put(index1, key1.clone(), data1.clone())
+                .put(index1, key1.clone(), data1)
                 .await
                 .expect("Failed to put data");
 
             // Put the key-data pair
             archive
-                .put(index2, key2.clone(), data2.clone())
+                .put(index2, key2.clone(), data2)
                 .await
                 .expect("Failed to put data");
 
@@ -713,13 +712,13 @@ mod tests {
 
             // Put the key-data pair
             archive
-                .put(index1, key1.clone(), data1.clone())
+                .put(index1, key1.clone(), data1)
                 .await
                 .expect("Failed to put data");
 
             // Put the key-data pair
             archive
-                .put(index2, key2.clone(), data2.clone())
+                .put(index2, key2.clone(), data2)
                 .await
                 .expect("Failed to put data");
 
@@ -780,7 +779,7 @@ mod tests {
 
             for (index, key, data) in &keys {
                 archive
-                    .put(*index, key.clone(), data.clone())
+                    .put(*index, key.clone(), *data)
                     .await
                     .expect("Failed to put data");
             }
@@ -844,7 +843,7 @@ mod tests {
                 context.clone(),
                 JConfig {
                     partition: "test_partition".into(),
-                    codec_config: ((), ()),
+                    codec_config: (),
                     compression: None,
                 },
             )
@@ -872,7 +871,7 @@ mod tests {
                 let key = FixedBytes::<64>::decode(key.as_ref()).unwrap();
                 let mut data = [0u8; 1024];
                 context.fill(&mut data);
-                let data = data.to_vec();
+                let data = FixedBytes::<1024>::decode(data.as_ref()).unwrap();
 
                 archive
                     .put(index, key.clone(), data.clone())
@@ -888,13 +887,13 @@ mod tests {
                     .await
                     .expect("Failed to get data")
                     .expect("Data not found");
-                assert_eq!(retrieved, data);
+                assert_eq!(&retrieved, data);
                 let retrieved = archive
                     .get(Identifier::Key(key))
                     .await
                     .expect("Failed to get data")
                     .expect("Data not found");
-                assert_eq!(retrieved, data);
+                assert_eq!(&retrieved, data);
             }
 
             // Check metrics
@@ -911,6 +910,8 @@ mod tests {
                 context.clone(),
                 JConfig {
                     partition: "test_partition".into(),
+                    codec_config: (),
+                    compression: None,
                 },
             )
             .await
@@ -919,12 +920,15 @@ mod tests {
                 translator: TwoCap,
                 pending_writes: 10,
                 replay_concurrency: 4,
-                compression: None,
                 section_mask,
             };
-            let mut archive = Archive::init(context.clone(), journal, cfg.clone())
-                .await
-                .expect("Failed to initialize archive");
+            let mut archive = Archive::<_, _, _, _, FixedBytes<1024>>::init(
+                context.clone(),
+                journal,
+                cfg.clone(),
+            )
+            .await
+            .expect("Failed to initialize archive");
 
             // Ensure all keys can be retrieved
             for (key, (index, data)) in &keys {
@@ -933,13 +937,13 @@ mod tests {
                     .await
                     .expect("Failed to get data")
                     .expect("Data not found");
-                assert_eq!(retrieved, data);
+                assert_eq!(&retrieved, data);
                 let retrieved = archive
                     .get(Identifier::Key(key))
                     .await
                     .expect("Failed to get data")
                     .expect("Data not found");
-                assert_eq!(retrieved, data);
+                assert_eq!(&retrieved, data);
             }
 
             // Prune first half
@@ -1038,7 +1042,7 @@ mod tests {
             ];
             for (index, key, data) in &keys {
                 archive
-                    .put(*index, key.clone(), data.clone())
+                    .put(*index, key.clone(), *data)
                     .await
                     .expect("Failed to put data");
             }
@@ -1082,7 +1086,7 @@ mod tests {
             .await
             .expect("Failed to initialize journal");
             let archive =
-                Archive::<_, FixedBytes<64>, _, _, _>::init(context, journal, cfg.clone())
+                Archive::<_, _, FixedBytes<64>, _, i32>::init(context, journal, cfg.clone())
                     .await
                     .expect("Failed to initialize archive");
 
