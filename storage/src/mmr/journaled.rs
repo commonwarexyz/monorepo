@@ -684,11 +684,10 @@ mod tests {
             // 497. Simulate a partial write by corrupting the last parent's checksum by truncating
             // the last blob by a single byte.
             let partition: String = "journal_partition".into();
-            let blob = context
+            let (blob, len) = context
                 .open(&partition, &71u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            let len = blob.len().await.expect("Failed to get blob length");
             assert_eq!(len, 36); // N+4 = 36 bytes per node, 1 node in the last blob
 
             // truncate the blob by one byte to corrupt the checksum of the last parent node.
@@ -720,11 +719,10 @@ mod tests {
                 .remove(&partition, Some(&71u64.to_be_bytes()))
                 .await
                 .expect("Failed to remove blob");
-            let blob = context
+            let (blob, len) = context
                 .open(&partition, &70u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            let len = blob.len().await.expect("Failed to get blob length");
             assert_eq!(len, 36 * 7); // this blob should be full.
 
             // The last leaf should be in slot 5 of this blob, truncate last byte of its checksum.
