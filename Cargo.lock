@@ -1220,6 +1220,7 @@ version = "0.0.45"
 dependencies = [
  "bytes",
  "commonware-codec",
+ "criterion",
  "futures",
  "num-bigint",
  "rand",

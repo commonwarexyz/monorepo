@@ -15,7 +15,7 @@ pub mod futures;
 
 /// Converts bytes to a hexadecimal string.
 pub fn hex(bytes: &[u8]) -> String {
-    let mut hex = String::new();
+    let mut hex = String::with_capacity(bytes.len() * 2);
     for byte in bytes.iter() {
         hex.push_str(&format!("{:02x}", byte));
     }
@@ -28,10 +28,17 @@ pub fn from_hex(hex: &str) -> Option<Vec<u8>> {
         return None;
     }
 
-    (0..hex.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())
-        .collect()
+    let mut bytes = Vec::with_capacity(hex.len() / 2);
+
+    for i in (0..hex.len()).step_by(2) {
+        if let Ok(byte) = u8::from_str_radix(&hex[i..i + 2], 16) {
+            bytes.push(byte);
+        } else {
+            return None;
+        }
+    }
+
+    Some(bytes)
 }
 
 /// Converts a hexadecimal string to bytes, stripping whitespace and/or a `0x` prefix. Commonly used
@@ -72,8 +79,9 @@ pub fn union(a: &[u8], b: &[u8]) -> Vec<u8> {
 ///
 /// This produces a unique byte sequence (i.e. no collisions) for each `(namespace, msg)` pair.
 pub fn union_unique(namespace: &[u8], msg: &[u8]) -> Vec<u8> {
-    let len = u32::try_from(namespace.len()).expect("namespace length too large");
-    let mut buf = BytesMut::with_capacity(varint::size(len) + namespace.len() + msg.len());
+    let namespace_len = namespace.len();
+    let len = u32::try_from(namespace_len).expect("namespace length too large");
+    let mut buf = BytesMut::with_capacity(varint::size(len) + namespace_len + msg.len());
     varint::write(len, &mut buf);
     buf.put_slice(namespace);
     buf.put_slice(msg);
