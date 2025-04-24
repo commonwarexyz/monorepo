@@ -159,7 +159,7 @@ impl<Cfg: Config, T: Read<Cfg>> Read<Cfg> for Option<T> {
 mod tests {
     use super::*;
     use crate::{Decode, DecodeExt, Encode, EncodeFixed};
-    use bytes::Bytes;
+    use bytes::{Bytes, BytesMut};
     use paste::paste;
 
     // Float tests
@@ -232,18 +232,25 @@ mod tests {
         let values = [0usize, 1, 42, u32::MAX as usize];
         for value in values.iter() {
             let encoded = value.encode();
-            assert_eq!(encoded.len(), VarUInt(*value as u32).encode_size());
+            assert_eq!(value.encode_size(), VarUInt(*value as u32).encode_size());
             let decoded = usize::decode_cfg(encoded, &..).unwrap();
             assert_eq!(*value, decoded);
-            assert_eq!(value.encode_size(), VarUInt(*value as u32).encode_size());
         }
     }
 
     #[test]
-    #[should_panic]
-    fn test_usize_panic() {
+    #[should_panic(expected = "encode_size: usize value is larger than u32")]
+    fn test_usize_encode_panic() {
         let value: usize = usize::MAX;
         let _ = value.encode();
+    }
+
+    #[test]
+    #[should_panic(expected = "write: usize value is larger than u32")]
+    fn test_usize_write_panic() {
+        let mut buf = &mut BytesMut::new();
+        let value: usize = usize::MAX;
+        value.write(&mut buf);
     }
 
     #[test]

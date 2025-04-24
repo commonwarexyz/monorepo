@@ -5,6 +5,7 @@
 //! - 7 bits for the value
 //! - 1 "continuation" bit to indicate if more bytes follow
 //!
+//! `u8` and `i8` are omitted since those types do not benefit from varint encoding.
 //! `usize` and `isize` are omitted to prevent behavior from depending on the target architecture.
 
 use crate::{EncodeSize, Error, FixedSize, Read, Write};
@@ -53,7 +54,6 @@ macro_rules! impl_uint {
         }
     };
 }
-impl_uint!(u8);
 impl_uint!(u16);
 impl_uint!(u32);
 impl_uint!(u64);
@@ -89,7 +89,6 @@ macro_rules! impl_sint {
         }
     };
 }
-impl_sint!(i8, u8);
 impl_sint!(i16, u16);
 impl_sint!(i32, u32);
 impl_sint!(i64, u64);
@@ -115,7 +114,9 @@ pub fn write<T: UInt>(value: T, buf: &mut impl BufMut) {
 
 /// Decodes a unsigned integer from a varint.
 ///
-/// Returns an error if the varint is invalid (too long) or if the buffer ends while reading.
+/// Returns an error if:
+/// - The varint is invalid (too long or malformed)
+/// - The buffer ends while reading
 pub fn read<T: UInt>(buf: &mut impl Buf) -> Result<T, Error> {
     let max_bits = T::SIZE * BITS_PER_BYTE;
     let mut result: T = T::from(0);
@@ -128,6 +129,14 @@ pub fn read<T: UInt>(buf: &mut impl Buf) -> Result<T, Error> {
             return Err(Error::EndOfBuffer);
         }
         let byte = buf.get_u8();
+
+        // If this is not the first byte, but the byte is completely zero, we have an invalid
+        // varint. This is because this byte has no data bits and no continuation, so there was no
+        // point in continuing to this byte in the first place. While the output could still result
+        // in a valid value, we ensure that every value has exactly one unique, valid encoding.
+        if byte == 0 && bits_read > 0 {
+            return Err(Error::InvalidVarint(T::SIZE));
+        }
 
         // If this must be the last byte, check for overflow (i.e. set bits beyond the size of T).
         // Because the continuation bit is the most-significant bit, this check also happens to
@@ -197,7 +206,7 @@ macro_rules! impl_varuint_into {
         )+
     };
 }
-impl_varuint_into!(u8, u16, u32, u64, u128);
+impl_varuint_into!(u16, u32, u64, u128);
 
 impl<U: UInt> Write for VarUInt<U> {
     fn write(&self, buf: &mut impl BufMut) {
@@ -251,29 +260,43 @@ mod tests {
     use bytes::Bytes;
 
     #[test]
-    fn test_temp() {
-        let val1 = read::<u8>(&mut &[0x81, 0x01][..]);
-        assert_eq!(val1.unwrap(), 0x81);
+    fn test_end_of_buffer() {
+        let mut buf: Bytes = Bytes::from_static(&[]);
+        let result = read::<u32>(&mut buf);
+        assert!(matches!(result, Err(Error::EndOfBuffer)));
 
-        let val2 = read::<u8>(&mut &[0x01][..]);
-        assert_eq!(val2.unwrap(), 0x01);
+        let mut buf: Bytes = Bytes::from_static(&[0x80, 0x8F]);
+        let result = read::<u32>(&mut buf);
+        assert!(matches!(result, Err(Error::EndOfBuffer)));
 
-        let val1 = read::<u8>(&mut &[0xAC, 0x02][..]);
-        assert_eq!(val1.unwrap(), 0xAC);
+        let mut buf: Bytes = Bytes::from_static(&[0xFF, 0x8F]);
+        let result = read::<u32>(&mut buf);
+        assert!(matches!(result, Err(Error::EndOfBuffer)));
     }
 
-    /// A 6-byte varint whose continuation bit never terminates:
-    /// 0xFF 0xFF 0xFF 0xFF 0xFF 0x01
-    const OVERLONG_U32: [u8; 6] = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01];
+    #[test]
+    fn test_overflow() {
+        let mut buf: Bytes = Bytes::from_static(&[0xFF, 0xFF, 0xFF, 0xFF, 0x0F]);
+        let result = read::<u32>(&mut buf);
+        assert_eq!(result.unwrap(), u32::MAX);
+
+        let mut buf: Bytes = Bytes::from_static(&[0xFF, 0xFF, 0xFF, 0xFF, 0x1F]);
+        let result = read::<u32>(&mut buf);
+        assert!(matches!(result, Err(Error::InvalidVarint(u32::SIZE))));
+    }
 
     #[test]
-    #[should_panic(expected = "called `Option::unwrap()` on a `None` value")]
-    fn overlong_varint_panics() {
-        // Wrap the test data in a `Bytes` buffer (implements `Buf`)
-        let mut buf: Bytes = Bytes::from_static(&OVERLONG_U32);
+    fn test_overcontinuation() {
+        let mut buf: Bytes = Bytes::from_static(&[0x80, 0x80, 0x80, 0x80, 0x80]);
+        let result = read::<u32>(&mut buf);
+        assert!(matches!(result, Err(Error::InvalidVarint(u32::SIZE))));
+    }
 
-        // This line panics inside `read::<u32>` due to the `unwrap()`
-        let _ = read::<u32>(&mut buf);
+    #[test]
+    fn test_zeroed_byte() {
+        let mut buf = Bytes::from_static(&[0xFF, 0x00]);
+        let result = read::<u64>(&mut buf);
+        assert!(matches!(result, Err(Error::InvalidVarint(u64::SIZE))));
     }
 
     #[test]
