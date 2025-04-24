@@ -207,6 +207,7 @@ mod tests {
     use commonware_utils::array::FixedBytes;
     use rand::Rng;
     use std::collections::BTreeMap;
+    use storage::Record;
 
     const DEFAULT_SECTION_MASK: u64 = 0xffff_ffff_ffff_0000u64;
 
@@ -453,7 +454,7 @@ mod tests {
             blob.close().await.unwrap();
 
             // Initialize the archive again
-            let journal = Journal::init(
+            let journal = Journal::<_, _, Record<FixedBytes<64>, _, i32>>::init(
                 context.clone(),
                 JConfig {
                     partition: "test_partition".into(),
@@ -463,7 +464,7 @@ mod tests {
             )
             .await
             .expect("Failed to initialize journal");
-            let archive = Archive::init(
+            let result = Archive::<_, _, _, _, i32>::init(
                 context,
                 journal,
                 Config {
@@ -473,11 +474,7 @@ mod tests {
                     section_mask: DEFAULT_SECTION_MASK,
                 },
             )
-            .await
-            .expect("Failed to initialize archive");
-
-            // Attempt to get the key
-            let result: Result<Option<i32>, Error> = archive.get(Identifier::Key(&key)).await;
+            .await;
             assert!(matches!(
                 result,
                 Err(Error::Journal(JournalError::ChecksumMismatch(_, _)))
