@@ -157,7 +157,7 @@ impl Storage {
 impl crate::Storage for Storage {
     type Blob = Blob;
 
-    async fn open(&self, partition: &str, name: &[u8]) -> Result<Blob, Error> {
+    async fn open(&self, partition: &str, name: &[u8]) -> Result<(Blob, u64), Error> {
         // Construct the full path
         let path = self.storage_directory.join(partition).join(hex(name));
         let parent = path
@@ -179,12 +179,9 @@ impl crate::Storage for Storage {
         // Get the file length
         let len = file.metadata().map_err(|_| Error::ReadFailed)?.len();
 
-        Ok(Blob::new(
-            partition.into(),
-            name,
-            file,
+        Ok((
+            Blob::new(partition.into(), name, file, len, self.io_sender.clone()),
             len,
-            self.io_sender.clone(),
         ))
     }
 
@@ -269,10 +266,6 @@ impl Blob {
 }
 
 impl crate::Blob for Blob {
-    async fn len(&self) -> Result<u64, Error> {
-        Ok(self.len.load(Ordering::Relaxed))
-    }
-
     async fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
         let current_len = self.len.load(Ordering::Relaxed);
         if offset + buf.len() as u64 > current_len {
