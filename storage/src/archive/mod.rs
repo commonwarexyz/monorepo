@@ -152,7 +152,6 @@
 //! ```
 
 mod storage;
-use commonware_codec::Config as CodecConfig;
 pub use storage::{Archive, Identifier};
 
 use crate::index::Translator;
@@ -173,14 +172,12 @@ pub enum Error {
 
 /// Configuration for `Archive` storage.
 #[derive(Clone)]
-pub struct Config<T: Translator, C: CodecConfig> {
+pub struct Config<T: Translator> {
     /// Logic to transform keys into their index representation.
     ///
     /// `Archive` assumes that all internal keys are spread uniformly across the key space.
     /// If that is not the case, lookups may be O(n) instead of O(1).
     pub translator: T,
-
-    pub codec_config: C,
 
     /// Mask to apply to indices to determine section.
     ///
@@ -231,6 +228,8 @@ mod tests {
                 context.clone(),
                 JConfig {
                     partition: "test_partition".into(),
+                    codec_config: (),
+                    compression,
                 },
             )
             .await
@@ -241,7 +240,6 @@ mod tests {
                 translator: FourCap,
                 pending_writes: 10,
                 replay_concurrency: 4,
-                compression,
                 section_mask: DEFAULT_SECTION_MASK,
             };
             let mut archive = Archive::init(context.clone(), journal, cfg.clone())
@@ -250,7 +248,7 @@ mod tests {
 
             let index = 1u64;
             let key = test_key("testkey");
-            let data = Bytes::from("testdata");
+            let data = 1;
 
             // Has the key
             let has = archive
@@ -337,6 +335,8 @@ mod tests {
                 context.clone(),
                 JConfig {
                     partition: "test_partition".into(),
+                    codec_config: (),
+                    compression: Some(3),
                 },
             )
             .await
@@ -347,7 +347,6 @@ mod tests {
                 translator: FourCap,
                 pending_writes: 10,
                 replay_concurrency: 4,
-                compression: Some(3),
                 section_mask: DEFAULT_SECTION_MASK,
             };
             let mut archive = Archive::init(context.clone(), journal, cfg.clone())
@@ -357,7 +356,7 @@ mod tests {
             // Put the key-data pair
             let index = 1u64;
             let key = test_key("testkey");
-            let data = Bytes::from("testdata");
+            let data = 1;
             archive
                 .put(index, key.clone(), data.clone())
                 .await
@@ -371,6 +370,8 @@ mod tests {
                 context.clone(),
                 JConfig {
                     partition: "test_partition".into(),
+                    codec_config: (),
+                    compression: None,
                 },
             )
             .await
@@ -379,7 +380,6 @@ mod tests {
                 translator: FourCap,
                 pending_writes: 10,
                 replay_concurrency: 4,
-                compression: None,
                 section_mask: DEFAULT_SECTION_MASK,
             };
             let archive = Archive::init(context, journal, cfg.clone())
@@ -387,7 +387,7 @@ mod tests {
                 .expect("Failed to initialize archive");
 
             // Get the data back
-            let retrieved = archive
+            let retrieved: i32 = archive
                 .get(Identifier::Index(index))
                 .await
                 .expect("Failed to get data")
@@ -412,6 +412,8 @@ mod tests {
                 context.clone(),
                 JConfig {
                     partition: "test_partition".into(),
+                    codec_config: (),
+                    compression: None,
                 },
             )
             .await
@@ -422,7 +424,6 @@ mod tests {
                 translator: FourCap,
                 pending_writes: 10,
                 replay_concurrency: 4,
-                compression: None,
                 section_mask: DEFAULT_SECTION_MASK,
             };
             let mut archive = Archive::init(context.clone(), journal, cfg.clone())
@@ -431,7 +432,7 @@ mod tests {
 
             let index = 1u64;
             let key = test_key("testkey");
-            let data = Bytes::from("testdata");
+            let data = 1;
 
             // Put the key-data pair
             archive
@@ -457,6 +458,8 @@ mod tests {
                 context.clone(),
                 JConfig {
                     partition: "test_partition".into(),
+                    codec_config: (),
+                    compression: None,
                 },
             )
             .await
@@ -468,7 +471,6 @@ mod tests {
                     translator: FourCap,
                     pending_writes: 10,
                     replay_concurrency: 4,
-                    compression: None,
                     section_mask: DEFAULT_SECTION_MASK,
                 },
             )
@@ -476,7 +478,7 @@ mod tests {
             .expect("Failed to initialize archive");
 
             // Attempt to get the key
-            let result = archive.get(Identifier::Key(&key)).await;
+            let result: Result<Option<i32>, Error> = archive.get(Identifier::Key(&key)).await;
             assert!(matches!(
                 result,
                 Err(Error::Journal(JournalError::ChecksumMismatch(_, _)))
@@ -494,6 +496,8 @@ mod tests {
                 context.clone(),
                 JConfig {
                     partition: "test_partition".into(),
+                    codec_config: (),
+                    compression: None,
                 },
             )
             .await
@@ -504,7 +508,6 @@ mod tests {
                 translator: FourCap,
                 pending_writes: 10,
                 replay_concurrency: 4,
-                compression: None,
                 section_mask: DEFAULT_SECTION_MASK,
             };
             let mut archive = Archive::init(context.clone(), journal, cfg.clone())
@@ -513,8 +516,8 @@ mod tests {
 
             let index = 1u64;
             let key = test_key("duplicate");
-            let data1 = Bytes::from("data1");
-            let data2 = Bytes::from("data2");
+            let data1 = 1;
+            let data2 = 2;
 
             // Put the key-data pair
             archive
@@ -560,6 +563,8 @@ mod tests {
                 context.clone(),
                 JConfig {
                     partition: "test_partition".into(),
+                    codec_config: (),
+                    compression: None,
                 },
             )
             .await
@@ -570,7 +575,6 @@ mod tests {
                 translator: FourCap,
                 pending_writes: 10,
                 replay_concurrency: 4,
-                compression: None,
                 section_mask: DEFAULT_SECTION_MASK,
             };
             let archive = Archive::init(context.clone(), journal, cfg.clone())
@@ -579,7 +583,7 @@ mod tests {
 
             // Attempt to get an index that doesn't exist
             let index = 1u64;
-            let retrieved = archive
+            let retrieved: Option<i32> = archive
                 .get(Identifier::Index(index))
                 .await
                 .expect("Failed to get data");
@@ -611,6 +615,8 @@ mod tests {
                 context.clone(),
                 JConfig {
                     partition: "test_partition".into(),
+                    codec_config: (),
+                    compression: None,
                 },
             )
             .await
@@ -621,7 +627,6 @@ mod tests {
                 translator: FourCap,
                 pending_writes: 10,
                 replay_concurrency: 4,
-                compression: None,
                 section_mask: DEFAULT_SECTION_MASK,
             };
             let mut archive = Archive::init(context.clone(), journal, cfg.clone())
@@ -630,10 +635,10 @@ mod tests {
 
             let index1 = 1u64;
             let key1 = test_key("keys1");
-            let data1 = Bytes::from("data1");
+            let data1 = 1;
             let index2 = 2u64;
             let key2 = test_key("keys2");
-            let data2 = Bytes::from("data2");
+            let data2 = 2;
 
             // Put the key-data pair
             archive
@@ -681,6 +686,8 @@ mod tests {
                 context.clone(),
                 JConfig {
                     partition: "test_partition".into(),
+                    codec_config: (),
+                    compression: None,
                 },
             )
             .await
@@ -691,7 +698,6 @@ mod tests {
                 translator: FourCap,
                 pending_writes: 10,
                 replay_concurrency: 4,
-                compression: None,
                 section_mask: DEFAULT_SECTION_MASK,
             };
             let mut archive = Archive::init(context.clone(), journal, cfg.clone())
@@ -700,10 +706,10 @@ mod tests {
 
             let index1 = 1u64;
             let key1 = test_key("keys1");
-            let data1 = Bytes::from("data1");
+            let data1 = 1;
             let index2 = 2_000_000u64;
             let key2 = test_key("keys2");
-            let data2 = Bytes::from("data2");
+            let data2 = 2;
 
             // Put the key-data pair
             archive
@@ -745,6 +751,8 @@ mod tests {
                 context.clone(),
                 JConfig {
                     partition: "test_partition".into(),
+                    codec_config: (),
+                    compression: None,
                 },
             )
             .await
@@ -755,7 +763,6 @@ mod tests {
                 translator: FourCap,
                 pending_writes: 10,
                 replay_concurrency: 4,
-                compression: None,
                 section_mask: 0xffff_ffff_ffff_ffffu64, // no mask
             };
             let mut archive = Archive::init(context.clone(), journal, cfg.clone())
@@ -764,11 +771,11 @@ mod tests {
 
             // Insert multiple keys across different sections
             let keys = vec![
-                (1u64, test_key("key1-blah"), Bytes::from("data1")),
-                (2u64, test_key("key2-blah"), Bytes::from("data2")),
-                (3u64, test_key("key3-blah"), Bytes::from("data3")),
-                (4u64, test_key("key3-bleh"), Bytes::from("data3-again")),
-                (5u64, test_key("key4-blah"), Bytes::from("data4")),
+                (1u64, test_key("key1-blah"), 1),
+                (2u64, test_key("key2-blah"), 2),
+                (3u64, test_key("key3-blah"), 3),
+                (4u64, test_key("key3-bleh"), 3),
+                (5u64, test_key("key4-blah"), 4),
             ];
 
             for (index, key, data) in &keys {
@@ -811,14 +818,12 @@ mod tests {
             archive.prune(3).await.expect("Failed to prune");
 
             // Try to put older index
-            let result = archive
-                .put(1, test_key("key1-blah"), Bytes::from("data1"))
-                .await;
+            let result = archive.put(1, test_key("key1-blah"), 1).await;
             assert!(matches!(result, Err(Error::AlreadyPrunedTo(3))));
 
             // Trigger lazy removal of keys
             archive
-                .put(6, test_key("key2-blfh"), Bytes::from("data2-2"))
+                .put(6, test_key("key2-blfh"), 5)
                 .await
                 .expect("Failed to put data");
 
@@ -839,6 +844,8 @@ mod tests {
                 context.clone(),
                 JConfig {
                     partition: "test_partition".into(),
+                    codec_config: ((), ()),
+                    compression: None,
                 },
             )
             .await
@@ -850,7 +857,6 @@ mod tests {
                 translator: TwoCap,
                 pending_writes: 10,
                 replay_concurrency: 4,
-                compression: None,
                 section_mask,
             };
             let mut archive = Archive::init(context.clone(), journal, cfg.clone())
@@ -866,7 +872,7 @@ mod tests {
                 let key = FixedBytes::<64>::decode(key.as_ref()).unwrap();
                 let mut data = [0u8; 1024];
                 context.fill(&mut data);
-                let data = Bytes::from(data.to_vec());
+                let data = data.to_vec();
 
                 archive
                     .put(index, key.clone(), data.clone())
@@ -1005,6 +1011,8 @@ mod tests {
                 context.clone(),
                 JConfig {
                     partition: "test_partition".into(),
+                    codec_config: (),
+                    compression: None,
                 },
             )
             .await
@@ -1015,7 +1023,6 @@ mod tests {
                 translator: FourCap,
                 pending_writes: 10,
                 replay_concurrency: 4,
-                compression: None,
                 section_mask: DEFAULT_SECTION_MASK,
             };
             let mut archive = Archive::init(context.clone(), journal, cfg.clone())
@@ -1024,10 +1031,10 @@ mod tests {
 
             // Insert multiple keys across different indices
             let keys = vec![
-                (1u64, test_key("key1-blah"), Bytes::from("data1")),
-                (10u64, test_key("key2-blah"), Bytes::from("data2")),
-                (11u64, test_key("key3-blah"), Bytes::from("data3")),
-                (14u64, test_key("key3-bleh"), Bytes::from("data3-again")),
+                (1u64, test_key("key1-blah"), 1),
+                (10u64, test_key("key2-blah"), 2),
+                (11u64, test_key("key3-blah"), 3),
+                (14u64, test_key("key3-bleh"), 3),
             ];
             for (index, key, data) in &keys {
                 archive
@@ -1068,13 +1075,16 @@ mod tests {
                 context.clone(),
                 JConfig {
                     partition: "test_partition".into(),
+                    codec_config: (),
+                    compression: None,
                 },
             )
             .await
             .expect("Failed to initialize journal");
-            let archive = Archive::<_, FixedBytes<64>, _>::init(context, journal, cfg.clone())
-                .await
-                .expect("Failed to initialize archive");
+            let archive =
+                Archive::<_, FixedBytes<64>, _, _, _>::init(context, journal, cfg.clone())
+                    .await
+                    .expect("Failed to initialize archive");
 
             // Check ranges again
             let (current_end, start_next) = archive.next_gap(0);

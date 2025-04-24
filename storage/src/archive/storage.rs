@@ -24,7 +24,7 @@ pub struct Archive<
     VCfg: CodecConfig + Copy,
     V: Codec<VCfg>,
 > {
-    cfg: Config<T, VCfg>,
+    cfg: Config<T>,
     journal: Journal<E, VCfg, Record<K, VCfg, V>>,
 
     // Oldest allowed section to read from. This is updated when `prune` is called.
@@ -108,7 +108,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, VCfg: CodecConfig + Copy, V:
     pub async fn init(
         context: E,
         mut journal: Journal<E, VCfg, Record<K, VCfg, V>>,
-        cfg: Config<T, VCfg>,
+        cfg: Config<T>,
     ) -> Result<Self, Error> {
         // Initialize keys and run corruption check
         let mut indices = BTreeMap::new();
