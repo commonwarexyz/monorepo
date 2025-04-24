@@ -21,7 +21,6 @@ const ITEM_SIZE: usize = 32;
 /// Replay all items in the given `journal`.
 async fn bench_run(journal: &mut Journal<Context, FixedBytes<ITEM_SIZE>>, items_to_read: u64) {
     let concurrency = std::cmp::max(1, (items_to_read / ITEMS_PER_BLOB) as usize);
-
     let stream = journal
         .replay(concurrency)
         .await
