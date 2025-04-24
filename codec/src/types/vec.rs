@@ -19,7 +19,7 @@ impl<T: Write> Write for Vec<T> {
 impl<T: EncodeSize> EncodeSize for Vec<T> {
     #[inline]
     fn encode_size(&self) -> usize {
-        self.len().encode_size()
+        self.len().encode_size() + self.iter().map(EncodeSize::encode_size).sum::<usize>()
     }
 }
 

@@ -183,7 +183,7 @@ mod tests {
     #[test]
     fn test_decode_value_length_limit_exceeded() {
         let mut map = HashMap::new();
-        map.insert(Bytes::from_static(b"key1"), vec![1, 2, 3, 4, 5]);
+        map.insert(Bytes::from_static(b"key1"), vec![1u8, 2u8, 3u8, 4u8, 5u8]);
 
         let key_range = ..=10;
         let map_range = 0..=10;

@@ -156,7 +156,7 @@ impl<Cfg: Config, T: Read<Cfg>> Read<Cfg> for Option<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{DecodeExt, Encode, EncodeFixed};
+    use crate::{Decode, DecodeExt, Encode, EncodeFixed};
     use bytes::Bytes;
     use paste::paste;
 
@@ -223,6 +223,25 @@ mod tests {
             assert_eq!(*value, decoded);
             assert_eq!(value.encode_size(), 1);
         }
+    }
+
+    #[test]
+    fn test_usize() {
+        let values = [0usize, 1, 42, u32::MAX as usize];
+        for value in values.iter() {
+            let encoded = value.encode();
+            assert_eq!(encoded.len(), VarUInt(*value as u32).encode_size());
+            let decoded = usize::decode_cfg(encoded, &..).unwrap();
+            assert_eq!(*value, decoded);
+            assert_eq!(value.encode_size(), VarUInt(*value as u32).encode_size());
+        }
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_usize_panic() {
+        let value: usize = usize::MAX;
+        let _ = value.encode();
     }
 
     #[test]
