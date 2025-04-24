@@ -1,25 +1,20 @@
 use crate::{Error, Spawner};
-use commonware_macros::select;
 use commonware_utils::{from_hex, hex};
 use futures::{
     channel::{mpsc, oneshot},
-    future::Either,
     SinkExt as _, StreamExt as _,
 };
 use io_uring::{opcode, squeue::Entry as SqueueEntry, types, IoUring};
 use std::{
     collections::HashMap,
     fs::{self, File},
-    future::Future,
     io::{Error as IoError, ErrorKind},
     os::fd::{AsRawFd as _, OwnedFd},
     path::PathBuf,
-    pin::Pin,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
-    task::{Context, Poll},
 };
 
 const IOURING_SIZE: u32 = 128;
@@ -32,35 +27,6 @@ pub struct Config {
 impl Config {
     pub fn new(storage_directory: PathBuf) -> Self {
         Self { storage_directory }
-    }
-}
-
-/// A future that resolves to the next completion queue entry when available
-struct NextCompletionFuture<'a> {
-    ring: &'a mut IoUring,
-}
-
-impl<'a> NextCompletionFuture<'a> {
-    fn new(ring: &'a mut IoUring) -> Self {
-        Self { ring }
-    }
-}
-
-impl Future for NextCompletionFuture<'_> {
-    type Output = io_uring::cqueue::Entry;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // Try to get a completion
-        if let Some(cqe) = self.ring.completion().next() {
-            return Poll::Ready(cqe);
-        }
-
-        // Submit any pending operations
-        self.ring.submit().expect("unable to submit to ring");
-
-        // No completions yet, register waker and return Pending
-        cx.waker().wake_by_ref();
-        Poll::Pending
     }
 }
 
@@ -84,41 +50,57 @@ async fn do_work(mut receiver: mpsc::Receiver<(SqueueEntry, oneshot::Sender<i32>
             continue;
         }
 
-        if waiters.len() == IOURING_SIZE as usize {
-            ring.submit_and_wait(1).expect("unable to submit to ring");
-            continue;
+        // Try to fill the submission queue with incoming work.
+        // Stop if we are at the max number of processing work.
+        while waiters.len() < IOURING_SIZE as usize {
+            let Ok(Some((mut work, sender))) = receiver.try_next() else {
+                break;
+            };
+
+            // Assign a unique id
+            let work_id = next_work_id;
+            work = work.user_data(work_id);
+            // Use wrapping add in case we overflow
+            next_work_id = next_work_id.wrapping_add(1);
+
+            // We'll send the result of this operation to `sender`.
+            waiters.insert(work_id, sender);
+
+            // Submit the operation to the ring
+            unsafe {
+                ring.submission()
+                    .push(&work)
+                    .expect("unable to push to queue");
+            }
         }
 
-        let work = if waiters.is_empty() {
-            receiver.next().await
-        } else {
-            // TODO: try_next returns immediately. This means we can enter
-            // a busy loop if there is incomplete work but no new work
-            // being submitted.
-            receiver.try_next().unwrap()
-        };
+        if waiters.is_empty() {
+            // If there's no processing work, there's nothing to do but wait for new work.
+            let Some((mut work, sender)) = receiver.next().await else {
+                // Channel closed, exit the loop
+                break;
+            };
 
-        let Some((mut work, sender)) = work else {
-            // Channel closed, exit the loop
-            continue;
-        };
+            // Assign a unique id
+            let work_id = next_work_id;
+            work = work.user_data(work_id);
+            // Use wrapping add in case we overflow
+            next_work_id = next_work_id.wrapping_add(1);
 
-        // Assign a unique id
-        let work_id = next_work_id;
-        work = work.user_data(work_id);
-        // Use wrapping add in case we overflow
-        next_work_id = next_work_id.wrapping_add(1);
+            // We'll send the result of this operation to `sender`.
+            waiters.insert(work_id, sender);
 
-        // We'll send the result of this operation to `sender`.
-        waiters.insert(work_id, sender);
-
-        // Submit the operation to the ring
-        unsafe {
-            ring.submission()
-                .push(&work)
-                .expect("unable to push to queue");
+            // Submit the operation to the ring
+            unsafe {
+                ring.submission()
+                    .push(&work)
+                    .expect("unable to push to queue");
+            }
         }
-        ring.submit().expect("unable to submit to ring");
+
+        // Note that waiters.len() is never empty here.
+        // If it were, this would block forever.
+        ring.submit_and_wait(1).expect("unable to submit to ring");
     }
 }
 
@@ -139,7 +121,7 @@ impl Storage {
             storage_directory: cfg.storage_directory.clone(),
             io_sender,
         };
-        spawner.spawn(|_| do_work(receiver));
+        spawner.spawn_blocking(|| do_work(receiver));
         storage
     }
 }
