@@ -1,13 +1,13 @@
 use super::{Config, Error, Translator};
 use crate::{index::Index, journal::variable::Journal};
 use bytes::{Buf, BufMut};
-use commonware_codec::{Codec, Config as CodecConfig, FixedSize};
+use commonware_codec::{Codec, Config as CodecConfig, EncodeSize, FixedSize, Read, ReadExt, Write};
 use commonware_runtime::{Metrics, Storage};
 use commonware_utils::Array;
 use futures::{pin_mut, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use rangemap::RangeInclusiveSet;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, marker::PhantomData};
 use tracing::{debug, trace};
 use zstd::bulk::{compress, decompress};
 
@@ -24,10 +24,15 @@ struct Location {
 }
 
 /// Implementation of `Archive` storage.
-pub struct Archive<T: Translator, E: Storage + Metrics, K: Array, VCfg: CodecConfig, V: Codec<VCfg>>
-{
+pub struct Archive<
+    T: Translator,
+    E: Storage + Metrics,
+    K: Array,
+    VCfg: CodecConfig + Copy,
+    V: Codec<VCfg>,
+> {
     cfg: Config<T, VCfg>,
-    journal: Journal<E>,
+    journal: Journal<E, VCfg, Record<K, VCfg, V>>,
 
     // Oldest allowed section to read from. This is updated when `prune` is called.
     oldest_allowed: Option<u64>,
@@ -53,18 +58,52 @@ pub struct Archive<T: Translator, E: Storage + Metrics, K: Array, VCfg: CodecCon
     _phantom_v: std::marker::PhantomData<V>,
 }
 
-impl<T: Translator, E: Storage + Metrics, K: Array, VCfg: CodecConfig, V: Codec<VCfg>>
+struct Record<K: Array, VCfg: CodecConfig + Copy, V: Codec<VCfg>> {
+    index: u64,
+    key: K,
+    value: V,
+
+    _phantom: PhantomData<VCfg>,
+}
+
+impl<K: Array, VCfg: CodecConfig + Copy, V: Codec<VCfg>> Write for Record<K, VCfg, V> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.index.write(buf);
+        self.key.write(buf);
+        self.value.write(buf);
+    }
+}
+
+impl<K: Array, VCfg: CodecConfig + Copy, V: Codec<VCfg>> Read<VCfg> for Record<K, VCfg, V> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &VCfg) -> Result<Self, commonware_codec::Error> {
+        let index = u64::read(buf)?;
+        let key = K::read(buf)?;
+        let value = V::read_cfg(buf, cfg)?;
+        Ok(Self {
+            index,
+            key,
+            value,
+            _phantom: PhantomData,
+        })
+    }
+}
+
+impl<K: Array, VCfg: CodecConfig + Copy, V: Codec<VCfg>> EncodeSize for Record<K, VCfg, V> {
+    fn encode_size(&self) -> usize {
+        u64::SIZE + K::SIZE + self.value.encode_size()
+    }
+}
+
+impl<T: Translator, E: Storage + Metrics, K: Array, VCfg: CodecConfig + Copy, V: Codec<VCfg>>
     Archive<T, E, K, VCfg, V>
 {
-    const PREFIX_LEN: u32 = (u64::SIZE + K::SIZE + u32::SIZE) as u32;
-
     /// Initialize a new `Archive` instance.
     ///
     /// The in-memory index for `Archive` is populated during this call
     /// by replaying the journal.
     pub async fn init(
         context: E,
-        mut journal: Journal<E>,
+        mut journal: Journal<E, VCfg, Record<K, VCfg, V>>,
         cfg: Config<T, VCfg>,
     ) -> Result<Self, Error> {
         // Initialize keys and run corruption check
@@ -73,13 +112,11 @@ impl<T: Translator, E: Storage + Metrics, K: Array, VCfg: CodecConfig, V: Codec<
         let mut intervals = RangeInclusiveSet::new();
         {
             debug!("initializing archive");
-            let stream = journal
-                .replay(cfg.replay_concurrency, Some(Self::PREFIX_LEN))
-                .await?;
+            let stream = journal.replay(cfg.replay_concurrency).await?;
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 // Extract key from record
-                let (_, offset, len, data) = result?;
+                let (_, offset, data) = result?;
                 let (index, key) = Self::parse_prefix(data)?;
 
                 // Store index
