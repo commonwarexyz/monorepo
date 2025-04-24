@@ -448,7 +448,7 @@ mod tests {
 
             // Corrupt the value
             let section = index & DEFAULT_SECTION_MASK;
-            let blob = context
+            let (blob, _) = context
                 .open("test_partition", &section.to_be_bytes())
                 .await
                 .unwrap();

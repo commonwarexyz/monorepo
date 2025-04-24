@@ -48,9 +48,9 @@ jobs:
         with:
           rust-version: ${{ steps.rust-version.outputs.rust_version}}
       - name: Compile benchmarks
-        run: cargo bench --no-run
+        run: cargo bench --no-run --all-features
       - name: Run benchmark
-        run: cargo bench --benches -p ${{ matrix.package }} -- --output-format bencher | tee ${{ matrix.package }}.txt
+        run: cargo bench --all-features --benches -p ${{ matrix.package }} -- --output-format bencher | tee ${{ matrix.package }}.txt
       - name: Publish benchmark result
         uses: benchmark-action/github-action-benchmark@v1
         with:
