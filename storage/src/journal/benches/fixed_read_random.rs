@@ -1,14 +1,18 @@
-use super::append_random_data;
+use super::{append_random_data, get_journal};
 use commonware_runtime::{
     benchmarks::{context, tokio},
-    tokio::Context,
+    tokio::{Config, Context, Runner},
+    Runner as RunnerTrait,
 };
 use commonware_storage::journal::fixed::Journal;
 use commonware_utils::array::FixedBytes;
 use criterion::{black_box, criterion_group, Criterion};
 use futures::future::try_join_all;
-use rand::{rngs::StdRng, Rng, SeedableRng};
-use std::time::{Duration, Instant};
+use rand::{rngs::OsRng, rngs::StdRng, Rng, RngCore, SeedableRng};
+use std::{
+    env,
+    time::{Duration, Instant},
+};
 
 /// Partition name to use in the journal config.
 const PARTITION: &str = "test_partition";
@@ -47,7 +51,34 @@ async fn bench_run_concurrent(
 }
 
 fn bench_fixed_read_random(c: &mut Criterion) {
-    let executor = tokio::Executor::default();
+    // Create a runtime config we can use across all benchmarks, allowing the
+    // same test file to be re-used. First we generate a random directory to
+    // avoid conflicts.
+    let rng = OsRng.next_u64();
+    let storage_directory =
+        env::temp_dir().join(format!("commonware_storage_journal_bench_{}", rng));
+
+    // Same config as tokio::Config::default() as of 4/2025.
+    let cfg = Config {
+        worker_threads: 2,
+        max_blocking_threads: 512,
+        catch_panics: true,
+        read_timeout: Duration::from_secs(60),
+        write_timeout: Duration::from_secs(30),
+        tcp_nodelay: None,
+        storage_directory,
+        maximum_buffer_size: 2 * 1024 * 1024, // 2 MB
+    };
+    let runner = Runner::new(cfg.clone());
+    runner.start(|ctx| async move {
+        // Create a large temp journal with random data.
+        let mut j = get_journal(ctx, PARTITION, ITEMS_PER_BLOB).await;
+        append_random_data::<ITEM_SIZE>(&mut j, ITEMS_TO_WRITE).await;
+        j.close().await.unwrap();
+    });
+
+    let runner = tokio::Runner::new(cfg.clone());
+
     for mode in ["serial", "concurrent"] {
         for items_to_read in [100, 1_000, 10_000, 100_000] {
             c.bench_function(
@@ -59,16 +90,9 @@ fn bench_fixed_read_random(c: &mut Criterion) {
                     ITEM_SIZE
                 ),
                 |b| {
-                    b.to_async(&executor).iter_custom(|iters| async move {
-                        // Append random data to the journal
+                    b.to_async(&runner).iter_custom(|iters| async move {
                         let ctx = context::get::<commonware_runtime::tokio::Context>();
-                        let j = append_random_data(
-                            ctx.clone(),
-                            PARTITION,
-                            ITEMS_PER_BLOB,
-                            ITEMS_TO_WRITE,
-                        )
-                        .await;
+                        let j = get_journal(ctx.clone(), PARTITION, ITEMS_PER_BLOB).await;
 
                         // Run the benchmark
                         let mut duration = Duration::ZERO;
@@ -81,16 +105,19 @@ fn bench_fixed_read_random(c: &mut Criterion) {
                             }
                             duration += start.elapsed();
                         }
-
-                        // Destroy the journal after reading to avoid polluting the next iteration
-                        j.destroy().await.unwrap();
-
                         duration
                     });
                 },
             );
         }
     }
+
+    // Clean up the temp journal
+    let runner = Runner::new(cfg);
+    runner.start(|context| async move {
+        let j = get_journal::<ITEM_SIZE>(context, PARTITION, ITEMS_PER_BLOB).await;
+        j.destroy().await.unwrap();
+    });
 }
 
 criterion_group! {
