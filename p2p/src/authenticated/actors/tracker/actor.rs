@@ -432,6 +432,12 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
     async fn run(mut self) {
         while let Some(msg) = self.receiver.next().await {
             match msg {
+                Message::Shutdown => {
+                    debug!("tracker shutdown");
+                    let _ = self.context.stopped();
+                    self.connections.clear();
+                    return;
+                }
                 Message::Construct {
                     public_key,
                     mut peer,

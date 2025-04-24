@@ -44,6 +44,7 @@ pub enum Message<E: Spawner + Metrics, C: Verifier> {
     Release {
         peer: C::PublicKey,
     },
+    Shutdown,
 }
 
 #[derive(Clone)]
