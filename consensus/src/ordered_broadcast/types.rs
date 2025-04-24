@@ -587,11 +587,13 @@ impl<P: Array, D: Digest> FixedSize for Ack<P, D> {
 /// This enum represents the two main types of activities that are reported:
 /// 1. Proposals - when a new chunk is proposed by a sequencer
 /// 2. Locks - when a threshold signature is formed for a chunk
+/// 3. Acks - when a chunk is acknowledged
+/// 4. Chunk mismatches - when conflicting chunks are detected
 ///
 /// The Reporter is notified of these activities so it can track the state of the system
 /// and provide the appropriate information to other components.
 #[allow(clippy::large_enum_variant)]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Activity<C: Verifier, D: Digest> {
     /// A new proposal from a sequencer
     ///
@@ -599,6 +601,10 @@ pub enum Activity<C: Verifier, D: Digest> {
     Proposal(Proposal<C, D>),
     /// A threshold signature for a chunk, indicating it has been acknowledged by a quorum
     Lock(Lock<C::PublicKey, D>),
+    /// An acknowledgment for a chunk
+    Ack(Ack<C::PublicKey, D>),
+    /// A chunk mismatch detected from a sender
+    ChunkMismatch(Chunk<C::PublicKey, D>),
 }
 
 impl<C: Verifier, D: Digest> Write for Activity<C, D> {
@@ -612,6 +618,14 @@ impl<C: Verifier, D: Digest> Write for Activity<C, D> {
                 1u8.write(writer);
                 lock.write(writer);
             }
+            Activity::Ack(ack) => {
+                2u8.write(writer);
+                ack.write(writer);
+            }
+            Activity::ChunkMismatch(chunk) => {
+                3u8.write(writer);
+                chunk.write(writer);
+            }
         }
     }
 }
@@ -621,6 +635,8 @@ impl<C: Verifier, D: Digest> Read for Activity<C, D> {
         match u8::read(reader)? {
             0 => Ok(Activity::Proposal(Proposal::read(reader)?)),
             1 => Ok(Activity::Lock(Lock::read(reader)?)),
+            2 => Ok(Activity::Ack(Ack::read(reader)?)),
+            3 => Ok(Activity::ChunkMismatch(Chunk::read(reader)?)),
             _ => Err(CodecError::Invalid(
                 "consensus::ordered_broadcast::Activity",
                 "Invalid type",
@@ -634,6 +650,8 @@ impl<C: Verifier, D: Digest> EncodeSize for Activity<C, D> {
         1 + match self {
             Activity::Proposal(proposal) => proposal.encode_size(),
             Activity::Lock(lock) => lock.encode_size(),
+            Activity::Ack(ack) => ack.encode_size(),
+            Activity::ChunkMismatch(chunk) => chunk.encode_size(),
         }
     }
 }
@@ -1017,6 +1035,35 @@ mod tests {
                 assert_eq!(l.epoch, epoch);
                 assert_eq!(l.signature, bls_signature);
                 assert!(l.verify(NAMESPACE, public));
+            }
+            _ => panic!("Decoded activity has wrong type"),
+        }
+
+        // Test Ack
+        let ack = Ack::sign(NAMESPACE, &shares[0], chunk.clone(), epoch);
+        let activity = Activity::Ack(ack.clone());
+        let encoded = activity.encode();
+        let decoded = Activity::<Ed25519, Sha256Digest>::decode(encoded).unwrap();
+
+        match decoded {
+            Activity::Ack(a) => {
+                assert_eq!(a.chunk, ack.chunk);
+                assert_eq!(a.epoch, ack.epoch);
+                assert_eq!(a.signature.index, ack.signature.index);
+                assert_eq!(a.signature.value, ack.signature.value);
+                assert!(a.verify(NAMESPACE, &identity));
+            }
+            _ => panic!("Decoded activity has wrong type"),
+        }
+
+        // Test ChunkMismatch
+        let activity = Activity::ChunkMismatch(chunk.clone());
+        let encoded = activity.encode();
+        let decoded = Activity::<Ed25519, Sha256Digest>::decode(encoded).unwrap();
+
+        match decoded {
+            Activity::ChunkMismatch(c) => {
+                assert_eq!(c, chunk);
             }
             _ => panic!("Decoded activity has wrong type"),
         }

@@ -364,7 +364,7 @@ impl<
                             continue;
                         }
                     };
-                    let result = match self.validate_node(&node, &sender) {
+                    let result = match self.validate_node(&node, &sender).await {
                         Ok(result) => result,
                         Err(err) => {
                             warn!(?err, ?sender, "node validate failed");
@@ -408,7 +408,7 @@ impl<
                             continue;
                         }
                     };
-                    if let Err(err) = self.validate_ack(&ack, &sender) {
+                    if let Err(err) = self.validate_ack(&ack, &sender).await {
                         warn!(?err, ?sender, "ack validate failed");
                         continue;
                     };
@@ -581,6 +581,9 @@ impl<
             self.handle_threshold(&ack.chunk, ack.epoch, threshold)
                 .await;
         }
+
+        // Report the activity
+        self.reporter.report(Activity::Ack).await;
 
         Ok(())
     }
@@ -803,7 +806,7 @@ impl<
     /// If valid (and not already the tracked tip for the sender), returns the implied
     /// parent chunk and its threshold signature.
     /// Else returns an error if the `Node` is invalid.
-    fn validate_node(
+    async fn validate_node(
         &mut self,
         node: &Node<C, D>,
         sender: &C::PublicKey,
@@ -822,7 +825,7 @@ impl<
         }
 
         // Validate chunk
-        self.validate_chunk(&node.chunk, self.epoch)?;
+        self.validate_chunk(&node.chunk, self.epoch).await?;
 
         // Get parent identity
         let public = if let Some(parent) = &node.parent {
@@ -843,9 +846,13 @@ impl<
     ///
     /// Returns the chunk, epoch, and partial signature if the ack is valid.
     /// Returns an error if the ack is invalid.
-    fn validate_ack(&self, ack: &Ack<C::PublicKey, D>, sender: &C::PublicKey) -> Result<(), Error> {
+    async fn validate_ack(
+        &self,
+        ack: &Ack<C::PublicKey, D>,
+        sender: &C::PublicKey,
+    ) -> Result<(), Error> {
         // Validate chunk
-        self.validate_chunk(&ack.chunk, ack.epoch)?;
+        self.validate_chunk(&ack.chunk, ack.epoch).await?;
 
         // Validate sender
         let Some(index) = self.validators.is_participant(ack.epoch, sender) else {
@@ -898,7 +905,11 @@ impl<
     ///
     /// Returns the chunk if the chunk is valid.
     /// Returns an error if the chunk is invalid.
-    fn validate_chunk(&self, chunk: &Chunk<C::PublicKey, D>, epoch: Epoch) -> Result<(), Error> {
+    async fn validate_chunk(
+        &mut self,
+        chunk: &Chunk<C::PublicKey, D>,
+        epoch: Epoch,
+    ) -> Result<(), Error> {
         // Verify sequencer
         if self
             .sequencers
@@ -918,6 +929,7 @@ impl<
                 std::cmp::Ordering::Equal => {
                     // Ensure this matches the tip if the height is the same
                     if tip.chunk.payload != chunk.payload {
+                        self.reporter.report(Activity::ChunkMismatch).await;
                         return Err(Error::ChunkMismatch(
                             chunk.sequencer.to_string(),
                             chunk.height,
