@@ -340,6 +340,8 @@ mod tests {
                 actor.start();
                 let cfg = JConfig {
                     partition: validator.to_string(),
+                    compression: Some(3),
+                    codec_config: (),
                 };
                 let journal = Journal::init(context.with_label("journal"), cfg)
                     .await
@@ -595,6 +597,8 @@ mod tests {
                     actor.start();
                     let cfg = JConfig {
                         partition: validator.to_string(),
+                        compression: Some(3),
+                        codec_config: (),
                     };
                     let journal = Journal::init(context.with_label("journal"), cfg)
                         .await
@@ -778,6 +782,8 @@ mod tests {
                 actor.start();
                 let cfg = JConfig {
                     partition: validator.to_string(),
+                    compression: Some(3),
+                    codec_config: (),
                 };
                 let journal = Journal::init(context.with_label("journal"), cfg)
                     .await
@@ -899,6 +905,8 @@ mod tests {
             actor.start();
             let cfg = JConfig {
                 partition: validator.to_string(),
+                compression: Some(3),
+                codec_config: (),
             };
             let journal = Journal::init(context.with_label("journal"), cfg)
                 .await
@@ -1035,6 +1043,8 @@ mod tests {
                 actor.start();
                 let cfg = JConfig {
                     partition: validator.to_string(),
+                    compression: Some(3),
+                    codec_config: (),
                 };
                 let journal = Journal::init(context.with_label("journal"), cfg)
                     .await
@@ -1255,6 +1265,8 @@ mod tests {
                 actor.start();
                 let cfg = JConfig {
                     partition: validator.to_string(),
+                    compression: Some(3),
+                    codec_config: (),
                 };
                 let journal = Journal::init(context.with_label("journal"), cfg)
                     .await
@@ -1420,6 +1432,8 @@ mod tests {
                 actor.start();
                 let cfg = JConfig {
                     partition: validator.to_string(),
+                    compression: Some(3),
+                    codec_config: (),
                 };
                 let journal = Journal::init(context.with_label("journal"), cfg)
                     .await
@@ -1580,6 +1594,8 @@ mod tests {
                 actor.start();
                 let cfg = JConfig {
                     partition: validator.to_string(),
+                    compression: Some(3),
+                    codec_config: (),
                 };
                 let journal = Journal::init(context.with_label("journal"), cfg)
                     .await
@@ -1768,6 +1784,8 @@ mod tests {
                 actor.start();
                 let cfg = JConfig {
                     partition: validator.to_string(),
+                    compression: Some(3),
+                    codec_config: (),
                 };
                 let journal = Journal::init(context.with_label("journal"), cfg)
                     .await
@@ -1944,6 +1962,8 @@ mod tests {
                     actor.start();
                     let cfg = JConfig {
                         partition: validator.to_string(),
+                        compression: Some(3),
+                        codec_config: (),
                     };
                     let journal = Journal::init(context.with_label("journal"), cfg)
                         .await
@@ -2110,6 +2130,8 @@ mod tests {
                     actor.start();
                     let cfg = JConfig {
                         partition: validator.to_string(),
+                        compression: Some(3),
+                        codec_config: (),
                     };
                     let journal = Journal::init(context.with_label("journal"), cfg)
                         .await
@@ -2272,6 +2294,8 @@ mod tests {
                     actor.start();
                     let cfg = JConfig {
                         partition: validator.to_string(),
+                        compression: Some(3),
+                        codec_config: (),
                     };
                     let journal = Journal::init(context.with_label("journal"), cfg)
                         .await

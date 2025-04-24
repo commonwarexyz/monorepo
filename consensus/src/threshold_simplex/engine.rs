@@ -1,7 +1,7 @@
 use super::{
     actors::{resolver, voter},
     config::Config,
-    types::{Activity, Context, View},
+    types::{Activity, Context, View, Voter},
 };
 use crate::{Automaton, Relay, Reporter, ThresholdSupervisor};
 use commonware_cryptography::{
@@ -57,7 +57,11 @@ impl<
     > Engine<E, C, D, A, R, F, S>
 {
     /// Create a new `threshold-simplex` consensus engine.
-    pub fn new(context: E, journal: Journal<E>, cfg: Config<C, D, A, R, F, S>) -> Self {
+    pub fn new(
+        context: E,
+        journal: Journal<E, (), Voter<D>>,
+        cfg: Config<C, D, A, R, F, S>,
+    ) -> Self {
         // Ensure configuration is valid
         cfg.assert();
 

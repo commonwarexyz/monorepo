@@ -510,7 +510,7 @@ pub struct Actor<
     supervisor: S,
 
     replay_concurrency: usize,
-    journal: Option<Journal<E>>,
+    journal: Option<Journal<E, (), Voter<D>>>,
 
     genesis: Option<D>,
 
@@ -555,7 +555,7 @@ impl<
 {
     pub fn new(
         context: E,
-        journal: Journal<E>,
+        journal: Journal<E, (), Voter<D>>,
         cfg: Config<C, D, A, R, F, S>,
     ) -> (Self, Mailbox<D>) {
         // Assert correctness of timeouts
@@ -903,12 +903,12 @@ impl<
         });
 
         // Handle nullify
-        let nullify_bytes = Voter::<D>::Nullify(nullify.clone()).encode().into();
+        let nullify_log = Voter::Nullify(nullify.clone());
         if round.add_verified_nullify(public_key_index, nullify).await && self.journal.is_some() {
             self.journal
                 .as_mut()
                 .unwrap()
-                .append(view, nullify_bytes)
+                .append(view, nullify_log)
                 .await
                 .expect("unable to append nullify");
         }
@@ -1240,7 +1240,7 @@ impl<
         });
 
         // Handle notarize
-        let notarize_bytes = Voter::Notarize(notarize.clone()).encode().into();
+        let notarize_log = Voter::Notarize(notarize.clone());
         if round
             .add_verified_notarize(public_key_index, notarize)
             .await
@@ -1249,7 +1249,7 @@ impl<
             self.journal
                 .as_mut()
                 .unwrap()
-                .append(view, notarize_bytes)
+                .append(view, notarize_log)
                 .await
                 .expect("unable to append to journal");
         }
@@ -1297,13 +1297,13 @@ impl<
         });
 
         // Store notarization
-        let notarization_bytes = Voter::Notarization(notarization.clone()).encode().into();
+        let notarization_log = Voter::Notarization(notarization.clone());
         let seed = notarization.seed_signature;
         if round.add_verified_notarization(notarization) && self.journal.is_some() {
             self.journal
                 .as_mut()
                 .unwrap()
-                .append(view, notarization_bytes)
+                .append(view, notarization_log)
                 .await
                 .expect("unable to append to journal");
         }
@@ -1353,15 +1353,13 @@ impl<
         });
 
         // Store nullification
-        let nullification_bytes = Voter::<D>::Nullification(nullification.clone())
-            .encode()
-            .into();
+        let nullification_log = Voter::Nullification(nullification.clone());
         let seed = nullification.seed_signature;
         if round.add_verified_nullification(nullification) && self.journal.is_some() {
             self.journal
                 .as_mut()
                 .unwrap()
-                .append(view, nullification_bytes)
+                .append(view, nullification_log)
                 .await
                 .expect("unable to append to journal");
         }
@@ -1411,7 +1409,7 @@ impl<
         });
 
         // Handle finalize
-        let finalize_bytes = Voter::Finalize(finalize.clone()).encode().into();
+        let finalize_log = Voter::Finalize(finalize.clone());
         if round
             .add_verified_finalize(public_key_index, finalize)
             .await
@@ -1420,7 +1418,7 @@ impl<
             self.journal
                 .as_mut()
                 .unwrap()
-                .append(view, finalize_bytes)
+                .append(view, finalize_log)
                 .await
                 .expect("unable to append to journal");
         }
@@ -1468,13 +1466,13 @@ impl<
         });
 
         // Store finalization
-        let finalization_bytes = Voter::Finalization(finalization.clone()).encode().into();
+        let finalization_log = Voter::Finalization(finalization.clone());
         let seed = finalization.seed_signature;
         if round.add_verified_finalization(finalization) && self.journal.is_some() {
             self.journal
                 .as_mut()
                 .unwrap()
-                .append(view, finalization_bytes)
+                .append(view, finalization_log)
                 .await
                 .expect("unable to append to journal");
         }
@@ -1801,15 +1799,12 @@ impl<
         let mut journal = self.journal.take().expect("missing journal");
         {
             let stream = journal
-                .replay(self.replay_concurrency, None)
+                .replay(self.replay_concurrency)
                 .await
                 .expect("unable to replay journal");
             pin_mut!(stream);
             while let Some(msg) = stream.next().await {
-                let (_, _, _, msg) = msg.expect("unable to decode journal message");
-                // We must wrap the message in Voter so we decode the right type of message (otherwise,
-                // we can parse a finalize as a notarize)
-                let msg = Voter::decode(msg).expect("journal message is unexpected format");
+                let (_, _, msg) = msg.expect("unable to replay journal");
                 let view = msg.view();
                 match msg {
                     Voter::Notarize(notarize) => {
