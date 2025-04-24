@@ -234,6 +234,7 @@ impl crate::Runner for Runner {
             IoUringStorage::start(
                 &IoUringConfig {
                     storage_directory: self.cfg.storage_directory.clone(),
+                    ring_config: Default::default(),
                 },
                 spawner.clone(),
             ),

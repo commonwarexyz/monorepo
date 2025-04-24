@@ -18,27 +18,50 @@ use std::{
     },
 };
 
-const IOURING_SIZE: u32 = 128;
-
-#[derive(Clone)]
-pub struct Config {
-    pub storage_directory: PathBuf,
+#[derive(Clone, Debug)]
+pub struct IoUringConfig {
+    pub size: u32,
+    pub iopoll: bool,
+    pub single_issuer: bool,
 }
 
-impl Config {
-    pub fn new(storage_directory: PathBuf) -> Self {
-        Self { storage_directory }
+impl Default for IoUringConfig {
+    fn default() -> Self {
+        Self {
+            size: 128,
+            iopoll: false,
+            single_issuer: true,
+        }
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct Config {
+    pub storage_directory: PathBuf,
+    pub ring_config: IoUringConfig,
+}
+
+fn new_ring(cfg: &IoUringConfig) -> Result<IoUring, std::io::Error> {
+    let mut builder = &mut IoUring::builder();
+    if cfg.iopoll {
+        builder = builder.setup_iopoll();
+    }
+    if cfg.single_issuer {
+        builder = builder.setup_single_issuer();
+    }
+    builder.build(cfg.size)
 }
 
 /// Background task that polls for completed work and notifies waiters on completion.
 /// The user data field of all operations received on `receiver` will be ignored.
-async fn do_work(mut receiver: mpsc::Receiver<(SqueueEntry, oneshot::Sender<i32>)>) {
-    let mut ring = IoUring::new(IOURING_SIZE).expect("failed to create io_uring");
+async fn do_work(
+    cfg: IoUringConfig,
+    mut receiver: mpsc::Receiver<(SqueueEntry, oneshot::Sender<i32>)>,
+) {
+    let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
     let mut next_work_id: u64 = 0;
     // Maps a work ID to the sender that we will send the result to.
-    let mut waiters: HashMap<_, oneshot::Sender<i32>> =
-        HashMap::with_capacity(IOURING_SIZE as usize);
+    let mut waiters: HashMap<_, oneshot::Sender<i32>> = HashMap::with_capacity(cfg.size as usize);
 
     loop {
         // Try to get a completion
@@ -53,7 +76,7 @@ async fn do_work(mut receiver: mpsc::Receiver<(SqueueEntry, oneshot::Sender<i32>
 
         // Try to fill the submission queue with incoming work.
         // Stop if we are at the max number of processing work.
-        while waiters.len() < IOURING_SIZE as usize {
+        while waiters.len() < cfg.size as usize {
             let Ok(Some((mut work, sender))) = receiver.try_next() else {
                 break;
             };
@@ -116,13 +139,14 @@ impl Storage {
     /// The `Spawner` is used to spawn the background task that handles IO operations.
     pub fn start<S: Spawner>(cfg: &Config, spawner: S) -> Self {
         let (io_sender, receiver) =
-            mpsc::channel::<(SqueueEntry, oneshot::Sender<i32>)>(IOURING_SIZE as usize);
+            mpsc::channel::<(SqueueEntry, oneshot::Sender<i32>)>(cfg.ring_config.size as usize);
 
         let storage = Storage {
             storage_directory: cfg.storage_directory.clone(),
             io_sender,
         };
-        spawner.spawn_blocking(|| block_on(do_work(receiver)));
+        let iouring_config = cfg.ring_config.clone();
+        spawner.spawn_blocking(|| block_on(do_work(iouring_config, receiver)));
         storage
     }
 }
@@ -447,7 +471,13 @@ mod tests {
             runtime,
         );
 
-        let storage = Storage::start(&Config::new(storage_directory.clone()), spawner);
+        let storage = Storage::start(
+            &Config {
+                storage_directory: storage_directory.clone(),
+                ring_config: Default::default(),
+            },
+            spawner,
+        );
         (storage, storage_directory)
     }
 
