@@ -61,7 +61,7 @@ pub struct Engine<
     // Messaging
     ////////////////////////////////////////
     /// The mailbox for receiving messages.
-    mailbox_receiver: mpsc::Receiver<Message<D, M>>,
+    mailbox_receiver: mpsc::Receiver<Message<P, D, M>>,
 
     /// Pending requests from the application.
     waiters: HashMap<D, Vec<oneshot::Sender<M>>>,
@@ -103,9 +103,9 @@ impl<
 {
     /// Creates a new engine with the given context and configuration.
     /// Returns the engine and a mailbox for sending messages to the engine.
-    pub fn new(context: E, cfg: Config<Cfg, P>) -> (Self, Mailbox<D, M>) {
+    pub fn new(context: E, cfg: Config<Cfg, P>) -> (Self, Mailbox<P, D, M>) {
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
-        let mailbox = Mailbox::<D, M>::new(mailbox_sender);
+        let mailbox = Mailbox::<P, D, M>::new(mailbox_sender);
         let metrics = metrics::Metrics::init(context.clone());
 
         let result = Self {
@@ -154,9 +154,9 @@ impl<
                         break;
                     };
                     match msg {
-                        Message::Broadcast{ message } => {
+                        Message::Broadcast{ message, responder } => {
                             trace!("mailbox: broadcast");
-                            self.handle_broadcast(&mut net_sender, message).await;
+                            self.handle_broadcast(&mut net_sender, message, responder).await;
                         }
                         Message::Get{ digest, responder } => {
                             trace!("mailbox: get");
@@ -199,16 +199,26 @@ impl<
     ////////////////////////////////////////
 
     /// Handles a `broadcast` request from the application.
-    async fn handle_broadcast(&mut self, net_sender: &mut NetS, msg: M) {
+    async fn handle_broadcast(
+        &mut self,
+        net_sender: &mut NetS,
+        msg: M,
+        responder: oneshot::Sender<Vec<P>>,
+    ) {
         // Store the message, continue even if it was already stored
         let _ = self.insert_message(self.public_key.clone(), msg.clone());
 
         // Broadcast the message to the network
         let recipients = Recipients::All;
         let msg = Bytes::from(msg.encode());
-        if let Err(err) = net_sender.send(recipients, msg, self.priority).await {
-            warn!(?err, "failed to send message");
-        }
+        let sent_to = net_sender
+            .send(recipients, msg, self.priority)
+            .await
+            .unwrap_or_else(|err| {
+                error!(?err, "failed to send message");
+                vec![]
+            });
+        let _ = responder.send(sent_to);
     }
 
     /// Handles a `get` request from the application.

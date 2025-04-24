@@ -572,6 +572,18 @@ impl<E: Storage + Metrics> Journal<E> {
         }
         Ok(())
     }
+
+    /// Close and remove any underlying blobs created by the journal.
+    pub async fn destroy(self) -> Result<(), Error> {
+        for (i, blob) in self.blobs.into_iter() {
+            blob.close().await?;
+            debug!(blob = i, "destroyed blob");
+            self.context
+                .remove(&self.cfg.partition, Some(&i.to_be_bytes()))
+                .await?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
