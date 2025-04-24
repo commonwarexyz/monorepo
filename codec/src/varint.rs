@@ -67,8 +67,12 @@ impl_uint!(u128);
 /// sign bit to the least significant bit (shifting all other bits to the left by one). This allows
 /// for more efficient encoding of numbers that are close to zero, even if they are negative.
 pub trait SInt: Copy + Sized + FixedSize + PartialOrd + Debug {
+    /// The unsigned equivalent type of the signed integer.
+    /// This type must be the same size as the signed integer type.
     type UnsignedEquivalent: UInt;
 
+    /// Compile-time assertion to ensure that the size of the signed integer is equal to the size of
+    /// the unsigned integer.
     #[doc(hidden)]
     const _COMMIT_OP_ASSERT: () =
         assert!(std::mem::size_of::<Self>() == std::mem::size_of::<Self::UnsignedEquivalent>());
@@ -282,9 +286,6 @@ mod tests {
     #[test]
     fn test_end_of_buffer() {
         let mut buf: Bytes = Bytes::from_static(&[]);
-        assert!(matches!(read::<u32>(&mut buf), Err(Error::EndOfBuffer)));
-
-        let mut buf: Bytes = Bytes::from_static(&[0x80, 0x8F]);
         assert!(matches!(read::<u32>(&mut buf), Err(Error::EndOfBuffer)));
 
         let mut buf: Bytes = Bytes::from_static(&[0x80, 0x8F]);

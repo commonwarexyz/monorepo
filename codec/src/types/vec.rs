@@ -53,16 +53,16 @@ mod tests {
             assert_eq!(value, decoded);
 
             // Failure for too long
-            matches!(
+            assert!(matches!(
                 Vec::<u8>::decode_range(value.encode(), 0..len),
                 Err(Error::InvalidLength(_))
-            );
+            ));
 
             // Failure for too short
-            matches!(
+            assert!(matches!(
                 Vec::<u8>::decode_range(value.encode(), len + 1..),
                 Err(Error::InvalidLength(_))
-            );
+            ));
         }
     }
 }
