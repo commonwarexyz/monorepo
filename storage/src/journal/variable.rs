@@ -163,7 +163,7 @@ impl<E: Storage + Metrics> Journal<E> {
                 Ok(section) => u64::from_be_bytes(section),
                 Err(_) => return Err(Error::InvalidBlobName(hex_name)),
             };
-            debug!(section, blob = hex_name, "loaded section");
+            debug!(section, blob = hex_name, len = blob.1, "loaded section");
             blobs.insert(section, blob);
         }
 
@@ -464,17 +464,16 @@ impl<E: Storage + Metrics> Journal<E> {
         let checksum = crc32fast::hash(&item);
         buf.put(item);
         buf.put_u32(checksum);
+        assert_eq!(buf.len(), len);
 
         // Append item to blob
         let cursor = blob.1;
         let offset = compute_next_offset(cursor)?;
-        blob.0
-            .write_at(&buf, offset as u64 * ITEM_ALIGNMENT)
-            .await?;
-        trace!(blob = section, offset, "appended item");
+        let aligned_cursor = offset as u64 * ITEM_ALIGNMENT;
+        blob.0.write_at(&buf, aligned_cursor).await?;
+        blob.1 = aligned_cursor + len as u64;
+        debug!(blob = section, offset, len, "appended item");
 
-        // Update blob length
-        blob.1 += len as u64;
         Ok(offset)
     }
 

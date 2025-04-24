@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
 use commonware_utils::hex;
+use tracing::debug;
 
 /// In-memory storage implementation for the commonware runtime.
 #[derive(Clone)]
@@ -144,6 +145,11 @@ impl crate::Blob for Blob {
                 hex(&self.name),
             ))?;
         *content = new_content;
+        debug!(
+            "Updated partition {} with content len: {:?}",
+            self.partition,
+            content.len()
+        );
         Ok(())
     }
 
