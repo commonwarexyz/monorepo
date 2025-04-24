@@ -208,6 +208,8 @@ fn main() {
             context.clone(),
             Config {
                 partition: String::from("log"),
+                compression: Some(3),
+                codec_config: (),
             },
         )
         .await

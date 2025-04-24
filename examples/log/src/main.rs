@@ -190,6 +190,8 @@ fn main() {
             context.with_label("journal"),
             Config {
                 partition: String::from("log"),
+                compression: Some(3),
+                codec_config: usize::MAX, // TODO: application shouldn't have to know this
             },
         )
         .await
