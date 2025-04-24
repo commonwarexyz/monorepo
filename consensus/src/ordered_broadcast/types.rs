@@ -604,7 +604,7 @@ pub enum Activity<C: Verifier, D: Digest> {
     /// An acknowledgment for a chunk
     Ack(Ack<C::PublicKey, D>),
     /// A chunk mismatch detected from a sender
-    ChunkMismatch(Chunk<C::PublicKey, D>),
+    ChunkMismatch(Chunk<C::PublicKey, D>, Chunk<C::PublicKey, D>),
 }
 
 impl<C: Verifier, D: Digest> Write for Activity<C, D> {
@@ -622,9 +622,10 @@ impl<C: Verifier, D: Digest> Write for Activity<C, D> {
                 2u8.write(writer);
                 ack.write(writer);
             }
-            Activity::ChunkMismatch(chunk) => {
+            Activity::ChunkMismatch(c1, c2) => {
                 3u8.write(writer);
-                chunk.write(writer);
+                c1.write(writer);
+                c2.write(writer);
             }
         }
     }
@@ -636,7 +637,11 @@ impl<C: Verifier, D: Digest> Read for Activity<C, D> {
             0 => Ok(Activity::Proposal(Proposal::read(reader)?)),
             1 => Ok(Activity::Lock(Lock::read(reader)?)),
             2 => Ok(Activity::Ack(Ack::read(reader)?)),
-            3 => Ok(Activity::ChunkMismatch(Chunk::read(reader)?)),
+            3 => {
+                let c1 = Chunk::read(reader)?;
+                let c2 = Chunk::read(reader)?;
+                Ok(Activity::ChunkMismatch(c1, c2))
+            }
             _ => Err(CodecError::Invalid(
                 "consensus::ordered_broadcast::Activity",
                 "Invalid type",
@@ -651,7 +656,7 @@ impl<C: Verifier, D: Digest> EncodeSize for Activity<C, D> {
             Activity::Proposal(proposal) => proposal.encode_size(),
             Activity::Lock(lock) => lock.encode_size(),
             Activity::Ack(ack) => ack.encode_size(),
-            Activity::ChunkMismatch(chunk) => chunk.encode_size(),
+            Activity::ChunkMismatch(c1, c2) => c1.encode_size() + c2.encode_size(),
         }
     }
 }
@@ -1041,7 +1046,7 @@ mod tests {
 
         // Test Ack
         let ack = Ack::sign(NAMESPACE, &shares[0], chunk.clone(), epoch);
-        let activity = Activity::Ack(ack.clone());
+        let activity = Activity::Ack::<Ed25519, Sha256Digest>(ack.clone());
         let encoded = activity.encode();
         let decoded = Activity::<Ed25519, Sha256Digest>::decode(encoded).unwrap();
 
@@ -1057,13 +1062,16 @@ mod tests {
         }
 
         // Test ChunkMismatch
-        let activity = Activity::ChunkMismatch(chunk.clone());
+        let chunk2 = Chunk::new(public_key.clone(), 43, sample_digest(2));
+        let activity =
+            Activity::ChunkMismatch::<Ed25519, Sha256Digest>(chunk.clone(), chunk2.clone());
         let encoded = activity.encode();
         let decoded = Activity::<Ed25519, Sha256Digest>::decode(encoded).unwrap();
 
         match decoded {
-            Activity::ChunkMismatch(c) => {
-                assert_eq!(c, chunk);
+            Activity::ChunkMismatch(c1, c2) => {
+                assert_eq!(c1, chunk);
+                assert_eq!(c2, chunk2);
             }
             _ => panic!("Decoded activity has wrong type"),
         }
@@ -1274,7 +1282,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "ParentOnGenesis")]
     fn test_node_genesis_with_parent_panics() {
         // Try to create a genesis node (height 0) with a parent - should panic on decode
         let public_key = sample_scheme(0).public_key();
@@ -1306,7 +1313,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "ParentMissing")]
     fn test_node_non_genesis_without_parent_panics() {
         // Try to create a non-genesis node (height > 0) without a parent - should panic on decode
         let public_key = sample_scheme(0).public_key();

@@ -583,7 +583,7 @@ impl<
         }
 
         // Report the activity
-        self.reporter.report(Activity::Ack).await;
+        self.reporter.report(Activity::Ack(ack.clone())).await;
 
         Ok(())
     }
@@ -847,7 +847,7 @@ impl<
     /// Returns the chunk, epoch, and partial signature if the ack is valid.
     /// Returns an error if the ack is invalid.
     async fn validate_ack(
-        &self,
+        &mut self,
         ack: &Ack<C::PublicKey, D>,
         sender: &C::PublicKey,
     ) -> Result<(), Error> {
@@ -929,7 +929,9 @@ impl<
                 std::cmp::Ordering::Equal => {
                     // Ensure this matches the tip if the height is the same
                     if tip.chunk.payload != chunk.payload {
-                        self.reporter.report(Activity::ChunkMismatch).await;
+                        self.reporter
+                            .report(Activity::ChunkMismatch(tip.chunk, chunk.clone()))
+                            .await;
                         return Err(Error::ChunkMismatch(
                             chunk.sequencer.to_string(),
                             chunk.height,
