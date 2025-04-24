@@ -378,7 +378,7 @@ impl crate::Spawner for Context {
         self.executor.signaler.lock().unwrap().signal(value);
     }
 
-    fn stopped(&self) -> Signal {
+    fn stopped(&self) -> Signal { 
         self.executor.signal.clone()
     }
 }

@@ -127,7 +127,7 @@ pub struct Auditor {
 
 impl Default for Auditor {
     fn default() -> Self {
-        Self {
+        Self { 
             hash: Vec::new().into(),
         }
     }
