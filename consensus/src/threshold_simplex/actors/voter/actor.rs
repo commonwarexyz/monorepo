@@ -903,12 +903,12 @@ impl<
         });
 
         // Handle nullify
-        let nullify_log = Voter::Nullify(nullify.clone());
+        let msg = Voter::Nullify(nullify.clone());
         if round.add_verified_nullify(public_key_index, nullify).await && self.journal.is_some() {
             self.journal
                 .as_mut()
                 .unwrap()
-                .append(view, nullify_log)
+                .append(view, msg)
                 .await
                 .expect("unable to append nullify");
         }
@@ -1240,7 +1240,7 @@ impl<
         });
 
         // Handle notarize
-        let notarize_log = Voter::Notarize(notarize.clone());
+        let msg = Voter::Notarize(notarize.clone());
         if round
             .add_verified_notarize(public_key_index, notarize)
             .await
@@ -1249,7 +1249,7 @@ impl<
             self.journal
                 .as_mut()
                 .unwrap()
-                .append(view, notarize_log)
+                .append(view, msg)
                 .await
                 .expect("unable to append to journal");
         }
@@ -1297,13 +1297,13 @@ impl<
         });
 
         // Store notarization
-        let notarization_log = Voter::Notarization(notarization.clone());
+        let msg = Voter::Notarization(notarization.clone());
         let seed = notarization.seed_signature;
         if round.add_verified_notarization(notarization) && self.journal.is_some() {
             self.journal
                 .as_mut()
                 .unwrap()
-                .append(view, notarization_log)
+                .append(view, msg)
                 .await
                 .expect("unable to append to journal");
         }
@@ -1353,13 +1353,13 @@ impl<
         });
 
         // Store nullification
-        let nullification_log = Voter::Nullification(nullification.clone());
+        let msg = Voter::Nullification(nullification.clone());
         let seed = nullification.seed_signature;
         if round.add_verified_nullification(nullification) && self.journal.is_some() {
             self.journal
                 .as_mut()
                 .unwrap()
-                .append(view, nullification_log)
+                .append(view, msg)
                 .await
                 .expect("unable to append to journal");
         }
@@ -1409,7 +1409,7 @@ impl<
         });
 
         // Handle finalize
-        let finalize_log = Voter::Finalize(finalize.clone());
+        let msg = Voter::Finalize(finalize.clone());
         if round
             .add_verified_finalize(public_key_index, finalize)
             .await
@@ -1418,7 +1418,7 @@ impl<
             self.journal
                 .as_mut()
                 .unwrap()
-                .append(view, finalize_log)
+                .append(view, msg)
                 .await
                 .expect("unable to append to journal");
         }
@@ -1466,13 +1466,13 @@ impl<
         });
 
         // Store finalization
-        let finalization_log = Voter::Finalization(finalization.clone());
+        let msg = Voter::Finalization(finalization.clone());
         let seed = finalization.seed_signature;
         if round.add_verified_finalization(finalization) && self.journal.is_some() {
             self.journal
                 .as_mut()
                 .unwrap()
-                .append(view, finalization_log)
+                .append(view, msg)
                 .await
                 .expect("unable to append to journal");
         }

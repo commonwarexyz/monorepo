@@ -708,12 +708,12 @@ impl<
         });
 
         // Handle nullify
-        let nullify_log = Voter::Nullify(nullify.clone());
+        let msg = Voter::Nullify(nullify.clone());
         if round.add_verified_nullify(nullify).await && self.journal.is_some() {
             self.journal
                 .as_mut()
                 .unwrap()
-                .append(view, nullify_log)
+                .append(view, msg)
                 .await
                 .expect("unable to append nullify");
         }
@@ -1019,9 +1019,7 @@ impl<
         });
 
         // Handle notarize
-        let msg = Voter::Notarize::<C::Signature, D>(notarize.clone())
-            .encode()
-            .into();
+        let msg = Voter::Notarize(notarize.clone());
         if round.add_verified_notarize(notarize).await && self.journal.is_some() {
             self.journal
                 .as_mut()
@@ -1073,9 +1071,7 @@ impl<
         });
         for signature in &notarization.signatures {
             let notarize = Notarize::new(notarization.proposal.clone(), signature.clone());
-            let msg = Voter::Notarize::<C::Signature, D>(notarize.clone())
-                .encode()
-                .into();
+            let msg = Voter::Notarize::<C::Signature, D>(notarize.clone());
             if round.add_verified_notarize(notarize).await && self.journal.is_some() {
                 self.journal
                     .as_mut()
