@@ -11,10 +11,10 @@ use std::ops::RangeBounds;
 /// `Clone + Send + 'static`.
 ///
 /// Use the unit type `()` if no configuration is required for a specific [`Read`] implementation.
-pub trait Config: Send + 'static {}
+pub trait Config: Clone + Send + 'static {}
 
 // Automatically implement `Config` for matching types.
-impl<T: Send + 'static> Config for T {}
+impl<T: Clone + Send + 'static> Config for T {}
 
 /// A marker trait for a [`Config`] type that is also a [`RangeBounds<usize>`].
 ///
