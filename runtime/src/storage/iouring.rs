@@ -20,8 +20,11 @@ use std::{
 
 #[derive(Clone, Debug)]
 pub struct IoUringConfig {
+    /// Size of the ring.
     pub size: u32,
+    /// If true, use IOPOLL mode.
     pub iopoll: bool,
+    /// If true, use single issuer mode.
     pub single_issuer: bool,
 }
 
