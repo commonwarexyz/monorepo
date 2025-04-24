@@ -12,10 +12,7 @@ use std::{
     io::{Error as IoError, ErrorKind},
     os::fd::{AsRawFd as _, OwnedFd},
     path::PathBuf,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
+    sync::Arc,
 };
 
 #[derive(Clone, Debug)]
@@ -180,7 +177,7 @@ impl crate::Storage for Storage {
         let len = file.metadata().map_err(|_| Error::ReadFailed)?.len();
 
         Ok((
-            Blob::new(partition.into(), name, file, len, self.io_sender.clone()),
+            Blob::new(partition.into(), name, file, self.io_sender.clone()),
             len,
         ))
     }
@@ -229,8 +226,6 @@ pub struct Blob {
     name: Vec<u8>,
     /// The underlying file descriptor
     fd: Arc<OwnedFd>,
-    /// The length of the blob
-    len: Arc<AtomicU64>,
     /// Where to send IO operations to be executed
     io_sender: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>)>,
 }
@@ -241,7 +236,6 @@ impl Clone for Blob {
             partition: self.partition.clone(),
             name: self.name.clone(),
             fd: self.fd.clone(),
-            len: self.len.clone(),
             io_sender: self.io_sender.clone(),
         }
     }
@@ -252,14 +246,12 @@ impl Blob {
         partition: String,
         name: &[u8],
         file: File,
-        len: u64,
         io_sender: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>)>,
     ) -> Self {
         Self {
             partition,
             name: name.to_vec(),
             fd: Arc::new(OwnedFd::from(file)),
-            len: Arc::new(AtomicU64::new(len)),
             io_sender,
         }
     }
@@ -267,11 +259,6 @@ impl Blob {
 
 impl crate::Blob for Blob {
     async fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
-        let current_len = self.len.load(Ordering::Relaxed);
-        if offset + buf.len() as u64 > current_len {
-            return Err(Error::BlobInsufficientLength);
-        }
-
         let fd = types::Fd(self.fd.as_raw_fd());
         let mut total_read = 0;
 
@@ -341,12 +328,6 @@ impl crate::Blob for Blob {
 
             total_written += bytes_written;
         }
-
-        // Update the virtual file size
-        let max_len = offset + buf.len() as u64;
-        if max_len > self.len.load(Ordering::Relaxed) {
-            self.len.store(max_len, Ordering::Relaxed);
-        }
         Ok(())
     }
 
@@ -382,14 +363,9 @@ impl crate::Blob for Blob {
             return Err(Error::BlobTruncateFailed(
                 self.partition.clone(),
                 hex(&self.name),
-                IoError::new(
-                    ErrorKind::Other,
-                    format!("got error code: {}", return_value),
-                ),
+                IoError::new(ErrorKind::Other, format!("error code: {}", return_value)),
             ));
         }
-        // Update length
-        self.len.store(len, Ordering::SeqCst);
         Ok(())
     }
 
@@ -424,10 +400,7 @@ impl crate::Blob for Blob {
             return Err(Error::BlobSyncFailed(
                 self.partition.clone(),
                 hex(&self.name),
-                IoError::new(
-                    ErrorKind::Other,
-                    format!("got error code: {}", return_value),
-                ),
+                IoError::new(ErrorKind::Other, format!("error code: {}", return_value)),
             ));
         }
 
