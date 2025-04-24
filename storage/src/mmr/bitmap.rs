@@ -3,12 +3,17 @@
 //! The authenticated bitmap is is an in-memory data structure that does not persist its contents
 //! other than the data corresponding to its "pruned" section, allowing full restoration by
 //! "replaying" any unpruned elements.
+//!
+//! Authentication is provided by a Merkle tree that is maintained over the bitmap, with each leaf
+//! covering a chunk of N bytes. This Merkle tree isn't balanced, but instead mimics the structure
+//! of an MMR with an equivalent number of leaves. This structure reduces overhead of updating the
+//! most recently added elements, and (more importantly) simplifies aligning the bitmap with an MMR
+//! over elements whose activity state is reflected by the bitmap.
 
 use crate::{
     metadata::{Config as MConfig, Metadata},
     mmr::{iterator::leaf_num_to_pos, mem::Mmr, verification::Proof, verification::Storage, Error},
 };
-use bytes::Bytes;
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
@@ -43,6 +48,9 @@ impl<H: CHasher + Send + Sync> Storage<H::Digest> for BitmapStorage<'_, H> {
 ///
 /// Merkelization of the bitmap is performed over chunks of N bytes. If the goal is to minimize
 /// proof sizes, choose an N that is equal to the size or double the size of the hasher's digest.
+///
+/// Warning: Even though we use u64 identifiers for bits, on 32-bit machines, the maximum
+/// addressable bit is limited to (u32::MAX * N * 8).
 pub struct Bitmap<H: CHasher, const N: usize> {
     /// The bitmap itself, in chunks of size N bytes. The number of valid bits in the last chunk is
     /// given by `self.next_bit`. Within each byte, lowest order bits are treated as coming before
@@ -75,8 +83,11 @@ impl<H: CHasher, const N: usize> Default for Bitmap<H, N> {
     }
 }
 
-const NODE_PREFIX: u8 = 0x00;
-const PRUNED_CHUNKS_PREFIX: u8 = 0x01;
+/// Prefix used for the metadata key identifying node digests.
+const NODE_PREFIX: u8 = 0;
+
+/// Prefix used for the metadata key identifying the pruned_chunks value.
+const PRUNED_CHUNKS_PREFIX: u8 = 1;
 
 impl<H: CHasher, const N: usize> Bitmap<H, N> {
     /// The size of a chunk in bytes.
@@ -97,20 +108,26 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         }
     }
 
-    /// Initialize a fully pruned bitmap from the metadata in the given partition.
+    /// Restore the fully pruned state of a bitmap from the metadata in the given partition. (The
+    /// caller must still replay retained elements to restore its full state.)
     ///
     /// The metadata must store the number of pruned chunks and the pinned hashes corresponding to
     /// that pruning boundary.
-    pub async fn init_pruned<C: RStorage + Metrics + Clock>(
+    pub async fn restore_pruned<C: RStorage + Metrics + Clock>(
         context: C,
         partition: String,
     ) -> Result<Self, Error> {
         let metadata_cfg = MConfig { partition };
-        let metadata = Metadata::init(context.with_label("bitmap_metadata"), metadata_cfg).await?;
+        let metadata = Metadata::init(context.with_label("metadata"), metadata_cfg).await?;
 
         let key: U64 = U64::new(PRUNED_CHUNKS_PREFIX, 0);
         let pruned_chunks = match metadata.get(&key) {
-            Some(bytes) => u64::from_be_bytes(bytes.as_ref().try_into().unwrap()),
+            Some(bytes) => u64::from_be_bytes(
+                bytes
+                    .as_slice()
+                    .try_into()
+                    .expect("pruned_chunks bytes could not be converted to u64"),
+            ),
             None => {
                 warn!("bitmap metadata does not contain pruned chunks, initializing as empty");
                 0
@@ -159,23 +176,19 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         partition: String,
     ) -> Result<(), Error> {
         let metadata_cfg = MConfig { partition };
-        let mut metadata =
-            Metadata::init(context.with_label("bitmap_metadata"), metadata_cfg).await?;
+        let mut metadata = Metadata::init(context.with_label("metadata"), metadata_cfg).await?;
         metadata.clear();
 
         // Write the number of pruned chunks.
         let key = U64::new(PRUNED_CHUNKS_PREFIX, 0);
-        metadata.put(
-            key,
-            Bytes::copy_from_slice(&self.pruned_chunks.to_be_bytes()),
-        );
+        metadata.put(key, self.pruned_chunks.to_be_bytes().to_vec());
 
         // Write the pinned nodes.
         let mmr_size = leaf_num_to_pos(self.pruned_chunks as u64);
         for (i, digest) in Proof::<H>::nodes_to_pin(mmr_size).enumerate() {
             let digest = self.mmr.get_node_unchecked(digest);
             let key = U64::new(NODE_PREFIX, i as u64);
-            metadata.put(key, Bytes::copy_from_slice(digest));
+            metadata.put(key, digest.to_vec());
         }
 
         metadata.close().await.map_err(Error::MetadataError)
@@ -689,23 +702,6 @@ mod tests {
                         "proving bit {} after flipping should have failed",
                         i
                     );
-
-                    let (proof, chunk) = bitmap.proof(&mut hasher, i).await.unwrap();
-
-                    // Proof should verify for the original chunk containing the bit.
-                    assert!(
-                        Bitmap::verify_bit_inclusion(&mut hasher, &proof, &chunk, i, &root),
-                        "failed to prove bit {}",
-                        i
-                    );
-
-                    // Flip the bit in the chunk and make sure the proof fails.
-                    let corrupted = flip_bit(i, &chunk);
-                    assert!(
-                        !Bitmap::verify_bit_inclusion(&mut hasher, &proof, &corrupted, i, &root),
-                        "proving bit {} after flipping should have failed",
-                        i
-                    );
                 }
             }
         })
@@ -720,7 +716,7 @@ mod tests {
         executor.start(|context| async move {
             // Initializing from an empty partition should result in an empty bitmap.
             let mut bitmap =
-                Bitmap::<Sha256, 32>::init_pruned(context.clone(), PARTITION.to_string())
+                Bitmap::<Sha256, 32>::restore_pruned(context.clone(), PARTITION.to_string())
                     .await
                     .unwrap();
             assert_eq!(bitmap.bit_count(), 0);
@@ -749,9 +745,10 @@ mod tests {
                     .write_pruned(context.clone(), PARTITION.to_string())
                     .await
                     .unwrap();
-                bitmap = Bitmap::<Sha256, 32>::init_pruned(context.clone(), PARTITION.to_string())
-                    .await
-                    .unwrap();
+                bitmap =
+                    Bitmap::<Sha256, 32>::restore_pruned(context.clone(), PARTITION.to_string())
+                        .await
+                        .unwrap();
                 let _ = bitmap.root(&mut hasher);
 
                 // Replay missing chunks.
