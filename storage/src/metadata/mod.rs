@@ -308,7 +308,7 @@ mod tests {
             metadata.close().await.unwrap();
 
             // Corrupt the metadata store
-            let blob = context.open("test", b"left").await.unwrap();
+            let (blob, _) = context.open("test", b"left").await.unwrap();
             blob.write_at(b"corrupted", 0).await.unwrap();
             blob.close().await.unwrap();
 
@@ -354,10 +354,10 @@ mod tests {
             metadata.close().await.unwrap();
 
             // Corrupt the metadata store
-            let blob = context.open("test", b"left").await.unwrap();
+            let (blob, _) = context.open("test", b"left").await.unwrap();
             blob.write_at(b"corrupted", 0).await.unwrap();
             blob.close().await.unwrap();
-            let blob = context.open("test", b"right").await.unwrap();
+            let (blob, _) = context.open("test", b"right").await.unwrap();
             blob.write_at(b"corrupted", 0).await.unwrap();
             blob.close().await.unwrap();
 
@@ -408,8 +408,7 @@ mod tests {
             metadata.close().await.unwrap();
 
             // Corrupt the metadata store
-            let blob = context.open("test", b"left").await.unwrap();
-            let blob_len = blob.len().await.unwrap();
+            let (blob, blob_len) = context.open("test", b"left").await.unwrap();
             blob.truncate(blob_len - 8).await.unwrap();
             blob.close().await.unwrap();
 
@@ -455,7 +454,7 @@ mod tests {
             metadata.close().await.unwrap();
 
             // Corrupt the metadata store
-            let blob = context.open("test", b"left").await.unwrap();
+            let (blob, _) = context.open("test", b"left").await.unwrap();
             blob.truncate(5).await.unwrap();
             blob.close().await.unwrap();
 
