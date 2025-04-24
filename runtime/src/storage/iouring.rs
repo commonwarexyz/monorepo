@@ -342,9 +342,7 @@ impl crate::Blob for Blob {
 
     async fn truncate(&self, len: u64) -> Result<(), Error> {
         // Create an operation to do the truncate
-        let op = opcode::Fallocate::new(types::Fd(self.fd.as_raw_fd()), len)
-            .mode(0) // 0 means truncate
-            .build();
+        let op = opcode::Ftruncate::new(types::Fd(self.fd.as_raw_fd()), len).build();
 
         // Submit the operation
         let (sender, receiver) = oneshot::channel();
