@@ -471,7 +471,7 @@ impl<E: Storage + Metrics> Journal<E> {
         blob.0
             .write_at(&buf, offset as u64 * ITEM_ALIGNMENT)
             .await?;
-        trace!(blob = section, previous_len = len, offset, "appended item");
+        trace!(blob = section, offset, "appended item");
 
         // Update blob length
         blob.1 += len as u64;
@@ -551,14 +551,14 @@ impl<E: Storage + Metrics> Journal<E> {
             }
 
             // Remove and close blob
-            let (blob, _) = self.blobs.remove(&section).unwrap();
+            let (blob, len) = self.blobs.remove(&section).unwrap();
             blob.close().await?;
 
             // Remove blob from storage
             self.context
                 .remove(&self.cfg.partition, Some(&section.to_be_bytes()))
                 .await?;
-            debug!(blob = section, "pruned blob");
+            debug!(blob = section, len, "pruned blob");
             self.tracked.dec();
             self.pruned.inc();
         }
@@ -570,18 +570,18 @@ impl<E: Storage + Metrics> Journal<E> {
 
     /// Closes all open sections.
     pub async fn close(self) -> Result<(), Error> {
-        for (section, (blob, _)) in self.blobs.into_iter() {
+        for (section, (blob, len)) in self.blobs.into_iter() {
             blob.close().await?;
-            debug!(blob = section, "closed blob");
+            debug!(blob = section, len, "closed blob");
         }
         Ok(())
     }
 
     /// Close and remove any underlying blobs created by the journal.
     pub async fn destroy(self) -> Result<(), Error> {
-        for (i, (blob, _)) in self.blobs.into_iter() {
+        for (i, (blob, len)) in self.blobs.into_iter() {
             blob.close().await?;
-            debug!(blob = i, "destroyed blob");
+            debug!(blob = i, len, "destroyed blob");
             self.context
                 .remove(&self.cfg.partition, Some(&i.to_be_bytes()))
                 .await?;
