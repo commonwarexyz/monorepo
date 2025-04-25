@@ -111,6 +111,7 @@ pub struct Config<C: CodecConfig> {
     /// Optional compression level (using `zstd`) to apply to data before storing.
     pub compression: Option<u8>,
 
+    /// The codec configuration to use for encoding and decoding items.
     pub codec_config: C,
 }
 
