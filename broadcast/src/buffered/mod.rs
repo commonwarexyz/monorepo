@@ -173,7 +173,7 @@ mod tests {
             let digest_m1 = m1.digest();
 
             // Attempt immediate retrieval before broadcasting
-            let receiver_before = mailbox_a.get(digest_m1).await.await.unwrap();
+            let receiver_before = mailbox_a.get(digest_m1).await;
             assert_eq!(receiver_before, None);
 
             // Attempt retrieval before broadcasting
@@ -190,7 +190,7 @@ mod tests {
             assert_eq!(msg_before, m1);
 
             // Attempt immediate retrieval after broadcasting
-            let receiver_after = mailbox_a.get(digest_m1).await.await.unwrap().unwrap();
+            let receiver_after = mailbox_a.get(digest_m1).await.unwrap();
             assert_eq!(receiver_after, m1);
 
             // Perform a second retrieval after the broadcast

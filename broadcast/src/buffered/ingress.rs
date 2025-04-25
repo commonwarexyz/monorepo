@@ -77,7 +77,7 @@ impl<P: Array, D: Digest, M: Digestible<D>> Mailbox<P, D, M> {
     }
 
     /// Get a message by digest.
-    pub async fn get(&mut self, digest: D) -> oneshot::Receiver<Option<M>> {
+    pub async fn get(&mut self, digest: D) -> Option<M> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Message::Get {
@@ -86,7 +86,7 @@ impl<P: Array, D: Digest, M: Digestible<D>> Mailbox<P, D, M> {
             })
             .await
             .expect("mailbox closed");
-        receiver
+        receiver.await.unwrap_or(None)
     }
 }
 
