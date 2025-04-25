@@ -281,6 +281,11 @@ mod tests {
         // Wait for all oneshot receivers to complete.
         let results = join_all(receivers).await;
         assert_eq!(results.len(), sequencers.len() * reporters.len());
+
+        // Check that none were cancelled.
+        for result in results {
+            assert!(result.is_ok(), "reporter was cancelled");
+        }
     }
 
     async fn get_max_height(
