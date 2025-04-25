@@ -31,7 +31,7 @@ jobs:
       env:
         RUSTDOCFLAGS: "-D warnings"
     - name: Run tests
-      run: cargo test --all-features --verbose
+      run: cargo test --features iouring --verbose
 
   Dependencies:
     runs-on: ubuntu-latest

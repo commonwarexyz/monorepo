@@ -12,10 +12,7 @@ use std::{
     io::{Error as IoError, ErrorKind},
     os::fd::{AsRawFd as _, OwnedFd},
     path::PathBuf,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
+    sync::Arc,
 };
 
 #[derive(Clone, Debug)]
@@ -80,32 +77,23 @@ async fn do_work(
         // Try to fill the submission queue with incoming work.
         // Stop if we are at the max number of processing work.
         while waiters.len() < cfg.size as usize {
-            let Ok(Some((mut work, sender))) = receiver.try_next() else {
-                break;
-            };
-
-            // Assign a unique id
-            let work_id = next_work_id;
-            work = work.user_data(work_id);
-            // Use wrapping add in case we overflow
-            next_work_id = next_work_id.wrapping_add(1);
-
-            // We'll send the result of this operation to `sender`.
-            waiters.insert(work_id, sender);
-
-            // Submit the operation to the ring
-            unsafe {
-                ring.submission()
-                    .push(&work)
-                    .expect("unable to push to queue");
-            }
-        }
-
-        if waiters.is_empty() {
-            // If there's no processing work, there's nothing to do but wait for new work.
-            let Some((mut work, sender)) = receiver.next().await else {
-                // Channel closed, exit the loop
-                break;
+            // Wait for more work
+            let (mut work, sender) = if waiters.is_empty() {
+                // Block until there is something to do
+                match receiver.next().await {
+                    Some(work) => work,
+                    None => return,
+                }
+            } else {
+                // Handle incoming work
+                match receiver.try_next() {
+                    // Got work without blocking
+                    Ok(Some(work_item)) => work_item,
+                    // Channel closed, shut down
+                    Ok(None) => return,
+                    // No new work available, wait for a completion
+                    Err(_) => break,
+                }
             };
 
             // Assign a unique id
@@ -180,7 +168,7 @@ impl crate::Storage for Storage {
         let len = file.metadata().map_err(|_| Error::ReadFailed)?.len();
 
         Ok((
-            Blob::new(partition.into(), name, file, len, self.io_sender.clone()),
+            Blob::new(partition.into(), name, file, self.io_sender.clone()),
             len,
         ))
     }
@@ -229,8 +217,6 @@ pub struct Blob {
     name: Vec<u8>,
     /// The underlying file descriptor
     fd: Arc<OwnedFd>,
-    /// The length of the blob
-    len: Arc<AtomicU64>,
     /// Where to send IO operations to be executed
     io_sender: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>)>,
 }
@@ -241,7 +227,6 @@ impl Clone for Blob {
             partition: self.partition.clone(),
             name: self.name.clone(),
             fd: self.fd.clone(),
-            len: self.len.clone(),
             io_sender: self.io_sender.clone(),
         }
     }
@@ -252,14 +237,12 @@ impl Blob {
         partition: String,
         name: &[u8],
         file: File,
-        len: u64,
         io_sender: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>)>,
     ) -> Self {
         Self {
             partition,
             name: name.to_vec(),
             fd: Arc::new(OwnedFd::from(file)),
-            len: Arc::new(AtomicU64::new(len)),
             io_sender,
         }
     }
@@ -267,11 +250,6 @@ impl Blob {
 
 impl crate::Blob for Blob {
     async fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
-        let current_len = self.len.load(Ordering::Relaxed);
-        if offset + buf.len() as u64 > current_len {
-            return Err(Error::BlobInsufficientLength);
-        }
-
         let fd = types::Fd(self.fd.as_raw_fd());
         let mut total_read = 0;
 
@@ -341,12 +319,6 @@ impl crate::Blob for Blob {
 
             total_written += bytes_written;
         }
-
-        // Update the virtual file size
-        let max_len = offset + buf.len() as u64;
-        if max_len > self.len.load(Ordering::Relaxed) {
-            self.len.store(max_len, Ordering::Relaxed);
-        }
         Ok(())
     }
 
@@ -382,14 +354,9 @@ impl crate::Blob for Blob {
             return Err(Error::BlobTruncateFailed(
                 self.partition.clone(),
                 hex(&self.name),
-                IoError::new(
-                    ErrorKind::Other,
-                    format!("got error code: {}", return_value),
-                ),
+                IoError::new(ErrorKind::Other, format!("error code: {}", return_value)),
             ));
         }
-        // Update length
-        self.len.store(len, Ordering::SeqCst);
         Ok(())
     }
 
@@ -424,10 +391,7 @@ impl crate::Blob for Blob {
             return Err(Error::BlobSyncFailed(
                 self.partition.clone(),
                 hex(&self.name),
-                IoError::new(
-                    ErrorKind::Other,
-                    format!("got error code: {}", return_value),
-                ),
+                IoError::new(ErrorKind::Other, format!("error code: {}", return_value)),
             ));
         }
 
