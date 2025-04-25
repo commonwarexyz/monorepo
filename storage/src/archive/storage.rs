@@ -50,9 +50,6 @@ pub struct Archive<
     gets: Counter,
     has: Counter,
     syncs: Counter,
-
-    _phantom_k: std::marker::PhantomData<K>,
-    _phantom_v: std::marker::PhantomData<V>,
 }
 
 pub struct Record<K: Array, VCfg: CodecConfig + Copy, V: Codec<VCfg>> {
@@ -189,8 +186,6 @@ impl<T: Translator, E: Storage + Metrics, K: Array, VC: CodecConfig + Copy, V: C
             gets,
             has,
             syncs,
-            _phantom_k: std::marker::PhantomData,
-            _phantom_v: std::marker::PhantomData,
         })
     }
 
