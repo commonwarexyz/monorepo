@@ -152,6 +152,10 @@ impl<
                             trace!("mailbox: broadcast");
                             self.handle_broadcast(&mut net_sender, message, responder).await;
                         }
+                        Message::Subscribe{ digest, responder } => {
+                            trace!("mailbox: subscribe");
+                            self.handle_subscribe(digest, responder).await;
+                        }
                         Message::Get{ digest, responder } => {
                             trace!("mailbox: get");
                             self.handle_get(digest, responder).await;
@@ -215,19 +219,25 @@ impl<
         let _ = responder.send(sent_to);
     }
 
-    /// Handles a `get` request from the application.
+    /// Handles a `subscribe` request from the application.
     ///
     /// If the message is already in the cache, the responder is immediately sent the message.
     /// Otherwise, the responder is stored in the waiters list.
-    async fn handle_get(&mut self, digest: D, responder: oneshot::Sender<M>) {
+    async fn handle_subscribe(&mut self, digest: D, responder: oneshot::Sender<M>) {
         // Check if the message is already in the cache
         if let Some(msg) = self.items.get(&digest) {
-            self.respond(responder, msg.clone());
+            self.respond_subscribe(responder, msg.clone());
             return;
         }
 
         // Store the responder
         self.waiters.entry(digest).or_default().push(responder);
+    }
+
+    /// Handles a `get` request from the application.
+    async fn handle_get(&mut self, digest: D, responder: oneshot::Sender<Option<M>>) {
+        let item = self.items.get(&digest).cloned();
+        self.respond_get(responder, item);
     }
 
     /// Handles a message that was received from a peer.
@@ -255,7 +265,7 @@ impl<
         // Send the message to the waiters, if any, ignoring errors (as the receiver may have dropped)
         if let Some(responders) = self.waiters.remove(&digest) {
             for responder in responders {
-                self.respond(responder, msg.clone());
+                self.respond_subscribe(responder, msg.clone());
             }
         }
 
@@ -331,7 +341,17 @@ impl<
 
     /// Respond to a waiter with a message.
     /// Increments the appropriate metric based on the result.
-    fn respond(&mut self, responder: oneshot::Sender<M>, msg: M) {
+    fn respond_subscribe(&mut self, responder: oneshot::Sender<M>, msg: M) {
+        let result = responder.send(msg);
+        self.metrics.subscribe.inc(match result {
+            Ok(_) => Status::Success,
+            Err(_) => Status::Dropped,
+        });
+    }
+
+    /// Respond to a waiter with an optional message.
+    /// Increments the appropriate metric based on the result.
+    fn respond_get(&mut self, responder: oneshot::Sender<Option<M>>, msg: Option<M>) {
         let result = responder.send(msg);
         self.metrics.get.inc(match result {
             Ok(_) => Status::Success,
