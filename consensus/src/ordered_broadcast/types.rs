@@ -585,7 +585,7 @@ impl<P: Array, D: Digest> FixedSize for Ack<P, D> {
 /// Activity is the type associated with the [`Reporter`](crate::Reporter) trait.
 ///
 /// This enum represents the two main types of activities that are reported:
-/// 1. Proposals - when a new chunk is proposed by a sequencer
+/// 1. Tips - when a new chunk at the latest tip is verified for some sequencer
 /// 2. Locks - when a threshold signature is formed for a chunk
 ///
 /// The Reporter is notified of these activities so it can track the state of the system
@@ -593,10 +593,10 @@ impl<P: Array, D: Digest> FixedSize for Ack<P, D> {
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum Activity<C: Verifier, D: Digest> {
-    /// A new proposal from a sequencer
+    /// A new tip for a sequencer
     ///
-    /// This activity is only emitted when the application has verified a peer proposal.
-    Proposal(Proposal<C, D>),
+    /// This activity is only emitted when the application has verified some peer proposal.
+    Tip(Proposal<C, D>),
     /// A threshold signature for a chunk, indicating it has been acknowledged by a quorum
     Lock(Lock<C::PublicKey, D>),
 }
@@ -604,7 +604,7 @@ pub enum Activity<C: Verifier, D: Digest> {
 impl<C: Verifier, D: Digest> Write for Activity<C, D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
-            Activity::Proposal(proposal) => {
+            Activity::Tip(proposal) => {
                 0u8.write(writer);
                 proposal.write(writer);
             }
@@ -619,7 +619,7 @@ impl<C: Verifier, D: Digest> Write for Activity<C, D> {
 impl<C: Verifier, D: Digest> Read for Activity<C, D> {
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         match u8::read(reader)? {
-            0 => Ok(Activity::Proposal(Proposal::read(reader)?)),
+            0 => Ok(Activity::Tip(Proposal::read(reader)?)),
             1 => Ok(Activity::Lock(Lock::read(reader)?)),
             _ => Err(CodecError::Invalid(
                 "consensus::ordered_broadcast::Activity",
@@ -632,7 +632,7 @@ impl<C: Verifier, D: Digest> Read for Activity<C, D> {
 impl<C: Verifier, D: Digest> EncodeSize for Activity<C, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Activity::Proposal(proposal) => proposal.encode_size(),
+            Activity::Tip(proposal) => proposal.encode_size(),
             Activity::Lock(lock) => lock.encode_size(),
         }
     }
@@ -971,12 +971,12 @@ mod tests {
         let message = chunk.encode();
         let signature = scheme.sign(Some(chunk_namespace.as_ref()), &message);
         let proposal = Proposal::<Ed25519, Sha256Digest>::new(chunk.clone(), signature.clone());
-        let activity = Activity::Proposal(proposal);
+        let activity = Activity::Tip(proposal);
         let encoded = activity.encode();
         let decoded = Activity::<Ed25519, Sha256Digest>::decode(encoded).unwrap();
 
         match decoded {
-            Activity::Proposal(p) => {
+            Activity::Tip(p) => {
                 assert_eq!(p.chunk, chunk);
                 assert_eq!(p.signature, signature);
             }

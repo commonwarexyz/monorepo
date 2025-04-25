@@ -490,7 +490,7 @@ impl<
 
         // Emit the activity
         self.reporter
-            .report(Activity::Proposal(Proposal::new(
+            .report(Activity::Tip(Proposal::new(
                 tip.chunk.clone(),
                 tip.signature.clone(),
             )))
