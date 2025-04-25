@@ -334,7 +334,6 @@ mod tests {
     use super::*;
     use commonware_macros::select;
     use futures::channel::oneshot;
-    use futures::executor;
     use futures::task::noop_waker;
     use futures::{channel::mpsc, future::ready, join, SinkExt, StreamExt};
     use prometheus_client::metrics::counter::Counter;
