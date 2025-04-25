@@ -75,4 +75,7 @@ pub struct Config<
 
     /// Upon replaying a journal, the number of entries to replay concurrently.
     pub journal_replay_concurrency: usize,
+
+    /// Compression level for the journal.
+    pub journal_compression: Option<u8>,
 }

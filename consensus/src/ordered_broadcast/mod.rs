@@ -230,6 +230,7 @@ mod tests {
                     journal_heights_per_section: 10,
                     journal_replay_concurrency: 1,
                     journal_name_prefix: format!("ordered-broadcast-seq/{}/", validator),
+                    journal_compression: Some(3),
                 },
             );
 

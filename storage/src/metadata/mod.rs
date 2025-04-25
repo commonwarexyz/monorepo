@@ -93,7 +93,6 @@ pub struct Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
     use commonware_utils::array::U64;
@@ -125,7 +124,7 @@ mod tests {
             assert!(buffer.contains("keys 0"));
 
             // Put a key
-            let hello = Bytes::from("hello");
+            let hello = b"hello".to_vec();
             metadata.put(key.clone(), hello.clone());
 
             // Get the key
@@ -192,7 +191,7 @@ mod tests {
 
             // Put a key
             let key = U64::new(42);
-            let hello = Bytes::from("hello");
+            let hello = b"hello".to_vec();
             metadata.put(key.clone(), hello.clone());
 
             // Sync the metadata store
@@ -209,10 +208,10 @@ mod tests {
             assert!(buffer.contains("keys 1"));
 
             // Put an overlapping key and a new key
-            let world = Bytes::from("world");
+            let world = b"world".to_vec();
             metadata.put(key.clone(), world.clone());
             let key2 = U64::new(43);
-            let foo = Bytes::from("foo");
+            let foo = b"foo".to_vec();
             metadata.put(key2.clone(), foo.clone());
 
             // Close the metadata store
@@ -291,17 +290,17 @@ mod tests {
 
             // Put a key
             let key = U64::new(42);
-            let hello = Bytes::from("hello");
+            let hello = b"hello".to_vec();
             metadata.put(key.clone(), hello.clone());
 
             // Sync the metadata store
             metadata.sync().await.unwrap();
 
             // Put an overlapping key and a new key
-            let world = Bytes::from("world");
+            let world = b"world".to_vec();
             metadata.put(key.clone(), world.clone());
             let key2 = U64::new(43);
-            let foo = Bytes::from("foo");
+            let foo = b"foo".to_vec();
             metadata.put(key2, foo.clone());
 
             // Close the metadata store
@@ -337,17 +336,17 @@ mod tests {
 
             // Put a key
             let key = U64::new(42);
-            let hello = Bytes::from("hello");
+            let hello = b"hello".to_vec();
             metadata.put(key.clone(), hello.clone());
 
             // Sync the metadata store
             metadata.sync().await.unwrap();
 
             // Put an overlapping key and a new key
-            let world = Bytes::from("world");
+            let world = b"world".to_vec();
             metadata.put(key.clone(), world.clone());
             let key2 = U64::new(43);
-            let foo = Bytes::from("foo");
+            let foo = b"foo".to_vec();
             metadata.put(key2, foo.clone());
 
             // Close the metadata store
@@ -391,17 +390,17 @@ mod tests {
 
             // Put a key
             let key = U64::new(42);
-            let hello = Bytes::from("hello");
+            let hello = b"hello".to_vec();
             metadata.put(key.clone(), hello.clone());
 
             // Sync the metadata store
             metadata.sync().await.unwrap();
 
             // Put an overlapping key and a new key
-            let world = Bytes::from("world");
+            let world = b"world".to_vec();
             metadata.put(key.clone(), world.clone());
             let key2 = U64::new(43);
-            let foo = Bytes::from("foo");
+            let foo = b"foo".to_vec();
             metadata.put(key2, foo.clone());
 
             // Close the metadata store
@@ -437,17 +436,17 @@ mod tests {
 
             // Put a key
             let key = U64::new(42);
-            let hello = Bytes::from("hello");
+            let hello = b"hello".to_vec();
             metadata.put(key.clone(), hello.clone());
 
             // Sync the metadata store
             metadata.sync().await.unwrap();
 
             // Put an overlapping key and a new key
-            let world = Bytes::from("world");
+            let world = b"world".to_vec();
             metadata.put(key.clone(), world.clone());
             let key2 = U64::new(43);
-            let foo = Bytes::from("foo");
+            let foo = b"foo".to_vec();
             metadata.put(key2, foo.clone());
 
             // Close the metadata store
@@ -476,7 +475,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let key = U64::new(42);
-            let hello = Bytes::from("hello");
+            let hello = b"hello".to_vec();
             {
                 // Create a metadata store
                 let cfg = Config {
@@ -520,7 +519,7 @@ mod tests {
 
             // Create a value that exceeds u32::MAX bytes
             let value = vec![0u8; (u32::MAX as usize) + 1];
-            metadata.put(U64::new(1), Bytes::from(value));
+            metadata.put(U64::new(1), value);
 
             // Assert
             let result = metadata.sync().await;
