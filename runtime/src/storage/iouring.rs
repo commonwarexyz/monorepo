@@ -1,4 +1,4 @@
-use crate::{Error, Spawner};
+use crate::Error;
 use commonware_utils::{from_hex, hex};
 use futures::{
     channel::{mpsc, oneshot},
@@ -6,14 +6,11 @@ use futures::{
     SinkExt as _, StreamExt as _,
 };
 use io_uring::{opcode, squeue::Entry as SqueueEntry, types, IoUring};
-use std::{
-    collections::HashMap,
-    fs::{self, File},
-    io::{Error as IoError, ErrorKind},
-    os::fd::{AsRawFd as _, OwnedFd},
-    path::PathBuf,
-    sync::Arc,
-};
+use std::fs::{self, File};
+use std::io::{Error as IoError, ErrorKind};
+use std::os::fd::AsRawFd;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 pub struct IoUringConfig {
@@ -61,7 +58,8 @@ async fn do_work(
     let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
     let mut next_work_id: u64 = 0;
     // Maps a work ID to the sender that we will send the result to.
-    let mut waiters: HashMap<_, oneshot::Sender<i32>> = HashMap::with_capacity(cfg.size as usize);
+    let mut waiters: std::collections::HashMap<_, oneshot::Sender<i32>> =
+        std::collections::HashMap::with_capacity(cfg.size as usize);
 
     loop {
         // Try to get a completion
@@ -113,8 +111,11 @@ async fn do_work(
             }
         }
 
-        // Note that waiters.len() is never empty here.
-        // If it were, this would block forever.
+        // Wait for at least 1 item to be in the completion queue.
+        // Note that we block until anything is in the completion queue,
+        // even if it's there before this call. That is, a completion
+        // that arrived before this call will be counted and cause this
+        // call to return. Note that waiters.len() > 0 here.
         ring.submit_and_wait(1).expect("unable to submit to ring");
     }
 }
@@ -128,7 +129,7 @@ pub struct Storage {
 impl Storage {
     /// Returns a new `Storage` instance.
     /// The `Spawner` is used to spawn the background task that handles IO operations.
-    pub fn start<S: Spawner>(cfg: &Config, spawner: S) -> Self {
+    pub fn start(cfg: &Config) -> Self {
         let (io_sender, receiver) =
             mpsc::channel::<(SqueueEntry, oneshot::Sender<i32>)>(cfg.ring_config.size as usize);
 
@@ -137,7 +138,7 @@ impl Storage {
             io_sender,
         };
         let iouring_config = cfg.ring_config.clone();
-        spawner.spawn_blocking(|| block_on(do_work(iouring_config, receiver)));
+        std::thread::spawn(|| block_on(do_work(iouring_config, receiver)));
         storage
     }
 }
@@ -215,8 +216,8 @@ pub struct Blob {
     partition: String,
     /// The name of the blob
     name: Vec<u8>,
-    /// The underlying file descriptor
-    fd: Arc<OwnedFd>,
+    /// The underlying file
+    file: Arc<File>,
     /// Where to send IO operations to be executed
     io_sender: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>)>,
 }
@@ -226,7 +227,7 @@ impl Clone for Blob {
         Self {
             partition: self.partition.clone(),
             name: self.name.clone(),
-            fd: self.fd.clone(),
+            file: self.file.clone(),
             io_sender: self.io_sender.clone(),
         }
     }
@@ -242,7 +243,7 @@ impl Blob {
         Self {
             partition,
             name: name.to_vec(),
-            fd: Arc::new(OwnedFd::from(file)),
+            file: Arc::new(file),
             io_sender,
         }
     }
@@ -250,7 +251,7 @@ impl Blob {
 
 impl crate::Blob for Blob {
     async fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
-        let fd = types::Fd(self.fd.as_raw_fd());
+        let fd = types::Fd(self.file.as_raw_fd());
         let mut total_read = 0;
 
         let mut io_sender = self.io_sender.clone();
@@ -287,7 +288,7 @@ impl crate::Blob for Blob {
     }
 
     async fn write_at(&self, buf: &[u8], offset: u64) -> Result<(), Error> {
-        let fd = types::Fd(self.fd.as_raw_fd());
+        let fd = types::Fd(self.file.as_raw_fd());
         let mut total_written = 0;
 
         let mut io_sender = self.io_sender.clone();
@@ -323,46 +324,18 @@ impl crate::Blob for Blob {
     }
 
     async fn truncate(&self, len: u64) -> Result<(), Error> {
-        // Create an operation to do the truncate
-        let op = opcode::Ftruncate::new(types::Fd(self.fd.as_raw_fd()), len).build();
-
-        // Submit the operation
-        let (sender, receiver) = oneshot::channel();
-        self.io_sender
-            .clone()
-            .send((op, sender))
-            .await
-            .map_err(|_| {
-                Error::BlobTruncateFailed(
-                    self.partition.clone(),
-                    hex(&self.name),
-                    IoError::new(ErrorKind::Other, "failed to send work"),
-                )
-            })?;
-
-        // Wait for the result
-        let return_value = receiver.await.map_err(|_| {
+        self.file.set_len(len).map_err(|e| {
             Error::BlobTruncateFailed(
                 self.partition.clone(),
                 hex(&self.name),
-                IoError::new(ErrorKind::Other, "failed to read result"),
+                IoError::new(ErrorKind::Other, e),
             )
-        })?;
-
-        // If the return value is negative, it indicates an error.
-        if return_value < 0 {
-            return Err(Error::BlobTruncateFailed(
-                self.partition.clone(),
-                hex(&self.name),
-                IoError::new(ErrorKind::Other, format!("error code: {}", return_value)),
-            ));
-        }
-        Ok(())
+        })
     }
 
     async fn sync(&self) -> Result<(), Error> {
         // Create an operation to do the sync
-        let op = opcode::Fsync::new(types::Fd(self.fd.as_raw_fd())).build();
+        let op = opcode::Fsync::new(types::Fd(self.file.as_raw_fd())).build();
 
         // Submit the operation
         let (sender, receiver) = oneshot::channel();
@@ -407,11 +380,7 @@ impl crate::Blob for Blob {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        storage::tests::run_storage_tests,
-        tokio::spawner::{Config as SpawnerConfig, Spawner},
-    };
-    use prometheus_client::registry::Registry;
+    use crate::storage::tests::run_storage_tests;
     use rand::{Rng as _, SeedableRng as _};
     use std::env;
 
@@ -421,23 +390,10 @@ mod tests {
         let storage_directory =
             env::temp_dir().join(format!("commonware_iouring_storage_{}", rng.gen::<u64>()));
 
-        // Initialize runtime
-        let runtime = Arc::new(tokio::runtime::Handle::current());
-
-        let spawner = Spawner::new(
-            String::new(),
-            SpawnerConfig { catch_panics: true },
-            &mut Registry::default(),
-            runtime,
-        );
-
-        let storage = Storage::start(
-            &Config {
-                storage_directory: storage_directory.clone(),
-                ring_config: Default::default(),
-            },
-            spawner,
-        );
+        let storage = Storage::start(&Config {
+            storage_directory: storage_directory.clone(),
+            ring_config: Default::default(),
+        });
         (storage, storage_directory)
     }
 

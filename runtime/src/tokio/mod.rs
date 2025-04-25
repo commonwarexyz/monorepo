@@ -25,7 +25,6 @@
 
 pub(super) mod metrics;
 mod runtime;
-pub(super) mod spawner;
 pub use runtime::*;
 pub mod telemetry;
 pub mod tracing;

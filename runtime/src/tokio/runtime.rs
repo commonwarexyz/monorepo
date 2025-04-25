@@ -4,9 +4,8 @@ use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage
 use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
 
 use crate::storage::metered::Storage as MeteredStorage;
-use crate::tokio::metrics::Metrics;
-use crate::tokio::spawner::Config as SpawnerConfig;
-use crate::{Clock, Error, Handle, Signal, METRICS_PREFIX};
+use crate::tokio::metrics::{Metrics, Work};
+use crate::{Clock, Error, Handle, Signal, Signaler, METRICS_PREFIX};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
     encoding::text::encode,
@@ -25,12 +24,10 @@ use std::{
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{tcp::OwnedReadHalf, tcp::OwnedWriteHalf, TcpListener, TcpStream},
-    runtime::Builder,
+    runtime::{Builder, Runtime},
     time::timeout,
 };
 use tracing::warn;
-
-use super::spawner::Spawner;
 
 /// Configuration for the `tokio` runtime.
 #[derive(Clone)]
@@ -106,6 +103,9 @@ pub struct Executor {
     cfg: Config,
     registry: Mutex<Registry>,
     metrics: Arc<Metrics>,
+    runtime: Runtime,
+    signaler: Mutex<Signaler>,
+    signal: Signal,
 }
 
 /// Implementation of [crate::Runner] for the `tokio` runtime.
@@ -146,25 +146,14 @@ impl crate::Runner for Runner {
             .enable_all()
             .build()
             .expect("failed to create Tokio runtime");
-
-        let spawner = Spawner::new(
-            String::new(),
-            SpawnerConfig {
-                catch_panics: self.cfg.catch_panics,
-            },
-            runtime_registry,
-            Arc::new(runtime.handle().clone()),
-        );
+        let (signaler, signal) = Signaler::new();
 
         #[cfg(feature = "iouring")]
         let storage = MeteredStorage::new(
-            IoUringStorage::start(
-                &IoUringConfig {
-                    storage_directory: self.cfg.storage_directory.clone(),
-                    ring_config: Default::default(),
-                },
-                spawner.clone(),
-            ),
+            IoUringStorage::start(&IoUringConfig {
+                storage_directory: self.cfg.storage_directory.clone(),
+                ring_config: Default::default(),
+            }),
             runtime_registry,
         );
 
@@ -178,16 +167,22 @@ impl crate::Runner for Runner {
         );
 
         let executor = Arc::new(Executor {
-            cfg: self.cfg.clone(),
+            cfg: self.cfg,
             registry: Mutex::new(registry),
             metrics,
+            runtime,
+            signaler: Mutex::new(signaler),
+            signal,
         });
 
-        runtime.block_on(f(Context {
+        let context = Context {
             storage,
-            spawner,
+            label: String::new(),
+            spawned: false,
             executor: executor.clone(),
-        }))
+        };
+
+        executor.runtime.block_on(f(context))
     }
 }
 
@@ -200,11 +195,22 @@ type Storage = MeteredStorage<TokioStorage>;
 /// Implementation of [`crate::Spawner`], [`crate::Clock`],
 /// [`crate::Network`], and [`crate::Storage`] for the `tokio`
 /// runtime.
-#[derive(Clone)]
 pub struct Context {
-    spawner: Spawner,
+    label: String,
+    spawned: bool,
     executor: Arc<Executor>,
     storage: Storage,
+}
+
+impl Clone for Context {
+    fn clone(&self) -> Self {
+        Self {
+            label: self.label.clone(),
+            spawned: false,
+            executor: self.executor.clone(),
+            storage: self.storage.clone(),
+        }
+    }
 }
 
 impl crate::Spawner for Context {
@@ -214,12 +220,34 @@ impl crate::Spawner for Context {
         Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        // Create a closure that adapts f to what Spawner::spawn expects
-        let context = self.clone();
-        self.spawner.spawn(|_| {
-            // Call the original function with ourself as context
-            f(context)
-        })
+        // Ensure a context only spawns one task
+        assert!(!self.spawned, "already spawned");
+
+        // Get metrics
+        let work = Work {
+            label: self.label.clone(),
+        };
+        self.executor
+            .metrics
+            .tasks_spawned
+            .get_or_create(&work)
+            .inc();
+        let gauge = self
+            .executor
+            .metrics
+            .tasks_running
+            .get_or_create(&work)
+            .clone();
+
+        // Set up the task
+        let catch_panics = self.executor.cfg.catch_panics;
+        let executor = self.executor.clone();
+        let future = f(self);
+        let (f, handle) = Handle::init(future, gauge, catch_panics);
+
+        // Spawn the task
+        executor.runtime.spawn(f);
+        handle
     }
 
     fn spawn_ref<F, T>(&mut self) -> impl FnOnce(F) -> Handle<T> + 'static
@@ -227,7 +255,35 @@ impl crate::Spawner for Context {
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        self.spawner.spawn_ref()
+        // Ensure a context only spawns one task
+        assert!(!self.spawned, "already spawned");
+        self.spawned = true;
+
+        // Get metrics
+        let work = Work {
+            label: self.label.clone(),
+        };
+        self.executor
+            .metrics
+            .tasks_spawned
+            .get_or_create(&work)
+            .inc();
+        let gauge = self
+            .executor
+            .metrics
+            .tasks_running
+            .get_or_create(&work)
+            .clone();
+
+        // Set up the task
+        let executor = self.executor.clone();
+        move |f: F| {
+            let (f, handle) = Handle::init(f, gauge, executor.cfg.catch_panics);
+
+            // Spawn the task
+            executor.runtime.spawn(f);
+            handle
+        }
     }
 
     fn spawn_blocking<F, T>(self, f: F) -> Handle<T>
@@ -235,22 +291,46 @@ impl crate::Spawner for Context {
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
     {
-        self.spawner.spawn_blocking(f)
+        // Ensure a context only spawns one task
+        assert!(!self.spawned, "already spawned");
+
+        // Get metrics
+        let work = Work {
+            label: self.label.clone(),
+        };
+        self.executor
+            .metrics
+            .blocking_tasks_spawned
+            .get_or_create(&work)
+            .inc();
+        let gauge = self
+            .executor
+            .metrics
+            .blocking_tasks_running
+            .get_or_create(&work)
+            .clone();
+
+        // Initialize the blocking task using the new function
+        let (f, handle) = Handle::init_blocking(f, gauge, self.executor.cfg.catch_panics);
+
+        // Spawn the blocking task
+        self.executor.runtime.spawn_blocking(f);
+        handle
     }
 
     fn stop(&self, value: i32) {
-        self.spawner.stop(value);
+        self.executor.signaler.lock().unwrap().signal(value);
     }
 
     fn stopped(&self) -> Signal {
-        self.spawner.stopped()
+        self.executor.signal.clone()
     }
 }
 
 impl crate::Metrics for Context {
     fn with_label(&self, label: &str) -> Self {
         let label = {
-            let prefix = self.spawner.label.clone();
+            let prefix = self.label.clone();
             if prefix.is_empty() {
                 label.to_string()
             } else {
@@ -262,20 +342,21 @@ impl crate::Metrics for Context {
             "using runtime label is not allowed"
         );
         Self {
-            spawner: self.spawner.with_label(label),
+            label,
+            spawned: false,
             executor: self.executor.clone(),
             storage: self.storage.clone(),
         }
     }
 
     fn label(&self) -> String {
-        self.spawner.label.clone()
+        self.label.clone()
     }
 
     fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
         let name = name.into();
         let prefixed_name = {
-            let prefix = &self.spawner.label;
+            let prefix = &self.label;
             if prefix.is_empty() {
                 name
             } else {
