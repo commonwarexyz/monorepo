@@ -1,8 +1,10 @@
 use crate::p2p::wire;
 use bimap::BiHashMap;
-use commonware_codec::Encode;
 use commonware_p2p::{
-    utils::requester::{Config, Requester, ID},
+    utils::{
+        codec::WrappedSender,
+        requester::{Config, Requester, ID},
+    },
     Recipients, Sender,
 };
 use commonware_runtime::{Clock, Metrics};
@@ -89,7 +91,12 @@ impl<E: Clock + GClock + Rng + Metrics, P: Array, Key: Array, NetS: Sender<Publi
     /// If false, the fetch is treated as a retry.
     ///
     /// Panics if the key is already being fetched.
-    pub async fn fetch(&mut self, sender: &mut NetS, key: Key, is_new: bool) {
+    pub async fn fetch(
+        &mut self,
+        sender: &mut WrappedSender<NetS, (), wire::Message<Key>>,
+        key: Key,
+        is_new: bool,
+    ) {
         // Panic if the key is already being fetched
         assert!(!self.contains(&key));
 
@@ -103,10 +110,15 @@ impl<E: Clock + GClock + Rng + Metrics, P: Array, Key: Array, NetS: Sender<Publi
         };
 
         // Send message to peer
-        let payload = wire::Payload::Request(key.clone());
-        let msg = wire::Message { id, payload }.encode().into();
         let result = sender
-            .send(Recipients::One(peer.clone()), msg, self.priority_requests)
+            .send(
+                Recipients::One(peer.clone()),
+                wire::Message {
+                    id,
+                    payload: wire::Payload::Request(key.clone()),
+                },
+                self.priority_requests,
+            )
             .await;
         let result = match result {
             Err(err) => Err(SendError::Failed::<NetS>(err)),

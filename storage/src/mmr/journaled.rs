@@ -78,6 +78,12 @@ impl<E: RStorage + Clock + Metrics, H: Hasher> Storage<H::Digest> for Mmr<E, H> 
     }
 }
 
+/// Prefix used for nodes in the metadata prefixed U8 key.
+const NODE_PREFIX: u8 = 0;
+
+/// Prefix used for the key storing the prune_to_pos position in the metadata.
+const PRUNE_TO_POS_PREFIX: u8 = 1;
+
 impl<E: RStorage + Clock + Metrics, H: Hasher> Mmr<E, H> {
     /// Initialize a new `Mmr` instance.
     pub async fn init(context: E, cfg: Config) -> Result<Self, Error> {
@@ -107,7 +113,7 @@ impl<E: RStorage + Clock + Metrics, H: Hasher> Mmr<E, H> {
         // Make sure the journal's oldest retained node is as expected based on the last pruning
         // boundary stored in metadata. If they don't match, prune the journal to the appropriate
         // location.
-        let key: U64 = U64::new(Self::PRUNE_TO_POS_PREFIX, 0);
+        let key: U64 = U64::new(PRUNE_TO_POS_PREFIX, 0);
         let metadata_prune_pos = match metadata.get(&key) {
             Some(bytes) => u64::from_be_bytes(
                 bytes
@@ -211,7 +217,7 @@ impl<E: RStorage + Clock + Metrics, H: Hasher> Mmr<E, H> {
         journal: &Journal<E, H::Digest>,
         pos: u64,
     ) -> Result<H::Digest, Error> {
-        if let Some(bytes) = metadata.get(&U64::new(0, pos)) {
+        if let Some(bytes) = metadata.get(&U64::new(NODE_PREFIX, pos)) {
             debug!(pos, "read node from metadata");
             let digest = H::Digest::decode(bytes.as_ref());
             let Ok(digest) = digest else {
@@ -331,12 +337,6 @@ impl<E: RStorage + Clock + Metrics, H: Hasher> Mmr<E, H> {
         Ok(())
     }
 
-    /// Prefix used for nodes in the metadata prefixed U8 key.
-    const NODE_PREFIX: u8 = 0;
-
-    /// Prefix used for the key storing the prune_to_pos position in the metadata.
-    const PRUNE_TO_POS_PREFIX: u8 = 1;
-
     /// Compute and add required nodes for the given pruning point to the metadata, and write it to
     /// disk. Return the computed set of required nodes.
     async fn update_metadata(
@@ -347,11 +347,11 @@ impl<E: RStorage + Clock + Metrics, H: Hasher> Mmr<E, H> {
         for pos in Proof::<H>::nodes_to_pin(prune_to_pos) {
             let digest = self.get_node(pos).await?.unwrap();
             self.metadata
-                .put(U64::new(Self::NODE_PREFIX, pos), digest.to_vec());
+                .put(U64::new(NODE_PREFIX, pos), digest.to_vec());
             pinned_nodes.insert(pos, digest);
         }
 
-        let key: U64 = U64::new(Self::PRUNE_TO_POS_PREFIX, 0);
+        let key: U64 = U64::new(PRUNE_TO_POS_PREFIX, 0);
         self.metadata.put(key, prune_to_pos.to_be_bytes().into());
 
         self.metadata.sync().await.map_err(Error::MetadataError)?;

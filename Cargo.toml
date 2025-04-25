@@ -68,6 +68,7 @@ opentelemetry_sdk =  "0.28.0"
 tracing-opentelemetry = "0.29.0"
 io-uring = "0.7.4"
 rayon = "1.10.0"
+async-lock = "3.4.0"
 
 [profile.bench]
 # Because we enable overflow checks in "release," we should benchmark with them.

@@ -181,6 +181,12 @@ pub struct PublicKey {
     key: group::Public,
 }
 
+impl AsRef<group::Public> for PublicKey {
+    fn as_ref(&self) -> &group::Public {
+        &self.key
+    }
+}
+
 impl Write for PublicKey {
     fn write(&self, buf: &mut impl BufMut) {
         self.raw.write(buf);
@@ -257,6 +263,12 @@ impl Display for PublicKey {
 pub struct Signature {
     raw: [u8; group::SIGNATURE_LENGTH],
     signature: group::Signature,
+}
+
+impl AsRef<group::Signature> for Signature {
+    fn as_ref(&self) -> &group::Signature {
+        &self.signature
+    }
 }
 
 impl Write for Signature {

@@ -118,13 +118,10 @@ mod tests {
                 mailbox_size: 1024,
                 deque_size: CACHE_SIZE,
                 priority: false,
-                decode_config: (),
+                codec_config: (),
             };
             let (engine, engine_mailbox) =
-                Engine::<_, PublicKey, Sha256Digest, _, TestMessage, _, _>::new(
-                    context.clone(),
-                    config,
-                );
+                Engine::<_, PublicKey, Sha256Digest, _, TestMessage>::new(context.clone(), config);
             mailboxes.insert(peer.clone(), engine_mailbox);
             engine.start(network);
         }
@@ -151,11 +148,32 @@ mod tests {
             for peer in peers.iter() {
                 let mut mailbox = mailboxes.get(peer).unwrap().clone();
                 let digest = message.digest();
-                let receiver = mailbox.get(digest).await;
+                let receiver = mailbox.subscribe(digest).await;
                 let received_message = receiver.await.ok();
                 assert_eq!(received_message.unwrap(), message);
             }
             assert_eq!(result.await.unwrap().len(), peers.len() - 1);
+
+            // Drop broadcast result
+            let message = TestMessage::new(b"hello world again");
+            let result = first_mailbox.broadcast(message.clone()).await;
+            drop(result);
+
+            // Allow time for propagation
+            context.sleep(Duration::from_secs(1)).await;
+
+            // Check that all peers received the new message
+            let mut found = 0;
+            for peer in peers.iter() {
+                let mut mailbox = mailboxes.get(peer).unwrap().clone();
+                let digest = message.digest();
+                let receiver = mailbox.get(digest).await;
+                if let Some(msg) = receiver {
+                    assert_eq!(msg, message);
+                    found += 1;
+                }
+            }
+            assert!(found > 0, "No peers received the message");
         });
     }
 
@@ -175,8 +193,12 @@ mod tests {
             let m1 = TestMessage::new(b"hello world");
             let digest_m1 = m1.digest();
 
-            // Attempt retrieval before broadcasting
+            // Attempt immediate retrieval before broadcasting
             let receiver_before = mailbox_a.get(digest_m1).await;
+            assert_eq!(receiver_before, None);
+
+            // Attempt retrieval before broadcasting
+            let receiver_before = mailbox_a.subscribe(digest_m1).await;
 
             // Broadcast the message
             let result = mailbox_a.broadcast(m1.clone()).await;
@@ -188,8 +210,12 @@ mod tests {
                 .expect("Pre-broadcast retrieval failed");
             assert_eq!(msg_before, m1);
 
+            // Attempt immediate retrieval after broadcasting
+            let receiver_after = mailbox_a.get(digest_m1).await.unwrap();
+            assert_eq!(receiver_after, m1);
+
             // Perform a second retrieval after the broadcast
-            let receiver_after = mailbox_a.get(digest_m1).await;
+            let receiver_after = mailbox_a.subscribe(digest_m1).await;
 
             // Measure the time taken for the second retrieval
             let start = context.current();
@@ -229,7 +255,7 @@ mod tests {
                 let mut all_received = true;
                 for peer in peers.iter() {
                     let mut mailbox = mailboxes.get(peer).unwrap().clone();
-                    let receiver = mailbox.get(digest).await;
+                    let receiver = mailbox.subscribe(digest).await;
                     let has = select! {
                         _ = context.sleep(A_JIFFY) => {false},
                         r = receiver => { r.is_ok() },
@@ -268,7 +294,7 @@ mod tests {
             // Get from cache (should be instant)
             let digest = message.digest();
             let mut mailbox = mailboxes.get(peers.last().unwrap()).unwrap().clone();
-            let receiver = mailbox.get(digest).await;
+            let receiver = mailbox.subscribe(digest).await;
             let start = context.current();
             let received = receiver.await.expect("failed to get cached message");
             let duration = context.current().duration_since(start).unwrap();
@@ -290,11 +316,11 @@ mod tests {
             let digest = message.digest();
             let mut mailbox1 = mailboxes.get(&peers[0]).unwrap().clone();
             let mut mailbox2 = mailboxes.get(&peers[1]).unwrap().clone();
-            let receiver = mailbox1.get(digest).await;
+            let receiver = mailbox1.subscribe(digest).await;
 
             // Create two other requests which are dropped
-            let dummy1 = mailbox1.get(digest).await;
-            let dummy2 = mailbox2.get(digest).await;
+            let dummy1 = mailbox1.subscribe(digest).await;
+            let dummy2 = mailbox2.subscribe(digest).await;
             drop(dummy1);
             drop(dummy2);
 
@@ -336,12 +362,12 @@ mod tests {
             // Check all other messages exist
             let mut peer_mailbox = mailboxes.get(&peers[1]).unwrap().clone();
             for msg in messages.iter().skip(1) {
-                let result = peer_mailbox.get(msg.digest()).await.await.unwrap();
+                let result = peer_mailbox.subscribe(msg.digest()).await.await.unwrap();
                 assert_eq!(result, msg.clone());
             }
 
             // Check first message times out
-            let receiver = peer_mailbox.get(messages[0].digest()).await;
+            let receiver = peer_mailbox.subscribe(messages[0].digest()).await;
             select! {
                 _ = context.sleep(A_JIFFY) => {},
                 _ = receiver => { panic!("receiver should have failed")},
@@ -389,7 +415,7 @@ mod tests {
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
             // Verify B can still get M1 (in C's deque)
-            let receiver = mailbox_b.get(digest_m1).await;
+            let receiver = mailbox_b.subscribe(digest_m1).await;
             let received = receiver.await.expect("M1 should be retrievable");
             assert_eq!(received, m1);
 
@@ -405,7 +431,7 @@ mod tests {
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
             // Verify B cannot get M1 (evicted from all deques)
-            let receiver = mailbox_b.get(digest_m1).await;
+            let receiver = mailbox_b.subscribe(digest_m1).await;
             select! {
                 _ = context.sleep(A_JIFFY) => {},
                 _ = receiver => { panic!("M1 should not be retrievable"); },

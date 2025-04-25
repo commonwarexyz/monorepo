@@ -15,6 +15,6 @@ pub struct Config<Cfg: CodecCfg, P: Array> {
     /// Whether messages are sent over the network as priority.
     pub priority: bool,
 
-    /// The configuration for decoding messages.
-    pub decode_config: Cfg,
+    /// The configuration for the codec item.
+    pub codec_config: Cfg,
 }
