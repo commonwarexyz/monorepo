@@ -248,7 +248,7 @@ mod tests {
         context: Context,
         sequencers: Vec<PublicKey>,
         reporters: &BTreeMap<PublicKey, mocks::ReporterMailbox<Ed25519, Sha256Digest>>,
-        threshold: (u64, Epoch),
+        threshold: (u64, Epoch, bool),
     ) {
         let mut receivers = Vec::new();
         for (reporter, mailbox) in reporters.iter() {
@@ -267,7 +267,14 @@ mod tests {
                             let (height, epoch) =
                                 mailbox.get_tip(sequencer.clone()).await.unwrap_or((0, 0));
                             debug!(height, epoch, ?sequencer, ?reporter, "reporter");
-                            if height >= threshold.0 && epoch >= threshold.1 {
+                            let contiguous_height = mailbox
+                                .get_contiguous_tip(sequencer.clone())
+                                .await
+                                .unwrap_or(0);
+                            if height >= threshold.0
+                                && epoch >= threshold.1
+                                && (!threshold.2 || contiguous_height >= threshold.0)
+                            {
                                 let _ = tx.send(sequencer.clone());
                                 break;
                             }
@@ -339,7 +346,7 @@ mod tests {
                 context.with_label("reporter"),
                 reporters.keys().cloned().collect::<Vec<_>>(),
                 &reporters,
-                (100, 111),
+                (100, 111, true),
             )
             .await;
         });
@@ -507,7 +514,7 @@ mod tests {
                 context.with_label("reporter"),
                 reporters.keys().cloned().collect::<Vec<_>>(),
                 &reporters,
-                (max_height + 100, 111),
+                (max_height + 100, 111, false),
             )
             .await;
         });
@@ -564,7 +571,7 @@ mod tests {
                 context.with_label("reporter"),
                 reporters.keys().cloned().collect::<Vec<_>>(),
                 &reporters,
-                (40, 111),
+                (40, 111, false),
             )
             .await;
 
@@ -627,7 +634,7 @@ mod tests {
                 context.with_label("reporter"),
                 reporters.keys().cloned().collect::<Vec<_>>(),
                 &reporters,
-                (100, 111),
+                (100, 111, true),
             )
             .await;
         });
@@ -674,7 +681,7 @@ mod tests {
                 context.with_label("reporter"),
                 reporters.keys().cloned().collect::<Vec<_>>(),
                 &reporters,
-                (100, 111),
+                (100, 111, true),
             )
             .await;
 
@@ -701,7 +708,7 @@ mod tests {
                 context.with_label("reporter"),
                 reporters.keys().cloned().collect::<Vec<_>>(),
                 &reporters,
-                (max_height + 100, 112),
+                (max_height + 100, 112, true),
             )
             .await;
         });
@@ -880,7 +887,7 @@ mod tests {
                 context.with_label("reporter"),
                 vec![sequencer.public_key()],
                 &reporters,
-                (100, 111),
+                (100, 111, true),
             )
             .await;
         });
