@@ -19,6 +19,55 @@ pub enum Identifier<'a, K: Array> {
     Key(&'a K),
 }
 
+/// Record stored in the `Archive`.
+pub struct Record<K: Array, VC: CodecConfig + Copy, V: Codec<VC>> {
+    index: u64,
+    key: K,
+    value: V,
+
+    _phantom: PhantomData<VC>,
+}
+
+impl<K: Array, VC: CodecConfig + Copy, V: Codec<VC>> Record<K, VC, V> {
+    /// Create a new `Record`.
+    fn new(index: u64, key: K, value: V) -> Self {
+        Self {
+            index,
+            key,
+            value,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<K: Array, VC: CodecConfig + Copy, V: Codec<VC>> Write for Record<K, VC, V> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.index.write(buf);
+        self.key.write(buf);
+        self.value.write(buf);
+    }
+}
+
+impl<K: Array, VC: CodecConfig + Copy, V: Codec<VC>> Read<VC> for Record<K, VC, V> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &VC) -> Result<Self, commonware_codec::Error> {
+        let index = u64::read(buf)?;
+        let key = K::read(buf)?;
+        let value = V::read_cfg(buf, cfg)?;
+        Ok(Self {
+            index,
+            key,
+            value,
+            _phantom: PhantomData,
+        })
+    }
+}
+
+impl<K: Array, VC: CodecConfig + Copy, V: Codec<VC>> EncodeSize for Record<K, VC, V> {
+    fn encode_size(&self) -> usize {
+        u64::SIZE + K::SIZE + self.value.encode_size()
+    }
+}
+
 /// Implementation of `Archive` storage.
 pub struct Archive<
     T: Translator,
@@ -27,8 +76,8 @@ pub struct Archive<
     VC: CodecConfig + Copy,
     V: Codec<VC>,
 > {
+    // The section mask is used to determine which section of the journal to write to.
     section_mask: u64,
-    pending_writes: usize,
     journal: Journal<E, VC, Record<K, VC, V>>,
 
     // Oldest allowed section to read from. This is updated when `prune` is called.
@@ -42,6 +91,7 @@ pub struct Archive<
     intervals: RangeInclusiveSet<u64>,
 
     // Track the number of writes pending for a section to determine when to sync.
+    pending_writes: usize,
     pending: BTreeMap<u64, usize>,
 
     items_tracked: Gauge,
@@ -50,53 +100,6 @@ pub struct Archive<
     gets: Counter,
     has: Counter,
     syncs: Counter,
-}
-
-pub struct Record<K: Array, VCfg: CodecConfig + Copy, V: Codec<VCfg>> {
-    index: u64,
-    key: K,
-    value: V,
-
-    _phantom: PhantomData<VCfg>,
-}
-
-impl<K: Array, VCfg: CodecConfig + Copy, V: Codec<VCfg>> Record<K, VCfg, V> {
-    fn new(index: u64, key: K, value: V) -> Self {
-        Self {
-            index,
-            key,
-            value,
-            _phantom: PhantomData,
-        }
-    }
-}
-
-impl<K: Array, VCfg: CodecConfig + Copy, V: Codec<VCfg>> Write for Record<K, VCfg, V> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.index.write(buf);
-        self.key.write(buf);
-        self.value.write(buf);
-    }
-}
-
-impl<K: Array, VCfg: CodecConfig + Copy, V: Codec<VCfg>> Read<VCfg> for Record<K, VCfg, V> {
-    fn read_cfg(buf: &mut impl Buf, cfg: &VCfg) -> Result<Self, commonware_codec::Error> {
-        let index = u64::read(buf)?;
-        let key = K::read(buf)?;
-        let value = V::read_cfg(buf, cfg)?;
-        Ok(Self {
-            index,
-            key,
-            value,
-            _phantom: PhantomData,
-        })
-    }
-}
-
-impl<K: Array, VCfg: CodecConfig + Copy, V: Codec<VCfg>> EncodeSize for Record<K, VCfg, V> {
-    fn encode_size(&self) -> usize {
-        u64::SIZE + K::SIZE + self.value.encode_size()
-    }
 }
 
 impl<T: Translator, E: Storage + Metrics, K: Array, VC: CodecConfig + Copy, V: Codec<VC>>
