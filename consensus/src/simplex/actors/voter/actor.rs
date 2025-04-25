@@ -1665,7 +1665,7 @@ impl<
         sender: impl Sender,
         receiver: impl Receiver,
     ) {
-        // Wrap channels
+        // Wrap channel
         let (mut sender, mut receiver) = wrap(self.max_participants, sender, receiver);
 
         // Compute genesis
@@ -1912,12 +1912,12 @@ impl<
                 },
                 msg = receiver.recv() => {
                     // Break if there is an internal error
-                    let Ok(msg) = msg else {
+                    let Ok((s, msg)) = msg else {
                         break;
                     };
 
                     // Skip if there is a decoding error
-                    let Ok((s, msg)) = msg else {
+                    let Ok(msg) = msg else {
                         continue;
                     };
 

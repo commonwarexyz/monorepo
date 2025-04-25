@@ -9,10 +9,15 @@ use crate::{
     },
     Supervisor,
 };
-use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{Digest, Scheme};
 use commonware_macros::select;
-use commonware_p2p::{utils::requester, Receiver, Recipients, Sender};
+use commonware_p2p::{
+    utils::{
+        codec::{wrap, WrappedSender},
+        requester,
+    },
+    Receiver, Recipients, Sender,
+};
 use commonware_runtime::{Clock, Handle, Metrics, Spawner};
 use futures::{channel::mpsc, future::Either, StreamExt};
 use governor::clock::Clock as GClock;
@@ -191,7 +196,11 @@ impl<
     }
 
     /// Concurrent indicates whether we should send a new request (only if we see a request for the first time)
-    async fn send(&mut self, shuffle: bool, sender: &mut impl Sender<PublicKey = C::PublicKey>) {
+    async fn send<Sr: Sender<PublicKey = C::PublicKey>>(
+        &mut self,
+        shuffle: bool,
+        sender: &mut WrappedSender<Sr, (usize, usize), Backfiller<C::Signature, D>>,
+    ) {
         // Clear retry
         self.retry = None;
 
@@ -255,9 +264,7 @@ impl<
 
                 // Create new message
                 msg.id = request;
-                let encoded = Backfiller::Request::<C::Signature, D>(msg.clone())
-                    .encode()
-                    .into();
+                let encoded = Backfiller::Request(msg.clone());
 
                 // Try to send
                 if sender
@@ -298,9 +305,16 @@ impl<
     async fn run(
         mut self,
         mut voter: voter::Mailbox<C::Signature, D>,
-        mut sender: impl Sender<PublicKey = C::PublicKey>,
-        mut receiver: impl Receiver<PublicKey = C::PublicKey>,
+        sender: impl Sender<PublicKey = C::PublicKey>,
+        receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) {
+        // Wrap channel
+        let (mut sender, mut receiver) = wrap(
+            (self.max_fetch_count, self.max_participants),
+            sender,
+            receiver,
+        );
+
         // Wait for an event
         let mut current_view = 0;
         let mut finalized_view = 0;
@@ -423,14 +437,16 @@ impl<
                     }
                 },
                 network = receiver.recv() => {
-                    let (s, msg) = network.unwrap();
-                    let msg = match Backfiller::decode_cfg(msg, &(self.max_fetch_count, self.max_participants)) {
-                        Ok(msg) => msg,
-                        Err(err) => {
-                            warn!(?err, sender = ?s, "failed to decode message");
-                            self.requester.block(s);
-                            continue;
-                        },
+                    // Break if there is an internal error
+                    let Ok((s, msg)) = network else {
+                        break;
+                    };
+
+                    // Skip if there is a decoding error
+                    let Ok(msg) = msg else {
+                        debug!(sender = ?s, "failed to decode message");
+                        self.requester.block(s);
+                        continue;
                     };
                     match msg {
                         Backfiller::Request(request) => {
@@ -465,13 +481,11 @@ impl<
 
                             // Send response
                             debug!(sender = ?s, ?notarizations, ?missing_notarizations, ?nullifications, ?missing_nullifications, "sending response");
-                            let msg = Backfiller::Response::<C::Signature, D>(Response::new(
+                            let msg = Backfiller::Response(Response::new(
                                 request.id,
                                 notarizations_found,
                                 nullifications_found,
-                            ))
-                            .encode()
-                            .into();
+                            ));
                             sender
                                 .send(Recipients::One(s), msg, false)
                                 .await
