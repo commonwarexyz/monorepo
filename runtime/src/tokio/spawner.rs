@@ -14,7 +14,7 @@ use crate::{Handle, Signal, Signaler};
 use super::metrics::Work;
 
 #[derive(Clone)]
-pub(super) struct Spawner {
+pub(crate) struct Spawner {
     cfg: Config,
     pub(super) label: String,
     spawned: bool,
@@ -25,12 +25,12 @@ pub(super) struct Spawner {
 }
 
 #[derive(Clone)]
-pub(super) struct Config {
-    pub(super) catch_panics: bool,
+pub(crate) struct Config {
+    pub(crate) catch_panics: bool,
 }
 
 impl Spawner {
-    pub(super) fn new(
+    pub(crate) fn new(
         label: String,
         cfg: Config,
         reg: &mut Registry,

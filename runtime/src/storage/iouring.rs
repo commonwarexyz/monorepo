@@ -409,7 +409,7 @@ mod tests {
     use super::*;
     use crate::{
         storage::tests::run_storage_tests,
-        tokio::{Spawner, SpawnerConfig},
+        tokio::spawner::{Config as SpawnerConfig, Spawner},
     };
     use prometheus_client::registry::Registry;
     use rand::{Rng as _, SeedableRng as _};
