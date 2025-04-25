@@ -238,6 +238,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_pointer_width = "64")]
     #[test]
     #[should_panic(expected = "encode_size: usize value is larger than u32")]
     fn test_usize_encode_panic() {
