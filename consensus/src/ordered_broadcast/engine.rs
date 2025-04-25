@@ -142,6 +142,9 @@ pub struct Engine<
     // The rest of the name is the hex-encoded public keys of the relevant sequencer.
     journal_name_prefix: String,
 
+    // Compression level for the journal.
+    journal_compression: Option<u8>,
+
     // A map of sequencer public keys to their journals.
     journals: BTreeMap<C::PublicKey, Journal<E, (), Node<C, D>>>,
 
@@ -227,6 +230,7 @@ impl<
             journal_heights_per_section: cfg.journal_heights_per_section,
             journal_replay_concurrency: cfg.journal_replay_concurrency,
             journal_name_prefix: cfg.journal_name_prefix,
+            journal_compression: cfg.journal_compression,
             journals: BTreeMap::new(),
             tip_manager: TipManager::<C, D>::new(),
             ack_manager: AckManager::<C::PublicKey, D>::new(),
@@ -952,7 +956,7 @@ impl<
         // Initialize journal
         let cfg = journal::variable::Config {
             partition: format!("{}{}", &self.journal_name_prefix, sequencer),
-            compression: Some(3),
+            compression: self.journal_compression,
             codec_config: (),
         };
         let mut journal =
