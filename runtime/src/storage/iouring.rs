@@ -111,8 +111,11 @@ async fn do_work(
             }
         }
 
-        // Note that waiters.len() is never empty here.
-        // If it were, this would block forever.
+        // Wait for at least 1 item to be in the completion queue.
+        // Note that we block until anything is in the completion queue,
+        // even if it's there before this call. That is, a completion
+        // that arrived before this call will be counted and cause this
+        // call to return. Note that waiters.len() > 0 here.
         ring.submit_and_wait(1).expect("unable to submit to ring");
     }
 }
