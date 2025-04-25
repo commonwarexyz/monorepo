@@ -182,8 +182,8 @@ impl<
                     };
 
                     // Decode the message
-                    let message = match msg {
-                        Ok(message) => message,
+                    let msg = match msg {
+                        Ok(msg) => msg,
                         Err(err) => {
                             warn!(?err, ?peer, "failed to decode message");
                             self.metrics.receive.inc(Status::Invalid);
@@ -193,7 +193,7 @@ impl<
 
                     trace!(?peer, "network");
                     self.metrics.peer.get_or_create(&SequencerLabel::from(&peer)).inc();
-                    self.handle_network(peer, message).await;
+                    self.handle_network(peer, msg).await;
                 },
             }
         }
