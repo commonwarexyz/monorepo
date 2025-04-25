@@ -71,6 +71,7 @@ mod tests {
         Metrics,
     };
     use commonware_runtime::{Clock, Runner, Spawner};
+    use commonware_utils::quorum;
     use futures::channel::oneshot;
     use futures::future::join_all;
     use rand::{rngs::StdRng, SeedableRng as _};
@@ -86,15 +87,15 @@ mod tests {
 
     type Registrations<P> = BTreeMap<P, ((Sender<P>, Receiver<P>), (Sender<P>, Receiver<P>))>;
 
-    async fn register_validators(
+    async fn register_participants(
         oracle: &mut Oracle<PublicKey>,
-        validators: &[PublicKey],
+        participants: &[PublicKey],
     ) -> Registrations<PublicKey> {
         let mut registrations = BTreeMap::new();
-        for validator in validators.iter() {
-            let (a1, a2) = oracle.register(validator.clone(), 0).await.unwrap();
-            let (b1, b2) = oracle.register(validator.clone(), 1).await.unwrap();
-            registrations.insert(validator.clone(), ((a1, a2), (b1, b2)));
+        for participant in participants.iter() {
+            let (a1, a2) = oracle.register(participant.clone(), 0).await.unwrap();
+            let (b1, b2) = oracle.register(participant.clone(), 1).await.unwrap();
+            registrations.insert(participant.clone(), ((a1, a2), (b1, b2)));
         }
         registrations
     }
@@ -106,19 +107,19 @@ mod tests {
         Unlink,
     }
 
-    async fn link_validators(
+    async fn link_participants(
         oracle: &mut Oracle<PublicKey>,
-        validators: &[PublicKey],
+        participants: &[PublicKey],
         action: Action,
         restrict_to: Option<fn(usize, usize, usize) -> bool>,
     ) {
-        for (i1, v1) in validators.iter().enumerate() {
-            for (i2, v2) in validators.iter().enumerate() {
+        for (i1, v1) in participants.iter().enumerate() {
+            for (i2, v2) in participants.iter().enumerate() {
                 if v2 == v1 {
                     continue;
                 }
                 if let Some(f) = restrict_to {
-                    if !f(validators.len(), i1, i2) {
+                    if !f(participants.len(), i1, i2) {
                         continue;
                     }
                 }
@@ -167,13 +168,13 @@ mod tests {
             .map(|(pk, _, _)| pk.clone())
             .collect::<Vec<_>>();
 
-        let registrations = register_validators(&mut oracle, &pks).await;
+        let registrations = register_participants(&mut oracle, &pks).await;
         let link = Link {
             latency: 10.0,
             jitter: 1.0,
             success_rate: 1.0,
         };
-        link_validators(&mut oracle, &pks, Action::Link(link), None).await;
+        link_participants(&mut oracle, &pks, Action::Link(link), None).await;
         (oracle, validators, pks, registrations)
     }
 
@@ -367,13 +368,13 @@ mod tests {
                     .map(|(pk, _, _)| pk.clone())
                     .collect::<Vec<_>>();
 
-                let mut registrations = register_validators(&mut oracle, &pks).await;
+                let mut registrations = register_participants(&mut oracle, &pks).await;
                 let link = commonware_p2p::simulated::Link {
                     latency: 10.0,
                     jitter: 1.0,
                     success_rate: 1.0,
                 };
-                link_validators(&mut oracle, &pks, Action::Link(link), None).await;
+                link_participants(&mut oracle, &pks, Action::Link(link), None).await;
 
                 let automatons = Arc::new(Mutex::new(BTreeMap::<
                     PublicKey,
@@ -471,7 +472,7 @@ mod tests {
             );
 
             // Simulate partition by removing all links.
-            link_validators(&mut oracle, &pks, Action::Unlink, None).await;
+            link_participants(&mut oracle, &pks, Action::Unlink, None).await;
             context.sleep(Duration::from_secs(30)).await;
 
             // Get the maximum height from all reporters.
@@ -483,7 +484,7 @@ mod tests {
                 jitter: 1.0,
                 success_rate: 1.0,
             };
-            link_validators(&mut oracle, &pks, Action::Link(link), None).await;
+            link_participants(&mut oracle, &pks, Action::Link(link), None).await;
             await_reporters(
                 context.with_label("reporter"),
                 &reporters,
@@ -520,7 +521,7 @@ mod tests {
                 success_rate: 0.5,
             };
             let mut oracle_clone = oracle.clone();
-            link_validators(&mut oracle_clone, &pks, Action::Update(delayed_link), None).await;
+            link_participants(&mut oracle_clone, &pks, Action::Update(delayed_link), None).await;
 
             let automatons = Arc::new(Mutex::new(
                 BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
@@ -641,7 +642,7 @@ mod tests {
             await_reporters(context.with_label("reporter"), &reporters, (100, 111)).await;
 
             // Simulate partition by removing all links.
-            link_validators(&mut oracle, &pks, Action::Unlink, None).await;
+            link_participants(&mut oracle, &pks, Action::Unlink, None).await;
             context.sleep(Duration::from_secs(30)).await;
 
             // Get the maximum height from all reporters.
@@ -658,13 +659,66 @@ mod tests {
                 jitter: 1.0,
                 success_rate: 1.0,
             };
-            link_validators(&mut oracle, &pks, Action::Link(link), None).await;
+            link_participants(&mut oracle, &pks, Action::Link(link), None).await;
             await_reporters(
                 context.with_label("reporter"),
                 &reporters,
                 (max_height + 100, 112),
             )
             .await;
+        });
+    }
+
+    #[test_traced]
+    fn test_external_sequencer() {
+        let num_validators: u32 = 4;
+        let quorum: u32 = quorum(3);
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            // Generate validator shares
+            let (identity, shares) =
+                ops::generate_shares(&mut context, None, num_validators, quorum);
+
+            // Generate validator schemes
+            let mut schemes = (0..num_validators)
+                .map(|i| Ed25519::from_seed(i as u64))
+                .collect::<Vec<_>>();
+            schemes.sort_by_key(|s| s.public_key());
+
+            // Generate validators
+            let validators: Vec<(PublicKey, Ed25519, Share)> = schemes
+                .iter()
+                .enumerate()
+                .map(|(i, scheme)| (scheme.public_key(), scheme.clone(), shares[i].clone()))
+                .collect();
+
+            // Generate sequencer
+            let sequencer = Ed25519::from_seed(u64::MAX);
+
+            // Generate network participants
+            let mut participants = validators
+                .iter()
+                .map(|(pk, _, _)| pk.clone())
+                .collect::<Vec<_>>();
+            participants.push(sequencer.public_key()); // as long as external participants are in same position for all, it is safe
+
+            // Create network
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                commonware_p2p::simulated::Config {
+                    max_size: 1024 * 1024,
+                },
+            );
+            network.start();
+
+            // Register all participants
+            let mut registrations = register_participants(&mut oracle, &participants).await;
+            let link = commonware_p2p::simulated::Link {
+                latency: 10.0,
+                jitter: 1.0,
+                success_rate: 1.0,
+            };
+            link_participants(&mut oracle, &participants, Action::Link(link), None).await;
         });
     }
 }
