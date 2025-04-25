@@ -26,7 +26,7 @@ struct Location {
 }
 
 /// Record stored in the `Archive`.
-pub struct Record<K: Array, VC: CodecConfig + Copy, V: Codec<VC>> {
+struct Record<K: Array, VC: CodecConfig, V: Codec<VC>> {
     index: u64,
     key: K,
     value: V,
@@ -34,7 +34,7 @@ pub struct Record<K: Array, VC: CodecConfig + Copy, V: Codec<VC>> {
     _phantom: PhantomData<VC>,
 }
 
-impl<K: Array, VC: CodecConfig + Copy, V: Codec<VC>> Record<K, VC, V> {
+impl<K: Array, VC: CodecConfig, V: Codec<VC>> Record<K, VC, V> {
     /// Create a new `Record`.
     fn new(index: u64, key: K, value: V) -> Self {
         Self {
@@ -46,7 +46,7 @@ impl<K: Array, VC: CodecConfig + Copy, V: Codec<VC>> Record<K, VC, V> {
     }
 }
 
-impl<K: Array, VC: CodecConfig + Copy, V: Codec<VC>> Write for Record<K, VC, V> {
+impl<K: Array, VC: CodecConfig, V: Codec<VC>> Write for Record<K, VC, V> {
     fn write(&self, buf: &mut impl BufMut) {
         self.index.write(buf);
         self.key.write(buf);
@@ -54,7 +54,7 @@ impl<K: Array, VC: CodecConfig + Copy, V: Codec<VC>> Write for Record<K, VC, V> 
     }
 }
 
-impl<K: Array, VC: CodecConfig + Copy, V: Codec<VC>> Read<VC> for Record<K, VC, V> {
+impl<K: Array, VC: CodecConfig, V: Codec<VC>> Read<VC> for Record<K, VC, V> {
     fn read_cfg(buf: &mut impl Buf, cfg: &VC) -> Result<Self, commonware_codec::Error> {
         let index = u64::read(buf)?;
         let key = K::read(buf)?;
@@ -68,7 +68,7 @@ impl<K: Array, VC: CodecConfig + Copy, V: Codec<VC>> Read<VC> for Record<K, VC, 
     }
 }
 
-impl<K: Array, VC: CodecConfig + Copy, V: Codec<VC>> EncodeSize for Record<K, VC, V> {
+impl<K: Array, VC: CodecConfig, V: Codec<VC>> EncodeSize for Record<K, VC, V> {
     fn encode_size(&self) -> usize {
         u64::SIZE + K::SIZE + self.value.encode_size()
     }
