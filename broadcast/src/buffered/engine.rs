@@ -358,9 +358,16 @@ impl<
     /// Respond to a waiter with an optional message.
     /// Increments the appropriate metric based on the result.
     fn respond_get(&mut self, responder: oneshot::Sender<Option<M>>, msg: Option<M>) {
+        let found = msg.is_some();
         let result = responder.send(msg);
         self.metrics.get.inc(match result {
-            Ok(_) => Status::Success,
+            Ok(_) => {
+                if found {
+                    Status::Success
+                } else {
+                    Status::Failure
+                }
+            }
             Err(_) => Status::Dropped,
         });
     }
