@@ -31,7 +31,7 @@
 
 use crate::{EncodeSize, Error, FixedSize, Read, Write};
 use bytes::{Buf, BufMut};
-use sealed::{SInt, UInt};
+use sealed::{SPrim, UPrim};
 use std::fmt::Debug;
 
 // ---------- Constants ----------
@@ -54,8 +54,8 @@ mod sealed {
     use super::*;
     use std::ops::{BitOrAssign, Shl, ShrAssign};
 
-    /// A trait for unsigned integers that can be varint encoded.
-    pub trait UInt:
+    /// A trait for unsigned integer primitives that can be varint encoded.
+    pub trait UPrim:
         Copy
         + From<u8>
         + Sized
@@ -73,10 +73,10 @@ mod sealed {
         fn as_u8(self) -> u8;
     }
 
-    // Implements the `UInt` trait for all unsigned integer types.
+    // Implements the `UPrim` trait for all unsigned integer types.
     macro_rules! impl_uint {
         ($type:ty) => {
-            impl UInt for $type {
+            impl UPrim for $type {
                 #[inline(always)]
                 fn leading_zeros(self) -> u32 {
                     self.leading_zeros()
@@ -94,16 +94,16 @@ mod sealed {
     impl_uint!(u64);
     impl_uint!(u128);
 
-    /// A trait for signed integers that can be converted to and from unsigned integers of the
-    /// equivalent size.
+    /// A trait for signed integer primitives that can be converted to and from unsigned integer
+    /// primitives of the equivalent size.
     ///
     /// When converted to unsigned integers, the encoding is done using ZigZag encoding, which moves the
     /// sign bit to the least significant bit (shifting all other bits to the left by one). This allows
     /// for more efficient encoding of numbers that are close to zero, even if they are negative.
-    pub trait SInt: Copy + Sized + FixedSize + PartialOrd + Debug {
+    pub trait SPrim: Copy + Sized + FixedSize + PartialOrd + Debug {
         /// The unsigned equivalent type of the signed integer.
         /// This type must be the same size as the signed integer type.
-        type UnsignedEquivalent: UInt;
+        type UnsignedEquivalent: UPrim;
 
         /// Compile-time assertion to ensure that the size of the signed integer is equal to the size of
         /// the unsigned integer.
@@ -118,10 +118,10 @@ mod sealed {
         fn un_zigzag(value: Self::UnsignedEquivalent) -> Self;
     }
 
-    // Implements the `SInt` trait for all signed integer types.
+    // Implements the `SPrim` trait for all signed integer types.
     macro_rules! impl_sint {
         ($type:ty, $utype:ty) => {
-            impl SInt for $type {
+            impl SPrim for $type {
                 type UnsignedEquivalent = $utype;
 
                 #[inline]
@@ -147,7 +147,7 @@ mod sealed {
 /// An ergonomic wrapper to allow for encoding and decoding of primitive unsigned integers as
 /// varints rather than the default fixed-width integers.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct VarUInt<U: UInt>(pub U);
+pub struct VarUInt<U: UPrim>(pub U);
 
 // Implements `Into<U>` for `VarUInt<U>` for all unsigned integer types.
 // This allows for easy conversion from `VarUInt<U>` to `U` using `.into()`.
@@ -164,19 +164,19 @@ macro_rules! impl_varuint_into {
 }
 impl_varuint_into!(u16, u32, u64, u128);
 
-impl<U: UInt> Write for VarUInt<U> {
+impl<U: UPrim> Write for VarUInt<U> {
     fn write(&self, buf: &mut impl BufMut) {
         write(self.0, buf);
     }
 }
 
-impl<U: UInt> Read for VarUInt<U> {
+impl<U: UPrim> Read for VarUInt<U> {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         read(buf).map(VarUInt)
     }
 }
 
-impl<U: UInt> EncodeSize for VarUInt<U> {
+impl<U: UPrim> EncodeSize for VarUInt<U> {
     fn encode_size(&self) -> usize {
         size(self.0)
     }
@@ -185,7 +185,7 @@ impl<U: UInt> EncodeSize for VarUInt<U> {
 /// An ergonomic wrapper to allow for encoding and decoding of primitive signed integers as
 /// varints rather than the default fixed-width integers.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct VarSInt<S: SInt>(pub S);
+pub struct VarSInt<S: SPrim>(pub S);
 
 // Implements `Into<U>` for `VarSInt<U>` for all signed integer types.
 // This allows for easy conversion from `VarSInt<S>` to `S` using `.into()`.
@@ -202,19 +202,19 @@ macro_rules! impl_varsint_into {
 }
 impl_varsint_into!(i16, i32, i64, i128);
 
-impl<S: SInt> Write for VarSInt<S> {
+impl<S: SPrim> Write for VarSInt<S> {
     fn write(&self, buf: &mut impl BufMut) {
         write_signed::<S>(self.0, buf);
     }
 }
 
-impl<S: SInt> Read for VarSInt<S> {
+impl<S: SPrim> Read for VarSInt<S> {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         read_signed::<S>(buf).map(VarSInt)
     }
 }
 
-impl<S: SInt> EncodeSize for VarSInt<S> {
+impl<S: SPrim> EncodeSize for VarSInt<S> {
     fn encode_size(&self) -> usize {
         size_signed::<S>(self.0)
     }
@@ -223,7 +223,7 @@ impl<S: SInt> EncodeSize for VarSInt<S> {
 // ---------- Helper Functions ----------
 
 /// Encodes an unsigned integer as a varint
-fn write<T: UInt>(value: T, buf: &mut impl BufMut) {
+fn write<T: UPrim>(value: T, buf: &mut impl BufMut) {
     let continuation_threshold = T::from(CONTINUATION_BIT_MASK);
     if value < continuation_threshold {
         // Fast path for small values (common case for lengths).
@@ -245,7 +245,7 @@ fn write<T: UInt>(value: T, buf: &mut impl BufMut) {
 /// Returns an error if:
 /// - The varint is invalid (too long or malformed)
 /// - The buffer ends while reading
-fn read<T: UInt>(buf: &mut impl Buf) -> Result<T, Error> {
+fn read<T: UPrim>(buf: &mut impl Buf) -> Result<T, Error> {
     let max_bits = T::SIZE * BITS_PER_BYTE;
     let mut result: T = T::from(0);
     let mut bits_read = 0;
@@ -294,7 +294,7 @@ fn read<T: UInt>(buf: &mut impl Buf) -> Result<T, Error> {
 }
 
 /// Calculates the number of bytes needed to encode an unsigned integer as a varint.
-fn size<T: UInt>(value: T) -> usize {
+fn size<T: UPrim>(value: T) -> usize {
     let total_bits = std::mem::size_of::<T>() * 8;
     let leading_zeros = value.leading_zeros() as usize;
     let data_bits = total_bits - leading_zeros;
@@ -302,17 +302,17 @@ fn size<T: UInt>(value: T) -> usize {
 }
 
 /// Encodes a signed integer as a varint using ZigZag encoding.
-fn write_signed<S: SInt>(value: S, buf: &mut impl BufMut) {
+fn write_signed<S: SPrim>(value: S, buf: &mut impl BufMut) {
     write(value.as_zigzag(), buf);
 }
 
 /// Decodes a signed integer from varint ZigZag encoding.
-fn read_signed<S: SInt>(buf: &mut impl Buf) -> Result<S, Error> {
+fn read_signed<S: SPrim>(buf: &mut impl Buf) -> Result<S, Error> {
     Ok(S::un_zigzag(read(buf)?))
 }
 
 /// Calculates the number of bytes needed to encode a signed integer as a varint.
-fn size_signed<S: SInt>(value: S) -> usize {
+fn size_signed<S: SPrim>(value: S) -> usize {
     size(value.as_zigzag())
 }
 
@@ -367,8 +367,8 @@ mod tests {
         assert!(matches!(result, Err(Error::InvalidVarint(u64::SIZE))));
     }
 
-    /// Core round-trip check, generic over any UInt.
-    fn varuint_round_trip<T: Copy + UInt + TryFrom<u128>>() {
+    /// Core round-trip check, generic over any UPrim.
+    fn varuint_round_trip<T: Copy + UPrim + TryFrom<u128>>() {
         const CASES: &[u128] = &[
             0,
             1,
@@ -420,7 +420,7 @@ mod tests {
         varuint_round_trip::<u128>();
     }
 
-    fn varsint_round_trip<T: Copy + SInt + TryFrom<i128>>() {
+    fn varsint_round_trip<T: Copy + SPrim + TryFrom<i128>>() {
         const CASES: &[i128] = &[
             0,
             1,
