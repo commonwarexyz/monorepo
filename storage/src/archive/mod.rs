@@ -15,18 +15,12 @@
 //! `Archive` stores data in the following format:
 //!
 //! ```text
-//! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-//! | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |10 |11 |12 |13 |14 |15 |16 |      ...      |
-//! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-//! |          Index(u64)           |  Key(Fixed Size)  |    C(u32)     |     Data      |
-//! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-//!
-//! C = CRC32(Key)
+//! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+//! | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |10 |11 |12 |      ...      |
+//! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+//! |          Index(u64)           |  Key(Fixed Size)  |     Data      |
+//! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
 //! ```
-//!
-//! _To ensure keys fetched using `Journal::get_prefix` are correctly read, the `Archive` includes a
-//! checksum of each index + key. (The `Journal` additionally checksums each entry, but this
-//! checksum is only verified if the entire entry is read via `Journal::get`.)_
 //!
 //! # Uniqueness
 //!
