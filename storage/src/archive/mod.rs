@@ -174,16 +174,19 @@ pub enum Error {
 /// Configuration for `Archive` storage.
 #[derive(Clone)]
 pub struct Config<T: Translator, C: CodecConfig> {
-    pub partition: String,
-
     /// Logic to transform keys into their index representation.
     ///
     /// `Archive` assumes that all internal keys are spread uniformly across the key space.
     /// If that is not the case, lookups may be O(n) instead of O(1).
     pub translator: T,
 
+    /// The partition to use for the archive's [crate::journal] storage.
+    pub partition: String,
+
+    /// The compression level to use for the archive's [crate::journal] storage.
     pub compression: Option<u8>,
 
+    /// The codec configuration to use for the value stored in the archive.
     pub codec_config: C,
 
     /// Mask to apply to indices to determine section.
