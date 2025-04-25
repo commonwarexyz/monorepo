@@ -1,3 +1,5 @@
+//! Codec wrapper for [Sender] and [Receiver].
+
 use crate::{Receiver, Recipients, Sender};
 use bytes::Bytes;
 use commonware_codec::{Codec, Config, Error};

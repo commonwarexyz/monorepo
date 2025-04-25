@@ -110,10 +110,15 @@ impl<E: Clock + GClock + Rng + Metrics, P: Array, Key: Array, NetS: Sender<Publi
         };
 
         // Send message to peer
-        let payload = wire::Payload::Request(key.clone());
-        let msg = wire::Message { id, payload };
         let result = sender
-            .send(Recipients::One(peer.clone()), msg, self.priority_requests)
+            .send(
+                Recipients::One(peer.clone()),
+                wire::Message {
+                    id,
+                    payload: wire::Payload::Request(key.clone()),
+                },
+                self.priority_requests,
+            )
             .await;
         let result = match result {
             Err(err) => Err(SendError::Failed::<NetS>(err)),
