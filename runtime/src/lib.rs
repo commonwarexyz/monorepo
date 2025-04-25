@@ -334,6 +334,8 @@ mod tests {
     use super::*;
     use commonware_macros::select;
     use futures::channel::oneshot;
+    use futures::executor;
+    use futures::task::noop_waker;
     use futures::{channel::mpsc, future::ready, join, SinkExt, StreamExt};
     use prometheus_client::metrics::counter::Counter;
     use std::collections::HashMap;
@@ -617,10 +619,13 @@ mod tests {
                 .expect("Failed to write data2");
 
             // Read data back
-            let mut buffer = vec![0u8; 10];
+            let mut buffer = [0u8; 10];
+            let before_point = buffer.as_mut_ptr();
             blob.read_at(&mut buffer, 0)
                 .await
                 .expect("Failed to read data");
+            let after_point = buffer.as_mut_ptr();
+            println!("before: {:?}, after: {:?}", before_point, after_point);
             assert_eq!(&buffer[..5], data1);
             assert_eq!(&buffer[5..], data2);
 
@@ -1389,5 +1394,62 @@ mod tests {
     fn test_tokio_metrics_serve() {
         let executor = tokio::Runner::default();
         test_metrics_serve(executor);
+    }
+
+    // Async fn that captures the address of a stack buffer before and after an
+    // `.await`.
+    async fn pointer_probe(mut tx: mpsc::Sender<(*const u8, *const u8)>) {
+        let stack_buf = [0u8; 8];
+        let before = stack_buf.as_ptr();
+
+        // Yield once so the executor is free to move the future.
+        reschedule().await;
+
+        let after = stack_buf.as_ptr();
+        tx.send((before, after)).await.unwrap();
+    }
+
+    /// A plain test (no runtime needed) showing the move.
+    #[test]
+    fn pointer_moves_across_await() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            // Create a channel to send the addresses.
+            let (tx, mut rx) = mpsc::channel(10);
+
+            // Build the future on the stack.
+            let mut fut = pointer_probe(tx);
+
+            // -------- first poll (stack-allocated) --------
+            let waker = noop_waker();
+            let mut cx = std::task::Context::from_waker(&waker);
+            // SAFETY: we intentionally poll an *un-pinned* future once so we
+            // can move it afterwards; this is for demonstration only.
+            unsafe {
+                assert!(std::pin::Pin::new_unchecked(&mut fut)
+                    .poll(&mut cx)
+                    .is_pending());
+            }
+
+            // -------- move the whole future to the heap --------
+            let fut = Box::new(fut); // 1st move
+            let mut fut = *fut; // 2nd move (inside Box)
+
+            // -------- second poll (heap-allocated) --------
+            let mut cx = std::task::Context::from_waker(&waker);
+            unsafe {
+                assert!(std::pin::Pin::new_unchecked(&mut fut)
+                    .poll(&mut cx)
+                    .is_ready());
+            }
+
+            // Compare the two addresses.
+            let (before, after) = rx.next().await.unwrap();
+            println!("pointer before = {:p}, after = {:p}", before, after);
+            assert_eq!(
+                before, after,
+                "stack buffer stayed put - future did not move"
+            );
+        });
     }
 }
