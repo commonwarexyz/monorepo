@@ -691,6 +691,10 @@ mod tests {
                 .enumerate()
                 .map(|(i, scheme)| (scheme.public_key(), scheme.clone(), shares[i].clone()))
                 .collect();
+            let validator_pks = validators
+                .iter()
+                .map(|(pk, _, _)| pk.clone())
+                .collect::<Vec<_>>();
 
             // Generate sequencer
             let sequencer = Ed25519::from_seed(u64::MAX);
@@ -719,6 +723,122 @@ mod tests {
                 success_rate: 1.0,
             };
             link_participants(&mut oracle, &participants, Action::Link(link), None).await;
+
+            // Setup engines
+            let automatons = Arc::new(Mutex::new(
+                BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
+            ));
+            let mut reporters =
+                BTreeMap::<PublicKey, mocks::ReporterMailbox<Ed25519, Sha256Digest>>::new();
+            let mut monitors = HashMap::new();
+            let namespace = b"my testing namespace";
+
+            // Spawn validator engines
+            for (validator, scheme, share) in validators.iter() {
+                let context = context.with_label(&validator.to_string());
+                let monitor = mocks::Monitor::new(111);
+                monitors.insert(validator.clone(), monitor.clone());
+                let sequencers = mocks::Sequencers::<PublicKey>::new(vec![sequencer.public_key()]);
+                let validators = mocks::Validators::<PublicKey>::new(
+                    identity.clone(),
+                    validator_pks.clone(),
+                    share.clone(),
+                );
+
+                let automaton = mocks::Automaton::<PublicKey>::new(|_| false);
+                automatons
+                    .lock()
+                    .unwrap()
+                    .insert(validator.clone(), automaton.clone());
+
+                let (reporter, reporter_mailbox) = mocks::Reporter::<Ed25519, Sha256Digest>::new(
+                    namespace,
+                    *poly::public(&identity),
+                    Some(5),
+                );
+                context.with_label("reporter").spawn(|_| reporter.run());
+                reporters.insert(validator.clone(), reporter_mailbox);
+
+                let engine = Engine::new(
+                    context.with_label("engine"),
+                    Config {
+                        crypto: scheme.clone(),
+                        relay: automaton.clone(),
+                        automaton: automaton.clone(),
+                        reporter: reporters.get(validator).unwrap().clone(),
+                        monitor,
+                        sequencers,
+                        validators,
+                        namespace: namespace.to_vec(),
+                        epoch_bounds: (1, 1),
+                        height_bound: 2,
+                        rebroadcast_timeout: Duration::from_secs(5),
+                        priority_acks: false,
+                        priority_proposals: false,
+                        journal_heights_per_section: 10,
+                        journal_replay_concurrency: 1,
+                        journal_name_prefix: format!("ordered-broadcast-seq/{}/", validator),
+                        journal_compression: Some(3),
+                    },
+                );
+
+                let ((a1, a2), (b1, b2)) = registrations.remove(validator).unwrap();
+                engine.start((a1, a2), (b1, b2));
+            }
+
+            // Spawn sequencer engine
+            {
+                let context = context.with_label("sequencer");
+                let automaton = mocks::Automaton::<PublicKey>::new(|_| false);
+                automatons
+                    .lock()
+                    .unwrap()
+                    .insert(sequencer.public_key(), automaton.clone());
+                let (reporter, reporter_mailbox) = mocks::Reporter::<Ed25519, Sha256Digest>::new(
+                    namespace,
+                    *poly::public(&identity),
+                    Some(5),
+                );
+                context.with_label("reporter").spawn(|_| reporter.run());
+                reporters.insert(sequencer.public_key(), reporter_mailbox);
+                let engine = Engine::new(
+                    context.with_label("engine"),
+                    Config {
+                        crypto: sequencer.clone(),
+                        relay: automaton.clone(),
+                        automaton: automaton.clone(),
+                        reporter: reporters.get(&sequencer.public_key()).unwrap().clone(),
+                        monitor: mocks::Monitor::new(111),
+                        sequencers: mocks::Sequencers::<PublicKey>::new(vec![
+                            sequencer.public_key()
+                        ]),
+                        validators: mocks::Validators::<PublicKey>::new(
+                            identity.clone(),
+                            validator_pks,
+                            shares[0].clone(),
+                        ),
+                        namespace: namespace.to_vec(),
+                        epoch_bounds: (1, 1),
+                        height_bound: 2,
+                        rebroadcast_timeout: Duration::from_secs(5),
+                        priority_acks: false,
+                        priority_proposals: false,
+                        journal_heights_per_section: 10,
+                        journal_replay_concurrency: 1,
+                        journal_name_prefix: format!(
+                            "ordered-broadcast-seq/{}/",
+                            sequencer.public_key()
+                        ),
+                        journal_compression: Some(3),
+                    },
+                );
+
+                let ((a1, a2), (b1, b2)) = registrations.remove(&sequencer.public_key()).unwrap();
+                engine.start((a1, a2), (b1, b2));
+            }
+
+            // Await reporters
+            await_reporters(context.with_label("reporter"), &reporters, (100, 111)).await;
         });
     }
 }
