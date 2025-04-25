@@ -17,13 +17,19 @@ pub enum Message<P: Array, D: Digest, M: Digestible<D>> {
         responder: oneshot::Sender<Vec<P>>,
     },
 
-    /// Get a message by digest.
+    /// Subscribe to receive a message by digest.
     ///
     /// The responder will be sent the message when it is available; either instantly (if cached) or
     /// when it is received from the network. The request can be canceled by dropping the responder.
-    Get {
+    Subscribe {
         digest: D,
         responder: oneshot::Sender<M>,
+    },
+
+    /// Get a message by digest.
+    Get {
+        digest: D,
+        responder: oneshot::Sender<Option<M>>,
     },
 }
 
@@ -40,8 +46,38 @@ impl<P: Array, D: Digest, M: Digestible<D>> Mailbox<P, D, M> {
 }
 
 impl<P: Array, D: Digest, M: Digestible<D>> Mailbox<P, D, M> {
+    /// Subscribe to a message by digest.
+    ///
+    /// The responder will be sent the message when it is available; either instantly (if cached) or
+    /// when it is received from the network. The request can be canceled by dropping the responder.
+    pub async fn subscribe(&mut self, digest: D) -> oneshot::Receiver<M> {
+        let (sender, receiver) = oneshot::channel();
+        self.sender
+            .send(Message::Subscribe {
+                digest,
+                responder: sender,
+            })
+            .await
+            .expect("mailbox closed");
+        receiver
+    }
+
+    /// Subscribe to a message by digest with an externally prepared sender.
+    ///
+    /// The responder will be sent the message when it is available; either instantly (if cached) or
+    /// when it is received from the network. The request can be canceled by dropping the responder.
+    pub async fn subscribe_prepared(&mut self, digest: D, sender: oneshot::Sender<M>) {
+        self.sender
+            .send(Message::Subscribe {
+                digest,
+                responder: sender,
+            })
+            .await
+            .expect("mailbox closed");
+    }
+
     /// Get a message by digest.
-    pub async fn get(&mut self, digest: D) -> oneshot::Receiver<M> {
+    pub async fn get(&mut self, digest: D) -> oneshot::Receiver<Option<M>> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Message::Get {
