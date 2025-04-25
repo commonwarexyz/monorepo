@@ -361,13 +361,8 @@ impl<
         let found = msg.is_some();
         let result = responder.send(msg);
         self.metrics.get.inc(match result {
-            Ok(_) => {
-                if found {
-                    Status::Success
-                } else {
-                    Status::Failure
-                }
-            }
+            Ok(_) if found => Status::Success,
+            Ok(_) => Status::Failure,
             Err(_) => Status::Dropped,
         });
     }
