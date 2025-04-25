@@ -220,7 +220,7 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
         cfg: &C,
         blob: &E::Blob,
         offset: u32,
-    ) -> Result<(u32, V), Error> {
+    ) -> Result<(u32, u32, V), Error> {
         // Read item size
         let offset = offset as u64 * ITEM_ALIGNMENT;
         let mut size = [0u8; 4];
@@ -257,7 +257,7 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
 
         // Return item
         let item = V::decode_cfg(item.as_ref(), cfg).map_err(Error::Codec)?;
-        Ok((aligned_offset, item))
+        Ok((aligned_offset, size, item))
     }
 
     /// Reads an item from the blob at the given offset and of a given size.
@@ -345,7 +345,7 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
                         let mut read = Self::read(compressed, &codec_config, blob, offset).await;
 
                         // Ensure a full read wouldn't put us past the end of the blob
-                        if let Ok((next_offset, _)) = read {
+                        if let Ok((next_offset, _, _)) = read {
                             if next_offset > len {
                                 read = Err(Error::Runtime(RError::BlobInsufficientLength));
                             }
@@ -353,10 +353,10 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
 
                         // Handle read result
                         match read {
-                            Ok((next_offset, item)) => {
+                            Ok((next_offset, size, item)) => {
                                 trace!(blob = section, cursor = offset, len, "replayed item");
                                 Some((
-                                    Ok((section, offset, len, item)),
+                                    Ok((section, offset, size, item)),
                                     (section, blob, next_offset),
                                 ))
                             }
@@ -464,7 +464,7 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
         };
 
         // Perform a multi-op read.
-        let (_, item) = Self::read(
+        let (_, _, item) = Self::read(
             self.cfg.compression.is_some(),
             &self.cfg.codec_config,
             blob,
