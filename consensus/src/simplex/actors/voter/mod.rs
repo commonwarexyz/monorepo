@@ -25,7 +25,6 @@ pub struct Config<
 
     pub partition: String,
     pub compression: Option<u8>,
-
     pub namespace: Vec<u8>,
     pub mailbox_size: usize,
     pub leader_timeout: Duration,
