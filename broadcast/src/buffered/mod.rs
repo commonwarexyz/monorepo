@@ -118,10 +118,13 @@ mod tests {
                 mailbox_size: 1024,
                 deque_size: CACHE_SIZE,
                 priority: false,
-                decode_config: (),
+                codec_config: (),
             };
             let (engine, engine_mailbox) =
-                Engine::<_, PublicKey, Sha256Digest, _, TestMessage>::new(context.clone(), config);
+                Engine::<_, PublicKey, Sha256Digest, _, TestMessage, _, _>::new(
+                    context.clone(),
+                    config,
+                );
             mailboxes.insert(peer.clone(), engine_mailbox);
             engine.start(network);
         }

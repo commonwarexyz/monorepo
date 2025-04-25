@@ -1,10 +1,12 @@
 use super::{metrics, Config, Mailbox, Message};
 use crate::buffered::metrics::SequencerLabel;
-use bytes::Bytes;
 use commonware_codec::{Codec, Config as CodecCfg};
 use commonware_cryptography::{Digest, Digestible};
 use commonware_macros::select;
-use commonware_p2p::{Receiver, Recipients, Sender};
+use commonware_p2p::{
+    utils::codec::{wrap, WrappedSender},
+    Receiver, Recipients, Sender,
+};
 use commonware_runtime::{
     telemetry::metrics::status::{CounterExt, Status},
     Clock, Handle, Metrics, Spawner,
@@ -30,6 +32,8 @@ pub struct Engine<
     D: Digest,
     Cfg: CodecCfg,
     M: Digestible<D> + Codec<Cfg>,
+    NetS: Sender<PublicKey = P>,
+    NetR: Receiver<PublicKey = P>,
 > {
     ////////////////////////////////////////
     // Interfaces
@@ -49,7 +53,7 @@ pub struct Engine<
     deque_size: usize,
 
     /// Configuration for decoding messages
-    decode_config: Cfg,
+    codec_config: Cfg,
 
     ////////////////////////////////////////
     // Messaging
@@ -83,6 +87,8 @@ pub struct Engine<
     ////////////////////////////////////////
     /// Metrics
     metrics: metrics::Metrics,
+
+    _phantom: std::marker::PhantomData<(NetS, NetR)>,
 }
 
 impl<
@@ -91,7 +97,9 @@ impl<
         D: Digest,
         Cfg: CodecCfg,
         M: Digestible<D> + Codec<Cfg>,
-    > Engine<E, P, D, Cfg, M>
+        NetS: Sender<PublicKey = P>,
+        NetR: Receiver<PublicKey = P>,
+    > Engine<E, P, D, Cfg, M, NetS, NetR>
 {
     /// Creates a new engine with the given context and configuration.
     /// Returns the engine and a mailbox for sending messages to the engine.
@@ -105,29 +113,28 @@ impl<
             public_key: cfg.public_key,
             priority: cfg.priority,
             deque_size: cfg.deque_size,
-            decode_config: cfg.decode_config,
+            codec_config: cfg.codec_config,
             mailbox_receiver,
             waiters: HashMap::new(),
             deques: HashMap::new(),
             items: HashMap::new(),
             counts: HashMap::new(),
             metrics,
+
+            _phantom: std::marker::PhantomData,
         };
 
         (result, mailbox)
     }
 
     /// Starts the engine with the given network.
-    pub fn start(
-        mut self,
-        network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
-    ) -> Handle<()> {
+    pub fn start(mut self, network: (NetS, NetR)) -> Handle<()> {
         self.context.spawn_ref()(self.run(network))
     }
 
     /// Inner run loop called by `start`.
-    async fn run(mut self, network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>)) {
-        let (mut net_sender, mut net_receiver) = network;
+    async fn run(mut self, network: (NetS, NetR)) {
+        let (mut sender, mut receiver) = wrap(self.codec_config.clone(), network.0, network.1);
         let mut shutdown = self.context.stopped();
 
         loop {
@@ -150,7 +157,7 @@ impl<
                     match msg {
                         Message::Broadcast{ message, responder } => {
                             trace!("mailbox: broadcast");
-                            self.handle_broadcast(&mut net_sender, message, responder).await;
+                            self.handle_broadcast(&mut sender, message, responder).await;
                         }
                         Message::Subscribe{ digest, responder } => {
                             trace!("mailbox: subscribe");
@@ -164,7 +171,7 @@ impl<
                 },
 
                 // Handle incoming messages
-                msg = net_receiver.recv() => {
+                msg = receiver.recv() => {
                     // Error handling
                     let (peer, msg) = match msg {
                         Ok(r) => r,
@@ -175,7 +182,7 @@ impl<
                     };
 
                     // Decode the message
-                    let message = match M::decode_cfg(msg, &self.decode_config) {
+                    let message = match msg {
                         Ok(message) => message,
                         Err(err) => {
                             warn!(?err, ?peer, "failed to decode message");
@@ -199,7 +206,7 @@ impl<
     /// Handles a `broadcast` request from the application.
     async fn handle_broadcast(
         &mut self,
-        net_sender: &mut impl Sender<PublicKey = P>,
+        sender: &mut WrappedSender<NetS, Cfg, M>,
         msg: M,
         responder: oneshot::Sender<Vec<P>>,
     ) {
@@ -208,8 +215,7 @@ impl<
 
         // Broadcast the message to the network
         let recipients = Recipients::All;
-        let msg = Bytes::from(msg.encode());
-        let sent_to = net_sender
+        let sent_to = sender
             .send(recipients, msg, self.priority)
             .await
             .unwrap_or_else(|err| {
