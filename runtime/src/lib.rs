@@ -1422,8 +1422,6 @@ mod tests {
             // -------- first poll (stack-allocated) --------
             let waker = noop_waker();
             let mut cx = std::task::Context::from_waker(&waker);
-            // SAFETY: we intentionally poll an *un-pinned* future once so we
-            // can move it afterwards; this is for demonstration only.
             unsafe {
                 assert!(std::pin::Pin::new_unchecked(&mut fut)
                     .poll(&mut cx)
@@ -1444,11 +1442,7 @@ mod tests {
 
             // Compare the two addresses.
             let (before, after) = rx.next().await.unwrap();
-            println!("pointer before = {:p}, after = {:p}", before, after);
-            assert_eq!(
-                before, after,
-                "stack buffer stayed put - future did not move"
-            );
+            assert_eq!(before, after, "pointer address changed");
         });
     }
 }
