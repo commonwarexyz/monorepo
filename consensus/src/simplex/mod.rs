@@ -139,7 +139,6 @@ mod tests {
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
-    use commonware_storage::journal::variable::{Config as JConfig, Journal};
     use commonware_utils::{quorum, Array};
     use engine::Engine;
     use futures::{future::join_all, StreamExt};
@@ -304,20 +303,14 @@ mod tests {
                     application_cfg,
                 );
                 actor.start();
-                let cfg = JConfig {
-                    partition: validator.to_string(),
-                    compression: Some(3),
-                    codec_config: usize::MAX,
-                };
-                let journal = Journal::init(context.with_label("journal"), cfg)
-                    .await
-                    .expect("unable to create journal");
                 let cfg = config::Config {
                     crypto: scheme,
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: supervisor.clone(),
                     supervisor,
+                    partition: validator.to_string(),
+                    compression: Some(3),
                     mailbox_size: 1024,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
@@ -332,7 +325,7 @@ mod tests {
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
                 };
-                let engine = Engine::new(context.with_label("engine"), journal, cfg);
+                let engine = Engine::new(context.with_label("engine"), cfg);
                 let (voter, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
@@ -553,20 +546,14 @@ mod tests {
                         application_cfg,
                     );
                     actor.start();
-                    let cfg = JConfig {
-                        partition: validator.to_string(),
-                        compression: Some(3),
-                        codec_config: usize::MAX,
-                    };
-                    let journal = Journal::init(context.with_label("journal"), cfg)
-                        .await
-                        .expect("unable to create journal");
                     let cfg = config::Config {
                         crypto: scheme,
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: supervisor.clone(),
                         supervisor,
+                        partition: validator.to_string(),
+                        compression: Some(3),
                         mailbox_size: 1024,
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
@@ -581,7 +568,7 @@ mod tests {
                         fetch_concurrent: 1,
                         replay_concurrency: 1,
                     };
-                    let engine = Engine::new(context.with_label("engine"), journal, cfg);
+                    let engine = Engine::new(context.with_label("engine"), cfg);
                     let (voter_network, resolver_network) = registrations
                         .remove(&validator)
                         .expect("validator should be registered");
@@ -726,20 +713,14 @@ mod tests {
                     application_cfg,
                 );
                 actor.start();
-                let cfg = JConfig {
-                    partition: validator.to_string(),
-                    compression: Some(3),
-                    codec_config: usize::MAX,
-                };
-                let journal = Journal::init(context.with_label("journal"), cfg)
-                    .await
-                    .expect("unable to create journal");
                 let cfg = config::Config {
                     crypto: scheme.clone(),
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: supervisor.clone(),
                     supervisor,
+                    partition: validator.to_string(),
+                    compression: Some(3),
                     mailbox_size: 1024,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
@@ -757,7 +738,7 @@ mod tests {
                 let (voter, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                let engine = Engine::new(context.with_label("engine"), journal, cfg);
+                let engine = Engine::new(context.with_label("engine"), cfg);
                 engine_handlers.push(engine.start(voter, resolver));
             }
 
@@ -849,20 +830,14 @@ mod tests {
                 application_cfg,
             );
             actor.start();
-            let cfg = JConfig {
-                partition: validator.to_string(),
-                compression: Some(3),
-                codec_config: usize::MAX,
-            };
-            let journal = Journal::init(context.with_label("journal"), cfg)
-                .await
-                .expect("unable to create journal");
             let cfg = config::Config {
                 crypto: scheme,
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: supervisor.clone(),
                 supervisor: supervisor.clone(),
+                partition: validator.to_string(),
+                compression: Some(3),
                 mailbox_size: 1024,
                 namespace: namespace.clone(),
                 leader_timeout: Duration::from_secs(1),
@@ -880,7 +855,7 @@ mod tests {
             let (voter, resolver) = registrations
                 .remove(&validator)
                 .expect("validator should be registered");
-            let engine = Engine::new(context.with_label("engine"), journal, cfg);
+            let engine = Engine::new(context.with_label("engine"), cfg);
             engine_handlers.push(engine.start(voter, resolver));
 
             // Wait for new engine to finalize required
@@ -975,19 +950,13 @@ mod tests {
                     application_cfg,
                 );
                 actor.start();
-                let cfg = JConfig {
-                    partition: validator.to_string(),
-                    compression: Some(3),
-                    codec_config: usize::MAX,
-                };
-                let journal = Journal::init(context.with_label("journal"), cfg)
-                    .await
-                    .expect("unable to create journal");
                 let cfg = config::Config {
                     crypto: scheme,
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: supervisor.clone(),
+                    partition: validator.to_string(),
+                    compression: Some(3),
                     supervisor,
                     mailbox_size: 1024,
                     namespace: namespace.clone(),
@@ -1006,7 +975,7 @@ mod tests {
                 let (voter, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                let engine = Engine::new(context.with_label("engine"), journal, cfg);
+                let engine = Engine::new(context.with_label("engine"), cfg);
                 engine_handlers.push(engine.start(voter, resolver));
             }
 
@@ -1175,19 +1144,13 @@ mod tests {
                     application_cfg,
                 );
                 actor.start();
-                let cfg = JConfig {
-                    partition: validator.to_string(),
-                    compression: Some(3),
-                    codec_config: usize::MAX,
-                };
-                let journal = Journal::init(context.with_label("journal"), cfg)
-                    .await
-                    .expect("unable to create journal");
                 let cfg = config::Config {
                     crypto: scheme,
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: supervisor.clone(),
+                    partition: validator.to_string(),
+                    compression: Some(3),
                     supervisor,
                     mailbox_size: 1024,
                     namespace: namespace.clone(),
@@ -1206,7 +1169,7 @@ mod tests {
                 let (voter, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                let engine = Engine::new(context.with_label("engine"), journal, cfg);
+                let engine = Engine::new(context.with_label("engine"), cfg);
                 engine_handlers.push(engine.start(voter, resolver));
             }
 
@@ -1337,19 +1300,13 @@ mod tests {
                     application_cfg,
                 );
                 actor.start();
-                let cfg = JConfig {
-                    partition: validator.to_string(),
-                    compression: Some(3),
-                    codec_config: usize::MAX,
-                };
-                let journal = Journal::init(context.with_label("journal"), cfg)
-                    .await
-                    .expect("unable to create journal");
                 let cfg = config::Config {
                     crypto: scheme.clone(),
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: supervisor.clone(),
+                    partition: validator.to_string(),
+                    compression: Some(3),
                     supervisor,
                     mailbox_size: 1024,
                     namespace: namespace.clone(),
@@ -1368,7 +1325,7 @@ mod tests {
                 let (voter, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                let engine = Engine::new(context.with_label("engine"), journal, cfg);
+                let engine = Engine::new(context.with_label("engine"), cfg);
                 engine_handlers.push(engine.start(voter, resolver));
             }
 
@@ -1491,19 +1448,13 @@ mod tests {
                     application_cfg,
                 );
                 actor.start();
-                let cfg = JConfig {
-                    partition: validator.to_string(),
-                    compression: Some(3),
-                    codec_config: usize::MAX,
-                };
-                let journal = Journal::init(context.with_label("journal"), cfg)
-                    .await
-                    .expect("unable to create journal");
                 let cfg = config::Config {
                     crypto: scheme.clone(),
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: supervisor.clone(),
+                    partition: validator.to_string(),
+                    compression: Some(3),
                     supervisor,
                     mailbox_size: 1024,
                     namespace: namespace.clone(),
@@ -1522,7 +1473,7 @@ mod tests {
                 let (voter, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                let engine = Engine::new(context.with_label("engine"), journal, cfg);
+                let engine = Engine::new(context.with_label("engine"), cfg);
                 engine_handlers.push(engine.start(voter, resolver));
             }
 
@@ -1676,19 +1627,13 @@ mod tests {
                     application_cfg,
                 );
                 actor.start();
-                let cfg = JConfig {
-                    partition: validator.to_string(),
-                    compression: Some(3),
-                    codec_config: usize::MAX,
-                };
-                let journal = Journal::init(context.with_label("journal"), cfg)
-                    .await
-                    .expect("unable to create journal");
                 let cfg = config::Config {
                     crypto: scheme,
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: supervisor.clone(),
+                    partition: validator.to_string(),
+                    compression: Some(3),
                     supervisor,
                     mailbox_size: 1024,
                     namespace: namespace.clone(),
@@ -1707,7 +1652,7 @@ mod tests {
                 let (voter, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                let engine = Engine::new(context.with_label("engine"), journal, cfg);
+                let engine = Engine::new(context.with_label("engine"), cfg);
                 engine_handlers.push(engine.start(voter, resolver));
             }
 
@@ -1844,19 +1789,13 @@ mod tests {
                         application_cfg,
                     );
                     actor.start();
-                    let cfg = JConfig {
-                        partition: validator.to_string(),
-                        compression: Some(3),
-                        codec_config: usize::MAX,
-                    };
-                    let journal = Journal::init(context.with_label("journal"), cfg)
-                        .await
-                        .expect("unable to create journal");
                     let cfg = config::Config {
                         crypto: scheme,
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: supervisor.clone(),
+                        partition: validator.to_string(),
+                        compression: Some(3),
                         supervisor,
                         mailbox_size: 1024,
                         namespace: namespace.clone(),
@@ -1875,7 +1814,7 @@ mod tests {
                     let (voter, resolver) = registrations
                         .remove(&validator)
                         .expect("validator should be registered");
-                    let engine = Engine::new(context.with_label("engine"), journal, cfg);
+                    let engine = Engine::new(context.with_label("engine"), cfg);
                     engine.start(voter, resolver);
                 }
             }
@@ -2006,19 +1945,13 @@ mod tests {
                         application_cfg,
                     );
                     actor.start();
-                    let cfg = JConfig {
-                        partition: validator.to_string(),
-                        compression: Some(3),
-                        codec_config: usize::MAX,
-                    };
-                    let journal = Journal::init(context.with_label("journal"), cfg)
-                        .await
-                        .expect("unable to create journal");
                     let cfg = config::Config {
                         crypto: scheme,
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: supervisor.clone(),
+                        partition: validator.to_string(),
+                        compression: Some(3),
                         supervisor,
                         mailbox_size: 1024,
                         namespace: namespace.clone(),
@@ -2037,7 +1970,7 @@ mod tests {
                     let (voter, resolver) = registrations
                         .remove(&validator)
                         .expect("validator should be registered");
-                    let engine = Engine::new(context.with_label("engine"), journal, cfg);
+                    let engine = Engine::new(context.with_label("engine"), cfg);
                     engine.start(voter, resolver);
                 }
             }
@@ -2164,20 +2097,14 @@ mod tests {
                         application_cfg,
                     );
                     actor.start();
-                    let cfg = JConfig {
-                        partition: validator.to_string(),
-                        compression: Some(3),
-                        codec_config: usize::MAX,
-                    };
-                    let journal = Journal::init(context.with_label("journal"), cfg)
-                        .await
-                        .expect("unable to create journal");
                     let cfg = config::Config {
                         crypto: scheme,
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: supervisor.clone(),
                         supervisor,
+                        partition: validator.to_string(),
+                        compression: Some(3),
                         mailbox_size: 1024,
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
@@ -2195,7 +2122,7 @@ mod tests {
                     let (voter, resolver) = registrations
                         .remove(&validator)
                         .expect("validator should be registered");
-                    let engine = Engine::new(context.with_label("engine"), journal, cfg);
+                    let engine = Engine::new(context.with_label("engine"), cfg);
                     engine.start(voter, resolver);
                 }
             }

@@ -23,6 +23,9 @@ pub struct Config<
     pub reporter: F,
     pub supervisor: S,
 
+    pub partition: String,
+    pub compression: Option<u8>,
+
     pub namespace: Vec<u8>,
     pub mailbox_size: usize,
     pub leader_timeout: Duration,
@@ -50,7 +53,6 @@ mod tests {
         Receiver, Recipients, Sender,
     };
     use commonware_runtime::{deterministic, Metrics, Runner, Spawner};
-    use commonware_storage::journal::variable::{Config as JConfig, Journal};
     use commonware_utils::quorum;
     use futures::{channel::mpsc, StreamExt};
     use std::time::Duration;
@@ -106,21 +108,14 @@ mod tests {
                 application_cfg,
             );
             actor.start();
-            let cfg = JConfig {
-                partition: "test".to_string(),
-                compression: Some(3),
-                codec_config: usize::MAX,
-            };
-            let journal = Journal::init(context.with_label("journal"), cfg)
-                .await
-                .expect("unable to create journal");
-
             let cfg = Config {
                 crypto: scheme,
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: supervisor.clone(),
                 supervisor,
+                partition: "test".to_string(),
+                compression: Some(3),
                 namespace: namespace.clone(),
                 mailbox_size: 10,
                 leader_timeout: Duration::from_secs(5),
@@ -131,7 +126,7 @@ mod tests {
                 skip_timeout: 10,
                 replay_concurrency: 1,
             };
-            let (actor, mut mailbox) = Actor::new(context.clone(), journal, cfg);
+            let (actor, mut mailbox) = Actor::new(context.clone(), cfg);
 
             // Create a dummy backfiller mailbox
             let (backfiller_sender, mut backfiller_receiver) = mpsc::channel(1);

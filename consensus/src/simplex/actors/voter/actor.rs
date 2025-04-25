@@ -16,7 +16,7 @@ use commonware_cryptography::{Digest, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
-use commonware_storage::journal::variable::Journal;
+use commonware_storage::journal::variable::{Config as JConfig, Journal};
 use commonware_utils::quorum;
 use futures::{
     channel::{mpsc, oneshot},
@@ -322,6 +322,8 @@ pub struct Actor<
     reporter: F,
     supervisor: S,
 
+    partition: String,
+    compression: Option<u8>,
     replay_concurrency: usize,
     journal: Option<Journal<E, usize, Voter<C::Signature, D>>>,
 
@@ -361,11 +363,7 @@ impl<
         S: Supervisor<Index = View, PublicKey = C::PublicKey>,
     > Actor<E, C, D, A, R, F, S>
 {
-    pub fn new(
-        context: E,
-        journal: Journal<E, usize, Voter<C::Signature, D>>,
-        cfg: Config<C, D, A, R, F, S>,
-    ) -> (Self, Mailbox<C::Signature, D>) {
+    pub fn new(context: E, cfg: Config<C, D, A, R, F, S>) -> (Self, Mailbox<C::Signature, D>) {
         // Assert correctness of timeouts
         if cfg.leader_timeout > cfg.notarization_timeout {
             panic!("leader timeout must be less than or equal to notarization timeout");
@@ -415,8 +413,10 @@ impl<
                 reporter: cfg.reporter,
                 supervisor: cfg.supervisor,
 
+                partition: cfg.partition,
+                compression: cfg.compression,
                 replay_concurrency: cfg.replay_concurrency,
-                journal: Some(journal),
+                journal: None,
 
                 genesis: None,
 
@@ -1673,9 +1673,20 @@ impl<
         // We start on view 1 because the genesis container occupies view 0/height 0.
         self.enter_view(1);
 
+        // Initialize journal
+        let mut journal = Journal::<_, _, Voter<C::Signature, D>>::init(
+            self.context.with_label("journal"),
+            JConfig {
+                partition: self.partition.clone(),
+                compression: self.compression,
+                codec_config: usize::MAX, // anything we read from journal is already verified
+            },
+        )
+        .await
+        .expect("unable to open journal");
+
         // Rebuild from journal
         let mut observed_view = 1;
-        let mut journal = self.journal.take().expect("missing journal");
         {
             let stream = journal
                 .replay(self.replay_concurrency)

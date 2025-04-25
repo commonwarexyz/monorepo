@@ -1,14 +1,13 @@
 use super::{
     actors::{resolver, voter},
     config::Config,
-    types::{Activity, Context, View, Voter},
+    types::{Activity, Context, View},
 };
 use crate::{Automaton, Relay, Reporter, Supervisor};
 use commonware_cryptography::{Digest, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Sender};
 use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
-use commonware_storage::journal::variable::Journal;
 use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
 use tracing::debug;
@@ -42,24 +41,21 @@ impl<
     > Engine<E, C, D, A, R, F, S>
 {
     /// Create a new `simplex` consensus engine.
-    pub fn new(
-        context: E,
-        journal: Journal<E, usize, Voter<C::Signature, D>>,
-        cfg: Config<C, D, A, R, F, S>,
-    ) -> Self {
+    pub fn new(context: E, cfg: Config<C, D, A, R, F, S>) -> Self {
         // Ensure configuration is valid
         cfg.assert();
 
         // Create voter
         let (voter, voter_mailbox) = voter::Actor::new(
             context.with_label("voter"),
-            journal,
             voter::Config {
                 crypto: cfg.crypto.clone(),
                 automaton: cfg.automaton,
                 relay: cfg.relay,
                 reporter: cfg.reporter,
                 supervisor: cfg.supervisor.clone(),
+                partition: cfg.partition,
+                compression: cfg.compression,
                 mailbox_size: cfg.mailbox_size,
                 namespace: cfg.namespace.clone(),
                 max_participants: cfg.max_participants,
