@@ -443,10 +443,13 @@ impl<
                     };
 
                     // Skip if there is a decoding error
-                    let Ok(msg) = msg else {
-                        debug!(sender = ?s, "failed to decode message");
-                        self.requester.block(s);
-                        continue;
+                    let msg = match msg {
+                        Ok(msg) => msg,
+                        Err(err) => {
+                            warn!(?err, sender = ?s, "failed to decode message");
+                            self.requester.block(s);
+                            continue;
+                        }
                     };
                     match msg {
                         Backfiller::Request(request) => {
