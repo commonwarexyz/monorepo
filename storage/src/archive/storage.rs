@@ -19,6 +19,12 @@ pub enum Identifier<'a, K: Array> {
     Key(&'a K),
 }
 
+/// Location of a record in `Journal`.
+struct Location {
+    offset: u32,
+    len: u32,
+}
+
 /// Record stored in the `Archive`.
 pub struct Record<K: Array, VC: CodecConfig + Copy, V: Codec<VC>> {
     index: u64,
@@ -87,7 +93,7 @@ pub struct Archive<
     // to its corresponding index. To avoid iterating over this keys map during pruning, we map said
     // indexes to their locations in the journal.
     keys: Index<T, u64>,
-    indices: BTreeMap<u64, u32>,
+    indices: BTreeMap<u64, Location>,
     intervals: RangeInclusiveSet<u64>,
 
     // Track the number of writes pending for a section to determine when to sync.
@@ -131,11 +137,11 @@ impl<T: Translator, E: Storage + Metrics, K: Array, VC: CodecConfig + Copy, V: C
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 // Extract key from record
-                let (_, offset, data) = result?;
+                let (_, offset, len, data) = result?;
 
                 // Store index
                 let index = data.index;
-                indices.insert(index, offset);
+                indices.insert(index, Location { offset, len });
 
                 // Store index in keys
                 keys.insert(&data.key, index);
@@ -211,10 +217,10 @@ impl<T: Translator, E: Storage + Metrics, K: Array, VC: CodecConfig + Copy, V: C
         // Store item in journal
         let record = Record::new(index, key.clone(), data);
         let section = self.section_mask & index;
-        let offset = self.journal.append(section, record).await?;
+        let (offset, len) = self.journal.append(section, record).await?;
 
         // Store index
-        self.indices.insert(index, offset);
+        self.indices.insert(index, Location { offset, len });
 
         // Store interval
         self.intervals.insert(index..=index);
@@ -256,8 +262,8 @@ impl<T: Translator, E: Storage + Metrics, K: Array, VC: CodecConfig + Copy, V: C
         self.gets.inc();
 
         // Get index location
-        let offset = match self.indices.get(&index) {
-            Some(offset) => *offset,
+        let location = match self.indices.get(&index) {
+            Some(offset) => offset,
             None => return Ok(None),
         };
 
@@ -265,7 +271,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, VC: CodecConfig + Copy, V: C
         let section = self.section_mask & index;
         let record = self
             .journal
-            .get(section, offset)
+            .get_exact(section, location.offset, location.len)
             .await?
             .ok_or(Error::RecordCorrupted)?;
         Ok(Some(record.value))
@@ -285,11 +291,11 @@ impl<T: Translator, E: Storage + Metrics, K: Array, VC: CodecConfig + Copy, V: C
             }
 
             // Fetch item from disk
-            let offset = self.indices.get(index).ok_or(Error::RecordCorrupted)?;
+            let location = self.indices.get(index).ok_or(Error::RecordCorrupted)?;
             let section = self.section_mask & index;
             let record = self
                 .journal
-                .get(section, *offset)
+                .get_exact(section, location.offset, location.len)
                 .await?
                 .ok_or(Error::RecordCorrupted)?;
 

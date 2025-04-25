@@ -260,6 +260,45 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
         Ok((aligned_offset, item))
     }
 
+    /// Reads an item from the blob at the given offset and of a given size.
+    async fn read_exact(
+        compressed: bool,
+        cfg: &C,
+        blob: &E::Blob,
+        offset: u32,
+        size: u32,
+    ) -> Result<V, Error> {
+        // Read buffer
+        let offset = offset as u64 * ITEM_ALIGNMENT;
+        let mut buf = vec![0u8; size as usize];
+        blob.read_at(&mut buf, offset).await?;
+
+        // Check size
+        let disk_size = u32::from_be_bytes(buf[..4].try_into().unwrap());
+        if size != disk_size {
+            return Err(Error::UnexpectedSize(disk_size, size));
+        }
+
+        // Get item
+        let item = &buf[4..4 + size as usize];
+        let item = if compressed {
+            decompress(item, u32::MAX as usize).map_err(|_| Error::DecompressionFailed)?
+        } else {
+            item.to_vec()
+        };
+
+        // Verify integrity
+        let stored_checksum = u32::from_be_bytes(buf[4 + size as usize..].try_into().unwrap());
+        let checksum = crc32fast::hash(&item);
+        if checksum != stored_checksum {
+            return Err(Error::ChecksumMismatch(stored_checksum, checksum));
+        }
+
+        // Return item
+        let item = V::decode_cfg(item.as_ref(), cfg).map_err(Error::Codec)?;
+        Ok(item)
+    }
+
     /// Returns an unordered stream of all items in the journal.
     ///
     /// # Repair
@@ -278,7 +317,7 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
     pub async fn replay(
         &mut self,
         concurrency: usize,
-    ) -> Result<impl Stream<Item = Result<(u64, u32, V), Error>> + '_, Error> {
+    ) -> Result<impl Stream<Item = Result<(u64, u32, u32, V), Error>> + '_, Error> {
         // Collect all blobs to replay
         let mut blobs = Vec::with_capacity(self.blobs.len());
         for (section, blob) in self.blobs.iter() {
@@ -315,7 +354,10 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
                         match read {
                             Ok((next_offset, item)) => {
                                 trace!(blob = section, cursor = offset, len, "replayed item");
-                                Some((Ok((section, offset, item)), (section, blob, next_offset)))
+                                Some((
+                                    Ok((section, offset, len, item)),
+                                    (section, blob, next_offset),
+                                ))
                             }
                             Err(Error::ChecksumMismatch(expected, found)) => {
                                 // If we encounter corruption, we don't try to fix it.
@@ -354,7 +396,9 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
             .flatten())
     }
 
-    /// Appends an item to `Journal` in a given `section`.
+    /// Appends an item to `Journal` in a given `section`, returning the offset
+    /// where the item was written and the size of the item (which may now be smaller
+    /// than the encoded size from the codec, if compression is enabled).
     ///
     /// # Warning
     ///
@@ -363,7 +407,7 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
     /// to the `Blob` will be considered corrupted (as the trailing bytes will fail
     /// the checksum verification). It is recommended to call `replay` before calling
     /// `append` to prevent this.
-    pub async fn append(&mut self, section: u64, item: V) -> Result<u32, Error> {
+    pub async fn append(&mut self, section: u64, item: V) -> Result<(u32, u32), Error> {
         // Check last pruned
         self.prune_guard(section, false)?;
 
@@ -406,7 +450,7 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
         let offset = compute_next_offset(cursor)?;
         blob.write_at(&buf, offset as u64 * ITEM_ALIGNMENT).await?;
         trace!(blob = section, previous_len = len, offset, "appended item");
-        Ok(offset)
+        Ok((offset, item_len))
     }
 
     /// Retrieves an item from `Journal` at a given `section` and `offset`.
@@ -423,6 +467,31 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
             &self.cfg.codec_config,
             blob,
             offset,
+        )
+        .await?;
+        Ok(Some(item))
+    }
+
+    /// Retrieves an item from `Journal` at a given `section` and `offset` with a given size.
+    pub async fn get_exact(
+        &self,
+        section: u64,
+        offset: u32,
+        size: u32,
+    ) -> Result<Option<V>, Error> {
+        self.prune_guard(section, false)?;
+        let blob = match self.blobs.get(&section) {
+            Some(blob) => blob,
+            None => return Ok(None),
+        };
+
+        // Perform a multi-op read.
+        let item = Self::read_exact(
+            self.cfg.compression.is_some(),
+            &self.cfg.codec_config,
+            blob,
+            offset,
+            size,
         )
         .await?;
         Ok(Some(item))
@@ -550,7 +619,7 @@ mod tests {
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 match result {
-                    Ok((blob_index, _, item)) => items.push((blob_index, item)),
+                    Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
                     Err(err) => panic!("Failed to read item: {}", err),
                 }
             }
@@ -615,7 +684,7 @@ mod tests {
                 pin_mut!(stream);
                 while let Some(result) = stream.next().await {
                     match result {
-                        Ok((blob_index, _, item)) => items.push((blob_index, item)),
+                        Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
                         Err(err) => panic!("Failed to read item: {}", err),
                     }
                 }
@@ -698,7 +767,7 @@ mod tests {
                 pin_mut!(stream);
                 while let Some(result) = stream.next().await {
                     match result {
-                        Ok((blob_index, _, item)) => items.push((blob_index, item)),
+                        Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
                         Err(err) => panic!("Failed to read item: {}", err),
                     }
                 }
@@ -799,7 +868,7 @@ mod tests {
             let mut items = Vec::<(u64, u64)>::new();
             while let Some(result) = stream.next().await {
                 match result {
-                    Ok((blob_index, _, item)) => items.push((blob_index, item)),
+                    Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
                     Err(err) => panic!("Failed to read item: {}", err),
                 }
             }
@@ -851,7 +920,7 @@ mod tests {
             let mut items = Vec::<(u64, u64)>::new();
             while let Some(result) = stream.next().await {
                 match result {
-                    Ok((blob_index, _, item)) => items.push((blob_index, item)),
+                    Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
                     Err(err) => panic!("Failed to read item: {}", err),
                 }
             }
@@ -913,7 +982,7 @@ mod tests {
             let mut items = Vec::<(u64, u64)>::new();
             while let Some(result) = stream.next().await {
                 match result {
-                    Ok((blob_index, _, item)) => items.push((blob_index, item)),
+                    Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
                     Err(err) => panic!("Failed to read item: {}", err),
                 }
             }
@@ -980,7 +1049,7 @@ mod tests {
             let mut got_checksum_error = false;
             while let Some(result) = stream.next().await {
                 match result {
-                    Ok((blob_index, _, item)) => items.push((blob_index, item)),
+                    Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
                     Err(err) => {
                         assert!(matches!(err, Error::ChecksumMismatch(_, _)));
                         got_checksum_error = true;
@@ -1050,7 +1119,7 @@ mod tests {
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 match result {
-                    Ok((blob_index, _, item)) => items.push((blob_index, item)),
+                    Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
                     Err(err) => panic!("Failed to read item: {}", err),
                 }
             }
@@ -1159,7 +1228,7 @@ mod tests {
 
             // Append data
             let data = 1;
-            let result = journal
+            let (result, _) = journal
                 .append(1, data)
                 .await
                 .expect("Failed to append data");
