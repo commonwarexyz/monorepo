@@ -75,9 +75,7 @@ impl<H: CHasher> Mmr<H> {
             return mmr;
         }
 
-        let required_positions = Proof::<H>::nodes_to_pin(mmr.size(), pruned_to_pos);
-        assert_eq!(pinned_nodes.len(), required_positions.len());
-        for (i, pos) in required_positions.into_iter().enumerate() {
+        for (i, pos) in Proof::<H>::nodes_to_pin(pruned_to_pos).enumerate() {
             mmr.pinned_nodes.insert(pos, pinned_nodes[i]);
         }
 
@@ -300,9 +298,7 @@ impl<H: CHasher> Mmr<H> {
     /// Get the nodes (position + digest) that need to be pinned (those required for proof
     /// generation) in this MMR when pruned to position `prune_pos`.
     pub(crate) fn nodes_to_pin(&self, prune_pos: u64) -> HashMap<u64, H::Digest> {
-        let positions = Proof::<H>::nodes_to_pin(self.size(), prune_pos);
-        positions
-            .into_iter()
+        Proof::<H>::nodes_to_pin(prune_pos)
             .map(|pos| (pos, *self.get_node_unchecked(pos)))
             .collect()
     }
@@ -310,9 +306,7 @@ impl<H: CHasher> Mmr<H> {
     /// Get the digests of nodes that need to be pinned (those required for proof generation) in
     /// this MMR when pruned to position `prune_pos`.
     pub(crate) fn node_digests_to_pin(&self, start_pos: u64) -> Vec<H::Digest> {
-        let positions = Proof::<H>::nodes_to_pin(self.size(), start_pos);
-        positions
-            .into_iter()
+        Proof::<H>::nodes_to_pin(start_pos)
             .map(|pos| *self.get_node_unchecked(pos))
             .collect()
     }

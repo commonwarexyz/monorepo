@@ -1,7 +1,7 @@
 //! Implements a [criterion]-compatible executor for the [tokio] runtime.
 
 use super::context;
-use crate::{tokio, Runner};
+use crate::{tokio, Runner as _};
 use criterion::async_executor::AsyncExecutor;
 use futures::Future;
 
@@ -15,7 +15,7 @@ use futures::Future;
 /// use std::time::Duration;
 ///
 /// fn my_benchmark(c: &mut Criterion) {
-///     let executor = tokio::Executor::default();
+///     let executor = tokio::Runner::default();
 ///     c.bench_function("sleep_benchmark", |b| {
 ///         b.to_async(&executor).iter_batched(|| (),
 ///         |_| async {
@@ -28,28 +28,28 @@ use futures::Future;
 /// }
 /// ```
 #[derive(Clone)]
-pub struct Executor {
+pub struct Runner {
     cfg: tokio::Config,
 }
 
-impl Executor {
+impl Runner {
     /// Create a new bencher with the given configuration
     pub fn new(cfg: tokio::Config) -> Self {
         Self { cfg }
     }
 }
 
-impl Default for Executor {
+impl Default for Runner {
     fn default() -> Self {
         Self::new(tokio::Config::default())
     }
 }
 
-impl AsyncExecutor for &Executor {
+impl AsyncExecutor for &Runner {
     fn block_on<T>(&self, future: impl Future<Output = T>) -> T {
-        let executor = tokio::Runner::new(self.cfg.clone());
+        let runner = tokio::Runner::new(self.cfg.clone());
 
-        let result = executor.start(|ctx| {
+        let result = runner.start(|ctx| {
             // Create and store our context
             context::set(ctx);
 

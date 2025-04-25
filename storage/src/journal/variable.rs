@@ -66,6 +66,13 @@
 //! (provided during `replay`) and usage of an incorrect `exact` value will result in undefined
 //! behavior.
 //!
+//! # Compression
+//!
+//! `Journal` supports optional compression using `zstd`. This can be enabled by setting
+//! the `compression` field in the `Config` struct to a valid `zstd` compression level. This setting
+//! can be changed between initializations of `Journal`, however, it must remain populated if any
+//! data was written with compression enabled.
+//!
 //! # Example
 //!
 //! ```rust
@@ -76,11 +83,13 @@
 //! executor.start(|context| async move {
 //!     // Create a journal
 //!     let mut journal = Journal::init(context, Config{
-//!         partition: "partition".to_string()
+//!         partition: "partition".to_string(),
+//!         compression: None,
+//!         codec_config: (),
 //!     }).await.unwrap();
 //!
 //!     // Append data to the journal
-//!     journal.append(1, "data".into()).await.unwrap();
+//!     journal.append(1, 128).await.unwrap();
 //!
 //!     // Close the journal
 //!     journal.close().await.unwrap();
@@ -130,13 +139,13 @@ fn compute_next_offset(mut offset: u64) -> Result<u32, Error> {
 }
 
 /// Implementation of `Journal` storage.
-pub struct Journal<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> {
+pub struct Journal<E: Storage + Metrics, C: CodecConfig, V: Codec<C>> {
     context: E,
     cfg: Config<C>,
 
     oldest_allowed: Option<u64>,
 
-    blobs: BTreeMap<u64, E::Blob>,
+    blobs: BTreeMap<u64, (E::Blob, u64)>,
 
     tracked: Gauge,
     synced: Counter,
@@ -145,7 +154,7 @@ pub struct Journal<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> {
     _phantom: PhantomData<V>,
 }
 
-impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> {
+impl<E: Storage + Metrics, C: CodecConfig, V: Codec<C>> Journal<E, C, V> {
     /// Initialize a new `Journal` instance.
     ///
     /// All backing blobs are opened but not read during
@@ -160,14 +169,14 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
             Err(err) => return Err(Error::Runtime(err)),
         };
         for name in stored_blobs {
-            let blob = context.open(&cfg.partition, &name).await?;
+            let (blob, len) = context.open(&cfg.partition, &name).await?;
             let hex_name = hex(&name);
             let section = match name.try_into() {
                 Ok(section) => u64::from_be_bytes(section),
                 Err(_) => return Err(Error::InvalidBlobName(hex_name)),
             };
-            debug!(section, blob = hex_name, "loaded section");
-            blobs.insert(section, blob);
+            debug!(section, blob = hex_name, len, "loaded section");
+            blobs.insert(section, (blob, len));
         }
 
         // Initialize metrics
@@ -311,79 +320,89 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
         concurrency: usize,
     ) -> Result<impl Stream<Item = Result<(u64, u32, u32, V), Error>> + '_, Error> {
         // Collect all blobs to replay
+        let codec_config = self.cfg.codec_config.clone();
+        let compressed = self.cfg.compression.is_some();
         let mut blobs = Vec::with_capacity(self.blobs.len());
-        for (section, blob) in self.blobs.iter() {
-            let len = blob.len().await?;
-            let aligned_len = compute_next_offset(len)?;
-            blobs.push((*section, blob, aligned_len));
+        for (section, (blob, len)) in self.blobs.iter() {
+            let aligned_len = compute_next_offset(*len)?;
+            blobs.push((
+                *section,
+                blob,
+                aligned_len,
+                codec_config.clone(),
+                compressed,
+            ));
         }
 
         // Replay all blobs concurrently and stream items as they are read (to avoid
         // occupying too much memory with buffered data)
-        let compressed = self.cfg.compression.is_some();
-        let codec_config = self.cfg.codec_config;
         Ok(stream::iter(blobs)
-            .map(move |(section, blob, len)| async move {
-                stream::unfold(
-                    (section, blob, 0u32),
-                    move |(section, blob, offset)| async move {
-                        // Check if we are at the end of the blob
-                        if offset == len {
-                            return None;
-                        }
+            .map(
+                move |(section, blob, len, codec_config, compressed)| async move {
+                    stream::unfold(
+                        (section, blob, 0u32, codec_config, compressed),
+                        move |(section, blob, offset, codec_config, compressed)| async move {
+                            // Check if we are at the end of the blob
+                            if offset == len {
+                                return None;
+                            }
 
-                        // Get next item
-                        let mut read = Self::read(compressed, &codec_config, blob, offset).await;
+                            // Get next item
+                            let mut read =
+                                Self::read(compressed, &codec_config, blob, offset).await;
 
-                        // Ensure a full read wouldn't put us past the end of the blob
-                        if let Ok((next_offset, _, _)) = read {
-                            if next_offset > len {
-                                read = Err(Error::Runtime(RError::BlobInsufficientLength));
-                            }
-                        };
+                            // Ensure a full read wouldn't put us past the end of the blob
+                            if let Ok((next_offset, _, _)) = read {
+                                if next_offset > len {
+                                    read = Err(Error::Runtime(RError::BlobInsufficientLength));
+                                }
+                            };
 
-                        // Handle read result
-                        match read {
-                            Ok((next_offset, size, item)) => {
-                                trace!(blob = section, cursor = offset, len, "replayed item");
-                                Some((
-                                    Ok((section, offset, size, item)),
-                                    (section, blob, next_offset),
-                                ))
+                            // Handle read result
+                            match read {
+                                Ok((next_offset, size, item)) => {
+                                    trace!(blob = section, cursor = offset, len, "replayed item");
+                                    Some((
+                                        Ok((section, offset, size, item)),
+                                        (section, blob, next_offset, codec_config, compressed),
+                                    ))
+                                }
+                                Err(Error::ChecksumMismatch(expected, found)) => {
+                                    // If we encounter corruption, we don't try to fix it.
+                                    warn!(
+                                        blob = section,
+                                        cursor = offset,
+                                        expected,
+                                        found,
+                                        "corruption detected"
+                                    );
+                                    Some((
+                                        Err(Error::ChecksumMismatch(expected, found)),
+                                        (section, blob, len, codec_config, compressed),
+                                    ))
+                                }
+                                Err(Error::Runtime(RError::BlobInsufficientLength)) => {
+                                    // If we encounter trailing bytes, we prune to the last
+                                    // valid item. This can happen during an unclean file close (where
+                                    // pending data is not fully synced to disk).
+                                    warn!(
+                                        blob = section,
+                                        new_size = offset,
+                                        old_size = len,
+                                        "trailing bytes detected: truncating"
+                                    );
+                                    blob.truncate(offset as u64 * ITEM_ALIGNMENT).await.ok()?;
+                                    blob.sync().await.ok()?;
+                                    None
+                                }
+                                Err(err) => {
+                                    Some((Err(err), (section, blob, len, codec_config, compressed)))
+                                }
                             }
-                            Err(Error::ChecksumMismatch(expected, found)) => {
-                                // If we encounter corruption, we don't try to fix it.
-                                warn!(
-                                    blob = section,
-                                    cursor = offset,
-                                    expected,
-                                    found,
-                                    "corruption detected"
-                                );
-                                Some((
-                                    Err(Error::ChecksumMismatch(expected, found)),
-                                    (section, blob, len),
-                                ))
-                            }
-                            Err(Error::Runtime(RError::BlobInsufficientLength)) => {
-                                // If we encounter trailing bytes, we prune to the last
-                                // valid item. This can happen during an unclean file close (where
-                                // pending data is not fully synced to disk).
-                                warn!(
-                                    blob = section,
-                                    new_size = offset,
-                                    old_size = len,
-                                    "trailing bytes detected: truncating"
-                                );
-                                blob.truncate(offset as u64 * ITEM_ALIGNMENT).await.ok()?;
-                                blob.sync().await.ok()?;
-                                None
-                            }
-                            Err(err) => Some((Err(err), (section, blob, len))),
-                        }
-                    },
-                )
-            })
+                        },
+                    )
+                },
+            )
             .buffer_unordered(concurrency)
             .flatten())
     }
@@ -439,9 +458,11 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
         assert_eq!(buf.len(), entry_len);
 
         // Append item to blob
-        let cursor = blob.len().await?;
+        let cursor = blob.1;
         let offset = compute_next_offset(cursor)?;
-        blob.write_at(&buf, offset as u64 * ITEM_ALIGNMENT).await?;
+        let aligned_cursor = offset as u64 * ITEM_ALIGNMENT;
+        blob.0.write_at(&buf, aligned_cursor).await?;
+        blob.1 = aligned_cursor + entry_len as u64;
         trace!(blob = section, offset, "appended item");
         Ok((offset, item_len))
     }
@@ -449,7 +470,7 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
     /// Retrieves an item from `Journal` at a given `section` and `offset`.
     pub async fn get(&self, section: u64, offset: u32) -> Result<Option<V>, Error> {
         self.prune_guard(section, false)?;
-        let blob = match self.blobs.get(&section) {
+        let (blob, _) = match self.blobs.get(&section) {
             Some(blob) => blob,
             None => return Ok(None),
         };
@@ -473,7 +494,7 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
         size: u32,
     ) -> Result<Option<V>, Error> {
         self.prune_guard(section, false)?;
-        let blob = match self.blobs.get(&section) {
+        let (blob, _) = match self.blobs.get(&section) {
             Some(blob) => blob,
             None => return Ok(None),
         };
@@ -495,7 +516,7 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
     /// If the `section` does not exist, no error will be returned.
     pub async fn sync(&self, section: u64) -> Result<(), Error> {
         self.prune_guard(section, false)?;
-        let blob = match self.blobs.get(&section) {
+        let (blob, _) = match self.blobs.get(&section) {
             Some(blob) => blob,
             None => return Ok(()),
         };
@@ -516,14 +537,14 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
             }
 
             // Remove and close blob
-            let blob = self.blobs.remove(&section).unwrap();
+            let (blob, len) = self.blobs.remove(&section).unwrap();
             blob.close().await?;
 
             // Remove blob from storage
             self.context
                 .remove(&self.cfg.partition, Some(&section.to_be_bytes()))
                 .await?;
-            debug!(blob = section, "pruned blob");
+            debug!(blob = section, len, "pruned blob");
             self.tracked.dec();
             self.pruned.inc();
         }
@@ -535,18 +556,18 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
 
     /// Closes all open sections.
     pub async fn close(self) -> Result<(), Error> {
-        for (section, blob) in self.blobs.into_iter() {
+        for (section, (blob, len)) in self.blobs.into_iter() {
             blob.close().await?;
-            debug!(blob = section, "closed blob");
+            debug!(blob = section, len, "closed blob");
         }
         Ok(())
     }
 
     /// Close and remove any underlying blobs created by the journal.
     pub async fn destroy(self) -> Result<(), Error> {
-        for (i, blob) in self.blobs.into_iter() {
+        for (i, (blob, len)) in self.blobs.into_iter() {
             blob.close().await?;
-            debug!(blob = i, "destroyed blob");
+            debug!(blob = i, len, "destroyed blob");
             self.context
                 .remove(&self.cfg.partition, Some(&i.to_be_bytes()))
                 .await?;
@@ -807,7 +828,7 @@ mod tests {
 
             // Manually create a blob with an invalid name (not 8 bytes)
             let invalid_blob_name = b"invalid"; // Less than 8 bytes
-            let blob = context
+            let (blob, _) = context
                 .open(&cfg.partition, invalid_blob_name)
                 .await
                 .expect("Failed to create blob with invalid name");
@@ -838,7 +859,7 @@ mod tests {
             // Manually create a blob with incomplete size data
             let section = 1u64;
             let blob_name = section.to_be_bytes();
-            let blob = context
+            let (blob, _) = context
                 .open(&cfg.partition, &blob_name)
                 .await
                 .expect("Failed to create blob");
@@ -886,7 +907,7 @@ mod tests {
             // Manually create a blob with missing item data
             let section = 1u64;
             let blob_name = section.to_be_bytes();
-            let blob = context
+            let (blob, _) = context
                 .open(&cfg.partition, &blob_name)
                 .await
                 .expect("Failed to create blob");
@@ -938,7 +959,7 @@ mod tests {
             // Manually create a blob with missing checksum
             let section = 1u64;
             let blob_name = section.to_be_bytes();
-            let blob = context
+            let (blob, _) = context
                 .open(&cfg.partition, &blob_name)
                 .await
                 .expect("Failed to create blob");
@@ -1000,7 +1021,7 @@ mod tests {
             // Manually create a blob with incorrect checksum
             let section = 1u64;
             let blob_name = section.to_be_bytes();
-            let blob = context
+            let (blob, _) = context
                 .open(&cfg.partition, &blob_name)
                 .await
                 .expect("Failed to create blob");
@@ -1091,11 +1112,10 @@ mod tests {
             journal.close().await.expect("Failed to close journal");
 
             // Manually corrupt the end of the second blob
-            let blob = context
+            let (blob, blob_len) = context
                 .open(&cfg.partition, &2u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            let blob_len = blob.len().await.expect("Failed to get blob length");
             blob.truncate(blob_len - 4)
                 .await
                 .expect("Failed to corrupt blob");
@@ -1130,16 +1150,9 @@ mod tests {
 
     // Define `MockBlob` that returns an offset length that should overflow
     #[derive(Clone)]
-    struct MockBlob {
-        len: u64,
-    }
+    struct MockBlob {}
 
     impl Blob for MockBlob {
-        async fn len(&self) -> Result<u64, commonware_runtime::Error> {
-            // Return a length that will cause offset overflow
-            Ok(self.len)
-        }
-
         async fn read_at(&self, _buf: &mut [u8], _offset: u64) -> Result<(), RError> {
             Ok(())
         }
@@ -1170,8 +1183,8 @@ mod tests {
     impl Storage for MockStorage {
         type Blob = MockBlob;
 
-        async fn open(&self, _partition: &str, _name: &[u8]) -> Result<MockBlob, RError> {
-            Ok(MockBlob { len: self.len })
+        async fn open(&self, _partition: &str, _name: &[u8]) -> Result<(MockBlob, u64), RError> {
+            Ok((MockBlob {}, self.len))
         }
 
         async fn remove(&self, _partition: &str, _name: Option<&[u8]>) -> Result<(), RError> {

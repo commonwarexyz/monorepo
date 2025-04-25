@@ -129,12 +129,7 @@ impl<E: RStorage + Clock + Metrics, H: Hasher> Mmr<E, H> {
             }
         }
 
-        let mut last_valid_size = journal_size;
-        while !PeakIterator::check_validity(last_valid_size) {
-            // Even this naive sequential backup must terminate in log2(n) iterations.
-            // A size-0 MMR is always valid so this loop must terminate before underflow.
-            last_valid_size -= 1;
-        }
+        let last_valid_size = PeakIterator::to_nearest_size(journal_size);
         let mut orphaned_leaf: Option<H::Digest> = None;
         if last_valid_size != journal_size {
             warn!(
@@ -153,7 +148,7 @@ impl<E: RStorage + Clock + Metrics, H: Hasher> Mmr<E, H> {
 
         // Initialize the mem_mmr in the "prune_all" state.
         let mut pinned_nodes = Vec::new();
-        for pos in Proof::<H>::nodes_to_pin(journal_size, journal_size) {
+        for pos in Proof::<H>::nodes_to_pin(journal_size) {
             let digest =
                 Mmr::<E, H>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
             pinned_nodes.push(digest);
@@ -163,7 +158,7 @@ impl<E: RStorage + Clock + Metrics, H: Hasher> Mmr<E, H> {
         // Compute the additional pinned nodes needed to prove all journal elements at the current
         // pruning boundary.
         let mut pinned_nodes = HashMap::new();
-        for pos in Proof::<H>::nodes_to_pin(journal_size, metadata_prune_pos) {
+        for pos in Proof::<H>::nodes_to_pin(metadata_prune_pos) {
             let digest =
                 Mmr::<E, H>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
             pinned_nodes.insert(pos, digest);
@@ -285,7 +280,7 @@ impl<E: RStorage + Clock + Metrics, H: Hasher> Mmr<E, H> {
 
         // Reset the mem_mmr to one of the new_size in the "prune_all" state.
         let mut pinned_nodes = Vec::new();
-        for pos in Proof::<H>::nodes_to_pin(new_size, new_size) {
+        for pos in Proof::<H>::nodes_to_pin(new_size) {
             let digest =
                 Mmr::<E, H>::get_from_metadata_or_journal(&self.metadata, &self.journal, pos)
                     .await?;
@@ -319,8 +314,7 @@ impl<E: RStorage + Clock + Metrics, H: Hasher> Mmr<E, H> {
         // Recompute pinned nodes since we'll need to repopulate the cache after it is cleared by
         // pruning the mem_mmr.
         let mut pinned_nodes = HashMap::new();
-        let required_positions = Proof::<H>::nodes_to_pin(self.size(), self.pruned_to_pos);
-        for pos in required_positions.into_iter() {
+        for pos in Proof::<H>::nodes_to_pin(self.pruned_to_pos) {
             let digest = self.mem_mmr.get_node_unchecked(pos);
             pinned_nodes.insert(pos, *digest);
         }
@@ -346,8 +340,7 @@ impl<E: RStorage + Clock + Metrics, H: Hasher> Mmr<E, H> {
         prune_to_pos: u64,
     ) -> Result<HashMap<u64, H::Digest>, Error> {
         let mut pinned_nodes = HashMap::new();
-        let required_positions = Proof::<H>::nodes_to_pin(self.size(), prune_to_pos);
-        for pos in required_positions.into_iter() {
+        for pos in Proof::<H>::nodes_to_pin(prune_to_pos) {
             let digest = self.get_node(pos).await?.unwrap();
             self.metadata.put(
                 U64::new(Self::NODE_PREFIX, pos),
@@ -684,11 +677,10 @@ mod tests {
             // 497. Simulate a partial write by corrupting the last parent's checksum by truncating
             // the last blob by a single byte.
             let partition: String = "journal_partition".into();
-            let blob = context
+            let (blob, len) = context
                 .open(&partition, &71u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            let len = blob.len().await.expect("Failed to get blob length");
             assert_eq!(len, 36); // N+4 = 36 bytes per node, 1 node in the last blob
 
             // truncate the blob by one byte to corrupt the checksum of the last parent node.
@@ -720,11 +712,10 @@ mod tests {
                 .remove(&partition, Some(&71u64.to_be_bytes()))
                 .await
                 .expect("Failed to remove blob");
-            let blob = context
+            let (blob, len) = context
                 .open(&partition, &70u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            let len = blob.len().await.expect("Failed to get blob length");
             assert_eq!(len, 36 * 7); // this blob should be full.
 
             // The last leaf should be in slot 5 of this blob, truncate last byte of its checksum.

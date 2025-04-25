@@ -624,7 +624,7 @@ impl CryptoRng for Context {}
 impl crate::Storage for Context {
     type Blob = <Storage<TokioStorage> as crate::Storage>::Blob;
 
-    async fn open(&self, partition: &str, name: &[u8]) -> Result<Self::Blob, Error> {
+    async fn open(&self, partition: &str, name: &[u8]) -> Result<(Self::Blob, u64), Error> {
         self.storage.open(partition, name).await
     }
 
