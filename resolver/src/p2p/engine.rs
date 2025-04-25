@@ -7,9 +7,11 @@ use super::{
 use super::{wire, Coordinator, Producer};
 use crate::Consumer;
 use bytes::Bytes;
-use commonware_codec::{DecodeExt, Encode};
 use commonware_macros::select;
-use commonware_p2p::{Receiver, Recipients, Sender};
+use commonware_p2p::{
+    utils::codec::{wrap, WrappedSender},
+    Receiver, Recipients, Sender,
+};
 use commonware_runtime::{
     telemetry::metrics::{
         histogram,
@@ -142,8 +144,10 @@ impl<
 
     /// Inner run loop called by `start`.
     async fn run(mut self, network: (NetS, NetR)) {
-        let (mut sender, mut receiver) = network;
         let mut shutdown = self.context.stopped();
+
+        // Wrap channel
+        let (mut sender, mut receiver) = wrap((), network.0, network.1);
 
         // Set initial peer set.
         self.last_peer_set_id = Some(self.coordinator.peer_set_id());
@@ -244,6 +248,7 @@ impl<
 
                 // Handle network messages
                 msg = receiver.recv() => {
+                    // Break if the receiver is closed
                     let (peer, msg) = match msg {
                         Ok(msg) => msg,
                         Err(err) => {
@@ -251,7 +256,9 @@ impl<
                             return;
                         }
                     };
-                    let msg = match wire::Message::decode(msg) {
+
+                    // Skip if there is a decoding error
+                    let msg = match msg {
                         Ok(msg) => msg,
                         Err(err) => {
                             trace!(?err, ?peer, "decode failed");
@@ -288,7 +295,7 @@ impl<
     /// Handles the case where the application responds to a request from an external peer.
     async fn handle_serve(
         &mut self,
-        sender: &mut NetS,
+        sender: &mut WrappedSender<NetS, (), wire::Message<Key>>,
         peer: P,
         id: u64,
         response: Result<Bytes, oneshot::Canceled>,
@@ -299,7 +306,7 @@ impl<
             Ok(data) => wire::Payload::Response(data),
             Err(_) => wire::Payload::ErrorResponse,
         };
-        let msg: Bytes = wire::Message { id, payload }.encode().into();
+        let msg = wire::Message { id, payload };
 
         // Send message to peer
         let result = sender
@@ -335,7 +342,7 @@ impl<
     /// Handle a network response from a peer.
     async fn handle_network_response(
         &mut self,
-        sender: &mut NetS,
+        sender: &mut WrappedSender<NetS, (), wire::Message<Key>>,
         peer: P,
         id: u64,
         response: Bytes,
@@ -363,7 +370,12 @@ impl<
     }
 
     /// Handle a network response from a peer that did not have the data.
-    async fn handle_network_error_response(&mut self, sender: &mut NetS, peer: P, id: u64) {
+    async fn handle_network_error_response(
+        &mut self,
+        sender: &mut WrappedSender<NetS, (), wire::Message<Key>>,
+        peer: P,
+        id: u64,
+    ) {
         trace!(?peer, ?id, "peer response: error");
 
         // Get the key associated with the response, if any
