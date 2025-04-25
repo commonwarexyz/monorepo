@@ -488,7 +488,15 @@ impl<
             return Err(Error::AppVerifiedPayloadMismatch);
         }
 
-        // Construct partial signature
+        // Emit the activity
+        self.reporter
+            .report(Activity::Tip(Proposal::new(
+                tip.chunk.clone(),
+                tip.signature.clone(),
+            )))
+            .await;
+
+        // Construct partial signature (if a validator)
         let Some(share) = self.validators.share(self.epoch) else {
             return Err(Error::UnknownShare(self.epoch));
         };
@@ -523,14 +531,6 @@ impl<
             .send(Recipients::Some(recipients), ack, self.priority_acks)
             .await
             .map_err(|_| Error::UnableToSendMessage)?;
-
-        // Emit the activity
-        self.reporter
-            .report(Activity::Proposal(Proposal::new(
-                tip.chunk,
-                tip.signature.clone(),
-            )))
-            .await;
 
         Ok(())
     }
