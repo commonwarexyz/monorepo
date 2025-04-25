@@ -11,10 +11,12 @@ use crate::{
     },
     Automaton, Relay, Reporter, Supervisor, LATENCY,
 };
-use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{Digest, Scheme};
 use commonware_macros::select;
-use commonware_p2p::{Receiver, Recipients, Sender};
+use commonware_p2p::{
+    utils::codec::{wrap, WrappedSender},
+    Receiver, Recipients, Sender,
+};
 use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
 use commonware_storage::journal::variable::{Config as JConfig, Journal};
 use commonware_utils::quorum;
@@ -598,7 +600,10 @@ impl<
         null_retry
     }
 
-    async fn timeout(&mut self, sender: &mut impl Sender) {
+    async fn timeout<Sr: Sender>(
+        &mut self,
+        sender: &mut WrappedSender<Sr, usize, Voter<C::Signature, D>>,
+    ) {
         // Set timeout fired
         let round = self.views.get_mut(&self.view).unwrap();
         let mut retry = false;
@@ -616,16 +621,14 @@ impl<
         let past_view = self.view - 1;
         if retry && past_view > 0 {
             if let Some(notarization) = self.construct_notarization(past_view, true) {
-                let msg = Voter::Notarization(notarization).encode().into();
+                let msg = Voter::Notarization(notarization);
                 sender.send(Recipients::All, msg, true).await.unwrap();
                 self.broadcast_messages
                     .get_or_create(&metrics::NOTARIZATION)
                     .inc();
                 debug!(view = past_view, "rebroadcast entry notarization");
             } else if let Some(nullification) = self.construct_nullification(past_view, true) {
-                let msg = Voter::Nullification::<C::Signature, D>(nullification)
-                    .encode()
-                    .into();
+                let msg = Voter::Nullification(nullification);
                 sender.send(Recipients::All, msg, true).await.unwrap();
                 self.broadcast_messages
                     .get_or_create(&metrics::NULLIFICATION)
@@ -663,7 +666,7 @@ impl<
             .expect("unable to sync journal");
 
         // Broadcast nullify
-        let msg = Voter::Nullify::<C::Signature, D>(nullify).encode().into();
+        let msg = Voter::Nullify(nullify);
         sender.send(Recipients::All, msg, true).await.unwrap();
         self.broadcast_messages
             .get_or_create(&metrics::NULLIFY)
@@ -1444,10 +1447,10 @@ impl<
         Some(Finalization::new(proposal, signatures))
     }
 
-    async fn notify(
+    async fn notify<Sr: Sender>(
         &mut self,
         backfiller: &mut resolver::Mailbox<C::Signature, D>,
-        sender: &mut impl Sender,
+        sender: &mut WrappedSender<Sr, usize, Voter<C::Signature, D>>,
         view: u64,
     ) {
         // Attempt to notarize
@@ -1464,7 +1467,7 @@ impl<
                 .expect("unable to sync journal");
 
             // Broadcast the notarize
-            let msg = Voter::Notarize(notarize).encode().into();
+            let msg = Voter::Notarize(notarize);
             sender.send(Recipients::All, msg, true).await.unwrap();
             self.broadcast_messages
                 .get_or_create(&metrics::NOTARIZE)
@@ -1500,7 +1503,7 @@ impl<
                 .await;
 
             // Broadcast the notarization
-            let msg = Voter::Notarization(notarization).encode().into();
+            let msg = Voter::Notarization(notarization);
             sender.send(Recipients::All, msg, true).await.unwrap();
             self.broadcast_messages
                 .get_or_create(&metrics::NOTARIZATION)
@@ -1531,9 +1534,7 @@ impl<
                 .await;
 
             // Broadcast the nullification
-            let msg = Voter::Nullification::<C::Signature, D>(nullification)
-                .encode()
-                .into();
+            let msg = Voter::Nullification(nullification);
             sender.send(Recipients::All, msg, true).await.unwrap();
             self.broadcast_messages
                 .get_or_create(&metrics::NULLIFICATION)
@@ -1573,7 +1574,7 @@ impl<
                     );
                     let finalization = self.construct_finalization(self.last_finalized, true);
                     if let Some(finalization) = finalization {
-                        let msg = Voter::Finalization(finalization).encode().into();
+                        let msg = Voter::Finalization(finalization);
                         sender
                             .send(Recipients::All, msg, true)
                             .await
@@ -1605,7 +1606,7 @@ impl<
                 .expect("unable to sync journal");
 
             // Broadcast the finalize
-            let msg = Voter::Finalize(finalize).encode().into();
+            let msg = Voter::Finalize(finalize);
             sender.send(Recipients::All, msg, true).await.unwrap();
             self.broadcast_messages
                 .get_or_create(&metrics::FINALIZE)
@@ -1641,7 +1642,7 @@ impl<
                 .await;
 
             // Broadcast the finalization
-            let msg = Voter::Finalization(finalization).encode().into();
+            let msg = Voter::Finalization(finalization);
             sender.send(Recipients::All, msg, true).await.unwrap();
             self.broadcast_messages
                 .get_or_create(&metrics::FINALIZATION)
@@ -1661,9 +1662,12 @@ impl<
     async fn run(
         mut self,
         mut backfiller: resolver::Mailbox<C::Signature, D>,
-        mut sender: impl Sender,
-        mut receiver: impl Receiver,
+        sender: impl Sender,
+        receiver: impl Receiver,
     ) {
+        // Wrap channels
+        let (mut sender, mut receiver) = wrap(self.max_participants, sender, receiver);
+
         // Compute genesis
         let genesis = self.automaton.genesis().await;
         self.genesis = Some(genesis);
@@ -1907,11 +1911,13 @@ impl<
                     }
                 },
                 msg = receiver.recv() => {
-                    // Parse message
-                    let Ok((s, msg)) = msg else {
+                    // Break if there is an internal error
+                    let Ok(msg) = msg else {
                         break;
                     };
-                    let Ok(msg) = Voter::decode_cfg(msg, &self.max_participants) else {
+
+                    // Skip if there is a decoding error
+                    let Ok((s, msg)) = msg else {
                         continue;
                     };
 
