@@ -7,7 +7,7 @@ use commonware_cryptography::{
         group::{Public, Share, Signature},
         ops::{
             aggregate_signatures, aggregate_verify_multiple_messages, partial_sign_message,
-            partial_verify_message, partial_verify_multiple_messages,
+            partial_verify_message, partial_verify_multiple_messages, verify_message,
         },
         poly::{PartialSignature, Poly},
     },
@@ -48,6 +48,12 @@ pub trait Viewable {
 pub trait Attributable {
     /// Returns the index of the signer (validator) who produced this message.
     fn signer(&self) -> u32;
+}
+
+/// Seedable is a trait that provides access to the seed associated with a message.
+pub trait Seedable {
+    /// Returns the seed associated with this object.
+    fn seed(&self) -> Seed;
 }
 
 // Constants for domain separation in signature verification
@@ -97,15 +103,15 @@ fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
 pub enum Voter<D: Digest> {
     /// A single validator notarize over a proposal
     Notarize(Notarize<D>),
-    /// An aggregated threshold signature for a notarization
+    /// A recovered threshold signature for a notarization
     Notarization(Notarization<D>),
     /// A single validator nullify to skip the current view (usually when leader is unresponsive)
     Nullify(Nullify),
-    /// An aggregated threshold signature for a nullification
+    /// A recovered threshold signature for a nullification
     Nullification(Nullification),
     /// A single validator finalize over a proposal
     Finalize(Finalize<D>),
-    /// An aggregated threshold signature for a finalization
+    /// A recovered threshold signature for a finalization
     Finalization(Finalization<D>),
 }
 
@@ -362,16 +368,16 @@ impl<D: Digest> FixedSize for Notarize<D> {
     const SIZE: usize = Proposal::<D>::SIZE + PartialSignature::SIZE + PartialSignature::SIZE;
 }
 
-/// Notarization represents an aggregated threshold signature certifying a proposal.
+/// Notarization represents a recovered threshold signature certifying a proposal.
 /// When a proposal is notarized, it means at least 2f+1 validators have voted for it.
 /// The threshold signatures provide compact verification compared to collecting individual signatures.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub struct Notarization<D: Digest> {
     /// The proposal that has been notarized
     pub proposal: Proposal<D>,
-    /// The aggregated threshold signature on the proposal
+    /// The recovered threshold signature on the proposal
     pub proposal_signature: Signature,
-    /// The aggregated threshold signature on the seed (for leader election/randomness)
+    /// The recovered threshold signature on the seed (for leader election/randomness)
     pub seed_signature: Signature,
 }
 
@@ -441,6 +447,12 @@ impl<D: Digest> Read for Notarization<D> {
 
 impl<D: Digest> FixedSize for Notarization<D> {
     const SIZE: usize = Proposal::<D>::SIZE + Signature::SIZE + Signature::SIZE;
+}
+
+impl<D: Digest> Seedable for Notarization<D> {
+    fn seed(&self) -> Seed {
+        Seed::new(self.view(), self.seed_signature)
+    }
 }
 
 /// Nullify represents a validator's vote to skip the current view.
@@ -547,16 +559,16 @@ impl FixedSize for Nullify {
     const SIZE: usize = View::SIZE + PartialSignature::SIZE + PartialSignature::SIZE;
 }
 
-/// Nullification represents an aggregated threshold signature to skip a view.
+/// Nullification represents a recovered threshold signature to skip a view.
 /// When a view is nullified, the consensus moves to the next view without finalizing a block.
 /// The threshold signatures provide compact verification compared to collecting individual signatures.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub struct Nullification {
     /// The view that has been nullified
     pub view: View,
-    /// The aggregated threshold signature on the view
+    /// The recovered threshold signature on the view
     pub view_signature: Signature,
-    /// The aggregated threshold signature on the seed (for leader election/randomness)
+    /// The recovered threshold signature on the seed (for leader election/randomness)
     pub seed_signature: Signature,
 }
 
@@ -621,6 +633,12 @@ impl Read for Nullification {
 
 impl FixedSize for Nullification {
     const SIZE: usize = View::SIZE + Signature::SIZE + Signature::SIZE;
+}
+
+impl Seedable for Nullification {
+    fn seed(&self) -> Seed {
+        Seed::new(self.view(), self.seed_signature)
+    }
 }
 
 /// Finalize represents a validator's vote to finalize a proposal.
@@ -702,16 +720,16 @@ impl<D: Digest> FixedSize for Finalize<D> {
     const SIZE: usize = Proposal::<D>::SIZE + PartialSignature::SIZE;
 }
 
-/// Finalization represents an aggregated threshold signature to finalize a proposal.
+/// Finalization represents a recovered threshold signature to finalize a proposal.
 /// When a proposal is finalized, it becomes the canonical block for its view.
 /// The threshold signatures provide compact verification compared to collecting individual signatures.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub struct Finalization<D: Digest> {
     /// The proposal that has been finalized
     pub proposal: Proposal<D>,
-    /// The aggregated threshold signature on the proposal
+    /// The recovered threshold signature on the proposal
     pub proposal_signature: Signature,
-    /// The aggregated threshold signature on the seed (for leader election/randomness)
+    /// The recovered threshold signature on the seed (for leader election/randomness)
     pub seed_signature: Signature,
 }
 
@@ -781,6 +799,12 @@ impl<D: Digest> Read for Finalization<D> {
 
 impl<D: Digest> FixedSize for Finalization<D> {
     const SIZE: usize = Proposal::<D>::SIZE + Signature::SIZE + Signature::SIZE;
+}
+
+impl<D: Digest> Seedable for Finalization<D> {
+    fn seed(&self) -> Seed {
+        Seed::new(self.view(), self.seed_signature)
+    }
 }
 
 /// Backfiller is a message type for requesting and receiving missing consensus artifacts.
@@ -949,15 +973,15 @@ impl<D: Digest> Read<usize> for Response<D> {
 pub enum Activity<D: Digest> {
     /// A single validator notarize over a proposal
     Notarize(Notarize<D>),
-    /// An aggregated threshold signature for a notarization
+    /// A threshold signature for a notarization
     Notarization(Notarization<D>),
     /// A single validator nullify to skip the current view
     Nullify(Nullify),
-    /// An aggregated threshold signature for a nullification
+    /// A threshold signature for a nullification
     Nullification(Nullification),
     /// A single validator finalize over a proposal
     Finalize(Finalize<D>),
-    /// An aggregated threshold signature for a finalization
+    /// A threshold signature for a finalization
     Finalization(Finalization<D>),
     /// Evidence of a validator sending conflicting notarizes (Byzantine behavior)
     ConflictingNotarize(ConflictingNotarize<D>),
@@ -1088,6 +1112,54 @@ impl<D: Digest> Viewable for Activity<D> {
             Activity::NullifyFinalize(v) => v.view(),
         }
     }
+}
+
+/// Seed represents a threshold signature over the current view.
+#[derive(Clone, Debug, PartialEq, Hash, Eq)]
+pub struct Seed {
+    /// The view for which this seed is generated
+    pub view: View,
+    /// The partial signature on the seed
+    pub signature: Signature,
+}
+
+impl Seed {
+    /// Creates a new seed with the given view and signature.
+    pub fn new(view: View, signature: Signature) -> Self {
+        Seed { view, signature }
+    }
+
+    /// Verifies the threshold signature on this seed.
+    pub fn verify(&self, namespace: &[u8], public_key: &Public) -> bool {
+        let seed_namespace = seed_namespace(namespace);
+        let message = view_message(self.view);
+        verify_message(public_key, Some(&seed_namespace), &message, &self.signature).is_ok()
+    }
+}
+
+impl Viewable for Seed {
+    fn view(&self) -> View {
+        self.view
+    }
+}
+
+impl Write for Seed {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.view.write(writer);
+        self.signature.write(writer);
+    }
+}
+
+impl Read for Seed {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        let view = View::read(reader)?;
+        let signature = Signature::read(reader)?;
+        Ok(Seed { view, signature })
+    }
+}
+
+impl FixedSize for Seed {
+    const SIZE: usize = View::SIZE + Signature::SIZE;
 }
 
 /// ConflictingNotarize represents evidence of a Byzantine validator sending conflicting notarizes.
@@ -1515,14 +1587,21 @@ mod tests {
 
         // Create notarization
         let notarization = Notarization::new(proposal, proposal_signature, seed_signature);
-
         let encoded = notarization.encode();
         let decoded = Notarization::<Sha256>::decode(encoded).unwrap();
-
         assert_eq!(notarization, decoded);
 
         // Verify the notarization
         let public_key = poly::public(&commitment);
+        assert!(decoded.verify(NAMESPACE, public_key));
+
+        // Create seed
+        let seed = notarization.seed();
+        let encoded = seed.encode();
+        let decoded = Seed::decode(encoded).unwrap();
+        assert_eq!(seed, decoded);
+
+        // Verify the seed
         assert!(decoded.verify(NAMESPACE, public_key));
     }
 
@@ -1561,14 +1640,21 @@ mod tests {
 
         // Create nullification
         let nullification = Nullification::new(10, view_signature, seed_signature);
-
         let encoded = nullification.encode();
         let decoded = Nullification::decode(encoded).unwrap();
-
         assert_eq!(nullification, decoded);
 
         // Verify the nullification
         let public_key = poly::public(&commitment);
+        assert!(decoded.verify(NAMESPACE, public_key));
+
+        // Create seed
+        let seed = nullification.seed();
+        let encoded = seed.encode();
+        let decoded = Seed::decode(encoded).unwrap();
+        assert_eq!(seed, decoded);
+
+        // Verify the seed
         assert!(decoded.verify(NAMESPACE, public_key));
     }
 
@@ -1614,14 +1700,21 @@ mod tests {
 
         // Create finalization
         let finalization = Finalization::new(proposal, proposal_signature, seed_signature);
-
         let encoded = finalization.encode();
         let decoded = Finalization::<Sha256>::decode(encoded).unwrap();
-
         assert_eq!(finalization, decoded);
 
         // Verify the finalization
         let public_key = poly::public(&commitment);
+        assert!(decoded.verify(NAMESPACE, public_key));
+
+        // Create seed
+        let seed = finalization.seed();
+        let encoded = seed.encode();
+        let decoded = Seed::decode(encoded).unwrap();
+        assert_eq!(seed, decoded);
+
+        // Verify the seed
         assert!(decoded.verify(NAMESPACE, public_key));
     }
 
