@@ -270,17 +270,19 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
     ) -> Result<V, Error> {
         // Read buffer
         let offset = offset as u64 * ITEM_ALIGNMENT;
-        let mut buf = vec![0u8; size as usize];
+        let entry_size = 4 + size as usize + 4;
+        let mut buf = vec![0u8; entry_size];
         blob.read_at(&mut buf, offset).await?;
 
         // Check size
         let disk_size = u32::from_be_bytes(buf[..4].try_into().unwrap());
-        if size != disk_size {
+        if disk_size != size {
             return Err(Error::UnexpectedSize(disk_size, size));
         }
 
         // Get item
         let item = &buf[4..4 + size as usize];
+        let checksum = crc32fast::hash(item);
         let item = if compressed {
             decompress(item, u32::MAX as usize).map_err(|_| Error::DecompressionFailed)?
         } else {
@@ -289,7 +291,6 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
 
         // Verify integrity
         let stored_checksum = u32::from_be_bytes(buf[4 + size as usize..].try_into().unwrap());
-        let checksum = crc32fast::hash(&item);
         if checksum != stored_checksum {
             return Err(Error::ChecksumMismatch(stored_checksum, checksum));
         }
@@ -421,7 +422,7 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
 
         // Ensure item is not too large
         let item_len = encoded.len();
-        let len = 4 + item_len + 4;
+        let entry_len = 4 + item_len + 4;
         let item_len = match item_len.try_into() {
             Ok(len) => len,
             Err(_) => return Err(Error::ItemTooLarge(item_len)),
@@ -439,17 +440,18 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
         };
 
         // Populate buffer
-        let mut buf = Vec::with_capacity(len);
+        let mut buf = Vec::with_capacity(entry_len);
         buf.put_u32(item_len);
         let checksum = crc32fast::hash(&encoded);
         buf.put_slice(&encoded);
         buf.put_u32(checksum);
+        assert_eq!(buf.len(), entry_len);
 
         // Append item to blob
         let cursor = blob.len().await?;
         let offset = compute_next_offset(cursor)?;
         blob.write_at(&buf, offset as u64 * ITEM_ALIGNMENT).await?;
-        trace!(blob = section, previous_len = len, offset, "appended item");
+        trace!(blob = section, offset, "appended item");
         Ok((offset, item_len))
     }
 
