@@ -358,15 +358,15 @@ pub fn create_pool<S: Spawner + Metrics>(
 /// let executor = deterministic::Runner::default();
 /// executor.start(|context| async move {
 ///     // Create a new RwLock
-///     let lock = RwLock::new(0);
+///     let lock = RwLock::new(2);
 ///
 ///     // many concurrent readers
 ///     let r1 = lock.read().await;
 ///     let r2 = lock.read().await;
-///     assert_eq!(*r1 + *r2, 0);
+///     assert_eq!(*r1 + *r2, 4);
 ///
 ///     // exclusive writer
-///     drop((r1, r2));          // all readers must go away
+///     drop((r1, r2));
 ///     let mut w = lock.write().await;
 ///     *w += 1;
 /// });
@@ -479,17 +479,20 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // Create a new RwLock
-            let lock = RwLock::new(0);
+            let lock = RwLock::new(100);
 
             // many concurrent readers
             let r1 = lock.read().await;
             let r2 = lock.read().await;
-            assert_eq!(*r1 + *r2, 0);
+            assert_eq!(*r1 + *r2, 200);
 
             // exclusive writer
             drop((r1, r2)); // all readers must go away
             let mut w = lock.write().await;
             *w += 1;
+
+            // Check the value
+            assert_eq!(*w, 101);
         });
     }
 }
