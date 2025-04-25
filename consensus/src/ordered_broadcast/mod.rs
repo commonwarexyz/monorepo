@@ -835,7 +835,7 @@ mod tests {
                 let (reporter, reporter_mailbox) = mocks::Reporter::<Ed25519, Sha256Digest>::new(
                     namespace,
                     *poly::public(&identity),
-                    None,
+                    Some(5),
                 );
                 context.with_label("reporter").spawn(|_| reporter.run());
                 reporters.insert(sequencer.public_key(), reporter_mailbox);
