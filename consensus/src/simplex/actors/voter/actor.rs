@@ -16,7 +16,7 @@ use commonware_cryptography::{Digest, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
-use commonware_storage::journal::variable::Journal;
+use commonware_storage::journal::variable::{Config as JConfig, Journal};
 use commonware_utils::quorum;
 use futures::{
     channel::{mpsc, oneshot},
@@ -322,8 +322,10 @@ pub struct Actor<
     reporter: F,
     supervisor: S,
 
+    partition: String,
+    compression: Option<u8>,
     replay_concurrency: usize,
-    journal: Option<Journal<E>>,
+    journal: Option<Journal<E, usize, Voter<C::Signature, D>>>,
 
     genesis: Option<D>,
 
@@ -361,11 +363,7 @@ impl<
         S: Supervisor<Index = View, PublicKey = C::PublicKey>,
     > Actor<E, C, D, A, R, F, S>
 {
-    pub fn new(
-        context: E,
-        journal: Journal<E>,
-        cfg: Config<C, D, A, R, F, S>,
-    ) -> (Self, Mailbox<C::Signature, D>) {
+    pub fn new(context: E, cfg: Config<C, D, A, R, F, S>) -> (Self, Mailbox<C::Signature, D>) {
         // Assert correctness of timeouts
         if cfg.leader_timeout > cfg.notarization_timeout {
             panic!("leader timeout must be less than or equal to notarization timeout");
@@ -415,8 +413,10 @@ impl<
                 reporter: cfg.reporter,
                 supervisor: cfg.supervisor,
 
+                partition: cfg.partition,
+                compression: cfg.compression,
                 replay_concurrency: cfg.replay_concurrency,
-                journal: Some(journal),
+                journal: None,
 
                 genesis: None,
 
@@ -708,9 +708,7 @@ impl<
         });
 
         // Handle nullify
-        let msg = Voter::Nullify::<C::Signature, D>(nullify.clone())
-            .encode()
-            .into();
+        let msg = Voter::Nullify(nullify.clone());
         if round.add_verified_nullify(nullify).await && self.journal.is_some() {
             self.journal
                 .as_mut()
@@ -1021,9 +1019,7 @@ impl<
         });
 
         // Handle notarize
-        let msg = Voter::Notarize::<C::Signature, D>(notarize.clone())
-            .encode()
-            .into();
+        let msg = Voter::Notarize(notarize.clone());
         if round.add_verified_notarize(notarize).await && self.journal.is_some() {
             self.journal
                 .as_mut()
@@ -1075,9 +1071,7 @@ impl<
         });
         for signature in &notarization.signatures {
             let notarize = Notarize::new(notarization.proposal.clone(), signature.clone());
-            let msg = Voter::Notarize::<C::Signature, D>(notarize.clone())
-                .encode()
-                .into();
+            let msg = Voter::Notarize::<C::Signature, D>(notarize.clone());
             if round.add_verified_notarize(notarize).await && self.journal.is_some() {
                 self.journal
                     .as_mut()
@@ -1146,9 +1140,7 @@ impl<
         });
         for signature in &nullification.signatures {
             let nullify = Nullify::new(view, signature.clone());
-            let msg = Voter::Nullify::<C::Signature, D>(nullify.clone())
-                .encode()
-                .into();
+            let msg = Voter::Nullify(nullify.clone());
             if round.add_verified_nullify(nullify).await && self.journal.is_some() {
                 self.journal
                     .as_mut()
@@ -1205,9 +1197,7 @@ impl<
         });
 
         // Handle finalize
-        let msg = Voter::Finalize::<C::Signature, D>(finalize.clone())
-            .encode()
-            .into();
+        let msg = Voter::Finalize(finalize.clone());
         if round.add_verified_finalize(finalize).await && self.journal.is_some() {
             self.journal
                 .as_mut()
@@ -1259,9 +1249,7 @@ impl<
         });
         for signature in &finalization.signatures {
             let finalize = Finalize::new(finalization.proposal.clone(), signature.clone());
-            let msg = Voter::Finalize::<C::Signature, D>(finalize.clone())
-                .encode()
-                .into();
+            let msg = Voter::Finalize(finalize.clone());
             if round.add_verified_finalize(finalize).await && self.journal.is_some() {
                 self.journal
                     .as_mut()
@@ -1685,21 +1673,28 @@ impl<
         // We start on view 1 because the genesis container occupies view 0/height 0.
         self.enter_view(1);
 
+        // Initialize journal
+        let mut journal = Journal::<_, _, Voter<C::Signature, D>>::init(
+            self.context.with_label("journal"),
+            JConfig {
+                partition: self.partition.clone(),
+                compression: self.compression,
+                codec_config: usize::MAX, // anything we read from journal is already verified
+            },
+        )
+        .await
+        .expect("unable to open journal");
+
         // Rebuild from journal
         let mut observed_view = 1;
-        let mut journal = self.journal.take().expect("missing journal");
         {
             let stream = journal
-                .replay(self.replay_concurrency, None)
+                .replay(self.replay_concurrency)
                 .await
                 .expect("unable to replay journal");
             pin_mut!(stream);
             while let Some(msg) = stream.next().await {
                 let (_, _, _, msg) = msg.expect("unable to decode journal message");
-                // We must wrap the message in Voter so we decode the right type of message (otherwise,
-                // we can parse a finalize as a notarize)
-                let msg = Voter::decode_cfg(msg, &self.max_participants)
-                    .expect("journal message is unexpected format");
                 let view = msg.view();
                 let public_key_index = self
                     .supervisor

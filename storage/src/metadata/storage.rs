@@ -1,5 +1,5 @@
 use super::{Config, Error};
-use bytes::{BufMut, Bytes};
+use bytes::BufMut;
 use commonware_codec::{FixedSize, ReadExt};
 use commonware_runtime::{Blob, Clock, Metrics, Storage};
 use commonware_utils::{Array, SystemTimeExt as _};
@@ -18,7 +18,7 @@ pub struct Metadata<E: Clock + Storage + Metrics, K: Array> {
     context: E,
 
     // Data is stored in a BTreeMap to enable deterministic serialization.
-    data: BTreeMap<K, Bytes>,
+    data: BTreeMap<K, Vec<u8>>,
     cursor: usize,
     blobs: [(E::Blob, u64, u128); 2],
 
@@ -86,7 +86,7 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         index: usize,
         blob: &E::Blob,
         len: u64,
-    ) -> Result<Option<(u128, BTreeMap<K, Bytes>)>, Error<K>> {
+    ) -> Result<Option<(u128, BTreeMap<K, Vec<u8>>)>, Error<K>> {
         // Get blob length
         if len == 0 {
             // Empty blob
@@ -151,7 +151,7 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
 
             // Read value
             let next_cursor = cursor + value_len;
-            let value = Bytes::copy_from_slice(&buf[cursor..next_cursor]);
+            let value = buf[cursor..next_cursor].to_vec();
             cursor = next_cursor;
             data.insert(key, value);
         }
@@ -161,7 +161,7 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
     }
 
     /// Get a value from `Metadata` (if it exists).
-    pub fn get(&self, key: &K) -> Option<&Bytes> {
+    pub fn get(&self, key: &K) -> Option<&Vec<u8>> {
         self.data.get(key)
     }
 
@@ -176,7 +176,7 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
     ///
     /// If the key already exists, the value will be overwritten. The
     /// value stored will not be persisted until `sync` is called.
-    pub fn put(&mut self, key: K, value: Bytes) {
+    pub fn put(&mut self, key: K, value: Vec<u8>) {
         self.data.insert(key, value);
         self.keys.set(self.data.len() as i64);
     }
