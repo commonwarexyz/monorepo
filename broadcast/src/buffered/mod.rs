@@ -172,6 +172,10 @@ mod tests {
             let m1 = TestMessage::new(b"hello world");
             let digest_m1 = m1.digest();
 
+            // Attempt immediate retrieval before broadcasting
+            let receiver_before = mailbox_a.get(digest_m1).await.await.unwrap();
+            assert_eq!(receiver_before, None);
+
             // Attempt retrieval before broadcasting
             let receiver_before = mailbox_a.subscribe(digest_m1).await;
 
@@ -184,6 +188,10 @@ mod tests {
                 .await
                 .expect("Pre-broadcast retrieval failed");
             assert_eq!(msg_before, m1);
+
+            // Attempt immediate retrieval after broadcasting
+            let receiver_after = mailbox_a.get(digest_m1).await.await.unwrap().unwrap();
+            assert_eq!(receiver_after, m1);
 
             // Perform a second retrieval after the broadcast
             let receiver_after = mailbox_a.subscribe(digest_m1).await;
