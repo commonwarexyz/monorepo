@@ -619,12 +619,9 @@ mod tests {
 
             // Read data back
             let mut buffer = [0u8; 10];
-            let before_point = buffer.as_mut_ptr();
             blob.read_at(&mut buffer, 0)
                 .await
                 .expect("Failed to read data");
-            let after_point = buffer.as_mut_ptr();
-            println!("before: {:?}, after: {:?}", before_point, after_point);
             assert_eq!(&buffer[..5], data1);
             assert_eq!(&buffer[5..], data2);
 
