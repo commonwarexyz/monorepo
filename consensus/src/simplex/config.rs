@@ -28,8 +28,10 @@ pub struct Config<
     /// Supervisor for the consensus engine.
     pub supervisor: S,
 
+    /// Partition for consensus engine storage.
     pub partition: String,
 
+    /// Compression level for consensus engine storage.
     pub compression: Option<u8>,
 
     /// Maximum number of messages to buffer on channels inside the consensus
