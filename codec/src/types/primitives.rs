@@ -1,4 +1,22 @@
-//! Implementations of Codec for primitive types.
+//! Codec implementations for Rust primitive types.
+//!
+//! # Fixed-size vs Variable-size
+//!
+//! Most primitives therefore have a compile-time constant `SIZE` and can be
+//! encoded/decoded without any configuration.
+//!
+//! `usize` is the lone exception: since most values refer to a length or size
+//! of an object in memory, values are biased towards smaller values. Therefore,
+//! it uses variable-length (varint) encoding to save space.  This means that
+//! it **does not implement [`FixedSize`]**.  When decoding a `usize`, callers
+//! must supply a [`RangeConfig`] to bound the allowable value — this protects
+//! against denial-of-service attacks that would allocate oversized buffers.
+//!
+//! ## Safety & portability
+//! * `usize` is restricted to values that fit in a `u32` to keep the on-wire
+//!   format identical across 32-bit and 64-bit architectures.
+//! * All fixed-size integers and floats are written big-endian to avoid host-
+//!   endian ambiguity.
 
 use crate::{
     util::at_least, varint::UInt, Config, EncodeSize, Error, FixedSize, RangeConfig, Read, ReadExt,
@@ -44,11 +62,6 @@ impl_numeric!(f32, get_f32, put_f32);
 impl_numeric!(f64, get_f64, put_f64);
 
 // Usize implementation
-// Since most values refer to a length or size of an object in memory, values are usually biased
-// towards smaller values. Therefore, we use a variable-length encoding for `usize` to save space.
-// For consistency across platforms, we expect all `usize` values to fit within a `u32`, and will
-// otherwise panic upon writing or return an error upon reading. In addition, for safety against DOS
-// attacks, we require a range as configuration when reading `usize` values.
 impl Write for usize {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {
