@@ -956,7 +956,7 @@ impl<
             codec_config: (),
         };
         let mut journal =
-            Journal::<_, _, Node<C, D>>::init(self.context.with_label("sequencer_journal"), cfg)
+            Journal::<_, _, Node<C, D>>::init(self.context.with_label("journal"), cfg)
                 .await
                 .expect("unable to init journal");
 
