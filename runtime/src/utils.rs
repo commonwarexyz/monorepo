@@ -453,7 +453,7 @@ pub fn run_tasks(tasks: usize, runner: crate::deterministic::Runner) -> (String,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{tokio, Metrics};
+    use crate::{deterministic, tokio, Metrics};
     use commonware_macros::test_traced;
     use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
@@ -471,6 +471,25 @@ mod tests {
             pool.install(|| {
                 assert_eq!(v.par_iter().sum::<i32>(), 10000 * 9999 / 2);
             });
+        });
+    }
+
+    #[test_traced]
+    fn test_rwlock() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            // Create a new RwLock
+            let lock = RwLock::new(0);
+
+            // many concurrent readers
+            let r1 = lock.read().await;
+            let r2 = lock.read().await;
+            assert_eq!(*r1 + *r2, 0);
+
+            // exclusive writer
+            drop((r1, r2)); // all readers must go away
+            let mut w = lock.write().await;
+            *w += 1;
         });
     }
 }
