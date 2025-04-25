@@ -13,13 +13,15 @@ use super::{
     AckManager, Config, TipManager,
 };
 use crate::{Automaton, Monitor, Relay, Reporter, Supervisor, ThresholdSupervisor};
-use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{
     bls12381::primitives::{group, poly},
     Digest, Scheme,
 };
 use commonware_macros::select;
-use commonware_p2p::{Receiver, Recipients, Sender};
+use commonware_p2p::{
+    utils::codec::{wrap, WrappedSender},
+    Receiver, Recipients, Sender,
+};
 use commonware_runtime::{
     telemetry::metrics::{
         histogram,
@@ -259,8 +261,8 @@ impl<
 
     /// Inner run loop called by `start`.
     async fn run(mut self, chunk_network: (NetS, NetR), ack_network: (NetS, NetR)) {
-        let (mut node_sender, mut node_receiver) = chunk_network;
-        let (mut ack_sender, mut ack_receiver) = ack_network;
+        let (mut node_sender, mut node_receiver) = wrap((), chunk_network.0, chunk_network.1);
+        let (mut ack_sender, mut ack_receiver) = wrap((), ack_network.0, ack_network.1);
         let mut shutdown = self.context.stopped();
 
         // Tracks if there is an outstanding proposal request to the automaton.
@@ -361,7 +363,7 @@ impl<
                         }
                     };
                     let mut guard = self.metrics.nodes.guard(Status::Invalid);
-                    let node = match Node::decode(msg) {
+                    let node = match msg {
                         Ok(node) => node,
                         Err(err) => {
                             warn!(?err, ?sender, "node decode failed");
@@ -405,7 +407,7 @@ impl<
                         }
                     };
                     let mut guard = self.metrics.acks.guard(Status::Invalid);
-                    let ack = match Ack::decode(msg) {
+                    let ack = match msg {
                         Ok(ack) => ack,
                         Err(err) => {
                             warn!(?err, ?sender, "ack decode failed");
@@ -469,7 +471,7 @@ impl<
         &mut self,
         context: &Context<C::PublicKey>,
         payload: &D,
-        ack_sender: &mut NetS,
+        ack_sender: &mut WrappedSender<NetS, (), Ack<C::PublicKey, D>>,
     ) -> Result<(), Error> {
         // Get the tip
         let Some(tip) = self.tip_manager.get(&context.sequencer) else {
@@ -513,18 +515,14 @@ impl<
             recipients
         };
 
-        // Send the ack to the network
-        ack_sender
-            .send(
-                Recipients::Some(recipients),
-                ack.encode().into(),
-                self.priority_acks,
-            )
-            .await
-            .map_err(|_| Error::UnableToSendMessage)?;
-
         // Handle the ack internally
         self.handle_ack(&ack).await?;
+
+        // Send the ack to the network
+        ack_sender
+            .send(Recipients::Some(recipients), ack, self.priority_acks)
+            .await
+            .map_err(|_| Error::UnableToSendMessage)?;
 
         // Emit the activity
         self.reporter
@@ -669,7 +667,7 @@ impl<
         &mut self,
         context: Context<C::PublicKey>,
         payload: D,
-        node_sender: &mut NetS,
+        node_sender: &mut WrappedSender<NetS, (), Node<C, D>>,
     ) -> Result<(), Error> {
         let mut guard = self.metrics.propose.guard(Status::Dropped);
         let me = self.crypto.public_key();
@@ -718,7 +716,7 @@ impl<
         self.propose_timer = Some(self.metrics.e2e_duration.timer());
 
         // Broadcast to network
-        if let Err(err) = self.broadcast(&node, node_sender, self.epoch).await {
+        if let Err(err) = self.broadcast(node, node_sender, self.epoch).await {
             guard.set(Status::Failure);
             return Err(err);
         };
@@ -734,7 +732,10 @@ impl<
     /// - this instance is the sequencer for the current epoch.
     /// - this instance has a chunk to rebroadcast.
     /// - this instance has not yet collected the threshold signature for the chunk.
-    async fn rebroadcast(&mut self, node_sender: &mut NetS) -> Result<(), Error> {
+    async fn rebroadcast(
+        &mut self,
+        node_sender: &mut WrappedSender<NetS, (), Node<C, D>>,
+    ) -> Result<(), Error> {
         let mut guard = self.metrics.rebroadcast.guard(Status::Dropped);
 
         // Unset the rebroadcast deadline
@@ -762,7 +763,7 @@ impl<
 
         // Broadcast the message, which resets the rebroadcast deadline
         guard.set(Status::Failure);
-        self.broadcast(&tip, node_sender, self.epoch).await?;
+        self.broadcast(tip, node_sender, self.epoch).await?;
         guard.set(Status::Success);
         Ok(())
     }
@@ -770,8 +771,8 @@ impl<
     /// Send a  `Node` message to all validators in the given epoch.
     async fn broadcast(
         &mut self,
-        node: &Node<C, D>,
-        node_sender: &mut NetS,
+        node: Node<C, D>,
+        node_sender: &mut WrappedSender<NetS, (), Node<C, D>>,
         epoch: Epoch,
     ) -> Result<(), Error> {
         // Get the validators for the epoch
@@ -786,7 +787,7 @@ impl<
         node_sender
             .send(
                 Recipients::Some(validators.clone()),
-                node.encode().into(),
+                node,
                 self.priority_proposals,
             )
             .await
