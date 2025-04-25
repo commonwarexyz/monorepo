@@ -66,6 +66,13 @@
 //! (provided during `replay`) and usage of an incorrect `exact` value will result in undefined
 //! behavior.
 //!
+//! # Compression
+//!
+//! `Journal` supports optional compression using `zstd`. This can be enabled by setting
+//! the `compression` field in the `Config` struct to a valid `zstd` compression level. This setting
+//! can be changed between initializations of `Journal`, however, it must remain populated if any
+//! data was written with compression enabled.
+//!
 //! # Example
 //!
 //! ```rust
@@ -76,11 +83,13 @@
 //! executor.start(|context| async move {
 //!     // Create a journal
 //!     let mut journal = Journal::init(context, Config{
-//!         partition: "partition".to_string()
+//!         partition: "partition".to_string(),
+//!         compression: None,
+//!         codec_config: (),
 //!     }).await.unwrap();
 //!
 //!     // Append data to the journal
-//!     journal.append(1, "data".into()).await.unwrap();
+//!     journal.append(1, 128).await.unwrap();
 //!
 //!     // Close the journal
 //!     journal.close().await.unwrap();

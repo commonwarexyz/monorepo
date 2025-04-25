@@ -116,29 +116,24 @@
 //! use commonware_storage::{
 //!     index::translator::FourCap,
 //!     archive::{Archive, Config},
-//!     journal::{Error, variable::{Config as JConfig, Journal}},
 //! };
 //!
 //! let executor = deterministic::Runner::default();
 //! executor.start(|context| async move {
-//!     // Create a journal
-//!     let cfg = JConfig {
-//!         partition: "partition".to_string()
-//!     };
-//!     let journal = Journal::init(context.clone(), cfg).await.unwrap();
-//!
 //!     // Create an archive
 //!     let cfg = Config {
 //!         translator: FourCap,
+//!         partition: "demo".into(),
+//!         compression: Some(3),
+//!         codec_config: (),
 //!         section_mask: 0xffff_ffff_ffff_0000u64,
 //!         pending_writes: 10,
 //!         replay_concurrency: 4,
-//!         compression: Some(3),
 //!     };
-//!     let mut archive = Archive::init(context, journal, cfg).await.unwrap();
+//!     let mut archive = Archive::init(context, cfg).await.unwrap();
 //!
 //!     // Put a key
-//!     archive.put(1, hash(b"data"), "data".into()).await.unwrap();
+//!     archive.put(1, hash(b"data"), 10).await.unwrap();
 //!
 //!     // Close the archive (also closes the journal)
 //!     archive.close().await.unwrap();
