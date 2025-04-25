@@ -1694,7 +1694,7 @@ impl<
                 .expect("unable to replay journal");
             pin_mut!(stream);
             while let Some(msg) = stream.next().await {
-                let (_, _, msg) = msg.expect("unable to decode journal message");
+                let (_, _, _, msg) = msg.expect("unable to decode journal message");
                 let view = msg.view();
                 let public_key_index = self
                     .supervisor

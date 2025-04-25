@@ -976,7 +976,7 @@ impl<
             let mut tip: Option<Node<C, D>> = None;
             let mut num_items = 0;
             while let Some(msg) = stream.next().await {
-                let (_, _, node) = msg.expect("unable to read from journal");
+                let (_, _, _, node) = msg.expect("unable to read from journal");
                 num_items += 1;
                 let height = node.chunk.height;
                 match tip {

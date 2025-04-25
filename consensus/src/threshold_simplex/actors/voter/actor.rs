@@ -1815,7 +1815,7 @@ impl<
                 .expect("unable to replay journal");
             pin_mut!(stream);
             while let Some(msg) = stream.next().await {
-                let (_, _, msg) = msg.expect("unable to replay journal");
+                let (_, _, _, msg) = msg.expect("unable to replay journal");
                 let view = msg.view();
                 match msg {
                     Voter::Notarize(notarize) => {
