@@ -59,16 +59,6 @@
 //! some in-memory state. `Journal` is heavily optimized for this pattern and provides a `replay`
 //! method that iterates over multiple `sections` concurrently in a single stream.
 //!
-//! ## Skip Reads
-//!
-//! Some applications may only want to read the first `n` bytes of each item during `replay`. This
-//! can be done by providing a `prefix` parameter to the `replay` method. If `prefix` is provided,
-//! `Journal` will only return the first `prefix` bytes of each item and "skip ahead" to the next
-//! item (computing the offset using the read `size` value).
-//!
-//! _Reading only the `prefix` bytes of an item makes it impossible to compute the checksum of an
-//! item. It is up to the caller to ensure these reads are safe._
-//!
 //! # Exact Reads
 //!
 //! To allow for items to be fetched in a single disk operation, `Journal` allows callers to specify
