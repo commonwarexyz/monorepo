@@ -130,7 +130,7 @@ fn compute_next_offset(mut offset: u64) -> Result<u32, Error> {
 }
 
 /// Implementation of `Journal` storage.
-pub struct Journal<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> {
+pub struct Journal<E: Storage + Metrics, C: CodecConfig, V: Codec<C>> {
     context: E,
     cfg: Config<C>,
 
@@ -145,7 +145,7 @@ pub struct Journal<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> {
     _phantom: PhantomData<V>,
 }
 
-impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> {
+impl<E: Storage + Metrics, C: CodecConfig, V: Codec<C>> Journal<E, C, V> {
     /// Initialize a new `Journal` instance.
     ///
     /// All backing blobs are opened but not read during
@@ -311,78 +311,89 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
         concurrency: usize,
     ) -> Result<impl Stream<Item = Result<(u64, u32, u32, V), Error>> + '_, Error> {
         // Collect all blobs to replay
+        let codec_config = self.cfg.codec_config.clone();
+        let compressed = self.cfg.compression.is_some();
         let mut blobs = Vec::with_capacity(self.blobs.len());
         for (section, (blob, len)) in self.blobs.iter() {
             let aligned_len = compute_next_offset(*len)?;
-            blobs.push((*section, blob, aligned_len));
+            blobs.push((
+                *section,
+                blob,
+                aligned_len,
+                codec_config.clone(),
+                compressed,
+            ));
         }
 
         // Replay all blobs concurrently and stream items as they are read (to avoid
         // occupying too much memory with buffered data)
-        let compressed = self.cfg.compression.is_some();
-        let codec_config = self.cfg.codec_config;
         Ok(stream::iter(blobs)
-            .map(move |(section, blob, len)| async move {
-                stream::unfold(
-                    (section, blob, 0u32),
-                    move |(section, blob, offset)| async move {
-                        // Check if we are at the end of the blob
-                        if offset == len {
-                            return None;
-                        }
+            .map(
+                move |(section, blob, len, codec_config, compressed)| async move {
+                    stream::unfold(
+                        (section, blob, 0u32, codec_config, compressed),
+                        move |(section, blob, offset, codec_config, compressed)| async move {
+                            // Check if we are at the end of the blob
+                            if offset == len {
+                                return None;
+                            }
 
-                        // Get next item
-                        let mut read = Self::read(compressed, &codec_config, blob, offset).await;
+                            // Get next item
+                            let mut read =
+                                Self::read(compressed, &codec_config, blob, offset).await;
 
-                        // Ensure a full read wouldn't put us past the end of the blob
-                        if let Ok((next_offset, _, _)) = read {
-                            if next_offset > len {
-                                read = Err(Error::Runtime(RError::BlobInsufficientLength));
-                            }
-                        };
+                            // Ensure a full read wouldn't put us past the end of the blob
+                            if let Ok((next_offset, _, _)) = read {
+                                if next_offset > len {
+                                    read = Err(Error::Runtime(RError::BlobInsufficientLength));
+                                }
+                            };
 
-                        // Handle read result
-                        match read {
-                            Ok((next_offset, size, item)) => {
-                                trace!(blob = section, cursor = offset, len, "replayed item");
-                                Some((
-                                    Ok((section, offset, size, item)),
-                                    (section, blob, next_offset),
-                                ))
+                            // Handle read result
+                            match read {
+                                Ok((next_offset, size, item)) => {
+                                    trace!(blob = section, cursor = offset, len, "replayed item");
+                                    Some((
+                                        Ok((section, offset, size, item)),
+                                        (section, blob, next_offset, codec_config, compressed),
+                                    ))
+                                }
+                                Err(Error::ChecksumMismatch(expected, found)) => {
+                                    // If we encounter corruption, we don't try to fix it.
+                                    warn!(
+                                        blob = section,
+                                        cursor = offset,
+                                        expected,
+                                        found,
+                                        "corruption detected"
+                                    );
+                                    Some((
+                                        Err(Error::ChecksumMismatch(expected, found)),
+                                        (section, blob, len, codec_config, compressed),
+                                    ))
+                                }
+                                Err(Error::Runtime(RError::BlobInsufficientLength)) => {
+                                    // If we encounter trailing bytes, we prune to the last
+                                    // valid item. This can happen during an unclean file close (where
+                                    // pending data is not fully synced to disk).
+                                    warn!(
+                                        blob = section,
+                                        new_size = offset,
+                                        old_size = len,
+                                        "trailing bytes detected: truncating"
+                                    );
+                                    blob.truncate(offset as u64 * ITEM_ALIGNMENT).await.ok()?;
+                                    blob.sync().await.ok()?;
+                                    None
+                                }
+                                Err(err) => {
+                                    Some((Err(err), (section, blob, len, codec_config, compressed)))
+                                }
                             }
-                            Err(Error::ChecksumMismatch(expected, found)) => {
-                                // If we encounter corruption, we don't try to fix it.
-                                warn!(
-                                    blob = section,
-                                    cursor = offset,
-                                    expected,
-                                    found,
-                                    "corruption detected"
-                                );
-                                Some((
-                                    Err(Error::ChecksumMismatch(expected, found)),
-                                    (section, blob, len),
-                                ))
-                            }
-                            Err(Error::Runtime(RError::BlobInsufficientLength)) => {
-                                // If we encounter trailing bytes, we prune to the last
-                                // valid item. This can happen during an unclean file close (where
-                                // pending data is not fully synced to disk).
-                                warn!(
-                                    blob = section,
-                                    new_size = offset,
-                                    old_size = len,
-                                    "trailing bytes detected: truncating"
-                                );
-                                blob.truncate(offset as u64 * ITEM_ALIGNMENT).await.ok()?;
-                                blob.sync().await.ok()?;
-                                None
-                            }
-                            Err(err) => Some((Err(err), (section, blob, len))),
-                        }
-                    },
-                )
-            })
+                        },
+                    )
+                },
+            )
             .buffer_unordered(concurrency)
             .flatten())
     }
