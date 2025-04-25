@@ -16,13 +16,18 @@ impl<S: crate::Storage> Storage<S> {
 impl<S: crate::Storage> crate::Storage for Storage<S> {
     type Blob = Blob<S::Blob>;
 
-    async fn open(&self, partition: &str, name: &[u8]) -> Result<Self::Blob, Error> {
+    async fn open(&self, partition: &str, name: &[u8]) -> Result<(Self::Blob, u64), Error> {
         self.auditor.open(partition, name);
-        self.inner.open(partition, name).await.map(|blob| Blob {
-            auditor: self.auditor.clone(),
-            inner: blob,
-            partition: partition.into(),
-            name: name.to_vec(),
+        self.inner.open(partition, name).await.map(|(blob, len)| {
+            (
+                Blob {
+                    auditor: self.auditor.clone(),
+                    inner: blob,
+                    partition: partition.into(),
+                    name: name.to_vec(),
+                },
+                len,
+            )
         })
     }
 
@@ -46,11 +51,6 @@ pub struct Blob<B: crate::Blob> {
 }
 
 impl<B: crate::Blob> crate::Blob for Blob<B> {
-    async fn len(&self) -> Result<u64, Error> {
-        self.auditor.len(&self.partition, &self.name);
-        self.inner.len().await
-    }
-
     async fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
         self.auditor
             .read_at(&self.partition, &self.name, buf.len(), offset);
@@ -114,8 +114,8 @@ mod tests {
         let storage2 = AuditedStorage::new(inner2, auditor2.clone());
 
         // Perform a sequence of operations on both storages simultaneously
-        let blob1 = storage1.open("partition", b"test_blob").await.unwrap();
-        let blob2 = storage2.open("partition", b"test_blob").await.unwrap();
+        let (blob1, _) = storage1.open("partition", b"test_blob").await.unwrap();
+        let (blob2, _) = storage2.open("partition", b"test_blob").await.unwrap();
 
         // Write data to the blobs
         blob1.write_at(b"hello world", 0).await.unwrap();
@@ -142,10 +142,6 @@ mod tests {
         // Truncate the blobs
         blob1.truncate(5).await.unwrap();
         blob2.truncate(5).await.unwrap();
-        let len1 = blob1.len().await.unwrap();
-        let len2 = blob2.len().await.unwrap();
-        assert_eq!(len1, 5, "Blob1 length after truncation is incorrect");
-        assert_eq!(len2, 5, "Blob2 length after truncation is incorrect");
         assert_eq!(
             auditor1.state(),
             auditor2.state(),

@@ -136,7 +136,7 @@ pub struct Journal<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> {
 
     oldest_allowed: Option<u64>,
 
-    blobs: BTreeMap<u64, E::Blob>,
+    blobs: BTreeMap<u64, (E::Blob, u64)>,
 
     tracked: Gauge,
     synced: Counter,
@@ -160,14 +160,14 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
             Err(err) => return Err(Error::Runtime(err)),
         };
         for name in stored_blobs {
-            let blob = context.open(&cfg.partition, &name).await?;
+            let (blob, len) = context.open(&cfg.partition, &name).await?;
             let hex_name = hex(&name);
             let section = match name.try_into() {
                 Ok(section) => u64::from_be_bytes(section),
                 Err(_) => return Err(Error::InvalidBlobName(hex_name)),
             };
-            debug!(section, blob = hex_name, "loaded section");
-            blobs.insert(section, blob);
+            debug!(section, blob = hex_name, len, "loaded section");
+            blobs.insert(section, (blob, len));
         }
 
         // Initialize metrics
@@ -312,9 +312,8 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
     ) -> Result<impl Stream<Item = Result<(u64, u32, u32, V), Error>> + '_, Error> {
         // Collect all blobs to replay
         let mut blobs = Vec::with_capacity(self.blobs.len());
-        for (section, blob) in self.blobs.iter() {
-            let len = blob.len().await?;
-            let aligned_len = compute_next_offset(len)?;
+        for (section, (blob, len)) in self.blobs.iter() {
+            let aligned_len = compute_next_offset(*len)?;
             blobs.push((*section, blob, aligned_len));
         }
 
@@ -439,9 +438,11 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
         assert_eq!(buf.len(), entry_len);
 
         // Append item to blob
-        let cursor = blob.len().await?;
+        let cursor = blob.1;
         let offset = compute_next_offset(cursor)?;
-        blob.write_at(&buf, offset as u64 * ITEM_ALIGNMENT).await?;
+        let aligned_cursor = offset as u64 * ITEM_ALIGNMENT;
+        blob.0.write_at(&buf, aligned_cursor).await?;
+        blob.1 = aligned_cursor + entry_len as u64;
         trace!(blob = section, offset, "appended item");
         Ok((offset, item_len))
     }
@@ -449,7 +450,7 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
     /// Retrieves an item from `Journal` at a given `section` and `offset`.
     pub async fn get(&self, section: u64, offset: u32) -> Result<Option<V>, Error> {
         self.prune_guard(section, false)?;
-        let blob = match self.blobs.get(&section) {
+        let (blob, _) = match self.blobs.get(&section) {
             Some(blob) => blob,
             None => return Ok(None),
         };
@@ -473,7 +474,7 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
         size: u32,
     ) -> Result<Option<V>, Error> {
         self.prune_guard(section, false)?;
-        let blob = match self.blobs.get(&section) {
+        let (blob, _) = match self.blobs.get(&section) {
             Some(blob) => blob,
             None => return Ok(None),
         };
@@ -495,7 +496,7 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
     /// If the `section` does not exist, no error will be returned.
     pub async fn sync(&self, section: u64) -> Result<(), Error> {
         self.prune_guard(section, false)?;
-        let blob = match self.blobs.get(&section) {
+        let (blob, _) = match self.blobs.get(&section) {
             Some(blob) => blob,
             None => return Ok(()),
         };
@@ -516,14 +517,14 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
             }
 
             // Remove and close blob
-            let blob = self.blobs.remove(&section).unwrap();
+            let (blob, len) = self.blobs.remove(&section).unwrap();
             blob.close().await?;
 
             // Remove blob from storage
             self.context
                 .remove(&self.cfg.partition, Some(&section.to_be_bytes()))
                 .await?;
-            debug!(blob = section, "pruned blob");
+            debug!(blob = section, len, "pruned blob");
             self.tracked.dec();
             self.pruned.inc();
         }
@@ -535,18 +536,18 @@ impl<E: Storage + Metrics, C: CodecConfig + Copy, V: Codec<C>> Journal<E, C, V> 
 
     /// Closes all open sections.
     pub async fn close(self) -> Result<(), Error> {
-        for (section, blob) in self.blobs.into_iter() {
+        for (section, (blob, len)) in self.blobs.into_iter() {
             blob.close().await?;
-            debug!(blob = section, "closed blob");
+            debug!(blob = section, len, "closed blob");
         }
         Ok(())
     }
 
     /// Close and remove any underlying blobs created by the journal.
     pub async fn destroy(self) -> Result<(), Error> {
-        for (i, blob) in self.blobs.into_iter() {
+        for (i, (blob, len)) in self.blobs.into_iter() {
             blob.close().await?;
-            debug!(blob = i, "destroyed blob");
+            debug!(blob = i, len, "destroyed blob");
             self.context
                 .remove(&self.cfg.partition, Some(&i.to_be_bytes()))
                 .await?;
@@ -807,7 +808,7 @@ mod tests {
 
             // Manually create a blob with an invalid name (not 8 bytes)
             let invalid_blob_name = b"invalid"; // Less than 8 bytes
-            let blob = context
+            let (blob, _) = context
                 .open(&cfg.partition, invalid_blob_name)
                 .await
                 .expect("Failed to create blob with invalid name");
@@ -838,7 +839,7 @@ mod tests {
             // Manually create a blob with incomplete size data
             let section = 1u64;
             let blob_name = section.to_be_bytes();
-            let blob = context
+            let (blob, _) = context
                 .open(&cfg.partition, &blob_name)
                 .await
                 .expect("Failed to create blob");
@@ -886,7 +887,7 @@ mod tests {
             // Manually create a blob with missing item data
             let section = 1u64;
             let blob_name = section.to_be_bytes();
-            let blob = context
+            let (blob, _) = context
                 .open(&cfg.partition, &blob_name)
                 .await
                 .expect("Failed to create blob");
@@ -938,7 +939,7 @@ mod tests {
             // Manually create a blob with missing checksum
             let section = 1u64;
             let blob_name = section.to_be_bytes();
-            let blob = context
+            let (blob, _) = context
                 .open(&cfg.partition, &blob_name)
                 .await
                 .expect("Failed to create blob");
@@ -1000,7 +1001,7 @@ mod tests {
             // Manually create a blob with incorrect checksum
             let section = 1u64;
             let blob_name = section.to_be_bytes();
-            let blob = context
+            let (blob, _) = context
                 .open(&cfg.partition, &blob_name)
                 .await
                 .expect("Failed to create blob");
@@ -1091,11 +1092,10 @@ mod tests {
             journal.close().await.expect("Failed to close journal");
 
             // Manually corrupt the end of the second blob
-            let blob = context
+            let (blob, blob_len) = context
                 .open(&cfg.partition, &2u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            let blob_len = blob.len().await.expect("Failed to get blob length");
             blob.truncate(blob_len - 4)
                 .await
                 .expect("Failed to corrupt blob");
@@ -1130,16 +1130,9 @@ mod tests {
 
     // Define `MockBlob` that returns an offset length that should overflow
     #[derive(Clone)]
-    struct MockBlob {
-        len: u64,
-    }
+    struct MockBlob {}
 
     impl Blob for MockBlob {
-        async fn len(&self) -> Result<u64, commonware_runtime::Error> {
-            // Return a length that will cause offset overflow
-            Ok(self.len)
-        }
-
         async fn read_at(&self, _buf: &mut [u8], _offset: u64) -> Result<(), RError> {
             Ok(())
         }
@@ -1170,8 +1163,8 @@ mod tests {
     impl Storage for MockStorage {
         type Blob = MockBlob;
 
-        async fn open(&self, _partition: &str, _name: &[u8]) -> Result<MockBlob, RError> {
-            Ok(MockBlob { len: self.len })
+        async fn open(&self, _partition: &str, _name: &[u8]) -> Result<(MockBlob, u64), RError> {
+            Ok((MockBlob {}, self.len))
         }
 
         async fn remove(&self, _partition: &str, _name: Option<&[u8]>) -> Result<(), RError> {

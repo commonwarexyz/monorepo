@@ -209,29 +209,13 @@ impl<H: CHasher> Proof<H> {
     /// in the retained section, but its immediate parent does. (A node meeting condition (2) can be
     /// shown to always be the left-child of its parent.)
     ///
-    /// Implementation: Iterate over peaks, adding each to the result, until we reach the first peak
-    /// that is retained.  For the first retained peak, we walk the path from peak to the left-most
-    /// retained leaf, adding the left-child of each node on this path to the result if it is
-    /// pruned.
-    pub fn nodes_to_pin(size: u64, start_pos: u64) -> Vec<u64> {
-        let mut positions = Vec::<u64>::new();
-        for (pos, height) in PeakIterator::new(size) {
-            if pos >= start_pos {
-                // Found the first unpruned peak, now walk the path towards the leftmost unpruned
-                // leaf (at position `start_pos`).
-                let iter = PathIterator::new(start_pos, pos, height);
-                for (_, sibling_pos) in iter {
-                    if sibling_pos < start_pos {
-                        // Found a left-sibling that is pruned, so include it in the set.
-                        positions.push(sibling_pos);
-                    }
-                }
-                break;
-            }
-            positions.push(pos);
-        }
-
-        positions
+    /// This set of nodes does not change with the MMR's size, only the pruning boundary. For a
+    /// given pruning boundary that happens to be a valid MMR size, one can prove that this set is
+    /// exactly the set of peaks for an MMR whose size equals the pruning boundary. If the pruning
+    /// boundary is not a valid MMR size, then the set corresponds to the peaks of the largest MMR
+    /// whose size is less than the pruning boundary.
+    pub fn nodes_to_pin(start_pos: u64) -> impl Iterator<Item = u64> {
+        PeakIterator::new(PeakIterator::to_nearest_size(start_pos)).map(|(pos, _)| pos)
     }
 
     /// Return the list of node positions required by the range proof for the specified range of

@@ -1,4 +1,4 @@
-use super::append_random_data;
+use super::{append_random_data, get_journal};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::Context,
@@ -20,7 +20,7 @@ const ITEM_SIZE: usize = 32;
 
 /// Replay all items in the given `journal`.
 async fn bench_run(journal: &mut Journal<Context, FixedBytes<ITEM_SIZE>>, items_to_read: u64) {
-    let concurrency = (items_to_read / ITEMS_PER_BLOB) as usize;
+    let concurrency = std::cmp::max(1, (items_to_read / ITEMS_PER_BLOB) as usize);
     let stream = journal
         .replay(concurrency)
         .await
@@ -39,21 +39,16 @@ async fn bench_run(journal: &mut Journal<Context, FixedBytes<ITEM_SIZE>>, items_
 /// Benchmark the replaying of items from a journal containing exactly that
 /// number of items.
 fn bench_fixed_replay(c: &mut Criterion) {
-    let executor = tokio::Executor::default();
+    let runner = tokio::Runner::default();
     for items in [1_000, 10_000, 100_000, 500_000] {
         c.bench_function(
             &format!("{}/items={} size={}", module_path!(), items, ITEM_SIZE),
             |b| {
-                b.to_async(&executor).iter_custom(|iters| async move {
+                b.to_async(&runner).iter_custom(|iters| async move {
                     // Append random data to the journal
                     let ctx = context::get::<commonware_runtime::tokio::Context>();
-                    let mut j = append_random_data::<ITEM_SIZE>(
-                        ctx.clone(),
-                        PARTITION,
-                        ITEMS_PER_BLOB,
-                        items,
-                    )
-                    .await;
+                    let mut j = get_journal::<ITEM_SIZE>(ctx, PARTITION, ITEMS_PER_BLOB).await;
+                    append_random_data::<ITEM_SIZE>(&mut j, items).await;
                     let sz = j.size().await.unwrap();
                     assert_eq!(sz, items);
 
