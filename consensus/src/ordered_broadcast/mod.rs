@@ -246,37 +246,41 @@ mod tests {
 
     async fn await_reporters(
         context: Context,
+        sequencers: Vec<PublicKey>,
         reporters: &BTreeMap<PublicKey, mocks::ReporterMailbox<Ed25519, Sha256Digest>>,
         threshold: (u64, Epoch),
     ) {
         let mut receivers = Vec::new();
-        for (sequencer, mailbox) in reporters.iter() {
-            // Create a oneshot channel to signal when the reporter has reached the threshold.
-            let (tx, rx) = oneshot::channel();
-            receivers.push(rx);
-
+        for (reporter, mailbox) in reporters.iter() {
             // Spawn a watcher for the reporter.
-            context.with_label("reporter_watcher").spawn({
-                let sequencer = sequencer.clone();
-                let mut mailbox = mailbox.clone();
-                move |context| async move {
-                    loop {
-                        let (height, epoch) =
-                            mailbox.get_tip(sequencer.clone()).await.unwrap_or((0, 0));
-                        debug!(height, epoch, ?sequencer, "reporter");
-                        if height >= threshold.0 && epoch >= threshold.1 {
-                            let _ = tx.send(sequencer.clone());
-                            break;
+            for sequencer in sequencers.iter() {
+                // Create a oneshot channel to signal when the reporter has reached the threshold.
+                let (tx, rx) = oneshot::channel();
+                receivers.push(rx);
+
+                context.with_label("reporter_watcher").spawn({
+                    let reporter = reporter.clone();
+                    let sequencer = sequencer.clone();
+                    let mut mailbox = mailbox.clone();
+                    move |context| async move {
+                        loop {
+                            let (height, epoch) =
+                                mailbox.get_tip(sequencer.clone()).await.unwrap_or((0, 0));
+                            debug!(height, epoch, ?sequencer, ?reporter, "reporter");
+                            if height >= threshold.0 && epoch >= threshold.1 {
+                                let _ = tx.send(sequencer.clone());
+                                break;
+                            }
+                            context.sleep(Duration::from_millis(100)).await;
                         }
-                        context.sleep(Duration::from_millis(100)).await;
                     }
-                }
-            });
+                });
+            }
         }
 
         // Wait for all oneshot receivers to complete.
         let results = join_all(receivers).await;
-        assert_eq!(results.len(), reporters.len());
+        assert_eq!(results.len(), sequencers.len() * reporters.len());
     }
 
     async fn get_max_height(
@@ -326,7 +330,13 @@ mod tests {
                 |_| false,
                 Some(5),
             );
-            await_reporters(context.with_label("reporter"), &reporters, (100, 111)).await;
+            await_reporters(
+                context.with_label("reporter"),
+                reporters.keys().cloned().collect::<Vec<_>>(),
+                &reporters,
+                (100, 111),
+            )
+            .await;
         });
     }
 
@@ -490,6 +500,7 @@ mod tests {
             link_participants(&mut oracle, &pks, Action::Link(link), None).await;
             await_reporters(
                 context.with_label("reporter"),
+                reporters.keys().cloned().collect::<Vec<_>>(),
                 &reporters,
                 (max_height + 100, 111),
             )
@@ -544,7 +555,13 @@ mod tests {
                 None,
             );
 
-            await_reporters(context.with_label("reporter"), &reporters, (40, 111)).await;
+            await_reporters(
+                context.with_label("reporter"),
+                reporters.keys().cloned().collect::<Vec<_>>(),
+                &reporters,
+                (40, 111),
+            )
+            .await;
 
             context.auditor().state()
         })
@@ -601,7 +618,13 @@ mod tests {
                 None,
             );
 
-            await_reporters(context.with_label("reporter"), &reporters, (100, 111)).await;
+            await_reporters(
+                context.with_label("reporter"),
+                reporters.keys().cloned().collect::<Vec<_>>(),
+                &reporters,
+                (100, 111),
+            )
+            .await;
         });
     }
 
@@ -642,7 +665,13 @@ mod tests {
             );
 
             // Perform some work
-            await_reporters(context.with_label("reporter"), &reporters, (100, 111)).await;
+            await_reporters(
+                context.with_label("reporter"),
+                reporters.keys().cloned().collect::<Vec<_>>(),
+                &reporters,
+                (100, 111),
+            )
+            .await;
 
             // Simulate partition by removing all links.
             link_participants(&mut oracle, &pks, Action::Unlink, None).await;
@@ -665,6 +694,7 @@ mod tests {
             link_participants(&mut oracle, &pks, Action::Link(link), None).await;
             await_reporters(
                 context.with_label("reporter"),
+                reporters.keys().cloned().collect::<Vec<_>>(),
                 &reporters,
                 (max_height + 100, 112),
             )
@@ -841,7 +871,13 @@ mod tests {
             }
 
             // Await reporters
-            await_reporters(context.with_label("reporter"), &reporters, (100, 111)).await;
+            await_reporters(
+                context.with_label("reporter"),
+                vec![sequencer.public_key()],
+                &reporters,
+                (100, 111),
+            )
+            .await;
         });
     }
 }
