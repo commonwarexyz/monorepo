@@ -15,7 +15,6 @@ use crate::mmr::{
     verification::{Proof, Storage},
     Error,
 };
-use bytes::Bytes;
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
@@ -110,7 +109,12 @@ impl<E: RStorage + Clock + Metrics, H: Hasher> Mmr<E, H> {
         // location.
         let key: U64 = U64::new(Self::PRUNE_TO_POS_PREFIX, 0);
         let metadata_prune_pos = match metadata.get(&key) {
-            Some(bytes) => u64::from_be_bytes(bytes.as_ref().try_into().unwrap()),
+            Some(bytes) => u64::from_be_bytes(
+                bytes
+                    .as_slice()
+                    .try_into()
+                    .expect("metadata prune position is not 8 bytes"),
+            ),
             None => 0,
         };
         let oldest_retained_pos = journal.oldest_retained_pos().await?.unwrap_or(0);
@@ -342,16 +346,13 @@ impl<E: RStorage + Clock + Metrics, H: Hasher> Mmr<E, H> {
         let mut pinned_nodes = HashMap::new();
         for pos in Proof::<H>::nodes_to_pin(prune_to_pos) {
             let digest = self.get_node(pos).await?.unwrap();
-            self.metadata.put(
-                U64::new(Self::NODE_PREFIX, pos),
-                Bytes::copy_from_slice(digest.as_ref()),
-            );
+            self.metadata
+                .put(U64::new(Self::NODE_PREFIX, pos), digest.to_vec());
             pinned_nodes.insert(pos, digest);
         }
 
         let key: U64 = U64::new(Self::PRUNE_TO_POS_PREFIX, 0);
-        self.metadata
-            .put(key, Bytes::copy_from_slice(&prune_to_pos.to_be_bytes()));
+        self.metadata.put(key, prune_to_pos.to_be_bytes().into());
 
         self.metadata.sync().await.map_err(Error::MetadataError)?;
 

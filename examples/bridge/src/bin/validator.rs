@@ -10,7 +10,6 @@ use commonware_cryptography::{
 };
 use commonware_p2p::authenticated;
 use commonware_runtime::{tokio, Metrics, Network, Runner};
-use commonware_storage::journal::variable::{Config, Journal};
 use commonware_stream::public_key::{self, Connection};
 use commonware_utils::{from_hex, quorum, union};
 use governor::Quota;
@@ -203,16 +202,6 @@ fn main() {
             Some(3),
         );
 
-        // Initialize storage
-        let journal = Journal::init(
-            context.clone(),
-            Config {
-                partition: String::from("log"),
-            },
-        )
-        .await
-        .expect("Failed to initialize journal");
-
         // Initialize application
         let consensus_namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
         let (application, supervisor, mailbox) = application::Application::new(
@@ -232,13 +221,14 @@ fn main() {
         // Initialize consensus
         let engine = Engine::new(
             context.with_label("engine"),
-            journal,
             threshold_simplex::Config {
                 crypto: signer.clone(),
                 automaton: mailbox.clone(),
                 relay: mailbox.clone(),
                 reporter: mailbox.clone(),
                 supervisor,
+                partition: String::from("log"),
+                compression: Some(3),
                 namespace: consensus_namespace,
                 mailbox_size: 1024,
                 replay_concurrency: 1,

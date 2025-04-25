@@ -52,7 +52,6 @@ use commonware_consensus::simplex;
 use commonware_cryptography::{Ed25519, Sha256, Signer};
 use commonware_p2p::authenticated::{self, Network};
 use commonware_runtime::{tokio, Metrics, Runner};
-use commonware_storage::journal::variable::{Config, Journal};
 use commonware_utils::union;
 use governor::Quota;
 use std::{
@@ -185,16 +184,6 @@ fn main() {
             Some(3),
         );
 
-        // Initialize storage
-        let journal = Journal::init(
-            context.with_label("journal"),
-            Config {
-                partition: String::from("log"),
-            },
-        )
-        .await
-        .expect("Failed to initialize journal");
-
         // Initialize application
         let namespace = union(APPLICATION_NAMESPACE, b"_CONSENSUS");
         let (application, supervisor, mailbox) = application::Application::new(
@@ -214,6 +203,8 @@ fn main() {
             reporter: supervisor.clone(),
             supervisor,
             namespace,
+            partition: String::from("log"),
+            compression: Some(3),
             mailbox_size: 1024,
             replay_concurrency: 1,
             leader_timeout: Duration::from_secs(1),
@@ -227,7 +218,7 @@ fn main() {
             fetch_concurrent: 2,
             fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
         };
-        let engine = simplex::Engine::new(context.with_label("engine"), journal, cfg);
+        let engine = simplex::Engine::new(context.with_label("engine"), cfg);
 
         // Start consensus
         application.start();
