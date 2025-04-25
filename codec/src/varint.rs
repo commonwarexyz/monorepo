@@ -14,18 +14,18 @@
 //! # Usage Example
 //!
 //! ```rust
-//! use commonware_codec::{Encode, DecodeExt, varint::{VarUInt, VarSInt}};
+//! use commonware_codec::{Encode, DecodeExt, varint::{UInt, SInt}};
 //!
 //! // Unsigned example
-//! let one = VarUInt(42u128).encode();
+//! let one = UInt(42u128).encode();
 //! assert_eq!(one.len(), 1); // 42 fits in a single byte
-//! let decoded: u128 = VarUInt::decode(one).unwrap().into();
+//! let decoded: u128 = UInt::decode(one).unwrap().into();
 //! assert_eq!(decoded, 42);
 //!
 //! // Signed example (ZigZag)
-//! let neg = VarSInt(-3i32).encode();
+//! let neg = SInt(-3i32).encode();
 //! assert_eq!(neg.len(), 1);
-//! let decoded: i32 = VarSInt::decode(neg).unwrap().into();
+//! let decoded: i32 = SInt::decode(neg).unwrap().into();
 //! assert_eq!(decoded, -3);
 //! ```
 
@@ -147,15 +147,15 @@ mod sealed {
 /// An ergonomic wrapper to allow for encoding and decoding of primitive unsigned integers as
 /// varints rather than the default fixed-width integers.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct VarUInt<U: UPrim>(pub U);
+pub struct UInt<U: UPrim>(pub U);
 
-// Implements `Into<U>` for `VarUInt<U>` for all unsigned integer types.
-// This allows for easy conversion from `VarUInt<U>` to `U` using `.into()`.
+// Implements `Into<U>` for `UInt<U>` for all unsigned integer types.
+// This allows for easy conversion from `UInt<U>` to `U` using `.into()`.
 macro_rules! impl_varuint_into {
     ($($type:ty),+) => {
         $(
-            impl From<VarUInt<$type>> for $type {
-                fn from(val: VarUInt<$type>) -> Self {
+            impl From<UInt<$type>> for $type {
+                fn from(val: UInt<$type>) -> Self {
                     val.0
                 }
             }
@@ -164,19 +164,19 @@ macro_rules! impl_varuint_into {
 }
 impl_varuint_into!(u16, u32, u64, u128);
 
-impl<U: UPrim> Write for VarUInt<U> {
+impl<U: UPrim> Write for UInt<U> {
     fn write(&self, buf: &mut impl BufMut) {
         write(self.0, buf);
     }
 }
 
-impl<U: UPrim> Read for VarUInt<U> {
+impl<U: UPrim> Read for UInt<U> {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        read(buf).map(VarUInt)
+        read(buf).map(UInt)
     }
 }
 
-impl<U: UPrim> EncodeSize for VarUInt<U> {
+impl<U: UPrim> EncodeSize for UInt<U> {
     fn encode_size(&self) -> usize {
         size(self.0)
     }
@@ -185,15 +185,15 @@ impl<U: UPrim> EncodeSize for VarUInt<U> {
 /// An ergonomic wrapper to allow for encoding and decoding of primitive signed integers as
 /// varints rather than the default fixed-width integers.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct VarSInt<S: SPrim>(pub S);
+pub struct SInt<S: SPrim>(pub S);
 
-// Implements `Into<U>` for `VarSInt<U>` for all signed integer types.
-// This allows for easy conversion from `VarSInt<S>` to `S` using `.into()`.
+// Implements `Into<U>` for `SInt<U>` for all signed integer types.
+// This allows for easy conversion from `SInt<S>` to `S` using `.into()`.
 macro_rules! impl_varsint_into {
     ($($type:ty),+) => {
         $(
-            impl From<VarSInt<$type>> for $type {
-                fn from(val: VarSInt<$type>) -> Self {
+            impl From<SInt<$type>> for $type {
+                fn from(val: SInt<$type>) -> Self {
                     val.0
                 }
             }
@@ -202,19 +202,19 @@ macro_rules! impl_varsint_into {
 }
 impl_varsint_into!(i16, i32, i64, i128);
 
-impl<S: SPrim> Write for VarSInt<S> {
+impl<S: SPrim> Write for SInt<S> {
     fn write(&self, buf: &mut impl BufMut) {
         write_signed::<S>(self.0, buf);
     }
 }
 
-impl<S: SPrim> Read for VarSInt<S> {
+impl<S: SPrim> Read for SInt<S> {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        read_signed::<S>(buf).map(VarSInt)
+        read_signed::<S>(buf).map(SInt)
     }
 }
 
-impl<S: SPrim> EncodeSize for VarSInt<S> {
+impl<S: SPrim> EncodeSize for SInt<S> {
     fn encode_size(&self) -> usize {
         size_signed::<S>(self.0)
     }
@@ -406,9 +406,9 @@ mod tests {
             assert_eq!(decoded, value);
             assert!(slice.is_empty());
 
-            // VarUInt wrapper
-            let encoded = VarUInt(value).encode();
-            assert_eq!(VarUInt::<T>::decode(encoded).unwrap(), VarUInt(value));
+            // UInt wrapper
+            let encoded = UInt(value).encode();
+            assert_eq!(UInt::<T>::decode(encoded).unwrap(), UInt(value));
         }
     }
 
@@ -461,9 +461,9 @@ mod tests {
             assert_eq!(decoded, value);
             assert!(slice.is_empty());
 
-            // VarSInt wrapper
-            let encoded = VarSInt(value).encode();
-            assert_eq!(VarSInt::<T>::decode(encoded).unwrap(), VarSInt(value));
+            // SInt wrapper
+            let encoded = SInt(value).encode();
+            assert_eq!(SInt::<T>::decode(encoded).unwrap(), SInt(value));
         }
     }
 
@@ -478,22 +478,22 @@ mod tests {
     #[test]
     fn test_varuint_into() {
         let v32: u32 = 0x1_FFFF;
-        let out32: u32 = VarUInt(v32).into();
+        let out32: u32 = UInt(v32).into();
         assert_eq!(v32, out32);
 
         let v64: u64 = 0x1_FF_FF_FF_FF;
-        let out64: u64 = VarUInt(v64).into();
+        let out64: u64 = UInt(v64).into();
         assert_eq!(v64, out64);
     }
 
     #[test]
     fn test_varsint_into() {
         let s32: i32 = -123_456;
-        let out32: i32 = VarSInt(s32).into();
+        let out32: i32 = SInt(s32).into();
         assert_eq!(s32, out32);
 
         let s64: i64 = 987_654_321;
-        let out64: i64 = VarSInt(s64).into();
+        let out64: i64 = SInt(s64).into();
         assert_eq!(s64, out64);
     }
 }

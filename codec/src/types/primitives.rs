@@ -1,8 +1,8 @@
 //! Implementations of Codec for primitive types.
 
 use crate::{
-    util::at_least, varint::VarUInt, Config, EncodeSize, Error, FixedSize, RangeConfig, Read,
-    ReadExt, Write,
+    util::at_least, varint::UInt, Config, EncodeSize, Error, FixedSize, RangeConfig, Read, ReadExt,
+    Write,
 };
 use bytes::{Buf, BufMut};
 
@@ -53,14 +53,14 @@ impl Write for usize {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {
         let self_as_u32 = u32::try_from(*self).expect("write: usize value is larger than u32");
-        VarUInt(self_as_u32).write(buf);
+        UInt(self_as_u32).write(buf);
     }
 }
 
 impl<R: RangeConfig> Read<R> for usize {
     #[inline]
     fn read_cfg(buf: &mut impl Buf, range: &R) -> Result<Self, Error> {
-        let self_as_u32: u32 = VarUInt::read(buf)?.into();
+        let self_as_u32: u32 = UInt::read(buf)?.into();
         let result = usize::try_from(self_as_u32).map_err(|_| Error::InvalidUsize)?;
         if !range.contains(&result) {
             return Err(Error::InvalidLength(result));
@@ -74,7 +74,7 @@ impl EncodeSize for usize {
     fn encode_size(&self) -> usize {
         let self_as_u32 =
             u32::try_from(*self).expect("encode_size: usize value is larger than u32");
-        VarUInt(self_as_u32).encode_size()
+        UInt(self_as_u32).encode_size()
     }
 }
 
@@ -232,7 +232,7 @@ mod tests {
         let values = [0usize, 1, 42, u32::MAX as usize];
         for value in values.iter() {
             let encoded = value.encode();
-            assert_eq!(value.encode_size(), VarUInt(*value as u32).encode_size());
+            assert_eq!(value.encode_size(), UInt(*value as u32).encode_size());
             let decoded = usize::decode_cfg(encoded, &..).unwrap();
             assert_eq!(*value, decoded);
         }
