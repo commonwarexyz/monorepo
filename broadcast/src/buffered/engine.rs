@@ -1,10 +1,12 @@
 use super::{metrics, Config, Mailbox, Message};
 use crate::buffered::metrics::SequencerLabel;
-use bytes::Bytes;
 use commonware_codec::{Codec, Config as CodecCfg};
 use commonware_cryptography::{Digest, Digestible};
 use commonware_macros::select;
-use commonware_p2p::{Receiver, Recipients, Sender};
+use commonware_p2p::{
+    utils::codec::{wrap, WrappedSender},
+    Receiver, Recipients, Sender,
+};
 use commonware_runtime::{
     telemetry::metrics::status::{CounterExt, Status},
     Clock, Handle, Metrics, Spawner,
@@ -14,10 +16,7 @@ use futures::{
     channel::{mpsc, oneshot},
     StreamExt,
 };
-use std::{
-    collections::{HashMap, VecDeque},
-    marker::PhantomData,
-};
+use std::collections::{HashMap, VecDeque};
 use tracing::{debug, error, trace, warn};
 
 /// Instance of the main engine for the module.
@@ -40,7 +39,6 @@ pub struct Engine<
     // Interfaces
     ////////////////////////////////////////
     context: E,
-    _phantom: PhantomData<(NetS, NetR)>,
 
     ////////////////////////////////////////
     // Configuration
@@ -55,7 +53,7 @@ pub struct Engine<
     deque_size: usize,
 
     /// Configuration for decoding messages
-    decode_config: Cfg,
+    codec_config: Cfg,
 
     ////////////////////////////////////////
     // Messaging
@@ -89,6 +87,8 @@ pub struct Engine<
     ////////////////////////////////////////
     /// Metrics
     metrics: metrics::Metrics,
+
+    _phantom: std::marker::PhantomData<(NetS, NetR)>,
 }
 
 impl<
@@ -110,17 +110,18 @@ impl<
 
         let result = Self {
             context,
-            _phantom: PhantomData,
             public_key: cfg.public_key,
             priority: cfg.priority,
             deque_size: cfg.deque_size,
-            decode_config: cfg.decode_config,
+            codec_config: cfg.codec_config,
             mailbox_receiver,
             waiters: HashMap::new(),
             deques: HashMap::new(),
             items: HashMap::new(),
             counts: HashMap::new(),
             metrics,
+
+            _phantom: std::marker::PhantomData,
         };
 
         (result, mailbox)
@@ -133,7 +134,7 @@ impl<
 
     /// Inner run loop called by `start`.
     async fn run(mut self, network: (NetS, NetR)) {
-        let (mut net_sender, mut net_receiver) = network;
+        let (mut sender, mut receiver) = wrap(self.codec_config.clone(), network.0, network.1);
         let mut shutdown = self.context.stopped();
 
         loop {
@@ -156,7 +157,11 @@ impl<
                     match msg {
                         Message::Broadcast{ message, responder } => {
                             trace!("mailbox: broadcast");
-                            self.handle_broadcast(&mut net_sender, message, responder).await;
+                            self.handle_broadcast(&mut sender, message, responder).await;
+                        }
+                        Message::Subscribe{ digest, responder } => {
+                            trace!("mailbox: subscribe");
+                            self.handle_subscribe(digest, responder).await;
                         }
                         Message::Get{ digest, responder } => {
                             trace!("mailbox: get");
@@ -166,7 +171,7 @@ impl<
                 },
 
                 // Handle incoming messages
-                msg = net_receiver.recv() => {
+                msg = receiver.recv() => {
                     // Error handling
                     let (peer, msg) = match msg {
                         Ok(r) => r,
@@ -177,8 +182,8 @@ impl<
                     };
 
                     // Decode the message
-                    let message = match M::decode_cfg(msg, &self.decode_config) {
-                        Ok(message) => message,
+                    let msg = match msg {
+                        Ok(msg) => msg,
                         Err(err) => {
                             warn!(?err, ?peer, "failed to decode message");
                             self.metrics.receive.inc(Status::Invalid);
@@ -188,7 +193,7 @@ impl<
 
                     trace!(?peer, "network");
                     self.metrics.peer.get_or_create(&SequencerLabel::from(&peer)).inc();
-                    self.handle_network(peer, message).await;
+                    self.handle_network(peer, msg).await;
                 },
             }
         }
@@ -201,7 +206,7 @@ impl<
     /// Handles a `broadcast` request from the application.
     async fn handle_broadcast(
         &mut self,
-        net_sender: &mut NetS,
+        sender: &mut WrappedSender<NetS, Cfg, M>,
         msg: M,
         responder: oneshot::Sender<Vec<P>>,
     ) {
@@ -210,8 +215,7 @@ impl<
 
         // Broadcast the message to the network
         let recipients = Recipients::All;
-        let msg = Bytes::from(msg.encode());
-        let sent_to = net_sender
+        let sent_to = sender
             .send(recipients, msg, self.priority)
             .await
             .unwrap_or_else(|err| {
@@ -221,19 +225,25 @@ impl<
         let _ = responder.send(sent_to);
     }
 
-    /// Handles a `get` request from the application.
+    /// Handles a `subscribe` request from the application.
     ///
     /// If the message is already in the cache, the responder is immediately sent the message.
     /// Otherwise, the responder is stored in the waiters list.
-    async fn handle_get(&mut self, digest: D, responder: oneshot::Sender<M>) {
+    async fn handle_subscribe(&mut self, digest: D, responder: oneshot::Sender<M>) {
         // Check if the message is already in the cache
         if let Some(msg) = self.items.get(&digest) {
-            self.respond(responder, msg.clone());
+            self.respond_subscribe(responder, msg.clone());
             return;
         }
 
         // Store the responder
         self.waiters.entry(digest).or_default().push(responder);
+    }
+
+    /// Handles a `get` request from the application.
+    async fn handle_get(&mut self, digest: D, responder: oneshot::Sender<Option<M>>) {
+        let item = self.items.get(&digest).cloned();
+        self.respond_get(responder, item);
     }
 
     /// Handles a message that was received from a peer.
@@ -261,7 +271,7 @@ impl<
         // Send the message to the waiters, if any, ignoring errors (as the receiver may have dropped)
         if let Some(responders) = self.waiters.remove(&digest) {
             for responder in responders {
-                self.respond(responder, msg.clone());
+                self.respond_subscribe(responder, msg.clone());
             }
         }
 
@@ -337,10 +347,22 @@ impl<
 
     /// Respond to a waiter with a message.
     /// Increments the appropriate metric based on the result.
-    fn respond(&mut self, responder: oneshot::Sender<M>, msg: M) {
+    fn respond_subscribe(&mut self, responder: oneshot::Sender<M>, msg: M) {
+        let result = responder.send(msg);
+        self.metrics.subscribe.inc(match result {
+            Ok(_) => Status::Success,
+            Err(_) => Status::Dropped,
+        });
+    }
+
+    /// Respond to a waiter with an optional message.
+    /// Increments the appropriate metric based on the result.
+    fn respond_get(&mut self, responder: oneshot::Sender<Option<M>>, msg: Option<M>) {
+        let found = msg.is_some();
         let result = responder.send(msg);
         self.metrics.get.inc(match result {
-            Ok(_) => Status::Success,
+            Ok(_) if found => Status::Success,
+            Ok(_) => Status::Failure,
             Err(_) => Status::Dropped,
         });
     }
