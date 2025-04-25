@@ -618,7 +618,7 @@ mod tests {
                 .expect("Failed to write data2");
 
             // Read data back
-            let mut buffer = [0u8; 10];
+            let mut buffer = vec![0u8; 10];
             blob.read_at(&mut buffer, 0)
                 .await
                 .expect("Failed to read data");
