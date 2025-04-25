@@ -198,8 +198,11 @@ mod tests {
             let monitor = mocks::Monitor::new(111);
             monitors.insert(validator.clone(), monitor.clone());
             let sequencers = mocks::Sequencers::<PublicKey>::new(pks.to_vec());
-            let validators =
-                mocks::Validators::<PublicKey>::new(identity.clone(), pks.to_vec(), share.clone());
+            let validators = mocks::Validators::<PublicKey>::new(
+                identity.clone(),
+                pks.to_vec(),
+                Some(share.clone()),
+            );
 
             let automaton = mocks::Automaton::<PublicKey>::new(invalid_when);
             automatons.insert(validator.clone(), automaton.clone());
@@ -742,7 +745,7 @@ mod tests {
                 let validators = mocks::Validators::<PublicKey>::new(
                     identity.clone(),
                     validator_pks.clone(),
-                    share.clone(),
+                    Some(share.clone()),
                 );
 
                 let automaton = mocks::Automaton::<PublicKey>::new(|_| false);
@@ -797,7 +800,7 @@ mod tests {
                 let (reporter, reporter_mailbox) = mocks::Reporter::<Ed25519, Sha256Digest>::new(
                     namespace,
                     *poly::public(&identity),
-                    Some(5),
+                    None,
                 );
                 context.with_label("reporter").spawn(|_| reporter.run());
                 reporters.insert(sequencer.public_key(), reporter_mailbox);
@@ -815,7 +818,7 @@ mod tests {
                         validators: mocks::Validators::<PublicKey>::new(
                             identity.clone(),
                             validator_pks,
-                            shares[0].clone(),
+                            None,
                         ),
                         namespace: namespace.to_vec(),
                         epoch_bounds: (1, 1),
