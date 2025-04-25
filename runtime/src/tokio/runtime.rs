@@ -231,13 +231,10 @@ impl crate::Runner for Runner {
 
         #[cfg(feature = "iouring")]
         let storage = MeteredStorage::new(
-            IoUringStorage::start(
-                &IoUringConfig {
-                    storage_directory: self.cfg.storage_directory.clone(),
-                    ring_config: Default::default(),
-                },
-                spawner.clone(),
-            ),
+            IoUringStorage::start(&IoUringConfig {
+                storage_directory: self.cfg.storage_directory.clone(),
+                ring_config: Default::default(),
+            }),
             runtime_registry,
         );
 

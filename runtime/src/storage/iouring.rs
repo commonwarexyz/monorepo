@@ -1,4 +1,4 @@
-use crate::{Error, Spawner};
+use crate::Error;
 use commonware_utils::{from_hex, hex};
 use futures::{
     channel::{mpsc, oneshot},
@@ -129,7 +129,7 @@ pub struct Storage {
 impl Storage {
     /// Returns a new `Storage` instance.
     /// The `Spawner` is used to spawn the background task that handles IO operations.
-    pub fn start<S: Spawner>(cfg: &Config, spawner: S) -> Self {
+    pub fn start(cfg: &Config) -> Self {
         let (io_sender, receiver) =
             mpsc::channel::<(SqueueEntry, oneshot::Sender<i32>)>(cfg.ring_config.size as usize);
 
@@ -138,7 +138,7 @@ impl Storage {
             io_sender,
         };
         let iouring_config = cfg.ring_config.clone();
-        spawner.spawn_blocking(|| block_on(do_work(iouring_config, receiver)));
+        std::thread::spawn(|| block_on(do_work(iouring_config, receiver)));
         storage
     }
 }
@@ -380,11 +380,7 @@ impl crate::Blob for Blob {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        storage::tests::run_storage_tests,
-        tokio::{Spawner, SpawnerConfig},
-    };
-    use prometheus_client::registry::Registry;
+    use crate::storage::tests::run_storage_tests;
     use rand::{Rng as _, SeedableRng as _};
     use std::env;
 
@@ -394,23 +390,10 @@ mod tests {
         let storage_directory =
             env::temp_dir().join(format!("commonware_iouring_storage_{}", rng.gen::<u64>()));
 
-        // Initialize runtime
-        let runtime = Arc::new(tokio::runtime::Handle::current());
-
-        let spawner = Spawner::new(
-            String::new(),
-            SpawnerConfig { catch_panics: true },
-            &mut Registry::default(),
-            runtime,
-        );
-
-        let storage = Storage::start(
-            &Config {
-                storage_directory: storage_directory.clone(),
-                ring_config: Default::default(),
-            },
-            spawner,
-        );
+        let storage = Storage::start(&Config {
+            storage_directory: storage_directory.clone(),
+            ring_config: Default::default(),
+        });
         (storage, storage_directory)
     }
 
