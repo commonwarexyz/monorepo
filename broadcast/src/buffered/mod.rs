@@ -156,7 +156,8 @@ mod tests {
 
             // Drop broadcast result
             let message = TestMessage::new(b"hello world again");
-            let _ = first_mailbox.broadcast(message.clone()).await;
+            let result = first_mailbox.broadcast(message.clone()).await;
+            drop(result);
 
             // Allow time for propagation
             context.sleep(Duration::from_secs(1)).await;
