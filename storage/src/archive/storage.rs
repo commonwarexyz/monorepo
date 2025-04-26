@@ -417,4 +417,9 @@ impl<T: Translator, E: Storage + Metrics, K: Array, VC: CodecConfig + Copy, V: C
     pub async fn close(self) -> Result<(), Error> {
         self.journal.close().await.map_err(Error::Journal)
     }
+
+    /// Remove all on-disk data created by this `Archive`.
+    pub async fn destroy(self) -> Result<(), Error> {
+        self.journal.destroy().await.map_err(Error::Journal)
+    }
 }
