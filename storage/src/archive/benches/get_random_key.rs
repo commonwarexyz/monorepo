@@ -15,21 +15,23 @@ use std::time::{Duration, Instant};
 /// Items pre-loaded into the archive.
 const ITEMS: u64 = 1_000_000;
 
-async fn read_serial(a: &ArchiveType, keys: &[Key], reads: usize) {
+fn select_keys(keys: &[Key], reads: usize) -> Vec<Key> {
     let mut rng = StdRng::seed_from_u64(42);
+    let mut selected_keys = Vec::with_capacity(reads);
     for _ in 0..reads {
-        let k = &keys[rng.gen_range(0..ITEMS as usize)];
-        black_box(a.get(Identifier::Key(k)).await.unwrap().unwrap());
+        selected_keys.push(keys[rng.gen_range(0..ITEMS as usize)].clone());
+    }
+    selected_keys
+}
+
+async fn read_serial(a: &ArchiveType, reads: Vec<Key>) {
+    for k in reads {
+        black_box(a.get(Identifier::Key(&k)).await.unwrap().unwrap());
     }
 }
 
-async fn read_concurrent(a: &ArchiveType, keys: &[Key], reads: usize) {
-    let mut rng = StdRng::seed_from_u64(42);
-    let mut owned_keys = Vec::with_capacity(reads);
-    for _ in 0..reads {
-        owned_keys.push(keys[rng.gen_range(0..ITEMS as usize)].clone());
-    }
-    let futures = owned_keys.iter().map(|k| a.get(Identifier::Key(k)));
+async fn read_concurrent(a: &ArchiveType, reads: Vec<Key>) {
+    let futures = reads.iter().map(|k| a.get(Identifier::Key(k)));
     black_box(try_join_all(futures).await.unwrap());
 }
 
@@ -59,20 +61,22 @@ fn bench_get_random_key(c: &mut Criterion) {
                         .unwrap_or_else(|| "off".into()),
                     reads
                 );
+                let selected_keys = select_keys(&keys, reads);
                 c.bench_function(&label, |b| {
-                    let keys = keys.clone();
+                    let selected_keys = selected_keys.clone();
                     b.to_async(&runner).iter_custom(move |iters| {
-                        let keys = keys.clone();
+                        let selected_keys = selected_keys.clone();
                         async move {
                             let ctx = context::get::<commonware_runtime::tokio::Context>();
                             let archive = get_archive(ctx, compression).await;
                             let mut total = Duration::ZERO;
-
                             for _ in 0..iters {
                                 let start = Instant::now();
                                 match mode {
-                                    "serial" => read_serial(&archive, &keys, reads).await,
-                                    "concurrent" => read_concurrent(&archive, &keys, reads).await,
+                                    "serial" => read_serial(&archive, selected_keys.clone()).await,
+                                    "concurrent" => {
+                                        read_concurrent(&archive, selected_keys.clone()).await
+                                    }
                                     _ => unreachable!(),
                                 }
                                 total += start.elapsed();
