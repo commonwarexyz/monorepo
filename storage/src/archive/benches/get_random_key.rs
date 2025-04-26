@@ -1,97 +1,78 @@
-//! Random key-lookup benchmark for `Archive`.
+//! Random key-lookup benchmark for Archive.
 
+use super::utils::{append_random, get_archive, ArchiveType, Key};
 use commonware_runtime::benchmarks::{context, tokio};
+use commonware_storage::archive::Identifier;
 use criterion::{black_box, criterion_group, Criterion};
 use futures::future::try_join_all;
 use rand::{rngs::StdRng, Rng, RngCore, SeedableRng};
 use std::time::{Duration, Instant};
 
-mod util;
-use util::*;
+/// Items pre-loaded into the archive.
+const ITEMS: u64 = 1_000_000;
 
-/// How many items we pre-load into the archive.
-const ITEMS_WRITTEN: u64 = 1_000_000;
-
-/// Populate the archive and return the corresponding Vec<Key>
-async fn load_archive(ctx: commonware_runtime::tokio::Context) -> (Archive, Vec<Key>)
-where
-    Archive: commonware_storage::archive::ArchiveTrait,
-{
+/// Build an archive filled with `ITEMS` random records and return the
+/// archive plus the vector of keys (deterministically reconstructed).
+async fn load_archive(ctx: commonware_runtime::tokio::Context) -> (ArchiveType, Vec<Key>) {
     let mut archive = get_archive(ctx, None).await;
+    append_random(&mut archive, ITEMS).await;
+
+    // Re-derive the keys inserted by append_random
     let mut rng = StdRng::seed_from_u64(0);
-    let mut keys = Vec::with_capacity(ITEMS_WRITTEN as usize);
+    let mut buf = [0u8; 64];
+    let mut _v = [0u8; 32]; // dummy for value RNG advancement
+    let mut keys = Vec::with_capacity(ITEMS as usize);
 
-    let mut key_buf = [0u8; 64];
-    let mut val_buf = [0u8; 32];
-
-    for idx in 0..ITEMS_WRITTEN {
-        rng.fill_bytes(&mut key_buf);
-        rng.fill_bytes(&mut val_buf);
-        let key = Key::new(key_buf);
-        archive
-            .put(idx, key.clone(), Val::new(val_buf))
-            .await
-            .unwrap();
-        keys.push(key);
+    for _ in 0..ITEMS {
+        rng.fill_bytes(&mut buf);
+        keys.push(Key::new(buf));
+        rng.fill_bytes(&mut _v); // advance RNG for value
     }
-    archive.sync().await.unwrap();
     (archive, keys)
 }
 
-async fn read_random_serial(archive: &Archive, keys: &[Key], reads: usize)
-where
-    Archive: commonware_storage::archive::ArchiveTrait,
-{
+async fn read_serial(a: &ArchiveType, keys: &[Key], reads: usize) {
     let mut rng = StdRng::seed_from_u64(42);
     for _ in 0..reads {
-        let k = &keys[rng.gen_range(0..ITEMS_WRITTEN as usize)];
-        black_box(
-            archive
-                .get(util::Identifier::Key(k))
-                .await
-                .unwrap()
-                .unwrap(),
-        );
+        let k = &keys[rng.gen_range(0..ITEMS as usize)];
+        black_box(a.get(Identifier::Key(k)).await.unwrap().unwrap());
     }
 }
 
-async fn read_random_concurrent(archive: &Archive, keys: &[Key], reads: usize)
-where
-    Archive: commonware_storage::archive::ArchiveTrait,
-{
+async fn read_concurrent(a: &ArchiveType, keys: &[Key], reads: usize) {
     let mut rng = StdRng::seed_from_u64(42);
     let mut futs = Vec::with_capacity(reads);
     for _ in 0..reads {
-        let k = keys[rng.gen_range(0..ITEMS_WRITTEN as usize)].clone();
-        futs.push(archive.get(util::Identifier::Key(&k)));
+        let k = keys[rng.gen_range(0..ITEMS as usize)].clone();
+        futs.push(a.get(Identifier::Key(&k)));
     }
-    let res = try_join_all(futs).await.unwrap();
-    black_box(res);
+    black_box(try_join_all(futs).await.unwrap());
 }
 
 fn bench_archive_get_random_key(c: &mut Criterion) {
-    // Build the big archive once
-    let build = commonware_runtime::tokio::Runner::default();
-    build.start(|ctx| async move {
-        let (a, _) = load_archive(ctx).await;
+    // Create a shared on-disk archive once so later setup is fast.
+    let builder = commonware_runtime::tokio::Runner::default();
+    builder.start(|ctx| async move {
+        let mut a = get_archive(ctx, None).await;
+        append_random(&mut a, ITEMS).await;
         a.close().await.unwrap();
     });
 
     let runner = tokio::Runner::default();
     for mode in ["serial", "concurrent"] {
         for reads in [1_000, 10_000, 100_000] {
-            let lbl = format!("{}/mode={} reads={}", module_path!(), mode, reads);
-            c.bench_function(&lbl, |b| {
+            let label = format!("{}/mode={} reads={}", module_path!(), mode, reads);
+            c.bench_function(&label, |b| {
                 b.to_async(&runner).iter_custom(move |iters| async move {
                     let ctx = context::get::<commonware_runtime::tokio::Context>();
-                    let (archive, keys) = load_archive(ctx).await; // load fresh each iter
+                    let (archive, keys) = load_archive(ctx).await;
                     let mut total = Duration::ZERO;
 
                     for _ in 0..iters {
                         let start = Instant::now();
                         match mode {
-                            "serial" => read_random_serial(&archive, &keys, reads).await,
-                            "concurrent" => read_random_concurrent(&archive, &keys, reads).await,
+                            "serial" => read_serial(&archive, &keys, reads).await,
+                            "concurrent" => read_concurrent(&archive, &keys, reads).await,
                             _ => unreachable!(),
                         }
                         total += start.elapsed();
@@ -103,7 +84,7 @@ fn bench_archive_get_random_key(c: &mut Criterion) {
         }
     }
 
-    // Tear down
+    // Clean up shared artifacts.
     let cleaner = commonware_runtime::tokio::Runner::default();
     cleaner.start(|ctx| async move {
         let a = get_archive(ctx, None).await;

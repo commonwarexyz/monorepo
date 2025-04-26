@@ -1,9 +1,7 @@
+use super::utils::{append_random, get_archive};
 use commonware_runtime::benchmarks::{context, tokio};
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
-
-mod util;
-use util::*;
 
 fn bench_archive_put(c: &mut Criterion) {
     let runner = tokio::Runner::default();

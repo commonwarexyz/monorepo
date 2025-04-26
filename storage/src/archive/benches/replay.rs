@@ -1,9 +1,10 @@
-use commonware_runtime::benchmarks::{context, tokio};
+use super::utils::{append_random, get_archive, ArchiveType};
+use commonware_runtime::{
+    benchmarks::{context, tokio},
+    Runner,
+};
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
-
-mod util;
-use util::*;
 
 /// Measure `Archive::init` (replay) time for different data sizes.
 fn bench_archive_replay(c: &mut Criterion) {
@@ -11,8 +12,8 @@ fn bench_archive_replay(c: &mut Criterion) {
     const ITEMS: u64 = 1_000_000;
     let builder = commonware_runtime::tokio::Runner::default();
     builder.start(|ctx| async move {
-        let mut a = util::get_archive(ctx, None).await;
-        util::append_random(&mut a, ITEMS).await;
+        let mut a = get_archive(ctx, None).await;
+        append_random(&mut a, ITEMS).await;
         a.close().await.unwrap();
     });
 
@@ -23,7 +24,7 @@ fn bench_archive_replay(c: &mut Criterion) {
             for _ in 0..iters {
                 let ctx = context::get::<commonware_runtime::tokio::Context>();
                 let start = Instant::now();
-                let a = util::get_archive(ctx, None).await; // replay happens inside init
+                let a = get_archive(ctx, None).await; // replay happens inside init
                 total += start.elapsed();
                 a.close().await.unwrap();
             }
@@ -34,7 +35,7 @@ fn bench_archive_replay(c: &mut Criterion) {
     // Tear down
     let cleaner = commonware_runtime::tokio::Runner::default();
     cleaner.start(|ctx| async move {
-        let a = util::get_archive(ctx, None).await;
+        let a = get_archive(ctx, None).await;
         a.destroy().await.unwrap();
     });
 }

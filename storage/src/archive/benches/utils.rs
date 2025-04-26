@@ -1,4 +1,4 @@
-//! Helpers shared by the `archive` benchmarks.
+//! Helpers shared by the Archive benchmarks.
 
 use commonware_runtime::tokio::Context;
 use commonware_storage::{
@@ -21,14 +21,13 @@ const SECTION_MASK: u64 = 0xffff_ffff_ffff_ff00u64;
 pub type Key = FixedBytes<64>;
 pub type Val = FixedBytes<32>;
 
-/// Open (or create) a fresh `Archive` with optional compression.
+/// Concrete archive type reused by every benchmark.
+pub type ArchiveType = Archive<TwoCap, Context, Key, (), Val>;
+
+/// Open (or create) a fresh archive with optional compression.
 ///
-/// The archive is *destroyed* on drop by the caller — benchmarks
-/// that reuse the same on-disk data should call this exactly once.
-pub async fn get_archive(
-    ctx: Context,
-    compression: Option<u8>,
-) -> Archive<TwoCap, Context, Key, (), Val> {
+/// The caller is responsible for closing or destroying it.
+pub async fn get_archive(ctx: Context, compression: Option<u8>) -> ArchiveType {
     let cfg = Config {
         partition: PARTITION.into(),
         translator: TwoCap,
@@ -41,9 +40,8 @@ pub async fn get_archive(
     Archive::init(ctx, cfg).await.unwrap()
 }
 
-/// Append `count` random (index, key, value) triples to the archive
-/// and `sync()` once at the end.
-pub async fn append_random(archive: &mut Archive<TwoCap, Context, Key, (), Val>, count: u64) {
+/// Append `count` random (index,key,value) triples and sync once.
+pub async fn append_random(archive: &mut ArchiveType, count: u64) {
     let mut rng = StdRng::seed_from_u64(0);
     let mut key_buf = [0u8; 64];
     let mut val_buf = [0u8; 32];
