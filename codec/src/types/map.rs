@@ -189,6 +189,7 @@ mod tests {
             + EncodeSize,
     {
         let encoded = map.encode();
+        assert_eq!(encoded.len(), map.encode_size());
         let config_tuple = (range_cfg, (k_cfg, v_cfg));
         let decoded = BTreeMap::<K, V>::decode_cfg(encoded, &config_tuple)
             .expect("decode_cfg failed for BTreeMap");
@@ -215,6 +216,7 @@ mod tests {
             + EncodeSize,
     {
         let encoded = map.encode();
+        assert_eq!(encoded.len(), map.encode_size());
         let config_tuple = (range_cfg, (k_cfg, v_cfg));
         let decoded = HashMap::<K, V>::decode_cfg(encoded, &config_tuple)
             .expect("decode_cfg failed for HashMap");
@@ -228,7 +230,7 @@ mod tests {
     // --- BTreeMap Tests ---
 
     #[test]
-    fn test_empty_btree_map() {
+    fn test_empty_btreemap() {
         let map = BTreeMap::<u32, u64>::new();
         round_trip_btree(&map, allow_any_len(), (), ());
         assert_eq!(map.encode_size(), 1); // varint 0
@@ -237,7 +239,7 @@ mod tests {
     }
 
     #[test]
-    fn test_simple_btree_map_u32_u64() {
+    fn test_simple_btreemap_u32_u64() {
         let mut map = BTreeMap::new();
         map.insert(1u32, 100u64);
         map.insert(5u32, 500u64);
@@ -257,16 +259,24 @@ mod tests {
     }
 
     #[test]
-    fn test_large_btree_map() {
+    fn test_large_btreemap() {
+        // Fixed-size items
         let mut map = BTreeMap::new();
         for i in 0..1000 {
             map.insert(i as u16, i as u64 * 2);
         }
         round_trip_btree(&map, 0..=1000, (), ());
+
+        // Variable-size items
+        let mut map = BTreeMap::new();
+        for i in 0..1000usize {
+            map.insert(i, 1000usize + i);
+        }
+        round_trip_btree(&map, 0..=1000, ..=1000, 1000..=2000);
     }
 
     #[test]
-    fn test_btree_map_with_variable_values() {
+    fn test_btreemap_with_variable_values() {
         let mut map = BTreeMap::new();
         map.insert(Bytes::from_static(b"apple"), vec![1, 2]);
         map.insert(Bytes::from_static(b"banana"), vec![3, 4, 5]);
@@ -280,7 +290,7 @@ mod tests {
     }
 
     #[test]
-    fn test_btree_decode_length_limit_exceeded() {
+    fn test_btreemap_decode_length_limit_exceeded() {
         let mut map = BTreeMap::new();
         map.insert(1u32, 100u64);
         map.insert(5u32, 500u64);
@@ -294,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn test_btree_decode_value_length_limit_exceeded() {
+    fn test_btreemap_decode_value_length_limit_exceeded() {
         let mut map = BTreeMap::new();
         map.insert(Bytes::from_static(b"key1"), vec![1, 2, 3, 4, 5]);
 
@@ -310,7 +320,7 @@ mod tests {
     }
 
     #[test]
-    fn test_btree_decode_invalid_key_order() {
+    fn test_btreemap_decode_invalid_key_order() {
         let mut encoded = BytesMut::new();
         2usize.write(&mut encoded); // Map length = 2
         5u32.write(&mut encoded); // Key 5
@@ -325,12 +335,12 @@ mod tests {
         // Note: Error message uses HashMap currently, should ideally be BTreeMap
         assert!(matches!(
             result,
-            Err(Error::Invalid("HashMap", "Keys must ascend"))
+            Err(Error::Invalid("BTreeMap", "Keys must ascend"))
         ));
     }
 
     #[test]
-    fn test_btree_decode_duplicate_key() {
+    fn test_btreemap_decode_duplicate_key() {
         let mut encoded = BytesMut::new();
         2usize.write(&mut encoded); // Map length = 2
         1u32.write(&mut encoded); // Key 1
@@ -345,12 +355,12 @@ mod tests {
         // Note: Error message uses HashMap currently, should ideally be BTreeMap
         assert!(matches!(
             result,
-            Err(Error::Invalid("HashMap", "Duplicate key"))
+            Err(Error::Invalid("BTreeMap", "Duplicate key"))
         ));
     }
 
     #[test]
-    fn test_btree_decode_end_of_buffer_key() {
+    fn test_btreemap_decode_end_of_buffer_key() {
         let mut map = BTreeMap::new();
         map.insert(1u32, 100u64);
         map.insert(5u32, 500u64);
@@ -365,7 +375,7 @@ mod tests {
     }
 
     #[test]
-    fn test_btree_decode_end_of_buffer_value() {
+    fn test_btreemap_decode_end_of_buffer_value() {
         let mut map = BTreeMap::new();
         map.insert(1u32, 100u64);
         map.insert(5u32, 500u64);
@@ -380,7 +390,7 @@ mod tests {
     }
 
     #[test]
-    fn test_btree_decode_extra_data() {
+    fn test_btreemap_decode_extra_data() {
         let mut map = BTreeMap::new();
         map.insert(1u32, 100u64);
 
@@ -402,10 +412,27 @@ mod tests {
         assert_eq!(decoded_map.get(&1u32), Some(&100u64));
     }
 
+    #[test]
+    fn test_btreemap_deterministic_encoding() {
+        // In-order
+        let mut map2 = BTreeMap::new();
+        (0..=1000u32).for_each(|i| {
+            map2.insert(i, i * 2);
+        });
+
+        // Reverse order
+        let mut map1 = BTreeMap::new();
+        (0..=1000u32).rev().for_each(|i| {
+            map1.insert(i, i * 2);
+        });
+
+        assert_eq!(map1.encode(), map2.encode());
+    }
+
     // --- HashMap Tests ---
 
     #[test]
-    fn test_empty_map() {
+    fn test_empty_hashmap() {
         let map = HashMap::<u32, u64>::new();
         round_trip_hash(&map, allow_any_len(), (), ());
         assert_eq!(map.encode_size(), 1);
@@ -414,7 +441,7 @@ mod tests {
     }
 
     #[test]
-    fn test_simple_map_u32_u64() {
+    fn test_simple_hashmap_u32_u64() {
         let mut map = HashMap::new();
         map.insert(1u32, 100u64);
         map.insert(5u32, 500u64);
@@ -424,16 +451,24 @@ mod tests {
     }
 
     #[test]
-    fn test_large_map() {
+    fn test_large_hashmap() {
+        // Fixed-size items
         let mut map = HashMap::new();
         for i in 0..1000 {
-            map.insert(i, i as u64 * 2);
+            map.insert(i as u16, i as u64 * 2);
         }
         round_trip_hash(&map, 0..=1000, (), ());
+
+        // Variable-size items
+        let mut map = HashMap::new();
+        for i in 0..1000usize {
+            map.insert(i, 1000usize + i);
+        }
+        round_trip_hash(&map, 0..=1000, ..=1000, 1000..=2000);
     }
 
     #[test]
-    fn test_map_with_variable_values() {
+    fn test_hashmap_with_variable_values() {
         let mut map = HashMap::new();
         map.insert(Bytes::from_static(b"apple"), vec![1, 2]);
         map.insert(Bytes::from_static(b"banana"), vec![3, 4, 5]);
@@ -447,7 +482,7 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_length_limit_exceeded() {
+    fn test_hashmap_decode_length_limit_exceeded() {
         let mut map = HashMap::new();
         map.insert(1u32, 100u64);
         map.insert(5u32, 500u64);
@@ -461,7 +496,7 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_value_length_limit_exceeded() {
+    fn test_hashmap_decode_value_length_limit_exceeded() {
         let mut map = HashMap::new();
         map.insert(Bytes::from_static(b"key1"), vec![1u8, 2u8, 3u8, 4u8, 5u8]);
 
@@ -477,7 +512,7 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_invalid_key_order() {
+    fn test_hashmap_decode_invalid_key_order() {
         let mut encoded = BytesMut::new();
         2usize.write(&mut encoded); // Map length = 2
         5u32.write(&mut encoded); // Key 5
@@ -496,7 +531,7 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_duplicate_key() {
+    fn test_hashmap_decode_duplicate_key() {
         let mut encoded = BytesMut::new();
         2usize.write(&mut encoded); // Map length = 2
         1u32.write(&mut encoded); // Key 1
@@ -515,7 +550,7 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_end_of_buffer_key() {
+    fn test_hashmap_decode_end_of_buffer_key() {
         let mut map = HashMap::new();
         map.insert(1u32, 100u64);
         map.insert(5u32, 500u64);
@@ -530,7 +565,7 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_end_of_buffer_value() {
+    fn test_hashmap_decode_end_of_buffer_value() {
         let mut map = HashMap::new();
         map.insert(1u32, 100u64);
         map.insert(5u32, 500u64);
@@ -545,7 +580,7 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_extra_data() {
+    fn test_hashmap_decode_extra_data() {
         let mut map = HashMap::new();
         map.insert(1u32, 100u64);
 
@@ -565,5 +600,22 @@ mod tests {
         let decoded_map = read_result.unwrap();
         assert_eq!(decoded_map.len(), 1);
         assert_eq!(decoded_map.get(&1u32), Some(&100u64));
+    }
+
+    #[test]
+    fn test_hashmap_deterministic_encoding() {
+        // In-order
+        let mut map2 = HashMap::new();
+        (0..=1000u32).for_each(|i| {
+            map2.insert(i, i * 2);
+        });
+
+        // Reverse order
+        let mut map1 = HashMap::new();
+        (0..=1000u32).rev().for_each(|i| {
+            map1.insert(i, i * 2);
+        });
+
+        assert_eq!(map1.encode(), map2.encode());
     }
 }
