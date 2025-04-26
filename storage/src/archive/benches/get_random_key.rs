@@ -8,28 +8,11 @@ use commonware_runtime::{
 use commonware_storage::archive::Identifier;
 use criterion::{black_box, criterion_group, Criterion};
 use futures::future::try_join_all;
-use rand::{rngs::StdRng, Rng, RngCore, SeedableRng};
+use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::time::{Duration, Instant};
 
 /// Items pre-loaded into the archive.
 const ITEMS: u64 = 1_000_000;
-
-/// Build an archive filled with `ITEMS` random records and return the
-/// archive plus the vector of keys (deterministically reconstructed).
-async fn load_archive(ctx: commonware_runtime::tokio::Context) -> (ArchiveType, Vec<Key>) {
-    let mut archive = get_archive(ctx, None).await;
-    append_random(&mut archive, ITEMS).await;
-
-    // Re-derive the keys inserted by append_random
-    let mut rng = StdRng::seed_from_u64(0);
-    let mut buf = [0u8; 64];
-    let mut keys = Vec::with_capacity(ITEMS as usize);
-    for _ in 0..ITEMS {
-        rng.fill_bytes(&mut buf);
-        keys.push(Key::new(buf));
-    }
-    (archive, keys)
-}
 
 async fn read_serial(a: &ArchiveType, keys: &[Key], reads: usize) {
     let mut rng = StdRng::seed_from_u64(42);
@@ -52,10 +35,11 @@ async fn read_concurrent(a: &ArchiveType, keys: &[Key], reads: usize) {
 fn bench_archive_get_random_key(c: &mut Criterion) {
     // Create a shared on-disk archive once so later setup is fast.
     let builder = commonware_runtime::tokio::Runner::default();
-    builder.start(|ctx| async move {
+    let keys = builder.start(|ctx| async move {
         let mut a = get_archive(ctx, None).await;
-        append_random(&mut a, ITEMS).await;
+        let keys = append_random(&mut a, ITEMS).await;
         a.close().await.unwrap();
+        keys
     });
 
     // Run the benchmarks.
@@ -64,22 +48,26 @@ fn bench_archive_get_random_key(c: &mut Criterion) {
         for reads in [1_000, 10_000, 100_000] {
             let label = format!("{}/mode={} reads={}", module_path!(), mode, reads);
             c.bench_function(&label, |b| {
-                b.to_async(&runner).iter_custom(move |iters| async move {
-                    let ctx = context::get::<commonware_runtime::tokio::Context>();
-                    let (archive, keys) = load_archive(ctx).await;
-                    let mut total = Duration::ZERO;
+                let keys = keys.clone();
+                b.to_async(&runner).iter_custom(move |iters| {
+                    let keys = keys.clone();
+                    async move {
+                        let ctx = context::get::<commonware_runtime::tokio::Context>();
+                        let archive = get_archive(ctx, None).await;
+                        let mut total = Duration::ZERO;
 
-                    for _ in 0..iters {
-                        let start = Instant::now();
-                        match mode {
-                            "serial" => read_serial(&archive, &keys, reads).await,
-                            "concurrent" => read_concurrent(&archive, &keys, reads).await,
-                            _ => unreachable!(),
+                        for _ in 0..iters {
+                            let start = Instant::now();
+                            match mode {
+                                "serial" => read_serial(&archive, &keys, reads).await,
+                                "concurrent" => read_concurrent(&archive, &keys, reads).await,
+                                _ => unreachable!(),
+                            }
+                            total += start.elapsed();
                         }
-                        total += start.elapsed();
+                        archive.destroy().await.unwrap();
+                        total
                     }
-                    archive.destroy().await.unwrap();
-                    total
                 });
             });
         }

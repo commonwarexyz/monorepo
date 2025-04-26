@@ -33,47 +33,57 @@ async fn read_concurrent(a: &ArchiveType, reads: usize) {
 }
 
 fn bench_archive_get_random(c: &mut Criterion) {
-    // Pre-populate a shared archive once.
-    let writer = commonware_runtime::tokio::Runner::default();
-    writer.start(|ctx| async move {
-        let mut a = get_archive(ctx, None).await;
-        append_random(&mut a, ITEMS).await;
-        a.close().await.unwrap();
-    });
+    for compression in [None, Some(3)] {
+        // Pre-populate a shared archive once.
+        let writer = commonware_runtime::tokio::Runner::default();
+        writer.start(|ctx| async move {
+            let mut a = get_archive(ctx, compression).await;
+            append_random(&mut a, ITEMS).await;
+            a.close().await.unwrap();
+        });
 
-    // Run the benchmarks for different read modes.
-    let runner = tokio::Runner::default();
-    for mode in ["serial", "concurrent"] {
-        for reads in [1_000, 10_000, 100_000] {
-            let label = format!("{}/mode={} reads={}", module_path!(), mode, reads);
-            c.bench_function(&label, |b| {
-                b.to_async(&runner).iter_custom(move |iters| async move {
-                    let ctx = context::get::<commonware_runtime::tokio::Context>();
-                    let archive = get_archive(ctx, None).await;
-                    let mut total = Duration::ZERO;
+        // Run the benchmarks for different read modes.
+        let runner = tokio::Runner::default();
+        for mode in ["serial", "concurrent"] {
+            for reads in [1_000, 10_000, 100_000] {
+                let label = format!(
+                    "{}/mode={} comp={} reads={}",
+                    module_path!(),
+                    mode,
+                    compression
+                        .map(|l| l.to_string())
+                        .unwrap_or_else(|| "off".into()),
+                    reads
+                );
+                c.bench_function(&label, |b| {
+                    b.to_async(&runner).iter_custom(move |iters| async move {
+                        let ctx = context::get::<commonware_runtime::tokio::Context>();
+                        let archive = get_archive(ctx, compression).await;
+                        let mut total = Duration::ZERO;
 
-                    for _ in 0..iters {
-                        let start = Instant::now();
-                        match mode {
-                            "serial" => read_serial(&archive, reads).await,
-                            "concurrent" => read_concurrent(&archive, reads).await,
-                            _ => unreachable!(),
+                        for _ in 0..iters {
+                            let start = Instant::now();
+                            match mode {
+                                "serial" => read_serial(&archive, reads).await,
+                                "concurrent" => read_concurrent(&archive, reads).await,
+                                _ => unreachable!(),
+                            }
+                            total += start.elapsed();
                         }
-                        total += start.elapsed();
-                    }
-                    archive.destroy().await.unwrap();
-                    total
+                        archive.destroy().await.unwrap();
+                        total
+                    });
                 });
-            });
+            }
         }
-    }
 
-    // Clean up shared artifacts.
-    let cleaner = commonware_runtime::tokio::Runner::default();
-    cleaner.start(|ctx| async move {
-        let a = get_archive(ctx, None).await;
-        a.destroy().await.unwrap();
-    });
+        // Clean up shared artifacts.
+        let cleaner = commonware_runtime::tokio::Runner::default();
+        cleaner.start(|ctx| async move {
+            let a = get_archive(ctx, None).await;
+            a.destroy().await.unwrap();
+        });
+    }
 }
 
 criterion_group! {

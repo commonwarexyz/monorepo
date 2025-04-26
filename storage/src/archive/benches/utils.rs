@@ -35,24 +35,25 @@ pub async fn get_archive(ctx: Context, compression: Option<u8>) -> ArchiveType {
         codec_config: (),
         section_mask: SECTION_MASK,
         pending_writes: PENDING_WRITES,
-        replay_concurrency: 4,
+        replay_concurrency: 1,
     };
     Archive::init(ctx, cfg).await.unwrap()
 }
 
 /// Append `count` random (index,key,value) triples and sync once.
-pub async fn append_random(archive: &mut ArchiveType, count: u64) {
+pub async fn append_random(archive: &mut ArchiveType, count: u64) -> Vec<Key> {
     let mut rng = StdRng::seed_from_u64(0);
     let mut key_buf = [0u8; 64];
     let mut val_buf = [0u8; 32];
 
+    let mut keys = Vec::with_capacity(count as usize);
     for i in 0..count {
         rng.fill_bytes(&mut key_buf);
+        let key = Key::new(key_buf);
+        keys.push(key.clone());
         rng.fill_bytes(&mut val_buf);
-        archive
-            .put(i, Key::new(key_buf), Val::new(val_buf))
-            .await
-            .unwrap();
+        archive.put(i, key, Val::new(val_buf)).await.unwrap();
     }
     archive.sync().await.unwrap();
+    keys
 }
