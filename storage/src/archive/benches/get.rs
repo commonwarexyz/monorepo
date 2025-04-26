@@ -39,8 +39,8 @@ async fn read_serial_keys(a: &ArchiveType, reads: &[Key]) {
     }
 }
 
-async fn read_serial_indicies(a: &ArchiveType, indicies: &[u64]) {
-    for idx in indicies {
+async fn read_serial_indices(a: &ArchiveType, indices: &[u64]) {
+    for idx in indices {
         black_box(a.get(Identifier::Index(*idx)).await.unwrap().unwrap());
     }
 }
@@ -50,9 +50,9 @@ async fn read_concurrent_keys(a: &ArchiveType, reads: Vec<Key>) {
     black_box(try_join_all(futures).await.unwrap());
 }
 
-async fn read_concurrent_indicies(a: &ArchiveType, indicies: &[u64]) {
-    let mut futs = Vec::with_capacity(indicies.len());
-    for idx in indicies {
+async fn read_concurrent_indices(a: &ArchiveType, indices: &[u64]) {
+    let mut futs = Vec::with_capacity(indices.len());
+    for idx in indices {
         futs.push(a.get(Identifier::Index(*idx)));
     }
     black_box(try_join_all(futs).await.unwrap());
@@ -118,15 +118,12 @@ fn bench_get(c: &mut Criterion) {
                                     for _ in 0..iters {
                                         match mode {
                                             "serial" => {
-                                                read_serial_indicies(&archive, &selected_indices)
+                                                read_serial_indices(&archive, &selected_indices)
                                                     .await
                                             }
                                             "concurrent" => {
-                                                read_concurrent_indicies(
-                                                    &archive,
-                                                    &selected_indices,
-                                                )
-                                                .await
+                                                read_concurrent_indices(&archive, &selected_indices)
+                                                    .await
                                             }
                                             _ => unreachable!(),
                                         }
