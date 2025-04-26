@@ -521,10 +521,10 @@ impl<P: Array, D: Digest> Ack<P, D> {
     /// It contains both the chunk and the epoch to ensure domain separation and prevent
     /// signature reuse across epochs.
     fn payload(chunk: &Chunk<P, D>, epoch: &Epoch) -> Vec<u8> {
-        let var_epoch = UInt(*epoch);
-        let mut message = Vec::with_capacity(chunk.encode_size() + var_epoch.encode_size());
+        let epoch = UInt(*epoch);
+        let mut message = Vec::with_capacity(chunk.encode_size() + epoch.encode_size());
         chunk.write(&mut message);
-        var_epoch.write(&mut message);
+        epoch.write(&mut message);
         message
     }
 
