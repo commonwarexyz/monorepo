@@ -105,6 +105,7 @@ define_cap_translator!(EightCap, 8, u64);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::hash::Hasher;
 
     #[test]
     fn test_one_cap() {
@@ -149,5 +150,12 @@ mod tests {
             t.transform(b"abcdefghijk").to_le_bytes(),
             [b'a', b'b', b'c', b'd', b'e', b'f', b'g', b'h']
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "we should only ever call type-specific write methods")]
+    fn identity_hasher_panics_on_write_slice() {
+        let mut h = UintIdentity::default();
+        h.write(b"not an int");
     }
 }
