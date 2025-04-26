@@ -44,12 +44,12 @@ async fn read_serial(a: &ArchiveType, keys: &[Key], reads: usize) {
 
 async fn read_concurrent(a: &ArchiveType, keys: &[Key], reads: usize) {
     let mut rng = StdRng::seed_from_u64(42);
-    let mut futs = Vec::with_capacity(reads);
+    let mut owned_keys = Vec::with_capacity(reads);
     for _ in 0..reads {
-        let k = keys[rng.gen_range(0..ITEMS as usize)].clone();
-        futs.push(a.get(Identifier::Key(&k)));
+        owned_keys.push(keys[rng.gen_range(0..ITEMS as usize)].clone());
     }
-    black_box(try_join_all(futs).await.unwrap());
+    let futures = owned_keys.iter().map(|k| a.get(Identifier::Key(k)));
+    black_box(try_join_all(futures).await.unwrap());
 }
 
 fn bench_archive_get_random_key(c: &mut Criterion) {
