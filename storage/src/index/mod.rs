@@ -15,16 +15,20 @@ mod storage;
 pub use storage::{Index, RemoveValueIterator, UpdateValueIterator, ValueIterator};
 pub mod translator;
 
-use std::hash::Hash;
+use std::hash::{BuildHasher, Hash};
 
 /// Translate keys into an internal representation used by `Index`.
 ///
 /// # Warning
 ///
-/// If invoking `transform` on keys results in many conflicts, the performance of `Index` will
-/// degrade substantially.
-pub trait Translator: Clone {
-    type Key: Eq + Hash + Send + Sync + Clone;
+/// The output of `transform` is used as the key in a hash table. If the output is not uniformly
+/// distributed, the performance of [Index] will degrade substantially.
+pub trait Translator: Clone + BuildHasher {
+    /// The type of the internal representation of keys.
+    ///
+    /// Although `Translator` is a [BuildHasher], the `Key` type must still implement [Hash] for compatibility
+    /// with the [std::collections::HashMap] used internally by [Index].
+    type Key: Eq + Hash;
 
     /// Transform a key into its internal representation.
     fn transform(&self, key: &[u8]) -> Self::Key;
