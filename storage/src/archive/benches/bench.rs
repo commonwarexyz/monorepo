@@ -5,4 +5,4 @@ mod put;
 mod restart;
 mod utils;
 
-criterion_main!(put::benches, get::benches, restart::benches,);
+criterion_main!(put::benches, get::benches, restart::benches);
