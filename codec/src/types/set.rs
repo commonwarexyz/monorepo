@@ -150,6 +150,7 @@ mod tests {
             + EncodeSize,
     {
         let encoded = set.encode();
+        assert_eq!(set.encode_size(), encoded.len());
         let config_tuple = (range_cfg, item_cfg);
         let decoded = BTreeSet::<K>::decode_cfg(encoded, &config_tuple).expect("decode_cfg failed");
         assert_eq!(set, &decoded);
@@ -167,6 +168,7 @@ mod tests {
             + EncodeSize,
     {
         let encoded = set.encode();
+        assert_eq!(set.encode_size(), encoded.len());
         let config_tuple = (range_cfg, item_cfg);
         let decoded = HashSet::<K>::decode_cfg(encoded, &config_tuple).expect("decode_cfg failed");
         assert_eq!(set, &decoded);
@@ -175,7 +177,7 @@ mod tests {
     // --- BTreeSet Tests ---
 
     #[test]
-    fn test_empty_btree_set() {
+    fn test_empty_btreeset() {
         let set = BTreeSet::<u32>::new();
         round_trip_btree(&set, (..).into(), ());
         assert_eq!(set.encode_size(), 1); // varint 0
@@ -184,7 +186,7 @@ mod tests {
     }
 
     #[test]
-    fn test_simple_btree_set_u32() {
+    fn test_simple_btreeset_u32() {
         let mut set = BTreeSet::new();
         set.insert(1u32);
         set.insert(5u32);
@@ -194,13 +196,18 @@ mod tests {
     }
 
     #[test]
-    fn test_large_btree_set() {
+    fn test_large_btreeset() {
+        // Fixed-size items
         let set: BTreeSet<_> = (0..1000u16).collect();
-        round_trip_btree(&set, (0..=1000).into(), ());
+        round_trip_btree(&set, (1000..=1000).into(), ());
+
+        // Variable-size items
+        let set: BTreeSet<_> = (0..1000usize).collect();
+        round_trip_btree(&set, (1000..=1000).into(), (..=1000).into());
     }
 
     #[test]
-    fn test_btree_set_with_variable_items() {
+    fn test_btreeset_with_variable_items() {
         let mut set = BTreeSet::new();
         set.insert(Bytes::from_static(b"apple"));
         set.insert(Bytes::from_static(b"banana"));
@@ -213,7 +220,7 @@ mod tests {
     }
 
     #[test]
-    fn test_btree_decode_length_limit_exceeded() {
+    fn test_btreeset_decode_length_limit_exceeded() {
         let mut set = BTreeSet::new();
         set.insert(1u32);
         set.insert(5u32);
@@ -225,7 +232,7 @@ mod tests {
     }
 
     #[test]
-    fn test_btree_decode_item_length_limit_exceeded() {
+    fn test_btreeset_decode_item_length_limit_exceeded() {
         let mut set = BTreeSet::new();
         set.insert(Bytes::from_static(b"longitem")); // 8 bytes
         let encoded = set.encode();
@@ -239,7 +246,7 @@ mod tests {
     }
 
     #[test]
-    fn test_btree_decode_invalid_item_order() {
+    fn test_btreeset_decode_invalid_item_order() {
         let mut encoded = BytesMut::new();
         2usize.write(&mut encoded); // Set length = 2
         5u32.write(&mut encoded); // Item 5
@@ -249,12 +256,12 @@ mod tests {
         let result = BTreeSet::<u32>::decode_cfg(encoded, &config_tuple);
         assert!(matches!(
             result,
-            Err(Error::Invalid("HashSet", "Items must ascend")) // Note: Error message uses HashSet currently
+            Err(Error::Invalid("BTreeSet", "Items must ascend")) // Note: Error message uses HashSet currently
         ));
     }
 
     #[test]
-    fn test_btree_decode_duplicate_item() {
+    fn test_btreeset_decode_duplicate_item() {
         let mut encoded = BytesMut::new();
         2usize.write(&mut encoded); // Set length = 2
         1u32.write(&mut encoded); // Item 1
@@ -264,12 +271,12 @@ mod tests {
         let result = BTreeSet::<u32>::decode_cfg(encoded, &config_tuple);
         assert!(matches!(
             result,
-            Err(Error::Invalid("HashSet", "Duplicate item")) // Note: Error message uses HashSet currently
+            Err(Error::Invalid("BTreeSet", "Duplicate item")) // Note: Error message uses HashSet currently
         ));
     }
 
     #[test]
-    fn test_btree_decode_end_of_buffer() {
+    fn test_btreeset_decode_end_of_buffer() {
         let mut set = BTreeSet::new();
         set.insert(1u32);
         set.insert(5u32);
@@ -283,7 +290,7 @@ mod tests {
     }
 
     #[test]
-    fn test_btree_decode_extra_data() {
+    fn test_btreeset_decode_extra_data() {
         let mut set = BTreeSet::new();
         set.insert(1u32);
 
@@ -303,10 +310,25 @@ mod tests {
         assert!(decoded_set.contains(&1u32));
     }
 
+    #[test]
+    fn test_btreeset_deterministic_encoding() {
+        let mut set1 = BTreeSet::new();
+        (0..1000u32).for_each(|i| {
+            set1.insert(i);
+        });
+
+        let mut set2 = BTreeSet::new();
+        (0..1000u32).rev().for_each(|i| {
+            set2.insert(i);
+        });
+
+        assert_eq!(set1.encode(), set2.encode());
+    }
+
     // --- HashSet Tests ---
 
     #[test]
-    fn test_empty_hash_set() {
+    fn test_empty_hashset() {
         let set = HashSet::<u32>::new();
         round_trip_hash(&set, (..).into(), ());
         assert_eq!(set.encode_size(), 1); // varint 0
@@ -315,7 +337,7 @@ mod tests {
     }
 
     #[test]
-    fn test_simple_hash_set_u32() {
+    fn test_simple_hashset_u32() {
         let mut set = HashSet::new();
         set.insert(1u32);
         set.insert(5u32);
@@ -333,13 +355,18 @@ mod tests {
     }
 
     #[test]
-    fn test_large_hash_set() {
+    fn test_large_hashset() {
+        // Fixed-size items
         let set: HashSet<_> = (0..1000u16).collect();
-        round_trip_hash(&set, (0..=1000).into(), ());
+        round_trip_hash(&set, (1000..=1000).into(), ());
+
+        // Variable-size items
+        let set: HashSet<_> = (0..1000usize).collect();
+        round_trip_hash(&set, (1000..=1000).into(), (..=1000).into());
     }
 
     #[test]
-    fn test_hash_set_with_variable_items() {
+    fn test_hashset_with_variable_items() {
         let mut set = HashSet::new();
         set.insert(Bytes::from_static(b"apple"));
         set.insert(Bytes::from_static(b"banana"));
@@ -352,7 +379,7 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_decode_length_limit_exceeded() {
+    fn test_hashset_decode_length_limit_exceeded() {
         let mut set = HashSet::new();
         set.insert(1u32);
         set.insert(5u32);
@@ -365,7 +392,7 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_decode_item_length_limit_exceeded() {
+    fn test_hashset_decode_item_length_limit_exceeded() {
         let mut set = HashSet::new();
         set.insert(Bytes::from_static(b"longitem")); // 8 bytes
 
@@ -380,7 +407,7 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_decode_invalid_item_order() {
+    fn test_hashset_decode_invalid_item_order() {
         let mut encoded = BytesMut::new();
         2usize.write(&mut encoded); // Set length = 2
         5u32.write(&mut encoded); // Item 5
@@ -396,7 +423,7 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_decode_duplicate_item() {
+    fn test_hashset_decode_duplicate_item() {
         let mut encoded = BytesMut::new();
         2usize.write(&mut encoded); // Set length = 2
         1u32.write(&mut encoded); // Item 1
@@ -411,7 +438,7 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_decode_end_of_buffer() {
+    fn test_hashset_decode_end_of_buffer() {
         let mut set = HashSet::new();
         set.insert(1u32);
         set.insert(5u32);
@@ -425,7 +452,7 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_decode_extra_data() {
+    fn test_hashset_decode_extra_data() {
         let mut set = HashSet::new();
         set.insert(1u32);
 
@@ -443,5 +470,20 @@ mod tests {
         let decoded_set = read_result.unwrap();
         assert_eq!(decoded_set.len(), 1);
         assert!(decoded_set.contains(&1u32));
+    }
+
+    #[test]
+    fn test_hashset_deterministic_encoding() {
+        let mut set1 = HashSet::new();
+        (0..1000u32).for_each(|i| {
+            set1.insert(i);
+        });
+
+        let mut set2 = HashSet::new();
+        (0..1000u32).rev().for_each(|i| {
+            set2.insert(i);
+        });
+
+        assert_eq!(set1.encode(), set2.encode());
     }
 }
