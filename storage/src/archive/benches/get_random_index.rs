@@ -1,7 +1,10 @@
 //! Random index-lookup benchmark for Archive.
 
 use super::utils::{append_random, get_archive, ArchiveType};
-use commonware_runtime::benchmarks::{context, tokio};
+use commonware_runtime::{
+    benchmarks::{context, tokio},
+    Runner,
+};
 use commonware_storage::archive::Identifier;
 use criterion::{black_box, criterion_group, Criterion};
 use futures::future::try_join_all;

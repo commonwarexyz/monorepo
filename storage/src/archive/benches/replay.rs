@@ -1,4 +1,4 @@
-use super::utils::{append_random, get_archive, ArchiveType};
+use super::utils::{append_random, get_archive};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     Runner,

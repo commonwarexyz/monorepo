@@ -417,4 +417,17 @@ impl<T: Translator, E: Storage + Metrics, K: Array, VC: CodecConfig + Copy, V: C
     pub async fn close(self) -> Result<(), Error> {
         self.journal.close().await.map_err(Error::Journal)
     }
+
+    /// Remove all on-disk data created by this `Archive`.
+    ///
+    /// Internally this just forwards to `Journal::destroy`, which
+    /// syncs any pending buffers, closes every open blob, and then
+    /// deletes the blobs from the underlying `Storage` partition.
+    ///
+    /// Use this **only in tests or benchmarks**—never in production
+    /// code—because once the call succeeds the archive is permanently
+    /// gone.
+    pub async fn destroy(self) -> Result<(), Error> {
+        self.journal.destroy().await.map_err(Error::Journal)
+    }
 }
