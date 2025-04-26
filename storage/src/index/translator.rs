@@ -29,6 +29,7 @@ macro_rules! define_cap_translator {
     };
 }
 
+define_cap_translator!(OneCap, 1);
 define_cap_translator!(TwoCap, 2);
 define_cap_translator!(FourCap, 4);
 define_cap_translator!(EightCap, 8);
@@ -36,6 +37,15 @@ define_cap_translator!(EightCap, 8);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_one_cap() {
+        let translator = OneCap;
+        assert_eq!(translator.transform(b""), [0]);
+        assert_eq!(translator.transform(b"a"), [b'a']);
+        assert_eq!(translator.transform(b"ab"), [b'a']);
+        assert_eq!(translator.transform(b"abc"), [b'a']);
+    }
 
     #[test]
     fn test_two_cap() {
