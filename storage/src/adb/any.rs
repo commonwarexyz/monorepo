@@ -645,22 +645,34 @@ mod test {
             assert!(db.get(&d1).await.unwrap().is_none());
             assert!(db.get(&d2).await.unwrap().is_none());
 
-            db.update(&mut hasher, d1, d2).await.unwrap();
+            assert!(matches!(
+                db.update(&mut hasher, d1, d2).await.unwrap(),
+                Some(None)
+            ));
             assert_eq!(db.get(&d1).await.unwrap().unwrap(), d2);
             assert!(db.get(&d2).await.unwrap().is_none());
 
-            db.update(&mut hasher, d2, d1).await.unwrap();
+            assert!(matches!(
+                db.update(&mut hasher, d2, d1).await.unwrap(),
+                Some(None)
+            ));
             assert_eq!(db.get(&d1).await.unwrap().unwrap(), d2);
             assert_eq!(db.get(&d2).await.unwrap().unwrap(), d1);
 
-            db.delete(&mut hasher, d1).await.unwrap();
+            assert!(matches!(db.delete(&mut hasher, d1).await.unwrap(), Some(0)));
             assert!(db.get(&d1).await.unwrap().is_none());
             assert_eq!(db.get(&d2).await.unwrap().unwrap(), d1);
 
-            db.update(&mut hasher, d1, d1).await.unwrap();
+            assert!(matches!(
+                db.update(&mut hasher, d1, d1).await.unwrap(),
+                Some(None),
+            ));
             assert_eq!(db.get(&d1).await.unwrap().unwrap(), d1);
 
-            db.update(&mut hasher, d2, d2).await.unwrap();
+            assert!(matches!(
+                db.update(&mut hasher, d2, d2).await.unwrap(),
+                Some(Some(1))
+            ));
             assert_eq!(db.get(&d2).await.unwrap().unwrap(), d2);
 
             assert_eq!(db.log.size().await.unwrap(), 5); // 4 updates, 1 deletion.
@@ -678,15 +690,15 @@ mod test {
             let root = db.root(&mut hasher);
 
             // Multiple assignments of the same value should be a no-op.
-            db.update(&mut hasher, d1, d1).await.unwrap();
-            db.update(&mut hasher, d2, d2).await.unwrap();
+            assert!(db.update(&mut hasher, d1, d1).await.unwrap().is_none());
+            assert!(db.update(&mut hasher, d2, d2).await.unwrap().is_none());
             // Log and root should be unchanged.
             assert_eq!(db.log.size().await.unwrap(), 6);
             assert_eq!(db.root(&mut hasher), root);
 
             // Delete all keys.
-            db.delete(&mut hasher, d1).await.unwrap();
-            db.delete(&mut hasher, d2).await.unwrap();
+            assert!(matches!(db.delete(&mut hasher, d1).await.unwrap(), Some(3)));
+            assert!(matches!(db.delete(&mut hasher, d2).await.unwrap(), Some(4)));
             assert!(db.get(&d1).await.unwrap().is_none());
             assert!(db.get(&d2).await.unwrap().is_none());
             assert_eq!(db.log.size().await.unwrap(), 8); // 4 updates, 3 deletions, 1 commit
@@ -695,13 +707,13 @@ mod test {
             let root = db.root(&mut hasher);
 
             // Multiple deletions of the same key should be a no-op.
-            db.delete(&mut hasher, d1).await.unwrap();
+            assert!(db.delete(&mut hasher, d1).await.unwrap().is_none());
             assert_eq!(db.log.size().await.unwrap(), 8);
             assert_eq!(db.root(&mut hasher), root);
 
             // Deletions of non-existent keys should be a no-op.
             let d3 = <Sha256 as CHasher>::Digest::decode(vec![2u8; 32].as_ref()).unwrap();
-            db.delete(&mut hasher, d3).await.unwrap();
+            assert!(db.delete(&mut hasher, d3).await.unwrap().is_none());
             assert_eq!(db.log.size().await.unwrap(), 8);
             assert_eq!(db.root(&mut hasher), root);
 
