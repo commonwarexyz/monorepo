@@ -33,15 +33,15 @@ fn select_indices(reads: usize) -> Vec<u64> {
     selected_indices
 }
 
-async fn read_serial_keys(a: &ArchiveType, reads: Vec<Key>) {
+async fn read_serial_keys(a: &ArchiveType, reads: &[Key]) {
     for k in reads {
-        black_box(a.get(Identifier::Key(&k)).await.unwrap().unwrap());
+        black_box(a.get(Identifier::Key(k)).await.unwrap().unwrap());
     }
 }
 
-async fn read_serial_indicies(a: &ArchiveType, indicies: Vec<u64>) {
+async fn read_serial_indicies(a: &ArchiveType, indicies: &[u64]) {
     for idx in indicies {
-        black_box(a.get(Identifier::Index(idx)).await.unwrap().unwrap());
+        black_box(a.get(Identifier::Index(*idx)).await.unwrap().unwrap());
     }
 }
 
@@ -50,10 +50,10 @@ async fn read_concurrent_keys(a: &ArchiveType, reads: Vec<Key>) {
     black_box(try_join_all(futures).await.unwrap());
 }
 
-async fn read_concurrent_indicies(a: &ArchiveType, indicies: Vec<u64>) {
+async fn read_concurrent_indicies(a: &ArchiveType, indicies: &[u64]) {
     let mut futs = Vec::with_capacity(indicies.len());
     for idx in indicies {
-        futs.push(a.get(Identifier::Index(idx)));
+        futs.push(a.get(Identifier::Index(*idx)));
     }
     black_box(try_join_all(futs).await.unwrap());
 }
@@ -99,8 +99,7 @@ fn bench_get(c: &mut Criterion) {
                                     for _ in 0..iters {
                                         match mode {
                                             "serial" => {
-                                                read_serial_keys(&archive, selected_keys.clone())
-                                                    .await
+                                                read_serial_keys(&archive, &selected_keys).await
                                             }
                                             "concurrent" => {
                                                 read_concurrent_keys(
@@ -119,16 +118,13 @@ fn bench_get(c: &mut Criterion) {
                                     for _ in 0..iters {
                                         match mode {
                                             "serial" => {
-                                                read_serial_indicies(
-                                                    &archive,
-                                                    selected_indices.clone(),
-                                                )
-                                                .await
+                                                read_serial_indicies(&archive, &selected_indices)
+                                                    .await
                                             }
                                             "concurrent" => {
                                                 read_concurrent_indicies(
                                                     &archive,
-                                                    selected_indices.clone(),
+                                                    &selected_indices,
                                                 )
                                                 .await
                                             }
