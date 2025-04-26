@@ -81,7 +81,6 @@ fn bench_get_random_key(c: &mut Criterion) {
                                 }
                                 total += start.elapsed();
                             }
-                            archive.destroy().await.unwrap();
                             total
                         }
                     });

@@ -15,19 +15,24 @@ use std::time::{Duration, Instant};
 /// Items pre-loaded into the archive.
 const ITEMS: u64 = 1_000_000;
 
-async fn read_serial(a: &ArchiveType, reads: usize) {
-    let mut rng = StdRng::seed_from_u64(0);
+fn select_indices(reads: usize) -> Vec<u64> {
+    let mut rng = StdRng::seed_from_u64(42);
+    let mut selected_indices = Vec::with_capacity(reads);
     for _ in 0..reads {
-        let idx = rng.gen_range(0..ITEMS);
+        selected_indices.push(rng.gen_range(0..ITEMS));
+    }
+    selected_indices
+}
+
+async fn read_serial(a: &ArchiveType, indicies: Vec<u64>) {
+    for idx in indicies {
         black_box(a.get(Identifier::Index(idx)).await.unwrap().unwrap());
     }
 }
 
-async fn read_concurrent(a: &ArchiveType, reads: usize) {
-    let mut rng = StdRng::seed_from_u64(0);
-    let mut futs = Vec::with_capacity(reads);
-    for _ in 0..reads {
-        let idx = rng.gen_range(0..ITEMS);
+async fn read_concurrent(a: &ArchiveType, indicies: Vec<u64>) {
+    let mut futs = Vec::with_capacity(indicies.len());
+    for idx in indicies {
         futs.push(a.get(Identifier::Index(idx)));
     }
     black_box(try_join_all(futs).await.unwrap());
@@ -64,16 +69,18 @@ fn bench_get_random(c: &mut Criterion) {
                         let archive = get_archive(ctx, compression).await;
                         let mut total = Duration::ZERO;
 
+                        let selected_indices = select_indices(reads);
                         for _ in 0..iters {
                             let start = Instant::now();
                             match mode {
-                                "serial" => read_serial(&archive, reads).await,
-                                "concurrent" => read_concurrent(&archive, reads).await,
+                                "serial" => read_serial(&archive, selected_indices.clone()).await,
+                                "concurrent" => {
+                                    read_concurrent(&archive, selected_indices.clone()).await
+                                }
                                 _ => unreachable!(),
                             }
                             total += start.elapsed();
                         }
-                        archive.destroy().await.unwrap();
                         total
                     });
                 });
