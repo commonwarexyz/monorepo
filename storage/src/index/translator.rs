@@ -3,13 +3,13 @@
 use super::Translator;
 use std::hash::{BuildHasher, Hasher};
 
-/// A “do-nothing” hasher.
+/// A “do-nothing” hasher for `uint`.
 ///
 /// [super::Index] typically stores keys that are **already hashed** (shortened by the [Translator]).
 /// Re-hashing them with SipHash (by [std::collections::HashMap]) would waste CPU, so we give `HashMap`
 /// this identity hasher instead:
 ///
-/// * `write_*` (or related) copies the input into an internal field;
+/// * `write_u8`, `write_u16`, `write_u32`, `write_u64` copies the input into an internal field;
 /// * `finish()` returns that value unchanged.
 ///
 /// # Warning
@@ -17,11 +17,11 @@ use std::hash::{BuildHasher, Hasher};
 /// This hasher is not suitable for general use. If the hasher is called over some type that is not
 /// `u8`, `u16`, `u32` or `u64`, it will panic.
 #[derive(Default, Clone)]
-pub struct IdentityHasher {
+pub struct UintIdentity {
     value: u64,
 }
 
-impl Hasher for IdentityHasher {
+impl Hasher for UintIdentity {
     #[inline]
     fn write(&mut self, _: &[u8]) {
         unimplemented!("we should only ever call type-specific write methods");
@@ -86,16 +86,17 @@ macro_rules! define_cap_translator {
 
         // Implement the `BuildHasher` trait for `IdentityHasher`.
         impl BuildHasher for $name {
-            type Hasher = IdentityHasher;
+            type Hasher = UintIdentity;
 
             #[inline]
             fn build_hasher(&self) -> Self::Hasher {
-                IdentityHasher::default()
+                UintIdentity::default()
             }
         }
     };
 }
 
+// Define translators for different sizes.
 define_cap_translator!(OneCap, 1, u8);
 define_cap_translator!(TwoCap, 2, u16);
 define_cap_translator!(FourCap, 4, u32);
