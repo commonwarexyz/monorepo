@@ -3,6 +3,7 @@
 use super::utils::{append_random, get_archive, ArchiveType};
 use commonware_runtime::{
     benchmarks::{context, tokio},
+    tokio::Config,
     Runner,
 };
 use commonware_storage::archive::Identifier;
@@ -33,9 +34,11 @@ async fn read_concurrent(a: &ArchiveType, reads: usize) {
 }
 
 fn bench_get_random(c: &mut Criterion) {
+    // Create a config we can use across all benchmarks (with a fixed `storage_directory`).
+    let cfg = Config::default();
     for compression in [None, Some(3)] {
         // Pre-populate a shared archive once.
-        let writer = commonware_runtime::tokio::Runner::default();
+        let writer = commonware_runtime::tokio::Runner::new(cfg.clone());
         writer.start(|ctx| async move {
             let mut a = get_archive(ctx, compression).await;
             append_random(&mut a, ITEMS).await;
@@ -43,7 +46,7 @@ fn bench_get_random(c: &mut Criterion) {
         });
 
         // Run the benchmarks for different read modes.
-        let runner = tokio::Runner::default();
+        let runner = tokio::Runner::new(cfg.clone());
         for mode in ["serial", "concurrent"] {
             for reads in [1_000, 10_000, 100_000] {
                 let label = format!(
@@ -78,7 +81,7 @@ fn bench_get_random(c: &mut Criterion) {
         }
 
         // Clean up shared artifacts.
-        let cleaner = commonware_runtime::tokio::Runner::default();
+        let cleaner = commonware_runtime::tokio::Runner::new(cfg.clone());
         cleaner.start(|ctx| async move {
             let a = get_archive(ctx, compression).await;
             a.destroy().await.unwrap();

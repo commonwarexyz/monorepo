@@ -5,37 +5,33 @@ use std::time::{Duration, Instant};
 
 fn bench_put(c: &mut Criterion) {
     let runner = tokio::Runner::default();
-    let cases = [
-        (10_000_u64, None),
-        (10_000_u64, Some(3)),
-        (100_000_u64, None),
-        (100_000_u64, Some(3)),
-    ];
-    for (items, compression) in cases {
-        let label = format!(
-            "{}/items={} comp={}",
-            module_path!(),
-            items,
-            compression
-                .map(|l| l.to_string())
-                .unwrap_or_else(|| "off".into()),
-        );
-        c.bench_function(&label, |b| {
-            b.to_async(&runner).iter_custom(move |iters| async move {
-                let ctx = context::get::<commonware_runtime::tokio::Context>();
-                let mut total = Duration::ZERO;
-                for _ in 0..iters {
-                    let mut archive = get_archive(ctx.clone(), compression).await;
+    for compression in [None, Some(3)] {
+        for items in [10_000_u64, 100_000_u64, 500_000_u64] {
+            let label = format!(
+                "{}/items={} comp={}",
+                module_path!(),
+                items,
+                compression
+                    .map(|l| l.to_string())
+                    .unwrap_or_else(|| "off".into()),
+            );
+            c.bench_function(&label, |b| {
+                b.to_async(&runner).iter_custom(move |iters| async move {
+                    let ctx = context::get::<commonware_runtime::tokio::Context>();
+                    let mut total = Duration::ZERO;
+                    for _ in 0..iters {
+                        let mut archive = get_archive(ctx.clone(), compression).await;
 
-                    let start = Instant::now();
-                    append_random(&mut archive, items).await;
-                    total += start.elapsed();
+                        let start = Instant::now();
+                        append_random(&mut archive, items).await;
+                        total += start.elapsed();
 
-                    archive.destroy().await.unwrap();
-                }
-                total
+                        archive.destroy().await.unwrap();
+                    }
+                    total
+                });
             });
-        });
+        }
     }
 }
 

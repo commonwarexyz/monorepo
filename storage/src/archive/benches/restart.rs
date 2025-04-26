@@ -1,24 +1,29 @@
 use super::utils::{append_random, get_archive};
 use commonware_runtime::{
     benchmarks::{context, tokio},
+    tokio::Config,
     Runner,
 };
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
 
-/// Measure `Archive::init` time for different data sizes.
+/// Items pre-loaded into the archive.
+const ITEMS: u64 = 1_000_000;
+
 fn bench_restart(c: &mut Criterion) {
+    // Create a config we can use across all benchmarks (with a fixed `storage_directory`).
+    let cfg = Config::default();
     for compression in [None, Some(3)] {
         // Build a single big archive once
-        const ITEMS: u64 = 1_000_000;
-        let builder = commonware_runtime::tokio::Runner::default();
+        let builder = commonware_runtime::tokio::Runner::new(cfg.clone());
         builder.start(|ctx| async move {
             let mut a = get_archive(ctx, compression).await;
             append_random(&mut a, ITEMS).await;
             a.close().await.unwrap();
         });
 
-        let runner = tokio::Runner::default();
+        // Run the benchmarks
+        let runner = tokio::Runner::new(cfg.clone());
         c.bench_function(
             &format!(
                 "{}/items={} comp={}",
@@ -44,7 +49,7 @@ fn bench_restart(c: &mut Criterion) {
         );
 
         // Tear down
-        let cleaner = commonware_runtime::tokio::Runner::default();
+        let cleaner = commonware_runtime::tokio::Runner::new(cfg.clone());
         cleaner.start(|ctx| async move {
             let a = get_archive(ctx, compression).await;
             a.destroy().await.unwrap();
