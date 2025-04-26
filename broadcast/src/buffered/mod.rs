@@ -121,10 +121,7 @@ mod tests {
                 codec_config: (),
             };
             let (engine, engine_mailbox) =
-                Engine::<_, PublicKey, Sha256Digest, _, TestMessage, _, _>::new(
-                    context.clone(),
-                    config,
-                );
+                Engine::<_, PublicKey, Sha256Digest, _, TestMessage>::new(context.clone(), config);
             mailboxes.insert(peer.clone(), engine_mailbox);
             engine.start(network);
         }
@@ -156,6 +153,27 @@ mod tests {
                 assert_eq!(received_message.unwrap(), message);
             }
             assert_eq!(result.await.unwrap().len(), peers.len() - 1);
+
+            // Drop broadcast result
+            let message = TestMessage::new(b"hello world again");
+            let result = first_mailbox.broadcast(message.clone()).await;
+            drop(result);
+
+            // Allow time for propagation
+            context.sleep(Duration::from_secs(1)).await;
+
+            // Check that all peers received the new message
+            let mut found = 0;
+            for peer in peers.iter() {
+                let mut mailbox = mailboxes.get(peer).unwrap().clone();
+                let digest = message.digest();
+                let receiver = mailbox.get(digest).await;
+                if let Some(msg) = receiver {
+                    assert_eq!(msg, message);
+                    found += 1;
+                }
+            }
+            assert!(found > 0, "No peers received the message");
         });
     }
 

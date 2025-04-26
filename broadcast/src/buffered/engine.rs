@@ -32,8 +32,6 @@ pub struct Engine<
     D: Digest,
     Cfg: CodecCfg,
     M: Digestible<D> + Codec<Cfg>,
-    NetS: Sender<PublicKey = P>,
-    NetR: Receiver<PublicKey = P>,
 > {
     ////////////////////////////////////////
     // Interfaces
@@ -87,8 +85,6 @@ pub struct Engine<
     ////////////////////////////////////////
     /// Metrics
     metrics: metrics::Metrics,
-
-    _phantom: std::marker::PhantomData<(NetS, NetR)>,
 }
 
 impl<
@@ -97,9 +93,7 @@ impl<
         D: Digest,
         Cfg: CodecCfg,
         M: Digestible<D> + Codec<Cfg>,
-        NetS: Sender<PublicKey = P>,
-        NetR: Receiver<PublicKey = P>,
-    > Engine<E, P, D, Cfg, M, NetS, NetR>
+    > Engine<E, P, D, Cfg, M>
 {
     /// Creates a new engine with the given context and configuration.
     /// Returns the engine and a mailbox for sending messages to the engine.
@@ -120,20 +114,21 @@ impl<
             items: HashMap::new(),
             counts: HashMap::new(),
             metrics,
-
-            _phantom: std::marker::PhantomData,
         };
 
         (result, mailbox)
     }
 
     /// Starts the engine with the given network.
-    pub fn start(mut self, network: (NetS, NetR)) -> Handle<()> {
+    pub fn start(
+        mut self,
+        network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+    ) -> Handle<()> {
         self.context.spawn_ref()(self.run(network))
     }
 
     /// Inner run loop called by `start`.
-    async fn run(mut self, network: (NetS, NetR)) {
+    async fn run(mut self, network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>)) {
         let (mut sender, mut receiver) = wrap(self.codec_config.clone(), network.0, network.1);
         let mut shutdown = self.context.stopped();
 
@@ -204,9 +199,9 @@ impl<
     ////////////////////////////////////////
 
     /// Handles a `broadcast` request from the application.
-    async fn handle_broadcast(
+    async fn handle_broadcast<Sr: Sender<PublicKey = P>>(
         &mut self,
-        sender: &mut WrappedSender<NetS, Cfg, M>,
+        sender: &mut WrappedSender<Sr, Cfg, M>,
         msg: M,
         responder: oneshot::Sender<Vec<P>>,
     ) {
