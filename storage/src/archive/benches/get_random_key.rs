@@ -23,13 +23,10 @@ async fn load_archive(ctx: commonware_runtime::tokio::Context) -> (ArchiveType, 
     // Re-derive the keys inserted by append_random
     let mut rng = StdRng::seed_from_u64(0);
     let mut buf = [0u8; 64];
-    let mut _v = [0u8; 32]; // dummy for value RNG advancement
     let mut keys = Vec::with_capacity(ITEMS as usize);
-
     for _ in 0..ITEMS {
         rng.fill_bytes(&mut buf);
         keys.push(Key::new(buf));
-        rng.fill_bytes(&mut _v); // advance RNG for value
     }
     (archive, keys)
 }
@@ -61,6 +58,7 @@ fn bench_archive_get_random_key(c: &mut Criterion) {
         a.close().await.unwrap();
     });
 
+    // Run the benchmarks.
     let runner = tokio::Runner::default();
     for mode in ["serial", "concurrent"] {
         for reads in [1_000, 10_000, 100_000] {

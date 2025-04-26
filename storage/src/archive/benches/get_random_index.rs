@@ -11,6 +11,7 @@ use futures::future::try_join_all;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::time::{Duration, Instant};
 
+/// Items pre-loaded into the archive.
 const ITEMS: u64 = 1_000_000;
 
 async fn read_serial(a: &ArchiveType, reads: usize) {
@@ -40,6 +41,7 @@ fn bench_archive_get_random(c: &mut Criterion) {
         a.close().await.unwrap();
     });
 
+    // Run the benchmarks for different read modes.
     let runner = tokio::Runner::default();
     for mode in ["serial", "concurrent"] {
         for reads in [1_000, 10_000, 100_000] {

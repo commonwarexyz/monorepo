@@ -5,15 +5,12 @@ use std::time::{Duration, Instant};
 
 fn bench_archive_put(c: &mut Criterion) {
     let runner = tokio::Runner::default();
-
-    // items, compression?
     let cases = [
         (10_000_u64, None),
         (10_000_u64, Some(3)),
         (100_000_u64, None),
         (100_000_u64, Some(3)),
     ];
-
     for (items, compression) in cases {
         let label = format!(
             "{}/items={} comp={}",
