@@ -6,7 +6,7 @@
 use crate::{
     codec::{EncodeSize, Read, Write},
     error::Error,
-    varint, Config, RangeConfig,
+    Config, RangeConfig,
 };
 use bytes::{Buf, BufMut};
 use std::{
@@ -19,8 +19,7 @@ use std::{
 
 impl<K: Ord + Hash + Eq + Write> Write for BTreeSet<K> {
     fn write(&self, buf: &mut impl BufMut) {
-        let len = u32::try_from(self.len()).expect("BTreeSet length exceeds u32::MAX");
-        varint::write(len, buf);
+        self.len().write(buf);
 
         // Items are already sorted in BTreeSet, so we can iterate directly
         for item in self {
@@ -31,8 +30,7 @@ impl<K: Ord + Hash + Eq + Write> Write for BTreeSet<K> {
 
 impl<K: Ord + Hash + Eq + EncodeSize> EncodeSize for BTreeSet<K> {
     fn encode_size(&self) -> usize {
-        let len = u32::try_from(self.len()).expect("BTreeSet length exceeds u32::MAX");
-        let mut size = varint::size(len);
+        let mut size = self.len().encode_size();
         for item in self {
             size += item.encode_size();
         }
@@ -45,11 +43,7 @@ impl<R: RangeConfig, Cfg: Config, K: Read<Cfg> + Clone + Ord + Hash + Eq> Read<(
 {
     fn read_cfg(buf: &mut impl Buf, (range, cfg): &(R, Cfg)) -> Result<Self, Error> {
         // Read and validate the length prefix
-        let len32 = varint::read::<u32>(buf)?;
-        let len = usize::try_from(len32).map_err(|_| Error::InvalidVarint)?;
-        if !range.contains(&len) {
-            return Err(Error::InvalidLength(len));
-        }
+        let len = usize::read_cfg(buf, range)?;
         let mut set = BTreeSet::new(); // BTreeSet does not have a capacity method
 
         // Keep track of the last item read
@@ -62,8 +56,8 @@ impl<R: RangeConfig, Cfg: Config, K: Read<Cfg> + Clone + Ord + Hash + Eq> Read<(
             // Check if items are in ascending order
             if let Some(ref last) = last {
                 match item.cmp(last) {
-                    Ordering::Equal => return Err(Error::Invalid("HashSet", "Duplicate item")),
-                    Ordering::Less => return Err(Error::Invalid("HashSet", "Items must ascend")),
+                    Ordering::Equal => return Err(Error::Invalid("BTreeSet", "Duplicate item")),
+                    Ordering::Less => return Err(Error::Invalid("BTreeSet", "Items must ascend")),
                     _ => {}
                 }
             }
@@ -79,8 +73,7 @@ impl<R: RangeConfig, Cfg: Config, K: Read<Cfg> + Clone + Ord + Hash + Eq> Read<(
 
 impl<K: Ord + Hash + Eq + Write> Write for HashSet<K> {
     fn write(&self, buf: &mut impl BufMut) {
-        let len = u32::try_from(self.len()).expect("HashSet length exceeds u32::MAX");
-        varint::write(len, buf);
+        self.len().write(buf);
 
         // Sort the items to ensure deterministic encoding
         let mut items: Vec<_> = self.iter().collect();
@@ -93,9 +86,7 @@ impl<K: Ord + Hash + Eq + Write> Write for HashSet<K> {
 
 impl<K: Ord + Hash + Eq + EncodeSize> EncodeSize for HashSet<K> {
     fn encode_size(&self) -> usize {
-        let len = u32::try_from(self.len()).expect("HashSet length exceeds u32::MAX");
-        let mut size = varint::size(len);
-        // Note: Iteration order doesn't matter for size calculation.
+        let mut size = self.len().encode_size();
         for item in self {
             size += item.encode_size();
         }
@@ -108,11 +99,7 @@ impl<R: RangeConfig, Cfg: Config, K: Read<Cfg> + Clone + Ord + Hash + Eq> Read<(
 {
     fn read_cfg(buf: &mut impl Buf, (range, cfg): &(R, Cfg)) -> Result<Self, Error> {
         // Read and validate the length prefix
-        let len32 = varint::read::<u32>(buf)?;
-        let len = usize::try_from(len32).map_err(|_| Error::InvalidVarint)?;
-        if !range.contains(&len) {
-            return Err(Error::InvalidLength(len));
-        }
+        let len = usize::read_cfg(buf, range)?;
         let mut set = HashSet::with_capacity(len);
 
         // Keep track of the last item read
@@ -255,7 +242,7 @@ mod tests {
     #[test]
     fn test_btree_decode_invalid_item_order() {
         let mut encoded = BytesMut::new();
-        varint::write(2u32, &mut encoded); // Set length = 2
+        2usize.write(&mut encoded); // Set length = 2
         5u32.write(&mut encoded); // Item 5
         2u32.write(&mut encoded); // Item 2 (out of order)
 
@@ -272,7 +259,7 @@ mod tests {
     #[test]
     fn test_btree_decode_duplicate_item() {
         let mut encoded = BytesMut::new();
-        varint::write(2u32, &mut encoded); // Set length = 2
+        2usize.write(&mut encoded); // Set length = 2
         1u32.write(&mut encoded); // Item 1
         1u32.write(&mut encoded); // Duplicate Item 1
 
@@ -346,7 +333,7 @@ mod tests {
         assert_eq!(set.encode_size(), 1 + 3 * u32::SIZE);
         // Encoding check: items must be sorted (1, 2, 5)
         let mut expected = BytesMut::new();
-        varint::write(3u32, &mut expected);
+        3usize.write(&mut expected); // Set length = 3
         1u32.write(&mut expected);
         2u32.write(&mut expected);
         5u32.write(&mut expected);
@@ -404,7 +391,7 @@ mod tests {
     #[test]
     fn test_hash_decode_invalid_item_order() {
         let mut encoded = BytesMut::new();
-        varint::write(2u32, &mut encoded); // Set length = 2
+        2usize.write(&mut encoded); // Set length = 2
         5u32.write(&mut encoded); // Item 5
         2u32.write(&mut encoded); // Item 2 (out of order)
 
@@ -421,7 +408,7 @@ mod tests {
     #[test]
     fn test_hash_decode_duplicate_item() {
         let mut encoded = BytesMut::new();
-        varint::write(2u32, &mut encoded); // Set length = 2
+        2usize.write(&mut encoded); // Set length = 2
         1u32.write(&mut encoded); // Item 1
         1u32.write(&mut encoded); // Duplicate Item 1
 

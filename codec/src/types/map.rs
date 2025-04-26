@@ -19,8 +19,7 @@ use std::{
 
 impl<K: Ord + Hash + Eq + Write, V: Write> Write for BTreeMap<K, V> {
     fn write(&self, buf: &mut impl BufMut) {
-        let len = u32::try_from(self.len()).expect("BTreeMap length exceeds u32::MAX");
-        varint::write(len, buf);
+        self.len().write(buf);
 
         // Keys are already sorted in BTreeMap, so we can iterate directly
         for (k, v) in self {
@@ -32,9 +31,8 @@ impl<K: Ord + Hash + Eq + Write, V: Write> Write for BTreeMap<K, V> {
 
 impl<K: Ord + Hash + Eq + EncodeSize, V: EncodeSize> EncodeSize for BTreeMap<K, V> {
     fn encode_size(&self) -> usize {
-        // Start with the varint size of the length
-        let len = u32::try_from(self.len()).expect("BTreeMap length exceeds u32::MAX");
-        let mut size = varint::size(len);
+        // Start with the size of the length prefix
+        let mut size = self.len().encode_size();
 
         // Add the encoded size of each key and value
         for (k, v) in self {
@@ -58,11 +56,7 @@ impl<
         (range, (k_cfg, v_cfg)): &(R, (KCfg, VCfg)),
     ) -> Result<Self, Error> {
         // Read and validate the length prefix
-        let len32 = varint::read::<u32>(buf)?;
-        let len = usize::try_from(len32).map_err(|_| Error::InvalidVarint)?;
-        if !range.contains(&len) {
-            return Err(Error::InvalidLength(len));
-        }
+        let len = usize::read_cfg(buf, range)?;
         let mut map = BTreeMap::new(); // BTreeMap does not have a capacity method
 
         // Keep track of the last key read
@@ -75,8 +69,8 @@ impl<
             // Check if keys are in ascending order relative to the previous key
             if let Some(ref last) = last_key {
                 match key.cmp(last) {
-                    Ordering::Equal => return Err(Error::Invalid("HashMap", "Duplicate key")),
-                    Ordering::Less => return Err(Error::Invalid("HashMap", "Keys must ascend")),
+                    Ordering::Equal => return Err(Error::Invalid("BTreeMap", "Duplicate key")),
+                    Ordering::Less => return Err(Error::Invalid("BTreeMap", "Keys must ascend")),
                     _ => {}
                 }
             }
@@ -252,7 +246,7 @@ mod tests {
         assert_eq!(map.encode_size(), 1 + 3 * (u32::SIZE + u64::SIZE));
         // Check encoding order (BTreeMap guarantees sorted keys: 1, 2, 5)
         let mut expected = BytesMut::new();
-        varint::write(3u32, &mut expected);
+        3usize.write(&mut expected); // Map length = 3
         1u32.write(&mut expected);
         100u64.write(&mut expected);
         2u32.write(&mut expected);
@@ -318,7 +312,7 @@ mod tests {
     #[test]
     fn test_btree_decode_invalid_key_order() {
         let mut encoded = BytesMut::new();
-        varint::write(2u32, &mut encoded); // Map length = 2
+        2usize.write(&mut encoded); // Map length = 2
         5u32.write(&mut encoded); // Key 5
         500u64.write(&mut encoded); // Value 500
         2u32.write(&mut encoded); // Key 2 (out of order)
@@ -338,7 +332,7 @@ mod tests {
     #[test]
     fn test_btree_decode_duplicate_key() {
         let mut encoded = BytesMut::new();
-        varint::write(2u32, &mut encoded); // Map length = 2
+        2usize.write(&mut encoded); // Map length = 2
         1u32.write(&mut encoded); // Key 1
         100u64.write(&mut encoded); // Value 100
         1u32.write(&mut encoded); // Duplicate Key 1
