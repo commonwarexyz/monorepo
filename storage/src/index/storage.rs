@@ -205,7 +205,7 @@ impl<V> Record<V> {
 /// An index that maps translated keys to values.
 pub struct Index<T: Translator, V> {
     translator: T,
-    map: HashMap<T::Key, Record<V>>,
+    map: HashMap<T::Key, Record<V>, T>,
 
     collisions: Counter,
     keys_pruned: Counter,
@@ -215,8 +215,8 @@ impl<T: Translator, V> Index<T, V> {
     /// Create a new index.
     pub fn init(context: impl Metrics, translator: T) -> Self {
         let s = Self {
-            translator,
-            map: HashMap::new(),
+            translator: translator.clone(),
+            map: HashMap::with_capacity_and_hasher(0, translator),
             collisions: Counter::default(),
             keys_pruned: Counter::default(),
         };

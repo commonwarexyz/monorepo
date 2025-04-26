@@ -1,4 +1,41 @@
 use super::Translator;
+use std::hash::{BuildHasher, Hasher};
+
+#[derive(Default, Clone)]
+pub struct IdentityHasher {
+    value: u64,
+}
+
+impl Hasher for IdentityHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        // Fallback for odd sizes: zero-extend to 8 bytes LE.
+        let mut buf = [0u8; 8];
+        let len = bytes.len().min(8);
+        buf[..len].copy_from_slice(&bytes[..len]);
+        self.value = u64::from_le_bytes(buf);
+    }
+    #[inline]
+    fn write_u8(&mut self, i: u8) {
+        self.value = i as u64;
+    }
+    #[inline]
+    fn write_u16(&mut self, i: u16) {
+        self.value = i as u64;
+    }
+    #[inline]
+    fn write_u32(&mut self, i: u32) {
+        self.value = i as u64;
+    }
+    #[inline]
+    fn write_u64(&mut self, i: u64) {
+        self.value = i;
+    }
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.value
+    }
+}
 
 /// Cap the key to a fixed length.
 ///
@@ -13,26 +50,43 @@ fn cap<const N: usize>(key: &[u8]) -> [u8; N] {
     capped[..len].copy_from_slice(&key[..len]);
     capped
 }
+
 macro_rules! define_cap_translator {
-    ($name:ident, $size:expr) => {
-        #[doc = concat!("A translator that caps the key to ", stringify!($size), " bytes.")]
-        #[derive(Clone)]
+    ($name:ident, $size:expr, $int:ty) => {
+        #[doc = concat!(
+                                    "Translator that caps the key to ",
+                                    stringify!($size),
+                                    " byte(s) and returns it packed in a ",
+                                    stringify!($int),
+                                    ". HashMap uses an identity hasher, so no extra hashing work."
+                                )]
+        #[derive(Clone, Default)]
         pub struct $name;
 
         impl Translator for $name {
-            type Key = [u8; $size];
-
+            type Key = $int; // minimal integer
+            #[inline]
             fn transform(&self, key: &[u8]) -> Self::Key {
-                cap(key)
+                let capped = cap::<$size>(key);
+                <$int>::from_le_bytes(capped) // pack LE
+            }
+        }
+
+        // Provide the identity BuildHasher so HashMap does not re-hash.
+        impl BuildHasher for $name {
+            type Hasher = IdentityHasher;
+            #[inline]
+            fn build_hasher(&self) -> Self::Hasher {
+                IdentityHasher::default()
             }
         }
     };
 }
 
-define_cap_translator!(OneCap, 1);
-define_cap_translator!(TwoCap, 2);
-define_cap_translator!(FourCap, 4);
-define_cap_translator!(EightCap, 8);
+define_cap_translator!(OneCap, 1, u8);
+define_cap_translator!(TwoCap, 2, u16);
+define_cap_translator!(FourCap, 4, u32);
+define_cap_translator!(EightCap, 8, u64);
 
 #[cfg(test)]
 mod tests {
@@ -40,42 +94,45 @@ mod tests {
 
     #[test]
     fn test_one_cap() {
-        let translator = OneCap;
-        assert_eq!(translator.transform(b""), [0]);
-        assert_eq!(translator.transform(b"a"), [b'a']);
-        assert_eq!(translator.transform(b"ab"), [b'a']);
-        assert_eq!(translator.transform(b"abc"), [b'a']);
+        let t = OneCap;
+        assert_eq!(t.transform(b"").to_le_bytes(), [0]);
+        assert_eq!(t.transform(b"a").to_le_bytes(), [b'a']);
+        assert_eq!(t.transform(b"ab").to_le_bytes(), [b'a']);
+        assert_eq!(t.transform(b"abc").to_le_bytes(), [b'a']);
     }
 
     #[test]
     fn test_two_cap() {
-        let translator = TwoCap;
-        assert_eq!(translator.transform(b""), [0, 0]);
-        assert_eq!(translator.transform(b"a"), [b'a', 0]);
-        assert_eq!(translator.transform(b"ab"), [b'a', b'b']);
-        assert_eq!(translator.transform(b"abc"), [b'a', b'b']);
+        let t = TwoCap;
+        assert_eq!(t.transform(b"").to_le_bytes(), [0, 0]);
+        assert_eq!(t.transform(b"a").to_le_bytes(), [b'a', 0]);
+        assert_eq!(t.transform(b"ab").to_le_bytes(), [b'a', b'b']);
+        assert_eq!(t.transform(b"abc").to_le_bytes(), [b'a', b'b']);
     }
 
     #[test]
     fn test_four_cap() {
-        let translator = FourCap;
-        assert_eq!(translator.transform(b""), [0, 0, 0, 0]);
-        assert_eq!(translator.transform(b"a"), [b'a', 0, 0, 0]);
-        assert_eq!(translator.transform(b"abcd"), [b'a', b'b', b'c', b'd']);
-        assert_eq!(translator.transform(b"abcdef"), [b'a', b'b', b'c', b'd']);
+        let t = FourCap;
+        assert_eq!(t.transform(b"").to_le_bytes(), [0, 0, 0, 0]);
+        assert_eq!(t.transform(b"a").to_le_bytes(), [b'a', 0, 0, 0]);
+        assert_eq!(t.transform(b"abcd").to_le_bytes(), [b'a', b'b', b'c', b'd']);
+        assert_eq!(
+            t.transform(b"abcdef").to_le_bytes(),
+            [b'a', b'b', b'c', b'd']
+        );
     }
 
     #[test]
     fn test_eight_cap() {
-        let translator = EightCap;
-        assert_eq!(translator.transform(b""), [0, 0, 0, 0, 0, 0, 0, 0]);
-        assert_eq!(translator.transform(b"a"), [b'a', 0, 0, 0, 0, 0, 0, 0]);
+        let t = EightCap;
+        assert_eq!(t.transform(b"").to_le_bytes(), [0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(t.transform(b"a").to_le_bytes(), [b'a', 0, 0, 0, 0, 0, 0, 0]);
         assert_eq!(
-            translator.transform(b"abcdefgh"),
+            t.transform(b"abcdefgh").to_le_bytes(),
             [b'a', b'b', b'c', b'd', b'e', b'f', b'g', b'h']
         );
         assert_eq!(
-            translator.transform(b"abcdefghijk"),
+            t.transform(b"abcdefghijk").to_le_bytes(),
             [b'a', b'b', b'c', b'd', b'e', b'f', b'g', b'h']
         );
     }
