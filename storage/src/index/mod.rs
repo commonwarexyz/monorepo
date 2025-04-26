@@ -25,6 +25,9 @@ use std::hash::{BuildHasher, Hash};
 /// distributed, the performance of [Index] will degrade substantially.
 pub trait Translator: Clone + BuildHasher {
     /// The type of the internal representation of keys.
+    ///
+    /// Although `Translator` is a [BuildHasher], the `Key` type must still implement [Hash] for compatibility
+    /// with the [std::collections::HashMap] used internally by [Index].
     type Key: Eq + Hash;
 
     /// Transform a key into its internal representation.
