@@ -24,7 +24,7 @@ pub struct IdentityHasher {
 impl Hasher for IdentityHasher {
     #[inline]
     fn write(&mut self, _: &[u8]) {
-        unreachable!("we should only ever call type-specific write methods");
+        unimplemented!("we should only ever call type-specific write methods");
     }
 
     #[inline]
