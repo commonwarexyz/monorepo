@@ -32,57 +32,67 @@ async fn read_concurrent(a: &ArchiveType, keys: &[Key], reads: usize) {
     black_box(try_join_all(futures).await.unwrap());
 }
 
-fn bench_archive_get_random_key(c: &mut Criterion) {
-    // Create a shared on-disk archive once so later setup is fast.
-    let builder = commonware_runtime::tokio::Runner::default();
-    let keys = builder.start(|ctx| async move {
-        let mut a = get_archive(ctx, None).await;
-        let keys = append_random(&mut a, ITEMS).await;
-        a.close().await.unwrap();
-        keys
-    });
+fn bench_get_random_key(c: &mut Criterion) {
+    for compression in [None, Some(3)] {
+        // Create a shared on-disk archive once so later setup is fast.
+        let builder = commonware_runtime::tokio::Runner::default();
+        let keys = builder.start(|ctx| async move {
+            let mut a = get_archive(ctx, compression).await;
+            let keys = append_random(&mut a, ITEMS).await;
+            a.close().await.unwrap();
+            keys
+        });
 
-    // Run the benchmarks.
-    let runner = tokio::Runner::default();
-    for mode in ["serial", "concurrent"] {
-        for reads in [1_000, 10_000, 100_000] {
-            let label = format!("{}/mode={} reads={}", module_path!(), mode, reads);
-            c.bench_function(&label, |b| {
-                let keys = keys.clone();
-                b.to_async(&runner).iter_custom(move |iters| {
+        // Run the benchmarks.
+        let runner = tokio::Runner::default();
+        for mode in ["serial", "concurrent"] {
+            for reads in [1_000, 10_000, 100_000] {
+                let label = format!(
+                    "{}/mode={} comp={} reads={}",
+                    module_path!(),
+                    mode,
+                    compression
+                        .map(|l| l.to_string())
+                        .unwrap_or_else(|| "off".into()),
+                    reads
+                );
+                c.bench_function(&label, |b| {
                     let keys = keys.clone();
-                    async move {
-                        let ctx = context::get::<commonware_runtime::tokio::Context>();
-                        let archive = get_archive(ctx, None).await;
-                        let mut total = Duration::ZERO;
+                    b.to_async(&runner).iter_custom(move |iters| {
+                        let keys = keys.clone();
+                        async move {
+                            let ctx = context::get::<commonware_runtime::tokio::Context>();
+                            let archive = get_archive(ctx, compression).await;
+                            let mut total = Duration::ZERO;
 
-                        for _ in 0..iters {
-                            let start = Instant::now();
-                            match mode {
-                                "serial" => read_serial(&archive, &keys, reads).await,
-                                "concurrent" => read_concurrent(&archive, &keys, reads).await,
-                                _ => unreachable!(),
+                            for _ in 0..iters {
+                                let start = Instant::now();
+                                match mode {
+                                    "serial" => read_serial(&archive, &keys, reads).await,
+                                    "concurrent" => read_concurrent(&archive, &keys, reads).await,
+                                    _ => unreachable!(),
+                                }
+                                total += start.elapsed();
                             }
-                            total += start.elapsed();
+                            archive.destroy().await.unwrap();
+                            total
                         }
-                        archive.destroy().await.unwrap();
-                        total
-                    }
+                    });
                 });
-            });
+            }
         }
-    }
 
-    // Clean up shared artifacts.
-    let cleaner = commonware_runtime::tokio::Runner::default();
-    cleaner.start(|ctx| async move {
-        let a = get_archive(ctx, None).await;
-        a.destroy().await.unwrap();
-    });
+        // Clean up shared artifacts.
+        let cleaner = commonware_runtime::tokio::Runner::default();
+        cleaner.start(|ctx| async move {
+            let a = get_archive(ctx, compression).await;
+            a.destroy().await.unwrap();
+        });
+    }
 }
 
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_archive_get_random_key
+    targets = bench_get_random_key
 }

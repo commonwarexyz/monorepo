@@ -32,7 +32,7 @@ async fn read_concurrent(a: &ArchiveType, reads: usize) {
     black_box(try_join_all(futs).await.unwrap());
 }
 
-fn bench_archive_get_random(c: &mut Criterion) {
+fn bench_get_random(c: &mut Criterion) {
     for compression in [None, Some(3)] {
         // Pre-populate a shared archive once.
         let writer = commonware_runtime::tokio::Runner::default();
@@ -80,7 +80,7 @@ fn bench_archive_get_random(c: &mut Criterion) {
         // Clean up shared artifacts.
         let cleaner = commonware_runtime::tokio::Runner::default();
         cleaner.start(|ctx| async move {
-            let a = get_archive(ctx, None).await;
+            let a = get_archive(ctx, compression).await;
             a.destroy().await.unwrap();
         });
     }
@@ -89,5 +89,5 @@ fn bench_archive_get_random(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_archive_get_random
+    targets = bench_get_random
 }

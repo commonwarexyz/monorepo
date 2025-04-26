@@ -3,7 +3,7 @@ use commonware_runtime::benchmarks::{context, tokio};
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
 
-fn bench_archive_put(c: &mut Criterion) {
+fn bench_put(c: &mut Criterion) {
     let runner = tokio::Runner::default();
     let cases = [
         (10_000_u64, None),
@@ -22,10 +22,10 @@ fn bench_archive_put(c: &mut Criterion) {
         );
         c.bench_function(&label, |b| {
             b.to_async(&runner).iter_custom(move |iters| async move {
+                let ctx = context::get::<commonware_runtime::tokio::Context>();
                 let mut total = Duration::ZERO;
                 for _ in 0..iters {
-                    let ctx = context::get::<commonware_runtime::tokio::Context>();
-                    let mut archive = get_archive(ctx, compression).await;
+                    let mut archive = get_archive(ctx.clone(), compression).await;
 
                     let start = Instant::now();
                     append_random(&mut archive, items).await;
@@ -42,5 +42,5 @@ fn bench_archive_put(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_archive_put
+    targets = bench_put
 }
