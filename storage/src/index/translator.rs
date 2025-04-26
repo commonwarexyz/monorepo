@@ -69,7 +69,7 @@ fn cap<const N: usize>(key: &[u8]) -> [u8; N] {
 
 macro_rules! define_cap_translator {
     ($name:ident, $size:expr, $int:ty) => {
-        #[doc = concat!("Translator that caps the key to ", stringify!($size), " byte(s) and returns it packed in a " ,stringify!($int), ". HashMap uses an identity hasher, so no extra hashing work.")]
+        #[doc = concat!("Translator that caps the key to ", stringify!($size), " byte(s) and returns it packed in a ", stringify!($int), ".")]
         #[derive(Clone, Default)]
         pub struct $name;
 
