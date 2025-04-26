@@ -21,10 +21,11 @@ use std::hash::{BuildHasher, Hash};
 ///
 /// # Warning
 ///
-/// If invoking `transform` on keys results in many conflicts, the performance of `Index` will
-/// degrade substantially.
+/// The output of `transform` is used as the key in a hash table. If the output is not uniformly
+/// distributed, the performance of [Index] will degrade substantially.
 pub trait Translator: Clone + BuildHasher {
-    type Key: Eq + Hash + Send + Sync + Clone;
+    /// The type of the internal representation of keys.
+    type Key: Eq + Hash;
 
     /// Transform a key into its internal representation.
     fn transform(&self, key: &[u8]) -> Self::Key;

@@ -1,6 +1,21 @@
+//! Primitive implementations of [Translator].
+
 use super::Translator;
 use std::hash::{BuildHasher, Hasher};
 
+/// A “do-nothing” hasher.
+///
+/// [super::Index] typically stores keys that are **already hashed** (shortened by the [Translator]).
+/// Re-hashing them with SipHash (by [std::collections::HashMap]) would waste CPU, so we give `HashMap`
+/// this identity hasher instead:
+///
+/// * `write_*` (or related) copies the input into an internal field;
+/// * `finish()` returns that value unchanged.
+///
+/// # Warning
+///
+/// This hasher is not suitable for general use. If the hasher is called over some type that is not
+/// `u8`, `u16`, `u32` or `u64`, it will panic.
 #[derive(Default, Clone)]
 pub struct IdentityHasher {
     value: u64,
@@ -8,29 +23,30 @@ pub struct IdentityHasher {
 
 impl Hasher for IdentityHasher {
     #[inline]
-    fn write(&mut self, bytes: &[u8]) {
-        // Fallback for odd sizes: zero-extend to 8 bytes LE.
-        let mut buf = [0u8; 8];
-        let len = bytes.len().min(8);
-        buf[..len].copy_from_slice(&bytes[..len]);
-        self.value = u64::from_le_bytes(buf);
+    fn write(&mut self, _: &[u8]) {
+        unreachable!("we should only ever call type-specific write methods");
     }
+
     #[inline]
     fn write_u8(&mut self, i: u8) {
         self.value = i as u64;
     }
+
     #[inline]
     fn write_u16(&mut self, i: u16) {
         self.value = i as u64;
     }
+
     #[inline]
     fn write_u32(&mut self, i: u32) {
         self.value = i as u64;
     }
+
     #[inline]
     fn write_u64(&mut self, i: u64) {
         self.value = i;
     }
+
     #[inline]
     fn finish(&self) -> u64 {
         self.value
@@ -64,17 +80,20 @@ macro_rules! define_cap_translator {
         pub struct $name;
 
         impl Translator for $name {
-            type Key = $int; // minimal integer
+            // Minimal uint size for the key.
+            type Key = $int;
+
             #[inline]
             fn transform(&self, key: &[u8]) -> Self::Key {
                 let capped = cap::<$size>(key);
-                <$int>::from_le_bytes(capped) // pack LE
+                <$int>::from_le_bytes(capped)
             }
         }
 
-        // Provide the identity BuildHasher so HashMap does not re-hash.
+        // Implement the `BuildHasher` trait for `IdentityHasher`.
         impl BuildHasher for $name {
             type Hasher = IdentityHasher;
+
             #[inline]
             fn build_hasher(&self) -> Self::Hasher {
                 IdentityHasher::default()
