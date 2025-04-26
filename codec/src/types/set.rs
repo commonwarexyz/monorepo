@@ -6,7 +6,6 @@
 use crate::{
     codec::{EncodeSize, Read, Write},
     error::Error,
-    varint::UInt,
     RangeCfg,
 };
 use bytes::{Buf, BufMut};
@@ -20,8 +19,7 @@ use std::{
 
 impl<K: Ord + Hash + Eq + Write> Write for BTreeSet<K> {
     fn write(&self, buf: &mut impl BufMut) {
-        let len = u32::try_from(self.len()).expect("BTreeSet length exceeds u32::MAX");
-        UInt(len).write(buf);
+        self.len().write(buf);
 
         // Items are already sorted in BTreeSet, so we can iterate directly
         for item in self {
@@ -32,8 +30,7 @@ impl<K: Ord + Hash + Eq + Write> Write for BTreeSet<K> {
 
 impl<K: Ord + Hash + Eq + EncodeSize> EncodeSize for BTreeSet<K> {
     fn encode_size(&self) -> usize {
-        let len = u32::try_from(self.len()).expect("BTreeSet length exceeds u32::MAX");
-        let mut size = UInt(len).encode_size();
+        let mut size = self.len().encode_size();
         for item in self {
             size += item.encode_size();
         }
@@ -59,8 +56,8 @@ impl<K: Read + Clone + Ord + Hash + Eq> Read for BTreeSet<K> {
             // Check if items are in ascending order
             if let Some(ref last) = last {
                 match item.cmp(last) {
-                    Ordering::Equal => return Err(Error::Invalid("HashSet", "Duplicate item")),
-                    Ordering::Less => return Err(Error::Invalid("HashSet", "Items must ascend")),
+                    Ordering::Equal => return Err(Error::Invalid("BTreeSet", "Duplicate item")),
+                    Ordering::Less => return Err(Error::Invalid("BTreeSet", "Items must ascend")),
                     _ => {}
                 }
             }
@@ -90,6 +87,7 @@ impl<K: Ord + Hash + Eq + Write> Write for HashSet<K> {
 impl<K: Ord + Hash + Eq + EncodeSize> EncodeSize for HashSet<K> {
     fn encode_size(&self) -> usize {
         let mut size = self.len().encode_size();
+
         // Note: Iteration order doesn't matter for size calculation.
         for item in self {
             size += item.encode_size();
@@ -327,7 +325,7 @@ mod tests {
         assert_eq!(set.encode_size(), 1 + 3 * u32::SIZE);
         // Encoding check: items must be sorted (1, 2, 5)
         let mut expected = BytesMut::new();
-        3usize.write(&mut expected);
+        3usize.write(&mut expected); // Set length = 3
         1u32.write(&mut expected);
         2u32.write(&mut expected);
         5u32.write(&mut expected);

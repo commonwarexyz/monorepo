@@ -31,7 +31,7 @@ impl<K: Ord + Hash + Eq + Write, V: Write> Write for BTreeMap<K, V> {
 
 impl<K: Ord + Hash + Eq + EncodeSize, V: EncodeSize> EncodeSize for BTreeMap<K, V> {
     fn encode_size(&self) -> usize {
-        // Start with the varint size of the length
+        // Start with the size of the length prefix
         let mut size = self.len().encode_size();
 
         // Add the encoded size of each key and value
@@ -61,8 +61,8 @@ impl<K: Read + Clone + Ord + Hash + Eq, V: Read + Clone> Read for BTreeMap<K, V>
             // Check if keys are in ascending order relative to the previous key
             if let Some(ref last) = last_key {
                 match key.cmp(last) {
-                    Ordering::Equal => return Err(Error::Invalid("HashMap", "Duplicate key")),
-                    Ordering::Less => return Err(Error::Invalid("HashMap", "Keys must ascend")),
+                    Ordering::Equal => return Err(Error::Invalid("BTreeMap", "Duplicate key")),
+                    Ordering::Less => return Err(Error::Invalid("BTreeMap", "Keys must ascend")),
                     _ => {}
                 }
             }
@@ -226,7 +226,7 @@ mod tests {
         assert_eq!(map.encode_size(), 1 + 3 * (u32::SIZE + u64::SIZE));
         // Check encoding order (BTreeMap guarantees sorted keys: 1, 2, 5)
         let mut expected = BytesMut::new();
-        3usize.write(&mut expected);
+        3usize.write(&mut expected); // Map length = 3
         1u32.write(&mut expected);
         100u64.write(&mut expected);
         2u32.write(&mut expected);
