@@ -74,7 +74,7 @@ fn bench_get(c: &mut Criterion) {
         // Run the benchmarks.
         let runner = tokio::Runner::new(cfg.clone());
         for mode in ["serial", "concurrent"] {
-            for pattern in ["keys", "indices"] {
+            for pattern in ["key", "index"] {
                 for reads in [1_000, 10_000, 100_000] {
                     let label = format!(
                         "{}/mode={} pattern={} comp={} reads={}",
@@ -93,7 +93,7 @@ fn bench_get(c: &mut Criterion) {
                             async move {
                                 let ctx = context::get::<commonware_runtime::tokio::Context>();
                                 let archive = get_archive(ctx, compression).await;
-                                if pattern == "keys" {
+                                if pattern == "key" {
                                     let selected_keys = select_keys(&keys, reads);
                                     let start = Instant::now();
                                     for _ in 0..iters {
