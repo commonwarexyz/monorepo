@@ -9,6 +9,11 @@ use std::{
     mem::swap,
 };
 
+/// The initial capacity of the hashmap. This is a guess at the number of unique keys we will
+/// encounter. The hashmap will grow as needed, but this is a good starting point (covering
+/// the entire [super::translator::OneCap] range).
+const INITIAL_CAPACITY: usize = 256;
+
 /// Each key is mapped to a `Record` that contains a linked list of potential values for the key.
 ///
 /// In the common case of a single value associated with a key, the value is stored within the
@@ -216,7 +221,7 @@ impl<T: Translator, V> Index<T, V> {
     pub fn init(context: impl Metrics, translator: T) -> Self {
         let s = Self {
             translator: translator.clone(),
-            map: HashMap::with_capacity_and_hasher(0, translator),
+            map: HashMap::with_capacity_and_hasher(INITIAL_CAPACITY, translator),
             collisions: Counter::default(),
             keys_pruned: Counter::default(),
         };
