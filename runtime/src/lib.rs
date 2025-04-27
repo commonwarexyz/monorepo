@@ -1392,17 +1392,49 @@ mod tests {
         test_metrics_serve(executor);
     }
 
-    // Async fn that captures the address of a stack buffer before and after an
-    // `.await`.
-    async fn pointer_probe(mut tx: mpsc::Sender<(*const u8, *const u8)>) {
-        let stack_buf = [0u8; 8];
-        let before = stack_buf.as_ptr();
+    async fn application(storage: &mut DumbStorage) {
+        let mut stack_buf = [0u8; 128];
+        let stack_ref = stack_buf.as_mut_ptr();
+        storage.read_at(&mut stack_buf, 10).await;
+        let stack_ref_after = stack_buf.as_mut_ptr();
+        println!(
+            "stack_ptr_before: {:p}, stack_ptr_after: {:p}, stack_buf_after: {:?}",
+            stack_ref, stack_ref_after, stack_buf
+        );
+        assert_ne!(stack_buf, [0u8; 128]);
+        assert_eq!(stack_ref, stack_ref_after);
+    }
 
-        // Yield once so the executor is free to move the future.
-        reschedule().await;
+    pub struct DumbStorage {
+        pub sender: mpsc::Sender<(*mut u8, oneshot::Sender<()>)>,
+    }
 
-        let after = stack_buf.as_ptr();
-        tx.send((before, after)).await.unwrap();
+    impl DumbStorage {
+        pub fn new(sender: mpsc::Sender<(*mut u8, oneshot::Sender<()>)>) -> Self {
+            Self { sender }
+        }
+
+        async fn read_at(&mut self, buf: &mut [u8], offset: usize) {
+            // Stage buffer reference
+            let buf_before = buf.as_mut_ptr();
+            let buf_ref = &mut buf[offset..];
+            let buf_ref_before = buf_ref.as_mut_ptr();
+            let (sender, receiver) = oneshot::channel();
+
+            // Send the buffer reference to the channel
+            self.sender.send((buf_ref_before, sender)).await.unwrap();
+
+            // Wait for the receiver to be resolved
+            receiver.await.unwrap();
+            let buf_ref_after = buf_ref.as_mut_ptr();
+            let buf_after = buf.as_mut_ptr();
+            println!(
+                "buf_ptr_before: {:p}, buf_ptr_after: {:p}, buf_ref_ptr_before: {:p}, buf_ref_ptr_after: {:p}",
+                buf_before, buf_after, buf_ref_before, buf_ref_after
+            );
+            assert_eq!(buf_before, buf_after);
+            assert_eq!(buf_ref_before, buf_ref_after);
+        }
     }
 
     /// A plain test (no runtime needed) showing the move.
@@ -1410,11 +1442,12 @@ mod tests {
     fn pointer_moves_across_await() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            // Create a channel to send the addresses.
+            // Create storage
             let (tx, mut rx) = mpsc::channel(10);
+            let mut storage = DumbStorage::new(tx);
 
             // Build the future on the stack.
-            let mut fut = pointer_probe(tx);
+            let mut fut = application(&mut storage);
 
             // -------- first poll (stack-allocated) --------
             let waker = noop_waker();
@@ -1429,6 +1462,13 @@ mod tests {
             let fut = Box::new(fut); // 1st move
             let mut fut = *fut; // 2nd move (inside Box)
 
+            // Modify buffer memory
+            let (buf_ptr, sender) = rx.next().await.unwrap();
+            let buf = unsafe { std::slice::from_raw_parts_mut(buf_ptr, 118) };
+            buf[0..11].copy_from_slice(b"Hello world");
+            println!("modified_buf (on stack): {:?}", buf);
+            sender.send(()).unwrap();
+
             // -------- second poll (heap-allocated) --------
             let mut cx = std::task::Context::from_waker(&waker);
             unsafe {
@@ -1436,10 +1476,6 @@ mod tests {
                     .poll(&mut cx)
                     .is_ready());
             }
-
-            // Compare the two addresses.
-            let (before, after) = rx.next().await.unwrap();
-            assert_eq!(before, after, "pointer address changed");
         });
     }
 }
