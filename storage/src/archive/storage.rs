@@ -4,7 +4,9 @@ use crate::{
     journal::variable::{Config as JConfig, Journal},
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{Codec, Config as CodecConfig, EncodeSize, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{
+    varint::UInt, Codec, Config as CodecConfig, EncodeSize, Read, ReadExt, Write,
+};
 use commonware_runtime::{Metrics, Storage};
 use commonware_utils::Array;
 use futures::{pin_mut, StreamExt};
@@ -48,7 +50,7 @@ impl<K: Array, VC: CodecConfig, V: Codec<VC>> Record<K, VC, V> {
 
 impl<K: Array, VC: CodecConfig, V: Codec<VC>> Write for Record<K, VC, V> {
     fn write(&self, buf: &mut impl BufMut) {
-        self.index.write(buf);
+        UInt(self.index).write(buf);
         self.key.write(buf);
         self.value.write(buf);
     }
@@ -56,7 +58,7 @@ impl<K: Array, VC: CodecConfig, V: Codec<VC>> Write for Record<K, VC, V> {
 
 impl<K: Array, VC: CodecConfig, V: Codec<VC>> Read<VC> for Record<K, VC, V> {
     fn read_cfg(buf: &mut impl Buf, cfg: &VC) -> Result<Self, commonware_codec::Error> {
-        let index = u64::read(buf)?;
+        let index = UInt::read(buf)?.into();
         let key = K::read(buf)?;
         let value = V::read_cfg(buf, cfg)?;
         Ok(Self {
@@ -70,7 +72,7 @@ impl<K: Array, VC: CodecConfig, V: Codec<VC>> Read<VC> for Record<K, VC, V> {
 
 impl<K: Array, VC: CodecConfig, V: Codec<VC>> EncodeSize for Record<K, VC, V> {
     fn encode_size(&self) -> usize {
-        u64::SIZE + K::SIZE + self.value.encode_size()
+        UInt(self.index).encode_size() + K::SIZE + self.value.encode_size()
     }
 }
 
