@@ -1396,10 +1396,11 @@ mod tests {
         let mut stack_buf = [0u8; 128];
         let stack_ref = stack_buf.as_mut_ptr();
         storage.read_at(&mut stack_buf, 10).await;
+        let ptr_stack_buf = unsafe { std::slice::from_raw_parts_mut(stack_ref, 128) };
         let stack_ref_after = stack_buf.as_mut_ptr();
         println!(
-            "stack_ptr_before: {:p}, stack_ptr_after: {:p}, stack_buf_after: {:?}",
-            stack_ref, stack_ref_after, stack_buf
+            "stack_ptr_before: {:p}, stack_ptr_after: {:p}, ptr_stack_buf: {:?}, stack_buf: {:?}",
+            stack_ref, stack_ref_after, ptr_stack_buf, stack_buf
         );
         assert_ne!(stack_buf, [0u8; 128]);
         assert_eq!(stack_ref, stack_ref_after);
