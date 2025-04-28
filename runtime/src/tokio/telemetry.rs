@@ -28,16 +28,24 @@ pub fn init(context: Context, level: Level, metrics: Option<SocketAddr>, traces:
         context
             .with_label("metrics")
             .spawn(move |context| async move {
+                // Create a listener for the metrics server
                 let listener = context
                     .bind(cfg)
                     .await
                     .expect("Could not bind to metrics address");
+
+                // Create a router for the metrics server
                 let app = Router::new()
                     .route(
                         "/metrics",
                         get(|extension: Extension<Context>| async move { extension.0.encode() }),
                     )
                     .layer(Extension(context));
+
+                // Serve the metrics over HTTP
+                //
+                // `serve` will spawn its own tasks using `tokio`. These will not be tracked
+                // like metrics spawned by `context`.
                 serve(listener, app.into_make_service())
                     .await
                     .expect("Could not serve metrics");
