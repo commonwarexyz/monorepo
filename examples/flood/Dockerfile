@@ -1,4 +1,4 @@
-# Use same Ubuntu version as `commonware-deployer` (https://github.com/commonwarexyz/monorepo/blob/0d0b81090c85c887f7a1f3c2435e2c2f6e91ec2a/deployer/src/ec2/aws.rs#L60)
+# Use same Ubuntu version as `commonware-deployer`
 FROM arm64v8/ubuntu:24.04
 
 # Install necessary tools and libraries
