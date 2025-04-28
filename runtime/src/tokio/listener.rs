@@ -5,7 +5,7 @@ use tracing::warn;
 
 use crate::Error;
 
-use super::{Context, Sink, Stream};
+use super::{sink::Sink, stream::Stream, Context};
 
 /// Implementation of [`crate::Listener`] for the `tokio` runtime.
 pub struct Listener {

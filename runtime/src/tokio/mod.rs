@@ -25,8 +25,10 @@
 
 pub(super) mod listener;
 pub(super) mod metrics;
-pub mod runner;
+pub(super) mod sink;
+pub(super) mod stream;
 
+pub mod runner;
 mod runtime;
 pub use runtime::*;
 pub mod telemetry;

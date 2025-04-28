@@ -21,14 +21,14 @@ use std::{
     time::{Duration, SystemTime},
 };
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{tcp::OwnedReadHalf, tcp::OwnedWriteHalf, TcpListener, TcpStream},
+    net::{TcpListener, TcpStream},
     runtime::Runtime,
-    time::timeout,
 };
 use tracing::warn;
 
 use super::listener::Listener;
+use super::sink::Sink;
+use super::stream::Stream;
 
 /// Configuration for the `tokio` runtime.
 #[derive(Clone)]
@@ -365,59 +365,6 @@ impl crate::Network<Listener, Sink, Stream> for Context {
             },
             Stream { context, stream },
         ))
-    }
-}
-
-/// Implementation of [`crate::Sink`] for the `tokio` runtime.
-pub struct Sink {
-    pub(super) context: Context,
-    pub(super) sink: OwnedWriteHalf,
-}
-
-impl crate::Sink for Sink {
-    async fn send(&mut self, msg: &[u8]) -> Result<(), Error> {
-        let len = msg.len();
-        timeout(
-            self.context.executor.cfg.write_timeout,
-            self.sink.write_all(msg),
-        )
-        .await
-        .map_err(|_| Error::Timeout)?
-        .map_err(|_| Error::SendFailed)?;
-        self.context
-            .executor
-            .metrics
-            .outbound_bandwidth
-            .inc_by(len as u64);
-        Ok(())
-    }
-}
-
-/// Implementation of [`crate::Stream`] for the `tokio` runtime.
-pub struct Stream {
-    pub(super) context: Context,
-    pub(super) stream: OwnedReadHalf,
-}
-
-impl crate::Stream for Stream {
-    async fn recv(&mut self, buf: &mut [u8]) -> Result<(), Error> {
-        // Wait for the stream to be readable
-        timeout(
-            self.context.executor.cfg.read_timeout,
-            self.stream.read_exact(buf),
-        )
-        .await
-        .map_err(|_| Error::Timeout)?
-        .map_err(|_| Error::RecvFailed)?;
-
-        // Record metrics
-        self.context
-            .executor
-            .metrics
-            .inbound_bandwidth
-            .inc_by(buf.len() as u64);
-
-        Ok(())
     }
 }
 
