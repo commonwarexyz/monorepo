@@ -24,7 +24,10 @@ pub struct Config<C: Scheme> {
     pub allowed_incoming_connection_rate: Quota,
 }
 
+/// Syntactic sugar for the type of [Sink] used by a given [Network] N.
 type Sink<E> = <<E as Network>::Listener as Listener>::Sink;
+
+/// Syntactic sugar for the type of [Stream] used by a given [Network] N.
 type Stream<E> = <<E as Network>::Listener as Listener>::Stream;
 
 pub struct Actor<

@@ -223,6 +223,9 @@ pub trait Clock: Clone + Send + Sync + 'static {
 /// Interface that any runtime must implement to create
 /// network connections.
 pub trait Network: Clone + Send + Sync + 'static {
+    /// The type of [Listener] that's returned when binding to a socket.
+    /// Accepting a connection returns a [Sink] and [Stream] which are defined
+    /// by the [Listener] and used to send and receive data over the connection.
     type Listener: Listener;
 
     /// Bind to the given socket address.

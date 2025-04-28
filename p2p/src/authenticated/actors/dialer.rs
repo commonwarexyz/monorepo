@@ -27,8 +27,11 @@ pub struct Config<C: Scheme> {
     pub dial_rate: Quota,
 }
 
-type Sink<E> = <<E as Network>::Listener as Listener>::Sink;
-type Stream<E> = <<E as Network>::Listener as Listener>::Stream;
+/// Syntactic sugar for the type of [Sink] used by a given [Network] N.
+type Sink<N> = <<N as Network>::Listener as Listener>::Sink;
+
+/// Syntactic sugar for the type of [Stream] used by a given [Network] N.
+type Stream<N> = <<N as Network>::Listener as Listener>::Stream;
 
 pub struct Actor<E: Spawner + Clock + GClock + Network + Metrics, C: Scheme> {
     context: E,
