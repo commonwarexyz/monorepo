@@ -5,9 +5,7 @@ use crate::authenticated::{
     metrics,
 };
 use commonware_cryptography::Scheme;
-use commonware_runtime::{
-    telemetry::traces::status, Clock, Handle, Listener, Metrics, Network, Spawner,
-};
+use commonware_runtime::{telemetry::traces::status, Clock, Handle, Metrics, Network, Spawner};
 use commonware_stream::public_key::{Config as StreamConfig, Connection};
 use governor::{
     clock::Clock as GClock,
@@ -21,17 +19,13 @@ use rand::{CryptoRng, Rng};
 use std::time::Duration;
 use tracing::{debug, debug_span, Instrument};
 
+use super::listener::{Sink, Stream};
+
 pub struct Config<C: Scheme> {
     pub stream_cfg: StreamConfig<C>,
     pub dial_frequency: Duration,
     pub dial_rate: Quota,
 }
-
-/// Syntactic sugar for the type of [Sink] used by a given [Network] N.
-type Sink<N> = <<N as Network>::Listener as Listener>::Sink;
-
-/// Syntactic sugar for the type of [Stream] used by a given [Network] N.
-type Stream<N> = <<N as Network>::Listener as Listener>::Stream;
 
 pub struct Actor<E: Spawner + Clock + GClock + Network + Metrics, C: Scheme> {
     context: E,

@@ -25,10 +25,10 @@ pub struct Config<C: Scheme> {
 }
 
 /// Syntactic sugar for the type of [Sink] used by a given [Network] N.
-type Sink<E> = <<E as Network>::Listener as Listener>::Sink;
+pub(super) type Sink<E> = <<E as Network>::Listener as Listener>::Sink;
 
 /// Syntactic sugar for the type of [Stream] used by a given [Network] N.
-type Stream<E> = <<E as Network>::Listener as Listener>::Stream;
+pub(super) type Stream<E> = <<E as Network>::Listener as Listener>::Stream;
 
 pub struct Actor<
     E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metrics,
