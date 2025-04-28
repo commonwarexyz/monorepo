@@ -1,6 +1,27 @@
-//! Implementations of Codec for primitive types.
+//! Codec implementations for Rust primitive types.
+//!
+//! # Fixed-size vs Variable-size
+//!
+//! Most primitives therefore have a compile-time constant `SIZE` and can be
+//! encoded/decoded without any configuration.
+//!
+//! `usize` is the lone exception: since most values refer to a length or size
+//! of an object in memory, values are biased towards smaller values. Therefore,
+//! it uses variable-length (varint) encoding to save space.  This means that
+//! it **does not implement [`FixedSize`]**.  When decoding a `usize`, callers
+//! must supply a [`RangeConfig`] to bound the allowable value — this protects
+//! against denial-of-service attacks that would allocate oversized buffers.
+//!
+//! ## Safety & portability
+//! * `usize` is restricted to values that fit in a `u32` to keep the on-wire
+//!   format identical across 32-bit and 64-bit architectures.
+//! * All fixed-size integers and floats are written big-endian to avoid host-
+//!   endian ambiguity.
 
-use crate::{util::at_least, Config, EncodeSize, Error, FixedSize, Read, ReadExt, Write};
+use crate::{
+    util::at_least, varint::UInt, Config, EncodeSize, Error, FixedSize, RangeConfig, Read, ReadExt,
+    Write,
+};
 use bytes::{Buf, BufMut};
 
 // Numeric types implementation
@@ -39,6 +60,36 @@ impl_numeric!(i64, get_i64, put_i64);
 impl_numeric!(i128, get_i128, put_i128);
 impl_numeric!(f32, get_f32, put_f32);
 impl_numeric!(f64, get_f64, put_f64);
+
+// Usize implementation
+impl Write for usize {
+    #[inline]
+    fn write(&self, buf: &mut impl BufMut) {
+        let self_as_u32 = u32::try_from(*self).expect("write: usize value is larger than u32");
+        UInt(self_as_u32).write(buf);
+    }
+}
+
+impl<R: RangeConfig> Read<R> for usize {
+    #[inline]
+    fn read_cfg(buf: &mut impl Buf, range: &R) -> Result<Self, Error> {
+        let self_as_u32: u32 = UInt::read(buf)?.into();
+        let result = usize::try_from(self_as_u32).map_err(|_| Error::InvalidUsize)?;
+        if !range.contains(&result) {
+            return Err(Error::InvalidLength(result));
+        }
+        Ok(result)
+    }
+}
+
+impl EncodeSize for usize {
+    #[inline]
+    fn encode_size(&self) -> usize {
+        let self_as_u32 =
+            u32::try_from(*self).expect("encode_size: usize value is larger than u32");
+        UInt(self_as_u32).encode_size()
+    }
+}
 
 // Bool implementation
 impl Write for bool {
@@ -120,8 +171,8 @@ impl<Cfg: Config, T: Read<Cfg>> Read<Cfg> for Option<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{DecodeExt, Encode, EncodeFixed};
-    use bytes::Bytes;
+    use crate::{Decode, DecodeExt, Encode, EncodeFixed};
+    use bytes::{Bytes, BytesMut};
     use paste::paste;
 
     // Float tests
@@ -187,6 +238,33 @@ mod tests {
             assert_eq!(*value, decoded);
             assert_eq!(value.encode_size(), 1);
         }
+    }
+
+    #[test]
+    fn test_usize() {
+        let values = [0usize, 1, 42, u32::MAX as usize];
+        for value in values.iter() {
+            let encoded = value.encode();
+            assert_eq!(value.encode_size(), UInt(*value as u32).encode_size());
+            let decoded = usize::decode_cfg(encoded, &..).unwrap();
+            assert_eq!(*value, decoded);
+        }
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    #[should_panic(expected = "encode_size: usize value is larger than u32")]
+    fn test_usize_encode_panic() {
+        let value: usize = usize::MAX;
+        let _ = value.encode();
+    }
+
+    #[test]
+    #[should_panic(expected = "write: usize value is larger than u32")]
+    fn test_usize_write_panic() {
+        let mut buf = &mut BytesMut::new();
+        let value: usize = usize::MAX;
+        value.write(&mut buf);
     }
 
     #[test]

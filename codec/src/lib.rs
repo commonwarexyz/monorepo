@@ -47,14 +47,14 @@
 //!   [`SocketAddrV4`](`std::net::SocketAddrV4`),
 //!   [`SocketAddrV6`](`std::net::SocketAddrV6`),
 //!   [`SocketAddr`](`std::net::SocketAddr`)
-//! - Common External Types: [`bytes::Bytes`]
+//! - Common External Types: [`::bytes::Bytes`]
 //!
 //! # Implementing for Custom Types
 //!
 //! You typically need to implement [`Write`], [`EncodeSize`] (unless [`FixedSize`]), and [`Read<Cfg>`]
 //! for your custom structs and enums.
 //!
-//! ## Example (Fixed Size Type)
+//! ## Example 1. Fixed-Size Type
 //!
 //! ```
 //! use bytes::{Buf, BufMut};
@@ -104,7 +104,7 @@
 //! assert_eq!(point, decoded_point);
 //! ```
 //!
-//! ## Example (Variable Size Type)
+//! ## Example 2. Variable-Size Type
 //!
 //! ```
 //! use bytes::{Buf, BufMut};
@@ -193,4 +193,3 @@ pub mod varint;
 pub use codec::*;
 pub use error::Error;
 pub use extensions::*;
-pub use types::{net, primitives};

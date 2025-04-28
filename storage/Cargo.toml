@@ -2,7 +2,7 @@
 name = "commonware-storage"
 edition = "2021"
 publish = true
-version = "0.0.45"
+version = "0.0.47"
 license = "MIT OR Apache-2.0"
 description = "Persist and retrieve data from an abstract store."
 readme = "README.md"
@@ -44,6 +44,11 @@ path = "src/archive/benches/bench.rs"
 name="bmt"
 harness = false
 path = "src/bmt/benches/bench.rs"
+
+[[bench]]
+name="index"
+harness = false
+path = "src/index/benches/bench.rs"
 
 [[bench]]
 name="journal"

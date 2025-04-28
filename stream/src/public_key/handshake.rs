@@ -1,7 +1,9 @@
 use super::x25519;
 use crate::Error;
 use bytes::{Buf, BufMut};
-use commonware_codec::{Encode, Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{
+    varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
+};
 use commonware_cryptography::Scheme;
 use commonware_runtime::Clock;
 use commonware_utils::SystemTimeExt;
@@ -9,8 +11,15 @@ use std::time::Duration;
 
 /// Handshake information that is signed over by the sender.
 pub struct Info<C: Scheme> {
+    /// The public key of the recipient.
     recipient: C::PublicKey,
+
+    /// The ephemeral public key of the sender.
+    ///
+    /// This is used to derive the shared secret for the encrypted connection.
     ephemeral_public_key: x25519::PublicKey,
+
+    /// Timestamp of the handshake (in epoch milliseconds).
     timestamp: u64,
 }
 
@@ -32,7 +41,7 @@ impl<C: Scheme> Write for Info<C> {
     fn write(&self, buf: &mut impl BufMut) {
         self.recipient.write(buf);
         self.ephemeral_public_key.write(buf);
-        self.timestamp.write(buf);
+        UInt(self.timestamp).write(buf);
     }
 }
 
@@ -40,7 +49,7 @@ impl<C: Scheme> Read for Info<C> {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let recipient = C::PublicKey::read(buf)?;
         let ephemeral_public_key = x25519::PublicKey::read(buf)?;
-        let timestamp = u64::read(buf)?;
+        let timestamp = UInt::read(buf)?.into();
         Ok(Info {
             recipient,
             ephemeral_public_key,
@@ -49,8 +58,12 @@ impl<C: Scheme> Read for Info<C> {
     }
 }
 
-impl<C: Scheme> FixedSize for Info<C> {
-    const SIZE: usize = C::PublicKey::SIZE + x25519::PublicKey::SIZE + u64::SIZE;
+impl<C: Scheme> EncodeSize for Info<C> {
+    fn encode_size(&self) -> usize {
+        self.recipient.encode_size()
+            + self.ephemeral_public_key.encode_size()
+            + UInt(self.timestamp).encode_size()
+    }
 }
 
 // Allows recipient to verify that the sender has the private key
@@ -159,8 +172,10 @@ impl<C: Scheme> Read for Signed<C> {
     }
 }
 
-impl<C: Scheme> FixedSize for Signed<C> {
-    const SIZE: usize = Info::<C>::SIZE + C::PublicKey::SIZE + C::Signature::SIZE;
+impl<C: Scheme> EncodeSize for Signed<C> {
+    fn encode_size(&self) -> usize {
+        self.info.encode_size() + self.signer.encode_size() + self.signature.encode_size()
+    }
 }
 
 #[cfg(test)]

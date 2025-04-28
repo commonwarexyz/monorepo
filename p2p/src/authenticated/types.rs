@@ -1,6 +1,6 @@
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{
-    varint, Encode, EncodeSize, Error, RangeConfig, Read, ReadExt, ReadRangeExt, Write,
+    varint::UInt, Encode, EncodeSize, Error, RangeConfig, Read, ReadExt, ReadRangeExt, Write,
 };
 use commonware_cryptography::Verifier;
 use commonware_utils::BitVec as UtilsBitVec;
@@ -110,20 +110,20 @@ pub struct BitVec {
 
 impl EncodeSize for BitVec {
     fn encode_size(&self) -> usize {
-        self.index.encode_size() + self.bits.encode_size()
+        UInt(self.index).encode_size() + self.bits.encode_size()
     }
 }
 
 impl Write for BitVec {
     fn write(&self, buf: &mut impl BufMut) {
-        self.index.write(buf);
+        UInt(self.index).write(buf);
         self.bits.write(buf);
     }
 }
 
 impl Read<usize> for BitVec {
     fn read_cfg(buf: &mut impl Buf, max_bits: &usize) -> Result<Self, Error> {
-        let index = u64::read(buf)?;
+        let index = UInt::read(buf)?.into();
         let bits = UtilsBitVec::read_cfg(buf, &..=*max_bits)?;
         Ok(Self { index, bits })
     }
@@ -138,7 +138,7 @@ pub struct PeerInfo<C: Verifier> {
     /// The socket address of the peer.
     pub socket: SocketAddr,
 
-    /// The timestamp at which the socket was signed over.
+    /// The timestamp (epoch milliseconds) at which the socket was signed over.
     pub timestamp: u64,
 
     /// The public key of the peer.
@@ -163,7 +163,7 @@ impl<C: Verifier> PeerInfo<C> {
 impl<C: Verifier> EncodeSize for PeerInfo<C> {
     fn encode_size(&self) -> usize {
         self.socket.encode_size()
-            + self.timestamp.encode_size()
+            + UInt(self.timestamp).encode_size()
             + self.public_key.encode_size()
             + self.signature.encode_size()
     }
@@ -172,7 +172,7 @@ impl<C: Verifier> EncodeSize for PeerInfo<C> {
 impl<C: Verifier> Write for PeerInfo<C> {
     fn write(&self, buf: &mut impl BufMut) {
         self.socket.write(buf);
-        self.timestamp.write(buf);
+        UInt(self.timestamp).write(buf);
         self.public_key.write(buf);
         self.signature.write(buf);
     }
@@ -181,7 +181,7 @@ impl<C: Verifier> Write for PeerInfo<C> {
 impl<C: Verifier> Read for PeerInfo<C> {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let socket = SocketAddr::read(buf)?;
-        let timestamp = u64::read(buf)?;
+        let timestamp = UInt::read(buf)?.into();
         let public_key = C::PublicKey::read(buf)?;
         let signature = C::Signature::read(buf)?;
         Ok(PeerInfo {
@@ -207,20 +207,20 @@ pub struct Data {
 
 impl EncodeSize for Data {
     fn encode_size(&self) -> usize {
-        varint::size(self.channel) + self.message.encode_size()
+        UInt(self.channel).encode_size() + self.message.encode_size()
     }
 }
 
 impl Write for Data {
     fn write(&self, buf: &mut impl BufMut) {
-        varint::write(self.channel, buf);
+        UInt(self.channel).write(buf);
         self.message.write(buf);
     }
 }
 
 impl<R: RangeConfig> Read<R> for Data {
     fn read_cfg(buf: &mut impl Buf, range: &R) -> Result<Self, Error> {
-        let channel = varint::read::<u32>(buf)?;
+        let channel = UInt::read(buf)?.into();
         let message = Bytes::read_cfg(buf, range)?;
         Ok(Data { channel, message })
     }

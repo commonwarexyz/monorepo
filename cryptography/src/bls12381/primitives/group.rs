@@ -22,6 +22,8 @@ use blst::{
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
+    varint::UInt,
+    EncodeSize,
     Error::{self, Invalid},
     FixedSize, Read, ReadExt, Write,
 };
@@ -347,21 +349,23 @@ impl Share {
 
 impl Write for Share {
     fn write(&self, buf: &mut impl BufMut) {
-        self.index.write(buf);
+        UInt(self.index).write(buf);
         self.private.write(buf);
     }
 }
 
 impl Read for Share {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let index = u32::read(buf)?;
+        let index = UInt::read(buf)?.into();
         let private = Private::read(buf)?;
         Ok(Self { index, private })
     }
 }
 
-impl FixedSize for Share {
-    const SIZE: usize = u32::SIZE + Private::SIZE;
+impl EncodeSize for Share {
+    fn encode_size(&self) -> usize {
+        UInt(self.index).encode_size() + self.private.encode_size()
+    }
 }
 
 impl Display for Share {

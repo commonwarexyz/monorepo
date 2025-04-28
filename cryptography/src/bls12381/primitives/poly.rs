@@ -11,7 +11,9 @@ use crate::bls12381::primitives::{
     Error,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{
+    varint::UInt, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write,
+};
 use rand::{rngs::OsRng, RngCore};
 use std::hash::Hash;
 
@@ -40,21 +42,23 @@ pub struct Eval<C: Element> {
 
 impl<C: Element> Write for Eval<C> {
     fn write(&self, buf: &mut impl BufMut) {
-        self.index.write(buf);
+        UInt(self.index).write(buf);
         self.value.write(buf);
     }
 }
 
 impl<C: Element> Read for Eval<C> {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let index = buf.get_u32();
+        let index = UInt::read(buf)?.into();
         let value = C::read(buf)?;
         Ok(Self { index, value })
     }
 }
 
-impl<C: Element> FixedSize for Eval<C> {
-    const SIZE: usize = u32::SIZE + C::SIZE;
+impl<C: Element> EncodeSize for Eval<C> {
+    fn encode_size(&self) -> usize {
+        UInt(self.index).encode_size() + C::SIZE
+    }
 }
 
 /// A polynomial that is using a scalar for the variable x and a generic
