@@ -6,6 +6,7 @@ use super::{
 };
 use crate::{Metrics, Network, Spawner};
 use axum::{
+    body::Body,
     http::{header, Response, StatusCode},
     routing::get,
     serve, Extension, Router,
@@ -46,7 +47,7 @@ pub fn init(context: Context, level: Level, metrics: Option<SocketAddr>, traces:
                             Response::builder()
                                 .status(StatusCode::OK)
                                 .header(header::CONTENT_TYPE, "text/plain; version=0.0.4")
-                                .body(ctx.encode())
+                                .body(Body::from(ctx.encode()))
                                 .expect("Failed to create response")
                         }),
                     )
