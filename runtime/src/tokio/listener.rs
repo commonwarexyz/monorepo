@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::warn;
 
-/// Implementation of [`crate::Listener`] for the `tokio` runtime.
+/// Implementation of [crate::Listener] for the `tokio` runtime.
 pub struct Listener {
     pub(super) context: Context,
     pub(super) listener: TcpListener,
