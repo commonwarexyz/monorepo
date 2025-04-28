@@ -11,7 +11,7 @@ fn bench_restart(c: &mut Criterion) {
     // Create a config we can use across all benchmarks (with a fixed `storage_directory`).
     let cfg = Config::default();
     for compression in [None, Some(3)] {
-        for items in [10_000, 100_000, 250_000] {
+        for items in [10_000, 50_000, 100_000] {
             let builder = commonware_runtime::tokio::Runner::new(cfg.clone());
             builder.start(|ctx| async move {
                 let mut a = get_archive(ctx, compression).await;

@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 fn bench_put(c: &mut Criterion) {
     let runner = tokio::Runner::default();
     for compression in [None, Some(3)] {
-        for items in [10_000, 100_000, 250_000] {
+        for items in [10_000, 50_000, 100_000] {
             let label = format!(
                 "{}/items={} comp={}",
                 module_path!(),
