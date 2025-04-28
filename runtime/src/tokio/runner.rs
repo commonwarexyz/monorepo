@@ -3,18 +3,15 @@ use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage
 #[cfg(not(feature = "iouring"))]
 use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
 
+use super::{metrics::Metrics, Config, Context, Executor};
+use crate::storage::metered::Storage as MeteredStorage;
+use crate::Signaler;
+use prometheus_client::registry::Registry;
 use std::{
     future::Future,
     sync::{Arc, Mutex},
 };
-
-use crate::storage::metered::Storage as MeteredStorage;
-use prometheus_client::registry::Registry;
 use tokio::runtime::Builder;
-
-use crate::Signaler;
-
-use super::{metrics::Metrics, Config, Context, Executor};
 
 /// Implementation of [crate::Runner] for the [tokio] runtime.
 pub struct Runner {

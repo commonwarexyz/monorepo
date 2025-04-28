@@ -63,7 +63,7 @@ fn bench_get(c: &mut Criterion) {
     let cfg = Config::default();
     for compression in [None, Some(3)] {
         // Create a shared on-disk archive once so later setup is fast.
-        let builder = commonware_runtime::tokio::Runner::new(cfg.clone());
+        let builder = commonware_runtime::tokio::runner::Runner::new(cfg.clone());
         let keys = builder.start(|ctx| async move {
             let mut a = get_archive(ctx, compression).await;
             let keys = append_random(&mut a, ITEMS).await;
@@ -138,7 +138,7 @@ fn bench_get(c: &mut Criterion) {
         }
 
         // Clean up shared artifacts.
-        let cleaner = commonware_runtime::tokio::Runner::new(cfg.clone());
+        let cleaner = commonware_runtime::tokio::runner::Runner::new(cfg.clone());
         cleaner.start(|ctx| async move {
             let a = get_archive(ctx, compression).await;
             a.destroy().await.unwrap();

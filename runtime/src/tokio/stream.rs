@@ -1,8 +1,6 @@
-use tokio::{io::AsyncReadExt as _, net::tcp::OwnedReadHalf, time::timeout};
-
-use crate::Error;
-
 use super::Context;
+use crate::Error;
+use tokio::{io::AsyncReadExt as _, net::tcp::OwnedReadHalf, time::timeout};
 
 /// Implementation of [`crate::Stream`] for the `tokio` runtime.
 pub struct Stream {

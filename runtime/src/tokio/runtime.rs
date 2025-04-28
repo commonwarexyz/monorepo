@@ -3,6 +3,9 @@ use crate::storage::iouring::Storage as IoUringStorage;
 #[cfg(not(feature = "iouring"))]
 use crate::storage::tokio::Storage as TokioStorage;
 
+use super::listener::Listener;
+use super::sink::Sink;
+use super::stream::Stream;
 use crate::storage::metered::Storage as MeteredStorage;
 use crate::tokio::metrics::{Metrics, Work};
 use crate::{Clock, Error, Handle, Signal, Signaler, METRICS_PREFIX};
@@ -25,10 +28,6 @@ use tokio::{
     runtime::Runtime,
 };
 use tracing::warn;
-
-use super::listener::Listener;
-use super::sink::Sink;
-use super::stream::Stream;
 
 /// Configuration for the `tokio` runtime.
 #[derive(Clone)]

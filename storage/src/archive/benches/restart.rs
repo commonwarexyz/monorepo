@@ -12,7 +12,7 @@ fn bench_restart(c: &mut Criterion) {
     let cfg = Config::default();
     for compression in [None, Some(3)] {
         for items in [10_000, 50_000, 100_000] {
-            let builder = commonware_runtime::tokio::Runner::new(cfg.clone());
+            let builder = commonware_runtime::tokio::runner::Runner::new(cfg.clone());
             builder.start(|ctx| async move {
                 let mut a = get_archive(ctx, compression).await;
                 append_random(&mut a, items).await;
@@ -46,7 +46,7 @@ fn bench_restart(c: &mut Criterion) {
             );
 
             // Tear down
-            let cleaner = commonware_runtime::tokio::Runner::new(cfg.clone());
+            let cleaner = commonware_runtime::tokio::runner::Runner::new(cfg.clone());
             cleaner.start(|ctx| async move {
                 let a = get_archive(ctx, compression).await;
                 a.destroy().await.unwrap();
