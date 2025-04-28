@@ -16,7 +16,7 @@ use crate::Signaler;
 
 use super::{metrics::Metrics, Config, Context, Executor};
 
-/// Implementation of [crate::Runner] for the `tokio` runtime.
+/// Implementation of [crate::Runner] for the [tokio] runtime.
 pub struct Runner {
     cfg: Config,
 }
@@ -28,9 +28,15 @@ impl Default for Runner {
 }
 
 impl Runner {
-    /// Initialize a new `tokio` runtime with the given number of threads.
+    /// Initialize a new [tokio] runtime with the given number of threads.
     pub fn new(cfg: Config) -> Self {
         Self { cfg }
+    }
+}
+
+impl From<Config> for Runner {
+    fn from(cfg: Config) -> Self {
+        Self::new(cfg)
     }
 }
 

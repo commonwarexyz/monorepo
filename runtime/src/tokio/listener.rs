@@ -1,11 +1,8 @@
+use super::{sink::Sink, stream::Stream, Context};
+use crate::Error;
 use std::net::SocketAddr;
-
 use tokio::net::{TcpListener, TcpStream};
 use tracing::warn;
-
-use crate::Error;
-
-use super::{sink::Sink, stream::Stream, Context};
 
 /// Implementation of [`crate::Listener`] for the `tokio` runtime.
 pub struct Listener {
