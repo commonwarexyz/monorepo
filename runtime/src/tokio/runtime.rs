@@ -463,7 +463,9 @@ impl GClock for Context {
 
 impl ReasonablyRealtime for Context {}
 
-impl crate::Network<Listener> for Context {
+impl crate::Network for Context {
+    type Listener = Listener;
+
     async fn bind(&self, socket: SocketAddr) -> Result<Listener, Error> {
         TcpListener::bind(socket)
             .await
@@ -474,7 +476,16 @@ impl crate::Network<Listener> for Context {
             })
     }
 
-    async fn dial(&self, socket: SocketAddr) -> Result<(Sink, Stream), Error> {
+    async fn dial(
+        &self,
+        socket: SocketAddr,
+    ) -> Result<
+        (
+            <<Self as crate::Network>::Listener as crate::Listener>::Sink,
+            <<Self as crate::Network>::Listener as crate::Listener>::Stream,
+        ),
+        Error,
+    > {
         // Create a new TCP stream
         let stream = TcpStream::connect(socket)
             .await

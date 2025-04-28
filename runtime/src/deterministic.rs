@@ -1223,8 +1223,10 @@ impl Networking {
     }
 }
 
-impl crate::Network<Listener> for Context {
-    async fn bind(&self, socket: SocketAddr) -> Result<Listener, Error> {
+impl crate::Network for Context {
+    type Listener = Listener;
+
+    async fn bind(&self, socket: SocketAddr) -> Result<Self::Listener, Error> {
         self.networking.bind(socket)
     }
 

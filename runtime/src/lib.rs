@@ -222,18 +222,29 @@ pub trait Clock: Clone + Send + Sync + 'static {
 
 /// Interface that any runtime must implement to create
 /// network connections.
-pub trait Network<L>: Clone + Send + Sync + 'static
-where
-    L: Listener,
-{
+pub trait Network: Clone + Send + Sync + 'static {
+    type Listener: Listener;
+
     /// Bind to the given socket address.
-    fn bind(&self, socket: SocketAddr) -> impl Future<Output = Result<L, Error>> + Send;
+    fn bind(
+        &self,
+        socket: SocketAddr,
+    ) -> impl Future<Output = Result<Self::Listener, Error>> + Send;
 
     /// Dial the given socket address.
+    #[allow(clippy::type_complexity)]
     fn dial(
         &self,
         socket: SocketAddr,
-    ) -> impl Future<Output = Result<(L::Sink, L::Stream), Error>> + Send;
+    ) -> impl Future<
+        Output = Result<
+            (
+                <<Self as Network>::Listener as Listener>::Sink,
+                <<Self as Network>::Listener as Listener>::Stream,
+            ),
+            Error,
+        >,
+    > + Send;
 }
 
 /// Interface that any runtime must implement to handle
@@ -982,11 +993,10 @@ mod tests {
         })
     }
 
-    fn test_metrics_serve<R, L>(runner: R)
+    fn test_metrics_serve<R>(runner: R)
     where
         R: Runner,
-        R::Context: Spawner + Metrics + Network<L> + Clock,
-        L: Listener,
+        R::Context: Spawner + Metrics + Network + Clock,
     {
         runner.start(|context| async move {
             // Register a test metric

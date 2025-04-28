@@ -14,7 +14,7 @@ use governor::{
 };
 use prometheus_client::metrics::counter::Counter;
 use rand::{CryptoRng, Rng};
-use std::{marker::PhantomData, net::SocketAddr};
+use std::net::SocketAddr;
 use tracing::{debug, debug_span, Instrument};
 
 /// Configuration for the listener actor.
@@ -25,8 +25,7 @@ pub struct Config<C: Scheme> {
 }
 
 pub struct Actor<
-    L: Listener,
-    E: Spawner + Clock + ReasonablyRealtime + Network<L> + Rng + CryptoRng + Metrics,
+    E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metrics,
     C: Scheme,
 > {
     context: E,
@@ -36,17 +35,10 @@ pub struct Actor<
     rate_limiter: RateLimiter<NotKeyed, InMemoryState, E, NoOpMiddleware<E::Instant>>,
 
     handshakes_rate_limited: Counter,
-
-    _phantom_si: PhantomData<L::Sink>,
-    _phantom_st: PhantomData<L::Stream>,
-    _phantom_l: PhantomData<L>,
 }
 
-impl<
-        L: Listener,
-        E: Spawner + Clock + ReasonablyRealtime + Network<L> + Rng + CryptoRng + Metrics,
-        C: Scheme,
-    > Actor<L, E, C>
+impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metrics, C: Scheme>
+    Actor<E, C>
 {
     pub fn new(context: E, cfg: Config<C>) -> Self {
         // Create metrics
@@ -68,10 +60,6 @@ impl<
             ),
 
             handshakes_rate_limited,
-
-            _phantom_si: PhantomData,
-            _phantom_st: PhantomData,
-            _phantom_l: PhantomData,
         }
     }
 
@@ -79,10 +67,15 @@ impl<
         context: E,
         address: SocketAddr,
         stream_cfg: StreamConfig<C>,
-        sink: L::Sink,
-        stream: L::Stream,
+        sink: <<E as Network>::Listener as commonware_runtime::Listener>::Sink,
+        stream: <<E as Network>::Listener as commonware_runtime::Listener>::Stream,
         mut tracker: tracker::Mailbox<E, C>,
-        mut supervisor: spawner::Mailbox<E, L::Sink, L::Stream, C>,
+        mut supervisor: spawner::Mailbox<
+            E,
+            <<E as Network>::Listener as commonware_runtime::Listener>::Sink,
+            <<E as Network>::Listener as commonware_runtime::Listener>::Stream,
+            C,
+        >,
     ) {
         // Create span
         let span = debug_span!("listener", ?address);
@@ -144,7 +137,12 @@ impl<
     pub fn start(
         self,
         tracker: tracker::Mailbox<E, C>,
-        supervisor: spawner::Mailbox<E, L::Sink, L::Stream, C>,
+        supervisor: spawner::Mailbox<
+            E,
+            <<E as Network>::Listener as commonware_runtime::Listener>::Sink,
+            <<E as Network>::Listener as commonware_runtime::Listener>::Stream,
+            C,
+        >,
     ) -> Handle<()> {
         self.context
             .clone()
@@ -154,7 +152,12 @@ impl<
     async fn run(
         self,
         tracker: tracker::Mailbox<E, C>,
-        supervisor: spawner::Mailbox<E, L::Sink, L::Stream, C>,
+        supervisor: spawner::Mailbox<
+            E,
+            <<E as Network>::Listener as commonware_runtime::Listener>::Sink,
+            <<E as Network>::Listener as commonware_runtime::Listener>::Stream,
+            C,
+        >,
     ) {
         // Start listening for incoming connections
         let mut listener = self

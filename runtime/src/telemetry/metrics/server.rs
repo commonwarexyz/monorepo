@@ -29,7 +29,7 @@ where
 }
 
 /// Serve metrics over HTTP (on all methods and paths) for the given address.
-pub async fn serve<L: Listener, C: Metrics + Network<L>>(context: C, address: SocketAddr) {
+pub async fn serve<C: Metrics + Network>(context: C, address: SocketAddr) {
     let mut listener = context
         .bind(address)
         .await
