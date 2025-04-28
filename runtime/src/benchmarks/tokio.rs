@@ -15,7 +15,7 @@ use futures::Future;
 /// use std::time::Duration;
 ///
 /// fn my_benchmark(c: &mut Criterion) {
-///     let executor = tokio::runner::Runner::default();
+///     let executor = tokio::Runner::default();
 ///     c.bench_function("sleep_benchmark", |b| {
 ///         b.to_async(&executor).iter_batched(|| (),
 ///         |_| async {
