@@ -5,7 +5,11 @@ use super::{
     Context,
 };
 use crate::{Metrics, Network, Spawner};
-use axum::{routing::get, serve, Extension, Router};
+use axum::{
+    http::{header, Response, StatusCode},
+    routing::get,
+    serve, Extension, Router,
+};
 use std::net::SocketAddr;
 use tracing::Level;
 use tracing_subscriber::{layer::SubscriberExt, Registry};
@@ -38,7 +42,13 @@ pub fn init(context: Context, level: Level, metrics: Option<SocketAddr>, traces:
                 let app = Router::new()
                     .route(
                         "/metrics",
-                        get(|extension: Extension<Context>| async move { extension.0.encode() }),
+                        get(|Extension(ctx): Extension<Context>| async move {
+                            Response::builder()
+                                .status(StatusCode::OK)
+                                .header(header::CONTENT_TYPE, "text/plain; version=0.0.4")
+                                .body(ctx.encode())
+                                .expect("failed to create response")
+                        }),
                     )
                     .layer(Extension(context));
 
