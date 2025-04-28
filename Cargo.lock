@@ -1171,7 +1171,6 @@ dependencies = [
  "futures",
  "getrandom 0.2.15",
  "governor",
- "httparse",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",

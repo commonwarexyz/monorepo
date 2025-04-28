@@ -4,7 +4,8 @@ use super::{
     tracing::{export, Config},
     Context,
 };
-use crate::{telemetry::metrics, Metrics, Spawner};
+use crate::{Metrics, Network, Spawner};
+use axum::{routing::get, serve, Extension, Router};
 use std::net::SocketAddr;
 use tracing::Level;
 use tracing_subscriber::{layer::SubscriberExt, Registry};
@@ -26,7 +27,21 @@ pub fn init(context: Context, level: Level, metrics: Option<SocketAddr>, traces:
     if let Some(cfg) = metrics {
         context
             .with_label("metrics")
-            .spawn(move |context| async move { metrics::server::serve(context, cfg).await });
+            .spawn(move |context| async move {
+                let listener = context
+                    .bind(cfg)
+                    .await
+                    .expect("Could not bind to metrics address");
+                let app = Router::new()
+                    .route(
+                        "/metrics",
+                        get(|extension: Extension<Context>| async move { extension.0.encode() }),
+                    )
+                    .layer(Extension(context));
+                serve(listener, app.into_make_service())
+                    .await
+                    .expect("Could not serve metrics");
+            });
     }
 
     // Combine layers into a single subscriber
