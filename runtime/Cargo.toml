@@ -27,6 +27,7 @@ opentelemetry = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 rayon = { workspace = true }
 async-lock = { workspace = true }
+httparse = "1.10.1"
 
 # Enable "js" feature when WASM is target
 [target.'cfg(target_arch = "wasm32")'.dependencies.getrandom]
