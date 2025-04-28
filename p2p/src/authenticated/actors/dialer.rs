@@ -5,7 +5,9 @@ use crate::authenticated::{
     metrics,
 };
 use commonware_cryptography::Scheme;
-use commonware_runtime::{telemetry::traces::status, Clock, Handle, Metrics, Network, Spawner};
+use commonware_runtime::{
+    telemetry::traces::status, Clock, Handle, Metrics, Network, SinkOf, Spawner, StreamOf,
+};
 use commonware_stream::public_key::{Config as StreamConfig, Connection};
 use governor::{
     clock::Clock as GClock,
@@ -18,8 +20,6 @@ use prometheus_client::metrics::family::Family;
 use rand::{CryptoRng, Rng};
 use std::time::Duration;
 use tracing::{debug, debug_span, Instrument};
-
-use super::listener::{Sink, Stream};
 
 pub struct Config<C: Scheme> {
     pub stream_cfg: StreamConfig<C>,
@@ -58,7 +58,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Schem
     async fn dial_peers(
         &self,
         tracker: &mut tracker::Mailbox<E, C>,
-        supervisor: &mut spawner::Mailbox<E, Sink<E>, Stream<E>, C>,
+        supervisor: &mut spawner::Mailbox<E, SinkOf<E>, StreamOf<E>, C>,
     ) {
         for (peer, address, reservation) in tracker.dialable().await {
             // Check if we have hit rate limit for dialing and if so, skip (we don't
@@ -124,7 +124,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Schem
     pub fn start(
         self,
         tracker: tracker::Mailbox<E, C>,
-        supervisor: spawner::Mailbox<E, Sink<E>, Stream<E>, C>,
+        supervisor: spawner::Mailbox<E, SinkOf<E>, StreamOf<E>, C>,
     ) -> Handle<()> {
         self.context
             .clone()
@@ -134,7 +134,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Schem
     async fn run(
         mut self,
         mut tracker: tracker::Mailbox<E, C>,
-        mut supervisor: spawner::Mailbox<E, Sink<E>, Stream<E>, C>,
+        mut supervisor: spawner::Mailbox<E, SinkOf<E>, StreamOf<E>, C>,
     ) {
         loop {
             // Attempt to dial peers we know about

@@ -220,6 +220,12 @@ pub trait Clock: Clone + Send + Sync + 'static {
     fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static;
 }
 
+/// Syntactic sugar for the type of [Sink] used by a given [Network] N.
+pub type SinkOf<N> = <<N as Network>::Listener as Listener>::Sink;
+
+/// Syntactic sugar for the type of [Stream] used by a given [Network] N.
+pub type StreamOf<N> = <<N as Network>::Listener as Listener>::Stream;
+
 /// Interface that any runtime must implement to create
 /// network connections.
 pub trait Network: Clone + Send + Sync + 'static {
@@ -235,19 +241,10 @@ pub trait Network: Clone + Send + Sync + 'static {
     ) -> impl Future<Output = Result<Self::Listener, Error>> + Send;
 
     /// Dial the given socket address.
-    #[allow(clippy::type_complexity)]
     fn dial(
         &self,
         socket: SocketAddr,
-    ) -> impl Future<
-        Output = Result<
-            (
-                <<Self as Network>::Listener as Listener>::Sink,
-                <<Self as Network>::Listener as Listener>::Stream,
-            ),
-            Error,
-        >,
-    > + Send;
+    ) -> impl Future<Output = Result<(SinkOf<Self>, StreamOf<Self>), Error>> + Send;
 }
 
 /// Interface that any runtime must implement to handle
