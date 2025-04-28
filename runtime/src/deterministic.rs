@@ -1223,7 +1223,7 @@ impl Networking {
     }
 }
 
-impl crate::Network<Listener, Sink, Stream> for Context {
+impl crate::Network<Listener> for Context {
     async fn bind(&self, socket: SocketAddr) -> Result<Listener, Error> {
         self.networking.bind(socket)
     }
@@ -1241,8 +1241,11 @@ pub struct Listener {
     listener: mpsc::UnboundedReceiver<(SocketAddr, mocks::Sink, mocks::Stream)>,
 }
 
-impl crate::Listener<Sink, Stream> for Listener {
-    async fn accept(&mut self) -> Result<(SocketAddr, Sink, Stream), Error> {
+impl crate::Listener for Listener {
+    type Sink = Sink;
+    type Stream = Stream;
+
+    async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), Error> {
         let (socket, sender, receiver) = self.listener.next().await.ok_or(Error::ReadFailed)?;
         self.auditor.accept(self.address, socket);
         Ok((

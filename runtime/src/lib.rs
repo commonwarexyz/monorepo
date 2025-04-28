@@ -222,28 +222,30 @@ pub trait Clock: Clone + Send + Sync + 'static {
 
 /// Interface that any runtime must implement to create
 /// network connections.
-pub trait Network<L, Si, St>: Clone + Send + Sync + 'static
+pub trait Network<L>: Clone + Send + Sync + 'static
 where
-    L: Listener<Si, St>,
-    Si: Sink,
-    St: Stream,
+    L: Listener,
 {
     /// Bind to the given socket address.
     fn bind(&self, socket: SocketAddr) -> impl Future<Output = Result<L, Error>> + Send;
 
     /// Dial the given socket address.
-    fn dial(&self, socket: SocketAddr) -> impl Future<Output = Result<(Si, St), Error>> + Send;
+    fn dial(
+        &self,
+        socket: SocketAddr,
+    ) -> impl Future<Output = Result<(L::Sink, L::Stream), Error>> + Send;
 }
 
 /// Interface that any runtime must implement to handle
 /// incoming network connections.
-pub trait Listener<Si, St>: Sync + Send + 'static
-where
-    Si: Sink,
-    St: Stream,
-{
+pub trait Listener: Sync + Send + 'static {
+    type Sink: Sink;
+    type Stream: Stream;
+
     /// Accept an incoming connection.
-    fn accept(&mut self) -> impl Future<Output = Result<(SocketAddr, Si, St), Error>> + Send;
+    fn accept(
+        &mut self,
+    ) -> impl Future<Output = Result<(SocketAddr, Self::Sink, Self::Stream), Error>> + Send;
 }
 
 /// Interface that any runtime must implement to send
@@ -980,13 +982,11 @@ mod tests {
         })
     }
 
-    fn test_metrics_serve<R, L, Si, St>(runner: R)
+    fn test_metrics_serve<R, L>(runner: R)
     where
         R: Runner,
-        R::Context: Spawner + Metrics + Network<L, Si, St> + Clock,
-        L: Listener<Si, St>,
-        Si: Sink,
-        St: Stream,
+        R::Context: Spawner + Metrics + Network<L> + Clock,
+        L: Listener,
     {
         runner.start(|context| async move {
             // Register a test metric

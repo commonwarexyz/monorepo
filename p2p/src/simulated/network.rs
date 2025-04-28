@@ -9,8 +9,7 @@ use bytes::Bytes;
 use commonware_codec::{DecodeExt, FixedSize};
 use commonware_macros::select;
 use commonware_runtime::{
-    deterministic::{Listener, Sink, Stream},
-    Clock, Handle, Listener as _, Metrics, Network as RNetwork, Spawner,
+    deterministic::Listener, Clock, Handle, Listener as _, Metrics, Network as RNetwork, Spawner,
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_utils::Array;
@@ -38,8 +37,7 @@ pub struct Config {
 }
 
 /// Implementation of a simulated network.
-pub struct Network<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock + Metrics, P: Array>
-{
+pub struct Network<E: RNetwork<Listener> + Spawner + Rng + Clock + Metrics, P: Array> {
     context: E,
 
     // Maximum size of a message that can be sent over the network
@@ -69,9 +67,7 @@ pub struct Network<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock +
     sent_messages: Family<metrics::Message, Counter>,
 }
 
-impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock + Metrics, P: Array>
-    Network<E, P>
-{
+impl<E: RNetwork<Listener> + Spawner + Rng + Clock + Metrics, P: Array> Network<E, P> {
     /// Create a new simulated network with a given runtime and configuration.
     ///
     /// Returns a tuple containing the network instance and the oracle that can
@@ -492,7 +488,7 @@ impl<P: Array> Peer<P> {
     ///
     /// The peer will listen for incoming connections on the given `socket` address.
     /// `max_size` is the maximum size of a message that can be sent to the peer.
-    fn new<E: Spawner + RNetwork<Listener, Sink, Stream> + Metrics>(
+    fn new<E: Spawner + RNetwork<Listener> + Metrics>(
         context: &mut E,
         public_key: P,
         socket: SocketAddr,
@@ -640,7 +636,7 @@ struct Link {
 }
 
 impl Link {
-    fn new<E: Spawner + RNetwork<Listener, Sink, Stream> + Metrics, P: Array>(
+    fn new<E: Spawner + RNetwork<Listener> + Metrics, P: Array>(
         context: &mut E,
         dialer: P,
         socket: SocketAddr,

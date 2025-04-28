@@ -463,7 +463,7 @@ impl GClock for Context {
 
 impl ReasonablyRealtime for Context {}
 
-impl crate::Network<Listener, Sink, Stream> for Context {
+impl crate::Network<Listener> for Context {
     async fn bind(&self, socket: SocketAddr) -> Result<Listener, Error> {
         TcpListener::bind(socket)
             .await
@@ -507,8 +507,11 @@ pub struct Listener {
     listener: TcpListener,
 }
 
-impl crate::Listener<Sink, Stream> for Listener {
-    async fn accept(&mut self) -> Result<(SocketAddr, Sink, Stream), Error> {
+impl crate::Listener for Listener {
+    type Sink = Sink;
+    type Stream = Stream;
+
+    async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), Error> {
         // Accept a new TCP stream
         let (stream, addr) = self.listener.accept().await.map_err(|_| Error::Closed)?;
         self.context.executor.metrics.inbound_connections.inc();

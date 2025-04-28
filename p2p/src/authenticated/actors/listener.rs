@@ -3,7 +3,7 @@
 use crate::authenticated::actors::{spawner, tracker};
 use commonware_cryptography::Scheme;
 use commonware_runtime::{
-    telemetry::traces::status, Clock, Handle, Listener, Metrics, Network, Sink, Spawner, Stream,
+    telemetry::traces::status, Clock, Handle, Listener, Metrics, Network, Spawner,
 };
 use commonware_stream::public_key::{Config as StreamConfig, Connection, IncomingConnection};
 use governor::{
@@ -25,10 +25,8 @@ pub struct Config<C: Scheme> {
 }
 
 pub struct Actor<
-    Si: Sink,
-    St: Stream,
-    L: Listener<Si, St>,
-    E: Spawner + Clock + ReasonablyRealtime + Network<L, Si, St> + Rng + CryptoRng + Metrics,
+    L: Listener,
+    E: Spawner + Clock + ReasonablyRealtime + Network<L> + Rng + CryptoRng + Metrics,
     C: Scheme,
 > {
     context: E,
@@ -39,18 +37,16 @@ pub struct Actor<
 
     handshakes_rate_limited: Counter,
 
-    _phantom_si: PhantomData<Si>,
-    _phantom_st: PhantomData<St>,
+    _phantom_si: PhantomData<L::Sink>,
+    _phantom_st: PhantomData<L::Stream>,
     _phantom_l: PhantomData<L>,
 }
 
 impl<
-        Si: Sink,
-        St: Stream,
-        L: Listener<Si, St>,
-        E: Spawner + Clock + ReasonablyRealtime + Network<L, Si, St> + Rng + CryptoRng + Metrics,
+        L: Listener,
+        E: Spawner + Clock + ReasonablyRealtime + Network<L> + Rng + CryptoRng + Metrics,
         C: Scheme,
-    > Actor<Si, St, L, E, C>
+    > Actor<L, E, C>
 {
     pub fn new(context: E, cfg: Config<C>) -> Self {
         // Create metrics
@@ -83,10 +79,10 @@ impl<
         context: E,
         address: SocketAddr,
         stream_cfg: StreamConfig<C>,
-        sink: Si,
-        stream: St,
+        sink: L::Sink,
+        stream: L::Stream,
         mut tracker: tracker::Mailbox<E, C>,
-        mut supervisor: spawner::Mailbox<E, Si, St, C>,
+        mut supervisor: spawner::Mailbox<E, L::Sink, L::Stream, C>,
     ) {
         // Create span
         let span = debug_span!("listener", ?address);
@@ -148,7 +144,7 @@ impl<
     pub fn start(
         self,
         tracker: tracker::Mailbox<E, C>,
-        supervisor: spawner::Mailbox<E, Si, St, C>,
+        supervisor: spawner::Mailbox<E, L::Sink, L::Stream, C>,
     ) -> Handle<()> {
         self.context
             .clone()
@@ -158,7 +154,7 @@ impl<
     async fn run(
         self,
         tracker: tracker::Mailbox<E, C>,
-        supervisor: spawner::Mailbox<E, Si, St, C>,
+        supervisor: spawner::Mailbox<E, L::Sink, L::Stream, C>,
     ) {
         // Start listening for incoming connections
         let mut listener = self
