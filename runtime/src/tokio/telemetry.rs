@@ -4,7 +4,7 @@ use super::{
     tracing::{export, Config},
     Context,
 };
-use crate::{Metrics, Network, Spawner};
+use crate::{Metrics, Spawner};
 use axum::{
     body::Body,
     http::{header, Response, StatusCode},
@@ -12,6 +12,7 @@ use axum::{
     serve, Extension, Router,
 };
 use std::net::SocketAddr;
+use tokio::net::TcpListener;
 use tracing::Level;
 use tracing_subscriber::{layer::SubscriberExt, Registry};
 
@@ -33,11 +34,14 @@ pub fn init(context: Context, level: Level, metrics: Option<SocketAddr>, traces:
         context
             .with_label("metrics")
             .spawn(move |context| async move {
-                // Create a listener for the metrics server
-                let listener = context
-                    .bind(cfg)
+                // Create a tokio listener for the metrics server.
+                //
+                // We explicitly avoid using a runtime `Listener` because
+                // it will track bandwidth used for metrics and apply a policy
+                // for read/write timeouts fit for a p2p network.
+                let listener = TcpListener::bind(cfg)
                     .await
-                    .expect("Could not bind to metrics address");
+                    .expect("Failed to bind metrics server");
 
                 // Create a router for the metrics server
                 let app = Router::new()
@@ -53,10 +57,10 @@ pub fn init(context: Context, level: Level, metrics: Option<SocketAddr>, traces:
                     )
                     .layer(Extension(context));
 
-                // Serve the metrics over HTTP
+                // Serve the metrics over HTTP.
                 //
-                // `serve` will spawn its own tasks using `tokio`. These will not be tracked
-                // like metrics spawned by `context`.
+                // `serve` will spawn its own tasks using `tokio::spawn` (and there is no way to specify
+                // it to do otherwise). These tasks will not be tracked like metrics spawned using `Spawner`.
                 serve(listener, app.into_make_service())
                     .await
                     .expect("Could not serve metrics");
