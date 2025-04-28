@@ -28,6 +28,8 @@ pub struct Metrics {
     pub peer: Family<SequencerLabel, Counter>,
     /// Number of received messages by status
     pub receive: status::Counter,
+    /// Number of `subscribe` requests by status
+    pub subscribe: status::Counter,
     /// Number of `get` requests by status
     pub get: status::Counter,
     /// Number of digests being awaited. May be less than the number of waiters since there may be
@@ -48,6 +50,11 @@ impl Metrics {
             "receive",
             "Number of received messages by status",
             metrics.receive.clone(),
+        );
+        context.register(
+            "subscribe",
+            "Number of `subscribe` requests by status",
+            metrics.subscribe.clone(),
         );
         context.register(
             "get",
