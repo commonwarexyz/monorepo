@@ -1,4 +1,5 @@
-FROM arm64v8/ubuntu
+# Use same Ubuntu version as `commonware-deployer` (https://github.com/commonwarexyz/monorepo/blob/0d0b81090c85c887f7a1f3c2435e2c2f6e91ec2a/deployer/src/ec2/aws.rs#L60)
+FROM arm64v8/ubuntu:22.04
 
 # Install necessary tools and libraries
 RUN apt-get update && apt-get install -y \
