@@ -13,7 +13,7 @@ use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::time::Instant;
 
 /// Items pre-loaded into the archive.
-const ITEMS: u64 = 500_000;
+const ITEMS: u64 = 250_000;
 
 fn select_keys(keys: &[Key], reads: usize) -> Vec<Key> {
     let mut rng = StdRng::seed_from_u64(42);
