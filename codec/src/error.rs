@@ -26,8 +26,12 @@ pub enum Error {
     /// - The decoded varint value exceeds the capacity of the target integer type.
     ///
     /// See the [`varint`](crate::varint) module for encoding details.
-    #[error("Invalid Varint: Malformed or value out of range")]
-    InvalidVarint,
+    #[error("Invalid {0}-byte varint")]
+    InvalidVarint(usize),
+
+    /// Same as `InvalidVarint`, but specifically for `usize`-sized varints.
+    #[error("Invalid usize-sized varint")]
+    InvalidUsize,
 
     /// A byte representing a boolean was expected to be `0` (false) or `1` (true),
     /// but a different value was encountered during decoding.

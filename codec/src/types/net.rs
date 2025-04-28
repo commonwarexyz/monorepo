@@ -7,7 +7,7 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 impl Write for Ipv4Addr {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {
-        self.to_bits().write(buf);
+        self.to_bits().to_be().write(buf);
     }
 }
 
@@ -15,7 +15,7 @@ impl Read for Ipv4Addr {
     #[inline]
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let bits = <u32>::read(buf)?;
-        Ok(Ipv4Addr::from_bits(bits))
+        Ok(Ipv4Addr::from_bits(u32::from_be(bits)))
     }
 }
 
@@ -26,7 +26,7 @@ impl FixedSize for Ipv4Addr {
 impl Write for Ipv6Addr {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {
-        self.to_bits().write(buf);
+        self.to_bits().to_be().write(buf);
     }
 }
 
@@ -34,7 +34,7 @@ impl Read for Ipv6Addr {
     #[inline]
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let bits = <u128>::read(buf)?;
-        Ok(Ipv6Addr::from_bits(bits))
+        Ok(Ipv6Addr::from_bits(u128::from_be(bits)))
     }
 }
 
@@ -90,11 +90,11 @@ impl Write for SocketAddr {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
             SocketAddr::V4(v4) => {
-                u8::write(&4, buf);
+                4u8.write(buf);
                 v4.write(buf);
             }
             SocketAddr::V6(v6) => {
-                u8::write(&6, buf);
+                6u8.write(buf);
                 v6.write(buf);
             }
         }

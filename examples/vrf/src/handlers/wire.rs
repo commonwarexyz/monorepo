@@ -1,5 +1,5 @@
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error, FixedSize, Read, ReadExt, ReadRangeExt, Write};
+use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::bls12381::primitives::{
     group,
     poly::{self, Eval},
@@ -20,14 +20,14 @@ pub struct Dkg<Sig: Array> {
 
 impl<Sig: Array> Write for Dkg<Sig> {
     fn write(&self, buf: &mut impl BufMut) {
-        self.round.write(buf);
+        UInt(self.round).write(buf);
         self.payload.write(buf);
     }
 }
 
 impl<Sig: Array> Read<usize> for Dkg<Sig> {
     fn read_cfg(buf: &mut impl Buf, num_players: &usize) -> Result<Self, Error> {
-        let round = u64::read(buf)?;
+        let round = UInt::read(buf)?.into();
         let payload = Payload::<Sig>::read_cfg(buf, num_players)?;
         Ok(Self { round, payload })
     }
@@ -35,7 +35,7 @@ impl<Sig: Array> Read<usize> for Dkg<Sig> {
 
 impl<Sig: Array> EncodeSize for Dkg<Sig> {
     fn encode_size(&self) -> usize {
-        self.round.encode_size() + self.payload.encode_size()
+        UInt(self.round).encode_size() + self.payload.encode_size()
     }
 }
 
@@ -122,7 +122,7 @@ impl<Sig: Array> Write for Payload<Sig> {
                 signature,
             } => {
                 buf.put_u8(2);
-                public_key.write(buf);
+                UInt(*public_key).write(buf);
                 signature.write(buf);
             }
             Payload::Commitment {
@@ -163,7 +163,7 @@ impl<Sig: Array> Read<usize> for Payload<Sig> {
                 share: group::Share::read(buf)?,
             },
             2 => Payload::Ack {
-                public_key: u32::read(buf)?,
+                public_key: UInt::read(buf)?.into(),
                 signature: Sig::read(buf)?,
             },
             3 => {
@@ -195,8 +195,11 @@ impl<Sig: Array> EncodeSize for Payload<Sig> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Payload::Start { group } => group.encode_size(),
-            Payload::Share { commitment, .. } => commitment.encode_size() + group::Share::SIZE,
-            Payload::Ack { .. } => u32::SIZE + Sig::SIZE,
+            Payload::Share { commitment, share } => commitment.encode_size() + share.encode_size(),
+            Payload::Ack {
+                public_key,
+                signature,
+            } => UInt(*public_key).encode_size() + signature.encode_size(),
             Payload::Commitment {
                 commitment,
                 acks,
@@ -226,27 +229,29 @@ pub struct Vrf {
 
 impl Write for Vrf {
     fn write(&self, buf: &mut impl BufMut) {
-        self.round.write(buf);
+        UInt(self.round).write(buf);
         self.signature.write(buf);
     }
 }
 
 impl Read for Vrf {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let round = u64::read(buf)?;
+        let round = UInt::read(buf)?.into();
         let signature = Eval::<group::Signature>::read(buf)?;
         Ok(Self { round, signature })
     }
 }
 
-impl FixedSize for Vrf {
-    const SIZE: usize = u64::SIZE + Eval::<group::Signature>::SIZE;
+impl EncodeSize for Vrf {
+    fn encode_size(&self) -> usize {
+        UInt(self.round).encode_size() + self.signature.encode_size()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::{Decode, DecodeExt, Encode};
+    use commonware_codec::{Decode, DecodeExt, Encode, FixedSize};
     use commonware_cryptography::{
         bls12381::primitives::{
             group::{self, Element},

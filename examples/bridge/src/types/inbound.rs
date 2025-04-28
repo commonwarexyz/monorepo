@@ -165,8 +165,10 @@ impl<D: Digest> Read for PutFinalization<D> {
     }
 }
 
-impl<D: Digest> FixedSize for PutFinalization<D> {
-    const SIZE: usize = group::Public::SIZE + Finalization::<D>::SIZE;
+impl<D: Digest> EncodeSize for PutFinalization<D> {
+    fn encode_size(&self) -> usize {
+        self.network.encode_size() + self.finalization.encode_size()
+    }
 }
 
 /// Message to retrieve the latest finality certificate from the indexer's storage.

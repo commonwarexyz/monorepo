@@ -197,7 +197,8 @@ mod tests {
     use super::*;
     use crate::index::translator::{FourCap, TwoCap};
     use crate::journal::Error as JournalError;
-    use commonware_codec::{DecodeExt, Error as CodecError};
+    use commonware_codec::varint::UInt;
+    use commonware_codec::{DecodeExt, EncodeSize, Error as CodecError};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
     use commonware_utils::array::FixedBytes;
@@ -398,7 +399,7 @@ mod tests {
                 .open("test_partition", &section.to_be_bytes())
                 .await
                 .unwrap();
-            let value_location = 4 + 8 + 64 + 4;
+            let value_location = 4 /* journal size */ + UInt(1u64).encode_size() as u64 /* index */ + 64 + 4 /* value length */;
             blob.write_at(b"testdaty", value_location).await.unwrap();
             blob.close().await.unwrap();
 
