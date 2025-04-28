@@ -27,6 +27,9 @@ pub struct Config<C: Scheme> {
     pub dial_rate: Quota,
 }
 
+type Sink<E> = <<E as Network>::Listener as Listener>::Sink;
+type Stream<E> = <<E as Network>::Listener as Listener>::Stream;
+
 pub struct Actor<E: Spawner + Clock + GClock + Network + Metrics, C: Scheme> {
     context: E,
 
@@ -58,12 +61,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Schem
     async fn dial_peers(
         &self,
         tracker: &mut tracker::Mailbox<E, C>,
-        supervisor: &mut spawner::Mailbox<
-            E,
-            <<E as Network>::Listener as Listener>::Sink,
-            <<E as Network>::Listener as Listener>::Stream,
-            C,
-        >,
+        supervisor: &mut spawner::Mailbox<E, Sink<E>, Stream<E>, C>,
     ) {
         for (peer, address, reservation) in tracker.dialable().await {
             // Check if we have hit rate limit for dialing and if so, skip (we don't
@@ -129,12 +127,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Schem
     pub fn start(
         self,
         tracker: tracker::Mailbox<E, C>,
-        supervisor: spawner::Mailbox<
-            E,
-            <<E as Network>::Listener as Listener>::Sink,
-            <<E as Network>::Listener as Listener>::Stream,
-            C,
-        >,
+        supervisor: spawner::Mailbox<E, Sink<E>, Stream<E>, C>,
     ) -> Handle<()> {
         self.context
             .clone()
@@ -144,12 +137,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Schem
     async fn run(
         mut self,
         mut tracker: tracker::Mailbox<E, C>,
-        mut supervisor: spawner::Mailbox<
-            E,
-            <<E as Network>::Listener as Listener>::Sink,
-            <<E as Network>::Listener as Listener>::Stream,
-            C,
-        >,
+        mut supervisor: spawner::Mailbox<E, Sink<E>, Stream<E>, C>,
     ) {
         loop {
             // Attempt to dial peers we know about

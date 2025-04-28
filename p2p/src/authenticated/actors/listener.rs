@@ -24,6 +24,9 @@ pub struct Config<C: Scheme> {
     pub allowed_incoming_connection_rate: Quota,
 }
 
+type Sink<E> = <<E as Network>::Listener as Listener>::Sink;
+type Stream<E> = <<E as Network>::Listener as Listener>::Stream;
+
 pub struct Actor<
     E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metrics,
     C: Scheme,
@@ -67,15 +70,10 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         context: E,
         address: SocketAddr,
         stream_cfg: StreamConfig<C>,
-        sink: <<E as Network>::Listener as commonware_runtime::Listener>::Sink,
-        stream: <<E as Network>::Listener as commonware_runtime::Listener>::Stream,
+        sink: Sink<E>,
+        stream: Stream<E>,
         mut tracker: tracker::Mailbox<E, C>,
-        mut supervisor: spawner::Mailbox<
-            E,
-            <<E as Network>::Listener as commonware_runtime::Listener>::Sink,
-            <<E as Network>::Listener as commonware_runtime::Listener>::Stream,
-            C,
-        >,
+        mut supervisor: spawner::Mailbox<E, Sink<E>, Stream<E>, C>,
     ) {
         // Create span
         let span = debug_span!("listener", ?address);
@@ -137,12 +135,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
     pub fn start(
         self,
         tracker: tracker::Mailbox<E, C>,
-        supervisor: spawner::Mailbox<
-            E,
-            <<E as Network>::Listener as commonware_runtime::Listener>::Sink,
-            <<E as Network>::Listener as commonware_runtime::Listener>::Stream,
-            C,
-        >,
+        supervisor: spawner::Mailbox<E, Sink<E>, Stream<E>, C>,
     ) -> Handle<()> {
         self.context
             .clone()
@@ -152,12 +145,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
     async fn run(
         self,
         tracker: tracker::Mailbox<E, C>,
-        supervisor: spawner::Mailbox<
-            E,
-            <<E as Network>::Listener as commonware_runtime::Listener>::Sink,
-            <<E as Network>::Listener as commonware_runtime::Listener>::Stream,
-            C,
-        >,
+        supervisor: spawner::Mailbox<E, Sink<E>, Stream<E>, C>,
     ) {
         // Start listening for incoming connections
         let mut listener = self
