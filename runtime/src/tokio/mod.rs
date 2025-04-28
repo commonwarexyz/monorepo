@@ -11,7 +11,7 @@
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, tokio, Metrics};
 //!
-//! let executor = tokio::Runner::default();
+//! let executor = tokio::runner::Runner::default();
 //! executor.start(|context| async move {
 //!     println!("Parent started");
 //!     let result = context.with_label("child").spawn(|_| async move {
@@ -24,6 +24,8 @@
 //! ```
 
 pub(super) mod metrics;
+pub mod runner;
+
 mod runtime;
 pub use runtime::*;
 pub mod telemetry;

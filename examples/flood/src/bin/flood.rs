@@ -63,7 +63,7 @@ fn main() {
         worker_threads: config.worker_threads,
         ..Default::default()
     };
-    let executor = tokio::Runner::new(cfg);
+    let executor = tokio::runner::Runner::new(cfg);
 
     // Start runtime
     executor.start(|context| async move {

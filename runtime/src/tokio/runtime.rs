@@ -1,7 +1,7 @@
 #[cfg(feature = "iouring")]
-use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage};
+use crate::storage::iouring::Storage as IoUringStorage;
 #[cfg(not(feature = "iouring"))]
-use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
+use crate::storage::tokio::Storage as TokioStorage;
 
 use crate::storage::metered::Storage as MeteredStorage;
 use crate::tokio::metrics::{Metrics, Work};
@@ -24,7 +24,7 @@ use std::{
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{tcp::OwnedReadHalf, tcp::OwnedWriteHalf, TcpListener, TcpStream},
-    runtime::{Builder, Runtime},
+    runtime::Runtime,
     time::timeout,
 };
 use tracing::warn;
@@ -100,90 +100,12 @@ impl Default for Config {
 
 /// Runtime based on [Tokio](https://tokio.rs).
 pub struct Executor {
-    cfg: Config,
-    registry: Mutex<Registry>,
-    metrics: Arc<Metrics>,
-    runtime: Runtime,
-    signaler: Mutex<Signaler>,
-    signal: Signal,
-}
-
-/// Implementation of [crate::Runner] for the `tokio` runtime.
-pub struct Runner {
-    cfg: Config,
-}
-
-impl Default for Runner {
-    fn default() -> Self {
-        Self::new(Config::default())
-    }
-}
-
-impl Runner {
-    /// Initialize a new `tokio` runtime with the given number of threads.
-    pub fn new(cfg: Config) -> Self {
-        Self { cfg }
-    }
-}
-
-impl crate::Runner for Runner {
-    type Context = Context;
-
-    fn start<F, Fut>(self, f: F) -> Fut::Output
-    where
-        F: FnOnce(Self::Context) -> Fut,
-        Fut: Future,
-    {
-        // Create a new registry
-        let mut registry = Registry::default();
-        let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
-
-        // Initialize runtime
-        let metrics = Arc::new(Metrics::init(runtime_registry));
-        let runtime = Builder::new_multi_thread()
-            .worker_threads(self.cfg.worker_threads)
-            .max_blocking_threads(self.cfg.max_blocking_threads)
-            .enable_all()
-            .build()
-            .expect("failed to create Tokio runtime");
-        let (signaler, signal) = Signaler::new();
-
-        #[cfg(feature = "iouring")]
-        let storage = MeteredStorage::new(
-            IoUringStorage::start(&IoUringConfig {
-                storage_directory: self.cfg.storage_directory.clone(),
-                ring_config: Default::default(),
-            }),
-            runtime_registry,
-        );
-
-        #[cfg(not(feature = "iouring"))]
-        let storage = MeteredStorage::new(
-            TokioStorage::new(TokioStorageConfig::new(
-                self.cfg.storage_directory.clone(),
-                self.cfg.maximum_buffer_size,
-            )),
-            runtime_registry,
-        );
-
-        let executor = Arc::new(Executor {
-            cfg: self.cfg,
-            registry: Mutex::new(registry),
-            metrics,
-            runtime,
-            signaler: Mutex::new(signaler),
-            signal,
-        });
-
-        let context = Context {
-            storage,
-            label: String::new(),
-            spawned: false,
-            executor: executor.clone(),
-        };
-
-        executor.runtime.block_on(f(context))
-    }
+    pub(super) cfg: Config,
+    pub(super) registry: Mutex<Registry>,
+    pub(super) metrics: Arc<Metrics>,
+    pub(super) runtime: Runtime,
+    pub(super) signaler: Mutex<Signaler>,
+    pub(super) signal: Signal,
 }
 
 #[cfg(feature = "iouring")]
@@ -196,10 +118,10 @@ type Storage = MeteredStorage<TokioStorage>;
 /// [`crate::Network`], and [`crate::Storage`] for the `tokio`
 /// runtime.
 pub struct Context {
-    label: String,
-    spawned: bool,
-    executor: Arc<Executor>,
-    storage: Storage,
+    pub(super) label: String,
+    pub(super) spawned: bool,
+    pub(super) executor: Arc<Executor>,
+    pub(super) storage: Storage,
 }
 
 impl Clone for Context {

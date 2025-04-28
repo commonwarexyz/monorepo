@@ -1,6 +1,6 @@
 use super::{append_random_data, get_journal};
 use commonware_runtime::{
-    benchmarks::{context, tokio},
+    benchmarks::{context, tokio::Runner as TokioBenchRunner},
     tokio::Context,
 };
 use commonware_storage::journal::fixed::Journal;
@@ -27,7 +27,7 @@ async fn bench_run(journal: &Journal<Context, FixedBytes<ITEM_SIZE>>, items_to_r
 /// Benchmark the sequential read of items from a journal containing exactly that
 /// number of items.
 fn bench_fixed_read_sequential(c: &mut Criterion) {
-    let runner = tokio::Runner::default();
+    let runner = TokioBenchRunner::default();
     for items in [1_000, 10_000, 100_000, 500_000] {
         c.bench_function(
             &format!("{}/items={} size={}", module_path!(), items, ITEM_SIZE),

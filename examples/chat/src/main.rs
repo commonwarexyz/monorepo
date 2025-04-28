@@ -74,7 +74,7 @@ const APPLICATION_NAMESPACE: &[u8] = b"commonware-chat";
 #[doc(hidden)]
 fn main() {
     // Initialize context
-    let executor = tokio::Runner::default();
+    let executor = tokio::runner::Runner::default();
 
     // Parse arguments
     let matches = Command::new("commonware-chat")

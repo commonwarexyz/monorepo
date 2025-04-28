@@ -459,7 +459,7 @@ mod tests {
 
     #[test_traced]
     fn test_create_pool() {
-        let executor = tokio::Runner::default();
+        let executor = tokio::runner::Runner::default();
         executor.start(|context| async move {
             // Create a thread pool with 4 threads
             let pool = create_pool(context.with_label("pool"), 4).unwrap();

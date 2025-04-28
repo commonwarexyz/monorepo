@@ -1,7 +1,7 @@
 use super::{append_random_data, get_journal};
 use commonware_runtime::{
-    benchmarks::{context, tokio},
-    tokio::{Config, Context, Runner},
+    benchmarks::{context, tokio::Runner as TokioBenchRunner},
+    tokio::{runner::Runner as TokioRunner, Config, Context},
     Runner as _,
 };
 use commonware_storage::journal::fixed::Journal;
@@ -53,7 +53,7 @@ fn bench_fixed_read_random(c: &mut Criterion) {
     let cfg = Config::default();
 
     // Generate a large temp journal with random data.
-    let runner = Runner::new(cfg.clone());
+    let runner = TokioRunner::new(cfg.clone());
     runner.start(|ctx| async move {
         // Create a large temp journal with random data.
         let mut j = get_journal(ctx, PARTITION, ITEMS_PER_BLOB).await;
@@ -62,7 +62,7 @@ fn bench_fixed_read_random(c: &mut Criterion) {
     });
 
     // Run the benchmarks
-    let runner = tokio::Runner::new(cfg.clone());
+    let runner = TokioBenchRunner::new(cfg.clone());
     for mode in ["serial", "concurrent"] {
         for items_to_read in [100, 1_000, 10_000, 100_000] {
             c.bench_function(
@@ -95,7 +95,7 @@ fn bench_fixed_read_random(c: &mut Criterion) {
     }
 
     // Clean up the temp journal
-    let runner = Runner::new(cfg);
+    let runner = TokioRunner::new(cfg);
     runner.start(|context| async move {
         let j = get_journal::<ITEM_SIZE>(context, PARTITION, ITEMS_PER_BLOB).await;
         j.destroy().await.unwrap();

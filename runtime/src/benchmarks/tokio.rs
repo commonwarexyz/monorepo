@@ -15,7 +15,7 @@ use futures::Future;
 /// use std::time::Duration;
 ///
 /// fn my_benchmark(c: &mut Criterion) {
-///     let executor = tokio::Runner::default();
+///     let executor = tokio::runner::Runner::default();
 ///     c.bench_function("sleep_benchmark", |b| {
 ///         b.to_async(&executor).iter_batched(|| (),
 ///         |_| async {
@@ -47,7 +47,7 @@ impl Default for Runner {
 
 impl AsyncExecutor for &Runner {
     fn block_on<T>(&self, future: impl Future<Output = T>) -> T {
-        let runner = tokio::Runner::new(self.cfg.clone());
+        let runner = tokio::runner::Runner::new(self.cfg.clone());
 
         let result = runner.start(|ctx| {
             // Create and store our context

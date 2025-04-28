@@ -141,7 +141,7 @@ fn main() {
         storage_directory: storage_directory.into(),
         ..Default::default()
     };
-    let executor = tokio::Runner::new(runtime_cfg.clone());
+    let executor = tokio::runner::Runner::new(runtime_cfg.clone());
 
     // Configure indexer
     let indexer_cfg = public_key::Config {

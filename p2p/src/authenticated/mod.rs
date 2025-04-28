@@ -102,7 +102,7 @@
 //!
 //! // Configure context
 //! let runtime_cfg = tokio::Config::default();
-//! let runner = tokio::Runner::new(runtime_cfg.clone());
+//! let runner = tokio::runner::Runner::new(runtime_cfg.clone());
 //!
 //! // Generate identity
 //! //
@@ -470,7 +470,7 @@ mod tests {
     #[test_traced]
     fn test_tokio_connectivity() {
         let cfg = tokio::Config::default();
-        let executor = tokio::Runner::new(cfg.clone());
+        let executor = tokio::runner::Runner::new(cfg.clone());
         executor.start(|context| async move {
             const MAX_MESSAGE_SIZE: usize = 1_024 * 1_024; // 1MB
             let base_port = 3000;

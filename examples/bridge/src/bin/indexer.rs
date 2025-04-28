@@ -131,7 +131,7 @@ fn main() {
     }
 
     // Create context
-    let executor = tokio::Runner::default();
+    let executor = tokio::runner::Runner::default();
     executor.start(|context| async move {
         // Create message handler
         let (handler, mut receiver) = mpsc::unbounded();
