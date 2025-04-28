@@ -13,7 +13,7 @@ use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::time::Instant;
 
 /// Items pre-loaded into the archive.
-const ITEMS: u64 = 1_000_000;
+const ITEMS: u64 = 250_000;
 
 fn select_keys(keys: &[Key], reads: usize) -> Vec<Key> {
     let mut rng = StdRng::seed_from_u64(42);
@@ -75,7 +75,7 @@ fn bench_get(c: &mut Criterion) {
         let runner = tokio::Runner::new(cfg.clone());
         for mode in ["serial", "concurrent"] {
             for pattern in ["key", "index"] {
-                for reads in [1_000, 10_000, 100_000] {
+                for reads in [1_000, 10_000, 50_000] {
                     let label = format!(
                         "{}/mode={} pattern={} comp={} reads={}",
                         module_path!(),
