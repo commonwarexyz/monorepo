@@ -100,7 +100,7 @@ impl Default for Config {
 }
 
 /// Runtime based on [Tokio](https://tokio.rs).
-pub struct Executor {
+pub(super) struct Executor {
     pub(super) cfg: Config,
     pub(super) registry: Mutex<Registry>,
     pub(super) metrics: Arc<Metrics>,
