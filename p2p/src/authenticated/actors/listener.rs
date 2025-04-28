@@ -36,9 +36,6 @@ pub struct Actor<
     rate_limiter: RateLimiter<NotKeyed, InMemoryState, E, NoOpMiddleware<E::Instant>>,
 
     handshakes_rate_limited: Counter,
-
-    _phantom_si: PhantomData<L::Sink>,
-    _phantom_st: PhantomData<L::Stream>,
     _phantom_l: PhantomData<L>,
 }
 
@@ -68,9 +65,6 @@ impl<
             ),
 
             handshakes_rate_limited,
-
-            _phantom_si: PhantomData,
-            _phantom_st: PhantomData,
             _phantom_l: PhantomData,
         }
     }
