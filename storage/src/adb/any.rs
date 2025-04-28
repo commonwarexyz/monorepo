@@ -12,7 +12,7 @@ use crate::{
         operation::{Operation, Type},
         Error,
     },
-    index::{translator::EightCap, Index},
+    index::{translator::EightCap, Index, Translator},
     journal::fixed::{Config as JConfig, Journal},
     mmr::{
         bitmap::Bitmap,
@@ -51,7 +51,13 @@ pub struct Config {
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub struct Any<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher> {
+pub struct Any<
+    E: RStorage + Clock + Metrics,
+    K: Array,
+    V: Array,
+    H: CHasher,
+    T: Translator = EightCap,
+> {
     /// An MMR over digests of the operations applied to the db. The number of leaves in this MMR
     /// always equals the number of operations in the unpruned `log`.
     ops: Mmr<E, H>,
@@ -72,7 +78,7 @@ pub struct Any<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher> {
     /// A snapshot of all currently active operations in the form of a map from each key to the
     /// location in the log containing its most recent update. Only contains the keys that currently
     /// have a value (that is, deleted keys are not in the map).
-    snapshot: Index<EightCap, u64>,
+    snapshot: Index<T, u64>,
 
     /// The number of operations that are pending commit.
     uncommitted_ops: u64,
@@ -80,21 +86,30 @@ pub struct Any<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher> {
 
 /// The result of a database `update` operation.
 pub enum UpdateResult {
-    NoOp,              // tried to set a key to its current value
-    Inserted(u64),     // key was not previously in the snapshot & its new loc is the wrapped value.
-    Updated(u64, u64), // key was previously in the snapshot & its (old, new) loc pair is wrapped.
+    /// Tried to set a key to its current value.
+    NoOp,
+    /// Key was not previously in the snapshot & its new loc is the wrapped value.
+    Inserted(u64),
+    /// Key was previously in the snapshot & its (old, new) loc pair is wrapped.
+    Updated(u64, u64),
 }
 
-impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher> Any<E, K, V, H> {
+impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translator>
+    Any<E, K, V, H, T>
+{
     /// Returns any `Any` adb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
-    pub async fn init(context: E, hasher: &mut H, cfg: Config) -> Result<Self, Error> {
-        let mut snapshot: Index<EightCap, u64> =
-            Index::init(context.with_label("snapshot"), EightCap);
+    pub async fn init(
+        context: E,
+        hasher: &mut H,
+        cfg: Config,
+        translator: T,
+    ) -> Result<Self, Error> {
+        let mut snapshot: Index<T, u64> = Index::init(context.with_label("snapshot"), translator);
         let (mmr, log) = Self::init_mmr_and_log(context, hasher, cfg).await?;
 
         let start_leaf_num = leaf_pos_to_num(mmr.pruned_to_pos()).unwrap();
-        let inactivity_floor_loc = Self::build_snapshot_from_log::<32 /* value is unused*/>(
+        let inactivity_floor_loc = Self::build_snapshot_from_log::<0 /* value is unused*/>(
             hasher,
             start_leaf_num,
             &log,
@@ -198,7 +213,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher> Any<E, K, V,
         hasher: &mut H,
         start_leaf_num: u64,
         log: &Journal<E, Operation<K, V>>,
-        snapshot: &mut Index<EightCap, u64>,
+        snapshot: &mut Index<T, u64>,
         mut bitmap: Option<&mut Bitmap<H, N>>,
     ) -> Result<u64, Error> {
         let mut inactivity_floor_loc = start_leaf_num;
@@ -207,7 +222,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher> Any<E, K, V,
             assert_eq!(start_leaf_num, bitmap.bit_count());
         }
 
-        //  TODO: Because all operations are idempotent, we could potentially parallelize this via
+        // TODO: Because all operations are idempotent, we could potentially parallelize this via
         // replay_all by keeping track of the location of each operation and only applying it if it
         // is more recent than the last operation for the same key.
         for i in start_leaf_num..log_size {
@@ -229,7 +244,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher> Any<E, K, V,
                 }
                 Type::Update(key, _) => {
                     let update_result =
-                        Any::<E, K, V, H>::update_loc(snapshot, log, key, None, i).await?;
+                        Any::<E, K, V, H, T>::update_loc(snapshot, log, key, None, i).await?;
                     if let Some(ref mut bitmap_ref) = bitmap {
                         match update_result {
                             UpdateResult::NoOp => unreachable!("unexpected no-op update"),
@@ -262,7 +277,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher> Any<E, K, V,
     /// if the key is already assigned that value, in which case this is a no-op, and `None` is
     /// returned.
     async fn update_loc(
-        snapshot: &mut Index<EightCap, u64>,
+        snapshot: &mut Index<T, u64>,
         log: &Journal<E, Operation<K, V>>,
         key: K,
         value: Option<&V>,
@@ -342,7 +357,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher> Any<E, K, V,
         value: V,
     ) -> Result<UpdateResult, Error> {
         let new_loc = self.op_count();
-        let res = Any::<E, K, V, H>::update_loc(
+        let res = Any::<_, _, _, H, _>::update_loc(
             &mut self.snapshot,
             &self.log,
             key.clone(),
@@ -463,7 +478,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher> Any<E, K, V,
 
         let digests = ops
             .iter()
-            .map(|op| Any::<E, _, _, _>::op_digest(hasher, op))
+            .map(|op| Any::<E, _, _, _, T>::op_digest(hasher, op))
             .collect::<Vec<_>>();
 
         proof.verify_range_inclusion(hasher, digests, start_pos, end_pos, root_hash)
@@ -631,7 +646,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher> Any<E, K, V,
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::mmr::mem::Mmr as MemMmr;
+    use crate::{
+        index::translator::{EightCap, TwoCap},
+        mmr::mem::Mmr as MemMmr,
+    };
     use commonware_codec::DecodeExt;
     use commonware_cryptography::{hash, sha256::Digest, Hasher as CHasher, Sha256};
     use commonware_macros::test_traced;
@@ -656,8 +674,8 @@ mod test {
     async fn open_db<E: RStorage + Clock + Metrics>(
         context: E,
         hasher: &mut Sha256,
-    ) -> Any<E, Digest, Digest, Sha256> {
-        Any::<E, Digest, Digest, Sha256>::init(context, hasher, any_db_config())
+    ) -> Any<E, Digest, Digest, Sha256, EightCap> {
+        Any::<E, Digest, Digest, Sha256, EightCap>::init(context, hasher, any_db_config(), EightCap)
             .await
             .unwrap()
     }
@@ -943,13 +961,15 @@ mod test {
             assert!(start_loc < db.inactivity_floor_loc);
             for i in start_loc..end_loc {
                 let (proof, log) = db.proof(i, max_ops).await.unwrap();
-                assert!(Any::<deterministic::Context, _, _, _>::verify_proof(
-                    &mut hasher,
-                    &proof,
-                    i,
-                    &log,
-                    &root
-                ));
+                assert!(
+                    Any::<deterministic::Context, _, _, _, EightCap>::verify_proof(
+                        &mut hasher,
+                        &proof,
+                        i,
+                        &log,
+                        &root
+                    )
+                );
             }
         });
     }
@@ -1118,15 +1138,19 @@ mod test {
 
             // Initialize the db's mmr/log.
             let cfg = any_db_config();
-            let (mmr, log) =
-                Any::<_, Digest, Digest, _>::init_mmr_and_log(context.clone(), &mut hasher, cfg)
-                    .await
-                    .unwrap();
+            let (mmr, log) = Any::<_, Digest, Digest, _, TwoCap>::init_mmr_and_log(
+                context.clone(),
+                &mut hasher,
+                cfg,
+            )
+            .await
+            .unwrap();
             let start_leaf_num = leaf_pos_to_num(mmr.pruned_to_pos()).unwrap();
 
-            // Replay log to populate the bitmap.
-            let mut snapshot: Index<EightCap, u64> =
-                Index::init(context.with_label("snapshot"), EightCap);
+            // Replay log to populate the bitmap.  Use a TwoCap instead of
+            // EightCap here so we exercise some collisions.
+            let mut snapshot: Index<TwoCap, u64> =
+                Index::init(context.with_label("snapshot"), TwoCap);
             let inactivity_floor_loc = Any::build_snapshot_from_log(
                 &mut hasher,
                 start_leaf_num,
@@ -1138,7 +1162,7 @@ mod test {
             .unwrap();
 
             // Check the recovered state is correct.
-            let db = Any {
+            let db = Any::<_, _, _, _, TwoCap> {
                 ops: mmr,
                 log,
                 snapshot,
