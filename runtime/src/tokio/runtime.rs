@@ -115,8 +115,8 @@ type Storage = MeteredStorage<IoUringStorage>;
 #[cfg(not(feature = "iouring"))]
 type Storage = MeteredStorage<TokioStorage>;
 
-/// Implementation of [`crate::Spawner`], [`crate::Clock`],
-/// [`crate::Network`], and [`crate::Storage`] for the `tokio`
+/// Implementation of [crate::Spawner], [crate::Clock],
+/// [crate::Network], and [crate::Storage] for the [tokio]
 /// runtime.
 pub struct Context {
     pub(super) label: String,
