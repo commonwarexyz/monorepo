@@ -47,7 +47,7 @@ pub fn init(context: Context, level: Level, metrics: Option<SocketAddr>, traces:
                                 .status(StatusCode::OK)
                                 .header(header::CONTENT_TYPE, "text/plain; version=0.0.4")
                                 .body(ctx.encode())
-                                .expect("failed to create response")
+                                .expect("Failed to create response")
                         }),
                     )
                     .layer(Extension(context));
