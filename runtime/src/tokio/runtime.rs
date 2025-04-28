@@ -180,7 +180,7 @@ pub struct Executor {
     signal: Signal,
 }
 
-/// Implementation of [`crate::Runner`] for the `tokio` runtime.
+/// Implementation of [crate::Runner] for the `tokio` runtime.
 pub struct Runner {
     cfg: Config,
 }
@@ -248,8 +248,8 @@ impl crate::Runner for Runner {
     }
 }
 
-/// Implementation of [`crate::Spawner`], [`crate::Clock`],
-/// [`crate::Network`], and [`crate::Storage`] for the `tokio`
+/// Implementation of [crate::Spawner], [crate::Clock],
+/// [crate::Network], and [crate::Storage] for the `tokio`
 /// runtime.
 pub struct Context {
     label: String,
@@ -512,7 +512,7 @@ impl crate::Network for Context {
     }
 }
 
-/// Implementation of [`crate::Listener`] for the `tokio` runtime.
+/// Implementation of [crate::Listener] for the `tokio` runtime.
 pub struct Listener {
     context: Context,
     listener: TcpListener,
@@ -562,7 +562,7 @@ impl axum::serve::Listener for Listener {
     }
 }
 
-/// Implementation of [`crate::Sink`] for the `tokio` runtime.
+/// Implementation of [crate::Sink] for the `tokio` runtime.
 pub struct Sink {
     context: Context,
     sink: OwnedWriteHalf,
@@ -587,7 +587,7 @@ impl crate::Sink for Sink {
     }
 }
 
-/// Implementation of [`crate::Stream`] for the `tokio` runtime.
+/// Implementation of [crate::Stream] for the `tokio` runtime.
 pub struct Stream {
     context: Context,
     stream: OwnedReadHalf,

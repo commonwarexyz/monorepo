@@ -394,7 +394,7 @@ enum State {
     Context(Context),
 }
 
-/// Implementation of [`crate::Runner`] for the `deterministic` runtime.
+/// Implementation of [crate::Runner] for the `deterministic` runtime.
 pub struct Runner {
     state: State,
 }
@@ -722,8 +722,8 @@ impl Tasks {
     }
 }
 
-/// Implementation of [`crate::Spawner`], [`crate::Clock`],
-/// [`crate::Network`], and [`crate::Storage`] for the `deterministic`
+/// Implementation of [crate::Spawner], [crate::Clock],
+/// [crate::Network], and [crate::Storage] for the `deterministic`
 /// runtime.
 pub struct Context {
     label: String,
@@ -1128,7 +1128,7 @@ type Dialable = mpsc::UnboundedSender<(
     mocks::Stream, // Dialer -> Listener
 )>;
 
-/// Implementation of [`crate::Network`] for the `deterministic` runtime.
+/// Implementation of [crate::Network] for the `deterministic` runtime.
 ///
 /// When a dialer connects to a listener, the listener is given a new ephemeral port
 /// from the range `32768..61000`. To keep things simple, it is not possible to
@@ -1235,7 +1235,7 @@ impl crate::Network for Context {
     }
 }
 
-/// Implementation of [`crate::Listener`] for the `deterministic` runtime.
+/// Implementation of [crate::Listener] for the `deterministic` runtime.
 pub struct Listener {
     metrics: Arc<Metrics>,
     auditor: Arc<Auditor>,
@@ -1269,7 +1269,7 @@ impl crate::Listener for Listener {
     }
 }
 
-/// Implementation of [`crate::Sink`] for the `deterministic` runtime.
+/// Implementation of [crate::Sink] for the `deterministic` runtime.
 pub struct Sink {
     metrics: Arc<Metrics>,
     auditor: Arc<Auditor>,
@@ -1287,7 +1287,7 @@ impl crate::Sink for Sink {
     }
 }
 
-/// Implementation of [`crate::Stream`] for the `deterministic` runtime.
+/// Implementation of [crate::Stream] for the `deterministic` runtime.
 pub struct Stream {
     auditor: Arc<Auditor>,
     me: SocketAddr,

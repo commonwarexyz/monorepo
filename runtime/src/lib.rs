@@ -250,7 +250,11 @@ pub trait Network: Clone + Send + Sync + 'static {
 /// Interface that any runtime must implement to handle
 /// incoming network connections.
 pub trait Listener: Sync + Send + 'static {
+    /// The type of [Sink] that's returned when accepting a connection.
+    /// This is used to send data to the remote connection.
     type Sink: Sink;
+    /// The type of [Stream] that's returned when accepting a connection.
+    /// This is used to receive data from the remote connection.
     type Stream: Stream;
 
     /// Accept an incoming connection.
