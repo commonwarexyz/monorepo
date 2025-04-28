@@ -15,7 +15,6 @@ use rand::{rngs::OsRng, CryptoRng, RngCore};
 use std::{
     env,
     future::Future,
-    io,
     net::SocketAddr,
     path::PathBuf,
     sync::{Arc, Mutex},
@@ -28,6 +27,8 @@ use tokio::{
     time::timeout,
 };
 use tracing::warn;
+
+use super::listener::Listener;
 
 /// Configuration for the `tokio` runtime.
 #[derive(Clone)]
@@ -367,57 +368,10 @@ impl crate::Network<Listener, Sink, Stream> for Context {
     }
 }
 
-/// Implementation of [`crate::Listener`] for the `tokio` runtime.
-pub struct Listener {
-    context: Context,
-    listener: TcpListener,
-}
-
-impl crate::Listener<Sink, Stream> for Listener {
-    async fn accept(&mut self) -> Result<(SocketAddr, Sink, Stream), Error> {
-        // Accept a new TCP stream
-        let (stream, addr) = self.listener.accept().await.map_err(|_| Error::Closed)?;
-        self.context.executor.metrics.inbound_connections.inc();
-
-        // Set TCP_NODELAY if configured
-        if let Some(tcp_nodelay) = self.context.executor.cfg.tcp_nodelay {
-            if let Err(err) = stream.set_nodelay(tcp_nodelay) {
-                warn!(?err, "failed to set TCP_NODELAY");
-            }
-        }
-
-        // Return the sink and stream
-        let context = self.context.clone();
-        let (stream, sink) = stream.into_split();
-        Ok((
-            addr,
-            Sink {
-                context: context.clone(),
-                sink,
-            },
-            Stream { context, stream },
-        ))
-    }
-}
-
-impl axum::serve::Listener for Listener {
-    type Io = TcpStream;
-    type Addr = SocketAddr;
-
-    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
-        let (stream, addr) = self.listener.accept().await.unwrap();
-        (stream, addr)
-    }
-
-    fn local_addr(&self) -> io::Result<Self::Addr> {
-        self.listener.local_addr()
-    }
-}
-
 /// Implementation of [`crate::Sink`] for the `tokio` runtime.
 pub struct Sink {
-    context: Context,
-    sink: OwnedWriteHalf,
+    pub(super) context: Context,
+    pub(super) sink: OwnedWriteHalf,
 }
 
 impl crate::Sink for Sink {
@@ -441,8 +395,8 @@ impl crate::Sink for Sink {
 
 /// Implementation of [`crate::Stream`] for the `tokio` runtime.
 pub struct Stream {
-    context: Context,
-    stream: OwnedReadHalf,
+    pub(super) context: Context,
+    pub(super) stream: OwnedReadHalf,
 }
 
 impl crate::Stream for Stream {
