@@ -63,6 +63,7 @@ enum MapEntry<'a, K, V> {
 /// An iterator over all values associated with a translated key, allowing for mutation of the
 /// current element and insertion of new elements at the front of the list.
 pub struct UpdateValueIterator<'a, K, V> {
+    prev: Option<*mut Record<V>>,
     next: Option<*mut Record<V>>,
     entry: Option<MapEntry<'a, K, V>>,
     collisions_counter: &'a Counter,
@@ -76,10 +77,11 @@ impl<'a, K, V> Iterator for UpdateValueIterator<'a, K, V> {
     type Item = &'a mut V;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match self.next {
+        match self.next.take() {
             Some(next) => {
                 let current = unsafe { &mut (*next) };
                 let value = &mut current.value;
+                self.prev = Some(next);
                 self.next = current
                     .next
                     .as_mut()
@@ -103,21 +105,34 @@ impl<K, V> UpdateValueIterator<'_, K, V> {
             MapEntry::Vacant(vacant_entry) => {
                 // Key had no associated values, so just turn the vacant entry into an occupied one.
                 let record = Record { value, next: None };
-                let occupied_entry = vacant_entry.insert_entry(record);
+                let mut occupied_entry = vacant_entry.insert_entry(record);
+                let head_ptr = occupied_entry.get_mut() as *mut _;
+                self.next = Some(head_ptr);
+                self.prev = None;
                 self.entry = Some(MapEntry::Occupied(occupied_entry));
                 return;
             }
         };
 
-        // This key already has a value, so add the new value to the front of the list.
+        // Modify the list by adding the new value at the front
         let record = occupied_entry.get_mut();
-        swap(&mut record.value, &mut value); // puts the new value at the front
-        record.next = Some(Box::new(Record {
+        swap(&mut record.value, &mut value); // New value goes into head, old head value into value
+        let new_node = Box::new(Record {
             value,
             next: record.next.take(),
-        }));
-        self.entry = Some(MapEntry::Occupied(occupied_entry));
+        });
+        record.next = Some(new_node);
 
+        // Update pointers to reflect the new head
+        let new_head_ptr = occupied_entry.get_mut() as *mut _;
+        if self.prev.is_none() && self.next.is_some() {
+            // If iteration hasn’t advanced (prev is None), update next to the new head
+            self.next = Some(new_head_ptr);
+        }
+        // If iteration has started (prev is Some), prev and next already point to valid nodes deeper in the list,
+        // so no update is needed as the insertion only affects the head.
+
+        self.entry = Some(MapEntry::Occupied(occupied_entry));
         self.collisions_counter.inc();
     }
 }
@@ -291,12 +306,14 @@ impl<T: Translator, V> Index<T, V> {
             Entry::Occupied(mut occupied_entry) => {
                 let record_ptr = occupied_entry.get_mut();
                 UpdateValueIterator {
+                    prev: None,
                     next: Some(record_ptr),
                     entry: Some(MapEntry::Occupied(occupied_entry)),
                     collisions_counter: &self.collisions,
                 }
             }
             Entry::Vacant(vacant_entry) => UpdateValueIterator {
+                prev: None,
                 next: None,
                 entry: Some(MapEntry::Vacant(vacant_entry)),
                 collisions_counter: &self.collisions,
