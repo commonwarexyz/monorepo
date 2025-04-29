@@ -238,7 +238,8 @@ impl<T: Translator, V> Index<T, V> {
                 self.collisions.inc();
 
                 // If there is only 1 value and that value should be pruned, we can just replace it.
-                if let Record::One(ref mut v1) = occ.get_mut() {
+                let entry = occ.get_mut();
+                if let Record::One(ref mut v1) = entry {
                     if prune(v1) {
                         *v1 = v;
                         self.keys_pruned.inc();
@@ -247,7 +248,7 @@ impl<T: Translator, V> Index<T, V> {
                 }
 
                 // If there is more than 1 value, we need to iterate.
-                let vec = occ.get_mut().as_vec_mut();
+                let vec = entry.as_vec_mut();
 
                 // Remove any items that are no longer valid (to avoid extending vec unnecessarily)
                 vec.retain(|v| !prune(v));
@@ -260,7 +261,7 @@ impl<T: Translator, V> Index<T, V> {
                     }
                     1 => {
                         let v = vec.pop().unwrap();
-                        *occ.into_mut() = Record::One(v);
+                        *entry = Record::One(v);
                     }
                     _ => {}
                 }
@@ -276,7 +277,8 @@ impl<T: Translator, V> Index<T, V> {
         match self.map.entry(k) {
             Entry::Occupied(mut occ) => {
                 // If there is only 1 value and that value should be pruned, we can just remove it.
-                if let Record::One(ref mut v1) = occ.get_mut() {
+                let entry = occ.get_mut();
+                if let Record::One(ref mut v1) = entry {
                     if prune(v1) {
                         occ.remove_entry();
                         self.keys_pruned.inc();
@@ -285,7 +287,7 @@ impl<T: Translator, V> Index<T, V> {
                 }
 
                 // If there is more than 1 value, we need to iterate.
-                let vec = occ.get_mut().as_vec_mut();
+                let vec = entry.as_vec_mut();
                 vec.retain(|v| !prune(v));
                 match vec.len() {
                     0 => {
@@ -294,7 +296,7 @@ impl<T: Translator, V> Index<T, V> {
                     }
                     1 => {
                         let v = vec.pop().unwrap();
-                        *occ.into_mut() = Record::One(v);
+                        *entry = Record::One(v);
                     }
                     _ => {}
                 }
