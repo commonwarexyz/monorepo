@@ -150,6 +150,9 @@ impl<
         // Start router
         let mut router_task = self.router.start(self.channels);
 
+        // Get shutdown signal
+        let mut shutdown = self.context.stopped();
+
         // Start spawner
         let (spawner, spawner_mailbox) = spawner::Actor::new(
             self.context.with_label("spawner"),
@@ -199,28 +202,31 @@ impl<
         // Wait for first actor to exit
         info!("network started");
         let err = select! {
+            _ = &mut shutdown => {
+                debug!("graceful shutdown initiated");
+                None
+            },
             tracker = &mut tracker_task => {
                 debug!("tracker exited");
-                tracker
+                Some(tracker)
             },
             router = &mut router_task => {
                 debug!("router exited");
-                router
+                Some(router)
             },
             spawner = &mut spawner_task => {
                 debug!("spawner exited");
-                spawner
+                Some(spawner)
             },
             listener = &mut listener_task => {
                 debug!("listener exited");
-                listener
+                Some(listener)
             },
             dialer = &mut dialer_task => {
                 debug!("dialer exited");
-                dialer
+                Some(dialer)
             },
-        }
-        .unwrap_err();
+        };
 
         // Ensure all tasks close
         tracker_task.abort();
@@ -229,7 +235,9 @@ impl<
         listener_task.abort();
         dialer_task.abort();
 
-        // Log error
-        warn!(error=?err, "network shutdown")
+        match err {
+            Some(err) => warn!(error=?err, "network shutdown due to error"),
+            None => info!("network shutdown gracefully"),
+        }
     }
 }

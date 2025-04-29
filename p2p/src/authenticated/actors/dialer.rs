@@ -19,6 +19,7 @@ use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use rand::{CryptoRng, Rng};
 use std::{marker::PhantomData, time::Duration};
+use tokio::select;
 use tracing::{debug, debug_span, Instrument};
 
 pub struct Config<C: Scheme> {
@@ -156,6 +157,8 @@ impl<
         mut tracker: tracker::Mailbox<E, C>,
         mut supervisor: spawner::Mailbox<E, Si, St, C>,
     ) {
+        let mut shutdown = self.context.stopped();
+
         loop {
             // Attempt to dial peers we know about
             self.dial_peers(&mut tracker, &mut supervisor).await;
@@ -164,7 +167,14 @@ impl<
             let wait = self
                 .context
                 .gen_range(Duration::default()..self.dial_frequency);
-            self.context.sleep(wait).await;
+
+            select! {
+                _ = &mut shutdown => {
+                    debug!("dialer shutting down");
+                    return;
+                }
+                _ = self.context.sleep(wait) => {}
+            }
         }
     }
 }

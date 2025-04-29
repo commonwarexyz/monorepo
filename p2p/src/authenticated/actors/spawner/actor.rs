@@ -6,8 +6,9 @@ use crate::authenticated::{
     actors::{peer, router, tracker},
     metrics,
 };
+use ::tokio::select;
 use commonware_cryptography::Verifier;
-use commonware_runtime::{Clock, Handle, Metrics, Sink, Spawner, Stream};
+use commonware_runtime::{tokio, Clock, Handle, Metrics, Sink, Spawner, Stream};
 use futures::{channel::mpsc, StreamExt};
 use governor::{clock::ReasonablyRealtime, Quota};
 use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
@@ -96,7 +97,17 @@ impl<
     }
 
     async fn run(mut self, tracker: tracker::Mailbox<E, C>, router: router::Mailbox<C::PublicKey>) {
-        while let Some(msg) = self.receiver.next().await {
+        let mut shutdown = self.context.stopped();
+
+        while let Some(msg) = select! {
+            _ = &mut shutdown => {
+                debug!("spawner shutting down gracefully");
+                None
+            }
+            msg = self.receiver.next() => {
+                msg
+            }
+        } {
             match msg {
                 Message::Spawn {
                     peer,

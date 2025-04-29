@@ -15,6 +15,7 @@ use governor::{
 use prometheus_client::metrics::counter::Counter;
 use rand::{CryptoRng, Rng};
 use std::{marker::PhantomData, net::SocketAddr};
+use tokio::select;
 use tracing::{debug, debug_span, Instrument};
 
 /// Configuration for the listener actor.
@@ -160,6 +161,8 @@ impl<
         tracker: tracker::Mailbox<E, C>,
         supervisor: spawner::Mailbox<E, Si, St, C>,
     ) {
+        let mut shutdown = self.context.stopped();
+
         // Start listening for incoming connections
         let mut listener = self
             .context
@@ -169,37 +172,44 @@ impl<
 
         // Loop over incoming connections as fast as our rate limiter allows
         loop {
-            // Ensure we don't attempt to perform too many handshakes at once
-            match self.rate_limiter.check() {
-                Ok(_) => {}
-                Err(negative) => {
-                    self.handshakes_rate_limited.inc();
-                    let wait = negative.wait_time_from(self.context.now());
-                    self.context.sleep(wait).await;
+            select! {
+                _ = &mut shutdown => {
+                    debug!("listener shutting down gracefully");
+                    return;
                 }
+                _ = async {
+                    // Ensure we don't attempt to perform too many handshakes at once
+                    match self.rate_limiter.check() {
+                        Ok(_) => {}
+                        Err(negative) => {
+                            self.handshakes_rate_limited.inc();
+                            let wait = negative.wait_time_from(self.context.now());
+                            self.context.sleep(wait).await;
+                        }
+                    }
+                    // Accept a new connection
+                    match listener.accept().await {
+                        Ok((address, sink, stream)) => {
+                            debug!(ip = ?address.ip(), port = ?address.port(), "accepted incoming connection");
+
+                            // Spawn a new handshaker to upgrade connection
+                            self.context.with_label("handshaker").spawn({
+                                let stream_cfg = self.stream_cfg.clone();
+                                let tracker = tracker.clone();
+                                let supervisor = supervisor.clone();
+                                move |context| {
+                                    Self::handshake(
+                                        context, address, stream_cfg, sink, stream, tracker, supervisor,
+                                    )
+                                }
+                            });
+                        }
+                        Err(e) => {
+                            debug!(error = ?e, "failed to accept connection");
+                        }
+                    }
+                } => {}
             }
-
-            // Accept a new connection
-            let (address, sink, stream) = match listener.accept().await {
-                Ok((address, sink, stream)) => (address, sink, stream),
-                Err(e) => {
-                    debug!(error = ?e, "failed to accept connection");
-                    continue;
-                }
-            };
-            debug!(ip = ?address.ip(), port = ?address.port(), "accepted incoming connection");
-
-            // Spawn a new handshaker to upgrade connection
-            self.context.with_label("handshaker").spawn({
-                let stream_cfg = self.stream_cfg.clone();
-                let tracker = tracker.clone();
-                let supervisor = supervisor.clone();
-                move |context| {
-                    Self::handshake(
-                        context, address, stream_cfg, sink, stream, tracker, supervisor,
-                    )
-                }
-            });
         }
     }
 }
