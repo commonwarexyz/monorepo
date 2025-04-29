@@ -2,11 +2,8 @@ use crate::index::Translator;
 use commonware_runtime::Metrics;
 use prometheus_client::metrics::counter::Counter;
 use std::{
-    collections::{
-        hash_map::{Entry, OccupiedEntry, VacantEntry},
-        HashMap,
-    },
-    mem::swap,
+    collections::{hash_map::Entry, HashMap},
+    ptr::NonNull,
 };
 
 /// The initial capacity of the hashmap. This is a guess at the number of unique keys we will
@@ -14,347 +11,383 @@ use std::{
 /// the entire [super::translator::OneCap] range).
 const INITIAL_CAPACITY: usize = 256;
 
-/// Each key is mapped to a `Record` that contains a linked list of potential values for the key.
+/// Each key is mapped to a `Record` that contains either the value or a pointer to a `Vec` of values.
 ///
-/// In the common case of a single value associated with a key, the value is stored within the
-/// HashMap entry and can be read without additional indirection (heap jumping).
-struct Record<V> {
-    value: V,
-
-    next: Option<Box<Record<V>>>,
+/// In the common case (where a single value is associated with a key), we store the value directly in the `Record`
+/// to avoid both indirection (heap jumping) and unnecessary allocations (storing `Vec` directly would make all
+/// `Record`s larger).
+#[allow(clippy::box_collection)]
+enum Record<V> {
+    One(V),
+    Many(Box<Vec<V>>),
 }
 
-/// An iterator over all values associated with a translated key.
-pub struct ValueIterator<'a, V> {
-    next: Option<&'a Record<V>>,
+/// An iterator over the value at some translated key.
+pub struct Iterator<'a, V> {
+    slice: &'a [V],
+    idx: usize,
 }
 
-impl<V> ValueIterator<'_, V> {
-    /// Create a `ValueIterator` that returns no items.
+impl<V> Iterator<'_, V> {
+    #[inline]
     fn empty() -> Self {
-        ValueIterator { next: None }
+        Self { slice: &[], idx: 0 }
     }
 }
 
-impl<'a, V> Iterator for ValueIterator<'a, V> {
+impl<'a, V> std::iter::Iterator for Iterator<'a, V> {
     type Item = &'a V;
-
     fn next(&mut self) -> Option<Self::Item> {
-        match self.next {
-            Some(next) => {
-                let value = &next.value;
-                match next.next {
-                    Some(ref next_next) => self.next = Some(next_next),
-                    None => self.next = None,
-                }
-                Some(value)
-            }
-            None => None,
+        if self.idx == 0 {
+            return None;
         }
-    }
-}
-
-/// A wrapper for the hashmap entry when it can be either occupied or vacant.
-enum MapEntry<'a, K, V> {
-    Occupied(OccupiedEntry<'a, K, Record<V>>),
-    Vacant(VacantEntry<'a, K, Record<V>>),
-}
-
-/// An iterator over all values associated with a translated key, allowing for mutation of the
-/// current element and insertion of new elements at the front of the list.
-pub struct UpdateValueIterator<'a, K, V> {
-    prev: Option<*mut Record<V>>,
-    next: Option<*mut Record<V>>,
-    entry: Option<MapEntry<'a, K, V>>,
-    collisions_counter: &'a Counter,
-}
-
-/// UpdateValueIterator must be sendable across threads so it can be held across a journal's read
-/// async boundary.
-unsafe impl<K, V> Send for UpdateValueIterator<'_, K, V> {}
-
-impl<'a, K, V> Iterator for UpdateValueIterator<'a, K, V> {
-    type Item = &'a mut V;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self.next.take() {
-            Some(next) => {
-                let current = unsafe { &mut (*next) };
-                let value = &mut current.value;
-                self.prev = Some(next);
-                self.next = current
-                    .next
-                    .as_mut()
-                    .map(|next_next| next_next.as_mut() as *mut _);
-                Some(value)
-            }
-            None => None,
-        }
-    }
-}
-
-impl<K, V> UpdateValueIterator<'_, K, V> {
-    /// Insert a new value at the front of the list. We always add to the front so behavior is
-    /// consistently last in, first out. This means most recently added values will be returned
-    /// first by the iterators, providing an LRU like behavior.
-    pub fn insert(&mut self, mut value: V) {
-        let entry = self.entry.take().unwrap();
-
-        let mut occupied_entry = match entry {
-            MapEntry::Occupied(occupied_entry) => occupied_entry,
-            MapEntry::Vacant(vacant_entry) => {
-                // Key had no associated values, so just turn the vacant entry into an occupied one.
-                let record = Record { value, next: None };
-                let mut occupied_entry = vacant_entry.insert_entry(record);
-                let head_ptr = occupied_entry.get_mut() as *mut _;
-                self.next = Some(head_ptr);
-                self.prev = None;
-                self.entry = Some(MapEntry::Occupied(occupied_entry));
-                return;
-            }
-        };
-
-        // Modify the list by adding the new value at the front
-        let record = occupied_entry.get_mut();
-        swap(&mut record.value, &mut value); // New value goes into head, old head value into value
-        let new_node = Box::new(Record {
-            value,
-            next: record.next.take(),
-        });
-        record.next = Some(new_node);
-
-        // Update pointers to reflect the new head
-        let new_head_ptr = occupied_entry.get_mut() as *mut _;
-        if self.prev.is_none() && self.next.is_some() {
-            // If iteration hasn’t advanced (prev is None), update next to the new head
-            self.next = Some(new_head_ptr);
-        }
-        // If iteration has started (prev is Some), prev and next already point to valid nodes deeper in the list,
-        // so no update is needed as the insertion only affects the head.
-
-        self.entry = Some(MapEntry::Occupied(occupied_entry));
-        self.collisions_counter.inc();
-    }
-}
-
-/// An iterator over all values associated with a translated key, allowing for mutation and removal
-/// of the current element.
-pub struct RemoveValueIterator<'a, K, V> {
-    can_remove: bool, //  false means remove should be a no-op
-    prev_prev: Option<*mut Record<V>>,
-    prev: Option<*mut Record<V>>,
-    next: Option<*mut Record<V>>,
-    entry: Option<OccupiedEntry<'a, K, Record<V>>>,
-    pruned_counter: &'a Counter,
-}
-
-/// RemoveValueIterator must be sendable across threads so it can be held across a journal's read
-/// async boundary.
-unsafe impl<K, V> Send for RemoveValueIterator<'_, K, V> {}
-
-impl<'a, K, V> Iterator for RemoveValueIterator<'a, K, V> {
-    type Item = &'a mut V;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self.next.take() {
-            Some(next) => {
-                let current = unsafe { &mut (*next) };
-                let value = &mut current.value;
-                self.prev_prev = self.prev;
-                self.prev = Some(next);
-                self.next = current
-                    .next
-                    .as_mut()
-                    .map(|next_next| next_next.as_mut() as *mut _);
-                self.can_remove = true;
-                Some(value)
-            }
-            None => None,
-        }
-    }
-}
-
-impl<K, V> RemoveValueIterator<'_, K, V> {
-    /// Remove the value last returned from this iterator from the map. If no value has been
-    /// returned yet, or if the last returned value was removed already, then this is a no-op.
-    pub fn remove(&mut self) {
-        if !self.can_remove {
-            return;
-        }
-        self.can_remove = false;
-        self.pruned_counter.inc();
-
-        if let Some(prev_prev) = self.prev_prev {
-            let prev = self.prev.take().unwrap();
-            unsafe {
-                (*prev_prev).next = (*prev).next.take();
-                self.next = (*prev_prev)
-                    .next
-                    .as_mut()
-                    .map(|next_next| next_next.as_mut() as *mut _);
-                self.prev = Some(prev_prev);
-            }
-            return;
-        }
-
-        let Some(occupied_entry) = self.entry.as_mut() else {
-            unreachable!("can_remove should prevent this");
-        };
-
-        // The element we are removing is at the front.
-        let head = occupied_entry.get_mut();
-
-        match head.next.take() {
-            Some(next) => {
-                // There is a linked element, so just make it the new head.
-                *head = *next;
-                self.prev = None;
-                self.next = Some(head as *mut Record<V>);
-            }
-            None => {
-                // This is the only element, so removing it requires we remove the map entry
-                // entirely.
-                self.entry.take().unwrap().remove();
-                self.prev = None;
-                self.next = None;
-            }
-        }
+        self.idx -= 1;
+        self.slice.get(self.idx)
     }
 }
 
 impl<V> Record<V> {
-    fn iter(&self) -> ValueIterator<V> {
-        ValueIterator { next: Some(self) }
+    /// Return an iterator over the values in the `Record`.
+    fn iter(&self) -> Iterator<'_, V> {
+        match self {
+            Record::One(v) => Iterator {
+                slice: std::slice::from_ref(v),
+                idx: 1,
+            },
+            Record::Many(boxed) => Iterator {
+                slice: boxed,
+                idx: boxed.len(),
+            },
+        }
+    }
+
+    /// Return a mutable reference to the `Vec` of values in the `Record`,
+    /// migrating from `One` to `Many` if necessary.
+    fn as_vec_mut(&mut self) -> &mut Vec<V> {
+        match self {
+            Record::Many(ref mut boxed) => boxed.as_mut(),
+            Record::One(_) => unsafe {
+                // Move the value out of `self` without running its destructor.
+                let v = match std::ptr::read(self) {
+                    Record::One(val) => val,
+                    _ => unreachable!(),
+                };
+
+                // Overwrite `self` with a fresh Many(vec![v]).
+                *self = Record::Many(Box::new(vec![v]));
+
+                // Return a mutable ref to that new vector.
+                match self {
+                    Record::Many(boxed) => boxed.as_mut(),
+                    _ => unreachable!(),
+                }
+            },
+        }
     }
 }
 
-/// An index that maps translated keys to values.
+/// A mutable iterator over the values at some translated key.
+pub struct MutableIterator<'a, T: Translator, V> {
+    map: NonNull<HashMap<T::Key, Record<V>, T>>,
+    key: T::Key,
+    values: &'a mut Vec<V>,
+
+    idx: usize,
+    last_idx: Option<usize>,
+
+    collisions: &'a Counter,
+    pruned: &'a Counter,
+}
+
+impl<'a, T: Translator, V> std::iter::Iterator for MutableIterator<'a, T, V> {
+    type Item = &'a mut V;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // Walk backwards over the `Vec` (preferring the most recently added value).
+        if self.idx == 0 || self.values.is_empty() {
+            return None;
+        }
+        self.idx -= 1;
+        let i = self.idx;
+
+        // SAFETY: i is in‐bounds, and we hold exclusive &mut to the Vec
+        let elem = unsafe { &mut *self.values.as_mut_ptr().add(i) };
+        self.last_idx = Some(i);
+        Some(elem)
+    }
+}
+
+impl<T: Translator, V> MutableIterator<'_, T, V> {
+    /// Insert a new value at the start of the iterator.
+    ///
+    /// This operation will prevent the iterator from being used again (although
+    /// it is possible to call `insert()` multiple times).
+    ///
+    /// If you want to instead update some existing value, use `next()` to get a mutable reference
+    /// and then update it directly.
+    ///
+    /// This is more efficient than calling `index::insert()` after iteration.
+    pub fn insert(&mut self, v: V) {
+        self.values.push(v);
+        let values_len = self.values.len();
+        if values_len > 1 {
+            self.collisions.inc();
+        }
+
+        // Stop the iterator.
+        self.idx = 0;
+        self.last_idx = None;
+    }
+
+    /// Remove the last value returned by `next()` (swapping it with the most recently added value for the
+    /// translated key).
+    ///
+    /// This is a no-op if `next()` has not been called or `remove()` is called multiple times without
+    /// calling `next()` after each `remove()`.
+    pub fn remove(&mut self) {
+        let Some(i) = self.last_idx.take() else {
+            return;
+        };
+        self.values.swap_remove(i);
+        self.pruned.inc();
+        if i < self.idx {
+            self.idx -= 1;
+        }
+    }
+}
+
+impl<T: Translator, V> Drop for MutableIterator<'_, T, V> {
+    /// When the iterator is dropped, check if the `Vec` is empty (delete from the map) or
+    /// if it has only one value (demote to `One`).
+    fn drop(&mut self) {
+        unsafe {
+            let map = self.map.as_mut();
+            match self.values.len() {
+                0 => {
+                    // We have no values left, so remove the entry from the map.
+                    map.remove(&self.key);
+                }
+                1 => {
+                    // We have only one value left, so demote to `One`.
+                    let v = self.values.pop().unwrap();
+                    *map.get_mut(&self.key).unwrap() = Record::One(v);
+                }
+                _ => {
+                    // We have more than one value left, so do nothing.
+                }
+            }
+        }
+    }
+}
+
+/// A memory-efficient index that maps translated keys to arbitrary values.
 pub struct Index<T: Translator, V> {
     translator: T,
     map: HashMap<T::Key, Record<V>, T>,
-
     collisions: Counter,
     keys_pruned: Counter,
 }
 
 impl<T: Translator, V> Index<T, V> {
-    /// Create a new index.
-    pub fn init(context: impl Metrics, translator: T) -> Self {
+    /// Create a new index with the given translator.
+    pub fn init(ctx: impl Metrics, tr: T) -> Self {
         let s = Self {
-            translator: translator.clone(),
-            map: HashMap::with_capacity_and_hasher(INITIAL_CAPACITY, translator),
+            translator: tr.clone(),
+            map: HashMap::with_capacity_and_hasher(INITIAL_CAPACITY, tr),
             collisions: Counter::default(),
             keys_pruned: Counter::default(),
         };
-        context.register("pruned", "Number of keys pruned", s.keys_pruned.clone());
-        context.register(
+        ctx.register("pruned", "Number of keys pruned", s.keys_pruned.clone());
+        ctx.register(
             "collisions",
             "Number of translated key collisions",
             s.collisions.clone(),
         );
-
         s
     }
 
-    /// The number of unique keys in the index after translation (so two keys that collide after
-    /// translation will only be counted as one).
+    /// Return the number of translated keys in the index (there may
+    /// be many more total entries, with multiple keys per translated
+    /// key).
+    #[inline]
     pub fn len(&self) -> usize {
         self.map.len()
     }
 
-    /// Returns if the index currently holds no values.
+    /// Return whether the index is empty.
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
     }
 
-    /// Insert a new record into the index. If there is a collision, then the new value will be
-    /// added in front of the rest of values for this translated key.
-    pub fn insert(&mut self, key: &[u8], mut value: V) {
-        let translated_key = self.translator.transform(key);
+    /// Create an immutable iterator over the values at the given translated key.
+    pub fn iter(&self, key: &[u8]) -> Iterator<V> {
+        self.map
+            .get(&self.translator.transform(key))
+            .map(|r| r.iter())
+            .unwrap_or_else(Iterator::empty)
+    }
 
-        match self.map.entry(translated_key) {
-            Entry::Occupied(mut occupied_entry) => {
-                let record = occupied_entry.get_mut();
-                swap(&mut record.value, &mut value); // puts the new value at the front
-                record.next = Some(Box::new(Record {
-                    value,
-                    next: record.next.take(),
-                }));
+    /// Create a mutable iterator over the values at the given translated key.
+    pub fn mut_iter(&mut self, key: &[u8]) -> MutableIterator<'_, T, V> {
+        let key = self.translator.transform(key);
+        let mut map = NonNull::from(&mut self.map);
+        let values = unsafe {
+            map.as_mut()
+                .entry(key)
+                .or_insert_with(|| Record::Many(Box::new(Vec::new())))
+                .as_vec_mut()
+        };
+        let idx = values.len();
+        MutableIterator {
+            map,
+            key,
+            values,
+
+            idx,
+            last_idx: None,
+
+            collisions: &self.collisions,
+            pruned: &self.keys_pruned,
+        }
+    }
+
+    /// Insert a value at the given translated key.
+    ///
+    /// If no value exists at the key, inserting via `insert()` will be more efficient than
+    /// `mut_iter()` + `insert()`.
+    pub fn insert(&mut self, key: &[u8], v: V) {
+        let k = self.translator.transform(key);
+        match self.map.entry(k) {
+            Entry::Occupied(mut occ) => {
+                occ.get_mut().as_vec_mut().push(v);
                 self.collisions.inc();
             }
-            Entry::Vacant(entry) => {
-                entry.insert(Record { value, next: None });
+            Entry::Vacant(vac) => {
+                vac.insert(Record::One(v));
             }
-        };
-    }
-
-    /// Retrieve all values associated with a translated key.
-    pub fn get_iter(&self, key: &[u8]) -> ValueIterator<V> {
-        let translated_key = self.translator.transform(key);
-        match self.map.get(&translated_key) {
-            Some(head) => head.iter(),
-            None => ValueIterator::empty(),
         }
     }
 
-    /// Retrieve all values associated with a translated key, allowing for mutation & insertion if
-    /// the key you are trying to update isn't currently active.
-    pub fn update_iter(&mut self, key: &[u8]) -> UpdateValueIterator<T::Key, V> {
-        let translated_key = self.translator.transform(key);
-        let entry = self.map.entry(translated_key);
-        match entry {
-            Entry::Occupied(mut occupied_entry) => {
-                let record_ptr = occupied_entry.get_mut();
-                UpdateValueIterator {
-                    prev: None,
-                    next: Some(record_ptr),
-                    entry: Some(MapEntry::Occupied(occupied_entry)),
-                    collisions_counter: &self.collisions,
+    /// Insert a value at the given translated key, and prune any values that are no longer valid.
+    ///
+    /// If no value exists at the key or only 1 value exists at a key, inserting via `insert_and_prune()`
+    /// will be more efficient than `mut_iter()` + `remove()` + `insert()`.
+    pub fn insert_and_prune(&mut self, key: &[u8], v: V, prune: impl Fn(&V) -> bool) {
+        let k = self.translator.transform(key);
+        match self.map.entry(k) {
+            Entry::Occupied(mut occ) => {
+                // Track collision regardless of what happens.
+                self.collisions.inc();
+
+                // If there is only 1 value and that value should be pruned, we can just replace it.
+                let entry = occ.get_mut();
+                if let Record::One(ref mut v1) = entry {
+                    if prune(v1) {
+                        *v1 = v;
+                        self.keys_pruned.inc();
+                        return;
+                    }
+                }
+
+                // If there is more than 1 value, we need to iterate.
+                let vec = entry.as_vec_mut();
+
+                // Remove any items that are no longer valid (to avoid extending vec unnecessarily)
+                let previous = vec.len();
+                vec.retain(|v| !prune(v));
+                let pruned = previous - vec.len();
+                if pruned > 0 {
+                    self.keys_pruned.inc_by(pruned as u64);
+                }
+
+                // Add the new value to the end of the vector.
+                vec.push(v);
+
+                // If there is only 1 value left, we can demote to `One`.
+                if vec.len() == 1 {
+                    let v = vec.pop().unwrap();
+                    *entry = Record::One(v);
                 }
             }
-            Entry::Vacant(vacant_entry) => UpdateValueIterator {
-                prev: None,
-                next: None,
-                entry: Some(MapEntry::Vacant(vacant_entry)),
-                collisions_counter: &self.collisions,
-            },
-        }
-    }
-
-    /// Retrieve all values associated with a translated key, allowing for mutation and removal.
-    pub fn remove_iter(&mut self, key: &[u8]) -> RemoveValueIterator<T::Key, V> {
-        let translated_key = self.translator.transform(key);
-        let entry = self.map.entry(translated_key);
-        match entry {
-            Entry::Occupied(mut occupied_entry) => {
-                let record_ptr = occupied_entry.get_mut();
-                RemoveValueIterator {
-                    can_remove: false,
-                    prev_prev: None,
-                    prev: None,
-                    next: Some(record_ptr),
-                    entry: Some(occupied_entry),
-                    pruned_counter: &self.keys_pruned,
-                }
+            Entry::Vacant(vac) => {
+                vac.insert(Record::One(v));
             }
-            Entry::Vacant(_) => RemoveValueIterator {
-                can_remove: false,
-                prev_prev: None,
-                prev: None,
-                next: None,
-                entry: None,
-                pruned_counter: &self.keys_pruned,
-            },
         }
     }
 
-    /// Remove all values associated with a translated key that match the `prune` predicate.
+    /// Remove a value at the given translated key, and prune any values that are no longer valid.
+    ///
+    /// If no value exists at the key or only 1 value exists at a key, this is more efficient than
+    /// `mut_iter()` + `remove()`.
     pub fn remove(&mut self, key: &[u8], prune: impl Fn(&V) -> bool) {
-        let mut iter = self.remove_iter(key);
-        while let Some(value) = iter.next() {
-            if prune(value) {
-                iter.remove();
+        let k = self.translator.transform(key);
+        match self.map.entry(k) {
+            Entry::Occupied(mut occ) => {
+                // If there is only 1 value and that value should be pruned, we can just remove it.
+                let entry = occ.get_mut();
+                if let Record::One(ref mut v1) = entry {
+                    if prune(v1) {
+                        occ.remove_entry();
+                        self.keys_pruned.inc();
+                        return;
+                    }
+                }
+
+                // If there is more than 1 value, we need to iterate.
+                let vec = entry.as_vec_mut();
+                let previous = vec.len();
+                vec.retain(|v| !prune(v));
+                let pruned = previous - vec.len();
+                if pruned > 0 {
+                    self.keys_pruned.inc_by(pruned as u64);
+                }
+
+                // If there are no values left, we can remove the entry.
+                // If there is only 1 value left, we can demote to `One`.
+                match vec.len() {
+                    0 => {
+                        occ.remove_entry();
+                        self.keys_pruned.inc();
+                    }
+                    1 => {
+                        let v = vec.pop().unwrap();
+                        *entry = Record::One(v);
+                    }
+                    _ => {}
+                }
             }
+            Entry::Vacant(_) => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::index::{translator::TwoCap, Translator};
+    use commonware_macros::test_traced;
+    use commonware_runtime::deterministic;
+
+    #[test_traced]
+    fn demote_many_to_one() {
+        let ctx = deterministic::Context::default();
+        let mut ix = Index::<TwoCap, u64>::init(ctx, TwoCap);
+        let kb = b"k";
+
+        ix.insert(kb, 1);
+        ix.insert(kb, 2);
+
+        {
+            let mut it = ix.mut_iter(kb);
+            it.next();
+            it.remove(); // remove newest
+        } // drop should demote
+
+        let key = TwoCap.transform(kb);
+        match ix.map.get(&key).unwrap() {
+            Record::One(v) => assert_eq!(*v, 1),
+            _ => panic!("expected One"),
         }
     }
 }
