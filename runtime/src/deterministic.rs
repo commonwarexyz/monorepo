@@ -342,17 +342,55 @@ impl Auditor {
 #[derive(Clone)]
 pub struct Config {
     /// Seed for the random number generator.
-    pub seed: u64,
+    seed: u64,
 
     /// The cycle duration determines how much time is advanced after each iteration of the event
     /// loop. This is useful to prevent starvation if some task never yields.
-    pub cycle: Duration,
+    cycle: Duration,
 
     /// If the runtime is still executing at this point (i.e. a test hasn't stopped), panic.
-    pub timeout: Option<Duration>,
+    timeout: Option<Duration>,
 }
 
 impl Config {
+    /// Returns a new [Config] with default values.
+    pub fn new() -> Self {
+        Self {
+            seed: 42,
+            cycle: Duration::from_millis(1),
+            timeout: None,
+        }
+    }
+
+    /// Set the seed for the random number generator.
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = seed;
+        self
+    }
+
+    /// Set the cycle duration.
+    pub fn with_cycle(mut self, cycle: Duration) -> Self {
+        self.cycle = cycle;
+        self
+    }
+
+    /// Set the timeout.
+    pub fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    // Getters
+    pub fn seed(&self) -> u64 {
+        self.seed
+    }
+    pub fn cycle(&self) -> Duration {
+        self.cycle
+    }
+    pub fn timeout(&self) -> Option<Duration> {
+        self.timeout
+    }
+
     pub fn assert(&self) {
         assert!(
             self.cycle != Duration::default() || self.timeout.is_none(),
@@ -363,11 +401,7 @@ impl Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Self {
-            seed: 42,
-            cycle: Duration::from_millis(1),
-            timeout: None,
-        }
+        Self::new()
     }
 }
 
@@ -839,7 +873,7 @@ impl Context {
             label: String::new(),
             spawned: false,
             executor,
-            networking: Arc::new(Networking::new(metrics, auditor.clone())),
+            networking: self.networking.clone(),
             storage: self.storage,
         }
     }
