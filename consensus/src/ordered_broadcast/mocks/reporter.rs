@@ -187,6 +187,13 @@ impl<C: Verifier, D: Digest> Z for Mailbox<C, D> {
                     .await
                     .expect("Failed to send locked");
             }
+            Activity::Ack(_ack) => {
+                // ignore partial acks in this mock reporter
+            }
+            Activity::ChunkMismatch(c1, c2) => {
+                // There shouldn't be chunk mismatches
+                panic!("Chunk mismatch: {:?} != {:?}", c1, c2);
+            }
         }
     }
 }
