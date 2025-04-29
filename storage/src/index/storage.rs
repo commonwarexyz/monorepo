@@ -18,28 +18,24 @@ enum Record<V> {
 /// -------- immutable iterator (newest → oldest) ---------------------------
 pub struct ValueIterator<'a, V> {
     slice: &'a [V],
-    idx: isize,
+    idx: usize,
 }
 
 impl<'a, V> ValueIterator<'a, V> {
     #[inline]
     fn empty() -> Self {
-        Self {
-            slice: &[],
-            idx: -1,
-        }
+        Self { slice: &[], idx: 0 }
     }
 }
 
 impl<'a, V> Iterator for ValueIterator<'a, V> {
     type Item = &'a V;
     fn next(&mut self) -> Option<Self::Item> {
-        if self.idx < 0 {
+        if self.idx == 0 {
             return None;
         }
-        let i = self.idx as usize;
         self.idx -= 1;
-        self.slice.get(i)
+        self.slice.get(self.idx)
     }
 }
 
@@ -49,11 +45,11 @@ impl<V> Record<V> {
         match self {
             Record::One(v) => ValueIterator {
                 slice: std::slice::from_ref(v),
-                idx: 0,
+                idx: 1,
             },
             Record::Many(boxed) => ValueIterator {
                 slice: boxed,
-                idx: boxed.len() as isize - 1,
+                idx: boxed.len(),
             },
         }
     }
@@ -97,18 +93,14 @@ impl<'a, T: Translator, V> Iterator for MutableIterator<'a, T, V> {
     type Item = &'a mut V;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.idx < 0 || self.values.is_empty() {
+        if self.idx == 0 || self.values.is_empty() {
             return None;
         }
-        let i = self.idx as usize;
-        if i >= self.values.len() {
-            return None;
-        }
+        self.idx -= 1;
+        let i = self.idx;
 
         // SAFETY: i is in‐bounds, and we hold exclusive &mut to the Vec
         let elem = unsafe { &mut *self.values.as_mut_ptr().add(i) };
-
-        self.idx -= 1;
         self.last_idx = Some(i);
         Some(elem)
     }
@@ -122,7 +114,7 @@ impl<'a, T: Translator, V> MutableIterator<'a, T, V> {
             self.collisions.inc();
         }
         if self.last_idx.is_none() {
-            self.idx = values_len - 1;
+            self.idx = values_len;
         }
     }
 
@@ -130,8 +122,9 @@ impl<'a, T: Translator, V> MutableIterator<'a, T, V> {
         if let Some(i) = self.last_idx.take() {
             self.values.swap_remove(i);
             self.pruned.inc();
-            if i <= self.idx {
-                self.idx = self.idx.saturating_sub(1);
+
+            if i < self.idx {
+                self.idx -= 1;
             }
         }
     }
@@ -224,7 +217,7 @@ impl<T: Translator, V> Index<T, V> {
                 .or_insert_with(|| Record::Many(Box::new(Vec::new())))
                 .as_vec_mut()
         };
-        let idx = vec_ref.len() - 1;
+        let idx = vec_ref.len();
         MutableIterator {
             map: map_ptr,
             key: k,
