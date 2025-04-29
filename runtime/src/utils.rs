@@ -373,10 +373,10 @@ pub fn create_pool<S: Spawner + Metrics>(
 /// ```
 pub struct RwLock<T>(async_lock::RwLock<T>);
 
-/// Shared guard returned by [`RwLock::read`].
+/// Shared guard returned by [RwLock::read].
 pub type RwLockReadGuard<'a, T> = async_lock::RwLockReadGuard<'a, T>;
 
-/// Exclusive guard returned by [`RwLock::write`].
+/// Exclusive guard returned by [RwLock::write].
 pub type RwLockWriteGuard<'a, T> = async_lock::RwLockWriteGuard<'a, T>;
 
 impl<T> RwLock<T> {

@@ -268,8 +268,8 @@ type Storage = MeteredStorage<IoUringStorage>;
 #[cfg(not(feature = "iouring"))]
 type Storage = MeteredStorage<TokioStorage>;
 
-/// Implementation of [`crate::Spawner`], [`crate::Clock`],
-/// [`crate::Network`], and [`crate::Storage`] for the `tokio`
+/// Implementation of [crate::Spawner], [crate::Clock],
+/// [crate::Network], and [crate::Storage] for the `tokio`
 /// runtime.
 pub struct Context {
     label: String,
@@ -521,7 +521,7 @@ impl crate::Network<Listener, Sink, Stream> for Context {
     }
 }
 
-/// Implementation of [`crate::Listener`] for the `tokio` runtime.
+/// Implementation of [crate::Listener] for the `tokio` runtime.
 pub struct Listener {
     context: Context,
     listener: TcpListener,
@@ -568,7 +568,7 @@ impl axum::serve::Listener for Listener {
     }
 }
 
-/// Implementation of [`crate::Sink`] for the `tokio` runtime.
+/// Implementation of [crate::Sink] for the `tokio` runtime.
 pub struct Sink {
     context: Context,
     sink: OwnedWriteHalf,
@@ -593,7 +593,7 @@ impl crate::Sink for Sink {
     }
 }
 
-/// Implementation of [`crate::Stream`] for the `tokio` runtime.
+/// Implementation of [crate::Stream] for the `tokio` runtime.
 pub struct Stream {
     context: Context,
     stream: OwnedReadHalf,
