@@ -227,14 +227,17 @@ impl<T: Translator, E: Storage + Metrics, K: Array, VC: CodecConfig + Copy, V: C
         // Store interval
         self.intervals.insert(index..=index);
 
-        // Store item
-        self.keys.insert(&key, index);
-
-        // Cleanup tracked keys
-        //
-        // We call this after insertion to avoid unnecessary underlying map
-        // operations.
-        self.keys.remove(&key, |index| *index < oldest_allowed);
+        // Cleanup any useless keys and insert new key
+        {
+            let mut iter = self.keys.update_iter(&key);
+            while let Some(index) = iter.next() {
+                if *index < oldest_allowed {
+                    iter.remove();
+                    continue;
+                }
+            }
+            iter.insert(index);
+        }
 
         // Update pending writes
         let pending_writes = self.pending.entry(section).or_default();
