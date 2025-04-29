@@ -197,13 +197,9 @@ impl<T: Translator, V> Index<T, V> {
             collisions: Counter::default(),
             keys_pruned: Counter::default(),
         };
+        ctx.register("pruned", "Number of keys pruned", s.keys_pruned.clone());
         ctx.register(
-            "pruned_total",
-            "Number of keys pruned",
-            s.keys_pruned.clone(),
-        );
-        ctx.register(
-            "collisions_total",
+            "collisions",
             "Number of translated key collisions",
             s.collisions.clone(),
         );

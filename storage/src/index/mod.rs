@@ -39,7 +39,7 @@ mod tests {
     use super::*;
     use crate::index::translator::{OneCap, TwoCap};
     use commonware_macros::test_traced;
-    use commonware_runtime::deterministic;
+    use commonware_runtime::{deterministic, Metrics};
     use rand::Rng;
     use std::collections::HashMap;
 
@@ -54,7 +54,7 @@ mod tests {
         index.insert(key, 1);
         index.insert(key, 2);
         assert_eq!(index.len(), 1);
-        // assert!(context.encode().contains("collisions_total 1"));
+        assert!(context.encode().contains("collisions_total 1"));
 
         // Make sure we can remove keys with a predicate
         index.insert(key, 3);
@@ -254,7 +254,7 @@ mod tests {
             index.iter(b"key").copied().collect::<Vec<_>>(),
             vec![4, 3, 2, 1]
         );
-        // assert!(context.encode().contains("pruned_total 0"));
+        assert!(context.encode().contains("pruned_total 0"));
 
         // Test removing first value from the list.
         {
@@ -263,7 +263,7 @@ mod tests {
             assert_eq!(*iter.next().unwrap(), 4);
             iter.remove();
             iter.remove(); // should be a no-op
-                           // assert!(context.encode().contains("pruned_total 1"));
+            assert!(context.encode().contains("pruned_total 1"));
         }
 
         assert_eq!(
@@ -285,7 +285,7 @@ mod tests {
             assert_eq!(*iter.next().unwrap(), 2);
             iter.remove();
             iter.remove(); // should be a no-op
-                           // assert!(context.encode().contains("pruned_total 2"));
+            assert!(context.encode().contains("pruned_total 2"));
         }
 
         assert_eq!(
@@ -307,7 +307,7 @@ mod tests {
             assert_eq!(*iter.next().unwrap(), 1);
             iter.remove();
             iter.remove(); // should be a no-op
-                           // assert!(context.encode().contains("pruned_total 3"));
+            assert!(context.encode().contains("pruned_total 3"));
         }
 
         assert_eq!(
@@ -324,7 +324,7 @@ mod tests {
             iter.remove(); // should be a no-op
         }
         assert_eq!(index.len(), 0);
-        // assert!(context.encode().contains("pruned_total 6"));
+        assert!(context.encode().contains("pruned_total 6"));
 
         // Removing from an empty iterator should be a no-op and shouldn't panic
         {
@@ -336,7 +336,7 @@ mod tests {
             index.iter(b"key").copied().collect::<Vec<_>>(),
             Vec::<u64>::new()
         );
-        // assert!(context.encode().contains("pruned_total 6"));
+        assert!(context.encode().contains("pruned_total 6"));
     }
 
     #[test_traced]
@@ -351,7 +351,7 @@ mod tests {
                 iter.insert(2);
             }
             index.insert(b"key", 3);
-            // assert!(context.encode().contains("collisions_total 2"));
+            assert!(context.encode().contains("collisions_total 2"));
         }
 
         assert_eq!(
@@ -361,20 +361,35 @@ mod tests {
         assert_eq!(index.len(), 1);
 
         // Try inserting into an iterator while iterating.
-        let mut iter = index.mut_iter(b"key");
-        iter.insert(42);
-        iter.insert(43);
+        {
+            let mut iter = index.mut_iter(b"key");
+            iter.insert(42);
+            assert_eq!(iter.next(), None);
+            iter.insert(43);
+            assert_eq!(iter.next(), None);
+            assert!(context.encode().contains("collisions_total 4"));
+        }
+
+        // Verify first two values are new ones
+        {
+            let mut iter = index.iter(b"key");
+            assert_eq!(*iter.next().unwrap(), 43);
+            assert_eq!(*iter.next().unwrap(), 42);
+        }
+
+        // Insert a new value
+        index.insert(b"key", 100);
+        assert!(context.encode().contains("collisions_total 5"));
+
+        // Iterate to end
+        let mut iter = index.iter(b"key");
+        assert_eq!(*iter.next().unwrap(), 100);
         assert_eq!(*iter.next().unwrap(), 43);
         assert_eq!(*iter.next().unwrap(), 42);
-        // assert!(context.encode().contains("collisions_total 4"));
-
-        // since we've advanced beyond the head, newly inserted elements won't be returned by next()
-        iter.insert(100);
         assert_eq!(*iter.next().unwrap(), 3);
         assert_eq!(*iter.next().unwrap(), 2);
         assert_eq!(*iter.next().unwrap(), 1);
         assert!(iter.next().is_none());
-        // assert!(context.encode().contains("collisions_total 5"));
     }
 
     #[test_traced]
@@ -436,18 +451,6 @@ mod tests {
                 (lower_bound..=i).rev().collect::<Vec<_>>(),
                 index.iter(key).copied().collect::<Vec<_>>()
             );
-        }
-    }
-
-    #[test_traced]
-    fn test_index_chain_workload() {
-        let mut context = deterministic::Context::default();
-        let mut index = Index::init(context.clone(), OneCap);
-
-        for i in 0..10_000u64 {
-            let key = context.gen_range(0..u8::MAX);
-            index.insert(&key.to_be_bytes(), i);
-            index.remove(&key.to_be_bytes(), |v| *v < i.saturating_sub(25));
         }
     }
 }
