@@ -28,7 +28,7 @@ pub trait Translator: Clone + BuildHasher {
     ///
     /// Although `Translator` is a [BuildHasher], the `Key` type must still implement [Hash] for compatibility
     /// with the [std::collections::HashMap] used internally by [Index].
-    type Key: Eq + Hash;
+    type Key: Eq + Hash + Copy;
 
     /// Transform a key into its internal representation.
     fn transform(&self, key: &[u8]) -> Self::Key;
