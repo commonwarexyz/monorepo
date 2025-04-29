@@ -42,6 +42,7 @@ mod tests {
     use commonware_runtime::{deterministic, Metrics};
     use rand::Rng;
     use std::collections::HashMap;
+    use translator::OneCap;
 
     #[test_traced]
     fn test_index_basic() {
@@ -395,5 +396,45 @@ mod tests {
             index.get_iter(b"key").copied().collect::<Vec<_>>(),
             vec![3, 0]
         );
+    }
+
+    #[test_traced]
+    fn test_index_many_conflicts() {
+        let context = deterministic::Context::default();
+        let mut index = Index::init(context.clone(), OneCap);
+
+        // Add 1000 entries to the same key (pruning 100 behind)
+        let key = b"key";
+        for i in 0..1000 {
+            index.insert(key, i);
+
+            if i < 100 {
+                continue;
+            }
+            let lower_bound = i - 100;
+            index.remove(key, |v| *v < lower_bound);
+            assert_eq!(
+                (lower_bound..=i).rev().collect::<Vec<_>>(),
+                index.get_iter(key).copied().collect::<Vec<_>>()
+            );
+        }
+
+        // Remove everything
+        index.remove(key, |v| *v < 1000);
+        assert!(index.get_iter(key).collect::<Vec<_>>().is_empty());
+
+        // Add again
+        for i in 1000..2000 {
+            index.insert(key, i);
+            if i < 1100 {
+                continue;
+            }
+            let lower_bound = i - 100;
+            index.remove(key, |v| *v < lower_bound);
+            assert_eq!(
+                (lower_bound..=i).rev().collect::<Vec<_>>(),
+                index.get_iter(key).copied().collect::<Vec<_>>()
+            );
+        }
     }
 }
