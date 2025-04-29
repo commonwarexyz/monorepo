@@ -3,7 +3,7 @@ use commonware_runtime::Metrics;
 use prometheus_client::metrics::counter::Counter;
 use std::{
     collections::{hash_map::Entry, HashMap},
-    mem,
+    ptr::NonNull,
 };
 
 /// The initial capacity of the hashmap. This is a guess at the number of unique keys we will
@@ -80,7 +80,7 @@ impl<V> Record<V> {
 
 /// -------- mutable iterator ----------------------------------------------
 pub struct MutableIterator<'a, T: Translator, V> {
-    map: *mut HashMap<T::Key, Record<V>, T>,
+    map: NonNull<HashMap<T::Key, Record<V>, T>>,
     key: T::Key,
     values: &'a mut Vec<V>,
 
@@ -135,7 +135,7 @@ impl<'a, T: Translator, V> MutableIterator<'a, T, V> {
 impl<'a, T: Translator, V> Drop for MutableIterator<'a, T, V> {
     fn drop(&mut self) {
         unsafe {
-            let map = &mut *self.map;
+            let map = self.map.as_mut();
             if self.values.is_empty() {
                 map.remove(&self.key);
                 self.pruned.inc();
@@ -199,9 +199,10 @@ impl<T: Translator, V> Index<T, V> {
 
     pub fn mut_iter(&mut self, key: &[u8]) -> MutableIterator<'_, T, V> {
         let k = self.translator.transform(key);
-        let map_ptr = &mut self.map as *mut HashMap<T::Key, Record<V>, T>;
+        let mut map_ptr = NonNull::from(&mut self.map);
         let vec_ref = unsafe {
-            (*map_ptr)
+            map_ptr
+                .as_mut()
                 .entry(k)
                 .or_insert_with(|| Record::Many(Box::new(Vec::new())))
                 .as_vec_mut()
