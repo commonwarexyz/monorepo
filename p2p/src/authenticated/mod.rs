@@ -207,8 +207,7 @@ mod tests {
     use commonware_cryptography::{Ed25519, Signer};
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        deterministic, tokio, Clock, Listener, Metrics, Network as RNetwork, Runner, Sink, Spawner,
-        Stream,
+        deterministic, tokio, Clock, Metrics, Network as RNetwork, Runner, Spawner,
     };
     use governor::{clock::ReasonablyRealtime, Quota};
     use rand::{CryptoRng, Rng};
@@ -232,14 +231,8 @@ mod tests {
     ///
     /// We set a unique `base_port` for each test to avoid "address already in use"
     /// errors when tests are run immediately after each other.
-    async fn run_network<Si: Sink, St: Stream, L: Listener<Si, St>>(
-        context: impl Spawner
-            + Clock
-            + ReasonablyRealtime
-            + Rng
-            + CryptoRng
-            + RNetwork<L, Si, St>
-            + Metrics,
+    async fn run_network(
+        context: impl Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metrics,
         max_message_size: usize,
         base_port: u16,
         n: usize,
