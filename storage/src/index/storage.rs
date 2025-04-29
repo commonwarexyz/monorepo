@@ -256,3 +256,33 @@ impl<T: Translator, V> Index<T, V> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::index::{translator::TwoCap, Translator};
+    use commonware_macros::test_traced;
+    use commonware_runtime::deterministic;
+
+    #[test_traced]
+    fn demote_many_to_one() {
+        let ctx = deterministic::Context::default();
+        let mut ix = Index::<TwoCap, u64>::init(ctx, TwoCap);
+        let kb = b"k";
+
+        ix.insert(kb, 1);
+        ix.insert(kb, 2);
+
+        {
+            let mut it = ix.remove_iter(kb);
+            it.next();
+            it.remove(); // remove newest
+        } // drop should demote
+
+        let key = TwoCap.transform(kb);
+        match ix.map.get(&key).unwrap() {
+            Record::One(v) => assert_eq!(*v, 1),
+            _ => panic!("expected One"),
+        }
+    }
+}
