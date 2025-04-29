@@ -212,7 +212,7 @@ impl<T: Translator, V> Index<T, V> {
         let k = self.translator.transform(key);
         let map_ptr = &mut self.map as *mut HashMap<T::Key, Record<V>, T>;
         let vec_ref = unsafe {
-            (&mut *map_ptr)
+            (*map_ptr)
                 .entry(k)
                 .or_insert_with(|| Record::Many(Box::new(Vec::new())))
                 .as_vec_mut()
