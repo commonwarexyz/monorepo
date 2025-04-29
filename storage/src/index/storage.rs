@@ -198,22 +198,23 @@ impl<T: Translator, V> Index<T, V> {
     }
 
     pub fn mut_iter(&mut self, key: &[u8]) -> MutableIterator<'_, T, V> {
-        let k = self.translator.transform(key);
-        let mut map_ptr = NonNull::from(&mut self.map);
-        let vec_ref = unsafe {
-            map_ptr
-                .as_mut()
-                .entry(k)
+        let key = self.translator.transform(key);
+        let mut map = NonNull::from(&mut self.map);
+        let values = unsafe {
+            map.as_mut()
+                .entry(key)
                 .or_insert_with(|| Record::Many(Box::new(Vec::new())))
                 .as_vec_mut()
         };
-        let idx = vec_ref.len();
+        let idx = values.len();
         MutableIterator {
-            map: map_ptr,
-            key: k,
-            values: vec_ref,
+            map,
+            key,
+            values,
+
             idx,
             last_idx: None,
+
             collisions: &self.collisions,
             pruned: &self.keys_pruned,
         }
