@@ -11,24 +11,31 @@ use std::{
 /// the entire [super::translator::OneCap] range).
 const INITIAL_CAPACITY: usize = 256;
 
+/// Each key is mapped to a `Record` that contains either the value or a pointer to a `Vec` of values.
+///
+/// In the common case (where a single value is associated with a key), we store the value directly in the `Record`
+/// to avoid both indirection (heap jumping) and unnecessary allocations (storing `Vec` directly would make all
+/// `Record`s larger).
+#[allow(clippy::box_collection)]
 enum Record<V> {
     One(V),
     Many(Box<Vec<V>>),
 }
-/// -------- immutable iterator (newest → oldest) ---------------------------
-pub struct ValueIterator<'a, V> {
+
+/// An iterator over the value at some translated key.
+pub struct Iterator<'a, V> {
     slice: &'a [V],
     idx: usize,
 }
 
-impl<'a, V> ValueIterator<'a, V> {
+impl<V> Iterator<'_, V> {
     #[inline]
     fn empty() -> Self {
         Self { slice: &[], idx: 0 }
     }
 }
 
-impl<'a, V> Iterator for ValueIterator<'a, V> {
+impl<'a, V> std::iter::Iterator for Iterator<'a, V> {
     type Item = &'a V;
     fn next(&mut self) -> Option<Self::Item> {
         if self.idx == 0 {
@@ -39,36 +46,37 @@ impl<'a, V> Iterator for ValueIterator<'a, V> {
     }
 }
 
-/// -------- helpers on Record ---------------------------------------------
 impl<V> Record<V> {
-    fn iter(&self) -> ValueIterator<'_, V> {
+    /// Return an iterator over the values in the `Record`.
+    fn iter(&self) -> Iterator<'_, V> {
         match self {
-            Record::One(v) => ValueIterator {
+            Record::One(v) => Iterator {
                 slice: std::slice::from_ref(v),
                 idx: 1,
             },
-            Record::Many(boxed) => ValueIterator {
+            Record::Many(boxed) => Iterator {
                 slice: boxed,
                 idx: boxed.len(),
             },
         }
     }
 
-    /// Ensure we have a `Vec` and return `&mut Vec<V>`.
+    /// Return a mutable reference to the `Vec` of values in the `Record`,
+    /// migrating from `One` to `Many` if necessary.
     fn as_vec_mut(&mut self) -> &mut Vec<V> {
         match self {
             Record::Many(ref mut boxed) => boxed.as_mut(),
             Record::One(_) => unsafe {
-                // 1. Move the value out of `self` without running its destructor.
+                // Move the value out of `self` without running its destructor.
                 let v = match std::ptr::read(self) {
                     Record::One(val) => val,
                     _ => unreachable!(),
                 };
 
-                // 2. Overwrite `self` with a fresh Many(vec![v]).
+                // Overwrite `self` with a fresh Many(vec![v]).
                 *self = Record::Many(Box::new(vec![v]));
 
-                // 3. Return a mutable ref to that Vec.
+                // Return a mutable ref to that new vector.
                 match self {
                     Record::Many(boxed) => boxed.as_mut(),
                     _ => unreachable!(),
@@ -78,7 +86,7 @@ impl<V> Record<V> {
     }
 }
 
-/// -------- mutable iterator ----------------------------------------------
+/// A mutable iterator over the values at some translated key.
 pub struct MutableIterator<'a, T: Translator, V> {
     map: NonNull<HashMap<T::Key, Record<V>, T>>,
     key: T::Key,
@@ -91,7 +99,7 @@ pub struct MutableIterator<'a, T: Translator, V> {
     pruned: &'a Counter,
 }
 
-impl<'a, T: Translator, V> Iterator for MutableIterator<'a, T, V> {
+impl<'a, T: Translator, V> std::iter::Iterator for MutableIterator<'a, T, V> {
     type Item = &'a mut V;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -109,6 +117,13 @@ impl<'a, T: Translator, V> Iterator for MutableIterator<'a, T, V> {
 }
 
 impl<'a, T: Translator, V> MutableIterator<'a, T, V> {
+    /// Insert a new value at the end of the list (the start of any future iteration, like an LRU).
+    ///
+    /// If you want to instead update some existing value, use `next()` to get a mutable reference to the
+    /// value, and then update it directly. Using `insert()` is only useful to avoid an extra map lookup
+    /// (if you already have a reference to the backing it maps to).
+    ///
+    /// Once `insert()` is called, the iterator is reset back to the start of the list.
     pub fn insert(&mut self, v: V) {
         self.values.push(v);
         let values_len = self.values.len();
@@ -120,14 +135,16 @@ impl<'a, T: Translator, V> MutableIterator<'a, T, V> {
         }
     }
 
+    /// Remove the last value returned by `next()` (swapping it with the most recently added value for the
+    /// translated key).
     pub fn remove(&mut self) {
-        if let Some(i) = self.last_idx.take() {
-            self.values.swap_remove(i);
-            self.pruned.inc();
-
-            if i < self.idx {
-                self.idx -= 1;
-            }
+        let Some(i) = self.last_idx.take() else {
+            return;
+        };
+        self.values.swap_remove(i);
+        self.pruned.inc();
+        if i < self.idx {
+            self.idx -= 1;
         }
     }
 }
