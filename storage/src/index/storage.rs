@@ -141,12 +141,12 @@ impl<'a, K, V> Iterator for RemoveValueIterator<'a, K, V> {
     type Item = &'a mut V;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match self.next {
+        match self.next.take() {
             Some(next) => {
                 let current = unsafe { &mut (*next) };
                 let value = &mut current.value;
                 self.prev_prev = self.prev;
-                self.prev = self.next;
+                self.prev = Some(next);
                 self.next = current
                     .next
                     .as_mut()
@@ -170,8 +170,14 @@ impl<K, V> RemoveValueIterator<'_, K, V> {
         self.pruned_counter.inc();
 
         if let Some(prev_prev) = self.prev_prev {
+            let prev = self.prev.take().unwrap();
             unsafe {
-                (*prev_prev).next = (*self.prev.unwrap()).next.take();
+                (*prev_prev).next = (*prev).next.take();
+                self.next = (*prev_prev)
+                    .next
+                    .as_mut()
+                    .map(|next_next| next_next.as_mut() as *mut _);
+                self.prev = Some(prev_prev);
             }
             return;
         }

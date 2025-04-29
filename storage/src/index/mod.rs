@@ -37,12 +37,11 @@ pub trait Translator: Clone + BuildHasher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index::translator::TwoCap;
+    use crate::index::translator::{OneCap, TwoCap};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Metrics};
     use rand::Rng;
     use std::collections::HashMap;
-    use translator::OneCap;
 
     #[test_traced]
     fn test_index_basic() {
@@ -437,4 +436,16 @@ mod tests {
             );
         }
     }
+
+    // #[test_traced]
+    // fn test_index_chain_workload() {
+    //     let mut context = deterministic::Context::default();
+    //     let mut index = Index::init(context.clone(), OneCap);
+
+    //     for i in 0..10_000u64 {
+    //         let key = context.gen_range(0..u8::MAX);
+    //         index.insert(&key.to_be_bytes(), i);
+    //         index.remove(&key.to_be_bytes(), |v| *v < i.saturating_sub(25));
+    //     }
+    // }
 }
