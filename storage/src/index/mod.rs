@@ -77,31 +77,31 @@ mod tests {
         assert!(index.is_empty());
     }
 
-    // #[test_traced]
-    // fn test_index_many_keys() {
-    //     let mut context = deterministic::Context::default();
-    //     let mut index = Index::init(context.clone(), TwoCap);
+    #[test_traced]
+    fn test_index_many_keys() {
+        let mut context = deterministic::Context::default();
+        let mut index = Index::init(context.clone(), TwoCap);
 
-    //     // Insert enough keys to generate some collisions, then confirm each value we inserted
-    //     // remains retrievable.
-    //     let mut expected = HashMap::new();
-    //     const NUM_KEYS: usize = 2000; // enough to generate some collisions
-    //     while expected.len() < NUM_KEYS {
-    //         let mut key_array = [0u8; 32];
-    //         context.fill(&mut key_array);
-    //         let key = key_array.to_vec();
+        // Insert enough keys to generate some collisions, then confirm each value we inserted
+        // remains retrievable.
+        let mut expected = HashMap::new();
+        const NUM_KEYS: usize = 2000; // enough to generate some collisions
+        while expected.len() < NUM_KEYS {
+            let mut key_array = [0u8; 32];
+            context.fill(&mut key_array);
+            let key = key_array.to_vec();
 
-    //         let loc = expected.len() as u64;
-    //         index.insert(&key, loc);
-    //         expected.insert(key, loc);
-    //     }
+            let loc = expected.len() as u64;
+            index.insert(&key, loc);
+            expected.insert(key, loc);
+        }
 
-    //     for (key, loc) in expected.iter() {
-    //         let mut values = index.get_iter(key);
-    //         let res = values.find(|i| *i == loc);
-    //         assert!(res.is_some());
-    //     }
-    // }
+        for (key, loc) in expected.iter() {
+            let mut values = index.get_iter(key);
+            let res = values.find(|i| *i == loc);
+            assert!(res.is_some());
+        }
+    }
 
     #[test_traced]
     fn test_index_key_lengths_and_collisions() {
@@ -397,55 +397,55 @@ mod tests {
         );
     }
 
-    // #[test_traced]
-    // fn test_index_many_conflicts() {
-    //     let context = deterministic::Context::default();
-    //     let mut index = Index::init(context.clone(), OneCap);
+    #[test_traced]
+    fn test_index_many_conflicts() {
+        let context = deterministic::Context::default();
+        let mut index = Index::init(context.clone(), OneCap);
 
-    //     // Add 1000 entries to the same key (pruning 100 behind)
-    //     let key = b"key";
-    //     for i in 0..1000 {
-    //         index.insert(key, i);
+        // Add 1000 entries to the same key (pruning 100 behind)
+        let key = b"key";
+        for i in 0..1000 {
+            index.insert(key, i);
 
-    //         if i < 100 {
-    //             continue;
-    //         }
-    //         let lower_bound = i - 100;
-    //         index.remove(key, |v| *v < lower_bound);
-    //         assert_eq!(
-    //             (lower_bound..=i).rev().collect::<Vec<_>>(),
-    //             index.get_iter(key).copied().collect::<Vec<_>>()
-    //         );
-    //     }
+            if i < 100 {
+                continue;
+            }
+            let lower_bound = i - 100;
+            index.remove(key, |v| *v < lower_bound);
+            assert_eq!(
+                (lower_bound..=i).rev().collect::<Vec<_>>(),
+                index.get_iter(key).copied().collect::<Vec<_>>()
+            );
+        }
 
-    //     // Remove everything
-    //     index.remove(key, |v| *v < 1000);
-    //     assert!(index.get_iter(key).collect::<Vec<_>>().is_empty());
+        // Remove everything
+        index.remove(key, |v| *v < 1000);
+        assert!(index.get_iter(key).collect::<Vec<_>>().is_empty());
 
-    //     // Add again
-    //     for i in 1000..2000 {
-    //         index.insert(key, i);
-    //         if i < 1100 {
-    //             continue;
-    //         }
-    //         let lower_bound = i - 100;
-    //         index.remove(key, |v| *v < lower_bound);
-    //         assert_eq!(
-    //             (lower_bound..=i).rev().collect::<Vec<_>>(),
-    //             index.get_iter(key).copied().collect::<Vec<_>>()
-    //         );
-    //     }
-    // }
+        // Add again
+        for i in 1000..2000 {
+            index.insert(key, i);
+            if i < 1100 {
+                continue;
+            }
+            let lower_bound = i - 100;
+            index.remove(key, |v| *v < lower_bound);
+            assert_eq!(
+                (lower_bound..=i).rev().collect::<Vec<_>>(),
+                index.get_iter(key).copied().collect::<Vec<_>>()
+            );
+        }
+    }
 
-    // #[test_traced]
-    // fn test_index_chain_workload() {
-    //     let mut context = deterministic::Context::default();
-    //     let mut index = Index::init(context.clone(), OneCap);
+    #[test_traced]
+    fn test_index_chain_workload() {
+        let mut context = deterministic::Context::default();
+        let mut index = Index::init(context.clone(), OneCap);
 
-    //     for i in 0..10_000u64 {
-    //         let key = context.gen_range(0..u8::MAX);
-    //         index.insert(&key.to_be_bytes(), i);
-    //         index.remove(&key.to_be_bytes(), |v| *v < i.saturating_sub(25));
-    //     }
-    // }
+        for i in 0..10_000u64 {
+            let key = context.gen_range(0..u8::MAX);
+            index.insert(&key.to_be_bytes(), i);
+            index.remove(&key.to_be_bytes(), |v| *v < i.saturating_sub(25));
+        }
+    }
 }
