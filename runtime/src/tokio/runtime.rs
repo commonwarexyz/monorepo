@@ -211,7 +211,7 @@ impl Config {
         self
     }
     /// Set the storage directory from the environment variable
-    /// [COMMONWARE_STORAGE_DIRECTORY]. Panics if it's unset.
+    /// COMMONWARE_STORAGE_DIRECTORY. Panics if it's unset.
     pub fn with_storage_directory_from_env(mut self) -> Self {
         let Ok(storage_directory) = env::var(COMMONWARE_STORAGE_DIRECTORY) else {
             panic!(
