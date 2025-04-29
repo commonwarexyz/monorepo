@@ -28,7 +28,7 @@ use futures::{
 use governor::clock::Clock as GClock;
 use rand::Rng;
 use std::{collections::HashMap, marker::PhantomData};
-use tracing::{debug, error, trace, warn};
+use tracing::{debug, error, trace};
 
 /// Represents a pending serve operation.
 struct Serve<E: Clock, P: Array> {
@@ -316,7 +316,7 @@ impl<
         // Log result, but do not handle errors
         match result {
             Err(err) => error!(?err, ?peer, ?id, "serve send failed"),
-            Ok(to) if to.is_empty() => warn!(?peer, ?id, "serve send failed"),
+            Ok(to) if to.is_empty() => debug!(?peer, ?id, "serve send failed"),
             Ok(_) => trace!(?peer, ?id, "serve sent"),
         };
     }
