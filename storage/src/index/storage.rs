@@ -116,7 +116,7 @@ impl<'a, T: Translator, V> std::iter::Iterator for MutableIterator<'a, T, V> {
     }
 }
 
-impl<'a, T: Translator, V> MutableIterator<'a, T, V> {
+impl<T: Translator, V> MutableIterator<'_, T, V> {
     /// Insert a new value at the end of the list (the start of any future iteration, like an LRU).
     ///
     /// If you want to instead update some existing value, use `next()` to get a mutable reference to the
@@ -155,7 +155,7 @@ impl<'a, T: Translator, V> MutableIterator<'a, T, V> {
     }
 }
 
-impl<'a, T: Translator, V> Drop for MutableIterator<'a, T, V> {
+impl<T: Translator, V> Drop for MutableIterator<'_, T, V> {
     /// When the iterator is dropped, check if the `Vec` is empty (delete from the map) or
     /// if it has only one value (demote to `One`).
     fn drop(&mut self) {
