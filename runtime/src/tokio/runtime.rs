@@ -1,6 +1,7 @@
 use crate::storage::metered::Storage;
 use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
 use crate::{utils::Signaler, Clock, Error, Handle, Signal, METRICS_PREFIX};
+use crate::{SinkOf, StreamOf};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
     encoding::{text::encode, EncodeLabelSet},
@@ -534,7 +535,9 @@ impl GClock for Context {
 
 impl ReasonablyRealtime for Context {}
 
-impl crate::Network<Listener, Sink, Stream> for Context {
+impl crate::Network for Context {
+    type Listener = Listener;
+
     async fn bind(&self, socket: SocketAddr) -> Result<Listener, Error> {
         TcpListener::bind(socket)
             .await
@@ -545,7 +548,7 @@ impl crate::Network<Listener, Sink, Stream> for Context {
             })
     }
 
-    async fn dial(&self, socket: SocketAddr) -> Result<(Sink, Stream), Error> {
+    async fn dial(&self, socket: SocketAddr) -> Result<(SinkOf<Self>, StreamOf<Self>), Error> {
         // Create a new TCP stream
         let stream = TcpStream::connect(socket)
             .await
@@ -578,8 +581,11 @@ pub struct Listener {
     listener: TcpListener,
 }
 
-impl crate::Listener<Sink, Stream> for Listener {
-    async fn accept(&mut self) -> Result<(SocketAddr, Sink, Stream), Error> {
+impl crate::Listener for Listener {
+    type Sink = Sink;
+    type Stream = Stream;
+
+    async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), Error> {
         // Accept a new TCP stream
         let (stream, addr) = self.listener.accept().await.map_err(|_| Error::Closed)?;
         self.context.executor.metrics.inbound_connections.inc();

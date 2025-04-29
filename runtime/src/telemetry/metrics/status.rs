@@ -24,6 +24,8 @@ pub enum Status {
     /// Input was valid, but intentionally not processed.
     /// For example due to a rate limit, being a duplicate, etc.
     Dropped,
+    /// Processing returned no result before some deadline.
+    Timeout,
 }
 
 /// A counter metric with a status label.
