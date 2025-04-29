@@ -16,7 +16,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 use thiserror::Error;
-use tracing::warn;
+use tracing::debug;
 
 /// Errors that can occur when sending network messages.
 #[derive(Error, Debug, PartialEq)]
@@ -104,7 +104,7 @@ impl<E: Clock + GClock + Rng + Metrics, P: Array, Key: Array, NetS: Sender<Publi
         let shuffle = !is_new;
         let Some((peer, id)) = self.requester.request(shuffle) else {
             // If there are no peers, add the key to the pending queue
-            warn!(?key, "requester failed");
+            debug!(?key, "requester failed");
             self.add_pending(key);
             return;
         };
@@ -130,9 +130,9 @@ impl<E: Clock + GClock + Rng + Metrics, P: Array, Key: Array, NetS: Sender<Publi
         match result {
             // If the message was not sent successfully, treat it instantly as a peer timeout
             Err(err) => {
-                warn!(?err, ?peer, "send failed");
+                debug!(?err, ?peer, "send failed");
                 let req = self.requester.handle(&peer, id).unwrap(); // Unwrap is safe
-                self.requester.timeout(req);
+                self.requester.fail(req);
                 self.add_pending(key);
             }
             // If the message was sent to someone, add the request to the map
