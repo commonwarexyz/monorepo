@@ -54,17 +54,22 @@ impl<'a, V> Iterator for ValueIterator<'a, V> {
     }
 }
 
-/// A wrapper for the hashmap entry when it can be either occupied or vacant.
-enum MapEntry<'a, K, V> {
-    Occupied(OccupiedEntry<'a, K, Record<V>>),
-    Vacant(VacantEntry<'a, K, Record<V>>),
-}
-
 /// An iterator over all values associated with a translated key, allowing for mutation of the
 /// current element and insertion of new elements at the front of the list.
 pub struct UpdateValueIterator<'a, K, V> {
+    /// If set, this is the record holding the next value to return. Otherwise, we are either at the
+    /// head of the list (and o_entry should be used to get the first element) or we have finished
+    /// iterating over all elements.
     next: Option<*mut Record<V>>,
-    entry: Option<MapEntry<'a, K, V>>,
+
+    /// The occupied entry from the hashmap whose records we're iterating over, or None if there are
+    /// no (more) elements to return.
+    o_entry: Option<OccupiedEntry<'a, K, Record<V>>>,
+
+    /// The vacant entry from the hashmap whose records we're iterating over if the hashmap had no
+    /// elements for the key.
+    v_entry: Option<VacantEntry<'a, K, Record<V>>>,
+
     collisions_counter: &'a Counter,
 }
 
@@ -76,17 +81,29 @@ impl<'a, K, V> Iterator for UpdateValueIterator<'a, K, V> {
     type Item = &'a mut V;
 
     fn next(&mut self) -> Option<Self::Item> {
+        let entry = self.o_entry.as_mut()?;
         match self.next {
             Some(next) => {
+                // Return the value of the record pointed at by self.next, and update self.next to
+                // point at the record after it.
                 let current = unsafe { &mut (*next) };
-                let value = &mut current.value;
-                self.next = current
-                    .next
-                    .as_mut()
-                    .map(|next_next| next_next.as_mut() as *mut _);
-                Some(value)
+                self.next = current.next.as_mut().map(|next| next.as_mut() as *mut _);
+                if self.next.is_none() {
+                    self.o_entry.take();
+                }
+
+                Some(&mut current.value)
             }
-            None => None,
+            None => {
+                // This is the first call to next(), so return the value pointed at by the head of
+                // the list (o_entry) and update self.next to point at the record after it.
+                let current = entry.get_mut() as *mut Record<V>;
+                unsafe {
+                    self.next = (*current).next.as_mut().map(|next| next.as_mut() as *mut _);
+                }
+
+                Some(unsafe { &mut (*current).value })
+            }
         }
     }
 }
@@ -96,40 +113,40 @@ impl<K, V> UpdateValueIterator<'_, K, V> {
     /// consistently last in, first out. This means most recently added values will be returned
     /// first by the iterators, providing an LRU like behavior.
     pub fn insert(&mut self, mut value: V) {
-        let entry = self.entry.take().unwrap();
-
-        let mut occupied_entry = match entry {
-            MapEntry::Occupied(occupied_entry) => occupied_entry,
-            MapEntry::Vacant(vacant_entry) => {
-                // Key had no associated values, so just turn the vacant entry into an occupied one.
-                let record = Record { value, next: None };
-                let occupied_entry = vacant_entry.insert_entry(record);
-                self.entry = Some(MapEntry::Occupied(occupied_entry));
-                return;
-            }
-        };
-
-        // This key already has a value, so add the new value to the front of the list.
-        let record = occupied_entry.get_mut();
-        swap(&mut record.value, &mut value); // puts the new value at the front
-        record.next = Some(Box::new(Record {
-            value,
-            next: record.next.take(),
-        }));
-        self.entry = Some(MapEntry::Occupied(occupied_entry));
-
-        self.collisions_counter.inc();
+        if let Some(ref mut o_entry) = self.o_entry {
+            let record = o_entry.get_mut();
+            swap(&mut record.value, &mut value); // puts the new value at the front
+            record.next = Some(Box::new(Record {
+                value,
+                next: record.next.take(),
+            }));
+            self.collisions_counter.inc();
+            return;
+        }
+        if let Some(v_entry) = self.v_entry.take() {
+            // Key had no associated values, so just turn the vacant entry into an occupied one.
+            let occupied_entry = v_entry.insert_entry(Record { value, next: None });
+            self.o_entry = Some(occupied_entry);
+            return;
+        }
+        unreachable!("UpdateValueIterator should always have an entry");
     }
 }
 
 /// An iterator over all values associated with a translated key, allowing for mutation and removal
 /// of the current element.
 pub struct RemoveValueIterator<'a, K, V> {
-    can_remove: bool, //  false means remove should be a no-op
-    prev_prev: Option<*mut Record<V>>,
+    /// The previous element to the last returned value, if any.
     prev: Option<*mut Record<V>>,
-    next: Option<*mut Record<V>>,
+
+    /// The last returned value if it hasn't been removed.
+    last_returned: Option<*mut Record<V>>,
+
+    /// The entry from the hashmap whose records we're iterating over, or None if there are no more
+    /// elements to iterate over.
     entry: Option<OccupiedEntry<'a, K, Record<V>>>,
+
+    /// The counter to increment each time we remove a value.
     pruned_counter: &'a Counter,
 }
 
@@ -141,20 +158,42 @@ impl<'a, K, V> Iterator for RemoveValueIterator<'a, K, V> {
     type Item = &'a mut V;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match self.next {
-            Some(next) => {
-                let current = unsafe { &mut (*next) };
-                let value = &mut current.value;
-                self.prev_prev = self.prev;
-                self.prev = self.next;
-                self.next = current
-                    .next
-                    .as_mut()
-                    .map(|next_next| next_next.as_mut() as *mut _);
-                self.can_remove = true;
-                Some(value)
+        let entry = self.entry.as_mut()?;
+
+        if let Some(last_returned) = self.last_returned {
+            // Happy case: last returned value exists.
+            let next = unsafe { (*last_returned).next.as_mut() };
+            let Some(next) = next else {
+                self.entry.take();
+                return None;
+            };
+            let next = next.as_mut();
+            self.prev = Some(last_returned);
+            self.last_returned = Some(next);
+            return Some(&mut next.value);
+        }
+
+        match self.prev {
+            Some(prev) => {
+                // Last returned value was removed, so we resume iterating from prev.next.
+                let next = unsafe { (*prev).next.as_mut() };
+                let Some(next) = next else {
+                    self.entry.take();
+                    return None;
+                };
+                let next = next.as_mut();
+                self.last_returned = Some(next as *mut Record<V>);
+
+                Some(&mut next.value)
             }
-            None => None,
+            None => {
+                // This is the first call to next(), so we start from the head of the list.
+                let next = entry.get_mut() as *mut Record<V>;
+                self.last_returned = Some(next);
+                let val = unsafe { &mut (*next).value };
+
+                Some(val)
+            }
         }
     }
 }
@@ -163,41 +202,37 @@ impl<K, V> RemoveValueIterator<'_, K, V> {
     /// Remove the value last returned from this iterator from the map. If no value has been
     /// returned yet, or if the last returned value was removed already, then this is a no-op.
     pub fn remove(&mut self) {
-        if !self.can_remove {
+        let Some(last_returned) = self.last_returned else {
             return;
-        }
-        self.can_remove = false;
+        };
+        let Some(occupied_entry) = self.entry.as_mut() else {
+            unreachable!("occupied_entry should be set if last_returned is set");
+        };
         self.pruned_counter.inc();
 
-        if let Some(prev_prev) = self.prev_prev {
-            unsafe {
-                (*prev_prev).next = (*self.prev.unwrap()).next.take();
-            }
-            return;
-        }
-
-        let Some(occupied_entry) = self.entry.as_mut() else {
-            unreachable!("can_remove should prevent this");
-        };
-
-        // The element we are removing is at the front.
-        let head = occupied_entry.get_mut();
-
-        match head.next.take() {
-            Some(next) => {
-                // There is a linked element, so just make it the new head.
-                *head = *next;
-                self.prev = None;
-                self.next = Some(head as *mut Record<V>);
-            }
+        match self.prev {
             None => {
-                // This is the only element, so removing it requires we remove the map entry
-                // entirely.
-                self.entry.take().unwrap().remove();
-                self.prev = None;
-                self.next = None;
+                // We are removing the head of the list.
+                let head = occupied_entry.get_mut();
+                match head.next.take() {
+                    Some(next) => {
+                        // There is a linked element, so just make it the new head.
+                        *head = *next;
+                        self.prev = None;
+                    }
+                    None => {
+                        // This is the only element, so removing it requires we remove the map entry
+                        // entirely.
+                        self.entry.take().unwrap().remove();
+                        self.prev = None;
+                    }
+                }
             }
+            Some(prev) => unsafe {
+                (*prev).next = (*last_returned).next.take();
+            },
         }
+        self.last_returned = None;
     }
 }
 
@@ -282,17 +317,16 @@ impl<T: Translator, V> Index<T, V> {
         let translated_key = self.translator.transform(key);
         let entry = self.map.entry(translated_key);
         match entry {
-            Entry::Occupied(mut occupied_entry) => {
-                let record_ptr = occupied_entry.get_mut();
-                UpdateValueIterator {
-                    next: Some(record_ptr),
-                    entry: Some(MapEntry::Occupied(occupied_entry)),
-                    collisions_counter: &self.collisions,
-                }
-            }
+            Entry::Occupied(occupied_entry) => UpdateValueIterator {
+                next: None,
+                o_entry: Some(occupied_entry),
+                v_entry: None,
+                collisions_counter: &self.collisions,
+            },
             Entry::Vacant(vacant_entry) => UpdateValueIterator {
                 next: None,
-                entry: Some(MapEntry::Vacant(vacant_entry)),
+                o_entry: None,
+                v_entry: Some(vacant_entry),
                 collisions_counter: &self.collisions,
             },
         }
@@ -303,22 +337,15 @@ impl<T: Translator, V> Index<T, V> {
         let translated_key = self.translator.transform(key);
         let entry = self.map.entry(translated_key);
         match entry {
-            Entry::Occupied(mut occupied_entry) => {
-                let record_ptr = occupied_entry.get_mut();
-                RemoveValueIterator {
-                    can_remove: false,
-                    prev_prev: None,
-                    prev: None,
-                    next: Some(record_ptr),
-                    entry: Some(occupied_entry),
-                    pruned_counter: &self.keys_pruned,
-                }
-            }
-            Entry::Vacant(_) => RemoveValueIterator {
-                can_remove: false,
-                prev_prev: None,
+            Entry::Occupied(occupied_entry) => RemoveValueIterator {
                 prev: None,
-                next: None,
+                entry: Some(occupied_entry),
+                last_returned: None,
+                pruned_counter: &self.keys_pruned,
+            },
+            Entry::Vacant(_) => RemoveValueIterator {
+                prev: None,
+                last_returned: None,
                 entry: None,
                 pruned_counter: &self.keys_pruned,
             },

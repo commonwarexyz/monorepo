@@ -373,4 +373,28 @@ mod tests {
         assert!(iter.next().is_none());
         assert!(context.encode().contains("collisions_total 5"));
     }
+
+    #[test_traced]
+    fn test_index_remove_middle_then_next() {
+        let context = deterministic::Context::default();
+        let mut index = Index::init(context.clone(), TwoCap);
+
+        // Build list: [3, 2, 1, 0]
+        for i in 0..4 {
+            index.insert(b"key", i);
+        }
+
+        // Remove middle: [3, 0]
+        let mut iter = index.remove_iter(b"key");
+        assert_eq!(*iter.next().unwrap(), 3); // head (kept)
+        assert_eq!(*iter.next().unwrap(), 2); // middle (removed)
+        iter.remove();
+        assert_eq!(*iter.next().unwrap(), 1); // middle (removed)
+        iter.remove();
+        assert_eq!(*iter.next().unwrap(), 0); // middle (removed)
+        assert_eq!(
+            index.get_iter(b"key").copied().collect::<Vec<_>>(),
+            vec![3, 0]
+        );
+    }
 }
