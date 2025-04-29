@@ -26,6 +26,8 @@ use tokio::{
 };
 use tracing::warn;
 
+const COMMONWARE_STORAGE_DIRECTORY: &str = "COMMONWARE_STORAGE_DIRECTORY";
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct Work {
     label: String,
@@ -206,6 +208,25 @@ impl Config {
     /// Maximum buffer size for operations on blobs.
     pub fn with_maximum_buffer_size(mut self, n: usize) -> Self {
         self.maximum_buffer_size = n;
+        self
+    }
+    /// Set the storage directory from the environment variable
+    /// [COMMONWARE_STORAGE_DIRECTORY]. Panics if it's unset.
+    pub fn with_storage_directory_from_env(mut self) -> Self {
+        let Ok(storage_directory) = env::var(COMMONWARE_STORAGE_DIRECTORY) else {
+            panic!(
+                "Environment variable {} is not set",
+                COMMONWARE_STORAGE_DIRECTORY
+            )
+        };
+
+        self.storage_directory = PathBuf::from(storage_directory);
+        if !self.storage_directory.is_absolute() {
+            panic!(
+                "Environment variable {} must be an absolute path",
+                COMMONWARE_STORAGE_DIRECTORY
+            )
+        }
         self
     }
 

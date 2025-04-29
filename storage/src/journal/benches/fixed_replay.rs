@@ -1,7 +1,7 @@
 use super::{append_random_data, get_journal};
 use commonware_runtime::{
-    benchmarks::{context, tokio},
-    tokio::Context,
+    benchmarks::{context, tokio::Runner as TokioBenchRunner},
+    tokio::{self, Context},
 };
 use commonware_storage::journal::fixed::Journal;
 use commonware_utils::array::FixedBytes;
@@ -39,7 +39,8 @@ async fn bench_run(journal: &mut Journal<Context, FixedBytes<ITEM_SIZE>>, items_
 /// Benchmark the replaying of items from a journal containing exactly that
 /// number of items.
 fn bench_fixed_replay(c: &mut Criterion) {
-    let runner = tokio::Runner::default();
+    let cfg = tokio::Config::new().with_storage_directory_from_env();
+    let runner = TokioBenchRunner::new(cfg);
     for items in [1_000, 10_000, 100_000, 500_000] {
         c.bench_function(
             &format!("{}/items={} size={}", module_path!(), items, ITEM_SIZE),

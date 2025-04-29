@@ -1,15 +1,14 @@
 use super::utils::{append_random, get_archive};
 use commonware_runtime::{
-    benchmarks::{context, tokio},
-    tokio::Config,
-    Runner,
+    benchmarks::{context, tokio::Runner as TokioBenchRunner},
+    tokio, Runner,
 };
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
 
 fn bench_restart(c: &mut Criterion) {
     // Create a config we can use across all benchmarks (with a fixed `storage_directory`).
-    let cfg = Config::default();
+    let cfg = tokio::Config::default().with_storage_directory_from_env();
     for compression in [None, Some(3)] {
         for items in [10_000, 50_000, 100_000] {
             let builder = commonware_runtime::tokio::Runner::new(cfg.clone());
@@ -20,7 +19,7 @@ fn bench_restart(c: &mut Criterion) {
             });
 
             // Run the benchmarks
-            let runner = tokio::Runner::new(cfg.clone());
+            let runner = TokioBenchRunner::new(cfg.clone());
             c.bench_function(
                 &format!(
                     "{}/items={} comp={}",

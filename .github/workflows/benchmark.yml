@@ -50,6 +50,8 @@ jobs:
       - name: Compile benchmarks
         run: cargo bench --no-run
       - name: Run benchmark
+        env:
+          COMMONWARE_STORAGE_DIR: "$GITHUB_WORKSPACE/benchmarks"
         run: cargo bench --benches -p ${{ matrix.package }} -- --output-format bencher | tee ${{ matrix.package }}.txt
       - name: Publish benchmark result
         uses: benchmark-action/github-action-benchmark@v1

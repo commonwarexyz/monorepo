@@ -50,7 +50,7 @@ async fn bench_run_concurrent(
 fn bench_fixed_read_random(c: &mut Criterion) {
     // Create a config we can use across all benchmarks (with a fixed `storage_directory`), allowing the
     // same test file to be re-used.
-    let cfg = Config::default();
+    let cfg = Config::new().with_storage_directory_from_env();
 
     // Generate a large temp journal with random data.
     let runner = Runner::new(cfg.clone());
