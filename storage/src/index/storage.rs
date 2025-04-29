@@ -58,20 +58,22 @@ impl<V> Record<V> {
     fn as_vec_mut(&mut self) -> &mut Vec<V> {
         match self {
             Record::Many(ref mut boxed) => boxed.as_mut(),
-            Record::One(_) => {
-                let old = mem::replace(self, Record::Many(Box::new(Vec::new())));
-                if let Record::One(v) = old {
-                    match self {
-                        Record::Many(b) => {
-                            b.push(v);
-                            b
-                        }
-                        _ => unreachable!(),
-                    }
-                } else {
-                    unreachable!()
+            Record::One(_) => unsafe {
+                // 1. Move the value out of `self` without running its destructor.
+                let v = match std::ptr::read(self) {
+                    Record::One(val) => val,
+                    _ => unreachable!(),
+                };
+
+                // 2. Overwrite `self` with a fresh Many(vec![v]).
+                *self = Record::Many(Box::new(vec![v]));
+
+                // 3. Return a mutable ref to that Vec.
+                match self {
+                    Record::Many(boxed) => boxed.as_mut(),
+                    _ => unreachable!(),
                 }
-            }
+            },
         }
     }
 }
