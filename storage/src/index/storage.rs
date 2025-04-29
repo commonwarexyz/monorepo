@@ -180,7 +180,7 @@ impl<T: Translator, V> Drop for MutableIterator<'_, T, V> {
     }
 }
 
-/// A memory-efficient index that maps arbitrary values to translated keys.
+/// A memory-efficient index that maps translated keys to arbitrary values.
 pub struct Index<T: Translator, V> {
     translator: T,
     map: HashMap<T::Key, Record<V>, T>,
