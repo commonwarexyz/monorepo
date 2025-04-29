@@ -123,20 +123,26 @@ impl<'a, T: Translator, V> MutableIterator<'a, T, V> {
     /// value, and then update it directly. Using `insert()` is only useful to avoid an extra map lookup
     /// (if you already have a reference to the backing it maps to).
     ///
-    /// Once `insert()` is called, the iterator is reset back to the start of the list.
+    /// Once `insert()` is called, the iterator is reset back to the start of the list. `insert()` can
+    /// be called multiple times in a row without calling `next()`.
     pub fn insert(&mut self, v: V) {
+        // Add the new value to the end of the list.
         self.values.push(v);
         let values_len = self.values.len();
         if values_len > 1 {
             self.collisions.inc();
         }
-        if self.last_idx.is_none() {
-            self.idx = values_len;
-        }
+
+        // Reset the iterator.
+        self.idx = values_len;
+        self.last_idx = None;
     }
 
     /// Remove the last value returned by `next()` (swapping it with the most recently added value for the
     /// translated key).
+    ///
+    /// This is a no-op if `next()` has not been called or `remove()` is called multiple times without
+    /// calling `next()`.
     pub fn remove(&mut self) {
         let Some(i) = self.last_idx.take() else {
             return;
@@ -150,26 +156,31 @@ impl<'a, T: Translator, V> MutableIterator<'a, T, V> {
 }
 
 impl<'a, T: Translator, V> Drop for MutableIterator<'a, T, V> {
+    /// When the iterator is dropped, check if the `Vec` is empty (delete from the map) or
+    /// if it has only one value (demote to `One`).
     fn drop(&mut self) {
         unsafe {
             let map = self.map.as_mut();
-            if self.values.is_empty() {
-                map.remove(&self.key);
-                self.pruned.inc();
-                return;
-            }
-            if self.values.len() == 1 {
-                if let Some(rec) = map.get_mut(&self.key) {
-                    if let Record::Many(ref mut boxed) = rec {
-                        let v = boxed.pop().unwrap();
-                        *rec = Record::One(v);
-                    }
+            match self.values.len() {
+                0 => {
+                    // We have no values left, so remove the entry from the map.
+                    map.remove(&self.key);
+                    self.pruned.inc();
+                }
+                1 => {
+                    // We have only one value left, so demote to `One`.
+                    let v = self.values.pop().unwrap();
+                    *map.get_mut(&self.key).unwrap() = Record::One(v);
+                }
+                _ => {
+                    // We have more than one value left, so do nothing.
                 }
             }
         }
     }
 }
 
+/// A memory-efficient index that maps arbitrary values to translated keys.
 pub struct Index<T: Translator, V> {
     translator: T,
     map: HashMap<T::Key, Record<V>, T>,
@@ -178,6 +189,7 @@ pub struct Index<T: Translator, V> {
 }
 
 impl<T: Translator, V> Index<T, V> {
+    /// Create a new index with the given translator.
     pub fn init(ctx: impl Metrics, tr: T) -> Self {
         let s = Self {
             translator: tr.clone(),
@@ -198,15 +210,19 @@ impl<T: Translator, V> Index<T, V> {
         s
     }
 
+    /// Return the number of translated keys in the index.
     #[inline]
     pub fn len(&self) -> usize {
         self.map.len()
     }
+
+    /// Return whether the index is empty.
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
     }
 
+    /// Create an immutable iterator over the values at the given translated key.
     pub fn iter(&self, key: &[u8]) -> Iterator<V> {
         self.map
             .get(&self.translator.transform(key))
@@ -214,6 +230,7 @@ impl<T: Translator, V> Index<T, V> {
             .unwrap_or_else(Iterator::empty)
     }
 
+    /// Create a mutable iterator over the values at the given translated key.
     pub fn mut_iter(&mut self, key: &[u8]) -> MutableIterator<'_, T, V> {
         let key = self.translator.transform(key);
         let mut map = NonNull::from(&mut self.map);
@@ -237,6 +254,10 @@ impl<T: Translator, V> Index<T, V> {
         }
     }
 
+    /// Insert a value at the given translated key.
+    ///
+    /// If no value exists at the key, inserting via `insert()` will be more efficient than
+    /// `mut_iter()` + `insert()`.
     pub fn insert(&mut self, key: &[u8], v: V) {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
@@ -250,6 +271,10 @@ impl<T: Translator, V> Index<T, V> {
         }
     }
 
+    /// Insert a value at the given translated key, and prune any values that are no longer valid.
+    ///
+    /// If no value exists at the key or only 1 value exists at a key, inserting via `insert_and_prune()`
+    /// will be more efficient than `mut_iter()` + `remove()` + `insert()`.
     pub fn insert_and_prune(&mut self, key: &[u8], v: V, prune: impl Fn(&V) -> bool) {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
@@ -291,6 +316,10 @@ impl<T: Translator, V> Index<T, V> {
         }
     }
 
+    /// Remove a value at the given translated key, and prune any values that are no longer valid.
+    ///
+    /// If no value exists at the key or only 1 value exists at a key, this is more efficient than
+    /// `mut_iter()` + `remove()`.
     pub fn remove(&mut self, key: &[u8], prune: impl Fn(&V) -> bool) {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
