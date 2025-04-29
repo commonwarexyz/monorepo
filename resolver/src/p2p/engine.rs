@@ -108,7 +108,7 @@ impl<
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
         let metrics = metrics::Metrics::init(context.clone());
         let fetcher = Fetcher::new(
-            context.clone(),
+            context.with_label("fetcher"),
             cfg.requester_config,
             cfg.fetch_retry_timeout,
             cfg.priority_requests,

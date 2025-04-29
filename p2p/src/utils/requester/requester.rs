@@ -1,7 +1,10 @@
 //! Requester for sending rate-limited requests to peers.
 
 use super::{Config, PeerLabel};
-use commonware_runtime::{Clock, Metrics};
+use commonware_runtime::{
+    telemetry::metrics::status::{CounterExt, Status},
+    Clock, Metrics,
+};
 use commonware_utils::{Array, PrioritySet};
 use either::Either;
 use governor::{
@@ -149,10 +152,12 @@ impl<E: Clock + GClock + Rng + Metrics, P: Array> Requester<E, P> {
             self.deadlines.put(id, deadline);
 
             // Increment metric if-and-only-if request is successful
-            self.metrics.requests.inc();
-
+            self.metrics.created.inc(Status::Success);
             return Some((participant.clone(), id));
         }
+
+        // Increment failed metric if no participants are available
+        self.metrics.created.inc(Status::Failure);
         None
     }
 
