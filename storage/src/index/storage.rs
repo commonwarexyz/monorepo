@@ -207,11 +207,11 @@ impl<T: Translator, V> Index<T, V> {
         self.map.is_empty()
     }
 
-    pub fn iter(&self, key: &[u8]) -> ValueIterator<V> {
+    pub fn iter(&self, key: &[u8]) -> Iterator<V> {
         self.map
             .get(&self.translator.transform(key))
             .map(|r| r.iter())
-            .unwrap_or_else(ValueIterator::empty)
+            .unwrap_or_else(Iterator::empty)
     }
 
     pub fn mut_iter(&mut self, key: &[u8]) -> MutableIterator<'_, T, V> {
