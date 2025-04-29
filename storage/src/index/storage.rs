@@ -235,6 +235,8 @@ impl<T: Translator, V> Index<T, V> {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
             Entry::Occupied(mut occ) => {
+                self.collisions.inc();
+
                 // If there is only 1 value and that value should be pruned, we can just replace it.
                 if let Record::One(ref mut v1) = occ.get_mut() {
                     if prune(v1) {
@@ -246,13 +248,15 @@ impl<T: Translator, V> Index<T, V> {
 
                 // If there is more than 1 value, we need to iterate.
                 let vec = occ.get_mut().as_vec_mut();
-                vec.push(v);
-                self.collisions.inc();
+
+                // Remove any items that are no longer valid (to avoid extending vec unnecessarily)
                 vec.retain(|v| !prune(v));
+                vec.push(v);
+
+                // Drop the entry or demote to One if we have only 1 value left.
                 match vec.len() {
                     0 => {
-                        occ.remove_entry();
-                        self.keys_pruned.inc();
+                        unreachable!("we will always have at least 1 item");
                     }
                     1 => {
                         let v = vec.pop().unwrap();
