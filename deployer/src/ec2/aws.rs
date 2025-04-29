@@ -50,14 +50,14 @@ pub async fn delete_key_pair(client: &Ec2Client, key_name: &str) -> Result<(), E
     Ok(())
 }
 
-/// Finds the latest Ubuntu 22.04 ARM64 AMI in the region
+/// Finds the latest Ubuntu 24.04 ARM64 AMI in the region
 pub async fn find_latest_ami(client: &Ec2Client) -> Result<String, Ec2Error> {
     let resp = client
         .describe_images()
         .filters(
             Filter::builder()
                 .name("name")
-                .values("ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-arm64-server-*")
+                .values("ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-arm64-server-*")
                 .build(),
         )
         .filters(
