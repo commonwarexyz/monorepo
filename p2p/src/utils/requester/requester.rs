@@ -216,14 +216,23 @@ impl<E: Clock + GClock + Rng + Metrics, P: Array> Requester<E, P> {
 
         // Update performance
         self.update(request.participant, elapsed);
+        self.metrics.results.inc(Status::Success);
         self.metrics.resolves.observe(elapsed.as_secs_f64());
     }
 
     /// Timeout an outstanding request.
     pub fn timeout(&mut self, request: Request<P>) {
-        // Update performance
         self.update(request.participant, self.timeout);
-        self.metrics.timeouts.inc();
+        self.metrics.results.inc(Status::Timeout);
+    }
+
+    /// Fail an outstanding request and penalize the request
+    /// participant with the timeout duration.
+    ///
+    /// This is used when we fail to send a request to a participant.
+    pub fn fail(&mut self, request: Request<P>) {
+        self.update(request.participant, self.timeout);
+        self.metrics.results.inc(Status::Failure);
     }
 
     /// Get the next outstanding ID and deadline.

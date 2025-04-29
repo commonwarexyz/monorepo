@@ -132,7 +132,7 @@ impl<E: Clock + GClock + Rng + Metrics, P: Array, Key: Array, NetS: Sender<Publi
             Err(err) => {
                 debug!(?err, ?peer, "send failed");
                 let req = self.requester.handle(&peer, id).unwrap(); // Unwrap is safe
-                self.requester.timeout(req);
+                self.requester.fail(req);
                 self.add_pending(key);
             }
             // If the message was sent to someone, add the request to the map

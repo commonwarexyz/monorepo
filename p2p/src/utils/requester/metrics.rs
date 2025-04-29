@@ -4,7 +4,7 @@ use commonware_runtime::telemetry::metrics::{histogram::Buckets, status};
 use commonware_utils::Array;
 use prometheus_client::{
     encoding::EncodeLabelSet,
-    metrics::{counter::Counter, family::Family, gauge::Gauge, histogram::Histogram},
+    metrics::{family::Family, gauge::Gauge, histogram::Histogram},
 };
 
 /// Label for peer metrics.
@@ -26,11 +26,11 @@ impl PeerLabel {
 /// Metrics for the requester.
 #[derive(Debug)]
 pub struct Metrics {
-    /// Number of requests created.
+    /// Status of all request creation attempts.
     pub created: status::Counter,
-    /// Number of requests that timed out.
-    pub timeouts: Counter,
-    /// Number and duration of requests that were resolved.
+    /// Status of all requests that were successfully created.
+    pub results: status::Counter,
+    /// Number and duration of requests that were successfully resolved.
     pub resolves: Histogram,
     /// Performance of each peer
     pub performance: Family<PeerLabel, Gauge>,
@@ -41,19 +41,19 @@ impl Metrics {
     pub fn init<M: commonware_runtime::Metrics>(registry: M) -> Self {
         let metrics = Self {
             created: status::Counter::default(),
-            timeouts: Counter::default(),
+            results: status::Counter::default(),
             resolves: Histogram::new(Buckets::NETWORK.into_iter()),
             performance: Family::default(),
         };
         registry.register(
-            "requests",
-            "Number of requests created",
+            "created",
+            "Status of all request creation attempts",
             metrics.created.clone(),
         );
         registry.register(
-            "timeouts",
-            "Number of requests that timed out",
-            metrics.timeouts.clone(),
+            "results",
+            "Status of all requests that were successfully created",
+            metrics.results.clone(),
         );
         registry.register(
             "resolves",
