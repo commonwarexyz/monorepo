@@ -188,27 +188,14 @@ impl<T: Translator, V> Index<T, V> {
         self.map.is_empty()
     }
 
-    pub fn insert(&mut self, key: &[u8], v: V) {
-        let k = self.translator.transform(key);
-        match self.map.entry(k) {
-            Entry::Occupied(mut occ) => {
-                occ.get_mut().as_vec_mut().push(v);
-                self.collisions.inc();
-            }
-            Entry::Vacant(vac) => {
-                vac.insert(Record::One(v));
-            }
-        }
-    }
-
-    pub fn get_iter(&self, key: &[u8]) -> ValueIterator<V> {
+    pub fn iter(&self, key: &[u8]) -> ValueIterator<V> {
         self.map
             .get(&self.translator.transform(key))
             .map(|r| r.iter())
             .unwrap_or_else(ValueIterator::empty)
     }
 
-    fn make_iter(&mut self, key: &[u8]) -> MutableIterator<'_, T, V> {
+    pub fn mut_iter(&mut self, key: &[u8]) -> MutableIterator<'_, T, V> {
         let k = self.translator.transform(key);
         let map_ptr = &mut self.map as *mut HashMap<T::Key, Record<V>, T>;
         let vec_ref = unsafe {
@@ -229,30 +216,84 @@ impl<T: Translator, V> Index<T, V> {
         }
     }
 
-    pub fn update_iter(&mut self, k: &[u8]) -> MutableIterator<'_, T, V> {
-        self.make_iter(k)
+    pub fn insert(&mut self, key: &[u8], v: V) {
+        let k = self.translator.transform(key);
+        match self.map.entry(k) {
+            Entry::Occupied(mut occ) => {
+                occ.get_mut().as_vec_mut().push(v);
+                self.collisions.inc();
+            }
+            Entry::Vacant(vac) => {
+                vac.insert(Record::One(v));
+            }
+        }
     }
 
-    pub fn remove_iter(&mut self, k: &[u8]) -> MutableIterator<'_, T, V> {
-        self.make_iter(k)
+    pub fn insert_and_prune(&mut self, key: &[u8], v: V, prune: impl Fn(&V) -> bool) {
+        let k = self.translator.transform(key);
+        match self.map.entry(k) {
+            Entry::Occupied(mut occ) => {
+                // If there is only 1 value and that value should be pruned, we can just replace it.
+                if let Record::One(ref mut v1) = occ.get_mut() {
+                    if prune(v1) {
+                        *v1 = v;
+                        self.keys_pruned.inc();
+                        return;
+                    }
+                }
+
+                // If there is more than 1 value, we need to iterate.
+                let vec = occ.get_mut().as_vec_mut();
+                vec.push(v);
+                self.collisions.inc();
+                vec.retain(|v| !prune(v));
+                match vec.len() {
+                    0 => {
+                        occ.remove_entry();
+                        self.keys_pruned.inc();
+                    }
+                    1 => {
+                        let v = vec.pop().unwrap();
+                        *occ.into_mut() = Record::One(v);
+                    }
+                    _ => {}
+                }
+            }
+            Entry::Vacant(vac) => {
+                vac.insert(Record::One(v));
+            }
+        }
     }
 
     pub fn remove(&mut self, key: &[u8], prune: impl Fn(&V) -> bool) {
         let k = self.translator.transform(key);
-        if let Entry::Occupied(mut occ) = self.map.entry(k) {
-            let vec = occ.get_mut().as_vec_mut();
-            vec.retain(|v| !prune(v));
-            match vec.len() {
-                0 => {
-                    occ.remove_entry();
-                    self.keys_pruned.inc();
+        match self.map.entry(k) {
+            Entry::Occupied(mut occ) => {
+                // If there is only 1 value and that value should be pruned, we can just remove it.
+                if let Record::One(ref mut v1) = occ.get_mut() {
+                    if prune(v1) {
+                        occ.remove_entry();
+                        self.keys_pruned.inc();
+                        return;
+                    }
                 }
-                1 => {
-                    let v = vec.pop().unwrap();
-                    *occ.into_mut() = Record::One(v);
+
+                // If there is more than 1 value, we need to iterate.
+                let vec = occ.get_mut().as_vec_mut();
+                vec.retain(|v| !prune(v));
+                match vec.len() {
+                    0 => {
+                        occ.remove_entry();
+                        self.keys_pruned.inc();
+                    }
+                    1 => {
+                        let v = vec.pop().unwrap();
+                        *occ.into_mut() = Record::One(v);
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
+            Entry::Vacant(_) => {}
         }
     }
 }
@@ -274,7 +315,7 @@ mod tests {
         ix.insert(kb, 2);
 
         {
-            let mut it = ix.remove_iter(kb);
+            let mut it = ix.mut_iter(kb);
             it.next();
             it.remove(); // remove newest
         } // drop should demote

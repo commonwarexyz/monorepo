@@ -227,17 +227,9 @@ impl<T: Translator, E: Storage + Metrics, K: Array, VC: CodecConfig + Copy, V: C
         // Store interval
         self.intervals.insert(index..=index);
 
-        // Cleanup any useless keys and insert new key
-        {
-            let mut iter = self.keys.update_iter(&key);
-            while let Some(index) = iter.next() {
-                if *index < oldest_allowed {
-                    iter.remove();
-                    continue;
-                }
-            }
-            iter.insert(index);
-        }
+        // Insert and prune any useless keys
+        self.keys
+            .insert_and_prune(&key, index, |v| *v < oldest_allowed);
 
         // Update pending writes
         let pending_writes = self.pending.entry(section).or_default();
@@ -287,7 +279,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, VC: CodecConfig + Copy, V: C
         self.gets.inc();
 
         // Fetch index
-        let iter = self.keys.get_iter(key);
+        let iter = self.keys.iter(key);
         let min_allowed = self.oldest_allowed.unwrap_or(0);
         for index in iter {
             // Continue if index is no longer allowed due to pruning.
