@@ -29,7 +29,7 @@ pub struct Metrics {
     /// Status of all request creation attempts.
     pub created: status::Counter,
     /// Status of all requests that were successfully created.
-    pub results: status::Counter,
+    pub requests: status::Counter,
     /// Number and duration of requests that were successfully resolved.
     pub resolves: Histogram,
     /// Performance of each peer
@@ -41,7 +41,7 @@ impl Metrics {
     pub fn init<M: commonware_runtime::Metrics>(registry: M) -> Self {
         let metrics = Self {
             created: status::Counter::default(),
-            results: status::Counter::default(),
+            requests: status::Counter::default(),
             resolves: Histogram::new(Buckets::NETWORK.into_iter()),
             performance: Family::default(),
         };
@@ -51,9 +51,9 @@ impl Metrics {
             metrics.created.clone(),
         );
         registry.register(
-            "results",
+            "requests",
             "Status of all requests that were successfully created",
-            metrics.results.clone(),
+            metrics.requests.clone(),
         );
         registry.register(
             "resolves",
