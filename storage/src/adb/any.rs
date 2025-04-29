@@ -298,7 +298,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher> Any<E, K, V,
         let mut op_found = false;
         {
             let mut loc_iter = self.snapshot.mut_iter(&key);
-            while let Some(loc) = loc_iter.next() {
+            for loc in &mut loc_iter {
                 let op = self.log.read(*loc).await?;
                 match op.to_type() {
                     Type::Update(k, _) => {
