@@ -281,6 +281,7 @@ impl<T: Translator, V> Index<T, V> {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
             Entry::Occupied(mut occ) => {
+                // Track collision regardless of what happens.
                 self.collisions.inc();
 
                 // If there is only 1 value and that value should be pruned, we can just replace it.
