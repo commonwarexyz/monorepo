@@ -103,6 +103,7 @@ impl<'a, T: Translator, V> std::iter::Iterator for MutableIterator<'a, T, V> {
     type Item = &'a mut V;
 
     fn next(&mut self) -> Option<Self::Item> {
+        // Walk backwards over the `Vec` (preferring the most recently added value).
         if self.idx == 0 || self.values.is_empty() {
             return None;
         }
@@ -117,24 +118,24 @@ impl<'a, T: Translator, V> std::iter::Iterator for MutableIterator<'a, T, V> {
 }
 
 impl<T: Translator, V> MutableIterator<'_, T, V> {
-    /// Insert a new value at the end of the list (the start of any future iteration, like an LRU).
+    /// Insert a new value at the start of the iterator.
     ///
-    /// If you want to instead update some existing value, use `next()` to get a mutable reference to the
-    /// value, and then update it directly. Using `insert()` is only useful to avoid an extra map lookup
-    /// (if you already have a reference to the backing it maps to).
+    /// This operation will prevent the iterator from being used again (although
+    /// it is possible to call `insert()` multiple times).
     ///
-    /// Once `insert()` is called, the iterator is reset back to the start of the list. `insert()` can
-    /// be called multiple times in a row without calling `next()`.
+    /// If you want to instead update some existing value, use `next()` to get a mutable reference
+    /// and then update it directly.
+    ///
+    /// This is more efficient than calling `index::insert()` after iteration.
     pub fn insert(&mut self, v: V) {
-        // Add the new value to the end of the list.
         self.values.push(v);
         let values_len = self.values.len();
         if values_len > 1 {
             self.collisions.inc();
         }
 
-        // Reset the iterator.
-        self.idx = values_len;
+        // Stop the iterator.
+        self.idx = 0;
         self.last_idx = None;
     }
 
@@ -142,7 +143,7 @@ impl<T: Translator, V> MutableIterator<'_, T, V> {
     /// translated key).
     ///
     /// This is a no-op if `next()` has not been called or `remove()` is called multiple times without
-    /// calling `next()`.
+    /// calling `next()` after each `remove()`.
     pub fn remove(&mut self) {
         let Some(i) = self.last_idx.take() else {
             return;
@@ -165,7 +166,6 @@ impl<T: Translator, V> Drop for MutableIterator<'_, T, V> {
                 0 => {
                     // We have no values left, so remove the entry from the map.
                     map.remove(&self.key);
-                    self.pruned.inc();
                 }
                 1 => {
                     // We have only one value left, so demote to `One`.
@@ -210,7 +210,9 @@ impl<T: Translator, V> Index<T, V> {
         s
     }
 
-    /// Return the number of translated keys in the index.
+    /// Return the number of translated keys in the index (there may
+    /// be many more total entries, with multiple keys per translated
+    /// key).
     #[inline]
     pub fn len(&self) -> usize {
         self.map.len()
@@ -295,19 +297,20 @@ impl<T: Translator, V> Index<T, V> {
                 let vec = entry.as_vec_mut();
 
                 // Remove any items that are no longer valid (to avoid extending vec unnecessarily)
+                let previous = vec.len();
                 vec.retain(|v| !prune(v));
+                let pruned = previous - vec.len();
+                if pruned > 0 {
+                    self.keys_pruned.inc_by(pruned as u64);
+                }
+
+                // Add the new value to the end of the vector.
                 vec.push(v);
 
-                // Drop the entry or demote to One if we have only 1 value left.
-                match vec.len() {
-                    0 => {
-                        unreachable!("we will always have at least 1 item");
-                    }
-                    1 => {
-                        let v = vec.pop().unwrap();
-                        *entry = Record::One(v);
-                    }
-                    _ => {}
+                // If there is only 1 value left, we can demote to `One`.
+                if vec.len() == 1 {
+                    let v = vec.pop().unwrap();
+                    *entry = Record::One(v);
                 }
             }
             Entry::Vacant(vac) => {
@@ -336,7 +339,15 @@ impl<T: Translator, V> Index<T, V> {
 
                 // If there is more than 1 value, we need to iterate.
                 let vec = entry.as_vec_mut();
+                let previous = vec.len();
                 vec.retain(|v| !prune(v));
+                let pruned = previous - vec.len();
+                if pruned > 0 {
+                    self.keys_pruned.inc_by(pruned as u64);
+                }
+
+                // If there are no values left, we can remove the entry.
+                // If there is only 1 value left, we can demote to `One`.
                 match vec.len() {
                     0 => {
                         occ.remove_entry();
