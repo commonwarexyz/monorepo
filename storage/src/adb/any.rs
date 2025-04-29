@@ -167,7 +167,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher> Any<E, K, V,
             let op: Operation<K, V> = log.read(i).await?;
             match op.to_type() {
                 Type::Deleted(key) => {
-                    let mut loc_iter = snapshot.remove_iter(&key);
+                    let mut loc_iter = snapshot.mut_iter(&key);
                     while let Some(loc) = loc_iter.next() {
                         let op = log.read(*loc).await?;
                         if op.to_key() == key {
@@ -205,7 +205,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher> Any<E, K, V,
         value: Option<&V>,
         new_loc: u64,
     ) -> Result<bool, Error> {
-        let mut loc_iter = snapshot.update_iter(&key);
+        let mut loc_iter = snapshot.mut_iter(&key);
         for loc in &mut loc_iter {
             let op = log.read(*loc).await?;
             if op.to_key() == key {
@@ -234,7 +234,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher> Any<E, K, V,
 
     /// Get the value of `key` in the db, or None if it has no value.
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
-        for loc in self.snapshot.get_iter(key) {
+        for loc in self.snapshot.iter(key) {
             let op = self.log.read(*loc).await?;
             match op.to_type() {
                 Type::Update(k, v) => {
@@ -295,24 +295,30 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher> Any<E, K, V,
     /// The operation is reflected in the snapshot, but will be subject to rollback until the next
     /// successful `commit`.
     pub async fn delete(&mut self, hasher: &mut H, key: K) -> Result<(), Error> {
-        let mut loc_iter = self.snapshot.remove_iter(&key);
-        for loc in &mut loc_iter {
-            let op = self.log.read(*loc).await?;
-            match op.to_type() {
-                Type::Update(k, _) => {
-                    if k == key {
-                        loc_iter.remove();
-                        self.apply_op(hasher, Operation::delete(key)).await?;
-                        return Ok(());
+        let mut op_found = false;
+        {
+            let mut loc_iter = self.snapshot.mut_iter(&key);
+            while let Some(loc) = loc_iter.next() {
+                let op = self.log.read(*loc).await?;
+                match op.to_type() {
+                    Type::Update(k, _) => {
+                        if k == key {
+                            loc_iter.remove();
+                            op_found = true;
+                            break;
+                        }
+                    }
+                    _ => {
+                        unreachable!(
+                            "snapshot should only reference update operations. key={}",
+                            key
+                        );
                     }
                 }
-                _ => {
-                    unreachable!(
-                        "snapshot should only reference update operations. key={}",
-                        key
-                    );
-                }
             }
+        }
+        if op_found {
+            self.apply_op(hasher, Operation::delete(key)).await?;
         }
 
         // The key wasn't in the snapshot, so this is a no-op.
@@ -442,7 +448,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher> Any<E, K, V,
     ) -> Result<(), Error> {
         let key = op.to_key();
         let new_loc = self.op_count();
-        let loc_iter = self.snapshot.update_iter(&key);
+        let loc_iter = self.snapshot.mut_iter(&key);
         let mut loc_found = false;
         for loc in loc_iter {
             if *loc == old_loc {
@@ -899,7 +905,7 @@ mod test {
 
             // Simulate a failed commit and test that the log replay doesn't leave behind old data.
             let db = open_db(context.clone(), &mut hasher).await;
-            let iter = db.snapshot.get_iter(&k);
+            let iter = db.snapshot.iter(&k);
             assert_eq!(iter.cloned().collect::<Vec<_>>().len(), 1);
             assert_eq!(db.root(&mut hasher), root);
         });
