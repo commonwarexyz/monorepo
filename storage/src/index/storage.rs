@@ -18,52 +18,6 @@ pub struct Record<V> {
     next: Option<Box<Record<V>>>,
 }
 
-impl<V> Record<V> {
-    pub fn get(&self) -> &V {
-        &self.value
-    }
-
-    pub fn peek(&self) -> Option<&V> {
-        self.next.as_deref().map(|r| r.get())
-    }
-
-    pub fn update(&mut self, v: V) {
-        self.value = v;
-    }
-
-    pub fn next(&self) -> Option<&Record<V>> {
-        self.next.as_deref()
-    }
-
-    pub fn next_mut(&mut self) -> Option<&mut Record<V>> {
-        self.next.as_deref_mut()
-    }
-
-    pub fn delete(&mut self) -> bool {
-        let Some(next) = self.next.take() else {
-            return false;
-        };
-        self.value = next.value;
-        self.next = next.next;
-        true
-    }
-
-    pub fn delete_next(&mut self) {
-        let Some(next) = self.next.take() else {
-            return;
-        };
-        self.next = next.next;
-    }
-
-    pub fn add(&mut self, v: V) {
-        let next = Box::new(Record {
-            value: v,
-            next: self.next.take(),
-        });
-        self.next = Some(next);
-    }
-}
-
 enum Phase {
     Initial,
     Current,
@@ -90,8 +44,8 @@ impl<'a, V> Cursor<'a, V> {
     pub fn get(&self) -> Option<&V> {
         match self.phase {
             Phase::Initial => None,
-            Phase::Current => self.current.as_deref().map(|r| r.get()),
-            Phase::Next => self.next.as_deref().map(|r| r.get()),
+            Phase::Current => self.current.as_deref().map(|r| &r.value),
+            Phase::Next => self.next.as_deref().map(|r| &r.value),
             Phase::Done => unreachable!("Cursor::next() returned false"),
         }
     }
@@ -102,10 +56,10 @@ impl<'a, V> Cursor<'a, V> {
                 unreachable!("must call Cursor::next() before interacting")
             }
             Phase::Current => {
-                self.current.as_mut().unwrap().update(v);
+                self.current.as_mut().unwrap().value = v;
             }
             Phase::Next => {
-                self.next.as_mut().unwrap().update(v);
+                self.next.as_mut().unwrap().value = v;
             }
             Phase::Done => {
                 unreachable!("Cursor::next() returned false")
@@ -213,8 +167,8 @@ impl<'a, V> Iterator for RecordIter<'a, V> {
 
     fn next(&mut self) -> Option<Self::Item> {
         self.current.map(|record| {
-            let value = record.get();
-            self.current = record.next();
+            let value = &record.value;
+            self.current = record.next.as_deref();
             value
         })
     }
