@@ -113,7 +113,7 @@ impl<'a, V> Cursor<'a, V> {
         }
     }
 
-    pub fn insert(&mut self, v: V) {
+    pub fn add(mut self, v: V) {
         match self.phase {
             Phase::Initial => {
                 unreachable!("must call Cursor::next() before interacting")
@@ -126,8 +126,13 @@ impl<'a, V> Cursor<'a, V> {
                 self.next = Some(new);
             }
             Phase::Next => {
-                let current = self.current.take().unwrap();
-                current.next = self.next.take();
+                let mut next = self.next.take().unwrap();
+                let next_next = next.next.take();
+                let new = Box::new(Record {
+                    value: v,
+                    next: next_next,
+                });
+                next.next = Some(new);
             }
             Phase::Done => {
                 unreachable!("Cursor::next() returned false")
