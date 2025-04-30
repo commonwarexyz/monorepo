@@ -87,15 +87,6 @@ impl<'a, V> Cursor<'a, V> {
         }
     }
 
-    pub fn get(&self) -> &V {
-        match self.phase {
-            Phase::Initial => unreachable!("must call Cursor::next() before interacting"),
-            Phase::Current => self.current.as_deref().map(|r| r.get()).unwrap(),
-            Phase::Next => self.next.as_deref().map(|r| r.get()).unwrap(),
-            Phase::Done => unreachable!("Cursor::next() returned false"),
-        }
-    }
-
     pub fn update(&mut self, v: V) {
         match self.phase {
             Phase::Initial => {
@@ -113,19 +104,19 @@ impl<'a, V> Cursor<'a, V> {
         }
     }
 
-    pub fn next(&mut self) -> bool {
+    pub fn next(&mut self) -> Option<&V> {
         match self.phase {
             Phase::Initial => {
                 self.phase = Phase::Current;
-                return self.current.is_some();
+                return self.current.as_deref().map(|r| r.get());
             }
             Phase::Current => {
                 if self.next.is_some() {
                     self.phase = Phase::Next;
-                    return true;
+                    return self.next.as_deref().map(|r| r.get());
                 }
                 self.phase = Phase::Done;
-                return false;
+                return None;
             }
             Phase::Next => {
                 let current = self.current.take().unwrap();
@@ -134,11 +125,11 @@ impl<'a, V> Cursor<'a, V> {
                 current.next = Some(next);
                 self.current = Some(current);
                 self.next = next_next;
-                return self.next.is_some();
+                return self.next.as_deref().map(|r| r.get());
             }
             Phase::Done => {}
         }
-        false
+        None
     }
 
     pub fn add(mut self, v: V) {

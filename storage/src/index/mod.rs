@@ -60,11 +60,11 @@ mod tests {
         index.insert(key, 3);
         index.insert(key, 4);
         index.prune(key, |i| *i == 3);
-        assert_eq!(index.iter(key).copied().collect::<Vec<_>>(), vec![1, 4, 2]);
+        assert_eq!(index.get(key).copied().collect::<Vec<_>>(), vec![1, 4, 2]);
         index.prune(key, |_| true);
         // Try removing all of a keys values.
         assert_eq!(
-            index.iter(key).copied().collect::<Vec<_>>(),
+            index.get(key).copied().collect::<Vec<_>>(),
             Vec::<u64>::new()
         );
         assert!(index.is_empty());
@@ -94,7 +94,7 @@ mod tests {
         }
 
         for (key, loc) in expected.iter() {
-            let mut values = index.iter(key);
+            let mut values = index.get(key);
             let res = values.find(|i| *i == loc);
             assert!(res.is_some());
         }
@@ -111,38 +111,35 @@ mod tests {
         index.insert(b"abc", 3); // Longer than cap (3 bytes -> "ab")
 
         // Check that "a" maps to "a\0"
-        assert_eq!(index.iter(b"a").copied().collect::<Vec<_>>(), vec![1]);
+        assert_eq!(index.get(b"a").copied().collect::<Vec<_>>(), vec![1]);
 
         // Check that "ab" and "abc" map to "ab" due to TwoCap truncation
-        let values = index.iter(b"ab").copied().collect::<Vec<_>>();
+        let values = index.get(b"ab").copied().collect::<Vec<_>>();
         assert_eq!(values, vec![2, 3]);
 
-        let values = index.iter(b"abc").copied().collect::<Vec<_>>();
+        let values = index.get(b"abc").copied().collect::<Vec<_>>();
         assert_eq!(values, vec![2, 3]);
 
         // Insert another value for "ab"
         index.insert(b"ab", 4);
         // Expected order: head=2 (first "ab"), then 4 (new "ab"), then 3 (from "abc")
 
-        assert_eq!(
-            index.iter(b"ab").copied().collect::<Vec<_>>(),
-            vec![2, 4, 3]
-        );
+        assert_eq!(index.get(b"ab").copied().collect::<Vec<_>>(), vec![2, 4, 3]);
 
         // Remove a specific value
         index.prune(b"ab", |v| *v == 4);
-        assert_eq!(index.iter(b"ab").copied().collect::<Vec<_>>(), vec![2, 3]);
+        assert_eq!(index.get(b"ab").copied().collect::<Vec<_>>(), vec![2, 3]);
 
         // Remove all values for "ab"
         index.prune(b"ab", |_| true);
         assert_eq!(
-            index.iter(b"ab").copied().collect::<Vec<_>>(),
+            index.get(b"ab").copied().collect::<Vec<_>>(),
             Vec::<u64>::new()
         );
         assert_eq!(index.len(), 1); // Only "a" remains
 
         // Check that "a" is still present
-        assert_eq!(index.iter(b"a").copied().collect::<Vec<_>>(), vec![1]);
+        assert_eq!(index.get(b"a").copied().collect::<Vec<_>>(), vec![1]);
     }
 
     #[test_traced]
@@ -156,7 +153,7 @@ mod tests {
 
         // Values should be in stack order (last in first).
         assert_eq!(
-            index.iter(b"key").copied().collect::<Vec<_>>(),
+            index.get(b"key").copied().collect::<Vec<_>>(),
             vec![1, 3, 2]
         );
     }
@@ -172,11 +169,11 @@ mod tests {
 
         // Remove value 2
         index.prune(b"key", |v| *v == 2);
-        assert_eq!(index.iter(b"key").copied().collect::<Vec<_>>(), vec![1, 3]);
+        assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![1, 3]);
 
         // Remove head value 1
         index.prune(b"key", |v| *v == 1);
-        assert_eq!(index.iter(b"key").copied().collect::<Vec<_>>(), vec![3]);
+        assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![3]);
     }
 
     #[test_traced]
@@ -189,21 +186,21 @@ mod tests {
         index.insert(b"\0\0", 2); // Maps to [0, 0]
 
         // All keys map to [0, 0], so all values should be returned
-        let mut values = index.iter(b"").copied().collect::<Vec<_>>();
+        let mut values = index.get(b"").copied().collect::<Vec<_>>();
         values.sort();
         assert_eq!(values, vec![0, 1, 2]);
 
-        let mut values = index.iter(b"\0").copied().collect::<Vec<_>>();
+        let mut values = index.get(b"\0").copied().collect::<Vec<_>>();
         values.sort();
         assert_eq!(values, vec![0, 1, 2]);
 
-        let mut values = index.iter(b"\0\0").copied().collect::<Vec<_>>();
+        let mut values = index.get(b"\0\0").copied().collect::<Vec<_>>();
         values.sort();
         assert_eq!(values, vec![0, 1, 2]);
 
         // Remove a specific value
         index.prune(b"", |v| *v == 1);
-        let mut values = index.iter(b"").copied().collect::<Vec<_>>();
+        let mut values = index.get(b"").copied().collect::<Vec<_>>();
         values.sort();
         assert_eq!(values, vec![0, 2]);
     }
@@ -217,16 +214,20 @@ mod tests {
         index.insert(b"key", 2);
         index.insert(b"key", 3);
 
-        let mut record = index.get_mut(b"key");
-        while let Some(this) = record {
-            // Mutate the value
-            let old = this.get();
-            this.update(old + 10);
-            record = this.next_mut();
+        {
+            let mut cursor = index.get_mut(b"key").unwrap();
+            loop {
+                let Some(old) = cursor.next() else {
+                    break;
+                };
+                // Mutate the value
+                let new = *old + 10;
+                cursor.update(new);
+            }
         }
 
         assert_eq!(
-            index.iter(b"key").copied().collect::<Vec<_>>(),
+            index.get(b"key").copied().collect::<Vec<_>>(),
             vec![11, 13, 12]
         );
     }
@@ -242,67 +243,61 @@ mod tests {
         index.insert(b"key", 4);
 
         assert_eq!(
-            index.iter(b"key").copied().collect::<Vec<_>>(),
+            index.get(b"key").copied().collect::<Vec<_>>(),
             vec![1, 4, 3, 2]
         );
         assert!(context.encode().contains("pruned_total 0"));
 
         // Test removing first value from the list.
         {
-            let item = index.get_mut(b"key").unwrap();
-            assert!(item.delete());
-            assert_eq!(*item.get(), 4);
+            let cursor = index.get_mut(b"key").unwrap();
+            assert!(cursor.delete());
             // assert!(context.encode().contains("pruned_total 1"));
         }
 
         assert_eq!(
-            index.iter(b"key").copied().collect::<Vec<_>>(),
+            index.get(b"key").copied().collect::<Vec<_>>(),
             vec![4, 3, 2]
         );
 
         index.insert(b"key", 1);
         assert_eq!(
-            index.iter(b"key").copied().collect::<Vec<_>>(),
+            index.get(b"key").copied().collect::<Vec<_>>(),
             vec![4, 1, 3, 2]
         );
 
         // Test removing from the middle.
         {
-            let mut iter = index.get_mut(b"key").unwrap();
-            assert_eq!(*iter.get(), 4);
-            iter = iter.next_mut().unwrap();
-            assert_eq!(*iter.get(), 1);
-            iter = iter.next_mut().unwrap();
-            assert_eq!(*iter.get(), 3);
-            assert!(iter.delete());
+            let mut cursor = index.get_mut(b"key").unwrap();
+            assert_eq!(*cursor.next().unwrap(), 4);
+            assert_eq!(*cursor.next().unwrap(), 1);
+            assert_eq!(*cursor.next().unwrap(), 3);
+            assert!(cursor.delete());
         }
 
         assert_eq!(
-            index.iter(b"key").copied().collect::<Vec<_>>(),
+            index.get(b"key").copied().collect::<Vec<_>>(),
             vec![4, 1, 2]
         );
         index.insert(b"key", 3);
         assert_eq!(
-            index.iter(b"key").copied().collect::<Vec<_>>(),
+            index.get(b"key").copied().collect::<Vec<_>>(),
             vec![4, 3, 1, 2]
         );
 
         // Test removing last value.
         {
-            let mut iter = index.get_mut(b"key").unwrap();
-            assert_eq!(*iter.get(), 4);
-            iter = iter.next_mut().unwrap();
-            assert_eq!(*iter.get(), 3);
-            iter = iter.next_mut().unwrap();
-            assert_eq!(*iter.get(), 1);
-            iter = iter.next_mut().unwrap();
-            assert_eq!(*iter.get(), 2);
-            assert!(!iter.delete());
+            let mut cursor = index.get_mut(b"key").unwrap();
+            assert_eq!(*cursor.next().unwrap(), 4);
+            assert_eq!(*cursor.next().unwrap(), 3);
+            assert_eq!(*cursor.next().unwrap(), 1);
+            assert_eq!(*cursor.next().unwrap(), 2);
+            assert!(!cursor.delete());
             // assert!(context.encode().contains("pruned_total 3"));
         }
 
         assert_eq!(
-            index.iter(b"key").copied().collect::<Vec<_>>(),
+            index.get(b"key").copied().collect::<Vec<_>>(),
             vec![4, 3, 1, 2]
         );
 
@@ -324,20 +319,20 @@ mod tests {
             record.add(3);
             // assert!(context.encode().contains("collisions_total 1"));
         }
-        assert_eq!(index.iter(b"key").copied().collect::<Vec<_>>(), vec![1, 3]);
+        assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![1, 3]);
         assert_eq!(index.len(), 1);
 
         // Try inserting into an iterator while iterating.
         {
-            let iter = index.get_mut(b"key").unwrap();
-            assert_eq!(*iter.get(), 1);
-            iter.add(42);
+            let mut cursor = index.get_mut(b"key").unwrap();
+            assert_eq!(*cursor.next().unwrap(), 1);
+            cursor.add(42);
             // assert!(context.encode().contains("collisions_total 2"));
         }
 
         // Verify second value is new one
         {
-            let mut iter = index.iter(b"key");
+            let mut iter = index.get(b"key");
             assert_eq!(*iter.next().unwrap(), 1);
             assert_eq!(*iter.next().unwrap(), 42);
         }
@@ -347,7 +342,7 @@ mod tests {
         // assert!(context.encode().contains("collisions_total 3"));
 
         // Iterate to end
-        let mut iter = index.iter(b"key");
+        let mut iter = index.get(b"key");
         assert_eq!(*iter.next().unwrap(), 1);
         assert_eq!(*iter.next().unwrap(), 100);
         assert_eq!(*iter.next().unwrap(), 42);
@@ -367,15 +362,15 @@ mod tests {
 
         // Remove middle: [3, 0]
         {
-            let mut iter = index.get_mut(b"key").unwrap();
-            assert_eq!(*iter.get(), 0); // head
-            iter = iter.next_mut().unwrap();
-            assert_eq!(*iter.get(), 3); // middle
-            iter.delete();
-            assert_eq!(*iter.get(), 2); // middle (removed)
-            iter.delete();
+            let mut cursor = index.get_mut(b"key").unwrap();
+            assert_eq!(*cursor.next().unwrap(), 0); // head
+            assert_eq!(*cursor.next().unwrap(), 3); // middle
+            cursor.delete();
         }
-        assert_eq!(index.iter(b"key").copied().collect::<Vec<_>>(), vec![0, 1]);
+        assert_eq!(
+            index.get(b"key").copied().collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
     }
 
     #[test_traced]
@@ -387,7 +382,7 @@ mod tests {
         // (no collisions and nothing to prune).
         index.insert_and_prune(b"key", 1u64, |_| false);
 
-        assert_eq!(index.iter(b"key").copied().collect::<Vec<_>>(), vec![1]);
+        assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![1]);
         assert!(ctx.encode().contains("collisions_total 0"));
         assert!(ctx.encode().contains("pruned_total 0"));
     }
@@ -402,7 +397,7 @@ mod tests {
         index.insert(b"key", 1u64); // 0 → collisions
         index.insert_and_prune(b"key", 2u64, |_| true); // +1 collision, +1 prune
 
-        assert_eq!(index.iter(b"key").copied().collect::<Vec<_>>(), vec![2]);
+        assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![2]);
         assert!(ctx.encode().contains("collisions_total 1"));
         assert!(ctx.encode().contains("pruned_total 1"));
     }
@@ -422,7 +417,7 @@ mod tests {
         // 3. *demote* back to `One` when only a single value remains.
         index.insert_and_prune(b"key", 30u64, |_| true); // +1 collision, +2 pruned
 
-        assert_eq!(index.iter(b"key").copied().collect::<Vec<_>>(), vec![30]);
+        assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![30]);
         assert!(ctx.encode().contains("collisions_total 2"));
         assert!(ctx.encode().contains("pruned_total 2"));
     }
