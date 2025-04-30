@@ -145,7 +145,9 @@ impl<'a, V> Cursor<'a, V> {
                 }
                 self.phase = Phase::Done;
             }
-            Phase::Done => {}
+            Phase::Done => {
+                unreachable!("Cursor::next() returned false")
+            }
         }
         None
     }

@@ -303,8 +303,8 @@ mod tests {
             assert_eq!(*cursor.next().unwrap(), 3);
             assert_eq!(*cursor.next().unwrap(), 1);
             assert_eq!(*cursor.next().unwrap(), 2);
-            assert!(!cursor.delete());
-            // assert!(context.encode().contains("pruned_total 3"));
+            assert!(cursor.delete());
+            assert!(context.encode().contains("pruned_total 3"));
         }
 
         assert_eq!(
@@ -382,6 +382,24 @@ mod tests {
             index.get(b"key").copied().collect::<Vec<_>>(),
             vec![0, 1, 2]
         );
+    }
+
+    #[test_traced]
+    fn test_index_insert_and_remove_cursor() {
+        let context = deterministic::Context::default();
+        let mut index = Index::init(context.clone(), TwoCap);
+
+        // Build list: [0]
+        index.insert(b"key", 0);
+
+        // Remove item: []
+        {
+            let mut cursor = index.get_mut(b"key").unwrap();
+            assert_eq!(*cursor.next().unwrap(), 0); // head
+            assert!(!cursor.delete());
+        }
+        index.remove(b"key");
+        assert!(index.get(b"key").copied().collect::<Vec<i32>>().is_empty());
     }
 
     #[test_traced]
