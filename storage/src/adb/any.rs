@@ -244,7 +244,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                             }
                             // If we can't delete from the cursor, then we need to remove the key from
                             // the snapshot (its the last one).
-                            break !cursor.delete();
+                            cursor.delete();
+                            break cursor.empty();
                         }
                     } else {
                         // The key isn't in the snapshot, so this is a no-op.
@@ -419,7 +420,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                 Type::Update(k, _) => {
                     if k == key {
                         let old_loc = *loc;
-                        if !cursor.delete() {
+                        cursor.delete();
+                        if cursor.empty() {
                             // If we can't delete from the cursor, then we need to remove the key from
                             // the snapshot (its the last one).
                             self.snapshot.remove(&key);
