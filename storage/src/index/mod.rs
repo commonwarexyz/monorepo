@@ -309,13 +309,13 @@ mod tests {
 
         assert_eq!(
             index.get(b"key").copied().collect::<Vec<_>>(),
-            vec![4, 3, 1, 2]
+            vec![4, 3, 1]
         );
 
         // Test removing all values.
         index.remove(b"key");
         assert_eq!(index.len(), 0);
-        // assert!(context.encode().contains("pruned_total 6"));
+        assert!(context.encode().contains("pruned_total 6"));
     }
 
     #[test_traced]
@@ -324,11 +324,12 @@ mod tests {
         let mut index = Index::init(context.clone(), TwoCap);
 
         // Add values to the index
+        index.insert(b"key", 1);
         {
-            index.insert(b"key", 1);
-            let record = index.get_mut(b"key").unwrap();
-            record.insert(3);
-            // assert!(context.encode().contains("collisions_total 1"));
+            let mut cursor = index.get_mut(b"key").unwrap();
+            assert_eq!(*cursor.next().unwrap(), 1);
+            cursor.insert(3);
+            assert!(context.encode().contains("collisions_total 1"));
         }
         assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![1, 3]);
         assert_eq!(index.len(), 1);
@@ -338,7 +339,7 @@ mod tests {
             let mut cursor = index.get_mut(b"key").unwrap();
             assert_eq!(*cursor.next().unwrap(), 1);
             cursor.insert(42);
-            // assert!(context.encode().contains("collisions_total 2"));
+            assert!(context.encode().contains("collisions_total 2"));
         }
 
         // Verify second value is new one
@@ -350,7 +351,7 @@ mod tests {
 
         // Insert a new value
         index.insert(b"key", 100);
-        // assert!(context.encode().contains("collisions_total 3"));
+        assert!(context.encode().contains("collisions_total 3"));
 
         // Iterate to end
         let mut iter = index.get(b"key");
@@ -380,7 +381,7 @@ mod tests {
         }
         assert_eq!(
             index.get(b"key").copied().collect::<Vec<_>>(),
-            vec![0, 1, 2]
+            vec![0, 2, 1]
         );
     }
 
@@ -421,8 +422,7 @@ mod tests {
         let ctx = deterministic::Context::default();
         let mut index = Index::init(ctx.clone(), TwoCap);
 
-        // If a key currently has *one* value and the predicate matches,
-        // the value is *replaced* in-place (1 prune, 1 collision).
+        // Add a value to the index
         index.insert(b"key", 1u64); // 0 → collisions
         index.insert_and_prune(b"key", 2u64, |_| true); // +1 collision, +1 prune
 
@@ -440,10 +440,7 @@ mod tests {
         index.insert(b"key", 10u64); // 0 → collisions
         index.insert(b"key", 20u64); // +1 collision
 
-        // When multiple values exist, `insert_and_prune` should:
-        // 1. remove all matching values,
-        // 2. push the new one,
-        // 3. *demote* back to `One` when only a single value remains.
+        // Update an item if it matches the predicate
         index.insert_and_prune(b"key", 30u64, |_| true); // +1 collision, +2 pruned
 
         assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![30]);

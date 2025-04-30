@@ -300,9 +300,8 @@ impl<T: Translator, V> Index<T, V> {
 
     /// Remove all values at the given translated key.
     pub fn remove(&mut self, key: &[u8]) {
-        let k = self.translator.transform(key);
-        // TODO: count records dropped?
-        self.map.remove(&k);
+        // We use `prune()` to ensure we count all dropped values.
+        self.prune(key, |_| true);
     }
 
     /// Insert a value at the given translated key.
