@@ -377,6 +377,9 @@ impl<T: Translator, V> Index<T, V> {
 
                 // Add our new value.
                 cursor.insert(v);
+
+                // There must be something left, so we don't need to worry about checking
+                // for emptiness.
             }
             Entry::Vacant(entry) => {
                 // No collision, so we can just insert the value.
