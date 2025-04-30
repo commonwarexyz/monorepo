@@ -229,29 +229,29 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             let op: Operation<K, V> = log.read(i).await?;
             match op.to_type() {
                 Type::Deleted(key) => {
-                    let Some(mut cursor) = snapshot.get_mut(&key) else {
-                        // We are reading an operation for a deletion that we already
-                        // pruned the update for.
-                        continue;
-                    };
-                    loop {
-                        let Some(loc) = cursor.next() else {
-                            // Nothing to delete
-                            break;
-                        };
-                        let op = log.read(*loc).await?;
-                        if op.to_key() != key {
-                            continue;
-                        }
-                        if let Some(ref mut bitmap_ref) = bitmap {
-                            bitmap_ref.set_bit(hasher, *loc, false);
-                        }
-                        if !cursor.delete() {
+                    let delete = if let Some(mut cursor) = snapshot.get_mut(&key) {
+                        loop {
+                            let Some(loc) = cursor.next() else {
+                                // Nothing to delete
+                                break false;
+                            };
+                            let op = log.read(*loc).await?;
+                            if op.to_key() != key {
+                                continue;
+                            }
+                            if let Some(ref mut bitmap_ref) = bitmap {
+                                bitmap_ref.set_bit(hasher, *loc, false);
+                            }
                             // If we can't delete from the cursor, then we need to remove the key from
                             // the snapshot (its the last one).
-                            snapshot.remove(&key);
+                            break !cursor.delete();
                         }
-                        break;
+                    } else {
+                        // The key isn't in the snapshot, so this is a no-op.
+                        false
+                    };
+                    if delete {
+                        snapshot.remove(&key);
                     }
                 }
                 Type::Update(key, _) => {
