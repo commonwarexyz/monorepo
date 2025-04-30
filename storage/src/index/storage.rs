@@ -11,15 +11,41 @@ use std::{
 /// the entire [super::translator::OneCap] range).
 const INITIAL_CAPACITY: usize = 256;
 
-/// Each key is mapped to a `Record` that contains either the value or a pointer to a `Vec` of values.
+/// Each key is mapped to a `Record` that contains a value and optionally a `Vec` of values.
 ///
 /// In the common case (where a single value is associated with a key), we store the value directly in the `Record`
 /// to avoid both indirection (heap jumping) and unnecessary allocations (storing `Vec` directly would make all
 /// `Record`s larger).
-#[allow(clippy::box_collection)]
-enum Record<V> {
-    One(V),
-    Many(Box<Vec<V>>),
+pub struct Record<V> {
+    value: V,
+    next: Option<Box<Record<V>>>,
+}
+
+impl<V> Record<V> {
+    pub fn get(&self) -> &V {
+        &self.value
+    }
+
+    pub fn update(&mut self, v: V) {
+        self.value = v;
+    }
+
+    pub fn next(&self) -> Option<&Record<V>> {
+        self.next.as_deref()
+    }
+
+    pub fn next_mut(&mut self) -> Option<&mut Record<V>> {
+        self.next.as_deref_mut()
+    }
+
+    pub fn delete(&mut self) -> bool {
+        let Some(next) = self.next.take() else {
+            return false;
+        };
+        self.value = next.value;
+        self.next = next.next;
+        true
+    }
 }
 
 /// An iterator over the value at some translated key.
