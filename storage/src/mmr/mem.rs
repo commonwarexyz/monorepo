@@ -196,14 +196,13 @@ impl<H: CHasher> Mmr<H> {
         Ok(self.size())
     }
 
-    /// Change the digest of an existing leaf.   Panics if `pos` does not correspond to a leaf.
+    /// Change the digest of any retained leaf. Panics if `pos` does not correspond to a leaf.
     ///
     /// # Warning
     ///
     /// This method will change the root hash and invalidate any previous inclusion proofs! This is
     /// useful if you want to use the MMR implementation as an updatable binary Merkle tree, and
-    /// otherwise should be avoided. Returns ElementPruned if some element required to update the
-    /// tree has been pruned.
+    /// otherwise should be avoided.
     pub fn update_leaf(&mut self, hasher: &mut H, pos: u64, element: &[u8]) -> Result<(), Error> {
         if pos < self.pruned_to_pos {
             return Err(ElementPruned(pos));
@@ -225,9 +224,6 @@ impl<H: CHasher> Mmr<H> {
             // Traverse up to the peak, recomputing each parent node hash along the way.
             let path: Vec<_> = PathIterator::new(pos, peak_pos, height).collect();
             for (parent_pos, sibling_pos) in path.into_iter().rev() {
-                if sibling_pos < self.pruned_to_pos {
-                    return Err(ElementPruned(sibling_pos));
-                }
                 if parent_pos == pos {
                     panic!("pos was not for a leaf");
                 }
@@ -859,14 +855,14 @@ pub(crate) mod tests {
         // Confirm the function gracefully handles failures when the MMR is pruned.
         mmr.prune_to_pos(leaves[150]);
         assert!(matches!(
-            mmr.update_leaf(&mut hasher, leaves[150], &element),
-            Err(ElementPruned(_))
-        ));
-        assert!(matches!(
             mmr.update_leaf(&mut hasher, leaves[149], &element),
             Err(ElementPruned(_))
         ));
-        assert!(mmr.update_leaf(&mut hasher, leaves[190], &element).is_ok());
+        // Confirm the tree has all the hashes necessary to update any element after pruning.
+        for &leaf_pos in &leaves[150..=190] {
+            mmr.prune_to_pos(leaf_pos);
+            assert!(mmr.update_leaf(&mut hasher, leaf_pos, &element).is_ok());
+        }
     }
 
     #[test]
