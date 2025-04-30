@@ -134,17 +134,17 @@ impl Config {
     }
     /// See [Config]
     pub fn with_read_timeout(mut self, d: Duration) -> Self {
-        self.network_cfg.read_timeout = d;
+        self.network_cfg = self.network_cfg.with_read_timeout(d);
         self
     }
     /// See [Config]
     pub fn with_write_timeout(mut self, d: Duration) -> Self {
-        self.network_cfg.write_timeout = d;
+        self.network_cfg = self.network_cfg.with_write_timeout(d);
         self
     }
     /// See [Config]
     pub fn with_tcp_nodelay(mut self, n: Option<bool>) -> Self {
-        self.network_cfg.tcp_nodelay = n;
+        self.network_cfg = self.network_cfg.with_tcp_nodelay(n);
         self
     }
     /// See [Config]
@@ -173,15 +173,15 @@ impl Config {
     }
     /// See [Config]
     pub fn read_timeout(&self) -> Duration {
-        self.network_cfg.read_timeout
+        self.network_cfg.read_timeout()
     }
     /// See [Config]
     pub fn write_timeout(&self) -> Duration {
-        self.network_cfg.write_timeout
+        self.network_cfg.write_timeout()
     }
     /// See [Config]
     pub fn tcp_nodelay(&self) -> Option<bool> {
-        self.network_cfg.tcp_nodelay
+        self.network_cfg.tcp_nodelay()
     }
     /// See [Config]
     pub fn storage_directory(&self) -> &PathBuf {

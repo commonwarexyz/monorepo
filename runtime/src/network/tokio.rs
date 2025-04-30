@@ -106,11 +106,44 @@ pub(crate) struct Config {
     ///
     /// Note: Make sure that your compile target has and allows this configuration otherwise
     /// panics or unexpected behaviours are possible.
-    pub(crate) tcp_nodelay: Option<bool>,
+    tcp_nodelay: Option<bool>,
     /// Read timeout for connections, after which the connection will be closed
-    pub(crate) read_timeout: Duration,
+    read_timeout: Duration,
     /// Write timeout for connections, after which the connection will be closed
-    pub(crate) write_timeout: Duration,
+    write_timeout: Duration,
+}
+
+impl Config {
+    // Setters
+    /// See [Config]
+    pub fn with_tcp_nodelay(mut self, tcp_nodelay: Option<bool>) -> Self {
+        self.tcp_nodelay = tcp_nodelay;
+        self
+    }
+    /// See [Config]
+    pub fn with_read_timeout(mut self, read_timeout: Duration) -> Self {
+        self.read_timeout = read_timeout;
+        self
+    }
+    /// See [Config]
+    pub fn with_write_timeout(mut self, write_timeout: Duration) -> Self {
+        self.write_timeout = write_timeout;
+        self
+    }
+
+    // Getters
+    /// See [Config]
+    pub fn tcp_nodelay(&self) -> Option<bool> {
+        self.tcp_nodelay
+    }
+    /// See [Config]
+    pub fn read_timeout(&self) -> Duration {
+        self.read_timeout
+    }
+    /// See [Config]
+    pub fn write_timeout(&self) -> Duration {
+        self.write_timeout
+    }
 }
 
 impl Default for Config {
