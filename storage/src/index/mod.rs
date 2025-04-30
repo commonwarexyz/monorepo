@@ -284,7 +284,9 @@ mod tests {
             assert_eq!(*cursor.next().unwrap(), 4);
             assert_eq!(*cursor.next().unwrap(), 1);
             assert_eq!(*cursor.next().unwrap(), 3);
+            cursor.delete();
             assert!(!cursor.empty());
+            assert!(context.encode().contains("pruned_total 2"));
         }
 
         assert_eq!(
@@ -304,6 +306,7 @@ mod tests {
             assert_eq!(*cursor.next().unwrap(), 3);
             assert_eq!(*cursor.next().unwrap(), 1);
             assert_eq!(*cursor.next().unwrap(), 2);
+            cursor.delete();
             assert!(!cursor.empty());
             assert!(context.encode().contains("pruned_total 3"));
         }
@@ -384,6 +387,61 @@ mod tests {
             index.get(b"key").copied().collect::<Vec<_>>(),
             vec![0, 2, 1]
         );
+    }
+
+    #[test_traced]
+    fn test_index_remove_to_nothing() {
+        let context = deterministic::Context::default();
+        let mut index = Index::init(context.clone(), TwoCap);
+
+        // Build list: [0, 3, 2, 1]
+        for i in 0..4 {
+            index.insert(b"key", i);
+        }
+
+        // Remove middle: []
+        {
+            let mut cursor = index.get_mut(b"key").unwrap();
+            assert_eq!(*cursor.next().unwrap(), 0); // head
+            cursor.delete();
+            assert_eq!(*cursor.next().unwrap(), 3); // middle
+            cursor.delete();
+            assert_eq!(*cursor.next().unwrap(), 2); // tail
+            cursor.delete();
+            assert_eq!(*cursor.next().unwrap(), 1); // tail
+            cursor.delete();
+            assert_eq!(cursor.next(), None);
+            assert!(cursor.empty());
+        }
+    }
+
+    #[test_traced]
+    fn test_index_remove_to_nothing_then_add() {
+        let context = deterministic::Context::default();
+        let mut index = Index::init(context.clone(), TwoCap);
+
+        // Build list: [0, 3, 2, 1]
+        for i in 0..4 {
+            index.insert(b"key", i);
+        }
+
+        // Remove middle: [4, 5]
+        {
+            let mut cursor = index.get_mut(b"key").unwrap();
+            assert_eq!(*cursor.next().unwrap(), 0); // head
+            cursor.delete();
+            assert_eq!(*cursor.next().unwrap(), 3); // middle
+            cursor.delete();
+            assert_eq!(*cursor.next().unwrap(), 2); // tail
+            cursor.delete();
+            assert_eq!(*cursor.next().unwrap(), 1); // tail
+            cursor.delete();
+            assert_eq!(cursor.next(), None);
+            cursor.insert(4);
+            cursor.insert(5);
+            assert!(!cursor.empty());
+        }
+        assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![4, 5]);
     }
 
     #[test_traced]

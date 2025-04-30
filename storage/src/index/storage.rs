@@ -81,10 +81,18 @@ impl<'a, V> Cursor<'a, V> {
                 return self.current.as_deref().map(|r| &r.value);
             }
             Phase::Current => {
+                // If was deleted, do nothing.
+                if was_deleted {
+                    return self.current.as_deref().map(|r| &r.value);
+                }
+
+                // If there is a next, switch to next phase.
                 if self.next.is_some() {
                     self.phase = Phase::Next;
                     return self.next.as_deref().map(|r| &r.value);
                 }
+
+                // If there is no next, we are done.
                 self.phase = Phase::Done;
                 return None;
             }
@@ -118,9 +126,7 @@ impl<'a, V> Cursor<'a, V> {
                 }
                 self.phase = Phase::Done;
             }
-            Phase::Done => {
-                unreachable!("Cursor::next() returned false")
-            }
+            Phase::Done => {}
         }
         None
     }
@@ -209,17 +215,13 @@ impl<'a, V> Cursor<'a, V> {
                     return;
                 };
 
-                // Take ownership of the current record.
-                let current = self.current.take().unwrap();
-
                 // If there is a next record, we update current to be it.
-                current.value = next.value;
+                self.current.as_mut().unwrap().value = next.value;
 
                 // Take next's next and set it to be current's next.
                 let next_next = next.next.take();
 
                 // Restore the current record (whatever is next will still be there).
-                self.current = Some(current);
                 self.next = next_next;
             }
             Phase::Next => {
