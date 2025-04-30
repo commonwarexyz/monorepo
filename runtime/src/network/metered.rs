@@ -3,6 +3,7 @@ use prometheus_client::{metrics::counter::Counter, registry::Registry};
 use std::{net::SocketAddr, sync::Arc};
 
 #[derive(Debug)]
+/// Tracks network metrics.
 struct Metrics {
     inbound_connections: Counter,
     outbound_connections: Counter,
@@ -45,10 +46,16 @@ impl Metrics {
 #[derive(Debug, Clone)]
 pub struct Network<N: crate::Network> {
     inner: N,
+    /// Metrics for the network.
+    /// Note these are not tracked on a per-connection basis.
+    /// That would be nice but it would be very expensive
+    /// and potentially an OOM vector.
     metrics: Arc<Metrics>,
 }
 
 impl<N: crate::Network> Network<N> {
+    /// Wraps `inner` to make it metered.
+    /// The `registry` is used to register the metrics.
     pub fn new(inner: N, registry: &mut Registry) -> Self {
         let metrics = Metrics::new(registry);
         Self {
@@ -75,20 +82,16 @@ impl<N: crate::Network> crate::Network for Network<N> {
     ) -> Result<(SinkOf<Self>, StreamOf<Self>), crate::Error> {
         let (sink, stream) = self.inner.dial(socket).await?;
         self.metrics.outbound_connections.inc();
-
-        let sink = sink;
-        let sink = Sink {
-            inner: sink,
-            metrics: self.metrics.clone(),
-        };
-
-        let stream = stream;
-        let stream = Stream {
-            inner: stream,
-            metrics: self.metrics.clone(),
-        };
-
-        Ok((sink, stream))
+        Ok((
+            Sink {
+                inner: sink,
+                metrics: self.metrics.clone(),
+            },
+            Stream {
+                inner: stream,
+                metrics: self.metrics.clone(),
+            },
+        ))
     }
 }
 
