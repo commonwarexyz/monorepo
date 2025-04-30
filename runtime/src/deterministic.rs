@@ -876,7 +876,7 @@ impl Context {
             label: String::new(),
             spawned: false,
             executor,
-            networking: self.networking.clone(),
+            networking: Arc::new(Networking::new(metrics, auditor.clone())),
             storage: self.storage,
         }
     }
