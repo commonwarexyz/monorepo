@@ -373,7 +373,7 @@ impl Config {
         self.cycle = cycle;
         self
     }
-    /// Set the timeout.
+    /// See [Config]
     pub fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.timeout = timeout;
         self
