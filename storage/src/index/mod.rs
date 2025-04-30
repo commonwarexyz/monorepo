@@ -53,8 +53,18 @@ mod tests {
         let key = b"duplicate".as_slice();
         index.insert(key, 1);
         index.insert(key, 2);
+        index.insert(key, 3);
         assert_eq!(index.len(), 1);
-        assert!(context.encode().contains("collisions_total 1"));
+        assert!(context.encode().contains("collisions_total 2"));
+
+        // Ensure cursor terminates
+        {
+            let mut cursor = index.get_mut(key).unwrap();
+            assert_eq!(*cursor.next().unwrap(), 1);
+            assert_eq!(*cursor.next().unwrap(), 3);
+            assert_eq!(*cursor.next().unwrap(), 2);
+            assert!(cursor.next().is_none());
+        }
 
         // Make sure we can remove keys with a predicate
         index.insert(key, 3);
@@ -223,7 +233,6 @@ mod tests {
                 // Mutate the value
                 let new = *old + 10;
                 cursor.update(new);
-                println!("Updated value: {}", new);
             }
         }
 

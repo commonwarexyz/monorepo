@@ -125,12 +125,21 @@ impl<'a, V> Cursor<'a, V> {
                 return None;
             }
             Phase::Next => {
+                // Take ownership of all records.
                 let current = self.current.take().unwrap();
                 let mut next = self.next.take().unwrap();
                 let next_next = next.next.take();
+
+                // Repair current.
                 current.next = Some(next);
-                self.current = Some(current);
+
+                // Set current to be next (via a mutable reference to current).
+                self.current = current.next_mut();
+
+                // Set next to be the next record.
                 self.next = next_next;
+
+                // If we have a next record, return it.
                 if self.next.is_some() {
                     return self.next.as_deref().map(|r| r.get());
                 }
