@@ -104,16 +104,19 @@ impl<T: Translator, V> Index<T, V> {
         self.map.is_empty()
     }
 
+    /// Get a reference to the value at the given translated key.
     pub fn get(&self, key: &[u8]) -> Option<&Record<V>> {
         let k = self.translator.transform(key);
         self.map.get(&k)
     }
 
+    /// Get a mutable reference to the value at the given translated key.
     pub fn get_mut(&mut self, key: &[u8]) -> Option<&mut Record<V>> {
         let k = self.translator.transform(key);
         self.map.get_mut(&k)
     }
 
+    /// Remove all values at the given translated key.
     pub fn remove(&mut self, key: &[u8]) {
         let k = self.translator.transform(key);
         self.map.remove(&k);
@@ -198,17 +201,27 @@ impl<T: Translator, V> Index<T, V> {
         match self.map.entry(k) {
             Entry::Occupied(mut entry) => loop {
                 let mut record = entry.get_mut();
-                let old = record.get();
-                if prune(old) {
-                    self.pruned.inc();
-                    if !record.delete() {
-                        // If there are no more values, remove the entry.
-                        entry.remove();
-                        break;
+
+                // Loop until we find a value that is not pruned.
+                let remove = loop {
+                    let old = record.get();
+                    if prune(old) {
+                        self.pruned.inc();
+                        if !record.delete() {
+                            // If there are no more values, remove the entry.
+                            break true;
+                        }
+                        continue;
                     }
+                    break false;
+                };
+                if remove {
+                    entry.remove();
+                    break;
                 }
 
-                // If the first value is not pruned, we should keep iterating.
+                // Now that we have some value that won't be pruned, we need to see if
+                // we should prune any of the next values.
                 loop {
                     let Some(peek) = record.peek() else {
                         break;
