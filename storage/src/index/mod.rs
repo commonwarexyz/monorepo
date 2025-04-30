@@ -495,7 +495,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn dangling_vec_pointer() {
+    fn test_dangling_item() {
         let ctx = deterministic::Context::default();
         let mut ix = Index::<TwoCap, i32>::init(ctx, TwoCap);
         let kb = b"k";
