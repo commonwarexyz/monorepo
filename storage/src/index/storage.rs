@@ -64,6 +64,23 @@ impl<V> Record<V> {
     }
 }
 
+/// An iterator over the values in a `Record` chain.
+pub struct RecordIter<'a, V> {
+    current: Option<&'a Record<V>>,
+}
+
+impl<'a, V> Iterator for RecordIter<'a, V> {
+    type Item = &'a V;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.current.map(|record| {
+            let value = record.get();
+            self.current = record.next();
+            value
+        })
+    }
+}
+
 /// A memory-efficient index that maps translated keys to arbitrary values.
 pub struct Index<T: Translator, V> {
     translator: T,
@@ -114,6 +131,17 @@ impl<T: Translator, V> Index<T, V> {
     pub fn get_mut(&mut self, key: &[u8]) -> Option<&mut Record<V>> {
         let k = self.translator.transform(key);
         self.map.get_mut(&k)
+    }
+
+    pub fn iter(&self, key: &[u8]) -> impl Iterator<Item = &V> {
+        let k = self.translator.transform(key);
+        self.map
+            .get(&k)
+            .map(|record| RecordIter {
+                current: Some(record),
+            })
+            .into_iter()
+            .flat_map(|iter| iter)
     }
 
     /// Remove all values at the given translated key.

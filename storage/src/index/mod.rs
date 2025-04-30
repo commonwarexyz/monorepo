@@ -12,7 +12,7 @@
 //! degrade substantially (each conflicting key may contain the desired value).
 
 mod storage;
-pub use storage::{Index, Iterator, MutableIterator};
+pub use storage::Index;
 pub mod translator;
 
 use std::hash::{BuildHasher, Hash};
@@ -59,9 +59,9 @@ mod tests {
         // Make sure we can remove keys with a predicate
         index.insert(key, 3);
         index.insert(key, 4);
-        index.remove(key, |i| *i == 3);
+        index.prune(key, |i| *i == 3);
         assert_eq!(index.iter(key).copied().collect::<Vec<_>>(), vec![4, 2, 1]);
-        index.remove(key, |_| true);
+        index.prune(key, |_| true);
         // Try removing all of a keys values.
         assert_eq!(
             index.iter(key).copied().collect::<Vec<_>>(),
@@ -70,7 +70,7 @@ mod tests {
         assert!(index.is_empty());
 
         // Removing a key that doesn't exist should be a no-op.
-        index.remove(key, |_| true);
+        index.prune(key, |_| true);
         assert!(index.is_empty());
     }
 
@@ -132,11 +132,11 @@ mod tests {
         );
 
         // Remove a specific value
-        index.remove(b"ab", |v| *v == 4);
+        index.prune(b"ab", |v| *v == 4);
         assert_eq!(index.iter(b"ab").copied().collect::<Vec<_>>(), vec![3, 2]);
 
         // Remove all values for "ab"
-        index.remove(b"ab", |_| true);
+        index.prune(b"ab", |_| true);
         assert_eq!(
             index.iter(b"ab").copied().collect::<Vec<_>>(),
             Vec::<u64>::new()
@@ -173,11 +173,11 @@ mod tests {
         index.insert(b"key", 3);
 
         // Remove value 2
-        index.remove(b"key", |v| *v == 2);
+        index.prune(b"key", |v| *v == 2);
         assert_eq!(index.iter(b"key").copied().collect::<Vec<_>>(), vec![3, 1]);
 
         // Remove head value 1
-        index.remove(b"key", |v| *v == 1);
+        index.prune(b"key", |v| *v == 1);
         assert_eq!(index.iter(b"key").copied().collect::<Vec<_>>(), vec![3]);
     }
 
@@ -204,7 +204,7 @@ mod tests {
         assert_eq!(values, vec![0, 1, 2]);
 
         // Remove a specific value
-        index.remove(b"", |v| *v == 1);
+        index.prune(b"", |v| *v == 1);
         let mut values = index.iter(b"").copied().collect::<Vec<_>>();
         values.sort();
         assert_eq!(values, vec![0, 2]);
@@ -219,24 +219,17 @@ mod tests {
         index.insert(b"key", 2);
         index.insert(b"key", 3);
 
-        for value in index.mut_iter(b"key") {
+        let mut record = index.get_mut(b"key");
+        while let Some(this) = record {
             // Mutate the value
-            *value += 10;
+            let old = this.get();
+            this.update(old + 10);
+            record = this.next_mut();
         }
 
         assert_eq!(
             index.iter(b"key").copied().collect::<Vec<_>>(),
             vec![13, 12, 11]
-        );
-
-        // Mutations should work with a remove iterator too
-        for value in index.mut_iter(b"key") {
-            // Mutate the value
-            *value *= 10;
-        }
-        assert_eq!(
-            index.iter(b"key").copied().collect::<Vec<_>>(),
-            vec![130, 120, 110]
         );
     }
 
