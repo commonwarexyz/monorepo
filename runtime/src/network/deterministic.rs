@@ -10,7 +10,7 @@ use std::{
 /// Range of ephemeral ports assigned to dialers.
 const EPHEMERAL_PORT_RANGE: Range<u16> = 32768..61000;
 
-/// Implementation of [crate::Sink] for the `deterministic` runtime.
+/// Implementation of [crate::Sink] for a deterministic [Network].
 pub struct Sink {
     auditor: Arc<Auditor>,
     me: SocketAddr,
@@ -26,7 +26,7 @@ impl crate::Sink for Sink {
     }
 }
 
-/// Implementation of [crate::Stream] for the `deterministic` runtime.
+/// Implementation of [crate::Stream] for a deterministic [Network].
 pub struct Stream {
     auditor: Arc<Auditor>,
     me: SocketAddr,
@@ -45,7 +45,7 @@ impl crate::Stream for Stream {
     }
 }
 
-/// Implementation of [crate::Listener] for the `deterministic` runtime.
+/// Implementation of [crate::Listener] for a deterministic [Network].
 pub struct Listener {
     auditor: Arc<Auditor>,
     address: SocketAddr,
