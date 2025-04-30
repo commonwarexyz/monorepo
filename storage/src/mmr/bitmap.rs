@@ -311,9 +311,17 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
     /// Convert a bit offset into the index of the chunk it belongs to within self.bitmap. Panics if
     /// the bit doesn't exist or has been pruned.
     fn chunk_index(&self, bit_offset: u64) -> usize {
-        assert!(bit_offset < self.bit_count(), "out of bounds");
+        assert!(
+            bit_offset < self.bit_count(),
+            "out of bounds: {}",
+            bit_offset
+        );
         let chunk_pos = Self::chunk_pos(bit_offset);
-        assert!(chunk_pos >= self.pruned_chunks, "bit pruned");
+        assert!(
+            chunk_pos >= self.pruned_chunks,
+            "bit pruned: {}",
+            bit_offset
+        );
 
         chunk_pos - self.pruned_chunks
     }
