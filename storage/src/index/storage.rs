@@ -41,11 +41,11 @@ impl<'a, V> Cursor<'a, V> {
         }
     }
 
-    pub fn get(&self) -> Option<&V> {
+    pub fn get(&self) -> &V {
         match self.phase {
-            Phase::Initial => None,
-            Phase::Current => self.current.as_deref().map(|r| &r.value),
-            Phase::Next => self.next.as_deref().map(|r| &r.value),
+            Phase::Initial => unreachable!("must call Cursor::next() before interacting"),
+            Phase::Current => self.current.as_deref().map(|r| &r.value).unwrap(),
+            Phase::Next => self.next.as_deref().map(|r| &r.value).unwrap(),
             Phase::Done => unreachable!("Cursor::next() returned false"),
         }
     }
