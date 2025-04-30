@@ -842,7 +842,7 @@ impl crate::Spawner for Context {
     }
 
     fn stopped(&self) -> Signal {
-        self.executor.auditor.event(b"stop", |_| {});
+        self.executor.auditor.event(b"stopped", |_| {});
         self.executor.signal.clone()
     }
 }
@@ -1195,22 +1195,30 @@ impl crate::Stream for Stream {
 
 impl RngCore for Context {
     fn next_u32(&mut self) -> u32 {
-        self.executor.auditor.event(b"next_u32", |_| {});
+        self.executor.auditor.event(b"rand", |hasher| {
+            hasher.update(b"next_u32");
+        });
         self.executor.rng.lock().unwrap().next_u32()
     }
 
     fn next_u64(&mut self) -> u64 {
-        self.executor.auditor.event(b"next_u64", |_| {});
+        self.executor.auditor.event(b"rand", |hasher| {
+            hasher.update(b"next_u64");
+        });
         self.executor.rng.lock().unwrap().next_u64()
     }
 
     fn fill_bytes(&mut self, dest: &mut [u8]) {
-        self.executor.auditor.event(b"fill_bytes", |_| {});
+        self.executor.auditor.event(b"rand", |hasher| {
+            hasher.update(b"fill_bytes");
+        });
         self.executor.rng.lock().unwrap().fill_bytes(dest)
     }
 
     fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
-        self.executor.auditor.event(b"try_fill_bytes", |_| {});
+        self.executor.auditor.event(b"rand", |hasher| {
+            hasher.update(b"try_fill_bytes");
+        });
         self.executor.rng.lock().unwrap().try_fill_bytes(dest)
     }
 }
