@@ -45,13 +45,45 @@ impl crate::Stream for Stream {
     }
 }
 
+/// Implementation of [crate::Listener] for the `deterministic` runtime.
+pub struct Listener {
+    auditor: Arc<Auditor>,
+    address: SocketAddr,
+    listener: mpsc::UnboundedReceiver<(SocketAddr, mocks::Sink, mocks::Stream)>,
+}
+
+impl crate::Listener for Listener {
+    type Sink = Sink;
+    type Stream = Stream;
+
+    async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), Error> {
+        let (socket, sender, receiver) = self.listener.next().await.ok_or(Error::ReadFailed)?;
+        self.auditor.accept(self.address, socket);
+        Ok((
+            socket,
+            Sink {
+                auditor: self.auditor.clone(),
+                me: self.address,
+                peer: socket,
+                sender,
+            },
+            Stream {
+                auditor: self.auditor.clone(),
+                me: self.address,
+                peer: socket,
+                receiver,
+            },
+        ))
+    }
+}
+
 type Dialable = mpsc::UnboundedSender<(
     SocketAddr,
     mocks::Sink,   // Listener -> Dialer
     mocks::Stream, // Dialer -> Listener
 )>;
 
-/// Implementation of [crate::Network] for the `deterministic` runtime.
+/// Deterministic implementation of [crate::Network].
 ///
 /// When a dialer connects to a listener, the listener is given a new ephemeral port
 /// from the range `32768..61000`. To keep things simple, it is not possible to
@@ -142,38 +174,6 @@ impl crate::Network for Network {
                 me: dialer,
                 peer: socket,
                 receiver: dialer_receiver,
-            },
-        ))
-    }
-}
-
-/// Implementation of [crate::Listener] for the `deterministic` runtime.
-pub struct Listener {
-    auditor: Arc<Auditor>,
-    address: SocketAddr,
-    listener: mpsc::UnboundedReceiver<(SocketAddr, mocks::Sink, mocks::Stream)>,
-}
-
-impl crate::Listener for Listener {
-    type Sink = Sink;
-    type Stream = Stream;
-
-    async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), Error> {
-        let (socket, sender, receiver) = self.listener.next().await.ok_or(Error::ReadFailed)?;
-        self.auditor.accept(self.address, socket);
-        Ok((
-            socket,
-            Sink {
-                auditor: self.auditor.clone(),
-                me: self.address,
-                peer: socket,
-                sender,
-            },
-            Stream {
-                auditor: self.auditor.clone(),
-                me: self.address,
-                peer: socket,
-                receiver,
             },
         ))
     }

@@ -227,7 +227,8 @@ pub type SinkOf<N> = <<N as Network>::Listener as Listener>::Sink;
 /// Syntactic sugar for the type of [Stream] used by a given [Network] N.
 pub type StreamOf<N> = <<N as Network>::Listener as Listener>::Stream;
 
-pub type ListenerOf<T> = <T as crate::Network>::Listener;
+/// Syntactic sugar for the type of [Listener] used by a given [Network] N.
+pub type ListenerOf<N> = <N as crate::Network>::Listener;
 
 /// Interface that any runtime must implement to create
 /// network connections.
