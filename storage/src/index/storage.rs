@@ -136,7 +136,7 @@ impl<'a, V> Cursor<'a, V> {
                 // Set current to be next (via a mutable reference to current).
                 self.current = current.next_mut();
 
-                // Set next to be the next record.
+                // Set next to be next's next.
                 self.next = next_next;
 
                 // If we have a next record, return it.
@@ -159,6 +159,7 @@ impl<'a, V> Cursor<'a, V> {
                 unreachable!("must call Cursor::next() before interacting")
             }
             Phase::Current => {
+                // Create a new record that points to next.
                 let new = Box::new(Record {
                     value: v,
                     next: self.next.take(),
@@ -177,7 +178,7 @@ impl<'a, V> Cursor<'a, V> {
                 // Set current to be next (via a mutable reference to current).
                 self.current = current.next_mut();
 
-                // Create a new record.
+                // Create a new record that points to next's next.
                 let new = Box::new(Record {
                     value: v,
                     next: next_next,
